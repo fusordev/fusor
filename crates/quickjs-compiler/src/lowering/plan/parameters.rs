@@ -593,23 +593,40 @@ impl<'arena> CompilationContext<'_, 'arena, '_> {
         storage: &crate::storage::BindingStorage,
         span: Span,
     ) -> Result<bool, LeafCompilationError> {
-        if storage.placement() != StoragePlacement::GlobalObject {
-            return Ok(false);
-        }
-        let supported_policy = matches!(
-            (storage.policy().kind(), storage.policy().initialization()),
-            (
-                DeclarationKind::Var,
-                InitializationPolicy::UndefinedAtInstantiation
-            ) | (
-                DeclarationKind::Function,
-                InitializationPolicy::FunctionAtInstantiation
-            )
-        );
-        if !supported_policy
-            || storage.policy().writes() != WritePolicy::Mutable
-            || storage.policy().has_temporal_dead_zone()
-        {
+        let supported = match storage.placement() {
+            StoragePlacement::GlobalObject => {
+                matches!(
+                    (storage.policy().kind(), storage.policy().initialization()),
+                    (
+                        DeclarationKind::Var,
+                        InitializationPolicy::UndefinedAtInstantiation
+                    ) | (
+                        DeclarationKind::Function,
+                        InitializationPolicy::FunctionAtInstantiation
+                    )
+                ) && storage.policy().writes() == WritePolicy::Mutable
+                    && !storage.policy().has_temporal_dead_zone()
+            }
+            StoragePlacement::GlobalLexical => {
+                matches!(
+                    (storage.policy().kind(), storage.policy().initialization()),
+                    (
+                        DeclarationKind::Let | DeclarationKind::Const,
+                        InitializationPolicy::AtDeclaration
+                    )
+                ) && storage.policy().has_temporal_dead_zone()
+                    && matches!(
+                        (storage.policy().kind(), storage.policy().writes()),
+                        (DeclarationKind::Let, WritePolicy::Mutable)
+                            | (DeclarationKind::Const, WritePolicy::Immutable)
+                    )
+            }
+            StoragePlacement::Argument { .. }
+            | StoragePlacement::Local
+            | StoragePlacement::ModuleLocal
+            | StoragePlacement::ModuleImport => return Ok(false),
+        };
+        if !supported {
             return unsupported(UnsupportedLeafFeature::UnsupportedDeclaration, span);
         }
         Ok(true)
@@ -622,7 +639,7 @@ impl<'arena> CompilationContext<'_, 'arena, '_> {
         constants: &CompiledConstantPool,
         flow: &mut PlannedControlFlow,
     ) -> Result<(), LeafCompilationError> {
-        if !crate::is_supported_dynamic_function_goal(self.unit.goal()) || executable.index() != 0 {
+        if !crate::is_supported_script_root_goal(self.unit.goal()) || executable.index() != 0 {
             return Ok(());
         }
         let root = self
@@ -639,7 +656,7 @@ impl<'arena> CompilationContext<'_, 'arena, '_> {
             )
         {
             return Err(LeafCompilationError::SemanticInvariant {
-                invariant: "constructor-realm function initializers belong to the dynamic Script root",
+                invariant: "realm-global function initializers belong to the Script root",
                 span: Some(root.span()),
             });
         }

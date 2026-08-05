@@ -73,6 +73,11 @@ does not imply complete ECMAScript or QuickJS compatibility.
 - [x] Explicit VM frame/continuation stacks handle bytecode and native re-entry,
   coercion, construction, abrupt completion, and traces. Deterministic fuel is
   separate from the pinned 10,000-instruction uncatchable host interrupt.
+- [x] `evaluate_script` executes a host-loaded Global Script as one verified
+  graph without a function wrapper. Realm `var`/function and GC-rooted
+  `let`/`const` bindings persist across evaluations; declaration conflicts,
+  TDZ, immutable writes, destructuring initialization, exact source identity,
+  and abrupt-completion instantiation follow Script semantics.
 - [ ] Complete remaining opcode families, debug/source tables, and
   direct/indirect `eval`. Raw or serialized unverified bytecode and `eval`
   remain fail closed.
@@ -178,10 +183,9 @@ does not imply complete ECMAScript or QuickJS compatibility.
 
 ### Conformance, performance, and optional layers
 
-- [ ] Maintain pinned Test262 `5c8206929d81b2d3d727ca6aac56c18358c8d790`
-  with its patch/configuration/expected errors; close every in-profile failure
-  and expand differential and fuzzing until the engine passes the admitted
-  suite.
+- [ ] Add the inventory/execution runner for pinned Test262
+  `5c8206929d81b2d3d727ca6aac56c18358c8d790` on `evaluate_script`, retain its
+  patch/configuration/expected errors, and close every in-profile failure.
 - [ ] Establish startup, memory, interpreter, and compile benchmarks; require no
   unexplained supported-platform crashes or undefined behavior.
 - [ ] Complete API, source-map, platform/resource, cancellation, dependency, and

@@ -2544,7 +2544,7 @@ fn final_authority_rejects_mixed_define_method_target_provenance_at_a_join() {
 }
 
 #[test]
-fn push_this_authority_is_limited_to_strict_functions_and_dynamic_scripts() {
+fn push_this_authority_is_limited_to_strict_functions_and_script_roots() {
     let instructions = [
         (FinalOpcode::PushThis, Operands::None),
         (FinalOpcode::Return, Operands::None),
@@ -5068,7 +5068,8 @@ fn define_method_input_with_root_arguments(
                     0,
                 )
             }
-            CompilerExecutableKind::DynamicFunctionScript => {
+            CompilerExecutableKind::GlobalScript
+            | CompilerExecutableKind::DynamicFunctionScript => {
                 panic!("a define_method child cannot be a Script")
             }
             CompilerExecutableKind::GeneratorFunction | CompilerExecutableKind::GeneratorMethod => {
@@ -6205,7 +6206,8 @@ fn unresolved_realm_globals_forbid_initialization_and_undeclared_delete_atoms() 
             .expect_err("an unresolved global reference is never declaration-initialized");
     assert_eq!(
         error.kind(),
-        &BytecodeVerificationErrorKind::UnsupportedCompilerOpcode {
+        &BytecodeVerificationErrorKind::ClosureBindingOpcodeMismatch {
+            closure: 0,
             pc: BytecodePc::new(1),
             opcode: FinalOpcode::PutVarInit,
         }
@@ -6558,7 +6560,7 @@ fn dynamic_script_lexical_is_evaluation_local_and_capturable_by_its_child() {
 }
 
 #[test]
-fn sloppy_this_is_authorized_only_inside_a_dynamic_function_authority() {
+fn sloppy_this_is_authorized_only_inside_a_script_authority() {
     let verified = verify_compiler_bytecode_graph(
         dynamic_realm_global_input(
             &[

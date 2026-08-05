@@ -395,6 +395,21 @@ impl UnverifiedFunctionHeader {
         )
     }
 
+    /// Creates a host-loaded Global Script header.
+    ///
+    /// A Global Script has no call arguments, retains ordinary Script strict
+    /// mode, and uses the same non-eval Script flag family as the exact
+    /// dynamic-Function wrapper.
+    #[must_use]
+    pub const fn global_script(strict: bool, variable_reference_count: u32) -> Self {
+        Self::new(
+            Self::DYNAMIC_FUNCTION_SCRIPT_FLAGS,
+            if strict { 1 } else { 0 },
+            0,
+            variable_reference_count,
+        )
+    }
+
     /// Returns the raw packed function flags.
     #[must_use]
     pub const fn serialized_flags(self) -> u16 {

@@ -27,8 +27,9 @@
 
 use super::{
     AtomUsage, BindingCellId, EnvironmentBinding, FunctionId, FunctionImplementation, HashMap,
-    HashSet, HeapReference, ObjectId, ObjectRecord, PromiseJob, RealmIntrinsics, Runtime,
-    RuntimeError, RuntimeResource, RuntimeUsage, SlotValue, StoredValue, usize_to_u64,
+    HashSet, HeapReference, ObjectId, ObjectRecord, PromiseJob, RealmGlobalBindingState,
+    RealmIntrinsics, Runtime, RuntimeError, RuntimeResource, RuntimeUsage, SlotValue, StoredValue,
+    usize_to_u64,
 };
 use crate::{
     atom::WeakAtom,
@@ -313,6 +314,21 @@ impl Runtime {
                 &mut marked_objects,
                 &mut work,
             );
+            for global in realm.global_bindings.values() {
+                if let Some(RealmGlobalBindingState::Lexical { cell, .. }) = self
+                    .global_bindings
+                    .get(*global)
+                    .map(|binding| binding.state)
+                {
+                    mark_collection_root(
+                        CollectionRoot::BindingCell(cell),
+                        &mut marked_functions,
+                        &mut marked_objects,
+                        &mut marked_cells,
+                        &mut work,
+                    );
+                }
+            }
             if let RealmIntrinsics::Ready {
                 function_prototype,
                 throw_type_error,

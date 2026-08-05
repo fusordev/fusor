@@ -103,6 +103,7 @@ pub(super) enum RealmGlobalReadOutcome {
         receiver: StoredValue,
     },
     Missing,
+    Uninitialized,
 }
 
 pub(super) enum RealmGlobalWriteOutcome {
@@ -113,6 +114,8 @@ pub(super) enum RealmGlobalWriteOutcome {
         value: StoredValue,
     },
     Missing,
+    Uninitialized,
+    Immutable,
     Property(PropertyFailure),
 }
 
@@ -317,6 +320,21 @@ pub(super) fn read_realm_global(
                 }
             },
         ),
+        RealmGlobalBindingState::Lexical { cell, .. } => {
+            let value = &runtime
+                .cells
+                .get(cell)
+                .ok_or(EngineFault::StaleHeapEdge {
+                    edge: "realm global lexical cell",
+                    index: cell.index(),
+                    generation: cell.generation(),
+                })?
+                .value;
+            Ok(match value {
+                SlotValue::Uninitialized => RealmGlobalReadOutcome::Uninitialized,
+                SlotValue::Value(value) => RealmGlobalReadOutcome::Value(value.duplicate()),
+            })
+        }
     }
 }
 
@@ -402,7 +420,65 @@ pub(super) fn write_realm_global(
                 },
             )
         }
+        RealmGlobalBindingState::Lexical { cell, mutable } => {
+            let binding = runtime
+                .cells
+                .get_mut(cell)
+                .ok_or(EngineFault::StaleHeapEdge {
+                    edge: "realm global lexical cell",
+                    index: cell.index(),
+                    generation: cell.generation(),
+                })?;
+            if matches!(binding.value, SlotValue::Uninitialized) {
+                return Ok(RealmGlobalWriteOutcome::Uninitialized);
+            }
+            if !mutable {
+                return Ok(RealmGlobalWriteOutcome::Immutable);
+            }
+            binding.value = SlotValue::Value(value);
+            runtime.collection_pending = true;
+            Ok(RealmGlobalWriteOutcome::Complete)
+        }
     }
+}
+
+pub(super) fn initialize_realm_global(
+    runtime: &mut Runtime,
+    global: &GlobalReferenceOperand,
+    value: StoredValue,
+) -> Result<(), ExecutionError> {
+    let state = runtime
+        .global_bindings
+        .get(global.binding)
+        .ok_or(EngineFault::StaleHeapEdge {
+            edge: "realm global binding",
+            index: global.binding.index(),
+            generation: global.binding.generation(),
+        })?
+        .state;
+    let RealmGlobalBindingState::Lexical { cell, .. } = state else {
+        return Err(EngineFault::RuntimeInvariant {
+            message: "put_var_init targeted a non-lexical realm global",
+        }
+        .into());
+    };
+    let binding = runtime
+        .cells
+        .get_mut(cell)
+        .ok_or(EngineFault::StaleHeapEdge {
+            edge: "realm global lexical cell",
+            index: cell.index(),
+            generation: cell.generation(),
+        })?;
+    if !matches!(binding.value, SlotValue::Uninitialized) {
+        return Err(EngineFault::RuntimeInvariant {
+            message: "realm global lexical binding was initialized twice",
+        }
+        .into());
+    }
+    binding.value = SlotValue::Value(value);
+    runtime.collection_pending = true;
+    Ok(())
 }
 
 pub(super) fn read_static_property(

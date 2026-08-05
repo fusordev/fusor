@@ -704,8 +704,7 @@ impl<'compiler, 'unit, 'arena, 'scope> ExpressionPlanner<'compiler, 'unit, 'aren
                 executable: layout.executable,
             },
         )?;
-        let is_dynamic_function_authority =
-            crate::is_supported_dynamic_function_goal(self.unit.goal());
+        let is_script_authority = crate::is_supported_script_root_goal(self.unit.goal());
         let is_object_method = self
             .planned
             .identities
@@ -714,7 +713,7 @@ impl<'compiler, 'unit, 'arena, 'scope> ExpressionPlanner<'compiler, 'unit, 'aren
             .copied()
             .and_then(|node_id| object_method_or_accessor_span(self.unit, node_id))
             .is_some();
-        if !executable.is_strict() && !is_dynamic_function_authority && !is_object_method {
+        if !executable.is_strict() && !is_script_authority && !is_object_method {
             return unsupported(UnsupportedLeafFeature::UnsupportedExpression, span);
         }
         Ok(PlannedInstruction::new(

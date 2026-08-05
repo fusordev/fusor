@@ -106,10 +106,8 @@ impl FrameLayout {
                     });
                     Some(FrameSlot::Local(slot))
                 }
-                StoragePlacement::GlobalObject => None,
-                StoragePlacement::GlobalLexical
-                | StoragePlacement::ModuleLocal
-                | StoragePlacement::ModuleImport => {
+                StoragePlacement::GlobalObject | StoragePlacement::GlobalLexical => None,
+                StoragePlacement::ModuleLocal | StoragePlacement::ModuleImport => {
                     let span = binding
                         .declaration_spans()
                         .first()

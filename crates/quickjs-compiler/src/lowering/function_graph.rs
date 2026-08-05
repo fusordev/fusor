@@ -701,11 +701,11 @@ impl CompilationContext<'_, '_, '_> {
                     id,
                 )?)
             } else {
-                if !crate::is_supported_dynamic_function_goal(self.unit.goal())
+                if !crate::is_supported_script_root_goal(self.unit.goal())
                     || executable.index() != 0
                 {
                     return Err(LeafCompilationError::SemanticInvariant {
-                        invariant: "only a dynamic Function Script root originates realm-global slots",
+                        invariant: "only a Script root originates realm-global slots",
                         span: Some(metadata.span()),
                     });
                 }

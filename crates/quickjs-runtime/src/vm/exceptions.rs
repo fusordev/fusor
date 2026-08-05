@@ -38,6 +38,50 @@ pub(super) fn tdz_exception(
     pc: BytecodePc,
 ) -> Result<PendingException, ExecutionError> {
     let code = code(runtime, frame.code)?;
+    let name = binding_name(runtime, frame, binding)?;
+    let message = if let Some(name) = name {
+        name.concat(&JsString::from_utf8(" is not initialized")?)?
+    } else {
+        JsString::from_utf8("lexical variable is not initialized")?
+    };
+    Ok(PendingException {
+        realm: code.realm,
+        payload: PendingExceptionPayload::EngineError {
+            kind: ExceptionKind::ReferenceError,
+            message,
+        },
+        origin: instruction_location(runtime, frame, pc)?,
+    })
+}
+
+pub(super) fn immutable_binding_exception(
+    runtime: &Runtime,
+    frame: &Frame,
+    binding: BindingName,
+    pc: BytecodePc,
+) -> Result<PendingException, ExecutionError> {
+    let code = code(runtime, frame.code)?;
+    let message = if let Some(name) = binding_name(runtime, frame, binding)? {
+        name.concat(&JsString::from_utf8(" is read-only")?)?
+    } else {
+        JsString::from_utf8("lexical variable is read-only")?
+    };
+    Ok(PendingException {
+        realm: code.realm,
+        payload: PendingExceptionPayload::EngineError {
+            kind: ExceptionKind::TypeError,
+            message,
+        },
+        origin: instruction_location(runtime, frame, pc)?,
+    })
+}
+
+fn binding_name(
+    runtime: &Runtime,
+    frame: &Frame,
+    binding: BindingName,
+) -> Result<Option<JsString>, EngineFault> {
+    let code = code(runtime, frame.code)?;
     let function =
         code.authority
             .function(frame.template)
@@ -58,23 +102,14 @@ pub(super) fn tdz_exception(
             .get(index as usize)
             .and_then(quickjs_bytecode::ClosureVariableDefinition::name),
     };
-    let message = if let Some(atom) = atom
-        && let Some(name) = installed
+    Ok(if let Some(atom) = atom {
+        installed
             .atoms
             .get(atom.get() as usize)
             .and_then(AtomDescription::description)
-    {
-        name.concat(&JsString::from_utf8(" is not initialized")?)?
+            .cloned()
     } else {
-        JsString::from_utf8("lexical variable is not initialized")?
-    };
-    Ok(PendingException {
-        realm: code.realm,
-        payload: PendingExceptionPayload::EngineError {
-            kind: ExceptionKind::ReferenceError,
-            message,
-        },
-        origin: instruction_location(runtime, frame, pc)?,
+        None
     })
 }
 

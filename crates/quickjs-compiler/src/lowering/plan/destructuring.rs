@@ -504,6 +504,7 @@ impl<'arena> CompilationContext<'_, 'arena, '_> {
                     identifier,
                     binding_initialization,
                     layout,
+                    tree_layout,
                     flow,
                 ),
             BindingPattern::AssignmentPattern(assignment) => {
@@ -590,6 +591,7 @@ impl<'arena> CompilationContext<'_, 'arena, '_> {
         identifier: &BindingIdentifier<'arena>,
         binding_initialization: DestructuringBindingInitialization,
         layout: &FrameLayout,
+        tree_layout: &FunctionTreeLayout,
         flow: &mut PlannedControlFlow,
     ) -> Result<(), LeafCompilationError> {
         let binding = self.binding_for_identifier(identifier.symbol_id.get(), identifier.span)?;
@@ -601,11 +603,37 @@ impl<'arena> CompilationContext<'_, 'arena, '_> {
                     invariant: "destructured compiler binding exists",
                     span: Some(identifier.span),
                 })?;
-        if storage.placement() == StoragePlacement::GlobalObject {
-            return unsupported(
-                UnsupportedLeafFeature::UnsupportedDeclaration,
+        if matches!(
+            storage.placement(),
+            StoragePlacement::GlobalObject | StoragePlacement::GlobalLexical
+        ) {
+            let DestructuringBindingInitialization::Declaration(declaration_kind) =
+                binding_initialization
+            else {
+                return unsupported(UnsupportedLeafFeature::UnsupportedBinding, identifier.span);
+            };
+            self.validate_realm_global_declaration(declaration_kind, storage, identifier.span)?;
+            let global = tree_layout.realm_globals.for_binding(binding).ok_or(
+                LeafCompilationError::SemanticInvariant {
+                    invariant: "destructured Program binding has a realm-global identity",
+                    span: Some(identifier.span),
+                },
+            )?;
+            let slot = tree_layout.realm_globals.closure_slot(
+                &self.planned.plan,
+                layout.executable,
+                global,
+            )?;
+            let opcode = if storage.placement() == StoragePlacement::GlobalLexical {
+                FinalOpcode::PutVarInit
+            } else {
+                FinalOpcode::PutVar
+            };
+            return flow.emit(PlannedInstruction::new(
+                opcode,
+                Operands::VarRef(slot),
                 identifier.span,
-            );
+            ));
         }
         let frame_slot = layout
             .slot(binding)

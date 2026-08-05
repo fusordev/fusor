@@ -107,7 +107,7 @@ impl<'arena> CompilationContext<'_, 'arena, '_> {
                 });
             }
             if executable.id().index() == 0
-                && crate::is_supported_dynamic_function_goal(self.unit.goal())
+                && crate::is_supported_script_root_goal(self.unit.goal())
             {
                 owner.push(CompiledMetadataAtomCandidate {
                     key: CompiledMetadataAtomKey::ScriptCompletion,

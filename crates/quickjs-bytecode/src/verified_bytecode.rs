@@ -511,6 +511,8 @@ impl CompilerSource {
 /// Compiler-owned execution role assigned to one function-graph record.
 #[derive(Clone, Copy, Debug, Default, Eq, Hash, PartialEq)]
 pub enum CompilerExecutableKind {
+    /// A host-loaded ECMAScript Global Script.
+    GlobalScript,
     /// An ordinary callable JavaScript function.
     #[default]
     OrdinaryFunction,
@@ -1194,6 +1196,18 @@ pub enum BytecodeVerificationErrorKind {
         /// Requested entries.
         requested: u64,
     },
+    /// A Global Script record is not the graph root.
+    GlobalScriptNotRoot,
+    /// A Global Script record declares a call-argument domain.
+    GlobalScriptHasArguments {
+        /// Header-defined arguments.
+        defined: u32,
+        /// Frame argument slots.
+        arguments: u32,
+    },
+    /// A Global Script record carries function-name metadata or a named
+    /// function self binding.
+    GlobalScriptHasFunctionName,
     /// A dynamic-Function Script record is not the graph root.
     DynamicFunctionScriptNotRoot,
     /// A dynamic-Function Script record declares a call-argument domain.
@@ -1209,8 +1223,8 @@ pub enum BytecodeVerificationErrorKind {
     /// An object method or accessor carries a source name before
     /// `define_method` assigns its property-derived observable name.
     OrdinaryMethodHasFunctionName,
-    /// A constructor-realm global source appears outside a dynamic-Function
-    /// Script authority root.
+    /// A constructor-realm global source appears outside a Script authority
+    /// root.
     ConstructorRealmGlobalSourceRequiresDynamicFunctionScript {
         /// Closure-domain slot containing the source.
         closure: u32,
@@ -1396,6 +1410,14 @@ pub enum BytecodeVerificationErrorKind {
         closure: u32,
         /// Actual closure PC.
         pc: BytecodePc,
+    },
+    /// A realm-global lexical binding has the wrong number of certified
+    /// declaration-initialization sites.
+    RealmGlobalLexicalInitializerCountMismatch {
+        /// Affected closure-domain slot.
+        closure: u32,
+        /// Matching `PutVarInit` sites.
+        matches: u32,
     },
     /// A function template is not owned by exactly one parent constant edge.
     FunctionTemplateOwnershipMismatch {
@@ -1630,6 +1652,15 @@ impl fmt::Display for BytecodeVerificationErrorKind {
                 formatter,
                 "could not allocate {requested} entries for {resource}"
             ),
+            Self::GlobalScriptNotRoot => {
+                formatter.write_str("Global Script executable is not the graph root")
+            }
+            Self::GlobalScriptHasArguments { defined, arguments } => write!(
+                formatter,
+                "Global Script declares {defined} defined arguments and {arguments} frame arguments"
+            ),
+            Self::GlobalScriptHasFunctionName => formatter
+                .write_str("Global Script carries function-name metadata or a self binding"),
             Self::DynamicFunctionScriptNotRoot => {
                 formatter.write_str("dynamic-Function Script executable is not the graph root")
             }
@@ -1645,7 +1676,7 @@ impl fmt::Display for BytecodeVerificationErrorKind {
             ),
             Self::ConstructorRealmGlobalSourceRequiresDynamicFunctionScript { closure } => write!(
                 formatter,
-                "closure slot {closure} originates a constructor-realm global outside a dynamic-Function Script root"
+                "closure slot {closure} originates a constructor-realm global outside a Script root"
             ),
             Self::ClosureBindingOpcodeMismatch {
                 closure,
@@ -1779,6 +1810,10 @@ impl fmt::Display for BytecodeVerificationErrorKind {
             Self::RealmGlobalFunctionInitializerPlacementMismatch { closure, pc } => write!(
                 formatter,
                 "realm-global function closure {closure} initializer at PC {pc} is outside the isolated entry prefix"
+            ),
+            Self::RealmGlobalLexicalInitializerCountMismatch { closure, matches } => write!(
+                formatter,
+                "realm-global lexical closure {closure} has {matches} put_var_init sites"
             ),
             Self::FunctionTemplateOwnershipMismatch { child, incoming } => write!(
                 formatter,
@@ -2344,6 +2379,27 @@ fn verify_executable_kind(
     metadata: &UnverifiedFunctionMetadata,
 ) -> Result<(), BytecodeVerificationError> {
     match metadata.executable_kind {
+        CompilerExecutableKind::GlobalScript => {
+            if id != root {
+                return Err(BytecodeVerificationError::function(
+                    id,
+                    BytecodeVerificationErrorKind::GlobalScriptNotRoot,
+                ));
+            }
+            let has_function_name_binding =
+                metadata.variables.iter().any(|definition| {
+                    definition.policy.kind() == CompilerBindingKind::FunctionName
+                }) || metadata.closures.iter().any(|definition| {
+                    definition.policy().kind() == CompilerBindingKind::FunctionName
+                });
+            if metadata.function_name.is_some() || has_function_name_binding {
+                return Err(BytecodeVerificationError::function(
+                    id,
+                    BytecodeVerificationErrorKind::GlobalScriptHasFunctionName,
+                ));
+            }
+            Ok(())
+        }
         CompilerExecutableKind::OrdinaryFunction
         | CompilerExecutableKind::GeneratorFunction
         | CompilerExecutableKind::AsyncFunction
@@ -2402,6 +2458,26 @@ fn verify_header(
     let header = *flow.function_header();
     let arguments = flow.domains().argument_count();
     match executable_kind {
+        CompilerExecutableKind::GlobalScript => {
+            if header.kind() != FunctionKind::Normal
+                || header.flags().bits() != 0x0400
+                || header.mode().bits() & !1 != 0
+            {
+                return Err(BytecodeVerificationError::function(
+                    id,
+                    BytecodeVerificationErrorKind::UnsupportedFunctionHeader,
+                ));
+            }
+            if header.defined_argument_count() != 0 || arguments != 0 {
+                return Err(BytecodeVerificationError::function(
+                    id,
+                    BytecodeVerificationErrorKind::GlobalScriptHasArguments {
+                        defined: header.defined_argument_count(),
+                        arguments,
+                    },
+                ));
+            }
+        }
         CompilerExecutableKind::OrdinaryFunction => {
             if header.kind() != FunctionKind::Normal
                 || !matches!(header.flags().bits(), 0x0641 | 0x0643)
@@ -3507,11 +3583,13 @@ fn verify_closures(
             }
             CompilerClosureBinding::RealmGlobal(_) => {
                 realm_global_policy_supported(policy)
+                    && (!matches!(
+                        policy.kind(),
+                        CompilerBindingKind::Let | CompilerBindingKind::Const
+                    ) || authority_kind == CompilerExecutableKind::GlobalScript)
                     && match *staged_source {
                         CompilerClosureSource::ConstructorRealmGlobal(atom) => {
-                            if id != root
-                                || authority_kind != CompilerExecutableKind::DynamicFunctionScript
-                            {
+                            if id != root || !is_script_authority_kind(authority_kind) {
                                 return Err(BytecodeVerificationError::function(
                                     id,
                                     BytecodeVerificationErrorKind::ConstructorRealmGlobalSourceRequiresDynamicFunctionScript {
@@ -3543,18 +3621,12 @@ fn verify_closures(
             staged_source,
             CompilerClosureSource::ConstructorRealmGlobal(_)
         );
-        let initializer_valid = match (
+        let initializer_valid = realm_global_function_initializer_is_valid(
+            function,
+            closure,
             realm_global_function,
             originates_in_constructor_realm,
-            closure.function_initializer,
-        ) {
-            (true, true, Some(constant)) => matches!(
-                function.constants().get(constant as usize),
-                Some(crate::CompilerConstant::Function(_))
-            ),
-            (true, false, None) | (false, _, None) => true,
-            (true, true, None) | (true, false, Some(_)) | (false, _, Some(_)) => false,
-        };
+        );
         if !initializer_valid {
             return Err(BytecodeVerificationError::function(
                 id,
@@ -3564,6 +3636,13 @@ fn verify_closures(
                 },
             ));
         }
+        verify_realm_global_lexical_initializer_sites(
+            id,
+            usize_to_u32(index),
+            function,
+            closure,
+            originates_in_constructor_realm,
+        )?;
         if closure.source != *staged_source {
             return Err(BytecodeVerificationError::function(
                 id,
@@ -3573,6 +3652,69 @@ fn verify_closures(
                 },
             ));
         }
+    }
+    Ok(())
+}
+
+fn realm_global_function_initializer_is_valid(
+    function: &VerifiedCompilerFunction,
+    closure: &ClosureVariableDefinition,
+    realm_global_function: bool,
+    originates_in_constructor_realm: bool,
+) -> bool {
+    match (
+        realm_global_function,
+        originates_in_constructor_realm,
+        closure.function_initializer,
+    ) {
+        (true, true, Some(constant)) => matches!(
+            function.constants().get(constant as usize),
+            Some(crate::CompilerConstant::Function(_))
+        ),
+        (true, false, None) | (false, _, None) => true,
+        (true, true, None) | (true, false, Some(_)) | (false, _, Some(_)) => false,
+    }
+}
+
+fn verify_realm_global_lexical_initializer_sites(
+    id: FunctionTemplateId,
+    closure_index: u32,
+    function: &VerifiedCompilerFunction,
+    closure: &ClosureVariableDefinition,
+    originates_in_constructor_realm: bool,
+) -> Result<(), BytecodeVerificationError> {
+    let realm_global_lexical = matches!(
+        closure.binding,
+        CompilerClosureBinding::RealmGlobal(policy)
+            if matches!(policy.kind(), CompilerBindingKind::Let | CompilerBindingKind::Const)
+    );
+    if !realm_global_lexical {
+        return Ok(());
+    }
+    let lexical_initializers = function
+        .control_flow()
+        .instructions()
+        .iter()
+        .filter(|instruction| {
+            matches!(
+                (
+                    instruction.decoded().instruction().opcode(),
+                    instruction.decoded().instruction().operands(),
+                ),
+                (FinalOpcode::PutVarInit, Operands::VarRef(slot))
+                    if u32::from(slot) == closure_index
+            )
+        })
+        .count();
+    let expected = usize::from(originates_in_constructor_realm);
+    if lexical_initializers != expected {
+        return Err(BytecodeVerificationError::function(
+            id,
+            BytecodeVerificationErrorKind::RealmGlobalLexicalInitializerCountMismatch {
+                closure: closure_index,
+                matches: usize_to_u32(lexical_initializers),
+            },
+        ));
     }
     Ok(())
 }
@@ -3600,12 +3742,31 @@ const fn realm_global_policy_supported(policy: CompilerBindingPolicy) -> bool {
             ) && matches!(policy.writes(), CompilerWritePolicy::Mutable)
                 && !policy.has_temporal_dead_zone()
         }
+        CompilerBindingKind::Let => {
+            matches!(
+                policy.initialization(),
+                CompilerInitializationPolicy::AtDeclaration
+            ) && matches!(policy.writes(), CompilerWritePolicy::Mutable)
+                && policy.has_temporal_dead_zone()
+        }
+        CompilerBindingKind::Const => {
+            matches!(
+                policy.initialization(),
+                CompilerInitializationPolicy::AtDeclaration
+            ) && matches!(policy.writes(), CompilerWritePolicy::Immutable)
+                && policy.has_temporal_dead_zone()
+        }
         CompilerBindingKind::Parameter
         | CompilerBindingKind::FunctionName
-        | CompilerBindingKind::Catch
-        | CompilerBindingKind::Let
-        | CompilerBindingKind::Const => false,
+        | CompilerBindingKind::Catch => false,
     }
+}
+
+const fn is_script_authority_kind(kind: CompilerExecutableKind) -> bool {
+    matches!(
+        kind,
+        CompilerExecutableKind::GlobalScript | CompilerExecutableKind::DynamicFunctionScript
+    )
 }
 
 fn verify_optional_atom(
@@ -5385,7 +5546,7 @@ fn verify_supported_opcodes(
             || (opcode == FinalOpcode::PushThis
                 && !flow.function_header().mode().is_strict()
                 && !method
-                && authority_kind != CompilerExecutableKind::DynamicFunctionScript)
+                && !is_script_authority_kind(authority_kind))
             || matches!(
                 (opcode, instruction.operands()),
                 (FinalOpcode::SpecialObject, operands)
@@ -5528,6 +5689,7 @@ const fn supported_compiler_opcode(opcode: FinalOpcode) -> bool {
             | FinalOpcode::GetVarUndef
             | FinalOpcode::GetVar
             | FinalOpcode::PutVar
+            | FinalOpcode::PutVarInit
             | FinalOpcode::GetLoc
             | FinalOpcode::PutLoc
             | FinalOpcode::SetLoc
@@ -8548,6 +8710,13 @@ fn verify_closure_opcode(
                     opcode,
                     FinalOpcode::GetVarUndef | FinalOpcode::GetVar | FinalOpcode::PutVar
                 ),
+                CompilerBindingKind::Let | CompilerBindingKind::Const => matches!(
+                    opcode,
+                    FinalOpcode::GetVarUndef
+                        | FinalOpcode::GetVar
+                        | FinalOpcode::PutVar
+                        | FinalOpcode::PutVarInit
+                ),
                 _ => false,
             };
             if !allowed {
@@ -8599,7 +8768,10 @@ fn verify_closure_opcode(
 const fn is_realm_global_opcode(opcode: FinalOpcode) -> bool {
     matches!(
         opcode,
-        FinalOpcode::GetVarUndef | FinalOpcode::GetVar | FinalOpcode::PutVar
+        FinalOpcode::GetVarUndef
+            | FinalOpcode::GetVar
+            | FinalOpcode::PutVar
+            | FinalOpcode::PutVarInit
     )
 }
 

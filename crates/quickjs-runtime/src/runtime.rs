@@ -39,9 +39,9 @@ use quickjs_bytecode::{
 use crate::promise_rejection::PromiseRejectionState;
 use crate::{
     ArrayIndex, Atom, AtomError, AtomLimits, AtomTable, AtomUsage, DynamicFunctionScriptError,
-    ExceptionKind, ExecutionLimits, Function, HandleError, HandleKind, InstallError, JsBigInt,
-    JsNumber, JsString, JsValue, OrdinaryDynamicFunctionCompiler, PredefinedAtom, PropertyKey,
-    PropertyLayout, PropertyLayoutKind, RuntimeError, RuntimeResource,
+    ExceptionKind, ExecutionLimits, Function, GlobalScriptError, HandleError, HandleKind,
+    InstallError, JsBigInt, JsNumber, JsString, JsValue, OrdinaryDynamicFunctionCompiler,
+    PredefinedAtom, PropertyKey, PropertyLayout, PropertyLayoutKind, RuntimeError, RuntimeResource,
     arena::{Arena, RuntimeIdentity},
     ids::{BindingCellId, FunctionId, InstalledCodeId, ObjectId, RealmGlobalBindingId, RealmId},
     interrupt::InterruptState,
@@ -2272,6 +2272,7 @@ pub(crate) struct RealmGlobalBinding {
 pub(crate) enum RealmGlobalBindingState {
     Unresolved,
     Object,
+    Lexical { cell: BindingCellId, mutable: bool },
 }
 
 #[derive(Clone, Copy)]
@@ -2279,6 +2280,8 @@ enum RealmGlobalRequest {
     Lookup,
     Var,
     Function,
+    Let,
+    Const,
 }
 
 impl RealmGlobalRequest {
@@ -2307,41 +2310,81 @@ impl RealmGlobalRequest {
                 quickjs_bytecode::CompilerWritePolicy::Mutable,
                 false,
             ) => Ok(Self::Function),
+            (
+                CompilerBindingKind::Let,
+                quickjs_bytecode::CompilerInitializationPolicy::AtDeclaration,
+                quickjs_bytecode::CompilerWritePolicy::Mutable,
+                true,
+            ) => Ok(Self::Let),
+            (
+                CompilerBindingKind::Const,
+                quickjs_bytecode::CompilerInitializationPolicy::AtDeclaration,
+                quickjs_bytecode::CompilerWritePolicy::Immutable,
+                true,
+            ) => Ok(Self::Const),
             _ => Err(InstallError::AuthorityInvariant {
                 message: "unsupported constructor-realm global declaration policy",
             }),
         }
     }
 
-    const fn initial_state(self) -> RealmGlobalBindingState {
+    const fn initial_nonlexical_state(self) -> Option<RealmGlobalBindingState> {
         match self {
-            Self::Lookup => RealmGlobalBindingState::Unresolved,
-            Self::Var | Self::Function => RealmGlobalBindingState::Object,
+            Self::Lookup => Some(RealmGlobalBindingState::Unresolved),
+            Self::Var | Self::Function => Some(RealmGlobalBindingState::Object),
+            Self::Let | Self::Const => None,
         }
     }
 
-    const fn upgraded_state(self, current: RealmGlobalBindingState) -> RealmGlobalBindingState {
+    const fn upgraded_object_state(
+        self,
+        current: RealmGlobalBindingState,
+    ) -> Option<RealmGlobalBindingState> {
         match (self, current) {
             (Self::Lookup, current)
-            | (Self::Var | Self::Function, current @ RealmGlobalBindingState::Object) => current,
-            (Self::Var | Self::Function, RealmGlobalBindingState::Unresolved) => {
-                RealmGlobalBindingState::Object
+            | (Self::Var | Self::Function, current @ RealmGlobalBindingState::Object) => {
+                Some(current)
             }
+            (Self::Var | Self::Function, RealmGlobalBindingState::Unresolved) => {
+                Some(RealmGlobalBindingState::Object)
+            }
+            (Self::Var | Self::Function, RealmGlobalBindingState::Lexical { .. })
+            | (Self::Let | Self::Const, _) => None,
         }
     }
 
     const fn declares_object_property(self) -> bool {
-        !matches!(self, Self::Lookup)
+        matches!(self, Self::Var | Self::Function)
+    }
+
+    const fn lexical_mutability(self) -> Option<bool> {
+        match self {
+            Self::Let => Some(true),
+            Self::Const => Some(false),
+            Self::Lookup | Self::Var | Self::Function => None,
+        }
     }
 }
 
-const fn dynamic_function_declaration_property_layout() -> PropertyLayout {
-    PropertyLayout::data(true, true, true)
+const fn global_declaration_property_layout(
+    executable_kind: CompilerExecutableKind,
+) -> PropertyLayout {
+    PropertyLayout::data(
+        true,
+        true,
+        matches!(
+            executable_kind,
+            CompilerExecutableKind::DynamicFunctionScript
+        ),
+    )
 }
 
-fn global_function_replacement_layout(existing: PropertyLayout) -> Option<PropertyLayout> {
+fn global_function_replacement_layout(
+    existing: PropertyLayout,
+    declaration: PropertyLayout,
+) -> Option<PropertyLayout> {
     if existing.is_configurable() {
-        Some(dynamic_function_declaration_property_layout())
+        Some(declaration)
     } else if existing.writable() == Some(true) && existing.is_enumerable() {
         Some(existing)
     } else {
@@ -2579,6 +2622,7 @@ struct RootEnvironment {
     bindings: Vec<EnvironmentBinding>,
     inserted_globals: Vec<(Atom, RealmGlobalBindingId)>,
     updated_globals: Vec<(RealmGlobalBindingId, RealmGlobalBindingState)>,
+    inserted_cells: Vec<BindingCellId>,
     inserted_global_properties: Vec<PropertyKey>,
     updated_global_properties: Vec<(PropertyKey, OwnProperty)>,
 }
@@ -2618,6 +2662,9 @@ fn require_root_kind(
         return Ok(());
     }
     let message = match expected {
+        CompilerExecutableKind::GlobalScript => {
+            "non-Script executable cannot execute as a host-loaded Global Script"
+        }
         CompilerExecutableKind::OrdinaryFunction => {
             "non-instantiable executable cannot be instantiated as a source function"
         }
@@ -2736,6 +2783,7 @@ const fn is_supported_opcode(opcode: FinalOpcode) -> bool {
             | FinalOpcode::GetVarUndef
             | FinalOpcode::GetVar
             | FinalOpcode::PutVar
+            | FinalOpcode::PutVarInit
             | FinalOpcode::GetVarRef
             | FinalOpcode::PutVarRef
             | FinalOpcode::SetVarRef

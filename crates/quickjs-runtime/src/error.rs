@@ -1010,6 +1010,46 @@ impl From<ExecutionError> for DynamicFunctionScriptError {
     }
 }
 
+/// Failure while installing or executing one verified host-loaded Global
+/// Script.
+#[derive(Debug)]
+pub enum GlobalScriptError {
+    /// Complete authority installation failed before Script execution began.
+    Install(InstallError),
+    /// The installed Script failed during execution or completion publication.
+    Execution(ExecutionError),
+}
+
+impl fmt::Display for GlobalScriptError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Install(source) => source.fmt(formatter),
+            Self::Execution(source) => source.fmt(formatter),
+        }
+    }
+}
+
+impl Error for GlobalScriptError {
+    fn source(&self) -> Option<&(dyn Error + 'static)> {
+        match self {
+            Self::Install(source) => Some(source),
+            Self::Execution(source) => Some(source),
+        }
+    }
+}
+
+impl From<InstallError> for GlobalScriptError {
+    fn from(source: InstallError) -> Self {
+        Self::Install(source)
+    }
+}
+
+impl From<ExecutionError> for GlobalScriptError {
+    fn from(source: ExecutionError) -> Self {
+        Self::Execution(source)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::{error::Error, fmt, sync::Arc};

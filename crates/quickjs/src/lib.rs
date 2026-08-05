@@ -14,15 +14,211 @@ use quickjs_bytecode::{
 };
 use quickjs_compiler::{CompilationContext, CompilerError, LeafCompilationError};
 use quickjs_frontend::{
-    DiagnosticStage, DynamicFunctionError, DynamicFunctionKind, DynamicFunctionSource,
-    FrontendLimits, PreparedDynamicFunctionSource, SourceFragment,
-    with_dynamic_function_source_and_prepared,
+    CompilationGoal, DiagnosticStage, DynamicFunctionError, DynamicFunctionKind,
+    DynamicFunctionSource, FrontendError, FrontendLimits, FrontendOptions, GlobalScriptGoal,
+    PreparedDynamicFunctionSource, SourceFragment, with_dynamic_function_source_and_prepared,
+    with_parsed_program,
 };
 use quickjs_runtime::{
     Context, DynamicFunctionCompileFailure, DynamicFunctionCompileRequest, DynamicFunctionCompiler,
     DynamicFunctionFamily, DynamicFunctionScriptError, ExecutionError, ExecutionLimits, Function,
-    JsString, JsValue,
+    GlobalScriptError, JsString, JsValue,
 };
+
+/// Resource limits applied across Global Script parsing, compilation,
+/// verification, and execution.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct ScriptLimits {
+    frontend: FrontendLimits,
+    bytecode: VerificationLimits,
+    function_graph: FunctionGraphVerificationLimits,
+    final_graph: BytecodeGraphVerificationLimits,
+    execution: ExecutionLimits,
+}
+
+impl ScriptLimits {
+    /// Replaces parser and semantic limits.
+    #[must_use]
+    pub const fn with_frontend(mut self, limits: FrontendLimits) -> Self {
+        self.frontend = limits;
+        self
+    }
+
+    /// Replaces per-template bytecode verification limits.
+    #[must_use]
+    pub const fn with_bytecode(mut self, limits: VerificationLimits) -> Self {
+        self.bytecode = limits;
+        self
+    }
+
+    /// Replaces aggregate staged function-graph limits.
+    #[must_use]
+    pub const fn with_function_graph(mut self, limits: FunctionGraphVerificationLimits) -> Self {
+        self.function_graph = limits;
+        self
+    }
+
+    /// Replaces complete metadata and final bytecode-graph limits.
+    #[must_use]
+    pub const fn with_final_graph(mut self, limits: BytecodeGraphVerificationLimits) -> Self {
+        self.final_graph = limits;
+        self
+    }
+
+    /// Replaces runtime instruction-fuel limits.
+    #[must_use]
+    pub const fn with_execution(mut self, limits: ExecutionLimits) -> Self {
+        self.execution = limits;
+        self
+    }
+
+    /// Returns parser and semantic limits.
+    #[must_use]
+    pub const fn frontend(self) -> FrontendLimits {
+        self.frontend
+    }
+
+    /// Returns per-template bytecode verification limits.
+    #[must_use]
+    pub const fn bytecode(self) -> VerificationLimits {
+        self.bytecode
+    }
+
+    /// Returns aggregate staged function-graph limits.
+    #[must_use]
+    pub const fn function_graph(self) -> FunctionGraphVerificationLimits {
+        self.function_graph
+    }
+
+    /// Returns complete metadata and final bytecode-graph limits.
+    #[must_use]
+    pub const fn final_graph(self) -> BytecodeGraphVerificationLimits {
+        self.final_graph
+    }
+
+    /// Returns runtime instruction-fuel limits.
+    #[must_use]
+    pub const fn execution(self) -> ExecutionLimits {
+        self.execution
+    }
+
+    const fn dynamic_function_limits(self) -> DynamicFunctionLimits {
+        DynamicFunctionLimits {
+            frontend: self.frontend,
+            bytecode: self.bytecode,
+            function_graph: self.function_graph,
+            final_graph: self.final_graph,
+            execution: self.execution,
+        }
+    }
+}
+
+/// Compiler stage that rejected an already parsed Global Script.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum ScriptCompilerError {
+    /// Storage planning or semantic preflight failed.
+    Planning(CompilerError),
+    /// Lowering or whole-graph verification failed.
+    Lowering(LeafCompilationError),
+}
+
+impl fmt::Display for ScriptCompilerError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Planning(source) => source.fmt(formatter),
+            Self::Lowering(source) => source.fmt(formatter),
+        }
+    }
+}
+
+impl Error for ScriptCompilerError {
+    fn source(&self) -> Option<&(dyn Error + 'static)> {
+        match self {
+            Self::Planning(source) => Some(source),
+            Self::Lowering(source) => Some(source),
+        }
+    }
+}
+
+/// Failure of the Global Script host pipeline.
+#[derive(Debug)]
+pub enum ScriptEvaluationError {
+    /// Parsing, the compatibility profile, or ECMAScript early errors failed.
+    Frontend(FrontendError),
+    /// The parsed Script could not become complete verified bytecode.
+    Compiler(ScriptCompilerError),
+    /// Realm installation or verified Script execution failed.
+    Runtime(GlobalScriptError),
+}
+
+impl fmt::Display for ScriptEvaluationError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Frontend(source) => source.fmt(formatter),
+            Self::Compiler(source) => source.fmt(formatter),
+            Self::Runtime(source) => source.fmt(formatter),
+        }
+    }
+}
+
+impl Error for ScriptEvaluationError {
+    fn source(&self) -> Option<&(dyn Error + 'static)> {
+        match self {
+            Self::Frontend(source) => Some(source),
+            Self::Compiler(source) => Some(source),
+            Self::Runtime(source) => Some(source),
+        }
+    }
+}
+
+/// Parses, compiles, final-verifies, installs, and executes one host-loaded
+/// ECMAScript Global Script.
+///
+/// The source is never rewritten as a function body. Its exact Script
+/// completion is returned, and successfully instantiated global bindings stay
+/// in `context`'s realm for later Script evaluations.
+///
+/// # Errors
+///
+/// Returns the exact failing frontend, compiler, installation, or execution
+/// stage.
+pub fn evaluate_script(
+    context: &mut Context<'_>,
+    source_text: &str,
+    source_name: &str,
+    limits: ScriptLimits,
+) -> Result<JsValue, ScriptEvaluationError> {
+    let source_name: Arc<str> = Arc::from(source_name);
+    let compiled = with_parsed_program(
+        source_text,
+        FrontendOptions::for_goal(CompilationGoal::GlobalScript(GlobalScriptGoal::new()))
+            .with_limits(limits.frontend),
+        move |unit| {
+            let compiler = CompilationContext::new_with_source_name(unit, source_name)
+                .map_err(ScriptCompilerError::Planning)?;
+            compiler
+                .compile_global_script_with_all_limits(
+                    limits.bytecode,
+                    limits.function_graph,
+                    limits.final_graph,
+                )
+                .map_err(ScriptCompilerError::Lowering)
+        },
+    )
+    .map_err(ScriptEvaluationError::Frontend)?
+    .map_err(ScriptEvaluationError::Compiler)?;
+    let authority = Arc::new(compiled.verified_bytecode().clone());
+    let dynamic_service: Arc<dyn DynamicFunctionCompiler> = Arc::new(
+        OxcDynamicFunctionCompiler::new(limits.dynamic_function_limits()),
+    );
+    context
+        .execute_global_script_with_dynamic_function_compiler(
+            authority,
+            limits.execution,
+            &dynamic_service,
+        )
+        .map_err(ScriptEvaluationError::Runtime)
+}
 
 /// Resource limits applied across every supported dynamic-function stage.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]

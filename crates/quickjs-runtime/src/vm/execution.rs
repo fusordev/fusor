@@ -1741,6 +1741,14 @@ pub(super) fn execute_one(
                         source_pc,
                     )?));
                 }
+                RealmGlobalReadOutcome::Uninitialized => {
+                    return Ok(Step::Abrupt(tdz_exception(
+                        runtime,
+                        frame,
+                        BindingName::Closure(index),
+                        source_pc,
+                    )?));
+                }
             }
         }
         FinalOpcode::PutVar => {
@@ -1787,12 +1795,34 @@ pub(super) fn execute_one(
                         runtime, frame, &name, source_pc,
                     )?));
                 }
+                RealmGlobalWriteOutcome::Uninitialized => {
+                    return Ok(Step::Abrupt(tdz_exception(
+                        runtime,
+                        frame,
+                        BindingName::Closure(index),
+                        source_pc,
+                    )?));
+                }
+                RealmGlobalWriteOutcome::Immutable => {
+                    return Ok(Step::Abrupt(immutable_binding_exception(
+                        runtime,
+                        frame,
+                        BindingName::Closure(index),
+                        source_pc,
+                    )?));
+                }
                 RealmGlobalWriteOutcome::Property(failure) => {
                     return Ok(Step::Abrupt(property_exception(
                         runtime, frame, source_pc, &name, failure,
                     )?));
                 }
             }
+        }
+        FinalOpcode::PutVarInit => {
+            let index = closure_index(opcode, operands)?;
+            let global = global_reference_operand(runtime, frame, index)?;
+            let value = pop(frame)?;
+            initialize_realm_global(runtime, &global, value)?;
         }
         FinalOpcode::GetLoc
         | FinalOpcode::GetLoc8

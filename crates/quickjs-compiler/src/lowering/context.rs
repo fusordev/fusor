@@ -229,6 +229,56 @@ impl<'unit, 'arena, 'scope> CompilationContext<'unit, 'arena, 'scope> {
         self.compile_subtree_with_all_limits(root, limits, graph_limits, bytecode_limits)
     }
 
+    /// Lowers one complete host-loaded Global Script and every nested
+    /// function template as an indivisible verified authority.
+    ///
+    /// # Errors
+    ///
+    /// Rejects non-Global-Script goals, asynchronous Script roots,
+    /// unsupported syntax, resource limits, and staged or final verification
+    /// failures.
+    pub fn compile_global_script(
+        &self,
+        limits: VerificationLimits,
+    ) -> Result<CompiledFunctionTree, LeafCompilationError> {
+        self.compile_global_script_with_all_limits(
+            limits,
+            FunctionGraphVerificationLimits::default(),
+            BytecodeGraphVerificationLimits::default(),
+        )
+    }
+
+    /// Lowers a complete Global Script with every staged and final graph
+    /// limit explicit.
+    ///
+    /// # Errors
+    ///
+    /// Returns the same failures as [`Self::compile_global_script`].
+    pub fn compile_global_script_with_all_limits(
+        &self,
+        limits: VerificationLimits,
+        graph_limits: FunctionGraphVerificationLimits,
+        bytecode_limits: BytecodeGraphVerificationLimits,
+    ) -> Result<CompiledFunctionTree, LeafCompilationError> {
+        if !crate::is_supported_global_script_goal(self.unit.goal()) {
+            return unsupported(
+                UnsupportedLeafFeature::UnsupportedCompilationUnit,
+                self.unit.program().span,
+            );
+        }
+        let root = self
+            .planned
+            .plan
+            .executables()
+            .first()
+            .ok_or(LeafCompilationError::SemanticInvariant {
+                invariant: "Global Script storage plan has a Program root",
+                span: Some(self.unit.program().span),
+            })?
+            .id();
+        self.compile_subtree_with_all_limits(root, limits, graph_limits, bytecode_limits)
+    }
+
     /// Lowers the complete exact wrapper Script for a supported synchronous
     /// dynamic-function constructor invocation.
     ///

@@ -26,13 +26,13 @@
 //! Runtime unit tests kept in the runtime module's private visibility boundary.
 
 use super::{
-    ArrayDefineOutcome, ArrayLengthWriteOutcome, ArrayState, CollectionRoot, ErrorIntrinsicKind,
-    ForInAdvance, FunctionImplementation, HeapFunction, NativeFunction, NativeFunctionKind,
-    PromiseCombinatorKind, PromiseCombinatorShared, PromiseFinallyThunkKind, PromiseJob,
-    RealmIntrinsics, RootEnvironment, Runtime, RuntimeLimits, RuntimeUsage, SetPrototypeOutcome,
-    array_length_from_number, dynamic_function_declaration_property_layout,
-    global_function_replacement_layout, is_supported_instruction, is_supported_opcode,
-    usize_to_u64,
+    ArrayDefineOutcome, ArrayLengthWriteOutcome, ArrayState, CollectionRoot,
+    CompilerExecutableKind, ErrorIntrinsicKind, ForInAdvance, FunctionImplementation, HeapFunction,
+    NativeFunction, NativeFunctionKind, PromiseCombinatorKind, PromiseCombinatorShared,
+    PromiseFinallyThunkKind, PromiseJob, RealmIntrinsics, RootEnvironment, Runtime, RuntimeLimits,
+    RuntimeUsage, SetPrototypeOutcome, array_length_from_number,
+    global_declaration_property_layout, global_function_replacement_layout,
+    is_supported_instruction, is_supported_opcode, usize_to_u64,
 };
 
 const REALM_OBJECT_SLOTS: u64 = 42;
@@ -3889,7 +3889,7 @@ fn function_methods_are_collected_after_their_realm_prototype_edges_are_replaced
 
 #[test]
 fn dynamic_function_declaration_properties_are_deletable_eval_properties() {
-    let layout = dynamic_function_declaration_property_layout();
+    let layout = global_declaration_property_layout(CompilerExecutableKind::DynamicFunctionScript);
 
     assert_eq!(layout.writable(), Some(true));
     assert!(layout.is_enumerable());
@@ -3898,29 +3898,30 @@ fn dynamic_function_declaration_properties_are_deletable_eval_properties() {
 
 #[test]
 fn global_function_descriptor_compatibility_matches_quickjs() {
-    let replacement = dynamic_function_declaration_property_layout();
+    let replacement =
+        global_declaration_property_layout(CompilerExecutableKind::DynamicFunctionScript);
     assert_eq!(
-        global_function_replacement_layout(PropertyLayout::data(false, false, true)),
+        global_function_replacement_layout(PropertyLayout::data(false, false, true), replacement),
         Some(replacement)
     );
     assert_eq!(
-        global_function_replacement_layout(PropertyLayout::data(true, true, false)),
+        global_function_replacement_layout(PropertyLayout::data(true, true, false), replacement),
         Some(PropertyLayout::data(true, true, false))
     );
     assert_eq!(
-        global_function_replacement_layout(PropertyLayout::data(false, true, false)),
+        global_function_replacement_layout(PropertyLayout::data(false, true, false), replacement),
         None
     );
     assert_eq!(
-        global_function_replacement_layout(PropertyLayout::data(true, false, false)),
+        global_function_replacement_layout(PropertyLayout::data(true, false, false), replacement),
         None
     );
     assert_eq!(
-        global_function_replacement_layout(PropertyLayout::accessor(false, true)),
+        global_function_replacement_layout(PropertyLayout::accessor(false, true), replacement),
         Some(replacement)
     );
     assert_eq!(
-        global_function_replacement_layout(PropertyLayout::accessor(true, false)),
+        global_function_replacement_layout(PropertyLayout::accessor(true, false), replacement),
         None
     );
 }
@@ -4077,7 +4078,7 @@ fn accessor_to_data_global_replacement_rolls_back_the_complete_slot() {
         .record
         .replace_existing_with_data(
             &key,
-            dynamic_function_declaration_property_layout(),
+            global_declaration_property_layout(CompilerExecutableKind::DynamicFunctionScript),
             StoredValue::Undefined,
         )
         .expect("accessor replacement");
@@ -4085,6 +4086,7 @@ fn accessor_to_data_global_replacement_rolls_back_the_complete_slot() {
         bindings: Vec::new(),
         inserted_globals: Vec::new(),
         updated_globals: Vec::new(),
+        inserted_cells: Vec::new(),
         inserted_global_properties: Vec::new(),
         updated_global_properties: vec![(key.clone(), previous)],
     };

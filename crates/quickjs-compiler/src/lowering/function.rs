@@ -242,7 +242,7 @@ impl CompilationContext<'_, '_, '_> {
         match metadata.kind() {
             ExecutableKind::Script {
                 asynchronous: false,
-            } => self.validate_dynamic_function_script(executable, tree_layout, limits),
+            } => self.validate_script(executable, tree_layout, limits),
             _ => self.validate_function(executable, tree_layout, limits),
         }
     }
@@ -368,13 +368,24 @@ impl CompilationContext<'_, '_, '_> {
         })
     }
 
-    fn validate_dynamic_function_script(
+    fn validate_script(
         &self,
         executable_id: ExecutableId,
         tree_layout: &FunctionTreeLayout,
         limits: VerificationLimits,
     ) -> Result<ValidatedFunction, LeafCompilationError> {
-        let (executable, program) = self.selected_dynamic_function_script(executable_id)?;
+        let (executable, program, executable_kind) =
+            if crate::is_supported_global_script_goal(self.unit.goal()) {
+                let (executable, program) = self.selected_global_script(executable_id)?;
+                (executable, program, CompilerExecutableKind::GlobalScript)
+            } else {
+                let (executable, program) = self.selected_dynamic_function_script(executable_id)?;
+                (
+                    executable,
+                    program,
+                    CompilerExecutableKind::DynamicFunctionScript,
+                )
+            };
         let layout = FrameLayout::new(
             FrameLayoutInput::new(&self.planned.plan, executable_id).with_internal_locals(1),
         )?;
@@ -415,7 +426,7 @@ impl CompilationContext<'_, '_, '_> {
             checked_function_entry_count(realm_globals.len(), "function closure variables")?;
 
         Ok(ValidatedFunction {
-            executable_kind: CompilerExecutableKind::DynamicFunctionScript,
+            executable_kind,
             strict: executable.is_strict(),
             argument_count: 0,
             defined_argument_count: 0,
@@ -473,6 +484,9 @@ const fn executable_header(
     variable_reference_count: u32,
 ) -> UnverifiedFunctionHeader {
     let header = match kind {
+        CompilerExecutableKind::GlobalScript => {
+            UnverifiedFunctionHeader::global_script(strict, variable_reference_count)
+        }
         CompilerExecutableKind::OrdinaryFunction => {
             UnverifiedFunctionHeader::ordinary_source_function_with_variable_references(
                 strict,

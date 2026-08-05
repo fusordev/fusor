@@ -1,32 +1,51 @@
 use super::super::{
     BindingId, CompilationContext, DeclarationKind, FrameSlot, InitializationPolicy,
-    LeafCompilationError, Span, UnsupportedLeafFeature, VariableDeclarationKind, WritePolicy,
-    unsupported,
+    LeafCompilationError, Span, StoragePlacement, UnsupportedLeafFeature, VariableDeclarationKind,
+    WritePolicy, unsupported,
 };
 
 impl CompilationContext<'_, '_, '_> {
-    pub(in crate::lowering) fn validate_realm_global_var_declaration(
+    pub(in crate::lowering) fn validate_realm_global_declaration(
         &self,
         declaration_kind: VariableDeclarationKind,
         storage: &crate::storage::BindingStorage,
         span: Span,
     ) -> Result<(), LeafCompilationError> {
-        let merged_global_policy = matches!(
-            (storage.policy().kind(), storage.policy().initialization()),
-            (
-                DeclarationKind::Var,
-                InitializationPolicy::UndefinedAtInstantiation
-            ) | (
-                DeclarationKind::Function,
-                InitializationPolicy::FunctionAtInstantiation
-            )
-        );
-        if !crate::is_supported_dynamic_function_goal(self.unit.goal())
-            || declaration_kind != VariableDeclarationKind::Var
-            || !merged_global_policy
-            || storage.policy().writes() != WritePolicy::Mutable
-            || storage.policy().has_temporal_dead_zone()
-        {
+        let valid = match storage.placement() {
+            StoragePlacement::GlobalObject => {
+                declaration_kind == VariableDeclarationKind::Var
+                    && matches!(
+                        (storage.policy().kind(), storage.policy().initialization()),
+                        (
+                            DeclarationKind::Var,
+                            InitializationPolicy::UndefinedAtInstantiation
+                        ) | (
+                            DeclarationKind::Function,
+                            InitializationPolicy::FunctionAtInstantiation
+                        )
+                    )
+                    && storage.policy().writes() == WritePolicy::Mutable
+                    && !storage.policy().has_temporal_dead_zone()
+            }
+            StoragePlacement::GlobalLexical => {
+                matches!(
+                    (declaration_kind, storage.policy().kind()),
+                    (VariableDeclarationKind::Let, DeclarationKind::Let)
+                        | (VariableDeclarationKind::Const, DeclarationKind::Const)
+                ) && storage.policy().initialization() == InitializationPolicy::AtDeclaration
+                    && storage.policy().has_temporal_dead_zone()
+                    && matches!(
+                        (declaration_kind, storage.policy().writes()),
+                        (VariableDeclarationKind::Let, WritePolicy::Mutable)
+                            | (VariableDeclarationKind::Const, WritePolicy::Immutable)
+                    )
+            }
+            StoragePlacement::Argument { .. }
+            | StoragePlacement::Local
+            | StoragePlacement::ModuleLocal
+            | StoragePlacement::ModuleImport => false,
+        };
+        if !crate::is_supported_script_root_goal(self.unit.goal()) || !valid {
             return unsupported(UnsupportedLeafFeature::UnsupportedDeclaration, span);
         }
         Ok(())

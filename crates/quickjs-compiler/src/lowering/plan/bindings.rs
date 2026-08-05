@@ -529,7 +529,7 @@ impl<'arena> CompilationContext<'_, 'arena, '_> {
                     span: Some(identifier.span),
                 })?;
         if storage.placement() == StoragePlacement::GlobalObject {
-            self.validate_realm_global_var_declaration(declaration.kind, storage, identifier.span)?;
+            self.validate_realm_global_declaration(declaration.kind, storage, identifier.span)?;
         } else {
             let slot = layout
                 .slot(binding)
@@ -819,7 +819,7 @@ impl<'arena> CompilationContext<'_, 'arena, '_> {
                     span: Some(identifier.span),
                 })?;
         if storage.placement() == StoragePlacement::GlobalObject {
-            self.validate_realm_global_var_declaration(declaration.kind, storage, identifier.span)?;
+            self.validate_realm_global_declaration(declaration.kind, storage, identifier.span)?;
         } else {
             let slot = layout
                 .slot(binding)
@@ -850,7 +850,7 @@ impl<'arena> CompilationContext<'_, 'arena, '_> {
                     span: Some(identifier.span),
                 })?;
         if storage.placement() == StoragePlacement::GlobalObject {
-            self.validate_realm_global_var_declaration(declaration_kind, storage, identifier.span)?;
+            self.validate_realm_global_declaration(declaration_kind, storage, identifier.span)?;
             let global = tree_layout.realm_globals.for_binding(binding).ok_or(
                 LeafCompilationError::SemanticInvariant {
                     invariant: "for-in Program var has a constructor-realm global identity",
@@ -987,33 +987,53 @@ impl<'arena> CompilationContext<'_, 'arena, '_> {
                     span: Some(identifier.span),
                 },
             )?;
-            if storage.placement() == StoragePlacement::GlobalObject {
-                self.validate_realm_global_var_declaration(
-                    declaration_kind,
-                    storage,
-                    identifier.span,
-                )?;
-                if let Some(initializer) = &declarator.init {
-                    let set_name = self.plan_inferred_function_name_for_initializer(
-                        identifier,
-                        initializer,
-                        constants,
-                    )?;
-                    self.plan_expression_with_abrupt_markers(
-                        initializer,
-                        layout,
-                        tree_layout,
-                        constants,
-                        abrupt_markers,
-                        flow,
-                    )?;
-                    if let Some(set_name) = set_name {
-                        flow.emit(set_name)?;
+            if matches!(
+                storage.placement(),
+                StoragePlacement::GlobalObject | StoragePlacement::GlobalLexical
+            ) {
+                self.validate_realm_global_declaration(declaration_kind, storage, identifier.span)?;
+                let initializes = match &declarator.init {
+                    Some(initializer) => {
+                        let set_name = self.plan_inferred_function_name_for_initializer(
+                            identifier,
+                            initializer,
+                            constants,
+                        )?;
+                        self.plan_expression_with_abrupt_markers(
+                            initializer,
+                            layout,
+                            tree_layout,
+                            constants,
+                            abrupt_markers,
+                            flow,
+                        )?;
+                        if let Some(set_name) = set_name {
+                            flow.emit(set_name)?;
+                        }
+                        true
                     }
+                    None if storage.placement() == StoragePlacement::GlobalLexical
+                        && declaration_kind == VariableDeclarationKind::Let =>
+                    {
+                        flow.emit(PlannedInstruction::new(
+                            FinalOpcode::Undefined,
+                            Operands::None,
+                            identifier.span,
+                        ))?;
+                        true
+                    }
+                    None if storage.placement() == StoragePlacement::GlobalLexical => {
+                        return unsupported(
+                            UnsupportedLeafFeature::UnsupportedDeclaration,
+                            declarator.span,
+                        );
+                    }
+                    None => false,
+                };
+                if initializes {
                     let global = tree_layout.realm_globals.for_binding(binding).ok_or(
                         LeafCompilationError::SemanticInvariant {
-                            invariant:
-                                "declared Program var has a constructor-realm global identity",
+                            invariant: "declared Program binding has a realm-global identity",
                             span: Some(identifier.span),
                         },
                     )?;
@@ -1022,8 +1042,13 @@ impl<'arena> CompilationContext<'_, 'arena, '_> {
                         layout.executable,
                         global,
                     )?;
+                    let opcode = if storage.placement() == StoragePlacement::GlobalLexical {
+                        FinalOpcode::PutVarInit
+                    } else {
+                        FinalOpcode::PutVar
+                    };
                     flow.emit(PlannedInstruction::new(
-                        FinalOpcode::PutVar,
+                        opcode,
                         Operands::VarRef(slot),
                         identifier.span,
                     ))?;
@@ -1173,16 +1198,14 @@ impl CompilationContext<'_, '_, '_> {
                             access: reference.access(),
                         })
                     }
-                    StoragePlacement::GlobalObject => self.lowered_realm_global_binding_reference(
-                        binding.id(),
-                        reference.access(),
-                        span,
-                        layout,
-                        tree_layout,
-                    ),
-                    StoragePlacement::GlobalLexical => {
-                        unsupported(UnsupportedLeafFeature::GlobalEnvironment, span)
-                    }
+                    StoragePlacement::GlobalObject | StoragePlacement::GlobalLexical => self
+                        .lowered_realm_global_binding_reference(
+                            binding.id(),
+                            reference.access(),
+                            span,
+                            layout,
+                            tree_layout,
+                        ),
                     StoragePlacement::ModuleLocal | StoragePlacement::ModuleImport => {
                         unsupported(UnsupportedLeafFeature::UnsupportedBinding, span)
                     }
@@ -1216,7 +1239,7 @@ impl CompilationContext<'_, '_, '_> {
                 span: Some(span),
             });
         }
-        if !crate::is_supported_dynamic_function_goal(self.unit.goal()) {
+        if !crate::is_supported_script_root_goal(self.unit.goal()) {
             return unsupported(UnsupportedLeafFeature::UnresolvedReference, span);
         }
         let global = tree_layout.realm_globals.for_unresolved(unresolved).ok_or(
@@ -1245,7 +1268,7 @@ impl CompilationContext<'_, '_, '_> {
         layout: &FrameLayout,
         tree_layout: &FunctionTreeLayout,
     ) -> Result<LoweredReference, LeafCompilationError> {
-        if !crate::is_supported_dynamic_function_goal(self.unit.goal()) {
+        if !crate::is_supported_script_root_goal(self.unit.goal()) {
             return unsupported(UnsupportedLeafFeature::GlobalEnvironment, span);
         }
         let global = tree_layout.realm_globals.for_binding(binding).ok_or(

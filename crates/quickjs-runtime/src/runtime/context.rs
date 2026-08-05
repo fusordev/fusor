@@ -27,13 +27,13 @@
 
 use super::{
     Arc, AtomError, BytecodeFunction, CompilerExecutableKind, Context, DynamicFunctionScriptError,
-    ExceptionKind, ExecutionLimits, Function, FunctionImplementation, HeapFunction, HeapObject,
-    HeapReference, InstallError, InstalledCode, InstalledRoot, InstalledTemplate, JsNumber,
-    JsString, JsValue, ObjectId, ObjectRecord, OrdinaryDynamicFunctionCompiler,
-    PendingRootEnvironment, PredefinedAtom, PrimitiveValue, PropertyKey, PropertyLayout,
-    RootPublication, Runtime, RuntimeResource, RuntimeUsage, StoredValue, VerifiedBytecode,
-    check_install_limit, global_declaration_error, preflight_opcodes, require_root_kind,
-    usize_to_u64,
+    ExceptionKind, ExecutionLimits, Function, FunctionImplementation, GlobalScriptError,
+    HeapFunction, HeapObject, HeapReference, InstallError, InstalledCode, InstalledRoot,
+    InstalledTemplate, JsNumber, JsString, JsValue, ObjectId, ObjectRecord,
+    OrdinaryDynamicFunctionCompiler, PendingRootEnvironment, PredefinedAtom, PrimitiveValue,
+    PropertyKey, PropertyLayout, RootPublication, Runtime, RuntimeResource, RuntimeUsage,
+    StoredValue, VerifiedBytecode, check_install_limit, global_declaration_error,
+    preflight_opcodes, require_root_kind, usize_to_u64,
 };
 
 struct RootFunctionRecords {
@@ -270,6 +270,101 @@ impl Context<'_> {
         limits: ExecutionLimits,
     ) -> Result<JsValue, DynamicFunctionScriptError> {
         self.execute_dynamic_function_script_with_optional_compiler(authority, limits, None)
+    }
+
+    /// Installs and executes one complete verified host-loaded Global Script.
+    ///
+    /// Declaration instantiation is committed immediately before execution,
+    /// so Global Script bindings persist in the realm after either normal or
+    /// abrupt completion. The internal root function itself is always retired.
+    ///
+    /// # Errors
+    ///
+    /// Returns a typed installation failure or an execution, JavaScript
+    /// exception, resource, publication, or engine failure.
+    pub fn execute_global_script(
+        &mut self,
+        authority: Arc<VerifiedBytecode>,
+        limits: ExecutionLimits,
+    ) -> Result<JsValue, GlobalScriptError> {
+        self.execute_global_script_with_optional_compiler(authority, limits, None)
+    }
+
+    /// Executes a Global Script while allowing nested calls to the realm's
+    /// dynamic Function constructors.
+    ///
+    /// # Errors
+    ///
+    /// Returns the same failures as [`Self::execute_global_script`], plus a
+    /// typed nested dynamic-compilation failure or JavaScript `SyntaxError`.
+    pub fn execute_global_script_with_dynamic_function_compiler(
+        &mut self,
+        authority: Arc<VerifiedBytecode>,
+        limits: ExecutionLimits,
+        compiler: &Arc<dyn OrdinaryDynamicFunctionCompiler>,
+    ) -> Result<JsValue, GlobalScriptError> {
+        self.execute_global_script_with_optional_compiler(authority, limits, Some(compiler))
+    }
+
+    fn execute_global_script_with_optional_compiler(
+        &mut self,
+        authority: Arc<VerifiedBytecode>,
+        limits: ExecutionLimits,
+        compiler: Option<&Arc<dyn OrdinaryDynamicFunctionCompiler>>,
+    ) -> Result<JsValue, GlobalScriptError> {
+        require_root_kind(&authority, CompilerExecutableKind::GlobalScript)?;
+        let global_object = self
+            .runtime
+            .realm_global_object(self.realm)
+            .map_err(crate::ExecutionError::from)?;
+        let exception_authority = Arc::clone(&authority);
+        let mut installed = match self.install_root(authority, RootPublication::Internal, true) {
+            Ok(installed) => installed,
+            Err(InstallError::GlobalDeclarationRejected {
+                name,
+                function,
+                pc,
+                source_span,
+            }) => {
+                let (message, origin) = global_declaration_error(
+                    &exception_authority,
+                    &name,
+                    function,
+                    pc,
+                    source_span,
+                )
+                .map_err(GlobalScriptError::Execution)?;
+                let exception = crate::JsException::engine_error(
+                    ExceptionKind::SyntaxError,
+                    message,
+                    origin,
+                    Vec::new(),
+                );
+                return Err(GlobalScriptError::Execution(
+                    crate::ExecutionError::Exception(exception),
+                ));
+            }
+            Err(error) => return Err(error.into()),
+        };
+        let result = match compiler {
+            Some(compiler) => self.execute_internal_root_with_dynamic_function_compiler(
+                &mut installed,
+                StoredValue::Object(global_object),
+                limits,
+                compiler,
+            ),
+            None => self.execute_internal_root(
+                &mut installed,
+                StoredValue::Object(global_object),
+                limits,
+            ),
+        }
+        .and_then(|completion| self.runtime.public_value(completion));
+        let retirement = self.runtime.retire_dynamic_root(installed);
+        match retirement {
+            Ok(()) => result.map_err(GlobalScriptError::Execution),
+            Err(fault) => Err(GlobalScriptError::Execution(fault.into())),
+        }
     }
 
     /// Installs and executes one complete verified dynamic-Function Script

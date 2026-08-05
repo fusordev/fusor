@@ -24,6 +24,22 @@ pub(crate) const fn is_supported_dynamic_function_goal(
     )
 }
 
+pub(crate) const fn is_supported_global_script_goal(
+    goal: quickjs_frontend::CompilationGoal<'_>,
+) -> bool {
+    matches!(
+        goal,
+        quickjs_frontend::CompilationGoal::GlobalScript(script)
+            if !script.allows_top_level_await()
+    )
+}
+
+pub(crate) const fn is_supported_script_root_goal(
+    goal: quickjs_frontend::CompilationGoal<'_>,
+) -> bool {
+    is_supported_global_script_goal(goal) || is_supported_dynamic_function_goal(goal)
+}
+
 pub use lowering::{
     CompilationContext, CompilationExecutable, CompiledClosureSource, CompiledClosureVariable,
     CompiledConstant, CompiledFunction, CompiledFunctionConstant, CompiledFunctionTree,

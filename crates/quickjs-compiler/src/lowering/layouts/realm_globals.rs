@@ -59,16 +59,8 @@ impl<'plan> RealmGlobalLayoutBuilder<'plan> {
     fn collect_declarations(&mut self) -> Result<(), LeafCompilationError> {
         for binding in self.plan.bindings() {
             match binding.placement() {
-                StoragePlacement::GlobalObject => self.collect_declaration(binding)?,
-                StoragePlacement::GlobalLexical => {
-                    return unsupported(
-                        UnsupportedLeafFeature::GlobalEnvironment,
-                        binding
-                            .declaration_spans()
-                            .first()
-                            .copied()
-                            .unwrap_or_default(),
-                    );
+                StoragePlacement::GlobalObject | StoragePlacement::GlobalLexical => {
+                    self.collect_declaration(binding)?;
                 }
                 StoragePlacement::Argument { .. }
                 | StoragePlacement::Local
@@ -97,12 +89,32 @@ impl<'plan> RealmGlobalLayoutBuilder<'plan> {
             ) | (
                 DeclarationKind::Function,
                 InitializationPolicy::FunctionAtInstantiation
+            ) | (
+                DeclarationKind::Let | DeclarationKind::Const,
+                InitializationPolicy::AtDeclaration
             )
         );
-        if !supported_policy
-            || binding.policy().writes() != WritePolicy::Mutable
-            || binding.policy().has_temporal_dead_zone()
-        {
+        let supported_writes = match binding.policy().kind() {
+            DeclarationKind::Var | DeclarationKind::Function => {
+                binding.policy().writes() == WritePolicy::Mutable
+                    && !binding.policy().has_temporal_dead_zone()
+            }
+            DeclarationKind::Let => {
+                binding.policy().writes() == WritePolicy::Mutable
+                    && binding.policy().has_temporal_dead_zone()
+            }
+            DeclarationKind::Const => {
+                binding.policy().writes() == WritePolicy::Immutable
+                    && binding.policy().has_temporal_dead_zone()
+            }
+            DeclarationKind::FunctionName
+            | DeclarationKind::Parameter
+            | DeclarationKind::Catch
+            | DeclarationKind::Import
+            | DeclarationKind::NamespaceImport
+            | DeclarationKind::SyntheticDefault => false,
+        };
+        if !supported_policy || !supported_writes {
             return unsupported(UnsupportedLeafFeature::GlobalEnvironment, first_span);
         }
         let owner = self.plan.executable(binding.executable()).ok_or(
@@ -112,7 +124,7 @@ impl<'plan> RealmGlobalLayoutBuilder<'plan> {
         )?;
         if binding.executable().index() != 0 || owner.parent().is_some() {
             return Err(LeafCompilationError::SemanticInvariant {
-                invariant: "constructor-realm declaration belongs to the dynamic Script root",
+                invariant: "realm-global declaration belongs to the Script root",
                 span: Some(first_span),
             });
         }
