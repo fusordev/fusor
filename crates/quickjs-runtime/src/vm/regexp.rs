@@ -139,29 +139,182 @@ enum RegExpExecStage {
 pub(super) struct RegExpExecContinuation {
     object: ObjectId,
     input: Option<JsString>,
-    test_mode: bool,
+    consumer: RegExpExecConsumer,
     realm: RealmId,
     stage: RegExpExecStage,
     origin: JsStackFrame,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-#[allow(
-    clippy::enum_variant_names,
-    reason = "the Await prefix documents each generic RegExpExec protocol suspension"
-)]
-enum RegExpTestStage {
-    AwaitInputConversion,
+enum RegExpExecProtocolStage {
     AwaitExec,
     AwaitExecResult,
 }
 
+enum RegExpExecConsumer {
+    Return,
+    Test,
+    Match(Box<RegExpMatchContinuation>),
+    Search(Box<RegExpSearchContinuation>),
+}
+
+impl RegExpExecConsumer {
+    fn retained_values(&self) -> u64 {
+        match self {
+            Self::Return | Self::Test => 0,
+            Self::Match(state) => state.retained_values(),
+            Self::Search(state) => state.retained_values(),
+        }
+    }
+
+    fn trace_roots(&self, mark: &mut dyn FnMut(CollectionRoot)) {
+        match self {
+            Self::Return | Self::Test => {}
+            Self::Match(state) => state.trace_roots(mark),
+            Self::Search(state) => state.trace_roots(mark),
+        }
+    }
+}
+
+pub(super) struct RegExpExecProtocolContinuation {
+    receiver: StoredValue,
+    input: JsString,
+    consumer: RegExpExecConsumer,
+    realm: RealmId,
+    stage: RegExpExecProtocolStage,
+    origin: JsStackFrame,
+}
+
 pub(super) struct RegExpTestContinuation {
     receiver: StoredValue,
-    input: Option<JsString>,
     realm: RealmId,
-    stage: RegExpTestStage,
     origin: JsStackFrame,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[allow(
+    clippy::enum_variant_names,
+    reason = "the Await prefix documents each observable match protocol boundary"
+)]
+enum RegExpMatchStage {
+    AwaitInputConversion,
+    AwaitFlags,
+    AwaitFlagsConversion,
+    AwaitLastIndexReset,
+    AwaitMatchElement,
+    AwaitMatchStringConversion,
+    AwaitEmptyLastIndex,
+    AwaitEmptyLastIndexConversion,
+    AwaitAdvanceSet,
+}
+
+pub(super) struct RegExpMatchContinuation {
+    receiver: StoredValue,
+    input: Option<JsString>,
+    flags: Option<JsString>,
+    result_array: Option<ObjectId>,
+    match_count: u32,
+    realm: RealmId,
+    stage: RegExpMatchStage,
+    origin: JsStackFrame,
+}
+
+impl RegExpMatchContinuation {
+    fn retained_values(&self) -> u64 {
+        1_u64
+            .saturating_add(u64::from(self.input.is_some()))
+            .saturating_add(u64::from(self.flags.is_some()))
+            .saturating_add(u64::from(self.result_array.is_some()))
+    }
+
+    fn trace_roots(&self, mark: &mut dyn FnMut(CollectionRoot)) {
+        trace_stored_value_root(&self.receiver, mark);
+        if let Some(array) = self.result_array {
+            mark(CollectionRoot::Heap(HeapReference::Object(array)));
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[allow(
+    clippy::enum_variant_names,
+    reason = "the Await prefix documents each observable search protocol boundary"
+)]
+enum RegExpSearchStage {
+    AwaitInputConversion,
+    AwaitPreviousLastIndex,
+    AwaitReset,
+    AwaitCurrentLastIndex,
+    AwaitRestore,
+    AwaitIndex,
+}
+
+pub(super) struct RegExpSearchContinuation {
+    receiver: StoredValue,
+    input: Option<JsString>,
+    previous_last_index: Option<StoredValue>,
+    result: Option<StoredValue>,
+    realm: RealmId,
+    stage: RegExpSearchStage,
+    origin: JsStackFrame,
+}
+
+impl RegExpSearchContinuation {
+    fn retained_values(&self) -> u64 {
+        1_u64
+            .saturating_add(u64::from(self.input.is_some()))
+            .saturating_add(u64::from(self.previous_last_index.is_some()))
+            .saturating_add(u64::from(self.result.is_some()))
+    }
+
+    fn trace_roots(&self, mark: &mut dyn FnMut(CollectionRoot)) {
+        trace_stored_value_root(&self.receiver, mark);
+        if let Some(value) = &self.previous_last_index {
+            trace_stored_value_root(value, mark);
+        }
+        if let Some(value) = &self.result {
+            trace_stored_value_root(value, mark);
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[allow(
+    clippy::enum_variant_names,
+    reason = "the Await prefix documents each observable String protocol boundary"
+)]
+enum StringRegExpProtocolStage {
+    AwaitMethod,
+    AwaitSubjectConversion,
+    AwaitRegExp,
+    AwaitFallbackMethod,
+}
+
+pub(super) struct StringRegExpProtocolContinuation {
+    method: RegExpSymbolMethod,
+    receiver: StoredValue,
+    regexp: StoredValue,
+    subject: Option<JsString>,
+    constructed: Option<StoredValue>,
+    realm: RealmId,
+    stage: StringRegExpProtocolStage,
+    origin: JsStackFrame,
+}
+
+impl StringRegExpProtocolContinuation {
+    fn retained_values(&self) -> u64 {
+        2_u64
+            .saturating_add(u64::from(self.subject.is_some()))
+            .saturating_add(u64::from(self.constructed.is_some()))
+    }
+
+    fn trace_roots(&self, mark: &mut dyn FnMut(CollectionRoot)) {
+        trace_stored_value_root(&self.receiver, mark);
+        trace_stored_value_root(&self.regexp, mark);
+        if let Some(value) = &self.constructed {
+            trace_stored_value_root(value, mark);
+        }
+    }
 }
 
 pub(super) enum RegExpContinuation {
@@ -171,7 +324,11 @@ pub(super) enum RegExpContinuation {
     Escape(RegExpEscapeContinuation),
     Compile(Box<RegExpCompileContinuation>),
     Exec(Box<RegExpExecContinuation>),
+    ExecProtocol(Box<RegExpExecProtocolContinuation>),
     Test(Box<RegExpTestContinuation>),
+    Match(Box<RegExpMatchContinuation>),
+    Search(Box<RegExpSearchContinuation>),
+    StringProtocol(Box<StringRegExpProtocolContinuation>),
 }
 
 impl RegExpContinuation {
@@ -188,8 +345,14 @@ impl RegExpContinuation {
             Self::Compile(state) => 3_u64
                 .saturating_add(u64::from(state.source.is_some()))
                 .saturating_add(u64::from(state.original_flags.is_some())),
-            Self::Exec(state) => 1_u64.saturating_add(u64::from(state.input.is_some())),
-            Self::Test(state) => 1_u64.saturating_add(u64::from(state.input.is_some())),
+            Self::Exec(state) => 1_u64
+                .saturating_add(u64::from(state.input.is_some()))
+                .saturating_add(state.consumer.retained_values()),
+            Self::ExecProtocol(state) => 2_u64.saturating_add(state.consumer.retained_values()),
+            Self::Test(_) => 1,
+            Self::Match(state) => state.retained_values(),
+            Self::Search(state) => state.retained_values(),
+            Self::StringProtocol(state) => state.retained_values(),
         }
     }
 
@@ -224,8 +387,16 @@ impl RegExpContinuation {
             }
             Self::Exec(state) => {
                 mark(CollectionRoot::Heap(HeapReference::Object(state.object)));
+                state.consumer.trace_roots(mark);
+            }
+            Self::ExecProtocol(state) => {
+                trace_stored_value_root(&state.receiver, mark);
+                state.consumer.trace_roots(mark);
             }
             Self::Test(state) => trace_stored_value_root(&state.receiver, mark),
+            Self::Match(state) => state.trace_roots(mark),
+            Self::Search(state) => state.trace_roots(mark),
+            Self::StringProtocol(state) => state.trace_roots(mark),
         }
     }
 }
@@ -301,8 +472,20 @@ pub(super) fn advance_regexp_continuation(
         RegExpContinuation::Exec(state) => {
             advance_regexp_exec(runtime, *state, completion, return_to, execution_budget)
         }
+        RegExpContinuation::ExecProtocol(state) => {
+            advance_regexp_exec_protocol(runtime, *state, completion, return_to, execution_budget)
+        }
         RegExpContinuation::Test(state) => {
             advance_regexp_test(runtime, *state, completion, return_to, execution_budget)
+        }
+        RegExpContinuation::Match(state) => {
+            advance_regexp_match(runtime, *state, completion, return_to, execution_budget)
+        }
+        RegExpContinuation::Search(state) => {
+            advance_regexp_search(runtime, *state, completion, return_to, execution_budget)
+        }
+        RegExpContinuation::StringProtocol(state) => {
+            advance_string_regexp_protocol(runtime, *state, completion, return_to, execution_budget)
         }
     }
 }
@@ -1015,7 +1198,7 @@ pub(super) fn begin_regexp_exec(
     let state = RegExpExecContinuation {
         object: *object,
         input: None,
-        test_mode: false,
+        consumer: RegExpExecConsumer::Return,
         realm,
         stage: RegExpExecStage::AwaitInputConversion,
         origin,
@@ -1083,15 +1266,135 @@ fn advance_regexp_exec(
         RegExpExecStage::AwaitLastIndexConversion => {
             let last_index =
                 number_to_length(operator_to_number(completion, state.realm, &state.origin)?);
-            finish_regexp_builtin_exec(runtime, &state, last_index, execution_budget)
+            finish_regexp_builtin_exec(runtime, state, last_index, return_to, execution_budget)
         }
     }
 }
 
-fn begin_regexp_builtin_exec_for_test(
+#[allow(
+    clippy::too_many_arguments,
+    reason = "RegExpExec carries its generic receiver, converted input, consumer, caller continuation, and execution authority"
+)]
+fn begin_regexp_exec_protocol(
+    runtime: &mut Runtime,
+    receiver: StoredValue,
+    input: JsString,
+    consumer: RegExpExecConsumer,
+    realm: RealmId,
+    origin: JsStackFrame,
+    return_to: Option<CallReturn>,
+    execution_budget: &mut ExecutionBudget,
+) -> Result<NativeDispatch, NativeFailure> {
+    let state = RegExpExecProtocolContinuation {
+        receiver,
+        input,
+        consumer,
+        realm,
+        stage: RegExpExecProtocolStage::AwaitExec,
+        origin,
+    };
+    charge_heap_property_lookup(runtime, &state.receiver, execution_budget)?;
+    let key = runtime.predefined_property_key(PredefinedAtom::Exec);
+    match read_static_property(runtime, state.realm, &state.receiver, &key)? {
+        PropertyReadOutcome::Value(value) => {
+            advance_regexp_exec_protocol(runtime, state, value, return_to, execution_budget)
+        }
+        PropertyReadOutcome::Getter { function, receiver } => call_regexp_function(
+            function,
+            receiver,
+            CallArguments::empty(),
+            RegExpContinuation::ExecProtocol(Box::new(state)),
+            return_to,
+        ),
+        PropertyReadOutcome::Failed(failure) => Err(NativeFailure::Abrupt(property_exception_at(
+            state.realm,
+            state.origin,
+            Some(&JsString::from_utf8("exec")?),
+            failure,
+        )?)),
+    }
+}
+
+fn advance_regexp_exec_protocol(
+    runtime: &mut Runtime,
+    mut state: RegExpExecProtocolContinuation,
+    completion: StoredValue,
+    return_to: Option<CallReturn>,
+    execution_budget: &mut ExecutionBudget,
+) -> Result<NativeDispatch, NativeFailure> {
+    match state.stage {
+        RegExpExecProtocolStage::AwaitExec => match completion {
+            StoredValue::Function(function) => {
+                let arguments = one_regexp_argument(StoredValue::String(state.input.clone()))?;
+                let receiver = state.receiver.duplicate();
+                state.stage = RegExpExecProtocolStage::AwaitExecResult;
+                call_regexp_function(
+                    function,
+                    receiver,
+                    arguments,
+                    RegExpContinuation::ExecProtocol(Box::new(state)),
+                    return_to,
+                )
+            }
+            StoredValue::Undefined
+            | StoredValue::Null
+            | StoredValue::Boolean(_)
+            | StoredValue::Number(_)
+            | StoredValue::BigInt(_)
+            | StoredValue::String(_)
+            | StoredValue::Symbol(_)
+            | StoredValue::Object(_) => {
+                let StoredValue::Object(object) = state.receiver else {
+                    return regexp_type_error(state.realm, state.origin, "not a RegExp");
+                };
+                if runtime.regexp_state(object)?.is_none() {
+                    return regexp_type_error(state.realm, state.origin, "not a RegExp");
+                }
+                begin_regexp_builtin_exec_for_consumer(
+                    runtime,
+                    object,
+                    state.input,
+                    state.consumer,
+                    state.realm,
+                    state.origin,
+                    return_to,
+                    execution_budget,
+                )
+            }
+        },
+        RegExpExecProtocolStage::AwaitExecResult => match completion {
+            result @ (StoredValue::Null | StoredValue::Function(_) | StoredValue::Object(_)) => {
+                complete_regexp_exec_consumer(
+                    runtime,
+                    state.consumer,
+                    result,
+                    return_to,
+                    execution_budget,
+                )
+            }
+            StoredValue::Undefined
+            | StoredValue::Boolean(_)
+            | StoredValue::Number(_)
+            | StoredValue::BigInt(_)
+            | StoredValue::String(_)
+            | StoredValue::Symbol(_) => regexp_type_error(
+                state.realm,
+                state.origin,
+                "RegExp exec returned a primitive",
+            ),
+        },
+    }
+}
+
+#[allow(
+    clippy::too_many_arguments,
+    reason = "builtin RegExp execution carries its branded receiver, converted input, consumer, caller continuation, and execution authority"
+)]
+fn begin_regexp_builtin_exec_for_consumer(
     runtime: &mut Runtime,
     object: ObjectId,
     input: JsString,
+    consumer: RegExpExecConsumer,
     realm: RealmId,
     origin: JsStackFrame,
     return_to: Option<CallReturn>,
@@ -1100,7 +1403,7 @@ fn begin_regexp_builtin_exec_for_test(
     let state = RegExpExecContinuation {
         object,
         input: Some(input),
-        test_mode: true,
+        consumer,
         realm,
         stage: RegExpExecStage::AwaitLastIndex,
         origin,
@@ -1130,8 +1433,9 @@ fn begin_regexp_builtin_exec_for_test(
 
 fn finish_regexp_builtin_exec(
     runtime: &mut Runtime,
-    state: &RegExpExecContinuation,
+    state: RegExpExecContinuation,
     mut last_index: u64,
+    return_to: Option<CallReturn>,
     execution_budget: &mut ExecutionBudget,
 ) -> Result<NativeDispatch, NativeFailure> {
     let input = state.input.as_ref().ok_or(EngineFault::RuntimeInvariant {
@@ -1198,34 +1502,68 @@ fn finish_regexp_builtin_exec(
     };
     let Some(matched) = matched else {
         if global || sticky {
-            write_regexp_last_index(runtime, state, 0, execution_budget)?;
+            write_regexp_last_index(runtime, &state, 0, execution_budget)?;
         }
-        return Ok(NativeDispatch::Immediate(if state.test_mode {
-            StoredValue::Boolean(false)
-        } else {
-            StoredValue::Null
-        }));
+        return complete_regexp_exec_consumer(
+            runtime,
+            state.consumer,
+            StoredValue::Null,
+            return_to,
+            execution_budget,
+        );
     };
     let whole = matched.range();
     if global || sticky {
         write_regexp_last_index(
             runtime,
-            state,
+            &state,
             u64::try_from(whole.end).unwrap_or(u64::MAX),
             execution_budget,
         )?;
     }
-    if state.test_mode {
-        return Ok(NativeDispatch::Immediate(StoredValue::Boolean(true)));
-    }
-    materialize_regexp_match(
+    let result = materialize_regexp_match(
         runtime,
         state.realm,
         input,
         &matched,
         &capture_names,
         has_indices,
-    )
+    )?;
+    complete_regexp_exec_consumer(runtime, state.consumer, result, return_to, execution_budget)
+}
+
+fn complete_regexp_exec_consumer(
+    runtime: &mut Runtime,
+    consumer: RegExpExecConsumer,
+    result: StoredValue,
+    return_to: Option<CallReturn>,
+    execution_budget: &mut ExecutionBudget,
+) -> Result<NativeDispatch, NativeFailure> {
+    match consumer {
+        RegExpExecConsumer::Return => Ok(NativeDispatch::Immediate(result)),
+        RegExpExecConsumer::Test => Ok(NativeDispatch::Immediate(StoredValue::Boolean(!matches!(
+            result,
+            StoredValue::Null
+        )))),
+        RegExpExecConsumer::Match(state) => {
+            advance_regexp_match_after_exec(runtime, *state, result, return_to, execution_budget)
+        }
+        RegExpExecConsumer::Search(state) => {
+            advance_regexp_search_after_exec(runtime, *state, result, return_to, execution_budget)
+        }
+    }
+}
+
+fn one_regexp_argument(value: StoredValue) -> Result<CallArguments, NativeFailure> {
+    let mut values = Vec::new();
+    values
+        .try_reserve_exact(1)
+        .map_err(|_| ExecutionError::AllocationFailed {
+            resource: RuntimeResource::FrameValues,
+            additional: 1,
+        })?;
+    values.push(value);
+    Ok(CallArguments::from_values(values))
 }
 
 fn write_regexp_last_index(
@@ -1312,7 +1650,7 @@ fn materialize_regexp_match(
     matched: &quickjs_regexp::Match,
     capture_names: &[Option<JsString>],
     has_indices: bool,
-) -> Result<NativeDispatch, NativeFailure> {
+) -> Result<StoredValue, NativeFailure> {
     let mut captures = Vec::new();
     captures
         .try_reserve_exact(matched.captures.len())
@@ -1350,7 +1688,7 @@ fn materialize_regexp_match(
             StoredValue::Object(indices),
         )?;
     }
-    Ok(NativeDispatch::Immediate(StoredValue::Object(result)))
+    Ok(StoredValue::Object(result))
 }
 
 fn materialize_match_indices(
@@ -1485,9 +1823,7 @@ pub(super) fn begin_regexp_test(
     }
     let state = RegExpTestContinuation {
         receiver,
-        input: None,
         realm,
-        stage: RegExpTestStage::AwaitInputConversion,
         origin,
     };
     convert_regexp_value(
@@ -1502,110 +1838,880 @@ pub(super) fn begin_regexp_test(
 
 fn advance_regexp_test(
     runtime: &mut Runtime,
-    mut state: RegExpTestContinuation,
+    state: RegExpTestContinuation,
+    completion: StoredValue,
+    return_to: Option<CallReturn>,
+    execution_budget: &mut ExecutionBudget,
+) -> Result<NativeDispatch, NativeFailure> {
+    let input = operator_primitive_to_string(completion, state.realm, &state.origin)?;
+    begin_regexp_exec_protocol(
+        runtime,
+        state.receiver,
+        input,
+        RegExpExecConsumer::Test,
+        state.realm,
+        state.origin,
+        return_to,
+        execution_budget,
+    )
+}
+
+#[allow(
+    clippy::too_many_arguments,
+    reason = "symbol protocol dispatch retains the method, receiver, input, caller continuation, source origin, and execution authority"
+)]
+pub(super) fn begin_regexp_symbol_protocol(
+    runtime: &mut Runtime,
+    method: RegExpSymbolMethod,
+    realm: RealmId,
+    receiver: StoredValue,
+    input: StoredValue,
+    return_to: Option<CallReturn>,
+    origin: JsStackFrame,
+    execution_budget: &mut ExecutionBudget,
+) -> Result<NativeDispatch, NativeFailure> {
+    if !matches!(receiver, StoredValue::Function(_) | StoredValue::Object(_)) {
+        return regexp_type_error(realm, origin, "not an object");
+    }
+    match method {
+        RegExpSymbolMethod::Match => {
+            let state = RegExpMatchContinuation {
+                receiver,
+                input: None,
+                flags: None,
+                result_array: None,
+                match_count: 0,
+                realm,
+                stage: RegExpMatchStage::AwaitInputConversion,
+                origin,
+            };
+            convert_regexp_value(
+                runtime,
+                RegExpContinuation::Match(Box::new(state)),
+                input,
+                OperatorPrimitiveHint::String,
+                return_to,
+                execution_budget,
+            )
+        }
+        RegExpSymbolMethod::Search => {
+            let state = RegExpSearchContinuation {
+                receiver,
+                input: None,
+                previous_last_index: None,
+                result: None,
+                realm,
+                stage: RegExpSearchStage::AwaitInputConversion,
+                origin,
+            };
+            convert_regexp_value(
+                runtime,
+                RegExpContinuation::Search(Box::new(state)),
+                input,
+                OperatorPrimitiveHint::String,
+                return_to,
+                execution_budget,
+            )
+        }
+        RegExpSymbolMethod::Replace | RegExpSymbolMethod::MatchAll | RegExpSymbolMethod::Split => {
+            regexp_type_error(realm, origin, "RegExp protocol is not implemented")
+        }
+    }
+}
+
+#[allow(
+    clippy::too_many_lines,
+    reason = "the match algorithm keeps every ES2025 observable boundary in one auditable stage dispatch"
+)]
+fn advance_regexp_match(
+    runtime: &mut Runtime,
+    mut state: RegExpMatchContinuation,
     completion: StoredValue,
     return_to: Option<CallReturn>,
     execution_budget: &mut ExecutionBudget,
 ) -> Result<NativeDispatch, NativeFailure> {
     match state.stage {
-        RegExpTestStage::AwaitInputConversion => {
+        RegExpMatchStage::AwaitInputConversion => {
             state.input = Some(operator_primitive_to_string(
                 completion,
                 state.realm,
                 &state.origin,
             )?);
-            state.stage = RegExpTestStage::AwaitExec;
-            charge_heap_property_lookup(runtime, &state.receiver, execution_budget)?;
-            let key = runtime.predefined_property_key(PredefinedAtom::Exec);
-            match read_static_property(runtime, state.realm, &state.receiver, &key)? {
-                PropertyReadOutcome::Value(value) => {
-                    advance_regexp_test(runtime, state, value, return_to, execution_budget)
-                }
-                PropertyReadOutcome::Getter { function, receiver } => call_regexp_function(
-                    function,
+            state.stage = RegExpMatchStage::AwaitFlags;
+            read_regexp_property(
+                runtime,
+                state.receiver.duplicate(),
+                runtime.predefined_property_key(PredefinedAtom::Flags),
+                "flags",
+                RegExpContinuation::Match(Box::new(state)),
+                return_to,
+                execution_budget,
+            )
+        }
+        RegExpMatchStage::AwaitFlags => {
+            state.stage = RegExpMatchStage::AwaitFlagsConversion;
+            convert_regexp_value(
+                runtime,
+                RegExpContinuation::Match(Box::new(state)),
+                completion,
+                OperatorPrimitiveHint::String,
+                return_to,
+                execution_budget,
+            )
+        }
+        RegExpMatchStage::AwaitFlagsConversion => {
+            let flags = operator_primitive_to_string(completion, state.realm, &state.origin)?;
+            let global = string_has_code_unit(&flags, u16::from(b'g'));
+            state.flags = Some(flags);
+            if global {
+                state.stage = RegExpMatchStage::AwaitLastIndexReset;
+                let receiver = state.receiver.duplicate();
+                write_regexp_protocol_property(
+                    runtime,
                     receiver,
-                    CallArguments::empty(),
-                    RegExpContinuation::Test(Box::new(state)),
+                    runtime.predefined_property_key(PredefinedAtom::LastIndex),
+                    StoredValue::Number(JsNumber::from_f64(0.0)),
+                    "lastIndex",
+                    RegExpContinuation::Match(Box::new(state)),
                     return_to,
-                ),
-                PropertyReadOutcome::Failed(failure) => {
-                    Err(NativeFailure::Abrupt(property_exception_at(
-                        state.realm,
-                        state.origin,
-                        Some(&JsString::from_utf8("exec")?),
-                        failure,
-                    )?))
-                }
+                    execution_budget,
+                )
+            } else {
+                begin_regexp_match_exec(runtime, state, return_to, execution_budget)
             }
         }
-        RegExpTestStage::AwaitExec => match completion {
-            StoredValue::Function(function) => {
-                let input = state.input.as_ref().ok_or(EngineFault::RuntimeInvariant {
-                    message: "RegExp test lost its input",
-                })?;
-                let mut arguments = Vec::new();
-                arguments
-                    .try_reserve_exact(1)
-                    .map_err(|_| ExecutionError::AllocationFailed {
-                        resource: RuntimeResource::FrameValues,
-                        additional: 1,
-                    })?;
-                arguments.push(StoredValue::String(input.clone()));
-                state.stage = RegExpTestStage::AwaitExecResult;
-                let receiver = state.receiver.duplicate();
-                call_regexp_function(
-                    function,
-                    receiver,
-                    CallArguments::from_values(arguments),
-                    RegExpContinuation::Test(Box::new(state)),
-                    return_to,
-                )
-            }
-            StoredValue::Undefined
-            | StoredValue::Null
-            | StoredValue::Boolean(_)
-            | StoredValue::Number(_)
-            | StoredValue::BigInt(_)
-            | StoredValue::String(_)
-            | StoredValue::Symbol(_)
-            | StoredValue::Object(_) => {
-                let StoredValue::Object(object) = state.receiver else {
-                    return regexp_type_error(state.realm, state.origin, "not a RegExp");
-                };
-                if runtime.regexp_state(object)?.is_none() {
-                    return regexp_type_error(state.realm, state.origin, "not a RegExp");
-                }
-                let input = state.input.ok_or(EngineFault::RuntimeInvariant {
-                    message: "RegExp test lost its input",
-                })?;
-                begin_regexp_builtin_exec_for_test(
+        RegExpMatchStage::AwaitLastIndexReset => {
+            state.result_array = Some(runtime.allocate_array(state.realm, Vec::new())?);
+            begin_regexp_match_exec(runtime, state, return_to, execution_budget)
+        }
+        RegExpMatchStage::AwaitMatchElement => {
+            state.stage = RegExpMatchStage::AwaitMatchStringConversion;
+            convert_regexp_value(
+                runtime,
+                RegExpContinuation::Match(Box::new(state)),
+                completion,
+                OperatorPrimitiveHint::String,
+                return_to,
+                execution_budget,
+            )
+        }
+        RegExpMatchStage::AwaitMatchStringConversion => {
+            let matched = operator_primitive_to_string(completion, state.realm, &state.origin)?;
+            let empty = matched.is_empty();
+            append_global_regexp_match(runtime, &mut state, matched, execution_budget)?;
+            if empty {
+                state.stage = RegExpMatchStage::AwaitEmptyLastIndex;
+                read_regexp_property(
                     runtime,
-                    object,
-                    input,
-                    state.realm,
-                    state.origin,
+                    state.receiver.duplicate(),
+                    runtime.predefined_property_key(PredefinedAtom::LastIndex),
+                    "lastIndex",
+                    RegExpContinuation::Match(Box::new(state)),
+                    return_to,
+                    execution_budget,
+                )
+            } else {
+                begin_regexp_match_exec(runtime, state, return_to, execution_budget)
+            }
+        }
+        RegExpMatchStage::AwaitEmptyLastIndex => {
+            state.stage = RegExpMatchStage::AwaitEmptyLastIndexConversion;
+            convert_regexp_value(
+                runtime,
+                RegExpContinuation::Match(Box::new(state)),
+                completion,
+                OperatorPrimitiveHint::Number,
+                return_to,
+                execution_budget,
+            )
+        }
+        RegExpMatchStage::AwaitEmptyLastIndexConversion => {
+            let index =
+                number_to_length(operator_to_number(completion, state.realm, &state.origin)?);
+            let input = state.input.as_ref().ok_or(EngineFault::RuntimeInvariant {
+                message: "RegExp match lost its converted input",
+            })?;
+            let flags = state.flags.as_ref().ok_or(EngineFault::RuntimeInvariant {
+                message: "RegExp match lost its converted flags",
+            })?;
+            let full_unicode = string_has_code_unit(flags, u16::from(b'u'))
+                || string_has_code_unit(flags, u16::from(b'v'));
+            let next = advance_regexp_string_index(input, index, full_unicode)?;
+            state.stage = RegExpMatchStage::AwaitAdvanceSet;
+            let receiver = state.receiver.duplicate();
+            write_regexp_protocol_property(
+                runtime,
+                receiver,
+                runtime.predefined_property_key(PredefinedAtom::LastIndex),
+                StoredValue::Number(JsNumber::from_f64(exact_regexp_index_as_f64(next))),
+                "lastIndex",
+                RegExpContinuation::Match(Box::new(state)),
+                return_to,
+                execution_budget,
+            )
+        }
+        RegExpMatchStage::AwaitAdvanceSet => {
+            begin_regexp_match_exec(runtime, state, return_to, execution_budget)
+        }
+    }
+}
+
+fn begin_regexp_match_exec(
+    runtime: &mut Runtime,
+    state: RegExpMatchContinuation,
+    return_to: Option<CallReturn>,
+    execution_budget: &mut ExecutionBudget,
+) -> Result<NativeDispatch, NativeFailure> {
+    let input = state
+        .input
+        .as_ref()
+        .ok_or(EngineFault::RuntimeInvariant {
+            message: "RegExp match reached exec without converted input",
+        })?
+        .clone();
+    let receiver = state.receiver.duplicate();
+    let realm = state.realm;
+    let origin = state.origin.clone();
+    begin_regexp_exec_protocol(
+        runtime,
+        receiver,
+        input,
+        RegExpExecConsumer::Match(Box::new(state)),
+        realm,
+        origin,
+        return_to,
+        execution_budget,
+    )
+}
+
+fn advance_regexp_match_after_exec(
+    runtime: &mut Runtime,
+    mut state: RegExpMatchContinuation,
+    result: StoredValue,
+    return_to: Option<CallReturn>,
+    execution_budget: &mut ExecutionBudget,
+) -> Result<NativeDispatch, NativeFailure> {
+    let flags = state.flags.as_ref().ok_or(EngineFault::RuntimeInvariant {
+        message: "RegExp match exec completed without converted flags",
+    })?;
+    if !string_has_code_unit(flags, u16::from(b'g')) {
+        return Ok(NativeDispatch::Immediate(result));
+    }
+    if matches!(result, StoredValue::Null) {
+        if state.match_count == 0 {
+            return Ok(NativeDispatch::Immediate(StoredValue::Null));
+        }
+        let array = state.result_array.ok_or(EngineFault::RuntimeInvariant {
+            message: "global RegExp match completed without a result array",
+        })?;
+        return Ok(NativeDispatch::Immediate(StoredValue::Object(array)));
+    }
+    state.stage = RegExpMatchStage::AwaitMatchElement;
+    read_regexp_property(
+        runtime,
+        result,
+        PropertyKey::from_index(ArrayIndex::new(0).expect("zero is a canonical array index")),
+        "0",
+        RegExpContinuation::Match(Box::new(state)),
+        return_to,
+        execution_budget,
+    )
+}
+
+fn append_global_regexp_match(
+    runtime: &mut Runtime,
+    state: &mut RegExpMatchContinuation,
+    value: JsString,
+    execution_budget: &mut ExecutionBudget,
+) -> Result<(), NativeFailure> {
+    let Some(index) = ArrayIndex::new(state.match_count) else {
+        return Err(NativeFailure::Abrupt(PendingException {
+            realm: state.realm,
+            payload: PendingExceptionPayload::EngineError {
+                kind: ExceptionKind::RangeError,
+                message: JsString::from_utf8("invalid array length")?,
+            },
+            origin: state.origin.clone(),
+        }));
+    };
+    let array = state.result_array.ok_or(EngineFault::RuntimeInvariant {
+        message: "global RegExp match append has no result array",
+    })?;
+    let work = runtime.preview_array_define_data_property_work(array)?;
+    execution_budget.charge_instructions(work)?;
+    match runtime.define_array_data_property(
+        array,
+        PropertyKey::from_index(index),
+        PropertyLayout::data(true, true, true),
+        StoredValue::String(value),
+    )? {
+        ArrayDefineOutcome::Complete => {}
+        ArrayDefineOutcome::ReadOnlyLength | ArrayDefineOutcome::NonExtensible => {
+            return Err(EngineFault::RuntimeInvariant {
+                message: "fresh RegExp match result array rejected an append",
+            }
+            .into());
+        }
+    }
+    state.match_count = state
+        .match_count
+        .checked_add(1)
+        .ok_or(EngineFault::RuntimeInvariant {
+            message: "RegExp global match count overflowed",
+        })?;
+    Ok(())
+}
+
+fn advance_regexp_string_index(
+    input: &JsString,
+    index: u64,
+    full_unicode: bool,
+) -> Result<u64, NativeFailure> {
+    if !full_unicode {
+        return index.checked_add(1).ok_or_else(|| {
+            EngineFault::RuntimeInvariant {
+                message: "RegExp string index overflowed",
+            }
+            .into()
+        });
+    }
+    let length = u64::from(input.len());
+    if index.saturating_add(1) >= length {
+        return index.checked_add(1).ok_or_else(|| {
+            EngineFault::RuntimeInvariant {
+                message: "RegExp Unicode string index overflowed",
+            }
+            .into()
+        });
+    }
+    let Some(index32) = u32::try_from(index).ok() else {
+        return index.checked_add(1).ok_or_else(|| {
+            EngineFault::RuntimeInvariant {
+                message: "RegExp Unicode string index overflowed",
+            }
+            .into()
+        });
+    };
+    let first = input
+        .code_unit_at(index32)
+        .ok_or(EngineFault::RuntimeInvariant {
+            message: "RegExp Unicode advance could not read the leading code unit",
+        })?;
+    let second =
+        input
+            .code_unit_at(index32.saturating_add(1))
+            .ok_or(EngineFault::RuntimeInvariant {
+                message: "RegExp Unicode advance could not read the trailing code unit",
+            })?;
+    let step = if (0xd800..=0xdbff).contains(&first) && (0xdc00..=0xdfff).contains(&second) {
+        2
+    } else {
+        1
+    };
+    index.checked_add(step).ok_or_else(|| {
+        EngineFault::RuntimeInvariant {
+            message: "RegExp Unicode string index overflowed",
+        }
+        .into()
+    })
+}
+
+#[expect(
+    clippy::cast_precision_loss,
+    reason = "RegExp protocol indices are at most 2^53 and therefore exactly representable as binary64 integers"
+)]
+fn exact_regexp_index_as_f64(index: u64) -> f64 {
+    index as f64
+}
+
+fn advance_regexp_search(
+    runtime: &mut Runtime,
+    mut state: RegExpSearchContinuation,
+    completion: StoredValue,
+    return_to: Option<CallReturn>,
+    execution_budget: &mut ExecutionBudget,
+) -> Result<NativeDispatch, NativeFailure> {
+    match state.stage {
+        RegExpSearchStage::AwaitInputConversion => {
+            state.input = Some(operator_primitive_to_string(
+                completion,
+                state.realm,
+                &state.origin,
+            )?);
+            state.stage = RegExpSearchStage::AwaitPreviousLastIndex;
+            read_regexp_property(
+                runtime,
+                state.receiver.duplicate(),
+                runtime.predefined_property_key(PredefinedAtom::LastIndex),
+                "lastIndex",
+                RegExpContinuation::Search(Box::new(state)),
+                return_to,
+                execution_budget,
+            )
+        }
+        RegExpSearchStage::AwaitPreviousLastIndex => {
+            let zero = StoredValue::Number(JsNumber::from_f64(0.0));
+            let requires_reset = !completion.same_value(&zero);
+            state.previous_last_index = Some(completion);
+            if requires_reset {
+                state.stage = RegExpSearchStage::AwaitReset;
+                let receiver = state.receiver.duplicate();
+                write_regexp_protocol_property(
+                    runtime,
+                    receiver,
+                    runtime.predefined_property_key(PredefinedAtom::LastIndex),
+                    zero,
+                    "lastIndex",
+                    RegExpContinuation::Search(Box::new(state)),
+                    return_to,
+                    execution_budget,
+                )
+            } else {
+                begin_regexp_search_exec(runtime, state, return_to, execution_budget)
+            }
+        }
+        RegExpSearchStage::AwaitReset => {
+            begin_regexp_search_exec(runtime, state, return_to, execution_budget)
+        }
+        RegExpSearchStage::AwaitCurrentLastIndex => {
+            let previous =
+                state
+                    .previous_last_index
+                    .as_ref()
+                    .ok_or(EngineFault::RuntimeInvariant {
+                        message: "RegExp search lost its previous lastIndex",
+                    })?;
+            if completion.same_value(previous) {
+                finish_regexp_search(runtime, state, return_to, execution_budget)
+            } else {
+                let previous = previous.duplicate();
+                state.stage = RegExpSearchStage::AwaitRestore;
+                let receiver = state.receiver.duplicate();
+                write_regexp_protocol_property(
+                    runtime,
+                    receiver,
+                    runtime.predefined_property_key(PredefinedAtom::LastIndex),
+                    previous,
+                    "lastIndex",
+                    RegExpContinuation::Search(Box::new(state)),
                     return_to,
                     execution_budget,
                 )
             }
-        },
-        RegExpTestStage::AwaitExecResult => match completion {
-            StoredValue::Null => Ok(NativeDispatch::Immediate(StoredValue::Boolean(false))),
-            StoredValue::Function(_) | StoredValue::Object(_) => {
-                Ok(NativeDispatch::Immediate(StoredValue::Boolean(true)))
-            }
-            StoredValue::Undefined
-            | StoredValue::Boolean(_)
-            | StoredValue::Number(_)
-            | StoredValue::BigInt(_)
-            | StoredValue::String(_)
-            | StoredValue::Symbol(_) => regexp_type_error(
-                state.realm,
-                state.origin,
-                "RegExp exec returned a primitive",
-            ),
-        },
+        }
+        RegExpSearchStage::AwaitRestore => {
+            finish_regexp_search(runtime, state, return_to, execution_budget)
+        }
+        RegExpSearchStage::AwaitIndex => Ok(NativeDispatch::Immediate(completion)),
     }
+}
+
+fn begin_regexp_search_exec(
+    runtime: &mut Runtime,
+    state: RegExpSearchContinuation,
+    return_to: Option<CallReturn>,
+    execution_budget: &mut ExecutionBudget,
+) -> Result<NativeDispatch, NativeFailure> {
+    let input = state
+        .input
+        .as_ref()
+        .ok_or(EngineFault::RuntimeInvariant {
+            message: "RegExp search reached exec without converted input",
+        })?
+        .clone();
+    let receiver = state.receiver.duplicate();
+    let realm = state.realm;
+    let origin = state.origin.clone();
+    begin_regexp_exec_protocol(
+        runtime,
+        receiver,
+        input,
+        RegExpExecConsumer::Search(Box::new(state)),
+        realm,
+        origin,
+        return_to,
+        execution_budget,
+    )
+}
+
+fn advance_regexp_search_after_exec(
+    runtime: &mut Runtime,
+    mut state: RegExpSearchContinuation,
+    result: StoredValue,
+    return_to: Option<CallReturn>,
+    execution_budget: &mut ExecutionBudget,
+) -> Result<NativeDispatch, NativeFailure> {
+    state.result = Some(result);
+    state.stage = RegExpSearchStage::AwaitCurrentLastIndex;
+    read_regexp_property(
+        runtime,
+        state.receiver.duplicate(),
+        runtime.predefined_property_key(PredefinedAtom::LastIndex),
+        "lastIndex",
+        RegExpContinuation::Search(Box::new(state)),
+        return_to,
+        execution_budget,
+    )
+}
+
+fn finish_regexp_search(
+    runtime: &mut Runtime,
+    mut state: RegExpSearchContinuation,
+    return_to: Option<CallReturn>,
+    execution_budget: &mut ExecutionBudget,
+) -> Result<NativeDispatch, NativeFailure> {
+    let result = state.result.take().ok_or(EngineFault::RuntimeInvariant {
+        message: "RegExp search completed without an exec result",
+    })?;
+    if matches!(result, StoredValue::Null) {
+        return Ok(NativeDispatch::Immediate(StoredValue::Number(
+            JsNumber::from_i32(-1),
+        )));
+    }
+    state.stage = RegExpSearchStage::AwaitIndex;
+    read_regexp_property(
+        runtime,
+        result,
+        runtime.predefined_property_key(PredefinedAtom::Index),
+        "index",
+        RegExpContinuation::Search(Box::new(state)),
+        return_to,
+        execution_budget,
+    )
+}
+
+#[expect(
+    clippy::needless_pass_by_value,
+    reason = "dynamic index keys and predefined keys share one ownership shape across immediate and suspended reads"
+)]
+fn read_regexp_property(
+    runtime: &mut Runtime,
+    base: StoredValue,
+    key: PropertyKey,
+    diagnostic_name: &str,
+    continuation: RegExpContinuation,
+    return_to: Option<CallReturn>,
+    execution_budget: &mut ExecutionBudget,
+) -> Result<NativeDispatch, NativeFailure> {
+    let (realm, origin) = regexp_continuation_context(&continuation);
+    charge_regexp_property_lookup(runtime, realm, &base, execution_budget)?;
+    match read_static_property(runtime, realm, &base, &key)? {
+        PropertyReadOutcome::Value(value) => {
+            advance_regexp_continuation(runtime, continuation, value, return_to, execution_budget)
+        }
+        PropertyReadOutcome::Getter { function, receiver } => call_regexp_function(
+            function,
+            receiver,
+            CallArguments::empty(),
+            continuation,
+            return_to,
+        ),
+        PropertyReadOutcome::Failed(failure) => Err(NativeFailure::Abrupt(property_exception_at(
+            realm,
+            origin,
+            Some(&JsString::from_utf8(diagnostic_name)?),
+            failure,
+        )?)),
+    }
+}
+
+#[allow(
+    clippy::too_many_arguments,
+    reason = "a resumable strict Set keeps its base, key, value, diagnostic, caller continuation, and execution authority explicit"
+)]
+#[expect(
+    clippy::needless_pass_by_value,
+    reason = "the resumable strict Set keeps one ownership shape for immediate writes and setter calls"
+)]
+fn write_regexp_protocol_property(
+    runtime: &mut Runtime,
+    base: StoredValue,
+    key: PropertyKey,
+    value: StoredValue,
+    diagnostic_name: &str,
+    continuation: RegExpContinuation,
+    return_to: Option<CallReturn>,
+    execution_budget: &mut ExecutionBudget,
+) -> Result<NativeDispatch, NativeFailure> {
+    let (realm, origin) = regexp_continuation_context(&continuation);
+    charge_regexp_property_lookup(runtime, realm, &base, execution_budget)?;
+    match write_static_property(runtime, realm, &base, key, value, true, execution_budget)? {
+        PropertyWriteOutcome::Complete => advance_regexp_continuation(
+            runtime,
+            continuation,
+            StoredValue::Undefined,
+            return_to,
+            execution_budget,
+        ),
+        PropertyWriteOutcome::Setter {
+            function,
+            receiver,
+            value,
+        } => call_regexp_function(
+            function,
+            receiver,
+            one_regexp_argument(value)?,
+            continuation,
+            return_to,
+        ),
+        PropertyWriteOutcome::Failed(failure) => Err(NativeFailure::Abrupt(property_exception_at(
+            realm,
+            origin,
+            Some(&JsString::from_utf8(diagnostic_name)?),
+            failure,
+        )?)),
+    }
+}
+
+fn charge_regexp_property_lookup(
+    runtime: &Runtime,
+    realm: RealmId,
+    base: &StoredValue,
+    execution_budget: &mut ExecutionBudget,
+) -> Result<(), NativeFailure> {
+    let prototype = match base {
+        StoredValue::Boolean(_) => Some(runtime.realm_boolean_prototype(realm)?),
+        StoredValue::Number(_) => Some(runtime.realm_number_prototype(realm)?),
+        StoredValue::BigInt(_) => Some(runtime.realm_bigint_prototype(realm)?),
+        StoredValue::String(_) => Some(runtime.realm_string_prototype(realm)?),
+        StoredValue::Symbol(_) => Some(runtime.realm_symbol_prototype(realm)?),
+        StoredValue::Function(_) | StoredValue::Object(_) => None,
+        StoredValue::Undefined | StoredValue::Null => {
+            return Err(EngineFault::RuntimeInvariant {
+                message: "RegExp property lookup received a nullish base",
+            }
+            .into());
+        }
+    };
+    if let Some(prototype) = prototype {
+        charge_heap_property_lookup(runtime, &StoredValue::Object(prototype), execution_budget)
+    } else {
+        charge_heap_property_lookup(runtime, base, execution_budget)
+    }
+}
+
+#[allow(
+    clippy::too_many_arguments,
+    reason = "String protocol dispatch retains the method, receiver, arguments, caller continuation, source origin, and execution authority"
+)]
+pub(super) fn begin_string_regexp_protocol(
+    runtime: &mut Runtime,
+    method: RegExpSymbolMethod,
+    realm: RealmId,
+    receiver: StoredValue,
+    mut arguments: CallArguments,
+    return_to: Option<CallReturn>,
+    origin: JsStackFrame,
+    execution_budget: &mut ExecutionBudget,
+) -> Result<NativeDispatch, NativeFailure> {
+    if matches!(receiver, StoredValue::Undefined | StoredValue::Null) {
+        return regexp_type_error(realm, origin, "null or undefined are forbidden");
+    }
+    if !matches!(
+        method,
+        RegExpSymbolMethod::Match | RegExpSymbolMethod::Search
+    ) {
+        return Err(EngineFault::RuntimeInvariant {
+            message: "String RegExp protocol received an unsupported symbol method",
+        }
+        .into());
+    }
+    let state = StringRegExpProtocolContinuation {
+        method,
+        receiver,
+        regexp: arguments.take_first_or_undefined(),
+        subject: None,
+        constructed: None,
+        realm,
+        stage: StringRegExpProtocolStage::AwaitMethod,
+        origin,
+    };
+    if matches!(state.regexp, StoredValue::Undefined | StoredValue::Null) {
+        begin_string_regexp_fallback(runtime, state, return_to, execution_budget)
+    } else {
+        read_string_regexp_method(runtime, state, false, return_to, execution_budget)
+    }
+}
+
+fn advance_string_regexp_protocol(
+    runtime: &mut Runtime,
+    mut state: StringRegExpProtocolContinuation,
+    completion: StoredValue,
+    return_to: Option<CallReturn>,
+    execution_budget: &mut ExecutionBudget,
+) -> Result<NativeDispatch, NativeFailure> {
+    match state.stage {
+        StringRegExpProtocolStage::AwaitMethod => {
+            decide_string_regexp_method(runtime, state, completion, return_to, execution_budget)
+        }
+        StringRegExpProtocolStage::AwaitSubjectConversion => {
+            state.subject = Some(operator_primitive_to_string(
+                completion,
+                state.realm,
+                &state.origin,
+            )?);
+            construct_string_regexp(runtime, state, return_to)
+        }
+        StringRegExpProtocolStage::AwaitRegExp => {
+            state.constructed = Some(completion);
+            read_string_regexp_method(runtime, state, true, return_to, execution_budget)
+        }
+        StringRegExpProtocolStage::AwaitFallbackMethod => {
+            invoke_string_regexp_fallback(state, completion, return_to)
+        }
+    }
+}
+
+fn read_string_regexp_method(
+    runtime: &mut Runtime,
+    mut state: StringRegExpProtocolContinuation,
+    constructed: bool,
+    return_to: Option<CallReturn>,
+    execution_budget: &mut ExecutionBudget,
+) -> Result<NativeDispatch, NativeFailure> {
+    state.stage = if constructed {
+        StringRegExpProtocolStage::AwaitFallbackMethod
+    } else {
+        StringRegExpProtocolStage::AwaitMethod
+    };
+    let base = if constructed {
+        state
+            .constructed
+            .as_ref()
+            .ok_or(EngineFault::RuntimeInvariant {
+                message: "String RegExp fallback lost its constructed RegExp",
+            })?
+            .duplicate()
+    } else {
+        state.regexp.duplicate()
+    };
+    let atom = state.method.atom();
+    let diagnostic = state.method.name();
+    read_regexp_property(
+        runtime,
+        base,
+        runtime.predefined_symbol_property_key(atom),
+        diagnostic,
+        RegExpContinuation::StringProtocol(Box::new(state)),
+        return_to,
+        execution_budget,
+    )
+}
+
+#[expect(
+    clippy::needless_pass_by_value,
+    reason = "GetMethod completion ownership is shared with the fallback branch that resumes receiver coercion"
+)]
+fn decide_string_regexp_method(
+    runtime: &mut Runtime,
+    state: StringRegExpProtocolContinuation,
+    completion: StoredValue,
+    return_to: Option<CallReturn>,
+    execution_budget: &mut ExecutionBudget,
+) -> Result<NativeDispatch, NativeFailure> {
+    match completion {
+        StoredValue::Undefined | StoredValue::Null => {
+            begin_string_regexp_fallback(runtime, state, return_to, execution_budget)
+        }
+        StoredValue::Function(function) => Ok(call_regexp_function_direct(
+            function,
+            state.regexp.duplicate(),
+            one_regexp_argument(state.receiver.duplicate())?,
+            state.origin,
+            return_to,
+        )),
+        StoredValue::Boolean(_)
+        | StoredValue::Number(_)
+        | StoredValue::BigInt(_)
+        | StoredValue::String(_)
+        | StoredValue::Symbol(_)
+        | StoredValue::Object(_) => regexp_type_error(state.realm, state.origin, "not a function"),
+    }
+}
+
+fn begin_string_regexp_fallback(
+    runtime: &mut Runtime,
+    mut state: StringRegExpProtocolContinuation,
+    return_to: Option<CallReturn>,
+    execution_budget: &mut ExecutionBudget,
+) -> Result<NativeDispatch, NativeFailure> {
+    state.stage = StringRegExpProtocolStage::AwaitSubjectConversion;
+    let receiver = state.receiver.duplicate();
+    convert_regexp_value(
+        runtime,
+        RegExpContinuation::StringProtocol(Box::new(state)),
+        receiver,
+        OperatorPrimitiveHint::String,
+        return_to,
+        execution_budget,
+    )
+}
+
+fn construct_string_regexp(
+    runtime: &mut Runtime,
+    mut state: StringRegExpProtocolContinuation,
+    return_to: Option<CallReturn>,
+) -> Result<NativeDispatch, NativeFailure> {
+    let constructor = runtime.realm_regexp_constructor(state.realm)?;
+    let mut values = Vec::new();
+    values
+        .try_reserve_exact(2)
+        .map_err(|_| ExecutionError::AllocationFailed {
+            resource: RuntimeResource::FrameValues,
+            additional: 2,
+        })?;
+    values.push(state.regexp.duplicate());
+    values.push(StoredValue::Undefined);
+    state.stage = StringRegExpProtocolStage::AwaitRegExp;
+    let origin = state.origin.clone();
+    let mut continuations = Vec::new();
+    continuations
+        .try_reserve_exact(1)
+        .map_err(|_| ExecutionError::AllocationFailed {
+            resource: RuntimeResource::Frames,
+            additional: 1,
+        })?;
+    continuations.push(NativeContinuation::RegExp(Box::new(
+        RegExpContinuation::StringProtocol(Box::new(state)),
+    )));
+    Ok(NativeDispatch::Call(NativeCall {
+        function: constructor,
+        receiver: StoredValue::Undefined,
+        arguments: CallArguments::from_values(values),
+        return_to,
+        origin,
+        continuations,
+        pre_call: None,
+        new_target: Some(constructor),
+        native_caller: None,
+    }))
+}
+
+#[expect(
+    clippy::needless_pass_by_value,
+    reason = "Invoke completion ownership matches the initial GetMethod decision boundary"
+)]
+fn invoke_string_regexp_fallback(
+    state: StringRegExpProtocolContinuation,
+    completion: StoredValue,
+    return_to: Option<CallReturn>,
+) -> Result<NativeDispatch, NativeFailure> {
+    let StoredValue::Function(function) = completion else {
+        return regexp_type_error(state.realm, state.origin, "not a function");
+    };
+    let receiver = state.constructed.ok_or(EngineFault::RuntimeInvariant {
+        message: "String RegExp fallback invocation lost its constructed RegExp",
+    })?;
+    let subject = state.subject.ok_or(EngineFault::RuntimeInvariant {
+        message: "String RegExp fallback invocation lost its converted subject",
+    })?;
+    Ok(call_regexp_function_direct(
+        function,
+        receiver,
+        one_regexp_argument(StoredValue::String(subject))?,
+        state.origin,
+        return_to,
+    ))
 }
 
 fn regexp_branded_object(runtime: &Runtime, value: &StoredValue) -> Result<bool, NativeFailure> {
@@ -1644,7 +2750,11 @@ fn regexp_continuation_context(state: &RegExpContinuation) -> (RealmId, JsStackF
         RegExpContinuation::Escape(state) => (state.realm, state.origin.clone()),
         RegExpContinuation::Compile(state) => (state.realm, state.origin.clone()),
         RegExpContinuation::Exec(state) => (state.realm, state.origin.clone()),
+        RegExpContinuation::ExecProtocol(state) => (state.realm, state.origin.clone()),
         RegExpContinuation::Test(state) => (state.realm, state.origin.clone()),
+        RegExpContinuation::Match(state) => (state.realm, state.origin.clone()),
+        RegExpContinuation::Search(state) => (state.realm, state.origin.clone()),
+        RegExpContinuation::StringProtocol(state) => (state.realm, state.origin.clone()),
     }
 }
 
@@ -1675,6 +2785,26 @@ fn call_regexp_function(
         new_target: None,
         native_caller: None,
     }))
+}
+
+fn call_regexp_function_direct(
+    function: FunctionId,
+    receiver: StoredValue,
+    arguments: CallArguments,
+    origin: JsStackFrame,
+    return_to: Option<CallReturn>,
+) -> NativeDispatch {
+    NativeDispatch::Call(NativeCall {
+        function,
+        receiver,
+        arguments,
+        return_to,
+        origin,
+        continuations: Vec::new(),
+        pre_call: None,
+        new_target: None,
+        native_caller: None,
+    })
 }
 
 fn fallible_code_units(value: &JsString) -> Result<Vec<u16>, NativeFailure> {

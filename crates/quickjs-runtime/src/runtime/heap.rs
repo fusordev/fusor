@@ -450,6 +450,46 @@ impl Runtime {
         Ok(array.constructor)
     }
 
+    /// Returns the realm's intrinsic `%RegExp%` constructor.
+    pub(crate) fn realm_regexp_constructor(
+        &self,
+        realm: RealmId,
+    ) -> Result<FunctionId, crate::EngineFault> {
+        let state = self
+            .realms
+            .get(realm)
+            .ok_or(crate::EngineFault::StaleHeapEdge {
+                edge: "realm",
+                index: realm.index(),
+                generation: realm.generation(),
+            })?;
+        let RealmIntrinsics::Ready { regexp, .. } = state.intrinsics else {
+            return Err(crate::EngineFault::RuntimeInvariant {
+                message: "realm RegExp intrinsics are not initialized",
+            });
+        };
+        let function =
+            self.functions
+                .get(regexp.constructor)
+                .ok_or(crate::EngineFault::StaleHeapEdge {
+                    edge: "RegExp constructor intrinsic",
+                    index: regexp.constructor.index(),
+                    generation: regexp.constructor.generation(),
+                })?;
+        if !matches!(
+            function.native(),
+            Some(NativeFunction {
+                realm: function_realm,
+                kind: NativeFunctionKind::RegExpConstructor,
+            }) if *function_realm == realm
+        ) {
+            return Err(crate::EngineFault::RuntimeInvariant {
+                message: "realm RegExp constructor intrinsic has the wrong implementation",
+            });
+        }
+        Ok(regexp.constructor)
+    }
+
     pub(crate) fn realm_error_intrinsic_prototype(
         &self,
         realm: RealmId,

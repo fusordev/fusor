@@ -286,3 +286,76 @@ fn regexp_match_undefined_falls_back_to_the_internal_brand() {
         "true|true"
     );
 }
+
+#[test]
+fn regexp_symbol_match_preserves_es2025_flags_exec_and_empty_advance_order() {
+    assert_eq!(
+        rendered(
+            "var log=[];var exact={ok:true};var receiver={\
+               get flags(){log.push('flags');return {toString:function(){log.push('flagsString');return ''}}},\
+               get exec(){log.push('execGet');return function(input){log.push('execCall:'+input);return exact}}\
+             };var input={toString:function(){log.push('input');return 'needle'}};\
+             var result=RegExp.prototype[Symbol.match].call(receiver,input);\
+             return (result===exact)+'|'+log.join(',');"
+        ),
+        "true|input,flags,flagsString,execGet,execCall:needle"
+    );
+
+    assert_eq!(
+        rendered(
+            "var log=[];var backing=9;var calls=0;var receiver={\
+               get flags(){log.push('flags');return 'gu'},\
+               get lastIndex(){var seen=backing;log.push('get:'+seen);return {valueOf:function(){log.push('valueOf:'+seen);return seen}}},\
+               set lastIndex(value){log.push('set:'+value);backing=value},\
+               exec:function(input){log.push('exec:'+backing+':'+input.length);\
+                 if(calls++<2)return {get 0(){log.push('zero');return ''}};return null}\
+             };var result=RegExp.prototype[Symbol.match].call(receiver,'😀');\
+             return result.join('|')+'#'+log.join(',')+'#'+backing;"
+        ),
+        "|#flags,set:0,exec:0:2,zero,get:0,valueOf:0,set:2,exec:2:2,zero,get:2,valueOf:2,set:3,exec:3:2#3"
+    );
+
+    assert_eq!(
+        thrown(
+            "return RegExp.prototype[Symbol.match].call({flags:'',exec:function(){return 1}},'x');"
+        )
+        .0,
+        ExceptionKind::TypeError
+    );
+}
+
+#[test]
+fn regexp_symbol_match_runs_the_builtin_global_path() {
+    assert_eq!(
+        rendered(
+            "var regexp=/a/g;regexp.lastIndex=99;var result=regexp[Symbol.match]('baab');\
+             return result.join(',')+'|'+regexp.lastIndex;"
+        ),
+        "a,a|0"
+    );
+}
+
+#[test]
+fn regexp_symbol_search_restores_last_index_before_reading_the_result_index() {
+    assert_eq!(
+        rendered(
+            "var log=[];var backing=-0;var receiver={\
+               get lastIndex(){log.push('get:'+(1/backing));return backing},\
+               set lastIndex(value){log.push('set:'+(1/value));backing=value},\
+               get exec(){log.push('execGet');return function(input){log.push('execCall:'+input);backing=7;\
+                 return {get index(){log.push('index');return 3}}}}\
+             };var input={toString:function(){log.push('input');return 'abc'}};\
+             var result=RegExp.prototype[Symbol.search].call(receiver,input);\
+             return result+'|'+log.join(',')+'|'+(1/backing);"
+        ),
+        "3|input,get:-Infinity,set:Infinity,execGet,execCall:abc,get:0.14285714285714285,set:-Infinity,index|-Infinity"
+    );
+
+    assert_eq!(
+        rendered(
+            "var regexp=/a/g;regexp.lastIndex=2;var result=regexp[Symbol.search]('ba');\
+             return result+'|'+regexp.lastIndex;"
+        ),
+        "1|2"
+    );
+}

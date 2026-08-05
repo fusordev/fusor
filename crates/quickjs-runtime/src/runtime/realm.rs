@@ -65,17 +65,16 @@ const BIGINT_INTERNED_STATICS: [&str; 2] = ["asIntN", "asUintN"];
 
 /// The `String.prototype` methods this profile installs.
 ///
-/// The set is deliberately narrower than the pinned oracle's: `replace` and
-/// `replaceAll` implement their `@@replace` protocols, `split` implements its
-/// `@@split` protocol, and all three provide exact plain-string paths. The
-/// remaining RegExp-coupled methods (`match`, `matchAll`, and `search`) remain
-/// absent and therefore fail closed rather than behaving incorrectly. The
-/// order is the pinned `QuickJS` own-key order with unsupported methods omitted.
+/// The set is deliberately narrower than the pinned oracle's: `match`,
+/// `search`, `replace`, `replaceAll`, and `split` implement their corresponding
+/// well-known-symbol protocols and exact fallbacks. `matchAll` remains absent
+/// and therefore fails closed rather than behaving incorrectly. The order is
+/// the pinned `QuickJS` own-key order with unsupported methods omitted.
 ///
 /// Each `length` matches the pinned oracle, which reports `1` for most methods
 /// and `2` for `replace`, `replaceAll`, `split`, `slice`, `substr`, and
 /// `substring`.
-const STRING_PROTOTYPE_METHODS: [StringPrototypeMethod; 43] = [
+const STRING_PROTOTYPE_METHODS: [StringPrototypeMethod; 45] = [
     StringPrototypeMethod::interned("at", StringMethod::At, 1),
     StringPrototypeMethod::interned("charCodeAt", StringMethod::CharCodeAt, 1),
     StringPrototypeMethod::interned("charAt", StringMethod::CharAt, 1),
@@ -88,6 +87,8 @@ const STRING_PROTOTYPE_METHODS: [StringPrototypeMethod; 43] = [
     StringPrototypeMethod::interned("includes", StringMethod::Includes, 1),
     StringPrototypeMethod::interned("endsWith", StringMethod::EndsWith, 1),
     StringPrototypeMethod::interned("startsWith", StringMethod::StartsWith, 1),
+    StringPrototypeMethod::interned("match", StringMethod::Match, 1),
+    StringPrototypeMethod::interned("search", StringMethod::Search, 1),
     StringPrototypeMethod::interned("split", StringMethod::Split, 2),
     StringPrototypeMethod::interned("substring", StringMethod::Substring, 2),
     StringPrototypeMethod::interned("substr", StringMethod::Substr, 2),

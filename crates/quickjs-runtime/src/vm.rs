@@ -65,9 +65,9 @@ use crate::{
         PromiseCombinatorElementKind, PromiseCombinatorKind, PromiseCombinatorShared,
         PromiseFinallyFunction, PromiseFinallyThunkKind, PromiseJob, PromiseResolvingFunction,
         PromiseResolvingKind, PromiseStatic, RealmGlobalBindingState, ReflectMethod, RegExpFlag,
-        SetMethod, SetPrototypeOutcome, StringArgument, StringMethod, UriFunction, WeakMapMethod,
-        WeakSetMethod, array_length_from_number, check_execution_limit, global_declaration_error,
-        usize_to_u64,
+        RegExpSymbolMethod, SetMethod, SetPrototypeOutcome, StringArgument, StringMethod,
+        UriFunction, WeakMapMethod, WeakSetMethod, array_length_from_number, check_execution_limit,
+        global_declaration_error, usize_to_u64,
     },
     value::{HeapReference, SlotValue, StoredValue},
 };

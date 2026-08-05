@@ -821,6 +821,10 @@ fn the_installed_methods_have_the_pinned_shape() {
         ("String.prototype.replace.name", "replace"),
         ("String.prototype.replaceAll.length", "2"),
         ("String.prototype.replaceAll.name", "replaceAll"),
+        ("String.prototype.match.length", "1"),
+        ("String.prototype.match.name", "match"),
+        ("String.prototype.search.length", "1"),
+        ("String.prototype.search.name", "search"),
         ("String.prototype.split.length", "2"),
         ("String.prototype.split.name", "split"),
         ("String.prototype.trim.length", "0"),
@@ -892,7 +896,7 @@ fn supported_string_prototype_names_preserve_the_pinned_quickjs_order() {
     assert_eq!(
         rendered("Object.getOwnPropertyNames(String.prototype).join('|')"),
         "length|at|charCodeAt|charAt|concat|codePointAt|isWellFormed|toWellFormed|\
-         indexOf|lastIndexOf|includes|endsWith|startsWith|split|substring|substr|slice|repeat|\
+         indexOf|lastIndexOf|includes|endsWith|startsWith|match|search|split|substring|substr|slice|repeat|\
          replace|replaceAll|padEnd|padStart|trim|trimEnd|trimRight|trimStart|trimLeft|toString|\
          valueOf|toLowerCase|toUpperCase|toLocaleLowerCase|toLocaleUpperCase|anchor|big|\
          blink|bold|fixed|fontcolor|fontsize|italics|link|small|strike|sub|sup|\
@@ -918,4 +922,72 @@ fn supported_string_prototype_names_preserve_the_pinned_quickjs_order() {
             "true",
         ),
     ]);
+}
+
+#[test]
+fn match_and_search_dispatch_before_receiver_coercion() {
+    assert_eq!(
+        rendered(
+            "(function(){var log=[];var receiver={toString:function(){log.push('receiver');throw 1}};\
+              var regexp={get [Symbol.match](){log.push('get');return function(value){\
+                log.push('call');return (this===regexp)+'|'+(value===receiver)}}};\
+              var result=String.prototype.match.call(receiver,regexp);return result+'#'+log.join(',');})()"
+        ),
+        "true|true#get,call"
+    );
+    assert_eq!(
+        rendered(
+            "(function(){var log=[];var receiver={toString:function(){log.push('receiver');throw 1}};\
+              var regexp={get [Symbol.search](){log.push('get');return function(value){\
+                log.push('call');return (this===regexp)+'|'+(value===receiver)}}};\
+              var result=String.prototype.search.call(receiver,regexp);return result+'#'+log.join(',');})()"
+        ),
+        "true|true#get,call"
+    );
+}
+
+#[test]
+fn match_and_search_fallback_construct_regexp_and_invoke_the_protocol() {
+    assert_eq!(
+        rendered(
+            "(function(){var log=[];var receiver={toString:function(){log.push('receiver');return 'abc'}};\
+              var pattern={get [Symbol.match](){log.push('match');return undefined},\
+                toString:function(){log.push('pattern');return '.'}};\
+              RegExp.prototype[Symbol.match]=function(value){log.push('invoke');return this.source+'|'+value};\
+              var result=String.prototype.match.call(receiver,pattern);return result+'#'+log.join(',');})()"
+        ),
+        ".|abc#match,receiver,match,pattern,invoke"
+    );
+    assert_all(&[
+        ("'abc'.match('.')[0]", "a"),
+        ("'abc'.search('b')", "1"),
+        ("'abc'.search('z')", "-1"),
+    ]);
+}
+
+#[test]
+fn match_and_search_observe_primitive_wrapper_protocols_per_es2025() {
+    assert_eq!(
+        rendered(
+            "(function(){String.prototype[Symbol.match]=function(value){return 'match:'+this+':'+value};\
+              String.prototype[Symbol.search]=function(value){return 'search:'+this+':'+value};\
+              return String.prototype.match.call('abc','b')+'|'+String.prototype.search.call('abc','b');})()"
+        ),
+        "match:b:abc|search:b:abc"
+    );
+}
+
+#[test]
+fn match_and_search_reject_nullish_receivers_before_protocol_lookup() {
+    assert_eq!(
+        rendered(
+            "(function(){var touched=false;var regexp={get [Symbol.match](){touched=true}};\
+              try{String.prototype.match.call(null,regexp)}catch(error){}return touched;})()"
+        ),
+        "false"
+    );
+    assert_eq!(
+        thrown("return String.prototype.search.call(undefined, {});").0,
+        ExceptionKind::TypeError
+    );
 }

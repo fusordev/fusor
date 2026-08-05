@@ -88,18 +88,24 @@ does not imply complete ECMAScript or QuickJS compatibility.
 - [x] Typed same-site iterator state covers Array/String iteration, spread,
   destructuring, `for-of`, `IteratorClose`, and original-abrupt precedence.
 - [x] Validated schemas derive Realm allocation and rollback. The normalized
-  snapshot pins 380 Realm-local identities and 1,161 ordered properties.
-- [ ] Add Proxy and remaining exotics, shape/transition interning, dense indexed
-  storage, and complete reflection/diagnostics.
+  snapshot pins 382 Realm-local identities and 1,167 ordered properties.
+- [ ] Implement Proxy and the remaining exotic-object internal methods, with
+  spec-ordered traps and invariant enforcement.
+- [ ] Intern object shapes and transitions without changing descriptor, key
+  order, prototype, or GC behavior.
+- [ ] Add dense indexed storage with exact hole, `length`, descriptor, and
+  sparse-transition semantics.
+- [ ] Complete reflection and public diagnostics after the object model can
+  express every required internal method.
 
 ### Built-ins
 
 - [x] Globals; admitted `Object`; all 13 `Reflect` methods; `Error`, native
   subclasses, and `AggregateError`; `Boolean`, `Number`, `BigInt`, and `Symbol`.
-- [x] Broad non-RegExp `String`, Unicode/normalization behavior, resumable
-  `replace`/`replaceAll`/`split` protocols and plain-string paths, Annex B HTML
-  wrappers, and pinned ICU4X data. Shared corpora: `replaceAll` 6/6 cases and
-  14/14 tags; `split` 6/6 cases and 17/17 tags.
+- [x] Broad `String`, Unicode/normalization behavior, resumable
+  `match`/`search`/`replace`/`replaceAll`/`split` protocols and fallbacks, Annex
+  B HTML wrappers, and pinned ICU4X data. Shared corpora: `replaceAll` 6/6 cases
+  and 14/14 tags; `split` 6/6 cases and 17/17 tags.
 - [x] A safe, bounded RegExp core parses ES2025 grammar through pinned Oxc,
   lowers to an owned explicit-backtracking VM, preserves UTF-16 positions,
   covers lookaround/backreferences/Unicode sets and most properties of strings,
@@ -108,9 +114,10 @@ does not imply complete ECMAScript or QuickJS compatibility.
   bytecode. The Realm installs the constructor, accessors, `escape`, `compile`,
   `exec`, `test`, and `toString`; execution shares VM fuel, bounds backtracking,
   updates `lastIndex`, and materializes captures, named groups, and `d` indices.
-  Shared core corpus: 63/63 QuickJS and Node cases. Symbol
-  match/search/replace/split protocols and RGI ZWJ string properties still fail
-  closed.
+  Generic resumable `@@match` and `@@search` preserve custom `exec`, strict
+  `lastIndex`, signed zero, empty-match UTF-16 advancement, and result access
+  order. Shared core corpus: 63/63 QuickJS and Node cases. `@@matchAll`,
+  `@@replace`, `@@split`, and RGI ZWJ string properties still fail closed.
 - [x] Full admitted `Array`, including generic array-like behavior and
   spec-ordered, resource-traced `fromAsync` iterator/array-like suspension.
 - [x] `Map`: ordered SameValueZero storage, `AddEntriesFromIterable` close
@@ -136,8 +143,8 @@ does not imply complete ECMAScript or QuickJS compatibility.
 - [x] Iterative `%JSON%` plus `rawJSON`; complete pinned `%Math%`, including
   exact `sumPrecise`; and intrinsic Promise core/combinators with bounded FIFO
   jobs and typed close/order continuations (29/29, 46/46 feature tags).
-- [ ] Complete RegExp symbol protocols and `String.prototype.match`,
-  `matchAll`, and `search`; implement Date, Temporal, Proxy, binary data/typed
+- [ ] Complete `RegExp` `@@matchAll`/`@@replace`/`@@split` and
+  `String.prototype.matchAll`; implement Date, Temporal, binary data/typed
   arrays, and Atomics.
 
 ### Jobs, asynchronous semantics, and modules
@@ -193,9 +200,10 @@ does not imply complete ECMAScript or QuickJS compatibility.
   pinned QuickJS deletes that entry and appends the computed result. ECMA-262
   rescans and updates the callback-created entry in place; this port follows the
   specification and preserves its insertion position.
-- `QJS-STRING-001`: pinned QuickJS skips inherited `@@replace`/`@@split` lookup
-  for primitive search or separator values. ES2025 `GetMethod` observes the
-  primitive wrapper prototype; this port follows the specification and Node.
+- `QJS-STRING-001`: pinned QuickJS skips inherited
+  `@@match`/`@@search`/`@@replace`/`@@split` lookup for primitive pattern,
+  search, or separator values. ES2025 `GetMethod` observes the primitive wrapper
+  prototype; this port follows the specification and Node.
 - `QJS-REGEXP-001`: pinned QuickJS rejects a Unicode-set string disjunction in
   lookbehind. ECMA-262's backwards matcher and Node accept it; this port follows
   the specification.

@@ -2423,6 +2423,22 @@ pub(super) fn dispatch_native_call_with_frames(
             origin.unwrap_or_else(native_function_host_origin),
             execution_budget,
         ),
+        NativeFunctionKind::StringPrototypeMethod(
+            method @ (StringMethod::Match | StringMethod::Search),
+        ) => begin_string_regexp_protocol(
+            runtime,
+            if matches!(method, StringMethod::Match) {
+                RegExpSymbolMethod::Match
+            } else {
+                RegExpSymbolMethod::Search
+            },
+            native.realm,
+            inputs.receiver,
+            inputs.arguments,
+            return_to,
+            origin.unwrap_or_else(native_function_host_origin),
+            execution_budget,
+        ),
         NativeFunctionKind::StringPrototypeMethod(method) => begin_string_method(
             runtime,
             method,
@@ -3002,6 +3018,18 @@ pub(super) fn dispatch_native_call_with_frames(
             native.realm,
             &inputs.receiver,
             inputs.arguments,
+            return_to,
+            origin.unwrap_or_else(native_function_host_origin),
+            execution_budget,
+        ),
+        NativeFunctionKind::RegExpPrototypeSymbol(
+            method @ (RegExpSymbolMethod::Match | RegExpSymbolMethod::Search),
+        ) => begin_regexp_symbol_protocol(
+            runtime,
+            method,
+            native.realm,
+            inputs.receiver,
+            inputs.arguments.take_first_or_undefined(),
             return_to,
             origin.unwrap_or_else(native_function_host_origin),
             execution_budget,

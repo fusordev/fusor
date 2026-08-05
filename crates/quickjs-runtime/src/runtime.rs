@@ -837,12 +837,18 @@ pub(crate) enum StringMethod {
     PadEnd,
     PadStart,
     Repeat,
+    /// `String.prototype.match`, whose `@@match` lookup precedes receiver
+    /// coercion and whose fallback constructs a fresh intrinsic `RegExp`.
+    Match,
     /// `String.prototype.replace`, whose `@@replace` protocol dispatch must run
     /// before the receiver and fallback arguments are string-coerced.
     Replace,
     /// `String.prototype.replaceAll`, which additionally performs the
     /// observable `IsRegExp` and global-flags checks before `@@replace`.
     ReplaceAll,
+    /// `String.prototype.search`, with the same protocol-first shape as
+    /// `match` and an intrinsic-RegExp fallback.
+    Search,
     /// `String.prototype.split`, whose `@@split` protocol dispatch precedes
     /// the receiver, limit, and fallback separator conversions.
     Split,
@@ -888,8 +894,10 @@ impl StringMethod {
             | Self::ToLowerCase
             | Self::ToUpperCase
             | Self::Concat
+            | Self::Match
             | Self::Replace
             | Self::ReplaceAll
+            | Self::Search
             | Self::Split
             | Self::FromCharCode
             | Self::FromCodePoint => &[],

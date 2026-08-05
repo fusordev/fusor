@@ -550,7 +550,11 @@ fn finish_string_method(
             }
             StoredValue::String(repeat_string(subject, count, state)?)
         }
-        StringMethod::Replace | StringMethod::ReplaceAll | StringMethod::Split => {
+        StringMethod::Match
+        | StringMethod::Replace
+        | StringMethod::ReplaceAll
+        | StringMethod::Search
+        | StringMethod::Split => {
             return Err(EngineFault::RuntimeInvariant {
                 message: "String protocol method entered the simple String method machine",
             }
