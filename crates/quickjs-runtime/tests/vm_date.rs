@@ -193,3 +193,49 @@ fn date_set_time_brand_check_precedes_argument_coercion() {
         "true|false"
     );
 }
+
+#[test]
+fn callable_date_returns_a_local_time_string_without_observing_arguments() {
+    let result = rendered(
+        "var touched=false;
+         var value=Date({valueOf:function(){touched=true;throw new Error('observed')}});
+         return typeof value+'|'+touched+'|'+value;",
+    );
+    let mut parts = result.splitn(3, '|');
+    assert_eq!(parts.next(), Some("string"));
+    assert_eq!(parts.next(), Some("false"));
+    let date = parts.next().expect("Date string");
+
+    let fields = date.split_ascii_whitespace().collect::<Vec<_>>();
+    assert_eq!(fields.len(), 6, "unexpected Date string: {date}");
+    assert!(
+        ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"].contains(&fields[0]),
+        "unexpected weekday in Date string: {date}"
+    );
+    assert!(
+        [
+            "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"
+        ]
+        .contains(&fields[1]),
+        "unexpected month in Date string: {date}"
+    );
+    assert!(is_ascii_digits(fields[2], 2));
+    assert!(is_ascii_digits(fields[3], 4));
+
+    let time = fields[4].as_bytes();
+    assert_eq!(time.len(), 8, "unexpected time in Date string: {date}");
+    assert_eq!((time[2], time[5]), (b':', b':'));
+    assert!(is_ascii_digits(&fields[4][0..2], 2));
+    assert!(is_ascii_digits(&fields[4][3..5], 2));
+    assert!(is_ascii_digits(&fields[4][6..8], 2));
+
+    let zone = fields[5].as_bytes();
+    assert_eq!(zone.len(), 8, "unexpected time zone in Date string: {date}");
+    assert_eq!(&zone[..3], b"GMT");
+    assert!(matches!(zone[3], b'+' | b'-'));
+    assert!(zone[4..].iter().all(u8::is_ascii_digit));
+}
+
+fn is_ascii_digits(value: &str, length: usize) -> bool {
+    value.len() == length && value.bytes().all(|byte| byte.is_ascii_digit())
+}

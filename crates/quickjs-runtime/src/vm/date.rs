@@ -69,10 +69,10 @@ pub(super) fn begin_date_constructor(
     execution_budget: &mut ExecutionBudget,
 ) -> Result<NativeDispatch, NativeFailure> {
     let Some(new_target) = inputs.new_target else {
-        return Err(EngineFault::RuntimeInvariant {
-            message: "Date() local-time rendering is not implemented",
-        }
-        .into());
+        let rendered = current_local_date_string()?;
+        return Ok(NativeDispatch::Immediate(StoredValue::String(
+            JsString::from_utf8(&rendered)?,
+        )));
     };
     let mut arguments = inputs.arguments.into_remaining_values();
     match arguments.len() {
@@ -406,6 +406,42 @@ fn current_time_value() -> JsNumber {
     Temporal::utc_now().instant().map_or_else(
         |_| JsNumber::from_f64(f64::NAN),
         |instant| JsNumber::from_i64(instant.epoch_milliseconds()),
+    )
+}
+
+fn current_local_date_string() -> Result<String, EngineFault> {
+    let date_time = Temporal::local_now()
+        .zoned_date_time_iso(None)
+        .map_err(|_| EngineFault::RuntimeInvariant {
+            message: "temporal_rs could not resolve the host date and time",
+        })?;
+    Ok(format_local_date_string(&date_time))
+}
+
+fn format_local_date_string(date_time: &ZonedDateTime) -> String {
+    let year = date_time.year();
+    let year_sign = if year < 0 { "-" } else { "" };
+    let year = year.unsigned_abs();
+
+    // TimeZoneString first truncates the nanosecond offset to milliseconds,
+    // then renders only its hour and minute components. The optional
+    // implementation-defined parenthesized time-zone name is intentionally
+    // empty so this representation is stable across hosts.
+    let offset_milliseconds = date_time.offset_nanoseconds() / 1_000_000;
+    let offset_sign = if offset_milliseconds < 0 { '-' } else { '+' };
+    let absolute_offset = offset_milliseconds.unsigned_abs();
+    let offset_hour = absolute_offset / 3_600_000;
+    let offset_minute = (absolute_offset / 60_000) % 60;
+
+    format!(
+        "{weekday} {month_name} {date:02} {year_sign}{year:04} \
+         {hour:02}:{minute:02}:{second:02} GMT{offset_sign}{offset_hour:02}{offset_minute:02}",
+        weekday = WEEKDAYS[usize::from(date_time.day_of_week() % 7)],
+        month_name = MONTHS[usize::from(date_time.month()) - 1],
+        date = date_time.day(),
+        hour = date_time.hour(),
+        minute = date_time.minute(),
+        second = date_time.second(),
     )
 }
 
@@ -743,6 +779,17 @@ mod tests {
         assert_eq!(
             to_iso_string(TIME_CLIP_BOUND).as_deref(),
             Some("+275760-09-13T00:00:00.000Z")
+        );
+    }
+
+    #[test]
+    fn local_date_rendering_uses_ecmascript_offset_shape_without_a_zone_name() {
+        let eastern = TimeZone::try_from_identifier_str("-05:00").expect("fixed offset");
+        let date_time =
+            ZonedDateTime::try_new(0, eastern, Calendar::ISO).expect("local Unix epoch");
+        assert_eq!(
+            format_local_date_string(&date_time),
+            "Wed Dec 31 1969 19:00:00 GMT-0500"
         );
     }
 }

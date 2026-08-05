@@ -164,9 +164,10 @@ does not imply complete ECMAScript or QuickJS compatibility.
   jobs and typed close/order continuations (29/29, 46/46 feature tags).
 - [x] Date has Realm-owned branded `[[DateValue]]` objects, TimeClip, exact UTC
   construction/parsing/getters, `setTime`, ISO/UTC rendering, observable
-  coercion order, and full clipped-year coverage through pinned
-  `temporal_rs = 0.2.5` (6/6 focused cases). Local-time construction/rendering
-  and the remaining legacy prototype methods stay fail closed.
+  coercion order, spec-shaped callable local-time rendering that ignores its
+  arguments, and full clipped-year coverage through pinned
+  `temporal_rs = 0.2.5` (7/7 focused cases). Local-time construction and the
+  remaining legacy prototype methods stay fail closed.
 - [ ] Complete Date local-time/prototype semantics and Temporal on the shared
   `temporal_rs` kernel; then implement binary data/typed arrays and Atomics.
 
@@ -193,7 +194,8 @@ does not imply complete ECMAScript or QuickJS compatibility.
   admitted fresh-realm cases through `evaluate_script` with typed JSON results.
   Focused literal/delete cohorts pass 1,170/1,240; all 55 literal failures need
   direct eval, while 15 delete failures need eval, `with`, `super`, or
-  non-ordinary functions.
+  non-ordinary functions. Six unary-expression cohorts pass 166/182; all 16
+  remaining failures need direct eval.
 - [ ] Close every admitted Test262 failure and remove temporary host/module/
   async skips as those capabilities land; keep ECMA-402 explicitly low priority.
 - [ ] Establish startup, memory, interpreter, and compile benchmarks; require no

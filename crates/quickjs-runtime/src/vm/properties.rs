@@ -289,7 +289,7 @@ pub(super) fn global_reference_operand(
 /// Resolves the atom operand of verified `delete_var` back to its typed Realm
 /// object-binding or unresolved-lookup closure entry.
 ///
-/// The verifier guarantees that one same-name GlobalReference, `var`, or
+/// The verifier guarantees that one same-name `GlobalReference`, `var`, or
 /// function descriptor is present. Matching installed atom identities here
 /// avoids trusting an untyped closure index in the instruction stream while
 /// preserving the pinned opcode's atom operand.
