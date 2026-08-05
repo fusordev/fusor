@@ -299,3 +299,19 @@ fn untagged_template_rejects_symbol_substitutions() {
     .expect_err("template ToString(Symbol)");
     assert_eq!(exception_kind(error), ExceptionKind::TypeError);
 }
+
+#[test]
+fn large_bigint_literals_materialize_exact_values() {
+    let mut runtime = Runtime::try_new(RuntimeLimits::default()).expect("runtime");
+    let realm = runtime.create_realm().expect("realm");
+    let mut context = runtime.context(&realm).expect("context");
+
+    let value = evaluate_script(
+        &mut context,
+        "(18_446_744_073_709_551_616n + 5n).toString();",
+        "large-bigint-literal.js",
+        ScriptLimits::default(),
+    )
+    .expect("large BigInt literal");
+    assert_eq!(string(&value), "18446744073709551621");
+}

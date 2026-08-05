@@ -25,11 +25,13 @@
 
 //! Failure-atomic verified bytecode staging, environments, and root publication.
 
+use std::sync::Arc;
+
 use super::{
     BindingCell, CompilerCaptureLayout, CompilerCapturedBinding, CompilerClosureBinding,
     CompilerConstant, CompilerConstantValue, EnvironmentBinding, FrameBindingAddress, FunctionId,
     HashSet, HeapReference, InstallError, InstalledCodeId, InstalledConstant, InstalledRoot,
-    InstalledTemplate, JsNumber, JsValue, OwnProperty, PropertyKey, RealmGlobalBinding,
+    InstalledTemplate, JsBigInt, JsNumber, JsValue, OwnProperty, PropertyKey, RealmGlobalBinding,
     RealmGlobalBindingState, RealmGlobalRequest, RealmId, RootEnvironment, RootTarget, Runtime,
     RuntimeError, RuntimeResource, SlotValue, StoredValue, VerifiedBytecode, check_execution_limit,
     check_install_limit, global_declaration_property_layout, global_function_replacement_layout,
@@ -292,6 +294,19 @@ impl Runtime {
                     }
                     CompilerConstant::Value(CompilerConstantValue::String(value)) => {
                         InstalledConstant::String(runtime_string(value)?)
+                    }
+                    CompilerConstant::Value(CompilerConstantValue::BigInt(value)) => {
+                        let bytes = value.decimal().latin1_units().ok_or(
+                            InstallError::AuthorityInvariant {
+                                message: "verified BigInt decimal is not compact ASCII",
+                            },
+                        )?;
+                        let decimal = std::str::from_utf8(bytes).map_err(|_| {
+                            InstallError::AuthorityInvariant {
+                                message: "verified BigInt decimal is not ASCII",
+                            }
+                        })?;
+                        InstalledConstant::BigInt(Arc::new(JsBigInt::from_str_radix(decimal, 10)?))
                     }
                     CompilerConstant::Function(function) => InstalledConstant::Function(*function),
                 });

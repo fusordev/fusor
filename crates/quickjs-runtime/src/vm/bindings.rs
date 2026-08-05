@@ -67,6 +67,7 @@ pub(super) fn materialize_constant(
         })? {
         InstalledConstant::Number(value) => Ok(StoredValue::Number(*value)),
         InstalledConstant::String(value) => Ok(StoredValue::String(value.clone())),
+        InstalledConstant::BigInt(value) => Ok(StoredValue::BigInt(Arc::clone(value))),
         InstalledConstant::Function(_) => Err(EngineFault::MissingPoolEntry {
             pool: "ordinary value constant",
             index,
@@ -89,13 +90,13 @@ pub(super) fn function_constant(
             index,
         })? {
         InstalledConstant::Function(function) => Ok(*function),
-        InstalledConstant::Number(_) | InstalledConstant::String(_) => {
-            Err(EngineFault::MissingPoolEntry {
-                pool: "function constant",
-                index,
-            }
-            .into())
+        InstalledConstant::Number(_)
+        | InstalledConstant::String(_)
+        | InstalledConstant::BigInt(_) => Err(EngineFault::MissingPoolEntry {
+            pool: "function constant",
+            index,
         }
+        .into()),
     }
 }
 

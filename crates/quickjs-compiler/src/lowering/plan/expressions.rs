@@ -60,20 +60,14 @@ pub(in crate::lowering) fn plan_literal(
             Some(value) => Ok(plan_push_integer(value, literal.span)),
             None => constants.plan_number(literal.value, literal.span),
         },
-        Expression::BigIntLiteral(literal) => literal
-            .value
-            .parse::<i32>()
-            .map(|value| {
-                PlannedInstruction::new(
-                    FinalOpcode::PushBigIntI32,
-                    Operands::I32(value),
-                    literal.span,
-                )
-            })
-            .map_err(|_| LeafCompilationError::Unsupported {
-                feature: UnsupportedLeafFeature::UnsupportedLiteral,
-                span: literal.span,
-            }),
+        Expression::BigIntLiteral(literal) => match literal.value.parse::<i32>() {
+            Ok(value) => Ok(PlannedInstruction::new(
+                FinalOpcode::PushBigIntI32,
+                Operands::I32(value),
+                literal.span,
+            )),
+            Err(_) => constants.plan_bigint(literal.span),
+        },
         Expression::StringLiteral(literal) if literal.value.is_empty() => Ok(
             PlannedInstruction::new(FinalOpcode::PushEmptyString, Operands::None, literal.span),
         ),

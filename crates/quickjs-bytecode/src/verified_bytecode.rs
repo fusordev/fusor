@@ -9444,6 +9444,14 @@ fn collect_requirements(
     }) {
         push_requirement(requirements, ExecutionRequirement::Numbers);
     }
+    if function.constants().iter().any(|constant| {
+        matches!(
+            constant,
+            crate::CompilerConstant::Value(crate::CompilerConstantValue::BigInt(_))
+        )
+    }) {
+        push_requirement(requirements, ExecutionRequirement::BigInts);
+    }
     if !metadata.closures.is_empty()
         || function
             .control_flow()

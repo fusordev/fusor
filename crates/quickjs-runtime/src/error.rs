@@ -2,7 +2,7 @@ use std::{error::Error, fmt, sync::Arc};
 
 use quickjs_bytecode::{BytecodePc, FinalOpcode, FunctionTemplateId, SourceByteSpan};
 
-use crate::{AtomError, JsString, JsStringError, JsValue};
+use crate::{AtomError, BigIntError, JsString, JsStringError, JsValue};
 
 /// Public runtime handle category.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
@@ -299,6 +299,8 @@ pub enum InstallError {
     },
     /// A compiler string could not become a runtime string.
     String(JsStringError),
+    /// A verified compiler `BigInt` could not become a runtime value.
+    BigInt(BigIntError),
     /// Runtime-local atom interning failed.
     Atom(AtomError),
     /// Global declaration instantiation rejected an existing object property.
@@ -348,6 +350,7 @@ impl fmt::Display for InstallError {
                 "failed to reserve {additional} additional entries for {resource}"
             ),
             Self::String(source) => source.fmt(formatter),
+            Self::BigInt(source) => source.fmt(formatter),
             Self::Atom(source) => source.fmt(formatter),
             Self::GlobalDeclarationRejected { name, .. } => write!(
                 formatter,
@@ -366,6 +369,7 @@ impl Error for InstallError {
     fn source(&self) -> Option<&(dyn Error + 'static)> {
         match self {
             Self::String(source) => Some(source),
+            Self::BigInt(source) => Some(source),
             Self::Atom(source) => Some(source),
             Self::UnsupportedOpcode { .. }
             | Self::LimitExceeded { .. }
@@ -379,6 +383,12 @@ impl Error for InstallError {
 impl From<JsStringError> for InstallError {
     fn from(source: JsStringError) -> Self {
         Self::String(source)
+    }
+}
+
+impl From<BigIntError> for InstallError {
+    fn from(source: BigIntError) -> Self {
+        Self::BigInt(source)
     }
 }
 

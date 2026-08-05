@@ -1,8 +1,8 @@
 use std::error::Error as _;
 
 use quickjs_bytecode::{
-    BytecodePc, EncodeError, FinalOpcode, FunctionIndexDomains, MAX_OPERAND_STACK_DEPTH, Operands,
-    VerificationErrorKind, VerificationLimits,
+    BytecodePc, CompilerConstantValue, EncodeError, FinalOpcode, FunctionIndexDomains,
+    MAX_OPERAND_STACK_DEPTH, Operands, VerificationErrorKind, VerificationLimits,
 };
 use quickjs_compiler::{
     CompilationContext, CompiledLeafFunction, LeafCompilationError, UnsupportedLeafFeature,
@@ -469,11 +469,35 @@ fn untagged_template_substitutions_lower_to_immediate_string_hint_conversions() 
 }
 
 #[test]
+fn bigint_literals_outside_i32_use_exact_verified_value_constants() {
+    for source in [
+        "function f(){ return 18_446_744_073_709_551_616n; }",
+        "function f(){ return 0x1_0000_0000_0000_0000n; }",
+    ] {
+        let compiled = compile(source, "f");
+
+        assert_eq!(
+            opcodes(&compiled),
+            [FinalOpcode::PushConst8, FinalOpcode::Return]
+        );
+        let [quickjs_compiler::CompiledConstant::Value(CompilerConstantValue::BigInt(value))] =
+            compiled.constants()
+        else {
+            panic!("large BigInt literal must own one value constant");
+        };
+        assert_eq!(
+            value.decimal().latin1_units(),
+            Some(b"18446744073709551616".as_slice())
+        );
+    }
+}
+
+#[test]
 fn unsupported_expression_families_fail_closed_at_the_exact_span() {
     let cases = [(
-        "function f(){ return 2147483648n; }",
-        UnsupportedLeafFeature::UnsupportedLiteral,
-        "2147483648n",
+        "function f(tag){ return tag`value`; }",
+        UnsupportedLeafFeature::UnsupportedExpression,
+        "tag`value`",
     )];
 
     for (source, expected_feature, expected_source) in cases {

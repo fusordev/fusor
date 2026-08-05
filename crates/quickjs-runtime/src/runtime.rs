@@ -445,6 +445,7 @@ pub(crate) enum FrameBindingAddress {
 pub(crate) enum InstalledConstant {
     Number(JsNumber),
     String(JsString),
+    BigInt(Arc<JsBigInt>),
     Function(FunctionTemplateId),
 }
 

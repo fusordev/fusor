@@ -6,8 +6,8 @@
 //! source before producing [`VerifiedCompilerFunctionGraph`].
 //!
 //! This certificate remains compiler-facing and is deliberately not execution
-//! authority: runtime-visible names, binding policies, non-string value
-//! families, and exception/debug metadata are not represented yet.
+//! authority: runtime-visible names, binding policies, some value families,
+//! and exception/debug metadata are not represented yet.
 
 use std::{
     collections::{HashMap, HashSet, VecDeque},
@@ -83,6 +83,90 @@ impl Binary64Constant {
     #[must_use]
     pub fn to_javascript_string(self) -> String {
         format_binary64_for_javascript(self.to_f64())
+    }
+}
+
+/// Invalid canonical decimal payload for a compiler-owned `BigInt` constant.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub enum CompilerBigIntError {
+    /// A `BigInt` constant must contain at least one digit.
+    Empty,
+    /// Only zero itself may begin with a zero digit.
+    LeadingZero,
+    /// A code unit was not an ASCII decimal digit.
+    InvalidDigit {
+        /// Zero-based code-unit position.
+        index: usize,
+        /// Rejected UTF-16 code unit.
+        code_unit: u16,
+    },
+}
+
+impl fmt::Display for CompilerBigIntError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Empty => formatter.write_str("compiler BigInt decimal payload is empty"),
+            Self::LeadingZero => {
+                formatter.write_str("compiler BigInt decimal payload has a leading zero")
+            }
+            Self::InvalidDigit { index, code_unit } => write!(
+                formatter,
+                "compiler BigInt decimal payload has non-digit code unit {code_unit:#06x} at {index}"
+            ),
+        }
+    }
+}
+
+impl Error for CompilerBigIntError {}
+
+/// Exact non-negative decimal value of one compiler-owned `BigInt` literal.
+///
+/// Unary negation remains bytecode, so constant payloads never carry a sign.
+/// The private validated representation prevents runtime installation from
+/// accepting an arbitrary or non-canonical numeric string.
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
+pub struct CompilerBigInt {
+    decimal: CompilerString,
+}
+
+impl CompilerBigInt {
+    /// Validates a canonical unsigned decimal spelling.
+    ///
+    /// # Errors
+    ///
+    /// Rejects empty, signed, non-decimal, or leading-zero spellings.
+    pub fn try_from_decimal(decimal: CompilerString) -> Result<Self, CompilerBigIntError> {
+        let mut units = decimal.code_units().enumerate();
+        let Some((_, first)) = units.next() else {
+            return Err(CompilerBigIntError::Empty);
+        };
+        if !(u16::from(b'0')..=u16::from(b'9')).contains(&first) {
+            return Err(CompilerBigIntError::InvalidDigit {
+                index: 0,
+                code_unit: first,
+            });
+        }
+        if first == u16::from(b'0') && decimal.len() != 1 {
+            return Err(CompilerBigIntError::LeadingZero);
+        }
+        for (index, code_unit) in units {
+            if !(u16::from(b'0')..=u16::from(b'9')).contains(&code_unit) {
+                return Err(CompilerBigIntError::InvalidDigit { index, code_unit });
+            }
+        }
+        Ok(Self { decimal })
+    }
+
+    /// Returns the canonical unsigned decimal spelling.
+    #[must_use]
+    pub const fn decimal(&self) -> &CompilerString {
+        &self.decimal
+    }
+
+    /// Returns the retained compact decimal payload size.
+    #[must_use]
+    pub fn payload_bytes(&self) -> usize {
+        self.decimal.payload_bytes()
     }
 }
 
@@ -190,6 +274,8 @@ pub enum CompilerConstantValue {
     Number(Binary64Constant),
     /// An ECMAScript String represented by exact UTF-16 code units.
     String(CompilerString),
+    /// An ECMAScript `BigInt` represented by canonical unsigned decimal digits.
+    BigInt(CompilerBigInt),
 }
 
 /// Dense identity of one function template in a compiler graph.
@@ -373,7 +459,7 @@ pub enum FunctionGraphResource {
     Constants,
     /// Content-interned atom slots across all functions.
     Atoms,
-    /// Compact string payload bytes retained by all values and atoms.
+    /// Compact text payload bytes retained by Strings, atoms, and `BigInt` values.
     StringPayloadBytes,
     /// Imported closure-variable slots across all functions.
     ClosureVariables,
@@ -400,7 +486,7 @@ impl fmt::Display for FunctionGraphResource {
             Self::Instructions => "graph instructions",
             Self::Constants => "graph constants",
             Self::Atoms => "graph atoms",
-            Self::StringPayloadBytes => "graph string payload bytes",
+            Self::StringPayloadBytes => "graph text payload bytes",
             Self::ClosureVariables => "graph closure variables",
             Self::ClosureEdgeEvaluations => "graph closure-edge evaluations",
             Self::TransferEvaluations => "graph transfer evaluations",
@@ -506,7 +592,7 @@ impl FunctionGraphVerificationLimits {
         self
     }
 
-    /// Returns a copy with a different aggregate compact string-payload maximum in bytes.
+    /// Returns a copy with a different aggregate compact text-payload maximum in bytes.
     #[must_use]
     pub const fn with_max_string_payload_bytes(mut self, maximum: u64) -> Self {
         self.max_string_payload_bytes = maximum;
@@ -570,7 +656,7 @@ impl FunctionGraphVerificationLimits {
         self.max_atoms
     }
 
-    /// Returns the aggregate retained compact string-payload maximum in bytes.
+    /// Returns the aggregate retained compact text-payload maximum in bytes.
     #[must_use]
     pub const fn max_string_payload_bytes(self) -> u64 {
         self.max_string_payload_bytes
@@ -657,7 +743,7 @@ impl FunctionGraphUsage {
         self.atoms
     }
 
-    /// Returns total compact payload bytes retained by string constants and atoms.
+    /// Returns total compact payload bytes retained by strings, atoms, and `BigInt` values.
     #[must_use]
     pub const fn string_payload_bytes(self) -> u64 {
         self.string_payload_bytes
@@ -1581,6 +1667,9 @@ fn function_string_payload_bytes(
     for constant in function.constants.iter() {
         let payload_bytes = match constant {
             CompilerConstant::Value(CompilerConstantValue::String(value)) => {
+                usize_to_u64(value.payload_bytes())
+            }
+            CompilerConstant::Value(CompilerConstantValue::BigInt(value)) => {
                 usize_to_u64(value.payload_bytes())
             }
             CompilerConstant::Value(CompilerConstantValue::Number(_))

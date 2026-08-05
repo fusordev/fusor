@@ -1,8 +1,8 @@
 use std::sync::Arc;
 
 use quickjs_bytecode::{
-    AtomPoolIndex, Binary64Constant, CompilerAtom, CompilerConstantValue, CompilerString,
-    FinalOpcode, Operands,
+    AtomPoolIndex, Binary64Constant, CompilerAtom, CompilerBigInt, CompilerConstantValue,
+    CompilerString, FinalOpcode, Operands,
 };
 use quickjs_frontend::Span;
 
@@ -319,6 +319,25 @@ impl<'arena> CompilationContext<'_, 'arena, '_> {
                         });
                 }
             }
+            AstKind::BigIntLiteral(literal)
+                if !is_noncomputed_static_property_key_node(self.unit, node_id)
+                    && literal.value.parse::<i32>().is_err() =>
+            {
+                let decimal = compiler_identifier_string(literal.value.as_str(), literal.span)?;
+                let value = CompilerBigInt::try_from_decimal(decimal).map_err(|source| {
+                    LeafCompilationError::CompilerBigInt {
+                        span: literal.span,
+                        source,
+                    }
+                })?;
+                candidates
+                    .get_mut(owner.index())
+                    .ok_or(LeafCompilationError::InvalidExecutable { executable: owner })?
+                    .push(CompiledConstantCandidate::BigInt {
+                        value,
+                        span: literal.span,
+                    });
+            }
             AstKind::StringLiteral(literal)
                 if !matches!(nodes.parent_kind(node_id), AstKind::Directive(_))
                     && !is_noncomputed_static_property_key_node(self.unit, node_id) =>
@@ -584,6 +603,7 @@ pub(in crate::lowering) struct CompiledConstantPool {
     entries: Arc<[CompiledConstant]>,
     function_indices: Box<[(ExecutableId, u32)]>,
     number_indices: Box<[(Span, u32)]>,
+    bigint_indices: Box<[(Span, u32)]>,
     string_indices: Box<[(Span, CompiledStringLocation)]>,
     property_atom_indices: Box<[(CompiledPropertyAtomKey, u32)]>,
     metadata_atom_indices: Box<[(CompiledMetadataAtomKey, u32)]>,
@@ -592,6 +612,10 @@ pub(in crate::lowering) struct CompiledConstantPool {
 pub(in crate::lowering) enum CompiledConstantCandidate {
     Number {
         value: Binary64Constant,
+        span: Span,
+    },
+    BigInt {
+        value: CompilerBigInt,
         span: Span,
     },
     String {
@@ -608,8 +632,9 @@ impl CompiledConstantCandidate {
     const fn order_key(&self) -> (u32, u32, u8) {
         match self {
             Self::Number { span, .. } => (span.start, span.end, 0),
-            Self::String { span, .. } => (span.start, span.end, 1),
-            Self::Function { span, .. } => (span.start, span.end, 2),
+            Self::BigInt { span, .. } => (span.start, span.end, 1),
+            Self::String { span, .. } => (span.start, span.end, 2),
+            Self::Function { span, .. } => (span.start, span.end, 3),
         }
     }
 }
@@ -631,6 +656,7 @@ struct FrozenConstantCandidates {
     entries: Vec<CompiledConstant>,
     function_indices: Vec<(ExecutableId, u32)>,
     number_indices: Vec<(Span, u32)>,
+    bigint_indices: Vec<(Span, u32)>,
     string_indices: Vec<(Span, CompiledStringLocation)>,
     property_atom_indices: Vec<(CompiledPropertyAtomKey, u32)>,
 }
@@ -649,6 +675,7 @@ fn freeze_constant_candidates(
                 span: None,
             },
         )?),
+        bigint_indices: Vec::new(),
         string_indices: Vec::with_capacity(string_capacity),
         property_atom_indices: Vec::with_capacity(string_capacity),
     };
@@ -664,6 +691,14 @@ fn freeze_constant_candidates(
                         value,
                     )));
                 frozen.number_indices.push((span, index));
+            }
+            CompiledConstantCandidate::BigInt { value, span } => {
+                frozen
+                    .entries
+                    .push(CompiledConstant::Value(CompilerConstantValue::BigInt(
+                        value,
+                    )));
+                frozen.bigint_indices.push((span, index));
             }
             CompiledConstantCandidate::String { value, span } => {
                 if value.is_empty() || !value.is_tagged_integer_atom() {
@@ -798,6 +833,7 @@ impl CompiledConstantPool {
             entries: frozen.entries.into(),
             function_indices: frozen.function_indices.into_boxed_slice(),
             number_indices: frozen.number_indices.into_boxed_slice(),
+            bigint_indices: frozen.bigint_indices.into_boxed_slice(),
             string_indices: frozen.string_indices.into_boxed_slice(),
             property_atom_indices: frozen.property_atom_indices.into_boxed_slice(),
             metadata_atom_indices: metadata_atom_indices.into_boxed_slice(),
@@ -857,6 +893,37 @@ impl CompiledConstantPool {
                 span: Some(span),
             });
         }
+        let (opcode, operands) = match u8::try_from(index) {
+            Ok(index) => (FinalOpcode::PushConst8, Operands::Const8(index)),
+            Err(_) => (FinalOpcode::PushConst, Operands::Const(index)),
+        };
+        Ok(PlannedInstruction::new(opcode, operands, span))
+    }
+
+    pub(in crate::lowering) fn plan_bigint(
+        &self,
+        span: Span,
+    ) -> Result<PlannedInstruction, LeafCompilationError> {
+        let position = self
+            .bigint_indices
+            .binary_search_by_key(&(span.start, span.end), |(candidate, _)| {
+                (candidate.start, candidate.end)
+            })
+            .map_err(|_| LeafCompilationError::SemanticInvariant {
+                invariant: "large BigInt literal has one constant-pool entry",
+                span: Some(span),
+            })?;
+        let index = self.bigint_indices[position].1;
+        let Some(CompiledConstant::Value(CompilerConstantValue::BigInt(_))) =
+            usize::try_from(index)
+                .ok()
+                .and_then(|index| self.entries.get(index))
+        else {
+            return Err(LeafCompilationError::SemanticInvariant {
+                invariant: "BigInt constant index resolves to its exact decimal payload",
+                span: Some(span),
+            });
+        };
         let (opcode, operands) = match u8::try_from(index) {
             Ok(index) => (FinalOpcode::PushConst8, Operands::Const8(index)),
             Err(_) => (FinalOpcode::PushConst, Operands::Const(index)),

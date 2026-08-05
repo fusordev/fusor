@@ -1,13 +1,13 @@
 use std::sync::Arc;
 
 use quickjs_bytecode::{
-    AtomPoolIndex, BytecodeBuilder, BytecodePc, CompilerAtom, CompilerCaptureLayout,
-    CompilerClosureSource, CompilerConstant, CompilerConstantLayout, CompilerConstantValue,
-    CompilerString, FinalOpcode, FunctionGraphResource, FunctionGraphVerificationErrorKind,
-    FunctionGraphVerificationLimits, FunctionIndexDomains, FunctionTemplateId, Operands,
-    UnverifiedCompilerFunction, UnverifiedCompilerFunctionBody, UnverifiedCompilerFunctionGraph,
-    UnverifiedFunctionHeader, VerificationLimits, verify_compiler_control_flow,
-    verify_compiler_function_graph,
+    AtomPoolIndex, BytecodeBuilder, BytecodePc, CompilerAtom, CompilerBigInt,
+    CompilerCaptureLayout, CompilerClosureSource, CompilerConstant, CompilerConstantLayout,
+    CompilerConstantValue, CompilerString, FinalOpcode, FunctionGraphResource,
+    FunctionGraphVerificationErrorKind, FunctionGraphVerificationLimits, FunctionIndexDomains,
+    FunctionTemplateId, Operands, UnverifiedCompilerFunction, UnverifiedCompilerFunctionBody,
+    UnverifiedCompilerFunctionGraph, UnverifiedFunctionHeader, VerificationLimits,
+    verify_compiler_control_flow, verify_compiler_function_graph,
 };
 
 fn string(units: &[u16]) -> CompilerString {
@@ -488,6 +488,26 @@ fn graph_aggregates_payloads_but_atom_uniqueness_is_function_local() {
     .expect("equal contents in distinct function-local atom domains are valid");
     assert_eq!(verified.usage().atoms(), 2);
     assert_eq!(verified.usage().string_payload_bytes(), 3);
+}
+
+#[test]
+fn graph_budgets_bigint_decimal_payload_bytes() {
+    let decimal = string(&"18446744073709551616".encode_utf16().collect::<Vec<_>>());
+    let value = CompilerBigInt::try_from_decimal(decimal).expect("canonical decimal");
+    let verified = graph(
+        graph_function(
+            0,
+            &[(FinalOpcode::ReturnUndef, Operands::None)],
+            Arc::from([]),
+            Arc::from([CompilerConstant::Value(CompilerConstantValue::BigInt(
+                value,
+            ))]),
+        ),
+        FunctionGraphVerificationLimits::default().with_max_string_payload_bytes(20),
+    )
+    .expect("BigInt text payload limit is inclusive");
+
+    assert_eq!(verified.usage().string_payload_bytes(), 20);
 }
 
 #[test]

@@ -39,7 +39,7 @@
 //! The module is self-contained so it can be tested without a runtime; the
 //! caller maps [`BigIntError`] onto the pinned exception messages.
 
-use std::{cmp::Ordering, collections::TryReserveError};
+use std::{cmp::Ordering, collections::TryReserveError, error::Error, fmt};
 
 /// Bits per limb, matching `JS_LIMB_BITS` for the 32-bit configuration.
 const LIMB_BITS: u32 = 32;
@@ -88,6 +88,24 @@ pub enum BigIntError {
     /// A radix fell outside `2..=36`.
     InvalidRadix,
 }
+
+impl fmt::Display for BigIntError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(match self {
+            Self::TooLarge => "BigInt is too large to allocate",
+            Self::ResultTooLarge => "BigInt result is too large",
+            Self::AllocationFailed => "BigInt allocation failed",
+            Self::NotAnInteger => "cannot convert a non-integer to BigInt",
+            Self::NotFinite => "cannot convert NaN or Infinity to BigInt",
+            Self::InvalidLiteral => "invalid BigInt literal",
+            Self::DivisionByZero => "BigInt division by zero",
+            Self::NegativeExponent => "BigInt exponent must be non-negative",
+            Self::InvalidRadix => "BigInt radix must be between 2 and 36",
+        })
+    }
+}
+
+impl Error for BigIntError {}
 
 impl From<TryReserveError> for BigIntError {
     fn from(_: TryReserveError) -> Self {

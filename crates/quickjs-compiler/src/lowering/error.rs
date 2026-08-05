@@ -1,8 +1,8 @@
 use std::{error::Error, fmt};
 
 use quickjs_bytecode::{
-    AssemblerError, BytecodePc, BytecodeVerificationError, CompilerStringError, EncodeError,
-    FunctionGraphVerificationError, VerificationError,
+    AssemblerError, BytecodePc, BytecodeVerificationError, CompilerBigIntError,
+    CompilerStringError, EncodeError, FunctionGraphVerificationError, VerificationError,
 };
 use quickjs_frontend::{OxcStringDecodeError, Span};
 
@@ -100,6 +100,13 @@ pub enum LeafCompilationError {
         /// Exact string-construction failure.
         source: CompilerStringError,
     },
+    /// A parsed `BigInt` literal did not produce a canonical decimal payload.
+    CompilerBigInt {
+        /// Exact literal span.
+        span: Span,
+        /// Exact decimal-payload validation failure.
+        source: CompilerBigIntError,
+    },
     /// `RegExp` literal grammar or executable lowering failed.
     RegExp {
         /// Exact literal span.
@@ -191,6 +198,9 @@ impl fmt::Display for LeafCompilationError {
             Self::CompilerString { span, source } => {
                 write!(formatter, "compiler string failed at {span:?}: {source}")
             }
+            Self::CompilerBigInt { span, source } => {
+                write!(formatter, "compiler BigInt failed at {span:?}: {source}")
+            }
             Self::RegExp { span, source } => {
                 write!(formatter, "regular expression failed at {span:?}: {source}")
             }
@@ -258,6 +268,7 @@ impl Error for LeafCompilationError {
             Self::BytecodeGraphVerification { source, .. } => Some(source),
             Self::CookedStringDecoding { source, .. } => Some(source),
             Self::CompilerString { source, .. } => Some(source),
+            Self::CompilerBigInt { source, .. } => Some(source),
             Self::RegExp { source, .. } => Some(source),
             Self::ForeignExecutable { .. }
             | Self::InvalidExecutable { .. }
