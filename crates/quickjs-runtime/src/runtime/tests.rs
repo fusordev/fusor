@@ -35,9 +35,9 @@ use super::{
     usize_to_u64,
 };
 
-const REALM_OBJECT_SLOTS: u64 = 40;
-const REALM_PROPERTY_SLOTS: u64 = 1_173;
-const REALM_FUNCTION_SLOTS: u64 = 344;
+const REALM_OBJECT_SLOTS: u64 = 41;
+const REALM_PROPERTY_SLOTS: u64 = 1_180;
+const REALM_FUNCTION_SLOTS: u64 = 346;
 
 #[test]
 fn finalization_job_limit_failure_does_not_clear_weak_targets() {

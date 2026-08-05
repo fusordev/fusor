@@ -32,6 +32,7 @@ pub(in crate::runtime) enum IntrinsicObjectId {
     AsyncFromSyncIteratorPrototype,
     ArrayIteratorPrototype,
     StringIteratorPrototype,
+    RegExpStringIteratorPrototype,
     GeneratorFunctionPrototype,
     GeneratorPrototype,
     AsyncGeneratorFunctionPrototype,
@@ -53,7 +54,7 @@ pub(in crate::runtime) enum IntrinsicObjectId {
 }
 
 impl IntrinsicObjectId {
-    pub(in crate::runtime) const ALL: [Self; 40] = [
+    pub(in crate::runtime) const ALL: [Self; 41] = [
         Self::ObjectPrototype,
         Self::GlobalObject,
         Self::ErrorPrototype(ErrorIntrinsicKind::Error),
@@ -76,6 +77,7 @@ impl IntrinsicObjectId {
         Self::AsyncFromSyncIteratorPrototype,
         Self::ArrayIteratorPrototype,
         Self::StringIteratorPrototype,
+        Self::RegExpStringIteratorPrototype,
         Self::GeneratorFunctionPrototype,
         Self::GeneratorPrototype,
         Self::AsyncGeneratorFunctionPrototype,

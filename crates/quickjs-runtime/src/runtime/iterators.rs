@@ -28,8 +28,8 @@
 use super::{
     ArrayIndex, ArrayIterator, ArrayIteratorKind, ArrayState, HeapObject, HeapReference, JsNumber,
     JsString, ObjectId, ObjectRecord, PredefinedAtom, PropertyKey, PropertyLayout, RealmId,
-    RealmIntrinsics, Runtime, RuntimeResource, StoredValue, StringIterator, check_execution_limit,
-    stale_heap_reference, usize_to_u64,
+    RealmIntrinsics, RegExpStringIterator, Runtime, RuntimeResource, StoredValue, StringIterator,
+    check_execution_limit, stale_heap_reference, usize_to_u64,
 };
 use crate::object::OwnProperty;
 
@@ -61,6 +61,14 @@ pub(crate) struct ArrayIteratorSnapshot {
     pub(crate) iterated: Option<StoredValue>,
     pub(crate) kind: ArrayIteratorKind,
     pub(crate) next: u32,
+}
+
+pub(crate) struct RegExpStringIteratorSnapshot {
+    pub(crate) matcher: Option<StoredValue>,
+    pub(crate) input: JsString,
+    pub(crate) global: bool,
+    pub(crate) full_unicode: bool,
+    pub(crate) phase: crate::object::RegExpStringIteratorPhase,
 }
 
 impl Runtime {
@@ -460,6 +468,139 @@ impl Runtime {
             ObjectRecord::empty(Some(HeapReference::Object(prototype))),
             StringIterator::new(iterated),
         ))
+    }
+
+    pub(crate) fn realm_regexp_string_iterator_prototype(
+        &self,
+        realm: RealmId,
+    ) -> Result<ObjectId, crate::EngineFault> {
+        let state = self
+            .realms
+            .get(realm)
+            .ok_or(crate::EngineFault::StaleHeapEdge {
+                edge: "realm",
+                index: realm.index(),
+                generation: realm.generation(),
+            })?;
+        let RealmIntrinsics::Ready { iterators, .. } = state.intrinsics else {
+            return Err(crate::EngineFault::RuntimeInvariant {
+                message: "realm iterator intrinsics are not initialized",
+            });
+        };
+        let prototype = self
+            .objects
+            .get(iterators.regexp_string_iterator_prototype)
+            .ok_or(crate::EngineFault::StaleHeapEdge {
+                edge: "RegExp String Iterator prototype intrinsic",
+                index: iterators.regexp_string_iterator_prototype.index(),
+                generation: iterators.regexp_string_iterator_prototype.generation(),
+            })?;
+        if prototype.record.prototype() != Some(HeapReference::Object(iterators.iterator_prototype))
+        {
+            return Err(crate::EngineFault::RuntimeInvariant {
+                message: "RegExp String Iterator prototype has the wrong prototype",
+            });
+        }
+        Ok(iterators.regexp_string_iterator_prototype)
+    }
+
+    pub(crate) fn allocate_regexp_string_iterator(
+        &mut self,
+        realm: RealmId,
+        matcher: StoredValue,
+        input: JsString,
+        global: bool,
+        full_unicode: bool,
+    ) -> Result<ObjectId, crate::ExecutionError> {
+        let prototype = self.realm_regexp_string_iterator_prototype(realm)?;
+        self.allocate_iterator_object(HeapObject::regexp_string_iterator(
+            ObjectRecord::empty(Some(HeapReference::Object(prototype))),
+            RegExpStringIterator::new(matcher, input, global, full_unicode),
+        ))
+    }
+
+    pub(crate) fn regexp_string_iterator_snapshot(
+        &self,
+        object: ObjectId,
+    ) -> Result<RegExpStringIteratorSnapshot, crate::EngineFault> {
+        let object = self
+            .objects
+            .get(object)
+            .ok_or_else(|| stale_heap_reference(HeapReference::Object(object)))?;
+        let iterator =
+            object
+                .regexp_string_iterator_state()
+                .ok_or(crate::EngineFault::RuntimeInvariant {
+                    message: "RegExp String Iterator method called on an incompatible receiver",
+                })?;
+        Ok(RegExpStringIteratorSnapshot {
+            matcher: iterator.matcher().map(StoredValue::duplicate),
+            input: iterator.input().clone(),
+            global: iterator.global(),
+            full_unicode: iterator.full_unicode(),
+            phase: iterator.phase(),
+        })
+    }
+
+    pub(crate) fn mark_regexp_string_iterator_non_global_yielded(
+        &mut self,
+        object: ObjectId,
+    ) -> Result<(), crate::EngineFault> {
+        self.objects
+            .get_mut(object)
+            .ok_or_else(|| stale_heap_reference(HeapReference::Object(object)))?
+            .regexp_string_iterator_state_mut()
+            .ok_or(crate::EngineFault::RuntimeInvariant {
+                message: "RegExp String Iterator method called on an incompatible receiver",
+            })?
+            .mark_non_global_yielded();
+        Ok(())
+    }
+
+    pub(crate) fn start_regexp_string_iterator(
+        &mut self,
+        object: ObjectId,
+    ) -> Result<(), crate::EngineFault> {
+        self.objects
+            .get_mut(object)
+            .ok_or_else(|| stale_heap_reference(HeapReference::Object(object)))?
+            .regexp_string_iterator_state_mut()
+            .ok_or(crate::EngineFault::RuntimeInvariant {
+                message: "RegExp String Iterator method called on an incompatible receiver",
+            })?
+            .start();
+        Ok(())
+    }
+
+    pub(crate) fn suspend_regexp_string_iterator(
+        &mut self,
+        object: ObjectId,
+    ) -> Result<(), crate::EngineFault> {
+        self.objects
+            .get_mut(object)
+            .ok_or_else(|| stale_heap_reference(HeapReference::Object(object)))?
+            .regexp_string_iterator_state_mut()
+            .ok_or(crate::EngineFault::RuntimeInvariant {
+                message: "RegExp String Iterator method called on an incompatible receiver",
+            })?
+            .suspend();
+        Ok(())
+    }
+
+    pub(crate) fn finish_regexp_string_iterator(
+        &mut self,
+        object: ObjectId,
+    ) -> Result<(), crate::EngineFault> {
+        self.objects
+            .get_mut(object)
+            .ok_or_else(|| stale_heap_reference(HeapReference::Object(object)))?
+            .regexp_string_iterator_state_mut()
+            .ok_or(crate::EngineFault::RuntimeInvariant {
+                message: "RegExp String Iterator method called on an incompatible receiver",
+            })?
+            .finish();
+        self.collection_pending = true;
+        Ok(())
     }
 
     fn allocate_iterator_object(

@@ -521,6 +521,7 @@ impl Runtime {
                     iterators.async_from_sync_iterator_prototype,
                     iterators.array_iterator_prototype,
                     iterators.string_iterator_prototype,
+                    iterators.regexp_string_iterator_prototype,
                     generators.function_prototype,
                     generators.generator_prototype,
                     async_functions.function_prototype,
@@ -951,6 +952,17 @@ impl Runtime {
                             if let Some(current) = object.array_iterator_current() {
                                 mark_heap_reference(
                                     current,
+                                    &mut marked_functions,
+                                    &mut marked_objects,
+                                    &mut work,
+                                );
+                            }
+                            if let Some(matcher) = object
+                                .regexp_string_iterator_state()
+                                .and_then(crate::object::RegExpStringIterator::matcher)
+                            {
+                                mark_stored_value(
+                                    matcher,
                                     &mut marked_functions,
                                     &mut marked_objects,
                                     &mut work,

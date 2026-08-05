@@ -88,7 +88,7 @@ does not imply complete ECMAScript or QuickJS compatibility.
 - [x] Typed same-site iterator state covers Array/String iteration, spread,
   destructuring, `for-of`, `IteratorClose`, and original-abrupt precedence.
 - [x] Validated schemas derive Realm allocation and rollback. The normalized
-  snapshot pins 384 Realm-local identities and 1,173 ordered properties.
+  snapshot pins 387 Realm-local identities and 1,180 ordered properties.
 - [x] Proxy and exotic-object integration covers all 11 internal methods,
   revocation/invariants, reflection, descriptors/integrity, constructors,
   iterators, Arrays, strings, RegExp, Promise, and JSON. Audited built-in
@@ -119,10 +119,14 @@ does not imply complete ECMAScript or QuickJS compatibility.
   bytecode. The Realm installs the constructor, accessors, `escape`, `compile`,
   `exec`, `test`, and `toString`; execution shares VM fuel, bounds backtracking,
   updates `lastIndex`, and materializes captures, named groups, and `d` indices.
-  Generic resumable `@@match` and `@@search` preserve custom `exec`, strict
-  `lastIndex`, signed zero, empty-match UTF-16 advancement, and result access
-  order. Shared core corpus: 63/63 QuickJS and Node cases. `@@matchAll`,
-  `@@replace`, `@@split`, and RGI ZWJ string properties still fail closed.
+  Generic resumable `@@match`, `@@search`, `@@matchAll`, and `@@replace`
+  preserve custom `exec`, strict `lastIndex`, empty-match UTF-16 advancement,
+  and observable result access/coercion order. Match-all adds species-based lazy
+  iteration and exact iterator GC roots; replace collects raw results before
+  processing captures, callbacks, and all positional/named substitutions.
+  `String.prototype.matchAll` enforces the global guard before dispatch. Shared
+  core corpus: 63/63 QuickJS and Node cases. `@@split` and RGI ZWJ string
+  properties still fail closed.
 - [x] Full admitted `Array`, including generic array-like behavior and
   spec-ordered, resource-traced `fromAsync` iterator/array-like suspension.
 - [x] `Map`: ordered SameValueZero storage, `AddEntriesFromIterable` close
@@ -148,8 +152,7 @@ does not imply complete ECMAScript or QuickJS compatibility.
 - [x] Iterative `%JSON%` plus `rawJSON`; complete pinned `%Math%`, including
   exact `sumPrecise`; and intrinsic Promise core/combinators with bounded FIFO
   jobs and typed close/order continuations (29/29, 46/46 feature tags).
-- [ ] Complete `RegExp` `@@matchAll`/`@@replace`/`@@split` and
-  `String.prototype.matchAll`; implement Date, Temporal, binary data/typed
+- [ ] Complete RegExp `@@split`; implement Date, Temporal, binary data/typed
   arrays, and Atomics.
 
 ### Jobs, asynchronous semantics, and modules

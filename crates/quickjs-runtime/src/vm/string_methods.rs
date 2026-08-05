@@ -551,6 +551,7 @@ fn finish_string_method(
             StoredValue::String(repeat_string(subject, count, state)?)
         }
         StringMethod::Match
+        | StringMethod::MatchAll
         | StringMethod::Replace
         | StringMethod::ReplaceAll
         | StringMethod::Search

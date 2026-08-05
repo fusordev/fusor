@@ -272,21 +272,26 @@ pub(super) fn resume_iterator_abrupt_continuations(
                 return_to,
                 execution_budget,
             ),
-            NativeContinuation::OperatorPrimitive(state) => {
-                let OperatorPrimitiveTarget::ArrayFromAsyncLength { operation } = state.target
-                else {
-                    return Err(EngineFault::RuntimeInvariant {
-                        message: "non-Array.fromAsync primitive continuation became an abrupt handler",
-                    }
-                    .into());
-                };
-                resume_array_from_async_length_conversion_abrupt(
-                    runtime,
-                    operation,
-                    pending,
-                    return_to,
-                    execution_budget,
-                )
+            NativeContinuation::OperatorPrimitive(state) => match state.target {
+                OperatorPrimitiveTarget::ArrayFromAsyncLength { operation } => {
+                    resume_array_from_async_length_conversion_abrupt(
+                        runtime,
+                        operation,
+                        pending,
+                        return_to,
+                        execution_budget,
+                    )
+                }
+                OperatorPrimitiveTarget::RegExpValue(state) if state.handles_abrupt() => {
+                    resume_regexp_abrupt(runtime, &state, pending)
+                }
+                _ => Err(EngineFault::RuntimeInvariant {
+                    message: "primitive continuation without abrupt semantics became a handler",
+                }
+                .into()),
+            },
+            NativeContinuation::RegExp(state) if state.handles_abrupt() => {
+                resume_regexp_abrupt(runtime, &state, pending)
             }
             NativeContinuation::Promise(state) => {
                 resume_promise_abrupt(runtime, state, pending, return_to, execution_budget)
@@ -2774,11 +2779,13 @@ pub(super) fn dispatch_native_call_with_frames(
             execution_budget,
         ),
         NativeFunctionKind::StringPrototypeMethod(
-            method @ (StringMethod::Match | StringMethod::Search),
+            method @ (StringMethod::Match | StringMethod::MatchAll | StringMethod::Search),
         ) => begin_string_regexp_protocol(
             runtime,
             if matches!(method, StringMethod::Match) {
                 RegExpSymbolMethod::Match
+            } else if matches!(method, StringMethod::MatchAll) {
+                RegExpSymbolMethod::MatchAll
             } else {
                 RegExpSymbolMethod::Search
             },
@@ -3209,6 +3216,14 @@ pub(super) fn dispatch_native_call_with_frames(
             native.realm,
             origin.unwrap_or_else(native_function_host_origin),
         ),
+        NativeFunctionKind::RegExpStringIteratorNext => begin_regexp_string_iterator_next(
+            runtime,
+            inputs.receiver,
+            native.realm,
+            return_to,
+            origin.unwrap_or_else(native_function_host_origin),
+            execution_budget,
+        ),
         NativeFunctionKind::GeneratorPrototypeNext
         | NativeFunctionKind::GeneratorPrototypeReturn
         | NativeFunctionKind::GeneratorPrototypeThrow => {
@@ -3373,13 +3388,16 @@ pub(super) fn dispatch_native_call_with_frames(
             execution_budget,
         ),
         NativeFunctionKind::RegExpPrototypeSymbol(
-            method @ (RegExpSymbolMethod::Match | RegExpSymbolMethod::Search),
+            method @ (RegExpSymbolMethod::Match
+            | RegExpSymbolMethod::MatchAll
+            | RegExpSymbolMethod::Replace
+            | RegExpSymbolMethod::Search),
         ) => begin_regexp_symbol_protocol(
             runtime,
             method,
             native.realm,
             inputs.receiver,
-            inputs.arguments.take_first_or_undefined(),
+            inputs.arguments,
             return_to,
             origin.unwrap_or_else(native_function_host_origin),
             execution_budget,

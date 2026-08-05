@@ -168,6 +168,10 @@ impl RealmSnapshot {
                 "%StringIterator.prototype%",
             ),
             (
+                iterators.regexp_string_iterator_prototype,
+                "%RegExpStringIterator.prototype%",
+            ),
+            (
                 generators.function_prototype,
                 "%GeneratorFunction.prototype%",
             ),
@@ -456,9 +460,9 @@ mod tests {
 
     use crate::runtime::{RealmIntrinsics, RuntimeLimits, RuntimeUsage};
 
-    const REALM_NODES: usize = 384;
-    const REALM_PROPERTIES: u64 = 1_173;
-    const REALM_SNAPSHOT_FINGERPRINT: u64 = 18_336_805_532_223_561_789;
+    const REALM_NODES: usize = 387;
+    const REALM_PROPERTIES: u64 = 1_180;
+    const REALM_SNAPSHOT_FINGERPRINT: u64 = 4_179_973_713_000_206_882;
 
     #[test]
     fn complete_realm_snapshot_pins_the_installed_intrinsic_graph() {

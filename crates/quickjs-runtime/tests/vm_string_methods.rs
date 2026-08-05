@@ -896,7 +896,7 @@ fn supported_string_prototype_names_preserve_the_pinned_quickjs_order() {
     assert_eq!(
         rendered("Object.getOwnPropertyNames(String.prototype).join('|')"),
         "length|at|charCodeAt|charAt|concat|codePointAt|isWellFormed|toWellFormed|\
-         indexOf|lastIndexOf|includes|endsWith|startsWith|match|search|split|substring|substr|slice|repeat|\
+         indexOf|lastIndexOf|includes|endsWith|startsWith|match|matchAll|search|split|substring|substr|slice|repeat|\
          replace|replaceAll|padEnd|padStart|trim|trimEnd|trimRight|trimStart|trimLeft|toString|\
          valueOf|toLowerCase|toUpperCase|toLocaleLowerCase|toLocaleUpperCase|anchor|big|\
          blink|bold|fixed|fontcolor|fontsize|italics|link|small|strike|sub|sup|\

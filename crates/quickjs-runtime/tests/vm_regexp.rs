@@ -10,8 +10,8 @@ use quickjs_frontend::{
 };
 use quickjs_runtime::{
     Context, DynamicFunctionCompileFailure, ExceptionKind, ExecutionError, ExecutionLimits,
-    Function, JsString, OrdinaryDynamicFunctionCompiler, OrdinaryDynamicFunctionSource, Runtime,
-    RuntimeLimits,
+    Function, JsString, Object, OrdinaryDynamicFunctionCompiler, OrdinaryDynamicFunctionSource,
+    Runtime, RuntimeLimits,
 };
 
 #[derive(Debug)]
@@ -112,6 +112,24 @@ fn thrown(body: &str) -> (ExceptionKind, String) {
                 .expect("UTF-8"),
         )
     })
+}
+
+fn call_with_state(
+    runtime: &mut Runtime,
+    realm: &quickjs_runtime::Realm,
+    body: &str,
+    state: &Object,
+) -> String {
+    let mut context = runtime.context(realm).expect("context");
+    let run = dynamic_function(&mut context, body);
+    context
+        .call(&run, &[state.as_value()], ExecutionLimits::default())
+        .expect("state call")
+        .as_string()
+        .expect("live result")
+        .expect("String result")
+        .to_utf8_lossy()
+        .expect("UTF-8")
 }
 
 #[test]
@@ -357,6 +375,136 @@ fn regexp_symbol_match_runs_the_builtin_global_path() {
 }
 
 #[test]
+fn regexp_symbol_replace_expands_captures_and_every_substitution_form() {
+    assert_eq!(
+        rendered(
+            "return 'xabcy'.replace(/(?<first>a)(b)?(z)?/g,\
+             '[$$][$&][$`][$\\'][$1][$2][$3][$<first>][$<missing>][$12][$99]');"
+        ),
+        "x[$][ab][x][cy][a][b][][a][][a2][$99]cy"
+    );
+}
+
+#[test]
+fn regexp_symbol_replace_passes_functional_capture_arguments() {
+    assert_eq!(
+        rendered(
+            "var log=[];var output='a1 b'.replace(/(?<letter>[a-z])(\\d)?/g,function(){\
+               var args=arguments;log.push([args[0],args[1],String(args[2]),args[3],args[4],args[5].letter].join(','));\
+               return args[5].letter+':'+args[3]});\
+             return output+'|'+log.join(';');"
+        ),
+        "a:0 b:3|a1,a,1,0,a1 b,a;b,b,undefined,3,a1 b,b"
+    );
+}
+
+#[test]
+fn regexp_symbol_replace_collects_results_before_processing_them() {
+    assert_eq!(
+        rendered(
+            "var log=[],call=0,backing=9;\
+             function result(text,index){var value={};\
+               Object.defineProperty(value,'0',{get:function(){log.push('zero:'+index);return text}});\
+               Object.defineProperty(value,'length',{get:function(){log.push('length:'+index);return 1}});\
+               Object.defineProperty(value,'index',{get:function(){log.push('index:'+index);return index}});\
+               Object.defineProperty(value,'groups',{get:function(){log.push('groups:'+index);return undefined}});\
+               return value}\
+             var receiver={\
+               get flags(){log.push('flags');return {toString:function(){log.push('flags-string');return 'g'}}},\
+               get lastIndex(){log.push('get-last:'+backing);return backing},\
+               set lastIndex(value){log.push('set-last:'+value);backing=value},\
+               get exec(){log.push('exec-get');return function(input){var current=call++;\
+                 log.push('exec:'+current+':'+input);\
+                 return current===0?result('a',0):current===1?result('b',2):null}}\
+             };\
+             var output=RegExp.prototype[Symbol.replace].call(receiver,'abc',function(match,position){\
+               log.push('replace:'+match+':'+position);return match.toUpperCase()});\
+             return output+'|'+log.join(',');"
+        ),
+        "AbB|flags,flags-string,set-last:0,exec-get,exec:0:abc,zero:0,\
+         exec-get,exec:1:abc,zero:2,exec-get,exec:2:abc,length:0,zero:0,index:0,groups:0,\
+         replace:a:0,length:2,zero:2,index:2,groups:2,replace:b:2"
+    );
+}
+
+#[test]
+fn regexp_symbol_replace_observes_input_replacement_flags_and_reset_order() {
+    assert_eq!(
+        rendered(
+            "var log=[];var receiver={\
+               get flags(){log.push('flags');return {toString:function(){log.push('flags-string');return 'g'}}},\
+               set lastIndex(value){log.push('set:'+value)},\
+               get exec(){log.push('exec-get');return function(input){log.push('exec:'+input);return null}}\
+             };\
+             var input={toString:function(){log.push('input');return 'subject'}};\
+             var replacement={toString:function(){log.push('replacement');return 'unused'}};\
+             var output=RegExp.prototype[Symbol.replace].call(receiver,input,replacement);\
+             return output+'|'+log.join(',');"
+        ),
+        "subject|input,replacement,flags,flags-string,set:0,exec-get,exec:subject"
+    );
+}
+
+#[test]
+fn regexp_symbol_replace_advances_empty_global_matches_with_full_unicode() {
+    assert_eq!(
+        rendered(
+            "var log=[],backing=7,calls=0;var match={length:1,index:0,groups:undefined,\
+               get 0(){log.push('zero');return ''}};\
+             var receiver={get flags(){log.push('flags');return 'gu'},\
+               get lastIndex(){log.push('get:'+backing);return backing},\
+               set lastIndex(value){log.push('set:'+value);backing=value},\
+               get exec(){log.push('exec-get');return function(){log.push('exec:'+backing);return calls++?null:match}}};\
+             var output=RegExp.prototype[Symbol.replace].call(receiver,'😀','x');\
+             return output+'|'+log.join(',')+'|'+backing;"
+        ),
+        "x😀|flags,set:0,exec-get,exec:0,zero,get:0,set:2,exec-get,exec:2,zero|2"
+    );
+}
+
+#[test]
+fn regexp_symbol_replace_resumes_capture_and_named_group_conversions_in_order() {
+    assert_eq!(
+        rendered(
+            "var log=[];var groups={get name(){log.push('name');return {toString:function(){log.push('name-string');return 'N'}}}};\
+             var result={get length(){log.push('length');return 2},\
+               get 0(){log.push('matched');return 'a'},\
+               get 1(){log.push('capture');return {toString:function(){log.push('capture-string');return 'C'}}},\
+               get index(){log.push('index');return {valueOf:function(){log.push('index-value');return 0}}},\
+               get groups(){log.push('groups');return groups}};\
+             var receiver={get flags(){log.push('flags');return ''},\
+               get exec(){log.push('exec-get');return function(){log.push('exec');return result}}};\
+             var output=RegExp.prototype[Symbol.replace].call(receiver,'abc','$1:$<name>');\
+             return output+'|'+log.join(',');"
+        ),
+        "C:Nbc|flags,exec-get,exec,length,matched,index,index-value,capture,capture-string,groups,name,name-string"
+    );
+}
+
+#[test]
+fn regexp_symbol_replace_computes_but_ignores_backwards_results() {
+    assert_eq!(
+        rendered(
+            "var calls=0,log=[];var receiver={flags:'g',lastIndex:0,exec:function(){\
+               var call=calls++;return call===0?{0:'c',length:1,index:2,groups:undefined}:\
+                 call===1?{0:'b',length:1,index:1,groups:undefined}:null}};\
+             var output=RegExp.prototype[Symbol.replace].call(receiver,'abc',function(match,position){\
+               log.push(match+':'+position);return match.toUpperCase()});\
+             return output+'|'+log.join(',');"
+        ),
+        "abC|c:2,b:1"
+    );
+
+    assert_eq!(
+        thrown(
+            "return RegExp.prototype[Symbol.replace].call({flags:'',exec:function(){return 1}},'x','y');"
+        )
+        .0,
+        ExceptionKind::TypeError
+    );
+}
+
+#[test]
 fn regexp_symbol_search_restores_last_index_before_reading_the_result_index() {
     assert_eq!(
         rendered(
@@ -378,5 +526,183 @@ fn regexp_symbol_search_restores_last_index_before_reading_the_result_index() {
              return result+'|'+regexp.lastIndex;"
         ),
         "1|2"
+    );
+}
+
+#[test]
+fn regexp_symbol_match_all_clones_last_index_and_exposes_the_exact_iterator_surface() {
+    assert_eq!(
+        rendered(
+            "var regexp=/(?<letter>a)?/g;regexp.lastIndex=1;\
+             var iterator=regexp[Symbol.matchAll]('ba');\
+             var first=iterator.next();var second=iterator.next();var done=iterator.next();\
+             var prototype=Object.getPrototypeOf(iterator);\
+             return [regexp.lastIndex,first.value[0],first.value.index,first.value.groups.letter,first.done,\
+                     second.value[0],second.value.index,String(second.value.groups.letter),second.done,done.done,\
+                     Object.prototype.toString.call(iterator),prototype.next.name,prototype.next.length,\
+                     iterator[Symbol.iterator]()===iterator].join('|');"
+        ),
+        "1|a|1|a|false||2|undefined|false|true|[object RegExp String Iterator]|next|0|true"
+    );
+}
+
+#[test]
+fn regexp_symbol_match_all_is_lazy_and_preserves_species_construction_order() {
+    assert_eq!(
+        rendered(
+            "var log=[];var match={0:'',length:1};var calls=0;var backing=0;\
+             function Species(pattern,flags){log.push('construct:'+(pattern===receiver)+':'+flags);return {\
+               get lastIndex(){log.push('matcher-get:'+backing);return backing},\
+               set lastIndex(value){log.push('matcher-set:'+value);backing=value},\
+               get exec(){log.push('exec-get');return function(input){log.push('exec:'+input+':'+backing);return calls++?null:match}}\
+             }}\
+             var receiver={\
+               get constructor(){log.push('constructor');return {get [Symbol.species](){log.push('species');return Species}}},\
+               get flags(){log.push('flags');return {toString:function(){log.push('flags-string');return 'gu'}}},\
+               get lastIndex(){log.push('last-index');return {valueOf:function(){log.push('last-index-value');return 0}}}\
+             };\
+             var input={toString:function(){log.push('input');return '😀'}};\
+             var iterator=RegExp.prototype[Symbol.matchAll].call(receiver,input);\
+             var before=log.join(',');var first=iterator.next();var after=log.join(',');var done=iterator.next();\
+             return [before,first.value===match,first.done,after,backing,done.done].join('|');"
+        ),
+        "input,constructor,species,flags,flags-string,construct:true:gu,last-index,last-index-value,matcher-set:0|true|false|input,constructor,species,flags,flags-string,construct:true:gu,last-index,last-index-value,matcher-set:0,exec-get,exec:😀:0,matcher-get:0,matcher-set:2|2|true"
+    );
+}
+
+#[test]
+fn regexp_symbol_match_all_yields_once_when_not_global_and_validates_exec_results() {
+    assert_eq!(
+        rendered(
+            "var calls=0;function Species(){return receiver}var receiver={constructor:{[Symbol.species]:Species},flags:'',lastIndex:0,\
+               exec:function(){calls++;return calls===1?{0:'x',length:1}:null}};\
+             var iterator=RegExp.prototype[Symbol.matchAll].call(receiver,'x');\
+             var first=iterator.next();var done=iterator.next();\
+             return [first.value[0],first.done,done.done,calls].join('|');"
+        ),
+        "x|false|true|1"
+    );
+    assert_eq!(
+        thrown(
+            "var receiver={flags:'g',lastIndex:0,exec:function(){return 1}};function Species(){return receiver}receiver.constructor={[Symbol.species]:Species};var iterator=RegExp.prototype[Symbol.matchAll].call(receiver,'x');return iterator.next();"
+        )
+        .0,
+        ExceptionKind::TypeError
+    );
+}
+
+#[test]
+fn regexp_string_iterator_rejects_reentry_and_resumes_the_outer_next() {
+    assert_eq!(
+        rendered(
+            "var log=[];var iterator;var receiver={flags:'g',lastIndex:0,\
+             exec:function(){try{iterator.next()}catch(error){log.push(error instanceof TypeError)}return null}};\
+             function Species(){return receiver}receiver.constructor={[Symbol.species]:Species};\
+             iterator=RegExp.prototype[Symbol.matchAll].call(receiver,'x');\
+             var first=iterator.next();var second=iterator.next();\
+             return [log.join(','),first.done,second.done].join('|');"
+        ),
+        "true|true|true"
+    );
+}
+
+#[test]
+fn regexp_string_iterator_closes_after_abrupt_exec_or_result_access() {
+    assert_eq!(
+        rendered(
+            "function iteratorFor(receiver){function Species(){return receiver}\
+               receiver.constructor={[Symbol.species]:Species};\
+               return RegExp.prototype[Symbol.matchAll].call(receiver,'x')}\
+             var execIterator=iteratorFor({flags:'g',lastIndex:0,exec:function(){throw 'exec'}});\
+             var resultIterator=iteratorFor({flags:'g',lastIndex:0,exec:function(){\
+               return {get 0(){throw 'zero'},length:1,index:0}}});\
+             var symbolIterator=iteratorFor({flags:'g',lastIndex:0,exec:function(){\
+               return {0:Symbol('match'),length:1,index:0}}});\
+             var calls=0;var indexIterator=iteratorFor({flags:'g',\
+               get lastIndex(){return calls?Symbol('index'):0},set lastIndex(value){},\
+               exec:function(){calls++;return {0:'',length:1,index:0}}});\
+             var caught=[];try{execIterator.next()}catch(error){caught.push(error)}\
+             try{resultIterator.next()}catch(error){caught.push(error)}\
+             try{symbolIterator.next()}catch(error){caught.push(error instanceof TypeError?'symbol':'bad')}\
+             try{indexIterator.next()}catch(error){caught.push(error instanceof TypeError?'index':'bad')}\
+             return [caught.join(','),execIterator.next().done,resultIterator.next().done,\
+                     symbolIterator.next().done,indexIterator.next().done].join('|');"
+        ),
+        "exec,zero,symbol,index|true|true|true|true"
+    );
+}
+
+#[test]
+fn string_match_all_enforces_global_before_protocol_dispatch_and_has_a_regexp_fallback() {
+    assert_eq!(
+        rendered(
+            "var log=[];var receiver={toString:function(){log.push('receiver');return 'aba'}};\
+             var pattern={\
+               get [Symbol.match](){log.push('match');return true},\
+               get flags(){log.push('flags');return {toString:function(){log.push('flags-string');return 'g'}}},\
+               get [Symbol.matchAll](){log.push('matchAll');return function(value){log.push('call');return value===receiver}}\
+             };var direct=String.prototype.matchAll.call(receiver,pattern);\
+             var matches=[];for(var match of 'aba'.matchAll('a'))matches.push(match.index);\
+             return direct+'|'+log.join(',')+'|'+matches.join(',');"
+        ),
+        "true|match,flags,flags-string,matchAll,call|0,2"
+    );
+
+    assert_eq!(
+        rendered(
+            "var log=[];var receiver={toString:function(){log.push('receiver');return 'x'}};\
+             var pattern={get [Symbol.match](){log.push('match');return true},get flags(){log.push('flags');return 'i'},\
+               get [Symbol.matchAll](){log.push('matchAll');return function(){}}};\
+             var rejected=false;try{String.prototype.matchAll.call(receiver,pattern)}catch(error){rejected=error instanceof TypeError}\
+             return rejected+'|'+log.join(',');"
+        ),
+        "true|match,flags"
+    );
+}
+
+#[test]
+fn regexp_string_iterator_keeps_its_matcher_alive_only_until_completion() {
+    let mut runtime = Runtime::try_new(RuntimeLimits::default()).expect("runtime");
+    let realm = runtime.create_realm().expect("realm");
+    let state = {
+        let mut context = runtime.context(&realm).expect("setup context");
+        let setup = dynamic_function(
+            &mut context,
+            "var matcher={lastIndex:0,exec:function(){return null}};\
+             var reference=new WeakRef(matcher);\
+             var regexp=/x/g;function Species(){return matcher}\
+             regexp.constructor={[Symbol.species]:Species};\
+             var iterator=regexp[Symbol.matchAll]('x');matcher=null;\
+             return {iterator:iterator,reference:reference};",
+        );
+        context
+            .call(&setup, &[], ExecutionLimits::default())
+            .expect("setup")
+            .into_object()
+            .expect("state")
+    };
+
+    runtime.collect_cycles().expect("live matcher collection");
+    assert_eq!(
+        call_with_state(
+            &mut runtime,
+            &realm,
+            "var state=arguments[0];return [state.reference.deref()!==undefined,state.iterator.next().done].join('|');",
+            &state,
+        ),
+        "true|true"
+    );
+
+    runtime
+        .collect_cycles()
+        .expect("completed matcher collection");
+    assert_eq!(
+        call_with_state(
+            &mut runtime,
+            &realm,
+            "return String(arguments[0].reference.deref());",
+            &state,
+        ),
+        "undefined"
     );
 }

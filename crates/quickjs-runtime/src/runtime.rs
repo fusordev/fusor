@@ -48,7 +48,8 @@ use crate::{
     object::{
         ArrayIterator, ArrayIteratorKind, ArrayState, BoxedPrimitive, ForInIterator, ForInSnapshot,
         HeapObject, KeyPhases, ObjectRecord, OwnProperty, PromiseCapability, PromiseReaction,
-        PropertyDeletion, ProxyState, RegExpState, ShapeInterner, StringIterator,
+        PropertyDeletion, ProxyState, RegExpState, RegExpStringIterator, ShapeInterner,
+        StringIterator,
     },
     value::{HeapReference, PrimitiveValue, ReleaseMailbox, RootTarget, SlotValue, StoredValue},
 };
@@ -309,6 +310,7 @@ struct IteratorIntrinsics {
     async_from_sync_iterator_next: FunctionId,
     array_iterator_prototype: ObjectId,
     string_iterator_prototype: ObjectId,
+    regexp_string_iterator_prototype: ObjectId,
     array_values: FunctionId,
 }
 
@@ -843,6 +845,9 @@ pub(crate) enum StringMethod {
     /// `String.prototype.match`, whose `@@match` lookup precedes receiver
     /// coercion and whose fallback constructs a fresh intrinsic `RegExp`.
     Match,
+    /// `String.prototype.matchAll`, including the global `RegExp` guard and
+    /// intrinsic-RegExp fallback.
+    MatchAll,
     /// `String.prototype.replace`, whose `@@replace` protocol dispatch must run
     /// before the receiver and fallback arguments are string-coerced.
     Replace,
@@ -898,6 +903,7 @@ impl StringMethod {
             | Self::ToUpperCase
             | Self::Concat
             | Self::Match
+            | Self::MatchAll
             | Self::Replace
             | Self::ReplaceAll
             | Self::Search
@@ -1302,6 +1308,7 @@ pub(crate) enum NativeFunctionKind {
     FinalizationRegistryPrototype(FinalizationRegistryMethod),
     StringPrototypeIterator,
     StringIteratorNext,
+    RegExpStringIteratorNext,
     GeneratorFunctionConstructor,
     AsyncFunctionConstructor,
     GeneratorPrototypeNext,

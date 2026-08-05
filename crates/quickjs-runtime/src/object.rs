@@ -386,6 +386,23 @@ pub(crate) struct StringIterator {
     next: u32,
 }
 
+/// Internal slots of an ECMAScript `RegExp` String Iterator.
+pub(crate) struct RegExpStringIterator {
+    matcher: Option<StoredValue>,
+    input: JsString,
+    global: bool,
+    full_unicode: bool,
+    phase: RegExpStringIteratorPhase,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum RegExpStringIteratorPhase {
+    Active,
+    Executing,
+    YieldedNonGlobal,
+    Done,
+}
+
 /// Hashable `SameValueZero` projection used by `Map`'s lookup index.
 ///
 /// The ordered entry vector remains the semantic source of truth. This key is
@@ -978,6 +995,60 @@ impl StringIterator {
 
     pub(crate) fn finish(&mut self) {
         self.iterated = None;
+    }
+}
+
+impl RegExpStringIterator {
+    pub(crate) const fn new(
+        matcher: StoredValue,
+        input: JsString,
+        global: bool,
+        full_unicode: bool,
+    ) -> Self {
+        Self {
+            matcher: Some(matcher),
+            input,
+            global,
+            full_unicode,
+            phase: RegExpStringIteratorPhase::Active,
+        }
+    }
+
+    pub(crate) const fn matcher(&self) -> Option<&StoredValue> {
+        self.matcher.as_ref()
+    }
+
+    pub(crate) const fn input(&self) -> &JsString {
+        &self.input
+    }
+
+    pub(crate) const fn global(&self) -> bool {
+        self.global
+    }
+
+    pub(crate) const fn full_unicode(&self) -> bool {
+        self.full_unicode
+    }
+
+    pub(crate) const fn phase(&self) -> RegExpStringIteratorPhase {
+        self.phase
+    }
+
+    pub(crate) fn start(&mut self) {
+        self.phase = RegExpStringIteratorPhase::Executing;
+    }
+
+    pub(crate) fn suspend(&mut self) {
+        self.phase = RegExpStringIteratorPhase::Active;
+    }
+
+    pub(crate) fn mark_non_global_yielded(&mut self) {
+        self.phase = RegExpStringIteratorPhase::YieldedNonGlobal;
+    }
+
+    pub(crate) fn finish(&mut self) {
+        self.matcher = None;
+        self.phase = RegExpStringIteratorPhase::Done;
     }
 }
 
@@ -2052,6 +2123,7 @@ pub(crate) enum HeapObjectKind {
     ForInIterator(ForInIterator),
     ArrayIterator(ArrayIterator),
     StringIterator(StringIterator),
+    RegExpStringIterator(RegExpStringIterator),
     /// An ECMAScript `RegExp` object with compiled `[[RegExpMatcher]]` state.
     RegExp(RegExpState),
     /// An ECMAScript Map object with ordered `[[MapData]]`.
@@ -2188,6 +2260,7 @@ impl HeapObjectKind {
             | Self::ForInIterator(_)
             | Self::ArrayIterator(_)
             | Self::StringIterator(_)
+            | Self::RegExpStringIterator(_)
             | Self::RegExp(_)
             | Self::Map(_)
             | Self::MapIterator(_)
@@ -2214,6 +2287,7 @@ impl HeapObjectKind {
             | Self::ForInIterator(_)
             | Self::ArrayIterator(_)
             | Self::StringIterator(_)
+            | Self::RegExpStringIterator(_)
             | Self::RegExp(_)
             | Self::Map(_)
             | Self::MapIterator(_)
@@ -2239,6 +2313,7 @@ impl HeapObjectKind {
             | Self::ForInIterator(_)
             | Self::ArrayIterator(_)
             | Self::StringIterator(_)
+            | Self::RegExpStringIterator(_)
             | Self::RegExp(_)
             | Self::Map(_)
             | Self::MapIterator(_)
@@ -2264,6 +2339,7 @@ impl HeapObjectKind {
             | Self::BoxedPrimitive(_)
             | Self::ArrayIterator(_)
             | Self::StringIterator(_)
+            | Self::RegExpStringIterator(_)
             | Self::RegExp(_)
             | Self::Map(_)
             | Self::MapIterator(_)
@@ -2289,6 +2365,7 @@ impl HeapObjectKind {
             | Self::BoxedPrimitive(_)
             | Self::ArrayIterator(_)
             | Self::StringIterator(_)
+            | Self::RegExpStringIterator(_)
             | Self::RegExp(_)
             | Self::Map(_)
             | Self::MapIterator(_)
@@ -2314,6 +2391,7 @@ impl HeapObjectKind {
             | Self::BoxedPrimitive(_)
             | Self::ForInIterator(_)
             | Self::StringIterator(_)
+            | Self::RegExpStringIterator(_)
             | Self::RegExp(_)
             | Self::Map(_)
             | Self::MapIterator(_)
@@ -2339,6 +2417,7 @@ impl HeapObjectKind {
             | Self::BoxedPrimitive(_)
             | Self::ForInIterator(_)
             | Self::StringIterator(_)
+            | Self::RegExpStringIterator(_)
             | Self::RegExp(_)
             | Self::Map(_)
             | Self::MapIterator(_)
@@ -2364,6 +2443,7 @@ impl HeapObjectKind {
             | Self::BoxedPrimitive(_)
             | Self::ForInIterator(_)
             | Self::ArrayIterator(_)
+            | Self::RegExpStringIterator(_)
             | Self::RegExp(_)
             | Self::Map(_)
             | Self::MapIterator(_)
@@ -2389,6 +2469,7 @@ impl HeapObjectKind {
             | Self::BoxedPrimitive(_)
             | Self::ForInIterator(_)
             | Self::ArrayIterator(_)
+            | Self::RegExpStringIterator(_)
             | Self::RegExp(_)
             | Self::Map(_)
             | Self::MapIterator(_)
@@ -2398,6 +2479,20 @@ impl HeapObjectKind {
             | Self::WeakSet(_)
             | Self::WeakRef(_)
             | Self::FinalizationRegistry(_) => None,
+        }
+    }
+
+    pub(crate) const fn regexp_string_iterator(&self) -> Option<&RegExpStringIterator> {
+        match self {
+            Self::RegExpStringIterator(iterator) => Some(iterator),
+            _ => None,
+        }
+    }
+
+    pub(crate) const fn regexp_string_iterator_mut(&mut self) -> Option<&mut RegExpStringIterator> {
+        match self {
+            Self::RegExpStringIterator(iterator) => Some(iterator),
+            _ => None,
         }
     }
 
@@ -2649,6 +2744,18 @@ impl HeapObject {
     }
 
     #[must_use]
+    pub(crate) const fn regexp_string_iterator(
+        record: ObjectRecord,
+        iterator: RegExpStringIterator,
+    ) -> Self {
+        Self {
+            kind: HeapObjectKind::RegExpStringIterator(iterator),
+            record,
+            public_roots: 0,
+        }
+    }
+
+    #[must_use]
     pub(crate) const fn regexp(record: ObjectRecord, state: RegExpState) -> Self {
         Self {
             kind: HeapObjectKind::RegExp(state),
@@ -2805,6 +2912,7 @@ impl HeapObject {
             | HeapObjectKind::ForInIterator(_)
             | HeapObjectKind::ArrayIterator(_)
             | HeapObjectKind::StringIterator(_)
+            | HeapObjectKind::RegExpStringIterator(_)
             | HeapObjectKind::RegExp(_)
             | HeapObjectKind::Map(_)
             | HeapObjectKind::MapIterator(_)
@@ -2830,6 +2938,7 @@ impl HeapObject {
             | HeapObjectKind::ForInIterator(_)
             | HeapObjectKind::ArrayIterator(_)
             | HeapObjectKind::StringIterator(_)
+            | HeapObjectKind::RegExpStringIterator(_)
             | HeapObjectKind::RegExp(_)
             | HeapObjectKind::Map(_)
             | HeapObjectKind::MapIterator(_)
@@ -2857,6 +2966,7 @@ impl HeapObject {
             | HeapObjectKind::ForInIterator(_)
             | HeapObjectKind::ArrayIterator(_)
             | HeapObjectKind::StringIterator(_)
+            | HeapObjectKind::RegExpStringIterator(_)
             | HeapObjectKind::RegExp(_)
             | HeapObjectKind::Map(_)
             | HeapObjectKind::MapIterator(_)
@@ -3042,6 +3152,18 @@ impl HeapObject {
     #[must_use]
     pub(crate) const fn string_iterator_state_mut(&mut self) -> Option<&mut StringIterator> {
         self.kind.string_iterator_mut()
+    }
+
+    #[must_use]
+    pub(crate) const fn regexp_string_iterator_state(&self) -> Option<&RegExpStringIterator> {
+        self.kind.regexp_string_iterator()
+    }
+
+    #[must_use]
+    pub(crate) const fn regexp_string_iterator_state_mut(
+        &mut self,
+    ) -> Option<&mut RegExpStringIterator> {
+        self.kind.regexp_string_iterator_mut()
     }
 
     #[must_use]

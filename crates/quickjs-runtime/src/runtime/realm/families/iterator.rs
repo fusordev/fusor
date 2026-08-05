@@ -35,6 +35,7 @@ pub(super) fn visit_objects(visit: ObjectSink<'_>) {
     for id in [
         IntrinsicObjectId::ArrayIteratorPrototype,
         IntrinsicObjectId::StringIteratorPrototype,
+        IntrinsicObjectId::RegExpStringIteratorPrototype,
     ] {
         visit(object(
             id,
@@ -72,6 +73,10 @@ pub(super) fn visit_functions(visit: FunctionSink<'_>) {
         ),
         (
             NativeFunctionKind::StringIteratorNext,
+            IntrinsicNameSpec::Predefined(PredefinedAtom::Next),
+        ),
+        (
+            NativeFunctionKind::RegExpStringIteratorNext,
             IntrinsicNameSpec::Predefined(PredefinedAtom::Next),
         ),
         (
@@ -182,6 +187,22 @@ pub(super) fn visit_properties(visit: PropertySink<'_>) {
         IDENTITY_PROPERTY,
         IntrinsicValueSpec::String(IntrinsicStringSpec::Predefined(
             PredefinedAtom::StringIterator,
+        )),
+    ));
+
+    let regexp_string_iterator =
+        IntrinsicIdentity::Object(IntrinsicObjectId::RegExpStringIteratorPrototype);
+    visit(method(
+        regexp_string_iterator,
+        IntrinsicKeySpec::PredefinedString(PredefinedAtom::Next),
+        NativeFunctionKind::RegExpStringIteratorNext,
+    ));
+    visit(data(
+        regexp_string_iterator,
+        IntrinsicKeySpec::WellKnownSymbol(PredefinedAtom::SymbolToStringTag),
+        IDENTITY_PROPERTY,
+        IntrinsicValueSpec::String(IntrinsicStringSpec::Predefined(
+            PredefinedAtom::RegExpStringIterator,
         )),
     ));
 }

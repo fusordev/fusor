@@ -896,12 +896,16 @@ impl NativeContinuation {
                 | Self::AsyncFromSyncClose(_)
                 | Self::AsyncGeneratorReturnAwait { .. }
         ) || matches!(self, Self::Promise(state) if state.handles_abrupt())
+            || matches!(self, Self::RegExp(state) if state.handles_abrupt())
             || matches!(
                 self,
                 Self::OperatorPrimitive(state)
                     if matches!(
                         &state.target,
                         OperatorPrimitiveTarget::ArrayFromAsyncLength { .. }
+                    ) || matches!(
+                        &state.target,
+                        OperatorPrimitiveTarget::RegExpValue(state) if state.handles_abrupt()
                     )
             )
     }
