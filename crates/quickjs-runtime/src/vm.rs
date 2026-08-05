@@ -58,18 +58,18 @@ use crate::{
     runtime::{
         ArrayCallback, ArrayCopier, ArrayDefineOutcome, ArrayFlatten, ArrayLengthWriteOutcome,
         ArrayMutator, ArrayReduction, ArraySearch, ArraySort, ArrayStatic, BindingCell,
-        BoundFunction, BytecodeFunction, CollectionRoot, EnvironmentBinding,
-        FinalizationRegistryMethod, FrameBindingAddress, FunctionImplementation,
-        GlobalNumericFunction, HeapFunction, InstalledCode, InstalledConstant, InstalledRoot,
-        InstalledTemplate, LocaleStringMethod, MapMethod, MathMethod, NativeFunction,
-        NativeFunctionKind, NumberFormat, NumberPredicate, PreparedIteratorResultPlan,
-        PromiseCapabilityCapture, PromiseCapabilityExecutor, PromiseCombinatorElementFunction,
-        PromiseCombinatorElementKind, PromiseCombinatorKind, PromiseCombinatorShared,
-        PromiseFinallyFunction, PromiseFinallyThunkKind, PromiseJob, PromiseResolvingFunction,
-        PromiseResolvingKind, PromiseStatic, RealmGlobalBindingState, ReflectMethod, RegExpFlag,
-        RegExpSymbolMethod, SetMethod, SetPrototypeOutcome, StringArgument, StringMethod,
-        UriFunction, WeakMapMethod, WeakSetMethod, array_length_from_number, check_execution_limit,
-        global_declaration_error, usize_to_u64,
+        BoundFunction, BytecodeFunction, CollectionRoot, DatePrototypeMethod, DateStaticMethod,
+        EnvironmentBinding, FinalizationRegistryMethod, FrameBindingAddress,
+        FunctionImplementation, GlobalNumericFunction, HeapFunction, InstalledCode,
+        InstalledConstant, InstalledRoot, InstalledTemplate, LocaleStringMethod, MapMethod,
+        MathMethod, NativeFunction, NativeFunctionKind, NumberFormat, NumberPredicate,
+        PreparedIteratorResultPlan, PromiseCapabilityCapture, PromiseCapabilityExecutor,
+        PromiseCombinatorElementFunction, PromiseCombinatorElementKind, PromiseCombinatorKind,
+        PromiseCombinatorShared, PromiseFinallyFunction, PromiseFinallyThunkKind, PromiseJob,
+        PromiseResolvingFunction, PromiseResolvingKind, PromiseStatic, RealmGlobalBindingState,
+        ReflectMethod, RegExpFlag, RegExpSymbolMethod, SetMethod, SetPrototypeOutcome,
+        StringArgument, StringMethod, UriFunction, WeakMapMethod, WeakSetMethod,
+        array_length_from_number, check_execution_limit, global_declaration_error, usize_to_u64,
     },
     value::{HeapReference, SlotValue, StoredValue},
 };
@@ -90,6 +90,7 @@ mod async_generator;
 mod bigint_intrinsics;
 mod bindings;
 mod conversions;
+mod date;
 mod define_property_intrinsics;
 mod dynamic;
 mod error_stack;
@@ -137,7 +138,7 @@ use {
     aggregate_error::*, array_callbacks::*, array_copiers::*, array_flatten::*,
     array_from_async::*, array_join::*, array_mutators::*, array_search::*, array_sort::*,
     array_statics::*, async_from_sync::*, async_generator::*, bigint_intrinsics::*, bindings::*,
-    conversions::*, define_property_intrinsics::*, dynamic::*, error_stack::*, errors::*,
+    conversions::*, date::*, define_property_intrinsics::*, dynamic::*, error_stack::*, errors::*,
     exceptions::*, execution::*, for_in::*, from_entries::*, generator::*, group_by::*,
     iterators::*, json_parse::*, json_stringify::*, locale_string::*, map::*, math::*,
     math_sum_precise::*, native::*, object_intrinsics::*, promise::*, promise_combinators::*,
@@ -1122,6 +1123,10 @@ enum IntrinsicGetContinuation {
         new_target: FunctionId,
         value: JsNumber,
     },
+    DateConstructor {
+        new_target: FunctionId,
+        value: JsNumber,
+    },
     StringConstructor {
         new_target: FunctionId,
         value: JsString,
@@ -1172,6 +1177,7 @@ impl IntrinsicGetContinuation {
         match self {
             Self::BooleanConstructor { .. }
             | Self::NumberConstructor { .. }
+            | Self::DateConstructor { .. }
             | Self::StringConstructor { .. } => 1,
             Self::ArrayConstructor { arguments, .. } => {
                 1_u64.saturating_add(usize_to_u64(arguments.len()))
@@ -1194,6 +1200,7 @@ enum ObjectPrototypeTag {
     Array,
     BigInt,
     Boolean,
+    Date,
     Error,
     Function,
     Number,
@@ -1210,6 +1217,7 @@ impl ObjectPrototypeTag {
             Self::Array => "Array",
             Self::BigInt => "BigInt",
             Self::Boolean => "Boolean",
+            Self::Date => "Date",
             Self::Error => "Error",
             Self::Function => "Function",
             Self::Number => "Number",
@@ -1829,6 +1837,18 @@ enum OperatorPrimitiveTarget {
     NumberIntrinsic {
         new_target: Option<FunctionId>,
     },
+    /// A one-argument Date construction, after `ToPrimitive(default)`.
+    DateConstructor {
+        new_target: FunctionId,
+    },
+    /// `Date.parse`, after `ToString`.
+    DateParse,
+    /// One supplied `Date.UTC` component, after `ToNumber`.
+    DateUtc(Box<DateUtcContinuation>),
+    /// `Date.prototype.setTime`, after its branded receiver check and `ToNumber`.
+    DateSetTime {
+        object: ObjectId,
+    },
     NumberToString {
         number: JsNumber,
     },
@@ -1954,6 +1974,8 @@ impl OperatorPrimitiveTarget {
             // retain nothing beyond the operand the caller already counted.
             Self::Unary { .. }
             | Self::NumberIntrinsic { new_target: None }
+            | Self::DateParse
+            | Self::DateSetTime { .. }
             | Self::StringIntrinsic { new_target: None }
             | Self::SymbolIntrinsic { .. }
             | Self::StringIteratorIntrinsic
@@ -1974,12 +1996,14 @@ impl OperatorPrimitiveTarget {
             | Self::NumberIntrinsic {
                 new_target: Some(_),
             }
+            | Self::DateConstructor { .. }
             | Self::StringIntrinsic {
                 new_target: Some(_),
             }
             | Self::MathBinaryRight { .. }
             | Self::MathBinaryFinish { .. }
             | Self::ArrayFromAsyncLength { .. } => 1,
+            Self::DateUtc(state) => state.retained_values(),
             Self::SetRecordSize(state) => state.retained_values(),
             Self::ErrorConstructorMessage(state) => state.retained_values(),
             Self::JsonParseText(state) => state.retained_values(),
@@ -2175,6 +2199,10 @@ fn trace_property_key_target_roots(
     }
 }
 
+#[allow(
+    clippy::too_many_lines,
+    reason = "one exhaustive tracer keeps every primitive-conversion target's heap roots explicit"
+)]
 fn trace_operator_primitive_target_roots(
     target: &OperatorPrimitiveTarget,
     mark: &mut dyn FnMut(CollectionRoot),
@@ -2185,6 +2213,7 @@ fn trace_operator_primitive_target_roots(
         OperatorPrimitiveTarget::Unary { .. }
         | OperatorPrimitiveTarget::NumberToString { .. }
         | OperatorPrimitiveTarget::NumberFormatDigits { .. }
+        | OperatorPrimitiveTarget::DateParse
         | OperatorPrimitiveTarget::GlobalNumeric(_)
         | OperatorPrimitiveTarget::MathUnary(_)
         | OperatorPrimitiveTarget::GlobalUri(_)
@@ -2196,6 +2225,13 @@ fn trace_operator_primitive_target_roots(
         | OperatorPrimitiveTarget::BigIntTruncationValue { .. }
         // The converted left Number carries no heap edge.
         | OperatorPrimitiveTarget::MathBinaryFinish { .. } => {}
+        OperatorPrimitiveTarget::DateSetTime { object } => {
+            mark(CollectionRoot::Heap(HeapReference::Object(*object)));
+        }
+        OperatorPrimitiveTarget::DateConstructor { new_target } => {
+            mark(CollectionRoot::Heap(HeapReference::Function(*new_target)));
+        }
+        OperatorPrimitiveTarget::DateUtc(state) => state.trace_roots(mark),
         OperatorPrimitiveTarget::JsonParseText(state) => state.trace_roots(mark),
         OperatorPrimitiveTarget::JsonParseArrayLength(state) => state.trace_roots(mark),
         OperatorPrimitiveTarget::JsonStringifyReplacerItem(state)
@@ -2369,6 +2405,7 @@ fn trace_native_continuation_roots(
         NativeContinuation::IntrinsicGet(state) => match state {
             IntrinsicGetContinuation::BooleanConstructor { new_target, .. }
             | IntrinsicGetContinuation::NumberConstructor { new_target, .. }
+            | IntrinsicGetContinuation::DateConstructor { new_target, .. }
             | IntrinsicGetContinuation::StringConstructor { new_target, .. } => {
                 mark(CollectionRoot::Heap(HeapReference::Function(*new_target)));
             }

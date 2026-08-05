@@ -2106,6 +2106,26 @@ impl RegExpState {
     }
 }
 
+/// The specification-level `[[DateValue]]` slot of a Date object.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct DateState {
+    value: JsNumber,
+}
+
+impl DateState {
+    pub(crate) const fn new(value: JsNumber) -> Self {
+        Self { value }
+    }
+
+    pub(crate) const fn value(self) -> JsNumber {
+        self.value
+    }
+
+    pub(crate) fn set_value(&mut self, value: JsNumber) {
+        self.value = value;
+    }
+}
+
 pub(crate) enum HeapObjectKind {
     Ordinary,
     /// A non-callable Proxy exotic object. Callable proxies live in the
@@ -2126,6 +2146,8 @@ pub(crate) enum HeapObjectKind {
     RegExpStringIterator(RegExpStringIterator),
     /// An ECMAScript `RegExp` object with compiled `[[RegExpMatcher]]` state.
     RegExp(RegExpState),
+    /// An ECMAScript Date object with a `[[DateValue]]` Number.
+    Date(DateState),
     /// An ECMAScript Map object with ordered `[[MapData]]`.
     Map(MapState),
     MapIterator(MapIterator),
@@ -2262,6 +2284,7 @@ impl HeapObjectKind {
             | Self::StringIterator(_)
             | Self::RegExpStringIterator(_)
             | Self::RegExp(_)
+            | Self::Date(_)
             | Self::Map(_)
             | Self::MapIterator(_)
             | Self::Set(_)
@@ -2289,6 +2312,7 @@ impl HeapObjectKind {
             | Self::StringIterator(_)
             | Self::RegExpStringIterator(_)
             | Self::RegExp(_)
+            | Self::Date(_)
             | Self::Map(_)
             | Self::MapIterator(_)
             | Self::Set(_)
@@ -2315,6 +2339,7 @@ impl HeapObjectKind {
             | Self::StringIterator(_)
             | Self::RegExpStringIterator(_)
             | Self::RegExp(_)
+            | Self::Date(_)
             | Self::Map(_)
             | Self::MapIterator(_)
             | Self::Set(_)
@@ -2341,6 +2366,7 @@ impl HeapObjectKind {
             | Self::StringIterator(_)
             | Self::RegExpStringIterator(_)
             | Self::RegExp(_)
+            | Self::Date(_)
             | Self::Map(_)
             | Self::MapIterator(_)
             | Self::Set(_)
@@ -2367,6 +2393,7 @@ impl HeapObjectKind {
             | Self::StringIterator(_)
             | Self::RegExpStringIterator(_)
             | Self::RegExp(_)
+            | Self::Date(_)
             | Self::Map(_)
             | Self::MapIterator(_)
             | Self::Set(_)
@@ -2393,6 +2420,7 @@ impl HeapObjectKind {
             | Self::StringIterator(_)
             | Self::RegExpStringIterator(_)
             | Self::RegExp(_)
+            | Self::Date(_)
             | Self::Map(_)
             | Self::MapIterator(_)
             | Self::Set(_)
@@ -2419,6 +2447,7 @@ impl HeapObjectKind {
             | Self::StringIterator(_)
             | Self::RegExpStringIterator(_)
             | Self::RegExp(_)
+            | Self::Date(_)
             | Self::Map(_)
             | Self::MapIterator(_)
             | Self::Set(_)
@@ -2445,6 +2474,7 @@ impl HeapObjectKind {
             | Self::ArrayIterator(_)
             | Self::RegExpStringIterator(_)
             | Self::RegExp(_)
+            | Self::Date(_)
             | Self::Map(_)
             | Self::MapIterator(_)
             | Self::Set(_)
@@ -2471,6 +2501,7 @@ impl HeapObjectKind {
             | Self::ArrayIterator(_)
             | Self::RegExpStringIterator(_)
             | Self::RegExp(_)
+            | Self::Date(_)
             | Self::Map(_)
             | Self::MapIterator(_)
             | Self::Set(_)
@@ -2765,6 +2796,15 @@ impl HeapObject {
     }
 
     #[must_use]
+    pub(crate) const fn date(record: ObjectRecord, state: DateState) -> Self {
+        Self {
+            kind: HeapObjectKind::Date(state),
+            record,
+            public_roots: 0,
+        }
+    }
+
+    #[must_use]
     pub(crate) const fn map(record: ObjectRecord, state: MapState) -> Self {
         Self {
             kind: HeapObjectKind::Map(state),
@@ -2894,6 +2934,20 @@ impl HeapObject {
         self.kind.regexp_mut()
     }
 
+    pub(crate) const fn date_state(&self) -> Option<&DateState> {
+        match &self.kind {
+            HeapObjectKind::Date(state) => Some(state),
+            _ => None,
+        }
+    }
+
+    pub(crate) const fn date_state_mut(&mut self) -> Option<&mut DateState> {
+        match &mut self.kind {
+            HeapObjectKind::Date(state) => Some(state),
+            _ => None,
+        }
+    }
+
     #[must_use]
     pub(crate) const fn is_arguments(&self) -> bool {
         matches!(self.kind, HeapObjectKind::Arguments(_))
@@ -2914,6 +2968,7 @@ impl HeapObject {
             | HeapObjectKind::StringIterator(_)
             | HeapObjectKind::RegExpStringIterator(_)
             | HeapObjectKind::RegExp(_)
+            | HeapObjectKind::Date(_)
             | HeapObjectKind::Map(_)
             | HeapObjectKind::MapIterator(_)
             | HeapObjectKind::Set(_)
@@ -2940,6 +2995,7 @@ impl HeapObject {
             | HeapObjectKind::StringIterator(_)
             | HeapObjectKind::RegExpStringIterator(_)
             | HeapObjectKind::RegExp(_)
+            | HeapObjectKind::Date(_)
             | HeapObjectKind::Map(_)
             | HeapObjectKind::MapIterator(_)
             | HeapObjectKind::Set(_)
@@ -2968,6 +3024,7 @@ impl HeapObject {
             | HeapObjectKind::StringIterator(_)
             | HeapObjectKind::RegExpStringIterator(_)
             | HeapObjectKind::RegExp(_)
+            | HeapObjectKind::Date(_)
             | HeapObjectKind::Map(_)
             | HeapObjectKind::MapIterator(_)
             | HeapObjectKind::Set(_)

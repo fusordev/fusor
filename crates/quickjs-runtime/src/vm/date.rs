@@ -1,0 +1,748 @@
+/*
+ * JavaScript Date semantics derived from ECMA-262 and QuickJS.
+ *
+ * Copyright (c) 2017-2018 Fabrice Bellard
+ * Copyright (c) 2017-2018 Charlie Gordon
+ *
+ * Permission is hereby granted, free of charge, to any person obtaining a copy
+ * of this software and associated documentation files (the "Software"), to deal
+ * in the Software without restriction, including without limitation the rights
+ * to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+ * copies of the Software, and to permit persons to whom the Software is
+ * furnished to do so, subject to the following conditions:
+ *
+ * The above copyright notice and this permission notice shall be included in
+ * all copies or substantial portions of the Software.
+ *
+ * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+ * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+ * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL
+ * THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+ * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+ * OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
+ * THE SOFTWARE.
+ */
+
+//! UTC and time-value foundation for the ES2025 `%Date%` intrinsic.
+
+use temporal_rs::{Calendar, Temporal, TimeZone, ZonedDateTime};
+
+#[allow(
+    clippy::wildcard_imports,
+    reason = "this private VM sibling participates in the shared interpreter implementation namespace"
+)]
+use super::*;
+
+const MS_PER_SECOND: f64 = 1_000.0;
+const MS_PER_MINUTE: f64 = 60.0 * MS_PER_SECOND;
+const MS_PER_HOUR: f64 = 60.0 * MS_PER_MINUTE;
+const MS_PER_DAY: f64 = 24.0 * MS_PER_HOUR;
+const TIME_CLIP_BOUND: f64 = 8_640_000_000_000_000.0;
+const WEEKDAYS: [&str; 7] = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
+const MONTHS: [&str; 12] = [
+    "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
+];
+
+pub(super) struct DateUtcContinuation {
+    arguments: Vec<StoredValue>,
+    converted: Vec<JsNumber>,
+}
+
+impl DateUtcContinuation {
+    pub(super) fn retained_values(&self) -> u64 {
+        usize_to_u64(self.arguments.len())
+    }
+
+    pub(super) fn trace_roots(&self, mark: &mut dyn FnMut(CollectionRoot)) {
+        for argument in &self.arguments {
+            trace_stored_value_root(argument, mark);
+        }
+    }
+}
+
+pub(super) fn begin_date_constructor(
+    runtime: &mut Runtime,
+    realm: RealmId,
+    inputs: CallInputs,
+    return_to: Option<CallReturn>,
+    origin: JsStackFrame,
+    execution_budget: &mut ExecutionBudget,
+) -> Result<NativeDispatch, NativeFailure> {
+    let Some(new_target) = inputs.new_target else {
+        return Err(EngineFault::RuntimeInvariant {
+            message: "Date() local-time rendering is not implemented",
+        }
+        .into());
+    };
+    let mut arguments = inputs.arguments.into_remaining_values();
+    match arguments.len() {
+        0 => begin_date_constructor_wrapper(
+            runtime,
+            realm,
+            new_target,
+            current_time_value(),
+            return_to,
+            Some(origin),
+            execution_budget,
+        ),
+        1 => {
+            let argument = arguments.pop().expect("one Date argument");
+            if let StoredValue::Object(object) = argument
+                && let Some(value) = runtime.date_value(object)?
+            {
+                return begin_date_constructor_wrapper(
+                    runtime,
+                    realm,
+                    new_target,
+                    value,
+                    return_to,
+                    Some(origin),
+                    execution_budget,
+                );
+            }
+            begin_operator_primitive_conversion(
+                runtime,
+                argument,
+                OperatorPrimitiveHint::Default,
+                OperatorPrimitiveTarget::DateConstructor { new_target },
+                realm,
+                return_to,
+                origin,
+                execution_budget,
+            )
+        }
+        _ => Err(EngineFault::RuntimeInvariant {
+            message: "multi-argument Date construction requires local-time semantics",
+        }
+        .into()),
+    }
+}
+
+pub(super) fn begin_date_constructor_wrapper(
+    runtime: &mut Runtime,
+    realm: RealmId,
+    new_target: FunctionId,
+    value: JsNumber,
+    return_to: Option<CallReturn>,
+    origin: Option<JsStackFrame>,
+    execution_budget: &mut ExecutionBudget,
+) -> Result<NativeDispatch, NativeFailure> {
+    let prototype_key = runtime.predefined_property_key(PredefinedAtom::Prototype);
+    begin_intrinsic_get(
+        runtime,
+        realm,
+        HeapReference::Function(new_target),
+        StoredValue::Function(new_target),
+        &prototype_key,
+        IntrinsicGetContinuation::DateConstructor { new_target, value },
+        return_to,
+        origin,
+        execution_budget,
+    )
+}
+
+pub(super) fn finish_date_constructor_wrapper(
+    runtime: &mut Runtime,
+    new_target: FunctionId,
+    date_value: JsNumber,
+    requested: &StoredValue,
+) -> Result<NativeDispatch, NativeFailure> {
+    let prototype = match requested {
+        StoredValue::Function(function) => HeapReference::Function(*function),
+        StoredValue::Object(object) => HeapReference::Object(*object),
+        StoredValue::Undefined
+        | StoredValue::Null
+        | StoredValue::Boolean(_)
+        | StoredValue::Number(_)
+        | StoredValue::BigInt(_)
+        | StoredValue::String(_)
+        | StoredValue::Symbol(_) => {
+            let realm = runtime.function_realm(new_target)?;
+            HeapReference::Object(runtime.realm_date_prototype(realm)?)
+        }
+    };
+    let object = runtime.allocate_date_object(prototype, date_value)?;
+    Ok(NativeDispatch::Immediate(StoredValue::Object(object)))
+}
+
+pub(super) fn finish_date_constructor_primitive(
+    runtime: &mut Runtime,
+    value: StoredValue,
+    new_target: FunctionId,
+    realm: RealmId,
+    return_to: Option<CallReturn>,
+    origin: &JsStackFrame,
+    execution_budget: &mut ExecutionBudget,
+) -> Result<NativeDispatch, NativeFailure> {
+    let value = match value {
+        StoredValue::String(text) => parse_date_string(&text, realm, origin)?,
+        value => time_clip(operator_to_number(value, realm, origin)?.as_f64()),
+    };
+    begin_date_constructor_wrapper(
+        runtime,
+        realm,
+        new_target,
+        value,
+        return_to,
+        Some(origin.clone()),
+        execution_budget,
+    )
+}
+
+pub(super) fn begin_date_static(
+    runtime: &mut Runtime,
+    method: DateStaticMethod,
+    realm: RealmId,
+    mut arguments: CallArguments,
+    return_to: Option<CallReturn>,
+    origin: JsStackFrame,
+    execution_budget: &mut ExecutionBudget,
+) -> Result<NativeDispatch, NativeFailure> {
+    match method {
+        DateStaticMethod::Now => Ok(NativeDispatch::Immediate(StoredValue::Number(
+            current_time_value(),
+        ))),
+        DateStaticMethod::Parse => begin_operator_primitive_conversion(
+            runtime,
+            arguments.take_first_or_undefined(),
+            OperatorPrimitiveHint::String,
+            OperatorPrimitiveTarget::DateParse,
+            realm,
+            return_to,
+            origin,
+            execution_budget,
+        ),
+        DateStaticMethod::Utc => begin_date_utc(
+            runtime,
+            arguments,
+            realm,
+            return_to,
+            &origin,
+            execution_budget,
+        ),
+    }
+}
+
+fn begin_date_utc(
+    runtime: &mut Runtime,
+    arguments: CallArguments,
+    realm: RealmId,
+    return_to: Option<CallReturn>,
+    origin: &JsStackFrame,
+    execution_budget: &mut ExecutionBudget,
+) -> Result<NativeDispatch, NativeFailure> {
+    let mut values = arguments.into_remaining_values();
+    values.truncate(7);
+    let conversion_count = values.len().max(2);
+    values
+        .try_reserve(conversion_count.saturating_sub(values.len()))
+        .map_err(|_| ExecutionError::AllocationFailed {
+            resource: RuntimeResource::FrameValues,
+            additional: conversion_count.saturating_sub(values.len()),
+        })?;
+    while values.len() < conversion_count {
+        values.push(StoredValue::Undefined);
+    }
+    let mut converted = Vec::new();
+    converted.try_reserve_exact(conversion_count).map_err(|_| {
+        ExecutionError::AllocationFailed {
+            resource: RuntimeResource::FrameValues,
+            additional: conversion_count,
+        }
+    })?;
+    advance_date_utc(
+        runtime,
+        DateUtcContinuation {
+            arguments: values,
+            converted,
+        },
+        None,
+        realm,
+        return_to,
+        origin,
+        execution_budget,
+    )
+}
+
+pub(super) fn advance_date_utc(
+    runtime: &mut Runtime,
+    mut state: DateUtcContinuation,
+    completion: Option<JsNumber>,
+    realm: RealmId,
+    return_to: Option<CallReturn>,
+    origin: &JsStackFrame,
+    execution_budget: &mut ExecutionBudget,
+) -> Result<NativeDispatch, NativeFailure> {
+    if let Some(value) = completion {
+        state.converted.push(value);
+    }
+    if state.converted.len() == state.arguments.len() {
+        return Ok(NativeDispatch::Immediate(StoredValue::Number(
+            date_utc_from_components(&state.converted),
+        )));
+    }
+    let index = state.converted.len();
+    let argument = std::mem::replace(&mut state.arguments[index], StoredValue::Undefined);
+    begin_operator_primitive_conversion(
+        runtime,
+        argument,
+        OperatorPrimitiveHint::Number,
+        OperatorPrimitiveTarget::DateUtc(Box::new(state)),
+        realm,
+        return_to,
+        origin.clone(),
+        execution_budget,
+    )
+}
+
+pub(super) fn finish_date_parse(
+    value: StoredValue,
+    realm: RealmId,
+    origin: &JsStackFrame,
+) -> Result<NativeDispatch, NativeFailure> {
+    let text = operator_primitive_to_string(value, realm, origin)?;
+    Ok(NativeDispatch::Immediate(StoredValue::Number(
+        parse_date_string(&text, realm, origin)?,
+    )))
+}
+
+pub(super) fn finish_date_set_time(
+    runtime: &mut Runtime,
+    object: ObjectId,
+    value: StoredValue,
+    realm: RealmId,
+    origin: &JsStackFrame,
+) -> Result<NativeDispatch, NativeFailure> {
+    let value = time_clip(operator_to_number(value, realm, origin)?.as_f64());
+    runtime.set_date_value(object, value)?;
+    Ok(NativeDispatch::Immediate(StoredValue::Number(value)))
+}
+
+#[allow(
+    clippy::too_many_arguments,
+    reason = "native dispatch keeps the VM continuation inputs explicit"
+)]
+pub(super) fn dispatch_date_prototype(
+    runtime: &mut Runtime,
+    method: DatePrototypeMethod,
+    realm: RealmId,
+    receiver: &StoredValue,
+    mut arguments: CallArguments,
+    return_to: Option<CallReturn>,
+    origin: JsStackFrame,
+    execution_budget: &mut ExecutionBudget,
+) -> Result<NativeDispatch, NativeFailure> {
+    let (object, value) = require_date_value(runtime, receiver, realm, &origin)?;
+    match method {
+        DatePrototypeMethod::ValueOf | DatePrototypeMethod::GetTime => {
+            Ok(NativeDispatch::Immediate(StoredValue::Number(value)))
+        }
+        DatePrototypeMethod::ToIsoString => {
+            let Some(rendered) = to_iso_string(value.as_f64()) else {
+                return Err(NativeFailure::Abrupt(PendingException {
+                    realm,
+                    payload: PendingExceptionPayload::EngineError {
+                        kind: ExceptionKind::RangeError,
+                        message: JsString::from_utf8("invalid time value")?,
+                    },
+                    origin: origin.clone(),
+                }));
+            };
+            Ok(NativeDispatch::Immediate(StoredValue::String(
+                JsString::from_utf8(&rendered)?,
+            )))
+        }
+        DatePrototypeMethod::ToUtcString => {
+            let rendered = to_utc_string(value.as_f64());
+            Ok(NativeDispatch::Immediate(StoredValue::String(
+                JsString::from_utf8(&rendered)?,
+            )))
+        }
+        DatePrototypeMethod::GetUtcFullYear
+        | DatePrototypeMethod::GetUtcMonth
+        | DatePrototypeMethod::GetUtcDate
+        | DatePrototypeMethod::GetUtcHours
+        | DatePrototypeMethod::GetUtcMinutes
+        | DatePrototypeMethod::GetUtcSeconds
+        | DatePrototypeMethod::GetUtcMilliseconds
+        | DatePrototypeMethod::GetUtcDay => Ok(NativeDispatch::Immediate(StoredValue::Number(
+            utc_component(method, value.as_f64()),
+        ))),
+        DatePrototypeMethod::SetTime => begin_operator_primitive_conversion(
+            runtime,
+            arguments.take_first_or_undefined(),
+            OperatorPrimitiveHint::Number,
+            OperatorPrimitiveTarget::DateSetTime { object },
+            realm,
+            return_to,
+            origin,
+            execution_budget,
+        ),
+    }
+}
+
+fn require_date_value(
+    runtime: &Runtime,
+    receiver: &StoredValue,
+    realm: RealmId,
+    origin: &JsStackFrame,
+) -> Result<(ObjectId, JsNumber), NativeFailure> {
+    if let StoredValue::Object(object) = receiver
+        && let Some(value) = runtime.date_value(*object)?
+    {
+        return Ok((*object, value));
+    }
+    Err(NativeFailure::Abrupt(PendingException {
+        realm,
+        payload: PendingExceptionPayload::EngineError {
+            kind: ExceptionKind::TypeError,
+            message: JsString::from_utf8("not a Date object")?,
+        },
+        origin: origin.clone(),
+    }))
+}
+
+fn current_time_value() -> JsNumber {
+    Temporal::utc_now().instant().map_or_else(
+        |_| JsNumber::from_f64(f64::NAN),
+        |instant| JsNumber::from_i64(instant.epoch_milliseconds()),
+    )
+}
+
+pub(super) fn time_clip(value: f64) -> JsNumber {
+    if !value.is_finite() || value.abs() > TIME_CLIP_BOUND {
+        return JsNumber::from_f64(f64::NAN);
+    }
+    let truncated = value.trunc();
+    JsNumber::from_f64(if truncated == 0.0 { 0.0 } else { truncated })
+}
+
+fn date_utc_from_components(values: &[JsNumber]) -> JsNumber {
+    let mut components = [0.0; 7];
+    components[0] = f64::NAN;
+    components[1] = f64::NAN;
+    components[2] = 1.0;
+    for (index, value) in values.iter().enumerate() {
+        components[index] = value.as_f64();
+    }
+    if components.iter().any(|value| !value.is_finite()) {
+        return JsNumber::from_f64(f64::NAN);
+    }
+    let mut year = components[0].trunc();
+    if (0.0..=99.0).contains(&year) {
+        year += 1_900.0;
+    }
+    let day = make_day(year, components[1], components[2]);
+    let time = make_time(components[3], components[4], components[5], components[6]);
+    time_clip(day * MS_PER_DAY + time)
+}
+
+#[allow(
+    clippy::cast_possible_truncation,
+    clippy::cast_precision_loss,
+    clippy::cast_sign_loss,
+    reason = "finite integral Date components are normalized and bounded before civil-day conversion"
+)]
+fn make_day(year: f64, month: f64, date: f64) -> f64 {
+    if !year.is_finite() || !month.is_finite() || !date.is_finite() {
+        return f64::NAN;
+    }
+    let year = year.trunc();
+    let month = month.trunc();
+    let normalized_year = year + (month / 12.0).floor();
+    if !normalized_year.is_finite() || normalized_year.abs() > 1_000_000.0 {
+        return f64::NAN;
+    }
+    let normalized_month = month.rem_euclid(12.0) as u32 + 1;
+    let first = days_from_civil(normalized_year as i64, normalized_month, 1);
+    first as f64 + date.trunc() - 1.0
+}
+
+fn make_time(hour: f64, minute: f64, second: f64, millisecond: f64) -> f64 {
+    if !hour.is_finite() || !minute.is_finite() || !second.is_finite() || !millisecond.is_finite() {
+        return f64::NAN;
+    }
+    hour.trunc() * MS_PER_HOUR
+        + minute.trunc() * MS_PER_MINUTE
+        + second.trunc() * MS_PER_SECOND
+        + millisecond.trunc()
+}
+
+fn utc_component(method: DatePrototypeMethod, value: f64) -> JsNumber {
+    let Some(fields) = temporal_utc_fields(value) else {
+        return JsNumber::from_f64(f64::NAN);
+    };
+    let component = match method {
+        DatePrototypeMethod::GetUtcFullYear => i64::from(fields.year),
+        DatePrototypeMethod::GetUtcMonth => i64::from(fields.month) - 1,
+        DatePrototypeMethod::GetUtcDate => i64::from(fields.date),
+        DatePrototypeMethod::GetUtcHours => i64::from(fields.hour),
+        DatePrototypeMethod::GetUtcMinutes => i64::from(fields.minute),
+        DatePrototypeMethod::GetUtcSeconds => i64::from(fields.second),
+        DatePrototypeMethod::GetUtcMilliseconds => i64::from(fields.millisecond),
+        // Temporal numbers Monday as 1 through Sunday as 7; legacy Date
+        // numbers Sunday as 0 through Saturday as 6.
+        DatePrototypeMethod::GetUtcDay => i64::from(fields.day_of_week % 7),
+        DatePrototypeMethod::ValueOf
+        | DatePrototypeMethod::ToUtcString
+        | DatePrototypeMethod::ToIsoString
+        | DatePrototypeMethod::GetTime
+        | DatePrototypeMethod::SetTime => unreachable!("non-component Date method"),
+    };
+    JsNumber::from_i64(component)
+}
+
+fn to_iso_string(value: f64) -> Option<String> {
+    let fields = temporal_utc_fields(value)?;
+    let year = if (0..=9_999).contains(&fields.year) {
+        format!("{:04}", fields.year)
+    } else if fields.year < 0 {
+        format!("-{abs:06}", abs = fields.year.unsigned_abs())
+    } else {
+        format!("+{:06}", fields.year)
+    };
+    Some(format!(
+        "{year}-{month:02}-{date:02}T{hour:02}:{minute:02}:{second:02}.{millisecond:03}Z",
+        month = fields.month,
+        date = fields.date,
+        hour = fields.hour,
+        minute = fields.minute,
+        second = fields.second,
+        millisecond = fields.millisecond,
+    ))
+}
+
+fn to_utc_string(value: f64) -> String {
+    let Some(fields) = temporal_utc_fields(value) else {
+        return "Invalid Date".to_owned();
+    };
+    format!(
+        "{weekday}, {date:02} {month_name} {year:04} {hour:02}:{minute:02}:{second:02} GMT",
+        weekday = WEEKDAYS[usize::from(fields.day_of_week % 7)],
+        date = fields.date,
+        month_name = MONTHS[usize::from(fields.month) - 1],
+        year = fields.year,
+        hour = fields.hour,
+        minute = fields.minute,
+        second = fields.second,
+    )
+}
+
+struct UtcDateFields {
+    year: i32,
+    month: u8,
+    date: u8,
+    hour: u8,
+    minute: u8,
+    second: u8,
+    millisecond: u16,
+    day_of_week: u16,
+}
+
+fn temporal_utc_fields(value: f64) -> Option<UtcDateFields> {
+    if !value.is_finite() || value.fract() != 0.0 {
+        return None;
+    }
+    #[allow(
+        clippy::cast_possible_truncation,
+        reason = "the value is finite, integral, and already constrained by the Date TimeClip domain"
+    )]
+    let epoch_nanoseconds = value as i128 * 1_000_000;
+    let date_time =
+        ZonedDateTime::try_new(epoch_nanoseconds, TimeZone::utc(), Calendar::ISO).ok()?;
+    Some(UtcDateFields {
+        year: date_time.year(),
+        month: date_time.month(),
+        date: date_time.day(),
+        hour: date_time.hour(),
+        minute: date_time.minute(),
+        second: date_time.second(),
+        millisecond: date_time.millisecond(),
+        day_of_week: date_time.day_of_week(),
+    })
+}
+
+fn parse_date_string(
+    value: &JsString,
+    _realm: RealmId,
+    _origin: &JsStackFrame,
+) -> Result<JsNumber, NativeFailure> {
+    let text = value.to_utf8_lossy()?;
+    let Some(milliseconds) = parse_iso_date(&text) else {
+        return Ok(JsNumber::from_f64(f64::NAN));
+    };
+    Ok(time_clip(milliseconds))
+}
+
+fn parse_iso_date(text: &str) -> Option<f64> {
+    let (date_text, time_text) = text
+        .split_once('T')
+        .map_or((text, None), |(date, time)| (date, Some(time)));
+    let (year, month, date) = parse_iso_date_fields(date_text)?;
+    let day = make_day(f64::from(year), f64::from(month - 1), f64::from(date));
+    let Some(time_text) = time_text else {
+        return Some(day * MS_PER_DAY);
+    };
+    let (clock, offset_minutes) = parse_iso_time(time_text)?;
+    Some(day * MS_PER_DAY + clock - f64::from(offset_minutes) * MS_PER_MINUTE)
+}
+
+fn parse_iso_date_fields(text: &str) -> Option<(i32, u32, u32)> {
+    let (year, rest) = if let Some(sign) = text.as_bytes().first().copied()
+        && matches!(sign, b'+' | b'-')
+    {
+        let digits = text.get(1..7)?;
+        if !digits.bytes().all(|byte| byte.is_ascii_digit()) {
+            return None;
+        }
+        let magnitude = digits.parse::<i32>().ok()?;
+        if sign == b'-' && magnitude == 0 {
+            return None;
+        }
+        let year = if sign == b'-' { -magnitude } else { magnitude };
+        (year, text.get(7..).unwrap_or_default())
+    } else {
+        let digits = text.get(..4)?;
+        if !digits.bytes().all(|byte| byte.is_ascii_digit()) {
+            return None;
+        }
+        (
+            digits.parse::<i32>().ok()?,
+            text.get(4..).unwrap_or_default(),
+        )
+    };
+    match rest.len() {
+        0 => Some((year, 1, 1)),
+        3 if rest.starts_with('-') => {
+            let month = parse_two_digits(&rest[1..3])?;
+            (1..=12).contains(&month).then_some((year, month, 1))
+        }
+        6 if rest.as_bytes().first() == Some(&b'-') && rest.as_bytes().get(3) == Some(&b'-') => {
+            let month = parse_two_digits(&rest[1..3])?;
+            let date = parse_two_digits(&rest[4..6])?;
+            ((1..=12).contains(&month) && (1..=31).contains(&date)).then_some((year, month, date))
+        }
+        _ => None,
+    }
+}
+
+fn parse_iso_time(text: &str) -> Option<(f64, i32)> {
+    let (clock, offset) = if let Some(clock) = text.strip_suffix('Z') {
+        (clock, 0)
+    } else {
+        let index = text
+            .char_indices()
+            .rev()
+            .find_map(|(index, character)| matches!(character, '+' | '-').then_some(index))?;
+        let sign = if text.as_bytes()[index] == b'-' {
+            -1
+        } else {
+            1
+        };
+        let zone = text.get(index + 1..)?;
+        if zone.len() != 5 || zone.as_bytes().get(2) != Some(&b':') {
+            return None;
+        }
+        let hours = i32::try_from(parse_two_digits(&zone[..2])?).ok()?;
+        let minutes = i32::try_from(parse_two_digits(&zone[3..])?).ok()?;
+        if hours > 23 || minutes > 59 {
+            return None;
+        }
+        (text.get(..index)?, sign * (hours * 60 + minutes))
+    };
+    let mut parts = clock.split(':');
+    let hour = parse_two_digits(parts.next()?)?;
+    let minute = parse_two_digits(parts.next()?)?;
+    let seconds = parts.next();
+    if parts.next().is_some() || hour > 24 || minute > 59 {
+        return None;
+    }
+    let (second, millisecond) = seconds.map_or(Some((0, 0)), parse_seconds)?;
+    if second > 59 || (hour == 24 && (minute != 0 || second != 0 || millisecond != 0)) {
+        return None;
+    }
+    Some((
+        make_time(
+            f64::from(hour),
+            f64::from(minute),
+            f64::from(second),
+            f64::from(millisecond),
+        ),
+        offset,
+    ))
+}
+
+fn parse_seconds(text: &str) -> Option<(u32, u32)> {
+    let (seconds, fraction) = text
+        .split_once('.')
+        .map_or((text, None), |(seconds, fraction)| {
+            (seconds, Some(fraction))
+        });
+    let seconds = parse_two_digits(seconds)?;
+    let milliseconds = match fraction {
+        None => 0,
+        Some(fraction)
+            if !fraction.is_empty()
+                && fraction.len() <= 3
+                && fraction.bytes().all(|byte| byte.is_ascii_digit()) =>
+        {
+            let fraction_digits = u32::try_from(fraction.len()).ok()?;
+            fraction.parse::<u32>().ok()? * 10_u32.pow(3 - fraction_digits)
+        }
+        Some(_) => return None,
+    };
+    Some((seconds, milliseconds))
+}
+
+fn parse_two_digits(text: &str) -> Option<u32> {
+    (text.len() == 2 && text.bytes().all(|byte| byte.is_ascii_digit()))
+        .then(|| text.parse::<u32>().ok())
+        .flatten()
+}
+
+fn days_from_civil(mut year: i64, month: u32, date: u32) -> i64 {
+    year -= i64::from(month <= 2);
+    let era = year.div_euclid(400);
+    let year_of_era = year - era * 400;
+    let shifted_month = i64::from(month) + if month > 2 { -3 } else { 9 };
+    let day_of_year = (153 * shifted_month + 2) / 5 + i64::from(date) - 1;
+    let day_of_era = year_of_era * 365 + year_of_era / 4 - year_of_era / 100 + day_of_year;
+    era * 146_097 + day_of_era - 719_468
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn temporal_bridge_covers_epoch_and_time_clip_bounds() {
+        let epoch = temporal_utc_fields(0.0).expect("epoch");
+        assert_eq!((epoch.year, epoch.month, epoch.date), (1970, 1, 1));
+        let maximum = temporal_utc_fields(TIME_CLIP_BOUND).expect("maximum");
+        assert_eq!(
+            (maximum.year, maximum.month, maximum.date),
+            (275_760, 9, 13)
+        );
+        let minimum = temporal_utc_fields(-TIME_CLIP_BOUND).expect("minimum");
+        assert_eq!(
+            (minimum.year, minimum.month, minimum.date),
+            (-271_821, 4, 20)
+        );
+    }
+
+    #[test]
+    fn iso_rendering_covers_signed_years_and_negative_milliseconds() {
+        assert_eq!(
+            to_iso_string(0.0).as_deref(),
+            Some("1970-01-01T00:00:00.000Z")
+        );
+        assert_eq!(
+            to_iso_string(-1.0).as_deref(),
+            Some("1969-12-31T23:59:59.999Z")
+        );
+        assert_eq!(
+            to_iso_string(TIME_CLIP_BOUND).as_deref(),
+            Some("+275760-09-13T00:00:00.000Z")
+        );
+    }
+}

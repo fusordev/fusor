@@ -32,6 +32,7 @@ enum NodeKindSnapshot {
     ArrayObject {
         length: u32,
     },
+    DateObject(u64),
     ErrorObject,
     BoxedBoolean(bool),
     BoxedNumber(u64),
@@ -101,6 +102,7 @@ impl RealmSnapshot {
             bigint,
             string,
             array,
+            date,
             map,
             set,
             weak_map,
@@ -136,6 +138,7 @@ impl RealmSnapshot {
             (bigint.prototype, "%BigInt.prototype%"),
             (string.prototype, "%String.prototype%"),
             (array.prototype, "%Array.prototype%"),
+            (date.prototype, "%Date.prototype%"),
             (map.prototype, "%Map.prototype%"),
             (map.iterator_prototype, "%MapIterator.prototype%"),
             (set.prototype, "%Set.prototype%"),
@@ -306,6 +309,9 @@ fn snapshot_object_kind(object: &super::HeapObject) -> NodeKindSnapshot {
     if object.is_error() {
         return NodeKindSnapshot::ErrorObject;
     }
+    if let Some(state) = object.date_state() {
+        return NodeKindSnapshot::DateObject(state.value().as_f64().to_bits());
+    }
     match object.boxed_primitive() {
         Some(BoxedPrimitive::Boolean(value)) => NodeKindSnapshot::BoxedBoolean(*value),
         Some(BoxedPrimitive::Number(value)) => {
@@ -460,9 +466,9 @@ mod tests {
 
     use crate::runtime::{RealmIntrinsics, RuntimeLimits, RuntimeUsage};
 
-    const REALM_NODES: usize = 387;
-    const REALM_PROPERTIES: u64 = 1_180;
-    const REALM_SNAPSHOT_FINGERPRINT: u64 = 4_179_973_713_000_206_882;
+    const REALM_NODES: usize = 405;
+    const REALM_PROPERTIES: u64 = 1_233;
+    const REALM_SNAPSHOT_FINGERPRINT: u64 = 6_994_246_214_922_165_781;
 
     #[test]
     fn complete_realm_snapshot_pins_the_installed_intrinsic_graph() {
@@ -510,9 +516,9 @@ mod tests {
         assert_eq!(
             first_atoms,
             AtomUsage {
-                live_atoms: PREDEFINED_ATOM_COUNT + 202,
-                live_description_code_units: PREDEFINED_DESCRIPTION_CODE_UNITS + 1_599,
-                interner_slots: PREDEFINED_INTERNER_SLOTS + 202,
+                live_atoms: PREDEFINED_ATOM_COUNT + 215,
+                live_description_code_units: PREDEFINED_DESCRIPTION_CODE_UNITS + 1_729,
+                interner_slots: PREDEFINED_INTERNER_SLOTS + 215,
             }
         );
 

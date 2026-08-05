@@ -136,13 +136,13 @@ mod tests {
         let atoms = RealmAtomPlan::try_new(&schema).expect("atom plan");
         let plan = RealmReservationPlan::try_new(&atoms, &schema).expect("reservation plan");
 
-        assert_eq!(plan.dynamic_atoms, 204);
-        assert_eq!(plan.dynamic_atom_code_units, 1_607);
+        assert_eq!(plan.dynamic_atoms, 217);
+        assert_eq!(plan.dynamic_atom_code_units, 1_737);
         assert_eq!(plan.realms, 1);
-        assert_eq!(plan.objects, 41);
-        assert_eq!(plan.functions, 346);
+        assert_eq!(plan.objects, 42);
+        assert_eq!(plan.functions, 363);
         assert_eq!(plan.global_bindings, 0);
-        assert_eq!(plan.object_properties, 1_180);
-        assert_eq!(plan.journal_entries, 592);
+        assert_eq!(plan.object_properties, 1_233);
+        assert_eq!(plan.journal_entries, 623);
     }
 }

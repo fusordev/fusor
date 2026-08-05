@@ -38,12 +38,12 @@ use super::{
     Arc, Arena, ArrayCallback, ArrayCopier, ArrayFlatten, ArrayIntrinsics, ArrayMutator,
     ArrayReduction, ArraySearch, ArraySort, ArrayState, ArrayStatic, AsyncFunctionIntrinsics,
     AsyncGeneratorIntrinsics, AtomError, AtomTable, BigIntIntrinsics, BooleanIntrinsics, Context,
-    ErrorIntrinsic, ErrorIntrinsicKind, ErrorIntrinsics, FinalizationRegistryIntrinsics,
-    FunctionId, FunctionImplementation, GeneratorIntrinsics, GlobalNumericFunction, HandleError,
-    HandleKind, HashMap, HeapFunction, HeapObject, HeapReference, InterruptState,
-    IteratorIntrinsics, JsNumber, JsString, LocaleStringMethod, MapIntrinsics, MapMethod,
-    MathMethod, NativeFunction, NativeFunctionKind, NumberFormat, NumberIntrinsics,
-    NumberPredicate, ObjectId, ObjectRecord, PredefinedAtom, PromiseIntrinsics,
+    DateIntrinsics, ErrorIntrinsic, ErrorIntrinsicKind, ErrorIntrinsics,
+    FinalizationRegistryIntrinsics, FunctionId, FunctionImplementation, GeneratorIntrinsics,
+    GlobalNumericFunction, HandleError, HandleKind, HashMap, HeapFunction, HeapObject,
+    HeapReference, InterruptState, IteratorIntrinsics, JsNumber, JsString, LocaleStringMethod,
+    MapIntrinsics, MapMethod, MathMethod, NativeFunction, NativeFunctionKind, NumberFormat,
+    NumberIntrinsics, NumberPredicate, ObjectId, ObjectRecord, PredefinedAtom, PromiseIntrinsics,
     PromiseRejectionState, PromiseStatic, PropertyKey, PropertyLayout, Rc, Realm, RealmHandle,
     RealmId, RealmIntrinsics, RealmState, RefCell, ReflectMethod, RegExpIntrinsics, ReleaseMailbox,
     Runtime, RuntimeError, RuntimeIdentity, RuntimeLimits, RuntimeResource, SetIntrinsics,
@@ -711,6 +711,10 @@ impl RealmBuildTransaction<'_> {
                 prototype: object(IntrinsicObjectId::ArrayPrototype),
                 constructor: function(NativeFunctionKind::ArrayConstructor),
             },
+            date: DateIntrinsics {
+                prototype: object(IntrinsicObjectId::DatePrototype),
+                constructor: function(NativeFunctionKind::DateConstructor),
+            },
             map: MapIntrinsics {
                 prototype: object(IntrinsicObjectId::MapPrototype),
                 constructor: function(NativeFunctionKind::MapConstructor),
@@ -851,6 +855,11 @@ impl RealmBuildTransaction<'_> {
         self.publish_intrinsic_schema_batch(
             intrinsic_schema,
             &graph.dynamic_atoms,
+            DeclarativeBatch::Dates,
+        )?;
+        self.publish_intrinsic_schema_batch(
+            intrinsic_schema,
+            &graph.dynamic_atoms,
             DeclarativeBatch::Iterators,
         )?;
         self.publish_intrinsic_schema_batch(
@@ -898,6 +907,11 @@ impl RealmBuildTransaction<'_> {
             intrinsic_schema,
             &graph.dynamic_atoms,
             DeclarativeBatch::ArrayGlobals,
+        )?;
+        self.publish_intrinsic_schema_batch(
+            intrinsic_schema,
+            &graph.dynamic_atoms,
+            DeclarativeBatch::DateGlobals,
         )?;
         self.publish_intrinsic_schema_batch(
             intrinsic_schema,

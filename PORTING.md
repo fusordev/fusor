@@ -35,7 +35,7 @@ Production crates remain independently reusable:
 | `quickjs-bytecode` | Instructions, codec, verifier, disassembly, constants, atoms, and debug data |
 | `quickjs-compiler` | Iterative Oxc lowering to verified bytecode |
 | `quickjs-regexp` | Safe, bounded ES RegExp grammar lowering and UTF-16 execution |
-| `quickjs-runtime` | Values, heap, realms, VM, built-ins, limits, interrupts, and embedding primitives |
+| `quickjs-runtime` | Values, heap, realms, VM, built-ins, Temporal-backed time, limits, interrupts, and embedding primitives |
 | `quickjs` | Ergonomic facade used by thin command-line tools |
 
 `xtask`, fuzzers, benchmarks, and pinned oracles are repository tooling, never
@@ -88,7 +88,7 @@ does not imply complete ECMAScript or QuickJS compatibility.
 - [x] Typed same-site iterator state covers Array/String iteration, spread,
   destructuring, `for-of`, `IteratorClose`, and original-abrupt precedence.
 - [x] Validated schemas derive Realm allocation and rollback. The normalized
-  snapshot pins 387 Realm-local identities and 1,180 ordered properties.
+  snapshot pins 405 Realm-local identities and 1,233 ordered properties.
 - [x] Proxy and exotic-object integration covers all 11 internal methods,
   revocation/invariants, reflection, descriptors/integrity, constructors,
   iterators, Arrays, strings, RegExp, Promise, and JSON. Audited built-in
@@ -153,7 +153,13 @@ does not imply complete ECMAScript or QuickJS compatibility.
 - [x] Iterative `%JSON%` plus `rawJSON`; complete pinned `%Math%`, including
   exact `sumPrecise`; and intrinsic Promise core/combinators with bounded FIFO
   jobs and typed close/order continuations (29/29, 46/46 feature tags).
-- [ ] Implement Date, Temporal, binary data/typed arrays, and Atomics.
+- [x] Date has Realm-owned branded `[[DateValue]]` objects, TimeClip, exact UTC
+  construction/parsing/getters, `setTime`, ISO/UTC rendering, observable
+  coercion order, and full clipped-year coverage through pinned
+  `temporal_rs = 0.2.5` (6/6 focused cases). Local-time construction/rendering
+  and the remaining legacy prototype methods stay fail closed.
+- [ ] Complete Date local-time/prototype semantics and Temporal on the shared
+  `temporal_rs` kernel; then implement binary data/typed arrays and Atomics.
 
 ### Jobs, asynchronous semantics, and modules
 
@@ -173,13 +179,17 @@ does not imply complete ECMAScript or QuickJS compatibility.
 ### Conformance, performance, and optional layers
 
 - [ ] Maintain pinned Test262 `5c8206929d81b2d3d727ca6aac56c18358c8d790`
-  with its patch/configuration/expected errors; expand differential and fuzzing.
+  with its patch/configuration/expected errors; close every in-profile failure
+  and expand differential and fuzzing until the engine passes the admitted
+  suite.
 - [ ] Establish startup, memory, interpreter, and compile benchmarks; require no
   unexplained supported-platform crashes or undefined behavior.
 - [ ] Complete API, source-map, platform/resource, cancellation, dependency, and
   reproducible-release audits.
 - [ ] Optional: Wasmtime WebAssembly, an audited safe N-API boundary, erasable
   TypeScript with source maps, and a bounded policy-driven Serde bridge.
+- [ ] Low priority: implement ECMA-402 as a separate `quickjs-intl` layer over
+  direct ICU4X; keep observable JavaScript algorithms in `quickjs-runtime`.
 
 ## Compatibility differences
 
@@ -285,6 +295,7 @@ not full engine conformance.
    audited boundary crate.
 7. Require profiles and benchmarks for performance work and preserve observable
    behavior under differential tests; `unsafe` is never an optimization escape.
-8. Match documented upstream omissions: proper tail calls and
-   `Atomics.waitAsync` remain out of scope, while `Intl` is a separate optional
-   layer. Preserve upstream notices and keep production APIs documented.
+8. Proper tail calls and `Atomics.waitAsync` remain out of scope. ECMA-402 is a
+   low-priority `quickjs-intl` layer over direct ICU4X; keep the safe core free
+   of ICU4C and preserve observable specification order in `quickjs-runtime`.
+   Preserve upstream notices and document production APIs.

@@ -1,6 +1,9 @@
 //! Ordered Realm-local atom planning and typed bindings.
 
-use crate::Atom;
+use crate::{
+    Atom,
+    runtime::{DatePrototypeMethod, DateStaticMethod},
+};
 
 use super::{
     ARRAY_CALLBACK_METHODS, ARRAY_COPIER_METHODS, ARRAY_FLATTEN_METHODS, ARRAY_MUTATOR_METHODS,
@@ -196,6 +199,10 @@ impl Runtime {
     }
 }
 
+#[allow(
+    clippy::too_many_lines,
+    reason = "the canonical Realm atom sequence keeps all intrinsic families in one auditable order"
+)]
 fn visit_realm_name_order(
     mut visit: impl FnMut(RealmNameId) -> Result<(), RuntimeError>,
 ) -> Result<(), RuntimeError> {
@@ -230,6 +237,17 @@ fn visit_realm_name_order(
     }
     visit(RealmNameId::ArrayIsArray)?;
     visit(RealmNameId::ArrayFromAsync)?;
+    for method in DateStaticMethod::ALL {
+        visit(RealmNameId::DateStatic(method))?;
+    }
+    for method in DatePrototypeMethod::ALL {
+        if !matches!(
+            method,
+            DatePrototypeMethod::ValueOf | DatePrototypeMethod::ToIsoString
+        ) {
+            visit(RealmNameId::DatePrototype(method))?;
+        }
+    }
     visit(RealmNameId::RegExpEscape)?;
     visit(RealmNameId::RegExpCompile)?;
     visit(RealmNameId::RegExpTest)?;
@@ -431,6 +449,8 @@ fn realm_name_description(id: RealmNameId) -> &'static str {
         RealmNameId::ArraySplice => "splice",
         RealmNameId::ArrayIsArray => "isArray",
         RealmNameId::ArrayFromAsync => "fromAsync",
+        RealmNameId::DateStatic(method) => method.name(),
+        RealmNameId::DatePrototype(method) => method.name(),
         RealmNameId::RegExpEscape => "escape",
         RealmNameId::RegExpCompile => "compile",
         RealmNameId::RegExpTest => "test",
@@ -453,8 +473,8 @@ mod tests {
         let schema = RealmIntrinsicSchema::try_new().expect("Realm schema");
         let plan = RealmAtomPlan::try_new(&schema).expect("atom plan");
 
-        assert_eq!(plan.len(), 204);
-        assert_eq!(plan.description_code_units(), 1_607);
+        assert_eq!(plan.len(), 217);
+        assert_eq!(plan.description_code_units(), 1_737);
     }
 
     #[test]

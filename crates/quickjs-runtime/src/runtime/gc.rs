@@ -331,6 +331,7 @@ impl Runtime {
                 finalization_registry,
                 promise,
                 regexp,
+                date,
                 symbol,
                 iterators,
                 generators,
@@ -352,6 +353,18 @@ impl Runtime {
                 );
                 mark_heap_reference(
                     HeapReference::Function(function_constructor),
+                    &mut marked_functions,
+                    &mut marked_objects,
+                    &mut work,
+                );
+                mark_heap_reference(
+                    HeapReference::Object(date.prototype),
+                    &mut marked_functions,
+                    &mut marked_objects,
+                    &mut work,
+                );
+                mark_heap_reference(
+                    HeapReference::Function(date.constructor),
                     &mut marked_functions,
                     &mut marked_objects,
                     &mut work,

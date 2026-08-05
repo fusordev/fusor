@@ -11,7 +11,7 @@ use super::{
         IntrinsicObjectKind, PrototypeSpec,
     },
 };
-use crate::runtime::BoxedPrimitive;
+use crate::runtime::{BoxedPrimitive, DateState};
 
 /// Pre-reserved records whose capacities are derived from declarative holders.
 pub(super) struct IntrinsicRecords {
@@ -169,6 +169,9 @@ impl RealmBuildTransaction<'_> {
                         )
                         .expect("the schema-derived Array prototype record is pre-reserved");
                     HeapObject::array(record, ArrayState::new(0))
+                }
+                IntrinsicObjectKind::DatePrototype => {
+                    HeapObject::date(record, DateState::new(JsNumber::from_f64(f64::NAN)))
                 }
             };
             self.insert_reserved_object(object.id, object_value);

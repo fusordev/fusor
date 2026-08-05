@@ -519,6 +519,10 @@ pub(super) fn finish_intrinsic_get(
             new_target,
             value: number_value,
         } => finish_number_constructor_wrapper(runtime, new_target, number_value, &value),
+        IntrinsicGetContinuation::DateConstructor {
+            new_target,
+            value: date_value,
+        } => finish_date_constructor_wrapper(runtime, new_target, date_value, &value),
         IntrinsicGetContinuation::StringConstructor {
             new_target,
             value: string_value,
@@ -1731,6 +1735,33 @@ fn finish_operator_primitive_target(
                     )
                 },
             )
+        }
+        OperatorPrimitiveTarget::DateConstructor { new_target } => {
+            finish_date_constructor_primitive(
+                runtime,
+                value,
+                new_target,
+                realm,
+                return_to,
+                origin,
+                execution_budget,
+            )
+        }
+        OperatorPrimitiveTarget::DateParse => finish_date_parse(value, realm, origin),
+        OperatorPrimitiveTarget::DateUtc(state) => {
+            let number = operator_to_number(value, realm, origin)?;
+            advance_date_utc(
+                runtime,
+                *state,
+                Some(number),
+                realm,
+                return_to,
+                origin,
+                execution_budget,
+            )
+        }
+        OperatorPrimitiveTarget::DateSetTime { object } => {
+            finish_date_set_time(runtime, object, value, realm, origin)
         }
         OperatorPrimitiveTarget::NumberToString { number } => {
             let radix = operator_to_number(value, realm, origin)?;

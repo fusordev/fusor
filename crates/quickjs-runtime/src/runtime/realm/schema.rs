@@ -11,6 +11,7 @@ use super::{
     MathMethod, NativeFunctionKind, NumberFormat, NumberPredicate, PredefinedAtom, PromiseStatic,
     PropertyLayout, ReflectMethod, SetMethod, StringMethod, UriFunction,
 };
+use crate::runtime::{DatePrototypeMethod, DateStaticMethod};
 
 /// Stable identity of an object allocated by Realm bootstrap.
 ///
@@ -26,6 +27,7 @@ pub(in crate::runtime) enum IntrinsicObjectId {
     BigIntPrototype,
     StringPrototype,
     ArrayPrototype,
+    DatePrototype,
     RegExpPrototype,
     IteratorPrototype,
     AsyncIteratorPrototype,
@@ -54,7 +56,7 @@ pub(in crate::runtime) enum IntrinsicObjectId {
 }
 
 impl IntrinsicObjectId {
-    pub(in crate::runtime) const ALL: [Self; 41] = [
+    pub(in crate::runtime) const ALL: [Self; 42] = [
         Self::ObjectPrototype,
         Self::GlobalObject,
         Self::ErrorPrototype(ErrorIntrinsicKind::Error),
@@ -71,6 +73,7 @@ impl IntrinsicObjectId {
         Self::BigIntPrototype,
         Self::StringPrototype,
         Self::ArrayPrototype,
+        Self::DatePrototype,
         Self::RegExpPrototype,
         Self::IteratorPrototype,
         Self::AsyncIteratorPrototype,
@@ -142,6 +145,8 @@ pub(in crate::runtime) enum RealmNameId {
     ArraySplice,
     ArrayIsArray,
     ArrayFromAsync,
+    DateStatic(DateStaticMethod),
+    DatePrototype(DatePrototypeMethod),
     RegExpEscape,
     RegExpCompile,
     RegExpTest,
@@ -195,6 +200,7 @@ pub(in crate::runtime) enum IntrinsicObjectKind {
     NumberPrototype,
     StringPrototype,
     ArrayPrototype,
+    DatePrototype,
 }
 
 /// One object identity and its allocation-time internal slots.

@@ -261,6 +261,8 @@ pub(super) fn begin_object_prototype_to_string(
                 ObjectPrototypeTag::String
             } else if runtime.boxed_symbol(*object)?.is_some() {
                 ObjectPrototypeTag::Symbol
+            } else if runtime.date_value(*object)?.is_some() {
+                ObjectPrototypeTag::Date
             } else if runtime
                 .objects
                 .get(*object)

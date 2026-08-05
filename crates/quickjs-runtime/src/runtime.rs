@@ -46,15 +46,16 @@ use crate::{
     ids::{BindingCellId, FunctionId, InstalledCodeId, ObjectId, RealmGlobalBindingId, RealmId},
     interrupt::InterruptState,
     object::{
-        ArrayIterator, ArrayIteratorKind, ArrayState, BoxedPrimitive, ForInIterator, ForInSnapshot,
-        HeapObject, KeyPhases, ObjectRecord, OwnProperty, PromiseCapability, PromiseReaction,
-        PropertyDeletion, ProxyState, RegExpState, RegExpStringIterator, ShapeInterner,
-        StringIterator,
+        ArrayIterator, ArrayIteratorKind, ArrayState, BoxedPrimitive, DateState, ForInIterator,
+        ForInSnapshot, HeapObject, KeyPhases, ObjectRecord, OwnProperty, PromiseCapability,
+        PromiseReaction, PropertyDeletion, ProxyState, RegExpState, RegExpStringIterator,
+        ShapeInterner, StringIterator,
     },
     value::{HeapReference, PrimitiveValue, ReleaseMailbox, RootTarget, SlotValue, StoredValue},
 };
 
 mod async_functions;
+mod dates;
 mod iterators;
 mod limits;
 mod maps;
@@ -95,6 +96,7 @@ enum RealmIntrinsics {
         bigint: BigIntIntrinsics,
         string: StringIntrinsics,
         array: ArrayIntrinsics,
+        date: DateIntrinsics,
         map: MapIntrinsics,
         set: SetIntrinsics,
         weak_map: WeakMapIntrinsics,
@@ -238,6 +240,12 @@ struct StringIntrinsics {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 struct ArrayIntrinsics {
+    prototype: ObjectId,
+    constructor: FunctionId,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct DateIntrinsics {
     prototype: ObjectId,
     constructor: FunctionId,
 }
@@ -1202,6 +1210,9 @@ pub(crate) enum NativeFunctionKind {
     JsonStringify,
     /// One method on the ordinary `%Math%` object.
     Math(MathMethod),
+    DateConstructor,
+    DateStatic(DateStaticMethod),
+    DatePrototype(DatePrototypeMethod),
     FunctionPrototypeToString,
     ErrorConstructor(ErrorIntrinsicKind),
     ErrorPrototypeToString,
@@ -1326,6 +1337,106 @@ pub(crate) enum NativeFunctionKind {
     PromisePrototypeThen,
     PromisePrototypeCatch,
     PromisePrototypeFinally,
+}
+
+/// Static methods on `%Date%` in pinned `QuickJS` publication order.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum DateStaticMethod {
+    Now,
+    Parse,
+    Utc,
+}
+
+impl DateStaticMethod {
+    pub(crate) const ALL: [Self; 3] = [Self::Now, Self::Parse, Self::Utc];
+
+    pub(crate) const fn name(self) -> &'static str {
+        match self {
+            Self::Now => "now",
+            Self::Parse => "parse",
+            Self::Utc => "UTC",
+        }
+    }
+
+    pub(crate) const fn length(self) -> i32 {
+        match self {
+            Self::Now => 0,
+            Self::Parse => 1,
+            Self::Utc => 7,
+        }
+    }
+}
+
+/// UTC/time-value methods in the first `%Date.prototype%` tranche.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum DatePrototypeMethod {
+    ValueOf,
+    ToUtcString,
+    ToIsoString,
+    GetTime,
+    GetUtcFullYear,
+    GetUtcMonth,
+    GetUtcDate,
+    GetUtcHours,
+    GetUtcMinutes,
+    GetUtcSeconds,
+    GetUtcMilliseconds,
+    GetUtcDay,
+    SetTime,
+}
+
+impl DatePrototypeMethod {
+    pub(crate) const ALL: [Self; 13] = [
+        Self::ValueOf,
+        Self::ToUtcString,
+        Self::ToIsoString,
+        Self::GetTime,
+        Self::GetUtcFullYear,
+        Self::GetUtcMonth,
+        Self::GetUtcDate,
+        Self::GetUtcHours,
+        Self::GetUtcMinutes,
+        Self::GetUtcSeconds,
+        Self::GetUtcMilliseconds,
+        Self::GetUtcDay,
+        Self::SetTime,
+    ];
+
+    pub(crate) const fn name(self) -> &'static str {
+        match self {
+            Self::ValueOf => "valueOf",
+            Self::ToUtcString => "toUTCString",
+            Self::ToIsoString => "toISOString",
+            Self::GetTime => "getTime",
+            Self::GetUtcFullYear => "getUTCFullYear",
+            Self::GetUtcMonth => "getUTCMonth",
+            Self::GetUtcDate => "getUTCDate",
+            Self::GetUtcHours => "getUTCHours",
+            Self::GetUtcMinutes => "getUTCMinutes",
+            Self::GetUtcSeconds => "getUTCSeconds",
+            Self::GetUtcMilliseconds => "getUTCMilliseconds",
+            Self::GetUtcDay => "getUTCDay",
+            Self::SetTime => "setTime",
+        }
+    }
+
+    pub(crate) const fn length(self) -> i32 {
+        match self {
+            Self::SetTime => 1,
+            Self::ValueOf
+            | Self::ToUtcString
+            | Self::ToIsoString
+            | Self::GetTime
+            | Self::GetUtcFullYear
+            | Self::GetUtcMonth
+            | Self::GetUtcDate
+            | Self::GetUtcHours
+            | Self::GetUtcMinutes
+            | Self::GetUtcSeconds
+            | Self::GetUtcMilliseconds
+            | Self::GetUtcDay => 0,
+        }
+    }
 }
 
 /// Boolean accessors backed by one `RegExp` instance's `[[OriginalFlags]]`.
@@ -1777,6 +1888,7 @@ impl NativeFunctionKind {
                 | Self::NumberConstructor
                 | Self::StringConstructor
                 | Self::ArrayConstructor
+                | Self::DateConstructor
                 | Self::RegExpConstructor
                 | Self::GeneratorFunctionConstructor
                 | Self::AsyncFunctionConstructor
