@@ -108,6 +108,26 @@ impl fmt::Display for CompileError {
 
 impl std::error::Error for CompileError {}
 
+/// Applies `IsValidRegularExpressionLiteral` grammar validation without
+/// building an executable matcher.
+///
+/// This is the parser-facing boundary for `RegExp` literal early errors. Runtime
+/// construction should use [`CompiledRegExp::compile`] or
+/// [`CompiledRegExp::compile_utf16`] so executor and resource limits are also
+/// enforced.
+///
+/// # Errors
+///
+/// Returns [`CompileError::InvalidFlags`], [`CompileError::Syntax`], or a
+/// source-length [`CompileError::ResourceLimit`].
+pub fn validate_literal(
+    pattern: &str,
+    flags: &str,
+    max_pattern_bytes: usize,
+) -> Result<(), CompileError> {
+    compiler::validate_literal(pattern, flags, max_pattern_bytes)
+}
+
 /// Execution failure distinct from an ordinary non-match.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ExecError {

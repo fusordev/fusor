@@ -54,7 +54,8 @@ does not imply complete ECMAScript or QuickJS compatibility.
 
 - [x] The safe, reproducible workspace pins published Oxc `0.142.0` directly.
   Lossless Script, Module, strict/async-global, and dynamic-Function parse goals
-  produce owned span, binding, and module records; unsupported adapters reject.
+  produce owned span, binding, and module records; `quickjs-regexp` supplies
+  RegExp-literal early errors, and unsupported adapters reject.
 - [x] A closed compatibility ledger covers admitted grammar and reachable
   diagnostics. Every intentional Oxc difference has an ID and fixture.
 - [ ] Complete source-map chaining and the remaining public diagnostic/API

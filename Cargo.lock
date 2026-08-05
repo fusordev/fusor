@@ -953,6 +953,7 @@ dependencies = [
  "oxc_span",
  "oxc_syntax",
  "quickjs-diagnostics",
+ "quickjs-regexp",
 ]
 
 [[package]]

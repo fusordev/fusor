@@ -7,7 +7,10 @@ use quickjs_bytecode::{
 use quickjs_compiler::{
     CompilationContext, CompiledLeafFunction, LeafCompilationError, UnsupportedLeafFeature,
 };
-use quickjs_frontend::{CompilationGoal, FrontendOptions, GlobalScriptGoal, with_parsed_program};
+use quickjs_frontend::{
+    CompilationGoal, DiagnosticStage, FrontendDiagnosticCode, FrontendOptions, GlobalScriptGoal,
+    with_parsed_program,
+};
 
 fn compile(source: &str, name: &str) -> CompiledLeafFunction {
     with_parsed_program(
@@ -428,16 +431,20 @@ fn regexp_literals_validate_and_lower_to_the_quickjs_two_input_opcode() {
 }
 
 #[test]
-fn regexp_literal_pattern_errors_are_reported_at_the_literal_span() {
+fn regexp_literal_pattern_errors_are_rejected_before_lowering() {
     let source = "function f(){ return /[z-a]/u; }";
-    let error = compile_error(source, "f");
-    let LeafCompilationError::RegExp {
-        span,
-        source: quickjs_regexp::CompileError::Syntax(_),
-    } = error
-    else {
-        panic!("expected a RegExp syntax error, got {error:?}");
-    };
+    let error = with_parsed_program(
+        source,
+        FrontendOptions::for_goal(CompilationGoal::GlobalScript(GlobalScriptGoal::new())),
+        |_| (),
+    )
+    .expect_err("invalid RegExp literals are early errors");
+    assert_eq!(error.stage(), DiagnosticStage::Semantic);
+    assert_eq!(
+        error.diagnostics()[0].code,
+        FrontendDiagnosticCode::InvalidRegExpLiteral
+    );
+    let span = error.diagnostics()[0].labels[0].span;
     assert_eq!(&source[span.start as usize..span.end as usize], "/[z-a]/u");
 }
 

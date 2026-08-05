@@ -16,6 +16,7 @@ oxc_semantic.workspace = true
 oxc_span.workspace = true
 oxc_syntax.workspace = true
 quickjs-diagnostics = { path = "../quickjs-diagnostics" }
+quickjs-regexp = { path = "../quickjs-regexp" }
 
 [lints]
 workspace = true

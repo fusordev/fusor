@@ -1,4 +1,6 @@
-use quickjs_regexp::{CompileError, CompileLimits, CompiledRegExp, ExecError, ExecLimits};
+use quickjs_regexp::{
+    CompileError, CompileLimits, CompiledRegExp, ExecError, ExecLimits, validate_literal,
+};
 
 fn compile(pattern: &str, flags: &str) -> CompiledRegExp {
     CompiledRegExp::compile(pattern, flags, CompileLimits::default())
@@ -49,6 +51,17 @@ fn validates_and_canonicalizes_es2025_flags() {
     assert!(matches!(
         CompiledRegExp::compile("a", "z", CompileLimits::default()),
         Err(CompileError::InvalidFlags)
+    ));
+}
+
+#[test]
+fn literal_validation_is_syntax_only_and_does_not_require_executor_support() {
+    assert!(validate_literal("[z-a]", "u", usize::MAX).is_err());
+    assert!(validate_literal("a", "gg", usize::MAX).is_err());
+    assert!(validate_literal(r"\p{RGI_Emoji_ZWJ_Sequence}", "v", usize::MAX).is_ok());
+    assert!(matches!(
+        CompiledRegExp::compile(r"\p{RGI_Emoji_ZWJ_Sequence}", "v", CompileLimits::default()),
+        Err(CompileError::Unsupported(_))
     ));
 }
 

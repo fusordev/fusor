@@ -45,6 +45,28 @@ pub(crate) fn compile(
     Ok((program, canonical_flags))
 }
 
+pub(crate) fn validate_literal(
+    pattern_source: &str,
+    flag_source: &str,
+    max_pattern_bytes: usize,
+) -> Result<(), CompileError> {
+    if pattern_source.len() > max_pattern_bytes {
+        return Err(CompileError::ResourceLimit("source length"));
+    }
+    let flags = RegExpFlags::parse(flag_source)?;
+    let canonical_flags = flags.canonical_source();
+    let allocator = Allocator::default();
+    LiteralParser::new(
+        &allocator,
+        pattern_source,
+        Some(&canonical_flags),
+        Options::default(),
+    )
+    .parse()
+    .map_err(|error| CompileError::Syntax(error.to_string()))?;
+    Ok(())
+}
+
 #[derive(Clone, Debug)]
 struct CaptureMetadata {
     by_start: HashMap<u32, usize>,

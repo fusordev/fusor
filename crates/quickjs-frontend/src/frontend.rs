@@ -2,9 +2,10 @@
 //!
 //! This module is the reusable source boundary for the compiler crate.
 //!
-//! Regular-expression pattern parsing is deliberately disabled. Oxc identifies
-//! literal boundaries and flags, while the QuickJS-compatible `RegExp` layer owns
-//! pattern semantics.
+//! Oxc identifies regular-expression literal boundaries and flags. The
+//! project-owned `quickjs-regexp` layer then applies the specification's
+//! `IsValidRegularExpressionLiteral` early error and owns executable pattern
+//! semantics.
 
 use std::{collections::HashMap, error::Error, fmt};
 
@@ -1748,6 +1749,8 @@ pub enum FrontendDiagnosticCode {
     OxcParser,
     /// An Oxc semantic/early-error diagnostic.
     OxcSemantic,
+    /// The project-owned `RegExp` grammar rejected a literal as an early error.
+    InvalidRegExpLiteral,
     /// A labeled `continue` chain does not terminate in an iteration statement.
     InvalidChainedContinueTarget,
     /// Oxc's AST and module record were inconsistent during owned lowering.
@@ -1802,6 +1805,7 @@ impl FrontendDiagnosticCode {
             }
             Self::OxcParser => "quickjs::frontend::oxc::parser",
             Self::OxcSemantic => "quickjs::frontend::oxc::semantic",
+            Self::InvalidRegExpLiteral => "quickjs::frontend::regexp::invalid_literal",
             Self::InvalidChainedContinueTarget => {
                 "quickjs::frontend::semantic::invalid_chained_continue_target"
             }
@@ -1841,6 +1845,7 @@ impl FrontendDiagnosticCode {
             | Self::AsyncScriptPreparationFailed
             | Self::OxcParser
             | Self::OxcSemantic
+            | Self::InvalidRegExpLiteral
             | Self::InvalidChainedContinueTarget
             | Self::ModuleSyntaxLowering => None,
             Self::TooManyCallArguments => Some(
@@ -2164,6 +2169,23 @@ impl FrontendError {
                     message: Some(
                         "this label chain does not terminate in an iteration statement".to_owned(),
                     ),
+                }],
+            }],
+            parser_panicked: false,
+            unsupported_goal: None,
+            limit_error: None,
+        }
+    }
+
+    fn invalid_regexp_literal(span: Span, source: &quickjs_regexp::CompileError) -> Self {
+        Self {
+            stage: DiagnosticStage::Semantic,
+            diagnostics: vec![FrontendDiagnostic {
+                code: FrontendDiagnosticCode::InvalidRegExpLiteral,
+                message: source.to_string(),
+                labels: vec![DiagnosticLabel {
+                    span,
+                    message: Some("this RegExp literal is not syntactically valid".to_owned()),
                 }],
             }],
             parser_panicked: false,
@@ -2953,6 +2975,12 @@ fn parse_in_mode<'arena, 'scope>(
     if allow_top_level_await && let Some(span) = async_script_import_meta_span(&semantic.semantic) {
         return Err(FrontendError::async_script_import_meta(span));
     }
+    if let Some((span, error)) = invalid_regexp_literal(
+        semantic.semantic.nodes(),
+        limits.max_source_bytes().min(MAX_OXC_SOURCE_BYTES),
+    ) {
+        return Err(FrontendError::invalid_regexp_literal(span, &error));
+    }
     let profile_diagnostics = quickjs_profile_diagnostics(semantic.semantic.nodes());
     if !profile_diagnostics.is_empty() {
         return Err(FrontendError::from_profile(profile_diagnostics));
@@ -2979,6 +3007,25 @@ fn parse_in_mode<'arena, 'scope>(
         semantic,
         module_syntax,
         synthetic_strict_directive,
+    })
+}
+
+fn invalid_regexp_literal(
+    nodes: &AstNodes<'_>,
+    max_pattern_bytes: usize,
+) -> Option<(Span, quickjs_regexp::CompileError)> {
+    nodes.iter().find_map(|node| {
+        let AstKind::RegExpLiteral(literal) = node.kind() else {
+            return None;
+        };
+        let flags = literal.regex.flags.to_string();
+        quickjs_regexp::validate_literal(
+            literal.regex.pattern.text.as_str(),
+            &flags,
+            max_pattern_bytes,
+        )
+        .err()
+        .map(|error| (literal.span, error))
     })
 }
 
