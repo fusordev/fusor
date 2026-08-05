@@ -4,6 +4,7 @@ use crate::flags::{MatchMode, RegExpFlags};
 pub(crate) struct Program {
     pub instructions: Vec<Instruction>,
     pub capture_count: usize,
+    pub capture_names: Vec<Option<String>>,
     pub repeat_count: usize,
     pub flags: RegExpFlags,
 }

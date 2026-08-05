@@ -1659,7 +1659,6 @@ pub(crate) struct RegExpState {
     source: JsString,
     flags: JsString,
     matcher: quickjs_regexp::CompiledRegExp,
-    last_index: u64,
 }
 
 impl RegExpState {
@@ -1672,7 +1671,6 @@ impl RegExpState {
             source,
             flags,
             matcher,
-            last_index: 0,
         }
     }
 
@@ -1688,8 +1686,15 @@ impl RegExpState {
         &self.matcher
     }
 
-    pub(crate) const fn last_index(&self) -> u64 {
-        self.last_index
+    pub(crate) fn reinitialize(
+        &mut self,
+        source: JsString,
+        flags: JsString,
+        matcher: quickjs_regexp::CompiledRegExp,
+    ) {
+        self.source = source;
+        self.flags = flags;
+        self.matcher = matcher;
     }
 }
 
@@ -2020,6 +2025,13 @@ impl HeapObjectKind {
     }
 
     pub(crate) const fn regexp(&self) -> Option<&RegExpState> {
+        match self {
+            Self::RegExp(state) => Some(state),
+            _ => None,
+        }
+    }
+
+    pub(crate) const fn regexp_mut(&mut self) -> Option<&mut RegExpState> {
         match self {
             Self::RegExp(state) => Some(state),
             _ => None,
@@ -2362,6 +2374,10 @@ impl HeapObject {
 
     pub(crate) const fn regexp_state(&self) -> Option<&RegExpState> {
         self.kind.regexp()
+    }
+
+    pub(crate) const fn regexp_state_mut(&mut self) -> Option<&mut RegExpState> {
+        self.kind.regexp_mut()
     }
 
     #[must_use]

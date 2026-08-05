@@ -1820,6 +1820,9 @@ fn finish_operator_primitive_target(
         OperatorPrimitiveTarget::StringSplitValue(state) => {
             advance_string_split(runtime, *state, value, return_to, execution_budget)
         }
+        OperatorPrimitiveTarget::RegExpValue(state) => {
+            advance_regexp_continuation(runtime, *state, value, return_to, execution_budget)
+        }
         OperatorPrimitiveTarget::LocaleStringValue(state) => {
             advance_locale_string(runtime, *state, Some(value), return_to, execution_budget)
         }

@@ -12,12 +12,12 @@ use quickjs_runtime::{
     ValueKind,
 };
 
-const REALM_ERROR_GRAPH_OBJECTS: u64 = 39;
-const REALM_ERROR_GRAPH_FUNCTIONS: u64 = 318;
-const REALM_ERROR_GRAPH_PROPERTIES: u64 = 1_093;
-const REALM_DYNAMIC_ATOMS: u32 = 198;
-const REALM_DYNAMIC_ATOM_CODE_UNITS: u64 = 1_573;
-const REALM_DYNAMIC_INTERNER_SLOTS: u32 = 198;
+const REALM_ERROR_GRAPH_OBJECTS: u64 = 40;
+const REALM_ERROR_GRAPH_FUNCTIONS: u64 = 340;
+const REALM_ERROR_GRAPH_PROPERTIES: u64 = 1_161;
+const REALM_DYNAMIC_ATOMS: u32 = 201;
+const REALM_DYNAMIC_ATOM_CODE_UNITS: u64 = 1_590;
+const REALM_DYNAMIC_INTERNER_SLOTS: u32 = 201;
 
 fn compile_dynamic(body: &str) -> Arc<VerifiedBytecode> {
     let parameters = [];

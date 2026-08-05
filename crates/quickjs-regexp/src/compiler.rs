@@ -50,6 +50,7 @@ struct CaptureMetadata {
     by_start: HashMap<u32, usize>,
     spans: Vec<(u32, u32, usize)>,
     by_name: HashMap<String, Vec<usize>>,
+    names: Vec<Option<String>>,
 }
 
 impl CaptureMetadata {
@@ -58,6 +59,7 @@ impl CaptureMetadata {
             by_start: HashMap::new(),
             spans: Vec::new(),
             by_name: HashMap::new(),
+            names: Vec::new(),
         }
     }
 
@@ -125,13 +127,15 @@ impl Compiler {
                         self.captures
                             .spans
                             .push((group.span.start, group.span.end, index));
-                        if let Some(name) = &group.name {
+                        let name = group.name.as_ref().map(ToString::to_string);
+                        if let Some(name) = &name {
                             self.captures
                                 .by_name
-                                .entry(name.to_string())
+                                .entry(name.clone())
                                 .or_default()
                                 .push(index);
                         }
+                        self.captures.names.push(name);
                         stack.push(Visit::Disjunction(&group.body, depth + 1));
                     }
                     Term::IgnoreGroup(group) => {
@@ -186,11 +190,14 @@ impl Compiler {
         }
         let flags = self.flags;
         let capture_count = self.captures.spans.len() + 1;
+        let mut capture_names = std::mem::take(&mut self.captures.names);
+        capture_names.insert(0, None);
         let repeat_count = self.repeat_count;
         let instructions = self.resolve()?;
         Ok(Program {
             instructions,
             capture_count,
+            capture_names,
             repeat_count,
             flags,
         })

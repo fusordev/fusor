@@ -660,6 +660,13 @@ pub(super) fn resume_native_continuations(
                 return_to,
                 execution_budget,
             )?,
+            NativeContinuation::RegExp(state) => advance_regexp_continuation(
+                runtime,
+                *state,
+                value.duplicate(),
+                return_to,
+                execution_budget,
+            )?,
             NativeContinuation::LocaleString(state) => advance_locale_string(
                 runtime,
                 *state,
@@ -2561,6 +2568,7 @@ pub(super) fn dispatch_native_call_with_frames(
         | NativeFunctionKind::PromiseSpeciesGetter
         | NativeFunctionKind::MapSpeciesGetter
         | NativeFunctionKind::SetSpeciesGetter
+        | NativeFunctionKind::RegExpSpeciesGetter
         | NativeFunctionKind::IteratorPrototypeIterator
         | NativeFunctionKind::AsyncIteratorPrototypeAsyncIterator => {
             Ok(NativeDispatch::Immediate(inputs.receiver))
@@ -2925,6 +2933,84 @@ pub(super) fn dispatch_native_call_with_frames(
         NativeFunctionKind::PromisePrototypeFinally => {
             begin_promise_finally(runtime, native, inputs, return_to, origin, execution_budget)
         }
+        NativeFunctionKind::RegExpConstructor => begin_regexp_constructor(
+            runtime,
+            function,
+            native.realm,
+            inputs,
+            return_to,
+            origin.unwrap_or_else(native_function_host_origin),
+            execution_budget,
+        ),
+        NativeFunctionKind::RegExpEscape => begin_regexp_escape(
+            runtime,
+            native.realm,
+            inputs.arguments.take_first_or_undefined(),
+            return_to,
+            origin.unwrap_or_else(native_function_host_origin),
+            execution_budget,
+        ),
+        NativeFunctionKind::RegExpPrototypeFlags => begin_regexp_flags(
+            runtime,
+            native.realm,
+            inputs.receiver,
+            return_to,
+            origin.unwrap_or_else(native_function_host_origin),
+            execution_budget,
+        ),
+        NativeFunctionKind::RegExpPrototypeSource => regexp_source_getter(
+            runtime,
+            native.realm,
+            &inputs.receiver,
+            origin.unwrap_or_else(native_function_host_origin),
+        ),
+        NativeFunctionKind::RegExpPrototypeFlag(flag) => regexp_flag_getter(
+            runtime,
+            native.realm,
+            &inputs.receiver,
+            flag,
+            origin.unwrap_or_else(native_function_host_origin),
+        ),
+        NativeFunctionKind::RegExpPrototypeExec => begin_regexp_exec(
+            runtime,
+            native.realm,
+            &inputs.receiver,
+            inputs.arguments.take_first_or_undefined(),
+            return_to,
+            origin.unwrap_or_else(native_function_host_origin),
+            execution_budget,
+        ),
+        NativeFunctionKind::RegExpPrototypeTest => begin_regexp_test(
+            runtime,
+            native.realm,
+            inputs.receiver,
+            inputs.arguments.take_first_or_undefined(),
+            return_to,
+            origin.unwrap_or_else(native_function_host_origin),
+            execution_budget,
+        ),
+        NativeFunctionKind::RegExpPrototypeToString => begin_regexp_to_string(
+            runtime,
+            native.realm,
+            inputs.receiver,
+            return_to,
+            origin.unwrap_or_else(native_function_host_origin),
+            execution_budget,
+        ),
+        NativeFunctionKind::RegExpPrototypeCompile => begin_regexp_compile(
+            runtime,
+            native.realm,
+            &inputs.receiver,
+            inputs.arguments,
+            return_to,
+            origin.unwrap_or_else(native_function_host_origin),
+            execution_budget,
+        ),
+        NativeFunctionKind::RegExpPrototypeSymbol(_) => regexp_type_error(
+            native.realm,
+            origin.unwrap_or_else(native_function_host_origin),
+            "RegExp protocol is not implemented",
+        ),
     }
 }
 

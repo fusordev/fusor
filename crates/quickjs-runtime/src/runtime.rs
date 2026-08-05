@@ -100,6 +100,7 @@ enum RealmIntrinsics {
         weak_ref: WeakRefIntrinsics,
         finalization_registry: FinalizationRegistryIntrinsics,
         promise: PromiseIntrinsics,
+        regexp: RegExpIntrinsics,
         symbol: SymbolIntrinsics,
         iterators: IteratorIntrinsics,
         generators: GeneratorIntrinsics,
@@ -279,6 +280,12 @@ struct FinalizationRegistryIntrinsics {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 struct PromiseIntrinsics {
+    prototype: ObjectId,
+    constructor: FunctionId,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct RegExpIntrinsics {
     prototype: ObjectId,
     constructor: FunctionId,
 }
@@ -1227,6 +1234,17 @@ pub(crate) enum NativeFunctionKind {
     ArrayConstructor,
     /// The `%Array%[Symbol.species]` getter.
     ArraySpeciesGetter,
+    RegExpConstructor,
+    RegExpEscape,
+    RegExpSpeciesGetter,
+    RegExpPrototypeFlags,
+    RegExpPrototypeSource,
+    RegExpPrototypeFlag(RegExpFlag),
+    RegExpPrototypeExec,
+    RegExpPrototypeCompile,
+    RegExpPrototypeTest,
+    RegExpPrototypeToString,
+    RegExpPrototypeSymbol(RegExpSymbolMethod),
     SymbolConstructor,
     SymbolPrototypeToString,
     SymbolPrototypeValueOf,
@@ -1286,6 +1304,105 @@ pub(crate) enum NativeFunctionKind {
     PromisePrototypeThen,
     PromisePrototypeCatch,
     PromisePrototypeFinally,
+}
+
+/// Boolean accessors backed by one `RegExp` instance's `[[OriginalFlags]]`.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum RegExpFlag {
+    Global,
+    IgnoreCase,
+    Multiline,
+    DotAll,
+    Unicode,
+    UnicodeSets,
+    Sticky,
+    HasIndices,
+}
+
+impl RegExpFlag {
+    pub(crate) const ALL: [Self; 8] = [
+        Self::Global,
+        Self::IgnoreCase,
+        Self::Multiline,
+        Self::DotAll,
+        Self::Unicode,
+        Self::UnicodeSets,
+        Self::Sticky,
+        Self::HasIndices,
+    ];
+
+    pub(crate) fn code_unit(self) -> u16 {
+        match self {
+            Self::Global => u16::from(b'g'),
+            Self::IgnoreCase => u16::from(b'i'),
+            Self::Multiline => u16::from(b'm'),
+            Self::DotAll => u16::from(b's'),
+            Self::Unicode => u16::from(b'u'),
+            Self::UnicodeSets => u16::from(b'v'),
+            Self::Sticky => u16::from(b'y'),
+            Self::HasIndices => u16::from(b'd'),
+        }
+    }
+
+    pub(crate) const fn atom(self) -> PredefinedAtom {
+        match self {
+            Self::Global => PredefinedAtom::Global,
+            Self::IgnoreCase => PredefinedAtom::IgnoreCase,
+            Self::Multiline => PredefinedAtom::Multiline,
+            Self::DotAll => PredefinedAtom::DotAll,
+            Self::Unicode => PredefinedAtom::Unicode,
+            Self::UnicodeSets => PredefinedAtom::UnicodeSets,
+            Self::Sticky => PredefinedAtom::Sticky,
+            Self::HasIndices => PredefinedAtom::HasIndices,
+        }
+    }
+}
+
+/// Well-known-symbol methods on `%RegExp.prototype%`.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum RegExpSymbolMethod {
+    Replace,
+    Match,
+    MatchAll,
+    Search,
+    Split,
+}
+
+impl RegExpSymbolMethod {
+    pub(crate) const ALL: [Self; 5] = [
+        Self::Replace,
+        Self::Match,
+        Self::MatchAll,
+        Self::Search,
+        Self::Split,
+    ];
+
+    pub(crate) const fn atom(self) -> PredefinedAtom {
+        match self {
+            Self::Replace => PredefinedAtom::SymbolReplace,
+            Self::Match => PredefinedAtom::SymbolMatch,
+            Self::MatchAll => PredefinedAtom::SymbolMatchAll,
+            Self::Search => PredefinedAtom::SymbolSearch,
+            Self::Split => PredefinedAtom::SymbolSplit,
+        }
+    }
+
+    pub(crate) const fn name(self) -> &'static str {
+        match self {
+            Self::Replace => "[Symbol.replace]",
+            Self::Match => "[Symbol.match]",
+            Self::MatchAll => "[Symbol.matchAll]",
+            Self::Search => "[Symbol.search]",
+            Self::Split => "[Symbol.split]",
+        }
+    }
+
+    pub(crate) const fn length(self) -> i32 {
+        match self {
+            Self::Replace | Self::Split => 2,
+            Self::Match | Self::MatchAll | Self::Search => 1,
+        }
+    }
 }
 
 /// Methods installed on `%Map.prototype%` in pinned `QuickJS` property order.
@@ -1638,6 +1755,7 @@ impl NativeFunctionKind {
                 | Self::NumberConstructor
                 | Self::StringConstructor
                 | Self::ArrayConstructor
+                | Self::RegExpConstructor
                 | Self::GeneratorFunctionConstructor
                 | Self::AsyncFunctionConstructor
                 | Self::AsyncGeneratorFunctionConstructor

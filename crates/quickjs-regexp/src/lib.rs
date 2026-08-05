@@ -180,6 +180,16 @@ impl CompiledRegExp {
         &self.flags
     }
 
+    /// Returns capture names indexed like [`Match::captures`].
+    ///
+    /// Capture zero and unnamed groups contain `None`. Duplicate names are
+    /// retained at every corresponding capture index so callers can implement
+    /// the specification's alternative-dependent named-groups result.
+    #[must_use]
+    pub fn capture_names(&self) -> &[Option<String>] {
+        &self.program.capture_names
+    }
+
     /// Executes against exact UTF-16 code units from `start_index`.
     ///
     /// # Errors
@@ -192,7 +202,23 @@ impl CompiledRegExp {
         start_index: usize,
         limits: ExecLimits,
     ) -> Result<Option<Match>, ExecError> {
-        executor::execute(&self.program, input, start_index, limits)
+        self.execute_counted(input, start_index, limits).0
+    }
+
+    /// Executes while reporting the exact number of matcher transitions.
+    ///
+    /// The counter is returned for successful matches, ordinary non-matches,
+    /// and deterministic execution-limit failures so an embedding can debit
+    /// the matcher from the same fuel authority as its JavaScript VM.
+    pub fn execute_counted(
+        &self,
+        input: &[u16],
+        start_index: usize,
+        limits: ExecLimits,
+    ) -> (Result<Option<Match>, ExecError>, u64) {
+        let mut steps = 0;
+        let result = executor::execute(&self.program, input, start_index, limits, &mut steps);
+        (result, steps)
     }
 }
 

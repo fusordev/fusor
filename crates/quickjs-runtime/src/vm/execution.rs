@@ -710,23 +710,33 @@ pub(super) fn execute_one(
             };
             let realm = code(runtime, frame.code)?.realm;
             let origin = instruction_location(runtime, frame, source_pc)?;
-            if char::decode_utf16(pattern.code_units()).any(|character| character.is_err())
-                || char::decode_utf16(flags.code_units()).any(|character| character.is_err())
-            {
-                return Ok(Step::Abrupt(PendingException {
-                    realm,
-                    payload: PendingExceptionPayload::EngineError {
-                        kind: ExceptionKind::SyntaxError,
-                        message: JsString::from_utf8("invalid regular expression source")?,
-                    },
-                    origin,
-                }));
-            }
-            let pattern_text = pattern.to_utf8_lossy()?;
-            let flags_text = flags.to_utf8_lossy()?;
-            let matcher = match quickjs_regexp::CompiledRegExp::compile(
-                &pattern_text,
-                &flags_text,
+            let pattern_len =
+                usize::try_from(pattern.len()).map_err(|_| EngineFault::RuntimeInvariant {
+                    message: "RegExp literal pattern length exceeded usize",
+                })?;
+            let flags_len =
+                usize::try_from(flags.len()).map_err(|_| EngineFault::RuntimeInvariant {
+                    message: "RegExp literal flags length exceeded usize",
+                })?;
+            let mut pattern_units = Vec::new();
+            pattern_units.try_reserve_exact(pattern_len).map_err(|_| {
+                ExecutionError::AllocationFailed {
+                    resource: RuntimeResource::FrameValues,
+                    additional: pattern_len,
+                }
+            })?;
+            pattern_units.extend(pattern.code_units());
+            let mut flags_units = Vec::new();
+            flags_units.try_reserve_exact(flags_len).map_err(|_| {
+                ExecutionError::AllocationFailed {
+                    resource: RuntimeResource::FrameValues,
+                    additional: flags_len,
+                }
+            })?;
+            flags_units.extend(flags.code_units());
+            let matcher = match quickjs_regexp::CompiledRegExp::compile_utf16(
+                &pattern_units,
+                &flags_units,
                 quickjs_regexp::CompileLimits::default(),
             ) {
                 Ok(matcher) => matcher,
@@ -741,7 +751,7 @@ pub(super) fn execute_one(
                     }));
                 }
             };
-            let prototype = runtime.realm_object_prototype(realm)?;
+            let prototype = runtime.realm_regexp_prototype(realm)?;
             let object = runtime.allocate_regexp_object(
                 HeapReference::Object(prototype),
                 pattern,

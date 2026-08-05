@@ -88,7 +88,7 @@ does not imply complete ECMAScript or QuickJS compatibility.
 - [x] Typed same-site iterator state covers Array/String iteration, spread,
   destructuring, `for-of`, `IteratorClose`, and original-abrupt precedence.
 - [x] Validated schemas derive Realm allocation and rollback. The normalized
-  snapshot pins 357 Realm-local identities and 1,093 ordered properties.
+  snapshot pins 380 Realm-local identities and 1,161 ordered properties.
 - [ ] Add Proxy and remaining exotics, shape/transition interning, dense indexed
   storage, and complete reflection/diagnostics.
 
@@ -105,9 +105,12 @@ does not imply complete ECMAScript or QuickJS compatibility.
   covers lookaround/backreferences/Unicode sets and most properties of strings,
   losslessly compiles constructor UTF-16 sources (including legacy surrogate
   element semantics), and validates/executes literals through verified
-  bytecode. Shared core corpus: 63/63 QuickJS and Node cases.
-  Constructor/prototype protocols remain open; RGI ZWJ string properties
-  currently reject explicitly.
+  bytecode. The Realm installs the constructor, accessors, `escape`, `compile`,
+  `exec`, `test`, and `toString`; execution shares VM fuel, bounds backtracking,
+  updates `lastIndex`, and materializes captures, named groups, and `d` indices.
+  Shared core corpus: 63/63 QuickJS and Node cases. Symbol
+  match/search/replace/split protocols and RGI ZWJ string properties still fail
+  closed.
 - [x] Full admitted `Array`, including generic array-like behavior and
   spec-ordered, resource-traced `fromAsync` iterator/array-like suspension.
 - [x] `Map`: ordered SameValueZero storage, `AddEntriesFromIterable` close
@@ -133,8 +136,9 @@ does not imply complete ECMAScript or QuickJS compatibility.
 - [x] Iterative `%JSON%` plus `rawJSON`; complete pinned `%Math%`, including
   exact `sumPrecise`; and intrinsic Promise core/combinators with bounded FIFO
   jobs and typed close/order continuations (29/29, 46/46 feature tags).
-- [ ] Complete `String.prototype.match`, `matchAll`, and `search`; implement
-  RegExp, Date, Temporal, Proxy, binary data/typed arrays, and Atomics.
+- [ ] Complete RegExp symbol protocols and `String.prototype.match`,
+  `matchAll`, and `search`; implement Date, Temporal, Proxy, binary data/typed
+  arrays, and Atomics.
 
 ### Jobs, asynchronous semantics, and modules
 
@@ -195,6 +199,9 @@ does not imply complete ECMAScript or QuickJS compatibility.
 - `QJS-REGEXP-001`: pinned QuickJS rejects a Unicode-set string disjunction in
   lookbehind. ECMA-262's backwards matcher and Node accept it; this port follows
   the specification.
+- `QJS-REGEXP-002`: pinned QuickJS hex-escapes non-ASCII characters such as
+  `é` in `RegExp.escape`. ECMA-262 and Node leave non-whitespace Unicode scalar
+  values unchanged; this port follows the specification.
 
 ## Completion gates
 

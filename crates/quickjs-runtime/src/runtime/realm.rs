@@ -45,11 +45,11 @@ use super::{
     MathMethod, NativeFunction, NativeFunctionKind, NumberFormat, NumberIntrinsics,
     NumberPredicate, ObjectId, ObjectRecord, PredefinedAtom, PromiseIntrinsics,
     PromiseRejectionState, PromiseStatic, PropertyKey, PropertyLayout, Realm, RealmHandle, RealmId,
-    RealmIntrinsics, RealmState, ReflectMethod, ReleaseMailbox, Runtime, RuntimeError,
-    RuntimeIdentity, RuntimeLimits, RuntimeResource, SetIntrinsics, SetMethod, StoredValue,
-    StringHtmlMethod, StringIntrinsics, StringMethod, SymbolIntrinsics, UriFunction, VecDeque,
-    WeakMapIntrinsics, WeakRefIntrinsics, WeakSetIntrinsics, check_limit, predefined_string,
-    usize_to_u64,
+    RealmIntrinsics, RealmState, ReflectMethod, RegExpIntrinsics, ReleaseMailbox, Runtime,
+    RuntimeError, RuntimeIdentity, RuntimeLimits, RuntimeResource, SetIntrinsics, SetMethod,
+    StoredValue, StringHtmlMethod, StringIntrinsics, StringMethod, SymbolIntrinsics, UriFunction,
+    VecDeque, WeakMapIntrinsics, WeakRefIntrinsics, WeakSetIntrinsics, check_limit,
+    predefined_string, usize_to_u64,
 };
 
 use allocation::IntrinsicRecords;
@@ -670,6 +670,10 @@ impl RealmBuildTransaction<'_> {
         })
     }
 
+    #[allow(
+        clippy::too_many_lines,
+        reason = "one exhaustive typed publication binds every validated Realm intrinsic identity"
+    )]
     fn ready_realm_intrinsics(&self) -> RealmIntrinsics {
         let object = |id| self.allocated.object(id);
         let function = |kind| self.allocated.function(IntrinsicFunctionId(kind));
@@ -734,6 +738,10 @@ impl RealmBuildTransaction<'_> {
             promise: PromiseIntrinsics {
                 prototype: object(IntrinsicObjectId::PromisePrototype),
                 constructor: function(NativeFunctionKind::PromiseConstructor),
+            },
+            regexp: RegExpIntrinsics {
+                prototype: object(IntrinsicObjectId::RegExpPrototype),
+                constructor: function(NativeFunctionKind::RegExpConstructor),
             },
             symbol: SymbolIntrinsics {
                 prototype: object(IntrinsicObjectId::SymbolPrototype),
@@ -802,6 +810,10 @@ impl RealmBuildTransaction<'_> {
 }
 
 impl RealmBuildTransaction<'_> {
+    #[allow(
+        clippy::too_many_lines,
+        reason = "Realm property batches stay in normative publication order at one transaction boundary"
+    )]
     fn publish_realm_properties(
         &mut self,
         graph: &RealmPublicationState,
@@ -856,6 +868,11 @@ impl RealmBuildTransaction<'_> {
         self.publish_intrinsic_schema_batch(
             intrinsic_schema,
             &graph.dynamic_atoms,
+            DeclarativeBatch::Regexps,
+        )?;
+        self.publish_intrinsic_schema_batch(
+            intrinsic_schema,
+            &graph.dynamic_atoms,
             DeclarativeBatch::Promises,
         )?;
         self.publish_collection_properties(graph, intrinsic_schema)?;
@@ -883,6 +900,11 @@ impl RealmBuildTransaction<'_> {
             intrinsic_schema,
             &graph.dynamic_atoms,
             DeclarativeBatch::SymbolGlobals,
+        )?;
+        self.publish_intrinsic_schema_batch(
+            intrinsic_schema,
+            &graph.dynamic_atoms,
+            DeclarativeBatch::RegExpGlobals,
         )?;
         self.publish_intrinsic_schema_batch(
             intrinsic_schema,

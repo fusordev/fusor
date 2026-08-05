@@ -253,9 +253,18 @@ fn decide_regexp_like(
     return_to: Option<CallReturn>,
     execution_budget: &mut ExecutionBudget,
 ) -> Result<NativeDispatch, NativeFailure> {
-    // No RegExp-branded heap object exists yet. Once that intrinsic lands,
-    // `undefined` must fall back to its internal `[[RegExpMatcher]]` slot here.
-    if matches!(matcher, StoredValue::Undefined) || !matcher.is_truthy() {
+    let branded = match state.search_value {
+        StoredValue::Object(object) => runtime.regexp_state(object)?.is_some(),
+        StoredValue::Undefined
+        | StoredValue::Null
+        | StoredValue::Boolean(_)
+        | StoredValue::Number(_)
+        | StoredValue::BigInt(_)
+        | StoredValue::String(_)
+        | StoredValue::Symbol(_)
+        | StoredValue::Function(_) => false,
+    };
+    if !branded && (matches!(matcher, StoredValue::Undefined) || !matcher.is_truthy()) {
         return read_replace_method(runtime, state, return_to, execution_budget);
     }
     read_flags_property(runtime, state, return_to, execution_budget)

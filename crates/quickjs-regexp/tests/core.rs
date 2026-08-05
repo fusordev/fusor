@@ -5,6 +5,20 @@ fn compile(pattern: &str, flags: &str) -> CompiledRegExp {
         .expect("test pattern must compile")
 }
 
+#[test]
+fn capture_names_follow_match_capture_indices() {
+    let expression = compile("(?<left>a)(b)(?<right>c)", "d");
+    assert_eq!(
+        expression.capture_names(),
+        [
+            None,
+            Some("left".to_owned()),
+            None,
+            Some("right".to_owned()),
+        ]
+    );
+}
+
 fn ranges(pattern: &str, flags: &str, input: &str) -> Vec<Option<(usize, usize)>> {
     compile(pattern, flags)
         .execute(

@@ -330,6 +330,7 @@ impl Runtime {
                 weak_ref,
                 finalization_registry,
                 promise,
+                regexp,
                 symbol,
                 iterators,
                 generators,
@@ -486,6 +487,18 @@ impl Runtime {
                 );
                 mark_heap_reference(
                     HeapReference::Function(promise.constructor),
+                    &mut marked_functions,
+                    &mut marked_objects,
+                    &mut work,
+                );
+                mark_heap_reference(
+                    HeapReference::Object(regexp.prototype),
+                    &mut marked_functions,
+                    &mut marked_objects,
+                    &mut work,
+                );
+                mark_heap_reference(
+                    HeapReference::Function(regexp.constructor),
                     &mut marked_functions,
                     &mut marked_objects,
                     &mut work,

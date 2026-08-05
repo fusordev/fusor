@@ -64,8 +64,8 @@ use crate::{
         PromiseCapabilityCapture, PromiseCapabilityExecutor, PromiseCombinatorElementFunction,
         PromiseCombinatorElementKind, PromiseCombinatorKind, PromiseCombinatorShared,
         PromiseFinallyFunction, PromiseFinallyThunkKind, PromiseJob, PromiseResolvingFunction,
-        PromiseResolvingKind, PromiseStatic, RealmGlobalBindingState, ReflectMethod, SetMethod,
-        SetPrototypeOutcome, StringArgument, StringMethod, UriFunction, WeakMapMethod,
+        PromiseResolvingKind, PromiseStatic, RealmGlobalBindingState, ReflectMethod, RegExpFlag,
+        SetMethod, SetPrototypeOutcome, StringArgument, StringMethod, UriFunction, WeakMapMethod,
         WeakSetMethod, array_length_from_number, check_execution_limit, global_declaration_error,
         usize_to_u64,
     },
@@ -111,6 +111,7 @@ mod promise;
 mod promise_combinators;
 mod properties;
 mod reflect;
+mod regexp;
 mod set;
 mod stack;
 mod string_methods;
@@ -136,8 +137,8 @@ use {
     exceptions::*, execution::*, from_entries::*, generator::*, group_by::*, iterators::*,
     json_parse::*, json_stringify::*, locale_string::*, map::*, math::*, math_sum_precise::*,
     native::*, object_intrinsics::*, promise::*, promise_combinators::*, properties::*, reflect::*,
-    set::*, stack::*, string_methods::*, string_raw::*, string_replace::*, string_split::*, uri::*,
-    weak_collections::*, weak_references::*,
+    regexp::*, set::*, stack::*, string_methods::*, string_raw::*, string_replace::*,
+    string_split::*, uri::*, weak_collections::*, weak_references::*,
 };
 
 /// Inclusive per-call interpreter limits.
@@ -227,6 +228,11 @@ impl ExecutionBudget {
         }
         self.executed_instructions = self.executed_instructions.saturating_add(additional);
         Ok(())
+    }
+
+    const fn remaining_instructions(&self) -> u64 {
+        self.instruction_limit
+            .saturating_sub(self.executed_instructions)
     }
 
     fn charge_dynamic_compilation(
@@ -428,6 +434,7 @@ enum NativeContinuation {
     StringRaw(Box<StringRawContinuation>),
     StringReplace(Box<StringReplaceContinuation>),
     StringSplit(Box<StringSplitContinuation>),
+    RegExp(Box<RegExpContinuation>),
     LocaleString(Box<LocaleStringContinuation>),
     DefineProperty(Box<DefinePropertyContinuation>),
     DefineProperties(Box<DefinePropertiesContinuation>),
@@ -499,6 +506,7 @@ impl NativeContinuation {
             Self::StringRaw(state) => state.retained_values(),
             Self::StringReplace(state) => state.retained_values(),
             Self::StringSplit(state) => state.retained_values(),
+            Self::RegExp(state) => state.retained_values(),
             Self::LocaleString(state) => state.retained_values(),
             Self::DefineProperty(state) => state.retained_values(),
             Self::DefineProperties(state) => state.retained_values(),
@@ -1547,6 +1555,8 @@ enum OperatorPrimitiveTarget {
     /// A `String.prototype.split` fallback operand awaiting primitive
     /// conversion to String or Number.
     StringSplitValue(Box<StringSplitContinuation>),
+    /// A `RegExp` protocol operand awaiting primitive conversion.
+    RegExpValue(Box<RegExpContinuation>),
     /// A locale-string length or invocation result awaiting primitive conversion.
     LocaleStringValue(Box<LocaleStringContinuation>),
     ArrayLengthWrite(ArrayLengthWriteState),
@@ -1621,6 +1631,7 @@ impl OperatorPrimitiveTarget {
             Self::StringRawValue(state) => state.retained_values(),
             Self::StringReplaceValue(state) => state.retained_values(),
             Self::StringSplitValue(state) => state.retained_values(),
+            Self::RegExpValue(state) => state.retained_values(),
             Self::LocaleStringValue(state) => state.retained_values(),
             Self::MathExtrema(state) => state.retained_values(),
             Self::MathHypot(state) => state.retained_values(),
@@ -1850,6 +1861,7 @@ fn trace_operator_primitive_target_roots(
         OperatorPrimitiveTarget::StringRawValue(state) => state.trace_roots(mark),
         OperatorPrimitiveTarget::StringReplaceValue(state) => state.trace_roots(mark),
         OperatorPrimitiveTarget::StringSplitValue(state) => state.trace_roots(mark),
+        OperatorPrimitiveTarget::RegExpValue(state) => state.trace_roots(mark),
         OperatorPrimitiveTarget::LocaleStringValue(state) => state.trace_roots(mark),
         OperatorPrimitiveTarget::MathExtrema(state) => state.trace_roots(mark),
         OperatorPrimitiveTarget::MathHypot(state) => state.trace_roots(mark),
@@ -1937,6 +1949,7 @@ fn trace_native_continuation_roots(
         NativeContinuation::StringRaw(state) => state.trace_roots(mark),
         NativeContinuation::StringReplace(state) => state.trace_roots(mark),
         NativeContinuation::StringSplit(state) => state.trace_roots(mark),
+        NativeContinuation::RegExp(state) => state.trace_roots(mark),
         NativeContinuation::LocaleString(state) => state.trace_roots(mark),
         NativeContinuation::DefineProperty(state) => state.trace_roots(mark),
         NativeContinuation::FunctionBind(state) => {

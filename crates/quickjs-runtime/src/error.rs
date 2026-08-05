@@ -171,6 +171,8 @@ pub enum RuntimeResource {
     FinalizationJobs,
     /// Weak targets retained until the current ECMAScript job completes.
     KeptAlive,
+    /// Backtracking states retained by one bounded `RegExp` execution.
+    RegExpBacktrackStates,
 }
 
 impl fmt::Display for RuntimeResource {
@@ -199,6 +201,7 @@ impl fmt::Display for RuntimeResource {
             Self::PromiseJobs => "Promise jobs",
             Self::FinalizationJobs => "finalization jobs",
             Self::KeptAlive => "kept-alive weak targets",
+            Self::RegExpBacktrackStates => "RegExp backtracking states",
         })
     }
 }

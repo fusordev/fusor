@@ -14,6 +14,7 @@ mod math;
 mod primitives;
 mod promise;
 mod reflect;
+mod regexp;
 mod set;
 mod string;
 mod symbol;
@@ -129,12 +130,12 @@ impl RealmIntrinsicSchema {
             FamilyCardinality {
                 family: "Realm intrinsic objects",
                 actual: self.objects.len(),
-                expected: 39,
+                expected: 40,
             },
             FamilyCardinality {
                 family: "Realm native functions",
                 actual: self.specs.len(),
-                expected: 318,
+                expected: 340,
             },
         ];
         validate_intrinsic_schema(IntrinsicSchema {
@@ -158,6 +159,7 @@ pub(super) const fn is_declarative_object(id: IntrinsicObjectId) -> bool {
             | IntrinsicObjectId::BigIntPrototype
             | IntrinsicObjectId::StringPrototype
             | IntrinsicObjectId::ArrayPrototype
+            | IntrinsicObjectId::RegExpPrototype
             | IntrinsicObjectId::IteratorPrototype
             | IntrinsicObjectId::AsyncIteratorPrototype
             | IntrinsicObjectId::AsyncFromSyncIteratorPrototype
@@ -184,6 +186,10 @@ pub(super) const fn is_declarative_object(id: IntrinsicObjectId) -> bool {
     )
 }
 
+#[allow(
+    clippy::too_many_lines,
+    reason = "the exhaustive declarative identity match is the audit boundary for every Realm-native family"
+)]
 pub(super) const fn is_declarative_function(id: IntrinsicFunctionId) -> bool {
     matches!(
         id.0,
@@ -227,6 +233,17 @@ pub(super) const fn is_declarative_function(id: IntrinsicFunctionId) -> bool {
             | NativeFunctionKind::ArrayPrototypeSplice
             | NativeFunctionKind::ArrayIsArray
             | NativeFunctionKind::ArrayStatic(_)
+            | NativeFunctionKind::RegExpConstructor
+            | NativeFunctionKind::RegExpEscape
+            | NativeFunctionKind::RegExpSpeciesGetter
+            | NativeFunctionKind::RegExpPrototypeFlags
+            | NativeFunctionKind::RegExpPrototypeSource
+            | NativeFunctionKind::RegExpPrototypeFlag(_)
+            | NativeFunctionKind::RegExpPrototypeExec
+            | NativeFunctionKind::RegExpPrototypeCompile
+            | NativeFunctionKind::RegExpPrototypeTest
+            | NativeFunctionKind::RegExpPrototypeToString
+            | NativeFunctionKind::RegExpPrototypeSymbol(_)
             | NativeFunctionKind::IteratorPrototypeIterator
             | NativeFunctionKind::AsyncIteratorPrototypeAsyncIterator
             | NativeFunctionKind::AsyncFromSyncIteratorNext
@@ -295,6 +312,8 @@ pub(super) enum DeclarativeBatch {
     PrimitiveGlobals,
     Arrays,
     ArrayGlobals,
+    Regexps,
+    RegExpGlobals,
     ArrayExoticInitialization,
     Iterators,
     Symbols,
@@ -358,6 +377,9 @@ pub(super) fn property_batch(property: IntrinsicPropertySpec) -> DeclarativeBatc
     }
     if is_array_identity(property.holder) || referenced_function.is_some_and(is_array_function) {
         return DeclarativeBatch::Arrays;
+    }
+    if is_regexp_identity(property.holder) || referenced_function.is_some_and(is_regexp_function) {
+        return DeclarativeBatch::Regexps;
     }
     if is_symbol_identity(property.holder)
         || matches!(
@@ -443,6 +465,7 @@ fn special_reference_batch(
         | NativeFunctionKind::BigIntConstructor
         | NativeFunctionKind::StringConstructor => Some(DeclarativeBatch::PrimitiveGlobals),
         NativeFunctionKind::ArrayConstructor => Some(DeclarativeBatch::ArrayGlobals),
+        NativeFunctionKind::RegExpConstructor => Some(DeclarativeBatch::RegExpGlobals),
         NativeFunctionKind::SymbolConstructor => Some(DeclarativeBatch::SymbolGlobals),
         NativeFunctionKind::PromiseConstructor => Some(DeclarativeBatch::PromiseGlobals),
         NativeFunctionKind::MapConstructor => Some(DeclarativeBatch::MapGlobals),
@@ -512,6 +535,31 @@ const fn is_promise_identity(id: IntrinsicIdentity) -> bool {
         IntrinsicIdentity::Function(id) => is_promise_function(id),
         IntrinsicIdentity::Object(_) => false,
     }
+}
+
+const fn is_regexp_identity(id: IntrinsicIdentity) -> bool {
+    match id {
+        IntrinsicIdentity::Object(IntrinsicObjectId::RegExpPrototype) => true,
+        IntrinsicIdentity::Function(id) => is_regexp_function(id),
+        IntrinsicIdentity::Object(_) => false,
+    }
+}
+
+const fn is_regexp_function(id: IntrinsicFunctionId) -> bool {
+    matches!(
+        id.0,
+        NativeFunctionKind::RegExpConstructor
+            | NativeFunctionKind::RegExpEscape
+            | NativeFunctionKind::RegExpSpeciesGetter
+            | NativeFunctionKind::RegExpPrototypeFlags
+            | NativeFunctionKind::RegExpPrototypeSource
+            | NativeFunctionKind::RegExpPrototypeFlag(_)
+            | NativeFunctionKind::RegExpPrototypeExec
+            | NativeFunctionKind::RegExpPrototypeCompile
+            | NativeFunctionKind::RegExpPrototypeTest
+            | NativeFunctionKind::RegExpPrototypeToString
+            | NativeFunctionKind::RegExpPrototypeSymbol(_)
+    )
 }
 
 const fn is_map_identity(id: IntrinsicIdentity) -> bool {
@@ -771,6 +819,8 @@ pub(super) const fn function_batch(id: IntrinsicFunctionId) -> DeclarativeBatch 
         DeclarativeBatch::Primitives
     } else if is_array_function(id) {
         DeclarativeBatch::Arrays
+    } else if is_regexp_function(id) {
+        DeclarativeBatch::Regexps
     } else if is_iterator_function(id) {
         DeclarativeBatch::Iterators
     } else if is_promise_function(id) {
@@ -813,6 +863,7 @@ fn visit_object_specs(visit: ObjectSink<'_>) {
     error::visit_objects(visit);
     primitives::visit_objects(visit);
     array::visit_objects(visit);
+    regexp::visit_objects(visit);
     iterator::visit_objects(visit);
     generator::visit_objects(visit);
     async_function::visit_objects(visit);
@@ -834,6 +885,7 @@ fn visit_function_specs(visit: FunctionSink<'_>) {
     primitives::visit_functions(visit);
     string::visit_functions(visit);
     array::visit_kernel_functions(visit);
+    regexp::visit_functions(visit);
     iterator::visit_functions(visit);
     generator::visit_functions(visit);
     async_function::visit_functions(visit);
@@ -857,6 +909,7 @@ fn visit_property_specs(visit: PropertySink<'_>) {
     primitives::visit_properties(visit);
     string::visit_properties(visit);
     array::visit_properties(visit);
+    regexp::visit_properties(visit);
     iterator::visit_properties(visit);
     generator::visit_properties(visit);
     async_function::visit_properties(visit);
@@ -977,8 +1030,8 @@ mod tests {
     #[test]
     fn complete_function_schema_has_characterized_cardinality_and_unique_ids() {
         let schema = RealmIntrinsicSchema::try_new().expect("function schema");
-        assert_eq!(schema.specs().len(), 318);
-        assert_eq!(schema.constructor_prototypes.len(), 27);
+        assert_eq!(schema.specs().len(), 340);
+        assert_eq!(schema.constructor_prototypes.len(), 28);
         for (index, spec) in schema.specs().iter().enumerate() {
             assert!(
                 schema.specs()[..index]

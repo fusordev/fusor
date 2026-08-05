@@ -17,15 +17,15 @@ pub(crate) fn execute(
     input: &[u16],
     start_index: usize,
     limits: ExecLimits,
+    steps: &mut u64,
 ) -> Result<Option<Match>, ExecError> {
     if start_index > input.len() {
         return Ok(None);
     }
-    let mut steps = 0;
     let mut candidate = start_index;
     loop {
-        consume_step(&mut steps, limits.max_steps)?;
-        if let Some(result) = run_candidate(program, input, candidate, limits, &mut steps)? {
+        consume_step(steps, limits.max_steps)?;
+        if let Some(result) = run_candidate(program, input, candidate, limits, steps)? {
             return Ok(Some(result));
         }
         if program.flags.sticky || candidate == input.len() {

@@ -26,6 +26,7 @@ pub(in crate::runtime) enum IntrinsicObjectId {
     BigIntPrototype,
     StringPrototype,
     ArrayPrototype,
+    RegExpPrototype,
     IteratorPrototype,
     AsyncIteratorPrototype,
     AsyncFromSyncIteratorPrototype,
@@ -52,7 +53,7 @@ pub(in crate::runtime) enum IntrinsicObjectId {
 }
 
 impl IntrinsicObjectId {
-    pub(in crate::runtime) const ALL: [Self; 39] = [
+    pub(in crate::runtime) const ALL: [Self; 40] = [
         Self::ObjectPrototype,
         Self::GlobalObject,
         Self::ErrorPrototype(ErrorIntrinsicKind::Error),
@@ -69,6 +70,7 @@ impl IntrinsicObjectId {
         Self::BigIntPrototype,
         Self::StringPrototype,
         Self::ArrayPrototype,
+        Self::RegExpPrototype,
         Self::IteratorPrototype,
         Self::AsyncIteratorPrototype,
         Self::AsyncFromSyncIteratorPrototype,
@@ -138,6 +140,9 @@ pub(in crate::runtime) enum RealmNameId {
     ArraySplice,
     ArrayIsArray,
     ArrayFromAsync,
+    RegExpEscape,
+    RegExpCompile,
+    RegExpTest,
     PromiseStatic(PromiseStatic),
     MapMethod(MapMethod),
     SetMethod(SetMethod),
