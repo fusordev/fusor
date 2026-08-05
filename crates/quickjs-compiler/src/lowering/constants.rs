@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use quickjs_bytecode::{
     AtomPoolIndex, Binary64Constant, CompilerAtom, CompilerBigInt, CompilerConstantValue,
-    CompilerString, FinalOpcode, Operands,
+    CompilerString, CompilerTemplateElement, CompilerTemplateObject, FinalOpcode, Operands,
 };
 use quickjs_frontend::Span;
 
@@ -349,6 +349,51 @@ impl<'arena> CompilationContext<'_, 'arena, '_> {
                 )?;
                 record_string_candidate(owner, value, literal.span, candidates, atom_candidates)?;
             }
+            AstKind::TaggedTemplateExpression(tagged) => {
+                let template = &tagged.quasi;
+                if template.quasis.len() != template.expressions.len().saturating_add(1) {
+                    return Err(LeafCompilationError::SemanticInvariant {
+                        invariant: "tagged template has one more quasi than substitutions",
+                        span: Some(template.span),
+                    });
+                }
+                let mut elements = Vec::with_capacity(template.quasis.len());
+                for (index, quasi) in template.quasis.iter().enumerate() {
+                    if quasi.tail != (index + 1 == template.quasis.len()) {
+                        return Err(LeafCompilationError::SemanticInvariant {
+                            invariant: "tagged template marks only its final quasi as tail",
+                            span: Some(quasi.span),
+                        });
+                    }
+                    let cooked = quasi
+                        .value
+                        .cooked
+                        .as_ref()
+                        .map(|value| {
+                            decode_compiler_string(
+                                value.as_str(),
+                                quasi.lone_surrogates,
+                                quasi.span,
+                            )
+                        })
+                        .transpose()?;
+                    let raw = compiler_identifier_string(quasi.value.raw.as_str(), quasi.span)?;
+                    elements.push(CompilerTemplateElement::new(cooked, raw));
+                }
+                let value = CompilerTemplateObject::try_from_elements(elements.into()).map_err(
+                    |source| LeafCompilationError::CompilerTemplateObject {
+                        span: tagged.span,
+                        source,
+                    },
+                )?;
+                candidates
+                    .get_mut(owner.index())
+                    .ok_or(LeafCompilationError::InvalidExecutable { executable: owner })?
+                    .push(CompiledConstantCandidate::TemplateObject {
+                        value,
+                        span: tagged.span,
+                    });
+            }
             AstKind::TemplateLiteral(template)
                 if !matches!(
                     nodes.parent_kind(node_id),
@@ -604,6 +649,7 @@ pub(in crate::lowering) struct CompiledConstantPool {
     function_indices: Box<[(ExecutableId, u32)]>,
     number_indices: Box<[(Span, u32)]>,
     bigint_indices: Box<[(Span, u32)]>,
+    template_object_indices: Box<[(Span, u32)]>,
     string_indices: Box<[(Span, CompiledStringLocation)]>,
     property_atom_indices: Box<[(CompiledPropertyAtomKey, u32)]>,
     metadata_atom_indices: Box<[(CompiledMetadataAtomKey, u32)]>,
@@ -616,6 +662,10 @@ pub(in crate::lowering) enum CompiledConstantCandidate {
     },
     BigInt {
         value: CompilerBigInt,
+        span: Span,
+    },
+    TemplateObject {
+        value: CompilerTemplateObject,
         span: Span,
     },
     String {
@@ -633,8 +683,9 @@ impl CompiledConstantCandidate {
         match self {
             Self::Number { span, .. } => (span.start, span.end, 0),
             Self::BigInt { span, .. } => (span.start, span.end, 1),
-            Self::String { span, .. } => (span.start, span.end, 2),
-            Self::Function { span, .. } => (span.start, span.end, 3),
+            Self::TemplateObject { span, .. } => (span.start, span.end, 2),
+            Self::String { span, .. } => (span.start, span.end, 3),
+            Self::Function { span, .. } => (span.start, span.end, 4),
         }
     }
 }
@@ -657,6 +708,7 @@ struct FrozenConstantCandidates {
     function_indices: Vec<(ExecutableId, u32)>,
     number_indices: Vec<(Span, u32)>,
     bigint_indices: Vec<(Span, u32)>,
+    template_object_indices: Vec<(Span, u32)>,
     string_indices: Vec<(Span, CompiledStringLocation)>,
     property_atom_indices: Vec<(CompiledPropertyAtomKey, u32)>,
 }
@@ -676,6 +728,7 @@ fn freeze_constant_candidates(
             },
         )?),
         bigint_indices: Vec::new(),
+        template_object_indices: Vec::new(),
         string_indices: Vec::with_capacity(string_capacity),
         property_atom_indices: Vec::with_capacity(string_capacity),
     };
@@ -699,6 +752,12 @@ fn freeze_constant_candidates(
                         value,
                     )));
                 frozen.bigint_indices.push((span, index));
+            }
+            CompiledConstantCandidate::TemplateObject { value, span } => {
+                frozen.entries.push(CompiledConstant::Value(
+                    CompilerConstantValue::TemplateObject(value),
+                ));
+                frozen.template_object_indices.push((span, index));
             }
             CompiledConstantCandidate::String { value, span } => {
                 if value.is_empty() || !value.is_tagged_integer_atom() {
@@ -834,6 +893,7 @@ impl CompiledConstantPool {
             function_indices: frozen.function_indices.into_boxed_slice(),
             number_indices: frozen.number_indices.into_boxed_slice(),
             bigint_indices: frozen.bigint_indices.into_boxed_slice(),
+            template_object_indices: frozen.template_object_indices.into_boxed_slice(),
             string_indices: frozen.string_indices.into_boxed_slice(),
             property_atom_indices: frozen.property_atom_indices.into_boxed_slice(),
             metadata_atom_indices: metadata_atom_indices.into_boxed_slice(),
@@ -921,6 +981,37 @@ impl CompiledConstantPool {
         else {
             return Err(LeafCompilationError::SemanticInvariant {
                 invariant: "BigInt constant index resolves to its exact decimal payload",
+                span: Some(span),
+            });
+        };
+        let (opcode, operands) = match u8::try_from(index) {
+            Ok(index) => (FinalOpcode::PushConst8, Operands::Const8(index)),
+            Err(_) => (FinalOpcode::PushConst, Operands::Const(index)),
+        };
+        Ok(PlannedInstruction::new(opcode, operands, span))
+    }
+
+    pub(in crate::lowering) fn plan_template_object(
+        &self,
+        span: Span,
+    ) -> Result<PlannedInstruction, LeafCompilationError> {
+        let position = self
+            .template_object_indices
+            .binary_search_by_key(&(span.start, span.end), |(candidate, _)| {
+                (candidate.start, candidate.end)
+            })
+            .map_err(|_| LeafCompilationError::SemanticInvariant {
+                invariant: "tagged template has one site-object constant",
+                span: Some(span),
+            })?;
+        let index = self.template_object_indices[position].1;
+        let Some(CompiledConstant::Value(CompilerConstantValue::TemplateObject(_))) =
+            usize::try_from(index)
+                .ok()
+                .and_then(|index| self.entries.get(index))
+        else {
+            return Err(LeafCompilationError::SemanticInvariant {
+                invariant: "tagged-template constant index resolves to its exact site payload",
                 span: Some(span),
             });
         };

@@ -9430,7 +9430,10 @@ fn collect_requirements(
         || function.constants().iter().any(|constant| {
             matches!(
                 constant,
-                crate::CompilerConstant::Value(crate::CompilerConstantValue::String(_))
+                crate::CompilerConstant::Value(
+                    crate::CompilerConstantValue::String(_)
+                        | crate::CompilerConstantValue::TemplateObject(_)
+                )
             )
         })
     {
@@ -9451,6 +9454,15 @@ fn collect_requirements(
         )
     }) {
         push_requirement(requirements, ExecutionRequirement::BigInts);
+    }
+    if function.constants().iter().any(|constant| {
+        matches!(
+            constant,
+            crate::CompilerConstant::Value(crate::CompilerConstantValue::TemplateObject(_))
+        )
+    }) {
+        push_requirement(requirements, ExecutionRequirement::Arrays);
+        push_requirement(requirements, ExecutionRequirement::OrdinaryObjects);
     }
     if !metadata.closures.is_empty()
         || function

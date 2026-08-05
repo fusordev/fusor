@@ -2,7 +2,8 @@ use std::{error::Error, fmt};
 
 use quickjs_bytecode::{
     AssemblerError, BytecodePc, BytecodeVerificationError, CompilerBigIntError,
-    CompilerStringError, EncodeError, FunctionGraphVerificationError, VerificationError,
+    CompilerStringError, CompilerTemplateObjectError, EncodeError, FunctionGraphVerificationError,
+    VerificationError,
 };
 use quickjs_frontend::{OxcStringDecodeError, Span};
 
@@ -107,6 +108,13 @@ pub enum LeafCompilationError {
         /// Exact decimal-payload validation failure.
         source: CompilerBigIntError,
     },
+    /// A tagged template did not produce a valid site-object payload.
+    CompilerTemplateObject {
+        /// Exact tagged-template span.
+        span: Span,
+        /// Exact site-object validation failure.
+        source: CompilerTemplateObjectError,
+    },
     /// `RegExp` literal grammar or executable lowering failed.
     RegExp {
         /// Exact literal span.
@@ -201,6 +209,12 @@ impl fmt::Display for LeafCompilationError {
             Self::CompilerBigInt { span, source } => {
                 write!(formatter, "compiler BigInt failed at {span:?}: {source}")
             }
+            Self::CompilerTemplateObject { span, source } => {
+                write!(
+                    formatter,
+                    "compiler template object failed at {span:?}: {source}"
+                )
+            }
             Self::RegExp { span, source } => {
                 write!(formatter, "regular expression failed at {span:?}: {source}")
             }
@@ -269,6 +283,7 @@ impl Error for LeafCompilationError {
             Self::CookedStringDecoding { source, .. } => Some(source),
             Self::CompilerString { source, .. } => Some(source),
             Self::CompilerBigInt { source, .. } => Some(source),
+            Self::CompilerTemplateObject { source, .. } => Some(source),
             Self::RegExp { source, .. } => Some(source),
             Self::ForeignExecutable { .. }
             | Self::InvalidExecutable { .. }

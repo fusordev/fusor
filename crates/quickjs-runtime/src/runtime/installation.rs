@@ -31,12 +31,57 @@ use super::{
     BindingCell, CompilerCaptureLayout, CompilerCapturedBinding, CompilerClosureBinding,
     CompilerConstant, CompilerConstantValue, EnvironmentBinding, FrameBindingAddress, FunctionId,
     HashSet, HeapReference, InstallError, InstalledCodeId, InstalledConstant, InstalledRoot,
-    InstalledTemplate, JsBigInt, JsNumber, JsValue, OwnProperty, PropertyKey, RealmGlobalBinding,
-    RealmGlobalBindingState, RealmGlobalRequest, RealmId, RootEnvironment, RootTarget, Runtime,
-    RuntimeError, RuntimeResource, SlotValue, StoredValue, VerifiedBytecode, check_execution_limit,
+    InstalledTemplate, InstalledTemplateElement, InstalledTemplateObject, JsBigInt, JsNumber,
+    JsValue, OwnProperty, PropertyKey, RealmGlobalBinding, RealmGlobalBindingState,
+    RealmGlobalRequest, RealmId, RootEnvironment, RootTarget, Runtime, RuntimeError,
+    RuntimeResource, SlotValue, StoredValue, VerifiedBytecode, check_execution_limit,
     check_install_limit, global_declaration_property_layout, global_function_replacement_layout,
     rejected_global_declaration, runtime_string, stale_heap_reference, usize_to_u64,
 };
+
+fn stage_constant(constant: &CompilerConstant) -> Result<InstalledConstant, InstallError> {
+    Ok(match constant {
+        CompilerConstant::Value(CompilerConstantValue::Number(value)) => {
+            InstalledConstant::Number(JsNumber::from_f64(value.to_f64()))
+        }
+        CompilerConstant::Value(CompilerConstantValue::String(value)) => {
+            InstalledConstant::String(runtime_string(value)?)
+        }
+        CompilerConstant::Value(CompilerConstantValue::BigInt(value)) => {
+            let bytes = value
+                .decimal()
+                .latin1_units()
+                .ok_or(InstallError::AuthorityInvariant {
+                    message: "verified BigInt decimal is not compact ASCII",
+                })?;
+            let decimal =
+                std::str::from_utf8(bytes).map_err(|_| InstallError::AuthorityInvariant {
+                    message: "verified BigInt decimal is not ASCII",
+                })?;
+            InstalledConstant::BigInt(Arc::new(JsBigInt::from_str_radix(decimal, 10)?))
+        }
+        CompilerConstant::Value(CompilerConstantValue::TemplateObject(value)) => {
+            let mut elements = Vec::new();
+            elements
+                .try_reserve_exact(value.elements().len())
+                .map_err(|_| InstallError::AllocationFailed {
+                    resource: RuntimeResource::InstalledConstants,
+                    additional: value.elements().len(),
+                })?;
+            for element in value.elements() {
+                elements.push(InstalledTemplateElement {
+                    cooked: element.cooked().map(runtime_string).transpose()?,
+                    raw: runtime_string(element.raw())?,
+                });
+            }
+            InstalledConstant::TemplateObject(InstalledTemplateObject {
+                elements: elements.into(),
+                object: None,
+            })
+        }
+        CompilerConstant::Function(function) => InstalledConstant::Function(*function),
+    })
+}
 
 impl Runtime {
     pub(crate) fn prepare_execution_safe_point(&mut self) -> Result<(), crate::ExecutionError> {
@@ -288,28 +333,7 @@ impl Runtime {
                     additional: function.function().constants().len(),
                 })?;
             for constant in function.function().constants() {
-                constants.push(match constant {
-                    CompilerConstant::Value(CompilerConstantValue::Number(value)) => {
-                        InstalledConstant::Number(JsNumber::from_f64(value.to_f64()))
-                    }
-                    CompilerConstant::Value(CompilerConstantValue::String(value)) => {
-                        InstalledConstant::String(runtime_string(value)?)
-                    }
-                    CompilerConstant::Value(CompilerConstantValue::BigInt(value)) => {
-                        let bytes = value.decimal().latin1_units().ok_or(
-                            InstallError::AuthorityInvariant {
-                                message: "verified BigInt decimal is not compact ASCII",
-                            },
-                        )?;
-                        let decimal = std::str::from_utf8(bytes).map_err(|_| {
-                            InstallError::AuthorityInvariant {
-                                message: "verified BigInt decimal is not ASCII",
-                            }
-                        })?;
-                        InstalledConstant::BigInt(Arc::new(JsBigInt::from_str_radix(decimal, 10)?))
-                    }
-                    CompilerConstant::Function(function) => InstalledConstant::Function(*function),
-                });
+                constants.push(stage_constant(constant)?);
             }
 
             let capture_layout = function.function().control_flow().compiler_capture_layout();

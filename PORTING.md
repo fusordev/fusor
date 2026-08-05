@@ -68,10 +68,10 @@ does not imply complete ECMAScript or QuickJS compatibility.
   before runtime mutation.
 - [x] Iterative lowering covers the admitted ordinary profile, closures,
   control flow, calls/spread, destructuring, exceptions, sync generators,
-  async functions/generators, delegated `yield*`, exact large-BigInt literal
-  constants, and untagged templates with immediate spec-ordered `ToString`.
-  Typed suspension and iterator records preserve resume, close, and `finally`
-  order.
+  async functions/generators, delegated `yield*`, exact large-BigInt literals,
+  untagged templates with immediate spec-ordered `ToString`, and tagged
+  templates with cached frozen cooked/raw site objects. Typed suspension and
+  iterator records preserve resume, close, and `finally` order.
 - [x] Explicit VM frame/continuation stacks handle bytecode and native re-entry,
   coercion, construction, abrupt completion, and traces. Deterministic fuel is
   separate from the pinned 10,000-instruction uncatchable host interrupt.

@@ -53,27 +53,66 @@ pub(super) fn installed_template(
 }
 
 pub(super) fn materialize_constant(
-    runtime: &Runtime,
+    runtime: &mut Runtime,
     code_id: InstalledCodeId,
     template: FunctionTemplateId,
     index: u32,
 ) -> Result<StoredValue, ExecutionError> {
-    match installed_template(runtime, code_id, template)?
+    let elements = match installed_template(runtime, code_id, template)?
         .constants
         .get(index as usize)
         .ok_or(EngineFault::MissingPoolEntry {
             pool: "constant",
             index,
         })? {
-        InstalledConstant::Number(value) => Ok(StoredValue::Number(*value)),
-        InstalledConstant::String(value) => Ok(StoredValue::String(value.clone())),
-        InstalledConstant::BigInt(value) => Ok(StoredValue::BigInt(Arc::clone(value))),
-        InstalledConstant::Function(_) => Err(EngineFault::MissingPoolEntry {
-            pool: "ordinary value constant",
+        InstalledConstant::Number(value) => return Ok(StoredValue::Number(*value)),
+        InstalledConstant::String(value) => return Ok(StoredValue::String(value.clone())),
+        InstalledConstant::BigInt(value) => {
+            return Ok(StoredValue::BigInt(Arc::clone(value)));
+        }
+        InstalledConstant::TemplateObject(value) => {
+            if let Some(object) = value.object {
+                return Ok(StoredValue::Object(object));
+            }
+            Arc::clone(&value.elements)
+        }
+        InstalledConstant::Function(_) => {
+            return Err(EngineFault::MissingPoolEntry {
+                pool: "ordinary value constant",
+                index,
+            }
+            .into());
+        }
+    };
+    let realm = code(runtime, code_id)?.realm;
+    let object = runtime.allocate_template_object(realm, &elements)?;
+    let installed = runtime
+        .code
+        .get_mut(code_id)
+        .and_then(|code| {
+            usize::try_from(template.get())
+                .ok()
+                .and_then(|index| code.templates.get_mut(index))
+        })
+        .and_then(|template| template.constants.get_mut(index as usize))
+        .ok_or(EngineFault::MissingPoolEntry {
+            pool: "template object constant",
+            index,
+        })?;
+    let InstalledConstant::TemplateObject(template_object) = installed else {
+        return Err(EngineFault::MissingPoolEntry {
+            pool: "template object constant",
             index,
         }
-        .into()),
+        .into());
+    };
+    if template_object.object.replace(object).is_some() {
+        return Err(EngineFault::RuntimeInvariant {
+            message: "template object cache was populated during non-observable allocation",
+        }
+        .into());
     }
+    Ok(StoredValue::Object(object))
 }
 
 pub(super) fn function_constant(
@@ -92,7 +131,8 @@ pub(super) fn function_constant(
         InstalledConstant::Function(function) => Ok(*function),
         InstalledConstant::Number(_)
         | InstalledConstant::String(_)
-        | InstalledConstant::BigInt(_) => Err(EngineFault::MissingPoolEntry {
+        | InstalledConstant::BigInt(_)
+        | InstalledConstant::TemplateObject(_) => Err(EngineFault::MissingPoolEntry {
             pool: "function constant",
             index,
         }

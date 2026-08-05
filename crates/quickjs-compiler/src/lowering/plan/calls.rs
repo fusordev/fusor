@@ -2,7 +2,7 @@ use super::super::{
     Argument, AssignmentExpression, AssignmentOperator, CallExpression, CompiledConstantPool,
     ComputedMemberExpression, Expression, FinalOpcode, GetSpan, LeafCompilationError,
     NewExpression, Operands, PlannedInstruction, Span, StaticMemberExpression,
-    UnsupportedLeafFeature, plan_push_integer, unsupported,
+    TaggedTemplateExpression, UnsupportedLeafFeature, plan_push_integer, unsupported,
 };
 use super::expressions::{ExpressionPlanner, ExpressionWork};
 
@@ -24,6 +24,68 @@ pub(in crate::lowering) fn plan_direct_call(argument_count: u16, span: Span) -> 
 }
 
 impl<'arena> ExpressionPlanner<'_, '_, 'arena, '_> {
+    pub(in crate::lowering) fn plan_tagged_template_expression<'expression>(
+        tagged: &'expression TaggedTemplateExpression<'arena>,
+        constants: &CompiledConstantPool,
+        work: &mut Vec<ExpressionWork<'expression, 'arena>>,
+    ) -> Result<(), LeafCompilationError> {
+        if tagged.type_arguments.is_some() {
+            return unsupported(UnsupportedLeafFeature::UnsupportedExpression, tagged.span);
+        }
+        if tagged.quasi.quasis.len() != tagged.quasi.expressions.len().saturating_add(1) {
+            return Err(LeafCompilationError::SemanticInvariant {
+                invariant: "tagged template has one more quasi than substitution",
+                span: Some(tagged.span),
+            });
+        }
+        let argument_count = tagged
+            .quasi
+            .expressions
+            .len()
+            .checked_add(1)
+            .and_then(|count| u16::try_from(count).ok())
+            .ok_or(LeafCompilationError::CapacityExceeded {
+                domain: "tagged template arguments",
+            })?;
+        let member = Self::member_callee(&tagged.tag)?;
+        work.push(ExpressionWork::Emit(if member.is_some() {
+            PlannedInstruction::new(
+                FinalOpcode::CallMethod,
+                Operands::NPop { argument_count },
+                tagged.span,
+            )
+        } else {
+            plan_direct_call(argument_count, tagged.span)
+        }));
+        for expression in tagged.quasi.expressions.iter().rev() {
+            work.push(ExpressionWork::Visit(expression));
+        }
+        work.push(ExpressionWork::Emit(
+            constants.plan_template_object(tagged.span)?,
+        ));
+        match member {
+            Some(MemberCallee::Static(member)) => {
+                work.push(ExpressionWork::Emit(PlannedInstruction::new(
+                    FinalOpcode::GetField2,
+                    Operands::Atom(constants.property_atom_index(member.property.span)?),
+                    member.span,
+                )));
+                work.push(ExpressionWork::Visit(&member.object));
+            }
+            Some(MemberCallee::Computed(member)) => {
+                work.push(ExpressionWork::Emit(PlannedInstruction::new(
+                    FinalOpcode::GetArrayEl2,
+                    Operands::None,
+                    member.span,
+                )));
+                work.push(ExpressionWork::Visit(&member.expression));
+                work.push(ExpressionWork::Visit(&member.object));
+            }
+            None => work.push(ExpressionWork::Visit(&tagged.tag)),
+        }
+        Ok(())
+    }
+
     #[expect(
         clippy::too_many_lines,
         reason = "call planning keeps the reverse work-list schedule visible as one operation"

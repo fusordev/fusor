@@ -493,11 +493,46 @@ fn bigint_literals_outside_i32_use_exact_verified_value_constants() {
 }
 
 #[test]
+fn tagged_templates_lower_to_one_exact_site_object_argument_before_substitutions() {
+    let compiled = compile("function f(tag, value){ return tag`a\\n${value}b`; }", "f");
+
+    assert_eq!(
+        opcodes(&compiled),
+        [
+            FinalOpcode::GetArg0,
+            FinalOpcode::PushConst8,
+            FinalOpcode::GetArg1,
+            FinalOpcode::Call2,
+            FinalOpcode::Return,
+        ]
+    );
+    let [
+        quickjs_compiler::CompiledConstant::Value(CompilerConstantValue::TemplateObject(template)),
+    ] = compiled.constants()
+    else {
+        panic!("tagged template must own one site-object constant");
+    };
+    let [head, tail] = template.elements() else {
+        panic!("one substitution must produce two template elements");
+    };
+    assert_eq!(
+        head.cooked().and_then(|value| value.latin1_units()),
+        Some(b"a\n".as_slice())
+    );
+    assert_eq!(head.raw().latin1_units(), Some(b"a\\n".as_slice()));
+    assert_eq!(
+        tail.cooked().and_then(|value| value.latin1_units()),
+        Some(b"b".as_slice())
+    );
+    assert_eq!(tail.raw().latin1_units(), Some(b"b".as_slice()));
+}
+
+#[test]
 fn unsupported_expression_families_fail_closed_at_the_exact_span() {
     let cases = [(
-        "function f(tag){ return tag`value`; }",
+        "function f(tag){ return tag?.(); }",
         UnsupportedLeafFeature::UnsupportedExpression,
-        "tag`value`",
+        "tag?.()",
     )];
 
     for (source, expected_feature, expected_source) in cases {

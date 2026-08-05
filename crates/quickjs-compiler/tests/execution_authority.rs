@@ -194,10 +194,10 @@ fn metadata_names_append_after_operand_atoms_without_shifting_bytecode_indices()
 #[test]
 fn execution_requirements_are_sorted_deduplicated_and_conservative() {
     let tree = compile_tree(
-        "function f(a){\
+        "function f(tag,a){\
             let x=1n;\
             function g(){return x;}\
-            return (1.5,typeof a,a in a,a+x,g);\
+            return (tag`site`,1.5,typeof a,a in a,a+x,g);\
         }",
         "f",
     );
@@ -210,6 +210,9 @@ fn execution_requirements_are_sorted_deduplicated_and_conservative() {
             ExecutionRequirement::Strings,
             ExecutionRequirement::BigInts,
             ExecutionRequirement::Closures,
+            ExecutionRequirement::Arrays,
+            ExecutionRequirement::OrdinaryObjects,
+            ExecutionRequirement::Calls,
             ExecutionRequirement::LexicalBindings,
             ExecutionRequirement::ObjectOperators,
             ExecutionRequirement::DynamicOperators,

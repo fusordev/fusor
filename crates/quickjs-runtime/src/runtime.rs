@@ -446,7 +446,19 @@ pub(crate) enum InstalledConstant {
     Number(JsNumber),
     String(JsString),
     BigInt(Arc<JsBigInt>),
+    TemplateObject(InstalledTemplateObject),
     Function(FunctionTemplateId),
+}
+
+#[derive(Clone)]
+pub(crate) struct InstalledTemplateElement {
+    pub(crate) cooked: Option<JsString>,
+    pub(crate) raw: JsString,
+}
+
+pub(crate) struct InstalledTemplateObject {
+    pub(crate) elements: Arc<[InstalledTemplateElement]>,
+    pub(crate) object: Option<ObjectId>,
 }
 
 pub(crate) struct InstalledTemplate {
@@ -2574,6 +2586,7 @@ mod installation;
 mod realm;
 #[cfg(test)]
 mod realm_snapshot;
+mod template_objects;
 
 /// An exclusive runtime mutator bound to one active realm.
 ///

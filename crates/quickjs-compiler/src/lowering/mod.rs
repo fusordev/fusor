@@ -13,8 +13,8 @@ use oxc_ast::{
         NewExpression, ObjectAssignmentTarget, ObjectExpression, ObjectPattern, ObjectProperty,
         ObjectPropertyKind, Program, PropertyKey as OxcPropertyKey, PropertyKind, RegExpLiteral,
         ReturnStatement, SequenceExpression, SimpleAssignmentTarget, StaticMemberExpression,
-        ThrowStatement, TryStatement, UnaryExpression, UpdateExpression, VariableDeclaration,
-        VariableDeclarationKind, VariableDeclarator, WhileStatement,
+        TaggedTemplateExpression, ThrowStatement, TryStatement, UnaryExpression, UpdateExpression,
+        VariableDeclaration, VariableDeclarationKind, VariableDeclarator, WhileStatement,
     },
 };
 use oxc_semantic::{NodeId, ReferenceId, SymbolId};

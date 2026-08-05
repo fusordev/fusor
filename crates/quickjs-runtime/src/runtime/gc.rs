@@ -27,9 +27,9 @@
 
 use super::{
     AtomUsage, BindingCellId, EnvironmentBinding, FunctionId, FunctionImplementation, HashMap,
-    HashSet, HeapReference, ObjectId, ObjectRecord, PromiseJob, RealmGlobalBindingState,
-    RealmIntrinsics, Runtime, RuntimeError, RuntimeResource, RuntimeUsage, SlotValue, StoredValue,
-    usize_to_u64,
+    HashSet, HeapReference, InstalledConstant, ObjectId, ObjectRecord, PromiseJob,
+    RealmGlobalBindingState, RealmIntrinsics, Runtime, RuntimeError, RuntimeResource, RuntimeUsage,
+    SlotValue, StoredValue, usize_to_u64,
 };
 use crate::{
     atom::WeakAtom,
@@ -747,6 +747,26 @@ impl Runtime {
                                         && marked_cells.insert(cell)
                                     {
                                         work.push(GraphNode::Cell(cell));
+                                    }
+                                }
+                                if let Some(installed) = self.code.get(bytecode.code)
+                                    && let Some(template) = usize::try_from(bytecode.template.get())
+                                        .ok()
+                                        .and_then(|index| installed.templates.get(index))
+                                {
+                                    for object in template.constants.iter().filter_map(|constant| {
+                                        let InstalledConstant::TemplateObject(template) = constant
+                                        else {
+                                            return None;
+                                        };
+                                        template.object
+                                    }) {
+                                        mark_heap_reference(
+                                            HeapReference::Object(object),
+                                            &mut marked_functions,
+                                            &mut marked_objects,
+                                            &mut work,
+                                        );
                                     }
                                 }
                             }

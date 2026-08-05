@@ -3,11 +3,12 @@ use std::sync::Arc;
 use quickjs_bytecode::{
     AtomPoolIndex, BytecodeBuilder, BytecodePc, CompilerAtom, CompilerBigInt,
     CompilerCaptureLayout, CompilerClosureSource, CompilerConstant, CompilerConstantLayout,
-    CompilerConstantValue, CompilerString, FinalOpcode, FunctionGraphResource,
-    FunctionGraphVerificationErrorKind, FunctionGraphVerificationLimits, FunctionIndexDomains,
-    FunctionTemplateId, Operands, UnverifiedCompilerFunction, UnverifiedCompilerFunctionBody,
-    UnverifiedCompilerFunctionGraph, UnverifiedFunctionHeader, VerificationLimits,
-    verify_compiler_control_flow, verify_compiler_function_graph,
+    CompilerConstantValue, CompilerString, CompilerTemplateElement, CompilerTemplateObject,
+    FinalOpcode, FunctionGraphResource, FunctionGraphVerificationErrorKind,
+    FunctionGraphVerificationLimits, FunctionIndexDomains, FunctionTemplateId, Operands,
+    UnverifiedCompilerFunction, UnverifiedCompilerFunctionBody, UnverifiedCompilerFunctionGraph,
+    UnverifiedFunctionHeader, VerificationLimits, verify_compiler_control_flow,
+    verify_compiler_function_graph,
 };
 
 fn string(units: &[u16]) -> CompilerString {
@@ -508,6 +509,29 @@ fn graph_budgets_bigint_decimal_payload_bytes() {
     .expect("BigInt text payload limit is inclusive");
 
     assert_eq!(verified.usage().string_payload_bytes(), 20);
+}
+
+#[test]
+fn graph_budgets_all_tagged_template_text_payload_bytes() {
+    let value = CompilerTemplateObject::try_from_elements(Arc::from([
+        CompilerTemplateElement::new(Some(string(&[b'a'.into()])), string(&[b'a'.into()])),
+        CompilerTemplateElement::new(None, string(&[b'\\'.into(), b'u'.into()])),
+    ]))
+    .expect("template object");
+    let verified = graph(
+        graph_function(
+            0,
+            &[(FinalOpcode::ReturnUndef, Operands::None)],
+            Arc::from([]),
+            Arc::from([CompilerConstant::Value(
+                CompilerConstantValue::TemplateObject(value),
+            )]),
+        ),
+        FunctionGraphVerificationLimits::default().with_max_string_payload_bytes(4),
+    )
+    .expect("cooked and raw template payload limit is inclusive");
+
+    assert_eq!(verified.usage().string_payload_bytes(), 4);
 }
 
 #[test]

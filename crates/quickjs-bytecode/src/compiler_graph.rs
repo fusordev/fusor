@@ -170,6 +170,115 @@ impl CompilerBigInt {
     }
 }
 
+/// Invalid compiler-owned tagged-template site payload.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub enum CompilerTemplateObjectError {
+    /// Every template literal has at least one template element.
+    Empty,
+    /// An Array length cannot represent the template element count.
+    TooManyElements {
+        /// Rejected template element count.
+        observed: usize,
+    },
+}
+
+impl fmt::Display for CompilerTemplateObjectError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Empty => formatter.write_str("compiler template object has no elements"),
+            Self::TooManyElements { observed } => write!(
+                formatter,
+                "compiler template object has {observed} elements, exceeding the Array length domain"
+            ),
+        }
+    }
+}
+
+impl Error for CompilerTemplateObjectError {}
+
+/// One cooked/raw pair retained for a tagged-template parse node.
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
+pub struct CompilerTemplateElement {
+    cooked: Option<CompilerString>,
+    raw: CompilerString,
+}
+
+impl CompilerTemplateElement {
+    /// Creates one exact template element.
+    ///
+    /// `cooked` is absent only when the tagged source contains an invalid
+    /// escape sequence; `raw` always preserves the template source value.
+    #[must_use]
+    pub const fn new(cooked: Option<CompilerString>, raw: CompilerString) -> Self {
+        Self { cooked, raw }
+    }
+
+    /// Returns the cooked value, or `None` for an invalid escape sequence.
+    #[must_use]
+    pub const fn cooked(&self) -> Option<&CompilerString> {
+        self.cooked.as_ref()
+    }
+
+    /// Returns the exact raw template value.
+    #[must_use]
+    pub const fn raw(&self) -> &CompilerString {
+        &self.raw
+    }
+
+    fn payload_bytes(&self) -> u64 {
+        let cooked = self
+            .cooked
+            .as_ref()
+            .map_or(0, |value| usize_to_u64(value.payload_bytes()));
+        cooked.saturating_add(usize_to_u64(self.raw.payload_bytes()))
+    }
+}
+
+/// Exact immutable payload of one tagged-template parse node.
+///
+/// The runtime uses this value constant as the site identity and lazily
+/// materializes its realm-local frozen cooked and raw Arrays exactly once.
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
+pub struct CompilerTemplateObject {
+    elements: Arc<[CompilerTemplateElement]>,
+}
+
+impl CompilerTemplateObject {
+    /// Validates and owns a nonempty template element list.
+    ///
+    /// # Errors
+    ///
+    /// Rejects an empty list or a count outside the ECMAScript Array length
+    /// domain used by `GetTemplateObject`.
+    pub fn try_from_elements(
+        elements: Arc<[CompilerTemplateElement]>,
+    ) -> Result<Self, CompilerTemplateObjectError> {
+        if elements.is_empty() {
+            return Err(CompilerTemplateObjectError::Empty);
+        }
+        if u32::try_from(elements.len()).is_err() {
+            return Err(CompilerTemplateObjectError::TooManyElements {
+                observed: elements.len(),
+            });
+        }
+        Ok(Self { elements })
+    }
+
+    /// Returns the source-ordered cooked/raw template elements.
+    #[must_use]
+    pub fn elements(&self) -> &[CompilerTemplateElement] {
+        &self.elements
+    }
+
+    /// Returns all retained cooked and raw compact text payload bytes.
+    #[must_use]
+    pub fn payload_bytes(&self) -> u64 {
+        self.elements.iter().fold(0_u64, |total, element| {
+            total.saturating_add(element.payload_bytes())
+        })
+    }
+}
+
 fn format_binary64_for_javascript(value: f64) -> String {
     if value.is_nan() {
         return "NaN".to_owned();
@@ -276,6 +385,8 @@ pub enum CompilerConstantValue {
     String(CompilerString),
     /// An ECMAScript `BigInt` represented by canonical unsigned decimal digits.
     BigInt(CompilerBigInt),
+    /// One tagged-template site and its exact cooked/raw element values.
+    TemplateObject(CompilerTemplateObject),
 }
 
 /// Dense identity of one function template in a compiler graph.
@@ -1671,6 +1782,9 @@ fn function_string_payload_bytes(
             }
             CompilerConstant::Value(CompilerConstantValue::BigInt(value)) => {
                 usize_to_u64(value.payload_bytes())
+            }
+            CompilerConstant::Value(CompilerConstantValue::TemplateObject(value)) => {
+                value.payload_bytes()
             }
             CompilerConstant::Value(CompilerConstantValue::Number(_))
             | CompilerConstant::Function(_) => 0,

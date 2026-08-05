@@ -339,6 +339,9 @@ impl<'compiler, 'unit, 'arena, 'scope> ExpressionPlanner<'compiler, 'unit, 'aren
                         Expression::CallExpression(call) => {
                             Self::plan_call_expression(call, constants, &mut work)?;
                         }
+                        Expression::TaggedTemplateExpression(tagged) => {
+                            Self::plan_tagged_template_expression(tagged, constants, &mut work)?;
+                        }
                         Expression::NewExpression(constructor) => {
                             Self::plan_new_expression(constructor, &mut work)?;
                         }

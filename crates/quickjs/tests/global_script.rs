@@ -315,3 +315,122 @@ fn large_bigint_literals_materialize_exact_values() {
     .expect("large BigInt literal");
     assert_eq!(string(&value), "18446744073709551621");
 }
+
+#[test]
+fn tagged_templates_cache_frozen_cooked_and_raw_arrays_with_member_this() {
+    let mut runtime = Runtime::try_new(RuntimeLimits::default()).expect("runtime");
+    let realm = runtime.create_realm().expect("realm");
+    let mut context = runtime.context(&realm).expect("context");
+
+    let value = evaluate_script(
+        &mut context,
+        r#"
+        var saved;
+        var receiver = {
+          tag(strings, first, second) {
+            if (this !== receiver) throw new Error("receiver");
+            if (saved === undefined) saved = strings;
+            else if (saved !== strings) throw new Error("site identity");
+            if (!Object.isFrozen(strings) || !Object.isFrozen(strings.raw)) {
+              throw new Error("integrity");
+            }
+            var index = Object.getOwnPropertyDescriptor(strings, "0");
+            var raw = Object.getOwnPropertyDescriptor(strings, "raw");
+            if (index.writable || !index.enumerable || index.configurable) {
+              throw new Error("index descriptor");
+            }
+            if (raw.writable || raw.enumerable || raw.configurable) {
+              throw new Error("raw descriptor");
+            }
+            return strings[0] + first + strings[1] + second + strings[2]
+              + "|" + strings.raw[0];
+          }
+        };
+        function run(first, second) {
+          return receiver.tag`a\n${first}b${second}c`;
+        }
+        run("X", "Y") + ";" + run("P", "Q");
+        "#,
+        "tagged-template.js",
+        ScriptLimits::default(),
+    )
+    .expect("tagged template");
+    assert_eq!(string(&value), "a\nXbYc|a\\n;a\nPbQc|a\\n");
+}
+
+#[test]
+fn tagged_templates_preserve_invalid_escapes_as_undefined_cooked_values() {
+    let mut runtime = Runtime::try_new(RuntimeLimits::default()).expect("runtime");
+    let realm = runtime.create_realm().expect("realm");
+    let mut context = runtime.context(&realm).expect("context");
+
+    let value = evaluate_script(
+        &mut context,
+        r#"function capture(strings) {
+          return String(strings[0]) + "|" + strings.raw[0];
+        }
+        capture`\unicode`;"#,
+        "tagged-template-invalid-escape.js",
+        ScriptLimits::default(),
+    )
+    .expect("invalid escapes are admitted only by tagged templates");
+    assert_eq!(string(&value), "undefined|\\unicode");
+}
+
+#[test]
+fn tagged_templates_evaluate_the_tag_before_substitutions() {
+    let mut runtime = Runtime::try_new(RuntimeLimits::default()).expect("runtime");
+    let realm = runtime.create_realm().expect("realm");
+    let mut context = runtime.context(&realm).expect("context");
+
+    let value = evaluate_script(
+        &mut context,
+        r#"
+        var order = "";
+        var receiver = {
+          get tag() {
+            order += "tag";
+            return function () { order += "|call"; };
+          }
+        };
+        function substitution() { order += "|substitution"; return 0; }
+        receiver.tag`${substitution()}`;
+        order;
+        "#,
+        "tagged-template-order.js",
+        ScriptLimits::default(),
+    )
+    .expect("tag before substitution");
+    assert_eq!(string(&value), "tag|substitution|call");
+}
+
+#[test]
+fn tagged_template_site_cache_remains_live_through_cycle_collection() {
+    let mut runtime = Runtime::try_new(RuntimeLimits::default()).expect("runtime");
+    let realm = runtime.create_realm().expect("realm");
+
+    let first = {
+        let mut context = runtime.context(&realm).expect("context");
+        evaluate_script(
+            &mut context,
+            "function tag(strings) { return strings; }\n\
+             function site() { return tag`alive`; }\n\
+             site();",
+            "tagged-template-cache-create.js",
+            ScriptLimits::default(),
+        )
+        .expect("first site evaluation")
+    };
+    drop(first);
+    runtime.collect_cycles().expect("cycle collection");
+
+    let mut context = runtime.context(&realm).expect("context after collection");
+    let value = evaluate_script(
+        &mut context,
+        "site()[0] + '|' + (site() === site());",
+        "tagged-template-cache-reuse.js",
+        ScriptLimits::default(),
+    )
+    .expect("cached site survives collection");
+    assert_eq!(string(&value), "alive|true");
+}
