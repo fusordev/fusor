@@ -138,7 +138,7 @@ impl RealmIntrinsicSchema {
             FamilyCardinality {
                 family: "Realm native functions",
                 actual: self.specs.len(),
-                expected: 425,
+                expected: 427,
             },
         ];
         validate_intrinsic_schema(IntrinsicSchema {
@@ -292,6 +292,7 @@ pub(super) const fn is_declarative_function(id: IntrinsicFunctionId) -> bool {
             | NativeFunctionKind::JsonStringify
             | NativeFunctionKind::Math(_)
             | NativeFunctionKind::TemporalDurationConstructor
+            | NativeFunctionKind::TemporalDurationStatic(_)
             | NativeFunctionKind::TemporalDurationPrototype(_)
             | NativeFunctionKind::TemporalInstantConstructor
             | NativeFunctionKind::TemporalInstantStatic(_)
@@ -1088,7 +1089,7 @@ mod tests {
     #[test]
     fn complete_function_schema_has_characterized_cardinality_and_unique_ids() {
         let schema = RealmIntrinsicSchema::try_new().expect("function schema");
-        assert_eq!(schema.specs().len(), 425);
+        assert_eq!(schema.specs().len(), 427);
         assert_eq!(schema.constructor_prototypes.len(), 31);
         for (index, spec) in schema.specs().iter().enumerate() {
             assert!(

@@ -2328,6 +2328,13 @@ pub(super) fn dispatch_native_call_with_frames(
             origin.unwrap_or_else(native_function_host_origin),
             execution_budget,
         ),
+        NativeFunctionKind::TemporalDurationStatic(method) => dispatch_temporal_duration_static(
+            runtime,
+            method,
+            native.realm,
+            inputs.arguments,
+            origin.unwrap_or_else(native_function_host_origin),
+        ),
         NativeFunctionKind::TemporalDurationPrototype(method) => {
             let origin = origin.unwrap_or_else(native_function_host_origin);
             dispatch_temporal_duration_prototype(

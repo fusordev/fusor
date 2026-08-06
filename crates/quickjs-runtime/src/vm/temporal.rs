@@ -301,6 +301,80 @@ fn require_temporal_duration(
     }))
 }
 
+#[allow(
+    clippy::needless_pass_by_value,
+    reason = "native entry points receive one owned source frame consistently"
+)]
+pub(super) fn dispatch_temporal_duration_static(
+    runtime: &mut Runtime,
+    method: TemporalDurationStaticMethod,
+    realm: RealmId,
+    mut arguments: CallArguments,
+    origin: JsStackFrame,
+) -> Result<NativeDispatch, NativeFailure> {
+    let first =
+        to_temporal_duration_value(runtime, arguments.take_first_or_undefined(), realm, &origin)?;
+    match method {
+        TemporalDurationStaticMethod::From => {
+            allocate_temporal_duration_result(runtime, realm, first)
+        }
+        TemporalDurationStaticMethod::Compare => {
+            let second = to_temporal_duration_value(
+                runtime,
+                arguments.take_first_or_undefined(),
+                realm,
+                &origin,
+            )?;
+            let ordering = match first.compare(&second, None) {
+                Ok(ordering) => ordering,
+                Err(error) => {
+                    return Err(NativeFailure::Abrupt(temporal_exception_from_error(
+                        realm, &origin, error,
+                    )?));
+                }
+            };
+            let value = match ordering {
+                std::cmp::Ordering::Less => -1,
+                std::cmp::Ordering::Equal => 0,
+                std::cmp::Ordering::Greater => 1,
+            };
+            Ok(NativeDispatch::Immediate(StoredValue::Number(
+                JsNumber::from_i32(value),
+            )))
+        }
+    }
+}
+
+fn to_temporal_duration_value(
+    runtime: &Runtime,
+    value: StoredValue,
+    realm: RealmId,
+    origin: &JsStackFrame,
+) -> Result<Duration, NativeFailure> {
+    if let StoredValue::Object(object) = value
+        && let Some(duration) = runtime.temporal_duration(object)?
+    {
+        return Ok(duration);
+    }
+    if let StoredValue::String(value) = value {
+        let source = value.to_utf8_lossy()?;
+        return match Duration::from_utf8(source.as_bytes()) {
+            Ok(duration) => Ok(duration),
+            Err(error) => Err(NativeFailure::Abrupt(temporal_range_exception_from_error(
+                realm, origin, error,
+            )?)),
+        };
+    }
+    Err(NativeFailure::Abrupt(PendingException {
+        realm,
+        payload: PendingExceptionPayload::EngineError {
+            kind: ExceptionKind::TypeError,
+            message: JsString::from_utf8("Temporal.Duration requires a string or property bag")?,
+        },
+        origin: origin.clone(),
+    }))
+}
+
 pub(super) fn begin_temporal_instant_constructor(
     runtime: &mut Runtime,
     realm: RealmId,

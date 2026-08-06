@@ -13,7 +13,7 @@ use super::{
 };
 use crate::runtime::{
     DatePrototypeMethod, DateStaticMethod, TemporalDurationPrototypeMethod,
-    TemporalInstantPrototypeMethod, TemporalInstantStaticMethod,
+    TemporalDurationStaticMethod, TemporalInstantPrototypeMethod, TemporalInstantStaticMethod,
 };
 
 /// Stable identity of an object allocated by Realm bootstrap.
@@ -159,6 +159,7 @@ pub(in crate::runtime) enum RealmNameId {
     Temporal,
     Duration,
     Instant,
+    TemporalDurationStatic(TemporalDurationStaticMethod),
     TemporalDurationPrototype(TemporalDurationPrototypeMethod),
     TemporalInstantStatic(TemporalInstantStaticMethod),
     TemporalInstantPrototype(TemporalInstantPrototypeMethod),

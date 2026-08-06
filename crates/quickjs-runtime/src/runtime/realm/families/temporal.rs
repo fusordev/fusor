@@ -14,7 +14,8 @@ use crate::runtime::realm::{
     },
 };
 use crate::runtime::{
-    TemporalDurationPrototypeMethod, TemporalInstantPrototypeMethod, TemporalInstantStaticMethod,
+    TemporalDurationPrototypeMethod, TemporalDurationStaticMethod, TemporalInstantPrototypeMethod,
+    TemporalInstantStaticMethod,
 };
 
 pub(super) fn visit_objects(visit: ObjectSink<'_>) {
@@ -37,6 +38,21 @@ pub(super) fn visit_functions(visit: FunctionSink<'_>) {
         IntrinsicNameSpec::Literal("Duration"),
         0,
     ));
+    for method in TemporalDurationStaticMethod::ALL {
+        let name = match method {
+            TemporalDurationStaticMethod::From => {
+                IntrinsicNameSpec::Predefined(PredefinedAtom::From)
+            }
+            TemporalDurationStaticMethod::Compare => {
+                IntrinsicNameSpec::RealmName(RealmNameId::TemporalDurationStatic(method))
+            }
+        };
+        visit(ordinary(
+            NativeFunctionKind::TemporalDurationStatic(method),
+            name,
+            method.length(),
+        ));
+    }
     for method in TemporalDurationPrototypeMethod::ALL {
         let name = match method {
             TemporalDurationPrototypeMethod::ToString => {
@@ -147,6 +163,21 @@ pub(super) fn visit_properties(visit: PropertySink<'_>) {
         IntrinsicKeySpec::PredefinedString(PredefinedAtom::Constructor),
         NativeFunctionKind::TemporalDurationConstructor,
     ));
+    for method_id in TemporalDurationStaticMethod::ALL {
+        let key = match method_id {
+            TemporalDurationStaticMethod::From => {
+                IntrinsicKeySpec::PredefinedString(PredefinedAtom::From)
+            }
+            TemporalDurationStaticMethod::Compare => {
+                IntrinsicKeySpec::InternedString(RealmNameId::TemporalDurationStatic(method_id))
+            }
+        };
+        visit(method(
+            duration_constructor,
+            key,
+            NativeFunctionKind::TemporalDurationStatic(method_id),
+        ));
+    }
     for method_id in TemporalDurationPrototypeMethod::ALL {
         let key = match method_id {
             TemporalDurationPrototypeMethod::ToString => {

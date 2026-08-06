@@ -202,3 +202,41 @@ fn duration_abs_negated_and_subclass_prototypes_allocate_fresh_branded_values() 
         "2|3|false|-2|-3|true|1|P1Y"
     );
 }
+
+#[test]
+fn duration_from_parses_strings_and_copies_branded_values() {
+    assert_eq!(
+        rendered(
+            "var first=Temporal.Duration.from('P1Y2M3DT4H5M6.007008009S');
+             var copy=Temporal.Duration.from(first);
+             return [Temporal.Duration.from.length,Temporal.Duration.from.name,
+               first.toString(),copy.toString(),first===copy].join('|');"
+        ),
+        "1|from|P1Y2M3DT4H5M6.007008009S|P1Y2M3DT4H5M6.007008009S|false"
+    );
+    assert_eq!(
+        thrown("return Temporal.Duration.from('not a duration');"),
+        ExceptionKind::RangeError
+    );
+    assert_eq!(
+        thrown("return Temporal.Duration.from(1);"),
+        ExceptionKind::TypeError
+    );
+}
+
+#[test]
+fn duration_compare_orders_time_units_and_requires_context_for_calendar_units() {
+    assert_eq!(
+        rendered(
+            "var a=Temporal.Duration.from('PT5H5M'),b=Temporal.Duration.from('PT5H4M');
+             return [Temporal.Duration.compare.length,Temporal.Duration.compare.name,
+               Temporal.Duration.compare(a,a),Temporal.Duration.compare(a,b),
+               Temporal.Duration.compare(b,a),Temporal.Duration.compare('-PT1S','PT0S')].join('|');"
+        ),
+        "2|compare|0|1|-1|-1"
+    );
+    assert_eq!(
+        thrown("return Temporal.Duration.compare('P1Y','P2Y');"),
+        ExceptionKind::RangeError
+    );
+}

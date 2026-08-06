@@ -140,9 +140,9 @@ mod tests {
         assert_eq!(plan.dynamic_atom_code_units, 2_261);
         assert_eq!(plan.realms, 1);
         assert_eq!(plan.objects, 45);
-        assert_eq!(plan.functions, 425);
+        assert_eq!(plan.functions, 427);
         assert_eq!(plan.global_bindings, 0);
-        assert_eq!(plan.object_properties, 1_426);
-        assert_eq!(plan.journal_entries, 737);
+        assert_eq!(plan.object_properties, 1_432);
+        assert_eq!(plan.journal_entries, 739);
     }
 }

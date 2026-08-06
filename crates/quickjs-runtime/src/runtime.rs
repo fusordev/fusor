@@ -1245,6 +1245,7 @@ pub(crate) enum NativeFunctionKind {
     DateStatic(DateStaticMethod),
     DatePrototype(DatePrototypeMethod),
     TemporalDurationConstructor,
+    TemporalDurationStatic(TemporalDurationStaticMethod),
     TemporalDurationPrototype(TemporalDurationPrototypeMethod),
     TemporalInstantConstructor,
     TemporalInstantStatic(TemporalInstantStaticMethod),
@@ -1659,6 +1660,30 @@ pub(crate) enum TemporalDurationPrototypeMethod {
     ToJson,
     ToLocaleString,
     ValueOf,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum TemporalDurationStaticMethod {
+    From,
+    Compare,
+}
+
+impl TemporalDurationStaticMethod {
+    pub(crate) const ALL: [Self; 2] = [Self::From, Self::Compare];
+
+    pub(crate) const fn name(self) -> &'static str {
+        match self {
+            Self::From => "from",
+            Self::Compare => "compare",
+        }
+    }
+
+    pub(crate) const fn length(self) -> i32 {
+        match self {
+            Self::From => 1,
+            Self::Compare => 2,
+        }
+    }
 }
 
 impl TemporalDurationPrototypeMethod {

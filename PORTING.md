@@ -107,7 +107,7 @@ does not imply complete ECMAScript or QuickJS compatibility.
 - [x] Typed same-site iterator state covers Array/String iteration, spread,
   destructuring, `for-of`, `IteratorClose`, and original-abrupt precedence.
 - [x] Validated schemas derive Realm allocation and rollback. The normalized
-  snapshot pins 470 Realm-local identities and 1,426 ordered properties.
+  snapshot pins 472 Realm-local identities and 1,432 ordered properties.
 - [x] Proxy and exotic-object integration covers all 11 internal methods,
   revocation/invariants, reflection, descriptors/integrity, constructors,
   iterators, Arrays, strings, RegExp, Promise, and JSON. Audited built-in
@@ -189,7 +189,9 @@ does not imply complete ECMAScript or QuickJS compatibility.
   `%Temporal.Duration%` now has spec-ordered ten-field construction, branded
   accessors, `sign`/`blank`, `abs`/`negated`, default string/JSON and non-Intl
   locale fallback, subclass prototype selection, and primitive rejection over
-  `temporal_rs::Duration` (6/6 VM; 48/48 selected Test262 modes). The full
+  `temporal_rs::Duration`; string/branded `from` and context-free time-unit
+  `compare` share the same kernel (8/8 VM; 48/48 selected Test262 foundation
+  modes). The full
   Duration subtree audit is 252/1,066 before `from`/`compare` and arithmetic/
   rounding land. `Date.prototype.toTemporalInstant` is complete (16/16).
   Complete Duration conversion/arithmetic, then Instant arithmetic/rounding/

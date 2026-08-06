@@ -4,7 +4,7 @@ use crate::{
     Atom,
     runtime::{
         DatePrototypeMethod, DateStaticMethod, TemporalDurationPrototypeMethod,
-        TemporalInstantPrototypeMethod, TemporalInstantStaticMethod,
+        TemporalDurationStaticMethod, TemporalInstantPrototypeMethod, TemporalInstantStaticMethod,
     },
 };
 
@@ -259,6 +259,9 @@ fn visit_realm_name_order(
     visit(RealmNameId::Temporal)?;
     visit(RealmNameId::Duration)?;
     visit(RealmNameId::Instant)?;
+    for method in TemporalDurationStaticMethod::ALL {
+        visit(RealmNameId::TemporalDurationStatic(method))?;
+    }
     for method in TemporalDurationPrototypeMethod::ALL {
         visit(RealmNameId::TemporalDurationPrototype(method))?;
     }
@@ -478,6 +481,7 @@ fn realm_name_description(id: RealmNameId) -> &'static str {
         RealmNameId::Temporal => "Temporal",
         RealmNameId::Duration => "Duration",
         RealmNameId::Instant => "Instant",
+        RealmNameId::TemporalDurationStatic(method) => method.name(),
         RealmNameId::TemporalDurationPrototype(method) => method.name(),
         RealmNameId::TemporalInstantStatic(method) => method.name(),
         RealmNameId::TemporalInstantPrototype(method) => method.name(),
