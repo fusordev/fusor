@@ -180,33 +180,6 @@ fn a_direct_anonymous_base_class_assignment_uses_its_target_name() {
 }
 
 #[test]
-fn a_static_property_anonymous_base_class_assignment_uses_its_target_name() {
-    let tree = compile(
-        "function make(holder){return holder.Result=class{static answer(){return 7;}};}",
-        "make",
-    );
-    assert_eq!(tree.functions().len(), 3);
-    assert!(
-        tree.root()
-            .control_flow()
-            .instructions()
-            .iter()
-            .any(|instruction| instruction.decoded().instruction().opcode()
-                == FinalOpcode::DefineClass),
-        "the inferred name is supplied to define_class, not a post-closure SetName"
-    );
-    assert!(
-        !tree
-            .root()
-            .control_flow()
-            .instructions()
-            .iter()
-            .any(|instruction| instruction.decoded().instruction().opcode() == FinalOpcode::SetName),
-        "class inference cannot reuse the ordinary-function SetName opcode"
-    );
-}
-
-#[test]
 fn named_class_member_writes_retain_a_dedicated_immutable_class_name_capture() {
     let tree = compile(
         "function make(){class Box{static replace(){Box=0;}}return Box;}",
@@ -300,6 +273,31 @@ fn computed_static_class_fields_use_the_typed_dynamic_definition_path() {
             .count(),
         1
     );
+}
+
+#[test]
+fn static_property_class_assignments_stay_fail_closed_until_empty_name_authority_exists() {
+    let error = with_parsed_program(
+        "function make(holder){return holder.Result=class{};}",
+        FrontendOptions::for_goal(CompilationGoal::GlobalScript(GlobalScriptGoal::new())),
+        |unit| {
+            let context = CompilationContext::new(unit).expect("storage plan");
+            let root = context
+                .executables()
+                .find(|executable| executable.metadata().name() == Some("make"))
+                .expect("root function");
+            context.compile_tree(&root, VerificationLimits::default())
+        },
+    )
+    .expect("frontend")
+    .expect_err("an anonymous class property assignment needs empty-name authority");
+    assert!(matches!(
+        error,
+        quickjs_compiler::LeafCompilationError::Unsupported {
+            feature: quickjs_compiler::UnsupportedLeafFeature::InferredFunctionName,
+            ..
+        }
+    ));
 }
 
 #[test]
