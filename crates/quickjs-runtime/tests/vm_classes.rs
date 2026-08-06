@@ -440,3 +440,25 @@ fn static_public_fields_evaluate_on_the_constructor() {
         },
     );
 }
+
+#[test]
+fn static_field_initializers_receive_the_class_and_undefined_new_target() {
+    run_with(
+        "function run(){class Box{static receiver=this;static target=new.target;static captured=()=>this;static capturedTarget=()=>new.target;static ordinary=function(){return this;}}return Box.receiver===Box&&Box.target===void 0&&Box.captured()===Box&&Box.capturedTarget()===void 0&&Box.ordinary()===Box;}",
+        |result| {
+            let value = result.expect("static class receiver execution");
+            assert_eq!(value.as_boolean().expect("live Boolean"), Some(true));
+        },
+    );
+}
+
+#[test]
+fn anonymous_class_static_field_receivers_use_the_created_constructor() {
+    run_with(
+        "function run(){let Box=class{static receiver=this;static captured=()=>this;};return Box.receiver===Box&&Box.captured()===Box;}",
+        |result| {
+            let value = result.expect("anonymous static class receiver execution");
+            assert_eq!(value.as_boolean().expect("live Boolean"), Some(true));
+        },
+    );
+}

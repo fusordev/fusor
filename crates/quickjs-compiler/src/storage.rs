@@ -266,6 +266,9 @@ pub enum DeclarationKind {
     /// The compiler-created immutable cell that retains one evaluated
     /// computed public instance-field key for its class definition.
     ClassFieldKey,
+    /// The compiler-created immutable class-scope cell that holds a class
+    /// constructor while its static field initializers execute.
+    ClassStaticReceiver,
     /// A function declaration.
     Function,
     /// A named function-expression binding.
@@ -600,6 +603,9 @@ pub(crate) struct OxcIdentityMap {
     /// field. Constructors capture these cells so field construction never
     /// re-evaluates an observable key expression.
     pub(crate) class_field_key_bindings: HashMap<NodeId, BindingId>,
+    /// The immutable class-scope receiver cell for each class whose static
+    /// field initializer lexically observes `this`.
+    pub(crate) class_static_receiver_bindings: HashMap<NodeId, BindingId>,
     pub(crate) scope_by_binding: Box<[Option<ScopeId>]>,
     pub(crate) reference_by_id: Box<[Option<NativeReferenceId>]>,
 }
@@ -734,6 +740,9 @@ pub enum UnsupportedFeature {
     AnonymousDefaultClassExport,
     /// A synthesized `this`, `new.target`, or `super` binding.
     FunctionSyntheticBinding,
+    /// `super` in a static field initializer needs the class home-object
+    /// lowering that is intentionally not part of the current class slice.
+    StaticFieldSuper,
 }
 
 /// Storage-planning failure.
@@ -828,6 +837,7 @@ struct BindingDraft {
     primary_symbol_binding: bool,
     class_node: Option<NodeId>,
     class_field_node: Option<NodeId>,
+    class_static_receiver_node: Option<NodeId>,
     executable: ExecutableId,
     name: Arc<str>,
     declaration_spans: Arc<[Span]>,
@@ -843,6 +853,7 @@ struct FrozenBindings {
     by_declaration: HashMap<(SymbolId, u32, u32), BindingId>,
     class_name_bindings: HashMap<NodeId, BindingId>,
     class_field_key_bindings: HashMap<NodeId, BindingId>,
+    class_static_receiver_bindings: HashMap<NodeId, BindingId>,
 }
 
 #[derive(Default)]
@@ -1036,6 +1047,7 @@ impl<'unit, 'arena, 'scope> Planner<'unit, 'arena, 'scope> {
         self.add_synthetic_default_binding(&mut binding_drafts)?;
         self.add_class_name_bindings(&mut binding_drafts)?;
         self.add_class_field_key_bindings(&mut binding_drafts)?;
+        self.add_class_static_receiver_bindings(&mut binding_drafts)?;
         binding_drafts.sort_by_key(|binding| {
             let first = binding
                 .declaration_spans
@@ -1057,12 +1069,14 @@ impl<'unit, 'arena, 'scope> Planner<'unit, 'arena, 'scope> {
             by_declaration: declaration_bindings,
             class_name_bindings,
             class_field_key_bindings,
+            class_static_receiver_bindings,
         } = self.freeze_binding_drafts(binding_drafts)?;
         let scope_by_binding = self.binding_scope_map(
             &symbol_bindings,
             &source_symbols,
             &class_name_bindings,
             &class_field_key_bindings,
+            &class_static_receiver_bindings,
             &bindings,
         )?;
 
@@ -1091,11 +1105,23 @@ impl<'unit, 'arena, 'scope> Planner<'unit, 'arena, 'scope> {
         });
         let class_field_key_captures =
             self.class_field_key_capture_requests(&class_field_key_bindings, &bindings)?;
+        let class_static_receiver_captures = self
+            .class_static_receiver_capture_requests(&class_static_receiver_bindings, &bindings)?;
+        let mut synthetic_captures = class_field_key_captures;
+        synthetic_captures.extend(class_static_receiver_captures);
+        synthetic_captures.sort_unstable_by_key(|request| {
+            (
+                request.executable.index(),
+                request.binding.index(),
+                request.span.start,
+                request.span.end,
+            )
+        });
         let frame_captures = plan_frame_captures(
             &self.executable_drafts,
             &mut bindings,
             &resolved_drafts,
-            &class_field_key_captures,
+            &synthetic_captures,
         )?;
 
         unresolved_drafts.sort_by_key(|reference| {
@@ -1153,6 +1179,7 @@ impl<'unit, 'arena, 'scope> Planner<'unit, 'arena, 'scope> {
                 default_class_constructors: self.default_class_constructors,
                 class_name_bindings,
                 class_field_key_bindings,
+                class_static_receiver_bindings,
                 scope_by_binding: scope_by_binding.into_boxed_slice(),
                 reference_by_id: reference_by_id.into_boxed_slice(),
             },
@@ -1172,6 +1199,7 @@ impl<'unit, 'arena, 'scope> Planner<'unit, 'arena, 'scope> {
         source_symbols: &[Option<SymbolId>],
         class_name_bindings: &HashMap<NodeId, BindingId>,
         class_field_key_bindings: &HashMap<NodeId, BindingId>,
+        class_static_receiver_bindings: &HashMap<NodeId, BindingId>,
         bindings: &[BindingStorage],
     ) -> Result<Vec<Option<ScopeId>>, CompilerError> {
         let scoping = self.unit.semantic().scoping();
@@ -1260,6 +1288,7 @@ impl<'unit, 'arena, 'scope> Planner<'unit, 'arena, 'scope> {
             }
         }
         self.bind_class_field_key_scopes(&mut scopes, class_field_key_bindings)?;
+        self.bind_class_static_receiver_scopes(&mut scopes, class_static_receiver_bindings)?;
         Ok(scopes)
     }
 
@@ -1306,6 +1335,35 @@ impl<'unit, 'arena, 'scope> Planner<'unit, 'arena, 'scope> {
                 return Err(CompilerError::SemanticInvariant {
                     invariant: "synthetic class-field key binding has one class scope",
                     span: Some(field.span),
+                });
+            }
+        }
+        Ok(())
+    }
+
+    fn bind_class_static_receiver_scopes(
+        &self,
+        scopes: &mut [Option<ScopeId>],
+        class_static_receiver_bindings: &HashMap<NodeId, BindingId>,
+    ) -> Result<(), CompilerError> {
+        for (&node_id, &binding) in class_static_receiver_bindings {
+            let AstKind::Class(class) = self.unit.semantic().nodes().kind(node_id) else {
+                return Err(CompilerError::SemanticInvariant {
+                    invariant: "class static-receiver binding belongs to a class node",
+                    span: None,
+                });
+            };
+            let target =
+                scopes
+                    .get_mut(binding.index())
+                    .ok_or(CompilerError::SemanticInvariant {
+                        invariant: "class static-receiver binding scope index is in range",
+                        span: Some(class.span),
+                    })?;
+            if target.replace(class.scope_id()).is_some() {
+                return Err(CompilerError::SemanticInvariant {
+                    invariant: "class static-receiver binding has one class scope",
+                    span: Some(class.span),
                 });
             }
         }
@@ -1723,6 +1781,10 @@ impl<'unit, 'arena, 'scope> Planner<'unit, 'arena, 'scope> {
         Ok(())
     }
 
+    #[allow(
+        clippy::too_many_lines,
+        reason = "the synthetic new.target and super validator keeps its owner exceptions in one audited path"
+    )]
     fn reject_synthetic_binding_uses(&self) -> Result<(), CompilerError> {
         let nodes = self.unit.semantic().nodes();
         for (node_id, node) in nodes.iter_enumerated() {
@@ -1731,6 +1793,15 @@ impl<'unit, 'arena, 'scope> Planner<'unit, 'arena, 'scope> {
                 AstKind::Super(expression) => (expression.span, false),
                 _ => continue,
             };
+            let static_field_owner = self.static_field_initializer_class_for_node(node_id)?;
+            if new_target && static_field_owner.is_some() {
+                // ClassDefinitionEvaluation supplies `undefined`, rather than
+                // the enclosing function's new.target, for this lexical site.
+                continue;
+            }
+            if !new_target && static_field_owner.is_some() {
+                return unsupported(UnsupportedFeature::StaticFieldSuper, span);
+            }
             let instance_field_owner = self.instance_field_initializer_owner(node_id)?;
             let owner =
                 instance_field_owner.unwrap_or(self.scope_owner(node.scope_id(), Some(span))?);
@@ -1871,6 +1942,7 @@ impl<'unit, 'arena, 'scope> Planner<'unit, 'arena, 'scope> {
                     primary_symbol_binding: false,
                     class_node: None,
                     class_field_node: None,
+                    class_static_receiver_node: None,
                     executable: owner,
                     name: Arc::clone(&name),
                     declaration_spans: parameter_spans.into(),
@@ -1888,6 +1960,7 @@ impl<'unit, 'arena, 'scope> Planner<'unit, 'arena, 'scope> {
                     primary_symbol_binding: true,
                     class_node: None,
                     class_field_node: None,
+                    class_static_receiver_node: None,
                     executable: owner,
                     name,
                     declaration_spans: body_spans.into(),
@@ -1910,6 +1983,7 @@ impl<'unit, 'arena, 'scope> Planner<'unit, 'arena, 'scope> {
                 primary_symbol_binding: true,
                 class_node: None,
                 class_field_node: None,
+                class_static_receiver_node: None,
                 executable: owner,
                 name,
                 declaration_spans,
@@ -2027,6 +2101,7 @@ impl<'unit, 'arena, 'scope> Planner<'unit, 'arena, 'scope> {
                 DeclarationKind::FunctionName
                 | DeclarationKind::ClassName
                 | DeclarationKind::ClassFieldKey
+                | DeclarationKind::ClassStaticReceiver
                 | DeclarationKind::Parameter
                 | DeclarationKind::Catch
                 | DeclarationKind::Import
@@ -2047,6 +2122,7 @@ impl<'unit, 'arena, 'scope> Planner<'unit, 'arena, 'scope> {
                 DeclarationKind::FunctionName
                 | DeclarationKind::ClassName
                 | DeclarationKind::ClassFieldKey
+                | DeclarationKind::ClassStaticReceiver
                 | DeclarationKind::Parameter
                 | DeclarationKind::Catch
                 | DeclarationKind::SyntheticDefault => Err(CompilerError::SemanticInvariant {
@@ -2083,7 +2159,8 @@ impl<'unit, 'arena, 'scope> Planner<'unit, 'arena, 'scope> {
             ),
             DeclarationKind::Const
             | DeclarationKind::ClassName
-            | DeclarationKind::ClassFieldKey => (
+            | DeclarationKind::ClassFieldKey
+            | DeclarationKind::ClassStaticReceiver => (
                 InitializationPolicy::AtDeclaration,
                 WritePolicy::Immutable,
                 true,
@@ -2166,6 +2243,7 @@ impl<'unit, 'arena, 'scope> Planner<'unit, 'arena, 'scope> {
             primary_symbol_binding: false,
             class_node: None,
             class_field_node: None,
+            class_static_receiver_node: None,
             executable: ExecutableId(0),
             name: Arc::from("*default*"),
             declaration_spans: synthetic_spans.into(),
@@ -2199,6 +2277,7 @@ impl<'unit, 'arena, 'scope> Planner<'unit, 'arena, 'scope> {
                 primary_symbol_binding: false,
                 class_node: Some(node_id),
                 class_field_node: None,
+                class_static_receiver_node: None,
                 executable: owner,
                 name: Arc::from(identifier.name.as_str()),
                 declaration_spans: Arc::from([identifier.span]),
@@ -2236,6 +2315,7 @@ impl<'unit, 'arena, 'scope> Planner<'unit, 'arena, 'scope> {
                     primary_symbol_binding: false,
                     class_node: None,
                     class_field_node: Some(field_node),
+                    class_static_receiver_node: None,
                     executable: owner,
                     name: Arc::from(format!("[[class-field-key:{}]]", field_node.index())),
                     declaration_spans: Arc::from([field.key.span()]),
@@ -2317,6 +2397,148 @@ impl<'unit, 'arena, 'scope> Planner<'unit, 'arena, 'scope> {
             )
         });
         Ok(requests)
+    }
+
+    /// Adds the class-definition receiver cell only when a static field value
+    /// lexically observes `this`. The class scope owns the cell, while arrow
+    /// function frames capture it like every other lexical binding.
+    fn add_class_static_receiver_bindings(
+        &self,
+        bindings: &mut Vec<BindingDraft>,
+    ) -> Result<(), CompilerError> {
+        let semantic = self.unit.semantic();
+        for (class_node, node) in semantic.nodes().iter_enumerated() {
+            let AstKind::Class(class) = node.kind() else {
+                continue;
+            };
+            if !self.class_static_receiver_is_used(class_node)? {
+                continue;
+            }
+            let owner = self.scope_owner(class.scope_id(), Some(class.span))?;
+            bindings.push(BindingDraft {
+                symbol_id: None,
+                primary_symbol_binding: false,
+                class_node: None,
+                class_field_node: None,
+                class_static_receiver_node: Some(class_node),
+                executable: owner,
+                name: Arc::from(format!("[[class-static-receiver:{}]]", class_node.index())),
+                declaration_spans: Arc::from([class.span]),
+                placement: StoragePlacement::Local,
+                policy: self.declaration_policy(owner, DeclarationKind::ClassStaticReceiver, false),
+                arguments_object: false,
+            });
+        }
+        Ok(())
+    }
+
+    fn class_static_receiver_is_used(&self, class_node: NodeId) -> Result<bool, CompilerError> {
+        let nodes = self.unit.semantic().nodes();
+        for (node_id, node) in nodes.iter_enumerated() {
+            if !matches!(node.kind(), AstKind::ThisExpression(_)) {
+                continue;
+            }
+            if self.static_field_initializer_class_for_node(node_id)? == Some(class_node) {
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    }
+
+    fn class_static_receiver_capture_requests(
+        &self,
+        class_static_receiver_bindings: &HashMap<NodeId, BindingId>,
+        bindings: &[BindingStorage],
+    ) -> Result<Vec<CaptureRequest>, CompilerError> {
+        let nodes = self.unit.semantic().nodes();
+        let mut requests = Vec::new();
+        for (node_id, node) in nodes.iter_enumerated() {
+            let AstKind::ThisExpression(expression) = node.kind() else {
+                continue;
+            };
+            let Some(class_node) = self.static_field_initializer_class_for_node(node_id)? else {
+                continue;
+            };
+            let binding = class_static_receiver_bindings
+                .get(&class_node)
+                .copied()
+                .ok_or(CompilerError::SemanticInvariant {
+                    invariant: "static field this has a class receiver binding",
+                    span: Some(expression.span),
+                })?;
+            let storage =
+                bindings
+                    .get(binding.index())
+                    .ok_or(CompilerError::SemanticInvariant {
+                        invariant: "class static-receiver capture binding exists",
+                        span: Some(expression.span),
+                    })?;
+            if storage.placement != StoragePlacement::Local
+                || storage.policy.kind != DeclarationKind::ClassStaticReceiver
+            {
+                return Err(CompilerError::SemanticInvariant {
+                    invariant: "class static-receiver capture uses an immutable local binding",
+                    span: Some(expression.span),
+                });
+            }
+            let executable = self.scope_owner(node.scope_id(), Some(expression.span))?;
+            if executable != storage.executable {
+                requests.push(CaptureRequest {
+                    executable,
+                    binding,
+                    span: expression.span,
+                });
+            }
+        }
+        requests.sort_unstable_by_key(|request| {
+            (
+                request.executable.index(),
+                request.binding.index(),
+                request.span.start,
+                request.span.end,
+            )
+        });
+        requests.dedup_by_key(|request| (request.executable, request.binding));
+        Ok(requests)
+    }
+
+    /// Returns the innermost class whose static field *value* lexically owns
+    /// `node_id`. Ordinary functions establish their own `this` and
+    /// `new.target`; arrows deliberately do not.
+    fn static_field_initializer_class_for_node(
+        &self,
+        node_id: NodeId,
+    ) -> Result<Option<NodeId>, CompilerError> {
+        let nodes = self.unit.semantic().nodes();
+        let node_span = nodes.kind(node_id).span();
+        for ancestor in nodes.ancestor_ids(node_id) {
+            match nodes.kind(ancestor) {
+                AstKind::Function(_) => return Ok(None),
+                AstKind::PropertyDefinition(field)
+                    if field.r#static
+                        && field
+                            .value
+                            .as_ref()
+                            .is_some_and(|value| span_within(node_span, value.span())) =>
+                {
+                    let AstKind::ClassBody(body) = nodes.parent_kind(field.node_id.get()) else {
+                        return Err(CompilerError::SemanticInvariant {
+                            invariant: "static field belongs to a class body",
+                            span: Some(field.span),
+                        });
+                    };
+                    let AstKind::Class(class) = nodes.parent_kind(body.node_id.get()) else {
+                        return Err(CompilerError::SemanticInvariant {
+                            invariant: "static field class body belongs to a class",
+                            span: Some(body.span),
+                        });
+                    };
+                    return Ok(Some(class.node_id.get()));
+                }
+                _ => {}
+            }
+        }
+        Ok(None)
     }
 
     fn synthetic_default_policy(&self) -> Result<DeclarationPolicy, CompilerError> {
@@ -2556,6 +2778,7 @@ impl<'unit, 'arena, 'scope> Planner<'unit, 'arena, 'scope> {
                 primary_symbol_binding: false,
                 class_node: None,
                 class_field_node: None,
+                class_static_receiver_node: None,
                 executable: owner,
                 name: Arc::from("arguments"),
                 declaration_spans: Arc::from([span]),
@@ -3049,6 +3272,7 @@ fn freeze_bindings(
     let mut declaration_bindings = HashMap::new();
     let mut class_name_bindings = HashMap::new();
     let mut class_field_key_bindings = HashMap::new();
+    let mut class_static_receiver_bindings = HashMap::new();
     for (index, draft) in drafts.into_iter().enumerate() {
         let id = u32::try_from(index)
             .map(BindingId)
@@ -3095,6 +3319,16 @@ fn freeze_bindings(
                 span: draft.declaration_spans.first().copied(),
             });
         }
+        if let Some(class_node) = draft.class_static_receiver_node
+            && class_static_receiver_bindings
+                .insert(class_node, id)
+                .is_some()
+        {
+            return Err(CompilerError::SemanticInvariant {
+                invariant: "one synthetic class static-receiver binding per class node",
+                span: draft.declaration_spans.first().copied(),
+            });
+        }
         source_symbols.push(draft.symbol_id);
         bindings.push(BindingStorage {
             id,
@@ -3120,6 +3354,7 @@ fn freeze_bindings(
         by_declaration: declaration_bindings,
         class_name_bindings,
         class_field_key_bindings,
+        class_static_receiver_bindings,
     })
 }
 

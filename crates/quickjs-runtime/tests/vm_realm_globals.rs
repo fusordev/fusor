@@ -48,6 +48,7 @@ fn policy(kind: CompilerBindingKind) -> CompilerBindingPolicy {
         | CompilerBindingKind::FunctionName
         | CompilerBindingKind::ClassName
         | CompilerBindingKind::ClassFieldKey
+        | CompilerBindingKind::ClassStaticReceiver
         | CompilerBindingKind::Catch
         | CompilerBindingKind::Let
         | CompilerBindingKind::Const => panic!("unsupported fixture policy"),

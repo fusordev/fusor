@@ -6,12 +6,12 @@ use super::super::{
     ComputedMemberExpression, ConditionalExpression, DeclarationKind, ExecutableId, ExecutableKind,
     Expression, FinalOpcode, FrameLayout, FrameSlot, Function, FunctionTreeLayout, GetSpan,
     IdentifierReference, InitializationPolicy, LeafCompilationError, LogicalExpression,
-    LogicalOperator, LoweredReference, MethodDefinition, MethodDefinitionKind, ObjectExpression,
-    ObjectProperty, ObjectPropertyKind, Operands, PlannedControlFlow, PlannedInstruction,
-    PropertyDefinition, PropertyKind, SequenceExpression, SimpleAssignmentTarget, Span,
-    StaticMemberExpression, StoragePlacement, UnaryExpression, UnaryOperator,
-    UnsupportedLeafFeature, UpdateExpression, UpdateOperator, compiled_static_property_key,
-    object_method_or_accessor_span, plan_put_slot, unsupported,
+    LogicalOperator, LoweredReference, MethodDefinition, MethodDefinitionKind, NodeId,
+    ObjectExpression, ObjectProperty, ObjectPropertyKind, Operands, PlannedControlFlow,
+    PlannedInstruction, PropertyDefinition, PropertyKind, SequenceExpression,
+    SimpleAssignmentTarget, Span, StaticMemberExpression, StoragePlacement, UnaryExpression,
+    UnaryOperator, UnsupportedLeafFeature, UpdateExpression, UpdateOperator,
+    compiled_static_property_key, object_method_or_accessor_span, plan_put_slot, unsupported,
 };
 use super::abrupt::{AbruptMarker, AbruptMarkerKind};
 use super::calls::MemberCallee;
@@ -523,11 +523,15 @@ impl<'compiler, 'unit, 'arena, 'scope> ExpressionPlanner<'compiler, 'unit, 'aren
                             flow.emit(self.plan_this_expression(this.span, layout)?)?;
                         }
                         Expression::NewTarget(new_target) => {
-                            flow.emit(PlannedInstruction::new(
-                                FinalOpcode::SpecialObject,
-                                Operands::U8(3),
-                                new_target.span,
-                            ))?;
+                            let (opcode, operands) = if self
+                                .static_field_initializer_class_for_span(new_target.span)?
+                                .is_some()
+                            {
+                                (FinalOpcode::Undefined, Operands::None)
+                            } else {
+                                (FinalOpcode::SpecialObject, Operands::U8(3))
+                            };
+                            flow.emit(PlannedInstruction::new(opcode, operands, new_target.span))?;
                         }
                         _ => {
                             return unsupported(
@@ -573,11 +577,11 @@ impl<'compiler, 'unit, 'arena, 'scope> ExpressionPlanner<'compiler, 'unit, 'aren
 
     /// Lowers the verified class slice: base and derived constructors,
     /// source-level direct `super(...)`, public methods/accessors with either
-    /// static or computed names, public static fields whose initializers
-    /// contain no `this`, `super`, or `new.target`, and initializer-free
-    /// public instance fields. Computed or initialized instance fields,
-    /// private elements, decorators, super properties, and static blocks stay
-    /// fail-closed until their distinct execution contracts exist.
+    /// static or computed names, public static fields with lexical `this` and
+    /// `new.target`, and initializer-free public instance fields. Computed or
+    /// initialized instance fields, private elements, decorators, static-field
+    /// `super`, super properties, and static blocks stay fail-closed until
+    /// their distinct execution contracts exist.
     fn plan_class_heritage(
         &self,
         class: &Class<'arena>,
@@ -730,6 +734,7 @@ impl<'compiler, 'unit, 'arena, 'scope> ExpressionPlanner<'compiler, 'unit, 'aren
         if class.id.is_some() {
             self.plan_base_class_name_initialization(class, layout, flow)?;
         }
+        self.plan_base_class_static_receiver_initialization(class, layout, flow)?;
 
         for element in &class.body.body {
             match element {
@@ -854,22 +859,18 @@ impl<'compiler, 'unit, 'arena, 'scope> ExpressionPlanner<'compiler, 'unit, 'aren
         if field.value.is_none() {
             return Ok(());
         }
-        let field_node = field.node_id.get();
         let nodes = self.unit.semantic().nodes();
         for (node_id, node) in nodes.iter_enumerated() {
-            if !nodes
-                .ancestor_ids(node_id)
-                .any(|ancestor| ancestor == field_node)
-            {
-                continue;
-            }
             let span = match node.kind() {
-                AstKind::ThisExpression(expression) => expression.span,
-                AstKind::NewTarget(expression) => expression.span,
                 AstKind::Super(expression) => expression.span,
                 _ => continue,
             };
-            return unsupported(UnsupportedLeafFeature::UnsupportedExpression, span);
+            if self
+                .static_field_initializer_class_for_node(node_id)?
+                .is_some()
+            {
+                return unsupported(UnsupportedLeafFeature::UnsupportedExpression, span);
+            }
         }
         Ok(())
     }
@@ -1469,6 +1470,65 @@ impl<'compiler, 'unit, 'arena, 'scope> ExpressionPlanner<'compiler, 'unit, 'aren
             Operands::None,
             class.span,
         ))
+    }
+
+    fn plan_base_class_static_receiver_initialization(
+        &self,
+        class: &Class<'arena>,
+        layout: &FrameLayout,
+        flow: &mut PlannedControlFlow,
+    ) -> Result<(), LeafCompilationError> {
+        let Some(binding) = self
+            .planned
+            .identities
+            .class_static_receiver_bindings
+            .get(&class.node_id())
+            .copied()
+        else {
+            return Ok(());
+        };
+        let storage =
+            self.planned
+                .plan
+                .binding(binding)
+                .ok_or(LeafCompilationError::SemanticInvariant {
+                    invariant: "class static-receiver binding exists",
+                    span: Some(class.span),
+                })?;
+        if storage.executable() != layout.executable
+            || storage.placement() != StoragePlacement::Local
+            || storage.policy().kind() != DeclarationKind::ClassStaticReceiver
+            || !storage.policy().has_temporal_dead_zone()
+        {
+            return Err(LeafCompilationError::SemanticInvariant {
+                invariant: "class static-receiver binding is lexical local storage",
+                span: Some(class.span),
+            });
+        }
+        let FrameSlot::Local(slot) =
+            layout
+                .slot(binding)
+                .ok_or(LeafCompilationError::SemanticInvariant {
+                    invariant: "class static-receiver binding has a frame slot",
+                    span: Some(class.span),
+                })?
+        else {
+            return Err(LeafCompilationError::SemanticInvariant {
+                invariant: "class static-receiver binding uses local storage",
+                span: Some(class.span),
+            });
+        };
+        // The post-define stack is `[constructor, prototype]`. Preserve that
+        // exact pair while initializing the class-scoped lexical receiver.
+        for instruction in [
+            PlannedInstruction::new(FinalOpcode::Swap, Operands::None, class.span),
+            PlannedInstruction::new(FinalOpcode::Dup, Operands::None, class.span),
+            plan_put_slot(FrameSlot::Local(slot), class.span),
+            PlannedInstruction::new(FinalOpcode::Swap, Operands::None, class.span),
+        ] {
+            flow.emit(instruction)?;
+        }
+        Ok(())
     }
 
     fn plan_base_class_declaration_binding(
@@ -2116,6 +2176,9 @@ impl<'compiler, 'unit, 'arena, 'scope> ExpressionPlanner<'compiler, 'unit, 'aren
         span: Span,
         layout: &FrameLayout,
     ) -> Result<PlannedInstruction, LeafCompilationError> {
+        if let Some(receiver) = self.static_field_receiver_read(span, layout)? {
+            return Ok(receiver);
+        }
         let executable = self.planned.plan.executable(layout.executable).ok_or(
             LeafCompilationError::InvalidExecutable {
                 executable: layout.executable,
@@ -2138,6 +2201,106 @@ impl<'compiler, 'unit, 'arena, 'scope> ExpressionPlanner<'compiler, 'unit, 'aren
             Operands::None,
             span,
         ))
+    }
+
+    fn static_field_receiver_read(
+        &self,
+        span: Span,
+        layout: &FrameLayout,
+    ) -> Result<Option<PlannedInstruction>, LeafCompilationError> {
+        let Some(class_node) = self.static_field_initializer_class_for_span(span)? else {
+            return Ok(None);
+        };
+        let binding = self
+            .planned
+            .identities
+            .class_static_receiver_bindings
+            .get(&class_node)
+            .copied()
+            .ok_or(LeafCompilationError::SemanticInvariant {
+                invariant: "static field this has a class receiver binding",
+                span: Some(span),
+            })?;
+        let storage =
+            self.planned
+                .plan
+                .binding(binding)
+                .ok_or(LeafCompilationError::SemanticInvariant {
+                    invariant: "class static-receiver binding exists",
+                    span: Some(span),
+                })?;
+        if storage.policy().kind() != DeclarationKind::ClassStaticReceiver
+            || storage.placement() != StoragePlacement::Local
+        {
+            return Err(LeafCompilationError::SemanticInvariant {
+                invariant: "static field this uses its immutable class receiver binding",
+                span: Some(span),
+            });
+        }
+        let slot = layout
+            .slot(binding)
+            .ok_or(LeafCompilationError::SemanticInvariant {
+                invariant: "static field this binding has a frame slot",
+                span: Some(span),
+            })?;
+        Ok(Some(self.plan_read_slot(binding, slot, span)?))
+    }
+
+    fn static_field_initializer_class_for_span(
+        &self,
+        span: Span,
+    ) -> Result<Option<NodeId>, LeafCompilationError> {
+        let nodes = self.unit.semantic().nodes();
+        for (node_id, node) in nodes.iter_enumerated() {
+            let node_span = match node.kind() {
+                AstKind::ThisExpression(expression) => expression.span,
+                AstKind::NewTarget(expression) => expression.span,
+                _ => continue,
+            };
+            if node_span == span {
+                return self.static_field_initializer_class_for_node(node_id);
+            }
+        }
+        Err(LeafCompilationError::SemanticInvariant {
+            invariant: "this or new.target expression retains a semantic node",
+            span: Some(span),
+        })
+    }
+
+    fn static_field_initializer_class_for_node(
+        &self,
+        node_id: NodeId,
+    ) -> Result<Option<NodeId>, LeafCompilationError> {
+        let nodes = self.unit.semantic().nodes();
+        let node_span = nodes.kind(node_id).span();
+        for ancestor in nodes.ancestor_ids(node_id) {
+            match nodes.kind(ancestor) {
+                AstKind::Function(_) => return Ok(None),
+                AstKind::PropertyDefinition(field)
+                    if field.r#static
+                        && field.value.as_ref().is_some_and(|value| {
+                            value.span().start <= node_span.start
+                                && node_span.end <= value.span().end
+                        }) =>
+                {
+                    let AstKind::ClassBody(body) = nodes.parent_kind(field.node_id.get()) else {
+                        return Err(LeafCompilationError::SemanticInvariant {
+                            invariant: "static field belongs to a class body",
+                            span: Some(field.span),
+                        });
+                    };
+                    let AstKind::Class(class) = nodes.parent_kind(body.node_id.get()) else {
+                        return Err(LeafCompilationError::SemanticInvariant {
+                            invariant: "static field class body belongs to a class",
+                            span: Some(body.span),
+                        });
+                    };
+                    return Ok(Some(class.node_id.get()));
+                }
+                _ => {}
+            }
+        }
+        Ok(None)
     }
 
     #[allow(

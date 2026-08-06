@@ -46,6 +46,9 @@ pub enum CompilerBindingKind {
     /// The compiler-created immutable class-scope cell for one evaluated
     /// computed public instance-field key.
     ClassFieldKey,
+    /// The compiler-created immutable class-scope receiver cell used by
+    /// static field initializers that lexically observe `this`.
+    ClassStaticReceiver,
     /// A function declaration.
     Function,
     /// A named function-expression self binding.
@@ -147,6 +150,7 @@ impl CompilerBindingPolicy {
                 | CompilerBindingKind::Const
                 | CompilerBindingKind::ClassName
                 | CompilerBindingKind::ClassFieldKey
+                | CompilerBindingKind::ClassStaticReceiver
                 | CompilerBindingKind::Catch
         ) || matches!(
             self.initialization,
@@ -176,7 +180,8 @@ impl CompilerBindingPolicy {
             }
             CompilerBindingKind::Const
             | CompilerBindingKind::ClassName
-            | CompilerBindingKind::ClassFieldKey => {
+            | CompilerBindingKind::ClassFieldKey
+            | CompilerBindingKind::ClassStaticReceiver => {
                 matches!(
                     self.initialization,
                     CompilerInitializationPolicy::AtDeclaration
@@ -3867,6 +3872,7 @@ const fn realm_global_policy_supported(policy: CompilerBindingPolicy) -> bool {
         | CompilerBindingKind::FunctionName
         | CompilerBindingKind::ClassName
         | CompilerBindingKind::ClassFieldKey
+        | CompilerBindingKind::ClassStaticReceiver
         | CompilerBindingKind::Catch => false,
     }
 }

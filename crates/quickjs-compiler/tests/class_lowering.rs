@@ -1,7 +1,10 @@
 use quickjs_bytecode::{
     CompilerBindingKind, CompilerExecutableKind, FinalOpcode, VerificationLimits,
 };
-use quickjs_compiler::{CompilationContext, CompiledFunctionTree, DeclarationKind, WritePolicy};
+use quickjs_compiler::{
+    CompilationContext, CompiledFunctionTree, CompilerError, DeclarationKind, UnsupportedFeature,
+    WritePolicy, build_storage_plan,
+};
 use quickjs_frontend::{CompilationGoal, FrontendOptions, GlobalScriptGoal, with_parsed_program};
 
 fn compile(source: &str, name: &str) -> CompiledFunctionTree {
@@ -673,25 +676,44 @@ fn nonlogical_member_class_assignments_use_the_typed_empty_name_path() {
 }
 
 #[test]
-fn static_field_initializers_requiring_a_class_receiver_stay_fail_closed() {
+fn static_field_initializers_use_a_dedicated_class_receiver_cell() {
+    let tree = compile(
+        "function make(){class Box{static receiver=this;static target=new.target;static captured=()=>this;}return Box;}",
+        "make",
+    );
+    assert!(matches!(
+        tree.root()
+            .storage_plan()
+            .bindings()
+            .iter()
+            .find(|binding| binding.policy().kind() == DeclarationKind::ClassStaticReceiver),
+        Some(binding)
+            if binding.placement() == quickjs_compiler::StoragePlacement::Local
+                && binding.policy().has_temporal_dead_zone()
+    ));
+    assert!(
+        tree.functions()
+            .iter()
+            .flat_map(|function| function.control_flow().instructions())
+            .any(|instruction| {
+                instruction.decoded().instruction().opcode() == FinalOpcode::GetVarRefCheck
+            })
+    );
+}
+
+#[test]
+fn static_field_super_reports_its_specific_deferred_contract() {
     let error = with_parsed_program(
-        "function make(){class Box{static receiver=this;}return Box;}",
+        "function make(Base){class Box extends Base{static inherited=super.value;}return Box;}",
         FrontendOptions::for_goal(CompilationGoal::GlobalScript(GlobalScriptGoal::new())),
-        |unit| {
-            let context = CompilationContext::new(unit).expect("storage plan");
-            let root = context
-                .executables()
-                .find(|executable| executable.metadata().name() == Some("make"))
-                .expect("root function");
-            context.compile_tree(&root, VerificationLimits::default())
-        },
+        build_storage_plan,
     )
     .expect("frontend")
-    .expect_err("class-bound static receiver needs its dedicated execution contract");
+    .expect_err("static-field super remains separately deferred");
     assert!(matches!(
         error,
-        quickjs_compiler::LeafCompilationError::Unsupported {
-            feature: quickjs_compiler::UnsupportedLeafFeature::UnsupportedExpression,
+        CompilerError::Unsupported {
+            feature: UnsupportedFeature::StaticFieldSuper,
             ..
         }
     ));

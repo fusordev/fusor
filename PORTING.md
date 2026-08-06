@@ -96,23 +96,24 @@ broad Test262.**
   Source writes to the captured class name reach a typed runtime `TypeError`
   without changing that cell. Public computed method/accessor keys use the
   same typed definition path; ordinary, generator, async, and async-generator
-  method templates are certified by their defining class element. Uncomputed
-  public static fields, and computed static fields with non-class values,
-  evaluate into own constructor properties when their initializers contain no
-  `this`, `super`, or `new.target`. Uncomputed public instance fields evaluate
-  in declaration order on every receiver (including `undefined` fields): before
-  a base constructor body and immediately after derived `super()` (including
-  synthesized derived constructors). Their expressions may use lexical
-  captures, `this`, `new.target`, source-derived `super` property access, and
-  arrow or ordinary function closures in the constructor environment.
+  method templates are certified by their defining class element. Public static
+  fields, including computed fields, evaluate into own constructor properties.
+  Their initializers bind lexical `this` to that constructor and `new.target`
+  to `undefined`, including arrow captures; static-field `super` is still
+  deferred. Uncomputed public instance fields evaluate in declaration order on
+  every receiver (including `undefined`
+  fields): before a base constructor body and immediately after derived
+  `super()` (including synthesized derived constructors). Their expressions may
+  use lexical captures, `this`, `new.target`, source-derived `super` property
+  access, and arrow or ordinary function closures in the constructor
+  environment.
   Computed public instance-field keys evaluate once in class-element order,
   convert through `ToPropertyKey`, and live in a typed immutable class-scope
   cell captured by the constructor; its certificate admits only typed field
   definition, including synthesized derived constructors.
 - [ ] Class closure: spread or arrow-contained `super()`; computed-key anonymous-class
   name inference outside direct object/static-field definitions, static-field
-  initializers using `this`, `super`, or `new.target`, private elements,
-  decorators, and static blocks. Do not relabel these as
+  `super`, private elements, decorators, and static blocks. Do not relabel these as
   supported merely because Oxc parses them.
 - [ ] Direct/indirect `eval`, `with`, Annex B block functions, remaining opcode
   families, and complete debug/source tables. Unverified or serialized bytecode
