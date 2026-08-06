@@ -278,10 +278,46 @@ impl<'arena> CompilationContext<'_, 'arena, '_> {
                     })?;
             *owner_slot = owner;
             if let Some(owner) = owner {
+                let owner = self
+                    .instance_field_initializer_owner(node_id)?
+                    .unwrap_or(owner);
                 self.record_node_literal_candidate(node_id, owner, candidates, atom_candidates)?;
             }
         }
         Ok(())
+    }
+
+    fn instance_field_initializer_owner(
+        &self,
+        node_id: NodeId,
+    ) -> Result<Option<ExecutableId>, LeafCompilationError> {
+        let nodes = self.unit.semantic().nodes();
+        for ancestor in nodes.ancestor_ids(node_id) {
+            match nodes.kind(ancestor) {
+                AstKind::Function(_) | AstKind::ArrowFunctionExpression(_) => return Ok(None),
+                AstKind::PropertyDefinition(field)
+                    if !field.r#static && !field.computed && field.value.is_some() =>
+                {
+                    let AstKind::ClassBody(body) = nodes.parent_kind(field.node_id.get()) else {
+                        return Err(LeafCompilationError::SemanticInvariant {
+                            invariant: "instance field belongs to a class body",
+                            span: Some(field.span),
+                        });
+                    };
+                    let AstKind::Class(class) = nodes.parent_kind(body.node_id.get()) else {
+                        return Err(LeafCompilationError::SemanticInvariant {
+                            invariant: "instance field class body belongs to a class",
+                            span: Some(body.span),
+                        });
+                    };
+                    return self
+                        .instance_field_constructor_owner(class.node_id.get(), class)
+                        .map(Some);
+                }
+                _ => {}
+            }
+        }
+        Ok(None)
     }
 
     #[allow(
@@ -486,7 +522,6 @@ impl<'arena> CompilationContext<'_, 'arena, '_> {
                         super::ClassElement::PropertyDefinition(field)
                             if !field.r#static
                                 && !field.computed
-                                && field.value.is_none()
                                 && field.decorators.is_empty() =>
                         {
                             let field_owner =

@@ -73,19 +73,6 @@ impl<'arena> CompilationContext<'_, 'arena, '_> {
                 class.span,
             );
         }
-        let unresolved = self
-            .planned
-            .plan
-            .unresolved_globals_for(executable_id)
-            .ok_or(LeafCompilationError::InvalidExecutable {
-                executable: executable_id,
-            })?;
-        if !unresolved.is_empty() {
-            return Err(LeafCompilationError::SemanticInvariant {
-                invariant: "default class constructor has no source references",
-                span: Some(class.span),
-            });
-        }
         Ok((executable, class))
     }
 

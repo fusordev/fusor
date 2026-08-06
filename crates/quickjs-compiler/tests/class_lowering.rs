@@ -698,33 +698,45 @@ fn static_field_initializers_requiring_a_class_receiver_stay_fail_closed() {
 }
 
 #[test]
-fn initialized_or_computed_public_instance_fields_stay_fail_closed() {
-    for source in [
-        "function make(){class Box{value=1;}return Box;}",
+fn uncomputed_public_instance_field_initializers_lower_into_each_constructor() {
+    let tree = compile(
+        "function make(seed){class Base{value=seed;constructor(){}}class Derived extends Base{next=seed+1;constructor(){super();}}class Default extends Base{forward=seed+2;}return [Base,Derived,Default];}",
+        "make",
+    );
+    assert_eq!(
+        tree.functions()
+            .iter()
+            .flat_map(|function| function.control_flow().instructions())
+            .filter(|instruction| instruction.decoded().instruction().opcode()
+                == FinalOpcode::DefineField)
+            .count(),
+        3,
+    );
+}
+
+#[test]
+fn computed_public_instance_fields_stay_fail_closed() {
+    let error = with_parsed_program(
         "function make(){class Box{[key];}return Box;}",
-    ] {
-        let error = with_parsed_program(
-            source,
-            FrontendOptions::for_goal(CompilationGoal::GlobalScript(GlobalScriptGoal::new())),
-            |unit| {
-                let context = CompilationContext::new(unit).expect("storage plan");
-                let root = context
-                    .executables()
-                    .find(|executable| executable.metadata().name() == Some("make"))
-                    .expect("root function");
-                context.compile_tree(&root, VerificationLimits::default())
-            },
-        )
-        .expect("frontend")
-        .expect_err("instance initializer execution has a distinct lexical contract");
-        assert!(matches!(
-            error,
-            quickjs_compiler::LeafCompilationError::Unsupported {
-                feature: quickjs_compiler::UnsupportedLeafFeature::UnsupportedDeclaration,
-                ..
-            }
-        ));
-    }
+        FrontendOptions::for_goal(CompilationGoal::GlobalScript(GlobalScriptGoal::new())),
+        |unit| {
+            let context = CompilationContext::new(unit).expect("storage plan");
+            let root = context
+                .executables()
+                .find(|executable| executable.metadata().name() == Some("make"))
+                .expect("root function");
+            context.compile_tree(&root, VerificationLimits::default())
+        },
+    )
+    .expect("frontend")
+    .expect_err("computed keys require a class-owned evaluated key slot");
+    assert!(matches!(
+        error,
+        quickjs_compiler::LeafCompilationError::Unsupported {
+            feature: quickjs_compiler::UnsupportedLeafFeature::UnsupportedDeclaration,
+            ..
+        }
+    ));
 }
 
 #[test]

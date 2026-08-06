@@ -1288,148 +1288,205 @@ impl<'unit, 'arena, 'scope> Planner<'unit, 'arena, 'scope> {
         let semantic = self.unit.semantic();
         let nodes = semantic.nodes();
         for (node_id, node) in nodes.iter_enumerated() {
-            let (kind, scope_id, span, name, name_span, parameters, source_executable) =
-                match node.kind() {
-                    AstKind::Program(program) => (
-                        self.root_executable_kind,
-                        program.scope_id(),
-                        program.span,
-                        None,
-                        None,
-                        ParameterLayout::default(),
-                        true,
-                    ),
-                    AstKind::Function(function) => {
-                        let parameters = self.validate_parameters(function.params.as_ref())?;
-                        (
-                            ExecutableKind::Function {
-                                asynchronous: function.r#async,
-                                generator: function.generator,
-                            },
-                            function.scope_id(),
-                            function.span,
-                            function
-                                .id
-                                .as_ref()
-                                .map(|identifier| Arc::<str>::from(identifier.name.as_str())),
-                            function.id.as_ref().map(|identifier| identifier.span),
-                            parameters,
-                            true,
-                        )
-                    }
-                    AstKind::ArrowFunctionExpression(arrow) => {
-                        let parameters = self.validate_parameters(arrow.params.as_ref())?;
-                        (
-                            ExecutableKind::Arrow {
-                                asynchronous: arrow.r#async,
-                            },
-                            arrow.scope_id(),
-                            arrow.span,
-                            None,
-                            None,
-                            parameters,
-                            true,
-                        )
-                    }
-                    AstKind::Class(class)
-                        if class.decorators.is_empty()
-                            && !class.body.body.iter().any(|element| {
-                                matches!(
-                                    element,
-                                    ClassElement::MethodDefinition(method)
-                                        if method.kind == MethodDefinitionKind::Constructor
-                                )
-                            }) =>
-                    {
-                        (
-                            ExecutableKind::ClassDefaultConstructor,
-                            class.scope_id(),
-                            class.span,
-                            None,
-                            None,
-                            ParameterLayout {
-                                simple: true,
-                                ..ParameterLayout::default()
-                            },
-                            false,
-                        )
-                    }
-                    _ => continue,
-                };
+            if let AstKind::Class(class) = node.kind()
+                && class.decorators.is_empty()
+                && let Some(constructor) =
+                    class.body.body.iter().find_map(|element| match element {
+                        ClassElement::MethodDefinition(method)
+                            if method.kind == MethodDefinitionKind::Constructor =>
+                        {
+                            Some(method)
+                        }
+                        _ => None,
+                    })
+            {
+                // Class elements are visited in source order, so a field initializer can
+                // precede a written constructor. Reserve the constructor executable at
+                // the class boundary: field-created closures must close over the
+                // constructor environment, not the surrounding source function.
+                self.inventory_source_function(
+                    constructor.value.node_id.get(),
+                    &constructor.value,
+                )?;
+            }
 
-            let id = executable_id(self.executable_drafts.len())?;
-            let parent = if matches!(kind, ExecutableKind::Script { .. } | ExecutableKind::Module) {
-                None
-            } else {
+            match node.kind() {
+                AstKind::Program(program) => self.inventory_executable(
+                    node_id,
+                    self.root_executable_kind,
+                    program.scope_id(),
+                    program.span,
+                    None,
+                    None,
+                    ParameterLayout::default(),
+                    true,
+                )?,
+                AstKind::Function(function) => {
+                    if self.node_executables[node_id.index()].is_none() {
+                        self.inventory_source_function(node_id, function)?;
+                    }
+                }
+                AstKind::ArrowFunctionExpression(arrow) => {
+                    let parameters = self.validate_parameters(arrow.params.as_ref())?;
+                    self.inventory_executable(
+                        node_id,
+                        ExecutableKind::Arrow {
+                            asynchronous: arrow.r#async,
+                        },
+                        arrow.scope_id(),
+                        arrow.span,
+                        None,
+                        None,
+                        parameters,
+                        true,
+                    )?;
+                }
+                AstKind::Class(class)
+                    if class.decorators.is_empty()
+                        && !class.body.body.iter().any(|element| {
+                            matches!(
+                                element,
+                                ClassElement::MethodDefinition(method)
+                                    if method.kind == MethodDefinitionKind::Constructor
+                            )
+                        }) =>
+                {
+                    self.inventory_executable(
+                        node_id,
+                        ExecutableKind::ClassDefaultConstructor,
+                        class.scope_id(),
+                        class.span,
+                        None,
+                        None,
+                        ParameterLayout {
+                            simple: true,
+                            ..ParameterLayout::default()
+                        },
+                        false,
+                    )?;
+                }
+                _ => {}
+            }
+        }
+
+        self.validate_root_executable()
+    }
+
+    fn inventory_source_function(
+        &mut self,
+        node_id: NodeId,
+        function: &oxc_ast::ast::Function<'arena>,
+    ) -> Result<(), CompilerError> {
+        let parameters = self.validate_parameters(function.params.as_ref())?;
+        self.inventory_executable(
+            node_id,
+            ExecutableKind::Function {
+                asynchronous: function.r#async,
+                generator: function.generator,
+            },
+            function.scope_id(),
+            function.span,
+            function
+                .id
+                .as_ref()
+                .map(|identifier| Arc::<str>::from(identifier.name.as_str())),
+            function.id.as_ref().map(|identifier| identifier.span),
+            parameters,
+            true,
+        )
+    }
+
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "an executable inventory record carries all validated source metadata"
+    )]
+    fn inventory_executable(
+        &mut self,
+        node_id: NodeId,
+        kind: ExecutableKind,
+        scope_id: ScopeId,
+        span: Span,
+        name: Option<Arc<str>>,
+        name_span: Option<Span>,
+        parameters: ParameterLayout,
+        source_executable: bool,
+    ) -> Result<(), CompilerError> {
+        let semantic = self.unit.semantic();
+        let nodes = semantic.nodes();
+        let id = executable_id(self.executable_drafts.len())?;
+        let parent = if matches!(kind, ExecutableKind::Script { .. } | ExecutableKind::Module) {
+            None
+        } else if let Some(owner) = self.instance_field_initializer_owner(node_id)? {
+            Some(owner)
+        } else {
+            Some(
                 nodes
                     .ancestor_ids(node_id)
                     .find_map(|ancestor| self.node_executables[ancestor.index()])
                     .ok_or(CompilerError::SemanticInvariant {
                         invariant: "executable parent",
                         span: Some(span),
-                    })?
-                    .into()
-            };
-            if source_executable {
-                if semantic.scoping().get_node_id(scope_id) != node_id {
-                    return Err(CompilerError::SemanticInvariant {
-                        invariant: "scope creator matches executable node",
-                        span: Some(span),
-                    });
-                }
-                if self.exact_scope_executables[scope_id.index()].is_some() {
-                    return Err(CompilerError::SemanticInvariant {
-                        invariant: "one executable per created scope",
-                        span: Some(span),
-                    });
-                }
-            }
-
-            let strict = semantic.scoping().scope_flags(scope_id).is_strict_mode();
-            let executable = Executable {
-                id,
-                parent,
-                kind,
-                span,
-                name,
-                name_span,
-                strict,
-                parameter_count: parameters.count,
-                defined_parameter_count: parameters.defined_count,
-                simple_parameter_list: parameters.simple,
-                parameter_expressions: parameters.expressions,
-                parameter_binding_indices: parameters.binding_indices,
-                mapped_parameter_indices: parameters.mapped_indices,
-                binding_start: 0,
-                binding_end: 0,
-                resolved_start: 0,
-                resolved_end: 0,
-                unresolved_start: 0,
-                unresolved_end: 0,
-                capture_start: 0,
-                capture_end: 0,
-            };
-            if source_executable {
-                self.node_executables[node_id.index()] = Some(id);
-                self.exact_scope_executables[scope_id.index()] = Some(id);
-            } else if self
-                .default_class_constructors
-                .insert(node_id, id)
-                .is_some()
-            {
+                    })?,
+            )
+        };
+        if source_executable {
+            if semantic.scoping().get_node_id(scope_id) != node_id {
                 return Err(CompilerError::SemanticInvariant {
-                    invariant: "one synthesized default constructor per class",
+                    invariant: "scope creator matches executable node",
                     span: Some(span),
                 });
             }
-            self.executable_drafts.push(ExecutableDraft {
-                executable,
-                node_id,
-                scope_id,
-            });
+            if self.exact_scope_executables[scope_id.index()].is_some() {
+                return Err(CompilerError::SemanticInvariant {
+                    invariant: "one executable per created scope",
+                    span: Some(span),
+                });
+            }
         }
 
-        self.validate_root_executable()
+        let strict = semantic.scoping().scope_flags(scope_id).is_strict_mode();
+        let executable = Executable {
+            id,
+            parent,
+            kind,
+            span,
+            name,
+            name_span,
+            strict,
+            parameter_count: parameters.count,
+            defined_parameter_count: parameters.defined_count,
+            simple_parameter_list: parameters.simple,
+            parameter_expressions: parameters.expressions,
+            parameter_binding_indices: parameters.binding_indices,
+            mapped_parameter_indices: parameters.mapped_indices,
+            binding_start: 0,
+            binding_end: 0,
+            resolved_start: 0,
+            resolved_end: 0,
+            unresolved_start: 0,
+            unresolved_end: 0,
+            capture_start: 0,
+            capture_end: 0,
+        };
+        if source_executable {
+            self.node_executables[node_id.index()] = Some(id);
+            self.exact_scope_executables[scope_id.index()] = Some(id);
+        } else if self
+            .default_class_constructors
+            .insert(node_id, id)
+            .is_some()
+        {
+            return Err(CompilerError::SemanticInvariant {
+                invariant: "one synthesized default constructor per class",
+                span: Some(span),
+            });
+        }
+        self.executable_drafts.push(ExecutableDraft {
+            executable,
+            node_id,
+            scope_id,
+        });
+        Ok(())
     }
 
     fn validate_root_executable(&self) -> Result<(), CompilerError> {
@@ -1597,7 +1654,9 @@ impl<'unit, 'arena, 'scope> Planner<'unit, 'arena, 'scope> {
                 AstKind::Super(expression) => (expression.span, false),
                 _ => continue,
             };
-            let owner = self.scope_owner(node.scope_id(), Some(span))?;
+            let instance_field_owner = self.instance_field_initializer_owner(node_id)?;
+            let owner =
+                instance_field_owner.unwrap_or(self.scope_owner(node.scope_id(), Some(span))?);
             if new_target {
                 let mut current = owner;
                 loop {
@@ -1619,6 +1678,11 @@ impl<'unit, 'arena, 'scope> Planner<'unit, 'arena, 'scope> {
                             current = parent;
                         }
                         ExecutableKind::ClassDefaultConstructor
+                            if instance_field_owner.is_some() =>
+                        {
+                            break;
+                        }
+                        ExecutableKind::ClassDefaultConstructor
                         | ExecutableKind::Script { .. }
                         | ExecutableKind::Module => {
                             return unsupported(UnsupportedFeature::FunctionSyntheticBinding, span);
@@ -1636,6 +1700,9 @@ impl<'unit, 'arena, 'scope> Planner<'unit, 'arena, 'scope> {
                             if expression.node_id.get() == node_id
                     )
             );
+            if direct_super_call && instance_field_owner.is_some() {
+                return unsupported(UnsupportedFeature::FunctionSyntheticBinding, span);
+            }
             let derived_constructor =
                 self.executable_drafts
                     .get(owner.index())
@@ -2161,7 +2228,9 @@ impl<'unit, 'arena, 'scope> Planner<'unit, 'arena, 'scope> {
             for &reference_id in scoping.get_resolved_reference_ids(symbol_id) {
                 let reference = scoping.get_reference(reference_id);
                 let span = semantic.reference_span(reference);
-                let executable = self.scope_owner(reference.scope_id(), Some(span))?;
+                let executable = self
+                    .instance_field_initializer_owner(reference.node_id())?
+                    .unwrap_or(self.scope_owner(reference.scope_id(), Some(span))?);
                 let binding = if let Some(owner) =
                     implicit_arguments_references.get(&reference_id).copied()
                 {
@@ -2235,7 +2304,9 @@ impl<'unit, 'arena, 'scope> Planner<'unit, 'arena, 'scope> {
         for reference_id in references {
             let reference = scoping.get_reference(reference_id);
             let span = semantic.reference_span(reference);
-            let executable = self.scope_owner(reference.scope_id(), Some(span))?;
+            let executable = self
+                .instance_field_initializer_owner(reference.node_id())?
+                .unwrap_or(self.scope_owner(reference.scope_id(), Some(span))?);
             let name = semantic.reference_name(reference);
             drafts.push(UnresolvedDraft {
                 reference_id,
@@ -2603,6 +2674,70 @@ impl<'unit, 'arena, 'scope> Planner<'unit, 'arena, 'scope> {
             .ok_or(CompilerError::SemanticInvariant {
                 invariant: "scope executable owner",
                 span,
+            })
+    }
+
+    fn instance_field_initializer_owner(
+        &self,
+        node_id: NodeId,
+    ) -> Result<Option<ExecutableId>, CompilerError> {
+        let nodes = self.unit.semantic().nodes();
+        for ancestor in nodes.ancestor_ids(node_id) {
+            match nodes.kind(ancestor) {
+                AstKind::Function(_) | AstKind::ArrowFunctionExpression(_) => return Ok(None),
+                AstKind::PropertyDefinition(field)
+                    if !field.r#static && !field.computed && field.value.is_some() =>
+                {
+                    let AstKind::ClassBody(body) = nodes.parent_kind(field.node_id.get()) else {
+                        return Err(CompilerError::SemanticInvariant {
+                            invariant: "instance field belongs to a class body",
+                            span: Some(field.span),
+                        });
+                    };
+                    let AstKind::Class(class) = nodes.parent_kind(body.node_id.get()) else {
+                        return Err(CompilerError::SemanticInvariant {
+                            invariant: "instance field class body belongs to a class",
+                            span: Some(body.span),
+                        });
+                    };
+                    return self
+                        .instance_field_constructor_owner(class.node_id.get(), class)
+                        .map(Some);
+                }
+                _ => {}
+            }
+        }
+        Ok(None)
+    }
+
+    fn instance_field_constructor_owner(
+        &self,
+        class_node: NodeId,
+        class: &oxc_ast::ast::Class<'arena>,
+    ) -> Result<ExecutableId, CompilerError> {
+        for element in &class.body.body {
+            let ClassElement::MethodDefinition(method) = element else {
+                continue;
+            };
+            if method.kind != MethodDefinitionKind::Constructor {
+                continue;
+            }
+            return self
+                .node_executables
+                .get(method.value.node_id.get().index())
+                .copied()
+                .flatten()
+                .ok_or(CompilerError::SemanticInvariant {
+                    invariant: "class constructor owns its public field references",
+                    span: Some(method.span),
+                });
+        }
+        self.default_class_constructors
+            .get(&class_node)
+            .copied()
+            .ok_or(CompilerError::SemanticInvariant {
+                invariant: "class without a source constructor owns a synthesized field template",
+                span: Some(class.span),
             })
     }
 }

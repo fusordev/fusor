@@ -110,6 +110,39 @@ fn initializer_free_public_instance_fields_define_on_each_receiver_at_constructo
 }
 
 #[test]
+fn uncomputed_public_instance_field_initializers_run_at_constructor_boundaries() {
+    run_with(
+        "function run(){let seed=7;class Base{value=seed;copy=this.value;constructor(){this.baseBeforeBody=this.copy;}}class Explicit extends Base{next=seed+1;constructor(){super();this.derivedBeforeBody=this.next;}}class Default extends Base{forward=seed+2;}let base=new Base;let explicit=new Explicit;let forwarded=new Default;return base.value===7&&base.copy===7&&base.baseBeforeBody===7&&explicit.value===7&&explicit.copy===7&&explicit.next===8&&explicit.baseBeforeBody===7&&explicit.derivedBeforeBody===8&&forwarded.value===7&&forwarded.copy===7&&forwarded.forward===9&&forwarded.baseBeforeBody===7;}",
+        |result| {
+            let value = result.expect("instance field initializer execution");
+            assert_eq!(value.as_boolean().expect("live Boolean"), Some(true));
+        },
+    );
+}
+
+#[test]
+fn uncomputed_instance_field_initializers_observe_this_super_and_new_target() {
+    run_with(
+        "function run(){class Base{constructor(value){this._value=value;}get value(){return this._value;}}class Derived extends Base{fromSuper=super.value;target=new.target;constructor(value){super(value);this.bodySeesFields=this.fromSuper===value&&this.target===Derived;}}let value=new Derived(7);return value.fromSuper===7&&value.target===Derived&&value.bodySeesFields;}",
+        |result| {
+            let value = result.expect("this, super, and new.target field execution");
+            assert_eq!(value.as_boolean().expect("live Boolean"), Some(true));
+        },
+    );
+}
+
+#[test]
+fn uncomputed_instance_field_initializers_create_closures_in_the_constructor_environment() {
+    run_with(
+        "function run(){let seed=2;class Default{value=3;read=()=>this.value+seed;readFunction=function(){return this.value+seed;};}class Explicit{value=4;read=()=>this.value+seed;constructor(){}}class Parent{value=5;}class Derived extends Parent{read=()=>this.value+seed;selected=seed?this.value+seed:0;}let defaultBox=new Default;let explicitBox=new Explicit;let derivedBox=new Derived;return defaultBox.read()===5&&defaultBox.read.name==='read'&&defaultBox.readFunction()===5&&defaultBox.readFunction.name==='readFunction'&&explicitBox.read()===6&&explicitBox.read.name==='read'&&derivedBox.read()===7&&derivedBox.read.name==='read'&&derivedBox.selected===7;}",
+        |result| {
+            let value = result.expect("field initializer closure execution");
+            assert_eq!(value.as_boolean().expect("live Boolean"), Some(true));
+        },
+    );
+}
+
+#[test]
 fn an_explicit_derived_constructor_calls_super_with_new_target_and_initializes_this() {
     run_with(
         "function run(){class Base{constructor(value){this.value=value;}}class Derived extends Base{constructor(value){let receiver=super(value+1);this.superReceiver=receiver===this;this.after=2;}}let instance=new Derived(4);return instance.value===5&&instance.superReceiver&&instance.after===2;}",

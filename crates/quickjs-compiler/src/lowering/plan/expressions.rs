@@ -224,6 +224,7 @@ pub(in crate::lowering) enum ExpressionWork<'expression, 'arena> {
         call: &'expression CallExpression<'arena>,
         method: bool,
     },
+    InitializeInstanceFields,
     Emit(PlannedInstruction),
     Branch {
         kind: BranchKind,
@@ -308,6 +309,15 @@ impl<'compiler, 'unit, 'arena, 'scope> ExpressionPlanner<'compiler, 'unit, 'aren
                 )?,
                 ExpressionWork::CallAfterCallee { call, method } => {
                     Self::plan_call_after_callee(call, method, &mut work)?;
+                }
+                ExpressionWork::InitializeInstanceFields => {
+                    self.plan_instance_field_initializations(
+                        layout.executable,
+                        layout,
+                        tree_layout,
+                        constants,
+                        flow,
+                    )?;
                 }
                 ExpressionWork::Branch { kind, target, span } => {
                     flow.branch(kind, &target, span)?;
@@ -805,7 +815,7 @@ impl<'compiler, 'unit, 'arena, 'scope> ExpressionPlanner<'compiler, 'unit, 'aren
             return unsupported(UnsupportedLeafFeature::UnsupportedDeclaration, field.span);
         }
         if !field.r#static {
-            if field.computed || field.value.is_some() {
+            if field.computed {
                 return unsupported(UnsupportedLeafFeature::UnsupportedDeclaration, field.span);
             }
             compiled_static_property_key(&field.key)?.ok_or(LeafCompilationError::Unsupported {
@@ -1053,6 +1063,110 @@ impl<'compiler, 'unit, 'arena, 'scope> ExpressionPlanner<'compiler, 'unit, 'aren
             Operands::None,
             field.span,
         ))
+    }
+
+    pub(in crate::lowering) fn plan_instance_field_initializations(
+        &self,
+        executable: ExecutableId,
+        layout: &FrameLayout,
+        tree_layout: &FunctionTreeLayout,
+        constants: &CompiledConstantPool,
+        flow: &mut PlannedControlFlow,
+    ) -> Result<(), LeafCompilationError> {
+        let Some(definitions) = self.instance_field_definitions(executable)? else {
+            return Ok(());
+        };
+        let synthesized_default = matches!(
+            self.planned
+                .plan
+                .executable(executable)
+                .ok_or(LeafCompilationError::InvalidExecutable { executable })?
+                .kind(),
+            ExecutableKind::ClassDefaultConstructor
+        );
+        for field_node in definitions.fields {
+            let AstKind::PropertyDefinition(field) = self.unit.semantic().nodes().kind(field_node)
+            else {
+                return Err(LeafCompilationError::SemanticInvariant {
+                    invariant: "instance field identity remains a property definition",
+                    span: None,
+                });
+            };
+            self.plan_instance_field_initialization(
+                field,
+                layout,
+                tree_layout,
+                constants,
+                synthesized_default,
+                flow,
+            )?;
+        }
+        Ok(())
+    }
+
+    fn plan_instance_field_initialization(
+        &self,
+        field: &PropertyDefinition<'arena>,
+        layout: &FrameLayout,
+        tree_layout: &FunctionTreeLayout,
+        constants: &CompiledConstantPool,
+        synthesized_default: bool,
+        flow: &mut PlannedControlFlow,
+    ) -> Result<(), LeafCompilationError> {
+        let key =
+            compiled_static_property_key(&field.key)?.ok_or(LeafCompilationError::Unsupported {
+                feature: UnsupportedLeafFeature::UnsupportedDeclaration,
+                span: field.key.span(),
+            })?;
+        let atom = constants.property_atom_index(key.span)?;
+        if synthesized_default {
+            // The upstream no-op delimits one deferred field-initializer
+            // region in an otherwise source-less default constructor. The
+            // bytecode authority checks paired regions before admitting
+            // `init_ctor` for a synthesized derived class.
+            flow.emit(PlannedInstruction::new(
+                FinalOpcode::Nop,
+                Operands::None,
+                field.span,
+            ))?;
+        }
+        flow.emit(PlannedInstruction::new(
+            FinalOpcode::PushThis,
+            Operands::None,
+            field.span,
+        ))?;
+        if let Some(value) = &field.value {
+            let inferred_name =
+                Self::plan_inferred_static_property_name_for_initializer(value, atom)?;
+            self.plan_expression(value, layout, tree_layout, constants, &[], flow)?;
+            if let Some(inferred_name) = inferred_name {
+                flow.emit(inferred_name)?;
+            }
+        } else {
+            flow.emit(PlannedInstruction::new(
+                FinalOpcode::Undefined,
+                Operands::None,
+                field.span,
+            ))?;
+        }
+        flow.emit(PlannedInstruction::new(
+            FinalOpcode::DefineField,
+            Operands::Atom(atom),
+            field.span,
+        ))?;
+        flow.emit(PlannedInstruction::new(
+            FinalOpcode::Drop,
+            Operands::None,
+            field.span,
+        ))?;
+        if synthesized_default {
+            flow.emit(PlannedInstruction::new(
+                FinalOpcode::Nop,
+                Operands::None,
+                field.span,
+            ))?;
+        }
+        Ok(())
     }
 
     fn base_class_name_binding(

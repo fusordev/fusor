@@ -201,20 +201,20 @@ impl<'arena> ExpressionPlanner<'_, '_, 'arena, '_> {
                 Operands::None,
                 call.span,
             )));
-            let instance_fields = self
-                .instance_field_definitions(layout.executable, constants)?
-                .ok_or(LeafCompilationError::SemanticInvariant {
+            let instance_fields = self.instance_field_definitions(layout.executable)?.ok_or(
+                LeafCompilationError::SemanticInvariant {
                     invariant: "super constructor call belongs to a class constructor",
                     span: Some(call.span),
-                })?;
+                },
+            )?;
             if !instance_fields.derived {
                 return Err(LeafCompilationError::SemanticInvariant {
                     invariant: "super constructor call belongs to a derived class constructor",
                     span: Some(call.span),
                 });
             }
-            for instruction in instance_fields.instructions.into_iter().rev() {
-                work.push(ExpressionWork::Emit(instruction));
+            if !instance_fields.fields.is_empty() {
+                work.push(ExpressionWork::InitializeInstanceFields);
             }
             work.push(ExpressionWork::Emit(PlannedInstruction::new(
                 FinalOpcode::CheckCtorReturn,

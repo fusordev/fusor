@@ -59,6 +59,7 @@ pub(in crate::lowering) enum StatementWork<'statement, 'arena> {
     ForOfRotate(ScopeId),
     Declaration(&'statement VariableDeclaration<'arena>),
     Expression(&'statement Expression<'arena>),
+    InitializeInstanceFields,
     Emit(PlannedInstruction),
     Branch {
         kind: BranchKind,
@@ -281,6 +282,15 @@ impl<'arena> CompilationContext<'_, 'arena, '_> {
                 &state.abrupt_markers,
                 flow,
             )?,
+            StatementWork::InitializeInstanceFields => {
+                ExpressionPlanner::new(self).plan_instance_field_initializations(
+                    planning.executable,
+                    planning.layout,
+                    planning.tree_layout,
+                    planning.constants,
+                    flow,
+                )?;
+            }
             StatementWork::Declaration(declaration) => self.validate_declaration(
                 declaration,
                 planning.layout,

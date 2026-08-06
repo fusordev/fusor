@@ -16,10 +16,10 @@ use quickjs_frontend::Span;
 use super::{
     AstKind, ClassElement, CompilationContext, CompiledClosureVariable, CompiledConstant,
     CompiledConstantPool, CompiledFunction, CompiledMetadataAtomKey, CompiledRealmGlobal,
-    FrameLayout, FrameLayoutInput, FunctionTreeLayout, LeafCompilationError, LocalSlot,
-    LoweredLocal, MethodDefinitionKind, OrdinaryFunctionForm, PlannedControlFlow,
-    PlannedInstruction, StatementCompletion, StatementControlStack, StatementPlanningState,
-    StatementWork, UnsupportedLeafFeature, checked_function_entry_count,
+    ExpressionPlanner, FrameLayout, FrameLayoutInput, FunctionTreeLayout, LeafCompilationError,
+    LocalSlot, LoweredLocal, MethodDefinitionKind, NodeId, OrdinaryFunctionForm,
+    PlannedControlFlow, PlannedInstruction, StatementCompletion, StatementControlStack,
+    StatementPlanningState, StatementWork, UnsupportedLeafFeature, checked_function_entry_count,
     compiled_static_property_key, unsupported,
 };
 use crate::storage::{ExecutableId, ExecutableKind};
@@ -47,7 +47,6 @@ const fn source_byte_span(span: Span) -> SourceByteSpan {
 
 fn synthesized_class_constructor_flow(
     derived: bool,
-    instance_field_definitions: &[PlannedInstruction],
     span: Span,
     limits: VerificationLimits,
 ) -> Result<PlannedControlFlow, LeafCompilationError> {
@@ -68,36 +67,21 @@ fn synthesized_class_constructor_flow(
             Operands::None,
             span,
         ))?;
-        for instruction in instance_field_definitions {
-            flow.emit(*instruction)?;
-        }
-        flow.emit(PlannedInstruction::new(
-            FinalOpcode::Drop,
-            Operands::None,
-            span,
-        ))?;
-    } else {
-        for instruction in instance_field_definitions {
-            flow.emit(*instruction)?;
-        }
     }
-    flow.ensure_terminal(span)?;
     Ok(flow)
 }
 
-/// The currently certified public-field subset has no initializer or computed
-/// key.  Its value is therefore always `undefined`, but it still must be
-/// defined for every new receiver at the precise constructor boundary.
+/// Each public field in the admitted noncomputed class subset is initialized
+/// in the constructor frame, preserving per-instance evaluation order.
 pub(in crate::lowering) struct InstanceFieldDefinitions {
     pub(in crate::lowering) derived: bool,
-    pub(in crate::lowering) instructions: Vec<PlannedInstruction>,
+    pub(in crate::lowering) fields: Vec<NodeId>,
 }
 
 impl CompilationContext<'_, '_, '_> {
     pub(in crate::lowering) fn instance_field_definitions(
         &self,
         executable: ExecutableId,
-        constants: &CompiledConstantPool,
     ) -> Result<Option<InstanceFieldDefinitions>, LeafCompilationError> {
         let node_id = self
             .planned
@@ -145,7 +129,7 @@ impl CompilationContext<'_, '_, '_> {
             }
             _ => return Ok(None),
         };
-        let mut instructions = Vec::new();
+        let mut fields = Vec::new();
         for element in &class.body.body {
             let ClassElement::PropertyDefinition(field) = element else {
                 continue;
@@ -153,29 +137,18 @@ impl CompilationContext<'_, '_, '_> {
             if field.r#static {
                 continue;
             }
-            if !field.decorators.is_empty() || field.computed || field.value.is_some() {
+            if !field.decorators.is_empty() || field.computed {
                 return unsupported(UnsupportedLeafFeature::UnsupportedDeclaration, field.span);
             }
-            let key = compiled_static_property_key(&field.key)?.ok_or(
-                LeafCompilationError::Unsupported {
-                    feature: UnsupportedLeafFeature::UnsupportedDeclaration,
-                    span: field.key.span(),
-                },
-            )?;
-            instructions.extend([
-                PlannedInstruction::new(FinalOpcode::PushThis, Operands::None, field.span),
-                PlannedInstruction::new(FinalOpcode::Undefined, Operands::None, field.span),
-                PlannedInstruction::new(
-                    FinalOpcode::DefineField,
-                    Operands::Atom(constants.property_atom_index(key.span)?),
-                    field.span,
-                ),
-                PlannedInstruction::new(FinalOpcode::Drop, Operands::None, field.span),
-            ]);
+            compiled_static_property_key(&field.key)?.ok_or(LeafCompilationError::Unsupported {
+                feature: UnsupportedLeafFeature::UnsupportedDeclaration,
+                span: field.key.span(),
+            })?;
+            fields.push(field.node_id.get());
         }
         Ok(Some(InstanceFieldDefinitions {
             derived: class.super_class.is_some(),
-            instructions,
+            fields,
         }))
     }
 }
@@ -248,8 +221,7 @@ impl<'compiler, 'statement, 'unit, 'arena, 'scope, 'layout>
         } else {
             FunctionTerminal::Ordinary
         };
-        let instance_fields =
-            compiler.instance_field_definitions(planning.executable, planning.constants)?;
+        let instance_fields = compiler.instance_field_definitions(planning.executable)?;
         let mut work = vec![
             StatementWork::PopScope(function_scope),
             StatementWork::VisitList {
@@ -266,10 +238,9 @@ impl<'compiler, 'statement, 'unit, 'arena, 'scope, 'layout>
         }
         if let Some(instance_fields) = instance_fields
             && !instance_fields.derived
+            && !instance_fields.fields.is_empty()
         {
-            for instruction in instance_fields.instructions.into_iter().rev() {
-                work.push(StatementWork::Emit(instruction));
-            }
+            work.push(StatementWork::InitializeInstanceFields);
         }
         work.push(StatementWork::PushScope {
             scope: function_scope,
@@ -481,43 +452,15 @@ impl CompilationContext<'_, '_, '_> {
                 span: Some(class.span),
             });
         }
-        let resolved = self
-            .planned
-            .plan
-            .resolved_references_for(executable_id)
-            .ok_or(LeafCompilationError::InvalidExecutable {
-                executable: executable_id,
-            })?;
-        if !resolved.is_empty() {
-            return Err(LeafCompilationError::SemanticInvariant {
-                invariant: "synthesized default constructor has no source references",
-                span: Some(class.span),
-            });
-        }
-        let captures = self.planned.plan.frame_captures_for(executable_id).ok_or(
-            LeafCompilationError::InvalidExecutable {
-                executable: executable_id,
-            },
-        )?;
-        if !captures.is_empty() {
-            return Err(LeafCompilationError::SemanticInvariant {
-                invariant: "synthesized default constructor has no frame captures",
-                span: Some(class.span),
-            });
-        }
-        if !tree_layout.children(executable_id)?.is_empty() {
-            return Err(LeafCompilationError::SemanticInvariant {
-                invariant: "synthesized default constructor has no child templates",
-                span: Some(class.span),
-            });
+        for child in tree_layout.children(executable_id)? {
+            if !self.is_direct_instance_field_initializer_child(executable_id, *child)? {
+                return Err(LeafCompilationError::SemanticInvariant {
+                    invariant: "synthesized default constructor owns only direct instance-field initializer templates",
+                    span: Some(class.span),
+                });
+            }
         }
         let constants = tree_layout.constant_pool(executable_id)?;
-        if !constants.entries().is_empty() {
-            return Err(LeafCompilationError::SemanticInvariant {
-                invariant: "synthesized default constructor has no value constants",
-                span: Some(class.span),
-            });
-        }
         let function_scope =
             self.created_scope(Some(class.scope_id()), class.node_id(), class.span)?;
         let capture_layout =
@@ -543,24 +486,37 @@ impl CompilationContext<'_, '_, '_> {
             "default class constructor closure variables",
         )?;
         let derived_class_constructor = class.super_class.is_some();
-        let instance_fields = self
-            .instance_field_definitions(executable_id, constants)?
-            .ok_or(LeafCompilationError::SemanticInvariant {
+        let instance_fields = self.instance_field_definitions(executable_id)?.ok_or(
+            LeafCompilationError::SemanticInvariant {
                 invariant: "synthesized constructor owns its class fields",
                 span: Some(class.span),
-            })?;
+            },
+        )?;
         if instance_fields.derived != derived_class_constructor {
             return Err(LeafCompilationError::SemanticInvariant {
                 invariant: "synthesized constructor field plan retains derived state",
                 span: Some(class.span),
             });
         }
-        let flow = synthesized_class_constructor_flow(
-            derived_class_constructor,
-            &instance_fields.instructions,
-            class.span,
-            limits,
-        )?;
+        let mut flow =
+            synthesized_class_constructor_flow(derived_class_constructor, class.span, limits)?;
+        if !instance_fields.fields.is_empty() {
+            ExpressionPlanner::new(self).plan_instance_field_initializations(
+                executable_id,
+                &layout,
+                tree_layout,
+                constants,
+                &mut flow,
+            )?;
+        }
+        if derived_class_constructor {
+            flow.emit(PlannedInstruction::new(
+                FinalOpcode::Drop,
+                Operands::None,
+                class.span,
+            ))?;
+        }
+        flow.ensure_terminal(class.span)?;
 
         Ok(ValidatedFunction {
             executable_kind: CompilerExecutableKind::ClassConstructor,
@@ -583,6 +539,35 @@ impl CompilationContext<'_, '_, '_> {
             function_name_span: None,
             flow,
         })
+    }
+
+    fn is_direct_instance_field_initializer_child(
+        &self,
+        parent: ExecutableId,
+        child: ExecutableId,
+    ) -> Result<bool, LeafCompilationError> {
+        let child_node = self
+            .planned
+            .identities
+            .node_by_executable
+            .get(child.index())
+            .copied()
+            .ok_or(LeafCompilationError::InvalidExecutable { executable: child })?;
+        let fields = self.instance_field_definitions(parent)?.ok_or(
+            LeafCompilationError::SemanticInvariant {
+                invariant: "synthesized default constructor has instance-field definitions",
+                span: None,
+            },
+        )?;
+        let nodes = self.unit.semantic().nodes();
+        for ancestor in nodes.ancestor_ids(child_node) {
+            match nodes.kind(ancestor) {
+                AstKind::Function(_) | AstKind::ArrowFunctionExpression(_) => return Ok(false),
+                AstKind::PropertyDefinition(_) => return Ok(fields.fields.contains(&ancestor)),
+                _ => {}
+            }
+        }
+        Ok(false)
     }
 
     fn validate_arrow(

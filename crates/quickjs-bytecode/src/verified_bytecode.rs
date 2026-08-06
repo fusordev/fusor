@@ -4245,7 +4245,11 @@ fn verify_method_definitions(
                         .flags()
                         .is_derived_class_constructor()
                     && index == 0
-                    && derived_default_constructor_pair(parent);
+                    && derived_default_constructor_pair(
+                        parent,
+                        &predecessor_counts,
+                        internal_stack,
+                    );
                 let heritage_check = index.checked_add(6).is_some_and(|definition_index| {
                     matches!(
                         instructions.get(definition_index).map(|instruction| {
@@ -4282,7 +4286,11 @@ fn verify_method_definitions(
                         .function_header()
                         .flags()
                         .is_derived_class_constructor()
-                    && derived_default_constructor_pair(parent))
+                    && derived_default_constructor_pair(
+                        parent,
+                        &predecessor_counts,
+                        internal_stack,
+                    ))
             {
                 return Err(BytecodeVerificationError::function(
                     parent_id,
@@ -4887,12 +4895,22 @@ fn derived_class_heritage_pair(
 }
 
 /// The synthesized derived constructor body is intentionally restricted to
-/// `super(...args)`, followed by zero or more compiler-shaped undefined public
-/// field definitions, then the final result drop. Source derived constructors
-/// are separately certified through the typed `special_object(4); get_super;
-/// special_object(3); call_constructor; check_ctor_return; drop` provenance
-/// transfer above.
-fn derived_default_constructor_pair(function: &VerifiedCompilerFunction) -> bool {
+/// `super(...args)`, followed by zero or more no-op-delimited public field
+/// initialization regions, then the final result drop. The delimiter exists
+/// only in source-less default constructors and keeps accepted field
+/// expressions from being confused with surrounding constructor code. Source
+/// derived constructors are separately certified through the typed
+/// `special_object(4); get_super; special_object(3); call_constructor;
+/// check_ctor_return; drop` provenance transfer above.
+#[allow(
+    clippy::too_many_lines,
+    reason = "the paired default-constructor certificate keeps its complete control-flow boundary audit together"
+)]
+fn derived_default_constructor_pair(
+    function: &VerifiedCompilerFunction,
+    predecessor_counts: &[u32],
+    internal_stack: &InternalStackCertificate,
+) -> bool {
     let instructions = function.control_flow().instructions();
     let Some((check_constructor, tail)) = instructions.split_first() else {
         return false;
@@ -4913,20 +4931,161 @@ fn derived_default_constructor_pair(function: &VerifiedCompilerFunction) -> bool
     {
         return false;
     }
-    fields.chunks_exact(4).remainder().is_empty()
-        && fields.chunks_exact(4).all(|field| {
-            matches!(
-                field,
-                [push_this, undefined, define, drop]
-                    if push_this.decoded().instruction().opcode() == FinalOpcode::PushThis
-                        && undefined.decoded().instruction().opcode() == FinalOpcode::Undefined
-                        && matches!(
-                            (define.decoded().instruction().opcode(), define.decoded().instruction().operands()),
-                            (FinalOpcode::DefineField, Operands::Atom(_))
-                        )
-                        && drop.decoded().instruction().opcode() == FinalOpcode::Drop
+    if predecessor_counts.len() != instructions.len()
+        || predecessor_counts.first() != Some(&0)
+        || predecessor_counts.get(1) != Some(&1)
+        || !has_only_effective_successor(internal_stack, instructions, 0, 1)
+    {
+        return false;
+    }
+
+    let final_drop_index = instructions.len().saturating_sub(2);
+    let return_index = instructions.len().saturating_sub(1);
+    let fields_start = 2;
+    let fields_end = final_drop_index.saturating_sub(1);
+    let first_after_init = if fields.is_empty() {
+        final_drop_index
+    } else {
+        fields_start
+    };
+    if predecessor_counts.get(final_drop_index) != Some(&1)
+        || predecessor_counts.get(return_index) != Some(&1)
+        || !has_only_effective_successor(
+            internal_stack,
+            instructions,
+            1,
+            usize_to_u32(first_after_init),
+        )
+        || !has_only_effective_successor(
+            internal_stack,
+            instructions,
+            final_drop_index,
+            usize_to_u32(return_index),
+        )
+    {
+        return false;
+    }
+    if fields.is_empty() {
+        return true;
+    }
+
+    for source in 0..instructions.len() {
+        for edge in internal_stack.effective_successors(instructions, source) {
+            let target = edge.target.get() as usize;
+            let source_is_field = (fields_start..=fields_end).contains(&source);
+            let target_is_field = (fields_start..=fields_end).contains(&target);
+            if target_is_field && !source_is_field && (source != 1 || target != fields_start) {
+                return false;
+            }
+            if source_is_field
+                && !target_is_field
+                && (source != fields_end || target != final_drop_index)
+            {
+                return false;
+            }
+        }
+    }
+
+    let mut next = 0;
+    while next < fields.len() {
+        if fields[next].decoded().instruction().opcode() != FinalOpcode::Nop {
+            return false;
+        }
+        let Some(close) = fields
+            .get(next.saturating_add(1)..)
+            .and_then(|tail| {
+                tail.iter().position(|instruction| {
+                    instruction.decoded().instruction().opcode() == FinalOpcode::Nop
+                })
+            })
+            .and_then(|offset| next.checked_add(offset.saturating_add(1)))
+        else {
+            return false;
+        };
+        let Some(region) = fields.get(next.saturating_add(1)..close) else {
+            return false;
+        };
+        if !matches!(
+            region,
+            [push_this, .., define, drop]
+                if push_this.decoded().instruction().opcode() == FinalOpcode::PushThis
+                    && matches!(
+                        (define.decoded().instruction().opcode(), define.decoded().instruction().operands()),
+                        (FinalOpcode::DefineField, Operands::Atom(_))
+                    )
+                    && drop.decoded().instruction().opcode() == FinalOpcode::Drop
+        ) {
+            return false;
+        }
+        let open_index = fields_start.saturating_add(next);
+        let push_this_index = open_index.saturating_add(1);
+        let close_index = fields_start.saturating_add(close);
+        let define_index = close_index.saturating_sub(2);
+        let drop_index = close_index.saturating_sub(1);
+        let next_after_close = if close_index == fields_end {
+            final_drop_index
+        } else {
+            close_index.saturating_add(1)
+        };
+        if predecessor_counts.get(open_index) != Some(&1)
+            || predecessor_counts.get(push_this_index) != Some(&1)
+            || predecessor_counts.get(drop_index) != Some(&1)
+            || predecessor_counts.get(close_index) != Some(&1)
+            || !has_only_effective_successor(
+                internal_stack,
+                instructions,
+                open_index,
+                usize_to_u32(push_this_index),
             )
-        })
+            || !has_only_effective_successor(
+                internal_stack,
+                instructions,
+                define_index,
+                usize_to_u32(drop_index),
+            )
+            || !has_only_effective_successor(
+                internal_stack,
+                instructions,
+                drop_index,
+                usize_to_u32(close_index),
+            )
+            || !has_only_effective_successor(
+                internal_stack,
+                instructions,
+                close_index,
+                usize_to_u32(next_after_close),
+            )
+        {
+            return false;
+        }
+        for source in push_this_index..=drop_index {
+            for edge in internal_stack.effective_successors(instructions, source) {
+                let target = edge.target.get() as usize;
+                if source == drop_index {
+                    if target != close_index {
+                        return false;
+                    }
+                } else if !(push_this_index..=drop_index).contains(&target) {
+                    return false;
+                }
+            }
+        }
+        next = close.saturating_add(1);
+    }
+    true
+}
+
+fn has_only_effective_successor(
+    internal_stack: &InternalStackCertificate,
+    instructions: &[VerifiedInstruction],
+    source: usize,
+    target: u32,
+) -> bool {
+    let mut successors = internal_stack.effective_successors(instructions, source);
+    successors
+        .next()
+        .is_some_and(|edge| edge.target.get() == target)
+        && successors.next().is_none()
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
