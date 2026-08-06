@@ -35,10 +35,20 @@ pub(super) fn visit_functions(visit: FunctionSink<'_>) {
         1,
     ));
     for method in TemporalInstantStaticMethod::ALL {
+        let name = match method {
+            TemporalInstantStaticMethod::From => {
+                IntrinsicNameSpec::Predefined(PredefinedAtom::From)
+            }
+            TemporalInstantStaticMethod::Compare
+            | TemporalInstantStaticMethod::FromEpochMilliseconds
+            | TemporalInstantStaticMethod::FromEpochNanoseconds => {
+                IntrinsicNameSpec::RealmName(RealmNameId::TemporalInstantStatic(method))
+            }
+        };
         visit(ordinary(
             NativeFunctionKind::TemporalInstantStatic(method),
-            IntrinsicNameSpec::RealmName(RealmNameId::TemporalInstantStatic(method)),
-            1,
+            name,
+            method.length(),
         ));
     }
     for method in TemporalInstantPrototypeMethod::ALL {
@@ -52,6 +62,9 @@ pub(super) fn visit_functions(visit: FunctionSink<'_>) {
             TemporalInstantPrototypeMethod::ValueOf => {
                 IntrinsicNameSpec::Predefined(PredefinedAtom::ValueOf)
             }
+            TemporalInstantPrototypeMethod::Equals => {
+                IntrinsicNameSpec::RealmName(RealmNameId::TemporalInstantPrototype(method))
+            }
             TemporalInstantPrototypeMethod::EpochMilliseconds
             | TemporalInstantPrototypeMethod::EpochNanoseconds => {
                 IntrinsicNameSpec::Literal(method.function_name())
@@ -60,7 +73,7 @@ pub(super) fn visit_functions(visit: FunctionSink<'_>) {
         visit(ordinary(
             NativeFunctionKind::TemporalInstantPrototype(method),
             name,
-            0,
+            method.length(),
         ));
     }
 }
@@ -95,9 +108,19 @@ pub(super) fn visit_properties(visit: PropertySink<'_>) {
         NativeFunctionKind::TemporalInstantConstructor,
     ));
     for method_id in TemporalInstantStaticMethod::ALL {
+        let key = match method_id {
+            TemporalInstantStaticMethod::From => {
+                IntrinsicKeySpec::PredefinedString(PredefinedAtom::From)
+            }
+            TemporalInstantStaticMethod::Compare
+            | TemporalInstantStaticMethod::FromEpochMilliseconds
+            | TemporalInstantStaticMethod::FromEpochNanoseconds => {
+                IntrinsicKeySpec::InternedString(RealmNameId::TemporalInstantStatic(method_id))
+            }
+        };
         visit(method(
             constructor,
-            IntrinsicKeySpec::InternedString(RealmNameId::TemporalInstantStatic(method_id)),
+            key,
             NativeFunctionKind::TemporalInstantStatic(method_id),
         ));
     }
@@ -126,6 +149,11 @@ pub(super) fn visit_properties(visit: PropertySink<'_>) {
             TemporalInstantPrototypeMethod::ValueOf => visit(method(
                 prototype,
                 IntrinsicKeySpec::PredefinedString(PredefinedAtom::ValueOf),
+                NativeFunctionKind::TemporalInstantPrototype(method_id),
+            )),
+            TemporalInstantPrototypeMethod::Equals => visit(method(
+                prototype,
+                IntrinsicKeySpec::InternedString(RealmNameId::TemporalInstantPrototype(method_id)),
                 NativeFunctionKind::TemporalInstantPrototype(method_id),
             )),
         }

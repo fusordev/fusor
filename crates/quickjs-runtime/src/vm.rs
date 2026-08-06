@@ -1827,6 +1827,28 @@ impl InstanceOfContinuation {
     }
 }
 
+enum TemporalInstantLikeTarget {
+    Allocate,
+    CompareFirst { second: StoredValue },
+    CompareSecond { first_epoch_nanoseconds: i128 },
+    Equals { receiver_epoch_nanoseconds: i128 },
+}
+
+impl TemporalInstantLikeTarget {
+    const fn retained_values(&self) -> u64 {
+        match self {
+            Self::CompareFirst { .. } => 1,
+            Self::Allocate | Self::CompareSecond { .. } | Self::Equals { .. } => 0,
+        }
+    }
+
+    fn trace_roots(&self, mark: &mut dyn FnMut(CollectionRoot)) {
+        if let Self::CompareFirst { second } = self {
+            trace_stored_value_root(second, mark);
+        }
+    }
+}
+
 enum OperatorPrimitiveTarget {
     Unary {
         opcode: FinalOpcode,
@@ -1871,6 +1893,7 @@ enum OperatorPrimitiveTarget {
         new_target: Option<FunctionId>,
     },
     TemporalInstantMilliseconds,
+    TemporalInstantString(Box<TemporalInstantLikeTarget>),
     NumberToString {
         number: JsNumber,
     },
@@ -2035,6 +2058,7 @@ impl OperatorPrimitiveTarget {
             Self::DateConstructorComponents(state) => state.retained_values(),
             Self::DateSetter(state) => state.retained_values(),
             Self::DateToJson(_) => DateToJsonContinuation::retained_values(),
+            Self::TemporalInstantString(state) => state.retained_values(),
             Self::SetRecordSize(state) => state.retained_values(),
             Self::ErrorConstructorMessage(state) => state.retained_values(),
             Self::JsonParseText(state) => state.retained_values(),
@@ -2272,6 +2296,7 @@ fn trace_operator_primitive_target_roots(
         OperatorPrimitiveTarget::DateConstructorComponents(state) => state.trace_roots(mark),
         OperatorPrimitiveTarget::DateSetter(state) => state.trace_roots(mark),
         OperatorPrimitiveTarget::DateToJson(state) => state.trace_roots(mark),
+        OperatorPrimitiveTarget::TemporalInstantString(state) => state.trace_roots(mark),
         OperatorPrimitiveTarget::JsonParseText(state) => state.trace_roots(mark),
         OperatorPrimitiveTarget::JsonParseArrayLength(state) => state.trace_roots(mark),
         OperatorPrimitiveTarget::JsonStringifyReplacerItem(state)

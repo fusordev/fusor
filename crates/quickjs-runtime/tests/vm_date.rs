@@ -483,6 +483,28 @@ fn temporal_instant_epoch_bounds_are_exact_when_the_shared_helper_cannot_compile
 }
 
 #[test]
+fn temporal_instant_from_compare_and_equals_share_spec_ordered_string_conversion() {
+    assert_eq!(
+        rendered(
+            "var original=new Temporal.Instant(1n),copy=Temporal.Instant.from(original),log=[];
+             function makeValue(label,text){return {toString:function(){log.push(label);return text}}}
+             var comparison=Temporal.Instant.compare(
+               makeValue('left','1970-01-01T00:00:00.000000001Z'),
+               makeValue('right','1970-01-01T00:00:00.000000002Z'));
+             var equal=copy.equals('1970-01-01T00:00:00.000000001Z'),typeErrors=0;
+             for(var value of [undefined,null,true,1,1n]){
+               try{Temporal.Instant.from(value)}catch(error){if(error instanceof TypeError)typeErrors++}}
+             var touched=false;try{Temporal.Instant.prototype.equals.call({},
+               {toString:function(){touched=true;return '1970-01-01T00:00Z'}})}catch(error){}
+             return [copy!==original,copy.epochNanoseconds,comparison,log.join(','),equal,
+               typeErrors,touched,Temporal.Instant.from.length,Temporal.Instant.compare.length,
+               Temporal.Instant.prototype.equals.length].join('|');"
+        ),
+        "true|1|-1|left,right|true|5|false|1|2|1"
+    );
+}
+
+#[test]
 fn callable_date_returns_a_local_time_string_without_observing_arguments() {
     let result = rendered(
         "var touched=false;

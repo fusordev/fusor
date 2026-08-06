@@ -264,6 +264,7 @@ fn visit_realm_name_order(
     for method in [
         TemporalInstantPrototypeMethod::EpochMilliseconds,
         TemporalInstantPrototypeMethod::EpochNanoseconds,
+        TemporalInstantPrototypeMethod::Equals,
     ] {
         visit(RealmNameId::TemporalInstantPrototype(method))?;
     }
@@ -496,8 +497,8 @@ mod tests {
         let schema = RealmIntrinsicSchema::try_new().expect("Realm schema");
         let plan = RealmAtomPlan::try_new(&schema).expect("atom plan");
 
-        assert_eq!(plan.len(), 250);
-        assert_eq!(plan.description_code_units(), 2_137);
+        assert_eq!(plan.len(), 252);
+        assert_eq!(plan.description_code_units(), 2_150);
     }
 
     #[test]

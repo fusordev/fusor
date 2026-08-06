@@ -1854,6 +1854,15 @@ fn finish_operator_primitive_target(
         OperatorPrimitiveTarget::TemporalInstantMilliseconds => {
             finish_temporal_instant_milliseconds(runtime, value, realm, origin)
         }
+        OperatorPrimitiveTarget::TemporalInstantString(target) => finish_temporal_instant_string(
+            runtime,
+            value,
+            *target,
+            realm,
+            return_to,
+            origin,
+            execution_budget,
+        ),
         OperatorPrimitiveTarget::NumberToString { number } => {
             let radix = operator_to_number(value, realm, origin)?;
             finish_number_to_string_radix(number, radix, realm, origin)

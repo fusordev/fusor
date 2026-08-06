@@ -2344,7 +2344,10 @@ pub(super) fn dispatch_native_call_with_frames(
                 method,
                 native.realm,
                 &inputs.receiver,
+                inputs.arguments,
+                return_to,
                 &origin,
+                execution_budget,
             )
         }
         NativeFunctionKind::ObjectPrototypeToString => begin_object_prototype_to_string(

@@ -46,6 +46,27 @@ pub(super) fn begin_temporal_instant_static(
 ) -> Result<NativeDispatch, NativeFailure> {
     let value = arguments.take_first_or_undefined();
     match method {
+        TemporalInstantStaticMethod::From => begin_temporal_instant_like(
+            runtime,
+            value,
+            TemporalInstantLikeTarget::Allocate,
+            realm,
+            return_to,
+            origin,
+            execution_budget,
+        ),
+        TemporalInstantStaticMethod::Compare => {
+            let second = arguments.take_first_or_undefined();
+            begin_temporal_instant_like(
+                runtime,
+                value,
+                TemporalInstantLikeTarget::CompareFirst { second },
+                realm,
+                return_to,
+                origin,
+                execution_budget,
+            )
+        }
         TemporalInstantStaticMethod::FromEpochNanoseconds => begin_operator_primitive_conversion(
             runtime,
             value,
@@ -66,6 +87,129 @@ pub(super) fn begin_temporal_instant_static(
             origin,
             execution_budget,
         ),
+    }
+}
+
+#[allow(
+    clippy::too_many_arguments,
+    reason = "Temporal instant conversion is resumable across user-defined primitive conversion"
+)]
+fn begin_temporal_instant_like(
+    runtime: &mut Runtime,
+    value: StoredValue,
+    target: TemporalInstantLikeTarget,
+    realm: RealmId,
+    return_to: Option<CallReturn>,
+    origin: JsStackFrame,
+    execution_budget: &mut ExecutionBudget,
+) -> Result<NativeDispatch, NativeFailure> {
+    if let StoredValue::Object(object) = value
+        && let Some(instant) = runtime.temporal_instant(object)?
+    {
+        return continue_temporal_instant_like(
+            runtime,
+            instant,
+            target,
+            realm,
+            return_to,
+            &origin,
+            execution_budget,
+        );
+    }
+    begin_operator_primitive_conversion(
+        runtime,
+        value,
+        OperatorPrimitiveHint::String,
+        OperatorPrimitiveTarget::TemporalInstantString(Box::new(target)),
+        realm,
+        return_to,
+        origin,
+        execution_budget,
+    )
+}
+
+#[allow(
+    clippy::too_many_arguments,
+    reason = "the primitive-conversion finish restores the complete native continuation context"
+)]
+pub(super) fn finish_temporal_instant_string(
+    runtime: &mut Runtime,
+    value: StoredValue,
+    target: TemporalInstantLikeTarget,
+    realm: RealmId,
+    return_to: Option<CallReturn>,
+    origin: &JsStackFrame,
+    execution_budget: &mut ExecutionBudget,
+) -> Result<NativeDispatch, NativeFailure> {
+    let StoredValue::String(value) = value else {
+        return temporal_type_error(realm, origin, "Temporal.Instant requires a string");
+    };
+    let source = value.to_utf8_lossy()?;
+    let instant = match Instant::from_utf8(source.as_bytes()) {
+        Ok(instant) => instant,
+        Err(error) => {
+            return Err(NativeFailure::Abrupt(temporal_range_exception_from_error(
+                realm, origin, error,
+            )?));
+        }
+    };
+    continue_temporal_instant_like(
+        runtime,
+        instant,
+        target,
+        realm,
+        return_to,
+        origin,
+        execution_budget,
+    )
+}
+
+#[allow(
+    clippy::too_many_arguments,
+    reason = "each conversion target resumes with explicit realm, return, source, and fuel context"
+)]
+fn continue_temporal_instant_like(
+    runtime: &mut Runtime,
+    instant: Instant,
+    target: TemporalInstantLikeTarget,
+    realm: RealmId,
+    return_to: Option<CallReturn>,
+    origin: &JsStackFrame,
+    execution_budget: &mut ExecutionBudget,
+) -> Result<NativeDispatch, NativeFailure> {
+    match target {
+        TemporalInstantLikeTarget::Allocate => {
+            allocate_temporal_instant_result(runtime, realm, instant)
+        }
+        TemporalInstantLikeTarget::CompareFirst { second } => begin_temporal_instant_like(
+            runtime,
+            second,
+            TemporalInstantLikeTarget::CompareSecond {
+                first_epoch_nanoseconds: instant.as_i128(),
+            },
+            realm,
+            return_to,
+            origin.clone(),
+            execution_budget,
+        ),
+        TemporalInstantLikeTarget::CompareSecond {
+            first_epoch_nanoseconds,
+        } => {
+            let ordering = first_epoch_nanoseconds.cmp(&instant.as_i128());
+            let result = match ordering {
+                std::cmp::Ordering::Less => -1,
+                std::cmp::Ordering::Equal => 0,
+                std::cmp::Ordering::Greater => 1,
+            };
+            Ok(NativeDispatch::Immediate(StoredValue::Number(
+                JsNumber::from_i32(result),
+            )))
+        }
+        TemporalInstantLikeTarget::Equals {
+            receiver_epoch_nanoseconds,
+        } => Ok(NativeDispatch::Immediate(StoredValue::Boolean(
+            receiver_epoch_nanoseconds == instant.as_i128(),
+        ))),
     }
 }
 
@@ -196,12 +340,19 @@ fn allocate_temporal_instant_result(
     Ok(NativeDispatch::Immediate(StoredValue::Object(object)))
 }
 
+#[allow(
+    clippy::too_many_arguments,
+    reason = "the shared prototype dispatcher preserves explicit call, return, source, and fuel context"
+)]
 pub(super) fn dispatch_temporal_instant_prototype(
-    runtime: &Runtime,
+    runtime: &mut Runtime,
     method: TemporalInstantPrototypeMethod,
     realm: RealmId,
     receiver: &StoredValue,
+    mut arguments: CallArguments,
+    return_to: Option<CallReturn>,
     origin: &JsStackFrame,
+    execution_budget: &mut ExecutionBudget,
 ) -> Result<NativeDispatch, NativeFailure> {
     let instant = require_temporal_instant(runtime, receiver, realm, origin)?;
     match method {
@@ -211,6 +362,17 @@ pub(super) fn dispatch_temporal_instant_prototype(
         TemporalInstantPrototypeMethod::EpochNanoseconds => Ok(NativeDispatch::Immediate(
             StoredValue::BigInt(Arc::new(JsBigInt::from_i128(instant.as_i128()))),
         )),
+        TemporalInstantPrototypeMethod::Equals => begin_temporal_instant_like(
+            runtime,
+            arguments.take_first_or_undefined(),
+            TemporalInstantLikeTarget::Equals {
+                receiver_epoch_nanoseconds: instant.as_i128(),
+            },
+            realm,
+            return_to,
+            origin.clone(),
+            execution_budget,
+        ),
         TemporalInstantPrototypeMethod::ToString | TemporalInstantPrototypeMethod::ToJson => {
             let rendered = match instant.to_ixdtf_string(None, ToStringRoundingOptions::default()) {
                 Ok(rendered) => rendered,
@@ -230,6 +392,21 @@ pub(super) fn dispatch_temporal_instant_prototype(
             "Temporal.Instant cannot be converted to a primitive value",
         ),
     }
+}
+
+fn temporal_range_exception_from_error(
+    realm: RealmId,
+    origin: &JsStackFrame,
+    error: temporal_rs::TemporalError,
+) -> Result<PendingException, NativeFailure> {
+    Ok(PendingException {
+        realm,
+        payload: PendingExceptionPayload::EngineError {
+            kind: ExceptionKind::RangeError,
+            message: JsString::from_utf8(error.into_message())?,
+        },
+        origin: origin.clone(),
+    })
 }
 
 fn require_temporal_instant(

@@ -1590,17 +1590,33 @@ impl DatePrototypeMethod {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum TemporalInstantStaticMethod {
+    From,
+    Compare,
     FromEpochMilliseconds,
     FromEpochNanoseconds,
 }
 
 impl TemporalInstantStaticMethod {
-    pub(crate) const ALL: [Self; 2] = [Self::FromEpochMilliseconds, Self::FromEpochNanoseconds];
+    pub(crate) const ALL: [Self; 4] = [
+        Self::From,
+        Self::Compare,
+        Self::FromEpochMilliseconds,
+        Self::FromEpochNanoseconds,
+    ];
 
     pub(crate) const fn name(self) -> &'static str {
         match self {
+            Self::From => "from",
+            Self::Compare => "compare",
             Self::FromEpochMilliseconds => "fromEpochMilliseconds",
             Self::FromEpochNanoseconds => "fromEpochNanoseconds",
+        }
+    }
+
+    pub(crate) const fn length(self) -> i32 {
+        match self {
+            Self::Compare => 2,
+            Self::From | Self::FromEpochMilliseconds | Self::FromEpochNanoseconds => 1,
         }
     }
 }
@@ -1609,15 +1625,17 @@ impl TemporalInstantStaticMethod {
 pub(crate) enum TemporalInstantPrototypeMethod {
     EpochMilliseconds,
     EpochNanoseconds,
+    Equals,
     ToString,
     ToJson,
     ValueOf,
 }
 
 impl TemporalInstantPrototypeMethod {
-    pub(crate) const ALL: [Self; 5] = [
+    pub(crate) const ALL: [Self; 6] = [
         Self::EpochMilliseconds,
         Self::EpochNanoseconds,
+        Self::Equals,
         Self::ToString,
         Self::ToJson,
         Self::ValueOf,
@@ -1627,6 +1645,7 @@ impl TemporalInstantPrototypeMethod {
         match self {
             Self::EpochMilliseconds => "epochMilliseconds",
             Self::EpochNanoseconds => "epochNanoseconds",
+            Self::Equals => "equals",
             Self::ToString => "toString",
             Self::ToJson => "toJSON",
             Self::ValueOf => "valueOf",
@@ -1637,9 +1656,21 @@ impl TemporalInstantPrototypeMethod {
         match self {
             Self::EpochMilliseconds => "get epochMilliseconds",
             Self::EpochNanoseconds => "get epochNanoseconds",
+            Self::Equals => "equals",
             Self::ToString => "toString",
             Self::ToJson => "toJSON",
             Self::ValueOf => "valueOf",
+        }
+    }
+
+    pub(crate) const fn length(self) -> i32 {
+        match self {
+            Self::Equals => 1,
+            Self::EpochMilliseconds
+            | Self::EpochNanoseconds
+            | Self::ToString
+            | Self::ToJson
+            | Self::ValueOf => 0,
         }
     }
 }
