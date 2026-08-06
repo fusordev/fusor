@@ -2961,6 +2961,36 @@ impl Runtime {
     pub fn has_interrupt_handler(&self) -> bool {
         self.interrupts.is_installed()
     }
+
+    /// Returns the predefined atom with the given descriptor.
+    pub(crate) fn predefined_atom(&self, predefined: PredefinedAtom) -> Atom {
+        self.atoms.predefined(predefined)
+    }
+
+    /// Returns a mutable reference to the bytecode function backing a function id.
+    pub(crate) fn bytecode_function_mut(
+        &mut self,
+        id: FunctionId,
+    ) -> Option<&mut BytecodeFunction> {
+        match self.functions.get_mut(id) {
+            Some(HeapFunction {
+                implementation: FunctionImplementation::Bytecode(bytecode),
+                ..
+            }) => Some(bytecode),
+            _ => None,
+        }
+    }
+
+    /// Returns an immutable reference to the bytecode function backing a function id.
+    pub(crate) fn bytecode_function(&self, id: FunctionId) -> Option<&BytecodeFunction> {
+        match self.functions.get(id) {
+            Some(HeapFunction {
+                implementation: FunctionImplementation::Bytecode(bytecode),
+                ..
+            }) => Some(bytecode),
+            _ => None,
+        }
+    }
 }
 
 mod arrays;

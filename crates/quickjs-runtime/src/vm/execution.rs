@@ -3293,10 +3293,124 @@ pub(super) fn execute_one(
             });
         }
         FinalOpcode::Nop => {}
-        // SetHomeObject/CheckBrand/AddBrand require runtime infrastructure
-        // (mutable BytecodeFunction.home_object and brand symbol properties).
-        // Deferred to a follow-up; private methods compile but brand checks are
-        // pending runtime support.
+        FinalOpcode::SetHomeObject => {
+            let home_object = pop(frame)?;
+            let function = pop(frame)?;
+            let Some(HeapReference::Function(function_id)) = function.heap_reference() else {
+                return Err(EngineFault::RuntimeInvariant {
+                    message: "set_home_object operand is not a function",
+                }
+                .into());
+            };
+            if let Some(bytecode) = runtime.bytecode_function_mut(function_id) {
+                bytecode.home_object = home_object.heap_reference();
+            }
+            push(frame, function);
+            push(frame, home_object);
+        }
+        FinalOpcode::CheckBrand => {
+            let receiver = pop(frame)?;
+            let function = pop(frame)?;
+            let Some(HeapReference::Function(function_id)) = function.heap_reference() else {
+                return Err(EngineFault::RuntimeInvariant {
+                    message: "check_brand operand is not a function",
+                }
+                .into());
+            };
+            let Some(home_object) = runtime.bytecode_function(function_id).and_then(|f| f.home_object) else {
+                let realm = code(runtime, frame.code)?.realm;
+                let origin = instruction_location(runtime, frame, source_pc)?;
+                return Ok(Step::Abrupt(PendingException {
+                    realm,
+                    payload: PendingExceptionPayload::EngineError {
+                        kind: ExceptionKind::TypeError,
+                        message: JsString::from_utf8("expecting <brand> private field")?,
+                    },
+                    origin,
+                }));
+            };
+            let brand_key = PropertyKey::from_private_atom(runtime.predefined_atom(PredefinedAtom::PrivateBrand));
+            let Some(_brand_present) = runtime.private_own_data_property(home_object, &brand_key)? else {
+                let realm = code(runtime, frame.code)?.realm;
+                let origin = instruction_location(runtime, frame, source_pc)?;
+                return Ok(Step::Abrupt(PendingException {
+                    realm,
+                    payload: PendingExceptionPayload::EngineError {
+                        kind: ExceptionKind::TypeError,
+                        message: JsString::from_utf8("expecting <brand> private field")?,
+                    },
+                    origin,
+                }));
+            };
+            let Some(reference) = receiver.heap_reference() else {
+                let realm = code(runtime, frame.code)?.realm;
+                let origin = instruction_location(runtime, frame, source_pc)?;
+                return Ok(Step::Abrupt(PendingException {
+                    realm,
+                    payload: PendingExceptionPayload::EngineError {
+                        kind: ExceptionKind::TypeError,
+                        message: JsString::from_utf8("brand check requires an object receiver")?,
+                    },
+                    origin,
+                }));
+            };
+            let has_brand = runtime.private_own_data_property(reference, &brand_key)?.is_some();
+            if !has_brand {
+                let realm = code(runtime, frame.code)?.realm;
+                let origin = instruction_location(runtime, frame, source_pc)?;
+                return Ok(Step::Abrupt(PendingException {
+                    realm,
+                    payload: PendingExceptionPayload::EngineError {
+                        kind: ExceptionKind::TypeError,
+                        message: JsString::from_utf8("invalid brand on object")?,
+                    },
+                    origin,
+                }));
+            }
+            push(frame, receiver);
+            push(frame, function);
+        }
+        FinalOpcode::AddBrand => {
+            let home_object = pop(frame)?;
+            let object = pop(frame)?;
+            let Some(home_ref) = home_object.heap_reference() else {
+                push(frame, object);
+                push(frame, home_object);
+                return Ok(Step::Continue);
+            };
+            let Some(obj_ref) = object.heap_reference() else {
+                push(frame, object);
+                push(frame, home_object);
+                return Ok(Step::Continue);
+            };
+            let brand_key = PropertyKey::from_private_atom(runtime.predefined_atom(PredefinedAtom::PrivateBrand));
+            if runtime.private_own_data_property(home_ref, &brand_key)?.is_none() {
+                runtime.append_data_property(
+                    home_ref,
+                    brand_key.clone(),
+                    PropertyLayout::data(false, false, true),
+                    StoredValue::Undefined,
+                )?;
+            }
+            if runtime.private_own_data_property(obj_ref, &brand_key)?.is_some() {
+                let realm = code(runtime, frame.code)?.realm;
+                let origin = instruction_location(runtime, frame, source_pc)?;
+                return Ok(Step::Abrupt(PendingException {
+                    realm,
+                    payload: PendingExceptionPayload::EngineError {
+                        kind: ExceptionKind::TypeError,
+                        message: JsString::from_utf8("private method is already present")?,
+                    },
+                    origin,
+                }));
+            }
+            runtime.append_data_property(
+                obj_ref,
+                brand_key,
+                PropertyLayout::data(false, false, true),
+                StoredValue::Undefined,
+            )?;
+        }
         _ => return unsupported_dispatch(opcode),
     }
 
