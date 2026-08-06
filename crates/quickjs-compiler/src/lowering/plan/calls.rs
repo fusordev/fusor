@@ -106,6 +106,62 @@ impl<'arena> ExpressionPlanner<'_, '_, 'arena, '_> {
         if call.optional || call.type_arguments.is_some() {
             return unsupported(UnsupportedLeafFeature::UnsupportedExpression, call.span);
         }
+        if matches!(&call.callee, Expression::Super(_)) {
+            if call.arguments.iter().any(Argument::is_spread) {
+                return unsupported(UnsupportedLeafFeature::UnsupportedExpression, call.span);
+            }
+            let argument_count = u16::try_from(call.arguments.len()).map_err(|_| {
+                LeafCompilationError::CapacityExceeded {
+                    domain: "super constructor arguments",
+                }
+            })?;
+            // `super(args)` evaluates the derived constructor's [[Prototype]]
+            // before its arguments, then constructs it with the active
+            // `new.target`. `check_ctor_return; drop` preserves the returned
+            // object as the expression value while its certified runtime path
+            // initializes this constructor frame's receiver.
+            work.push(ExpressionWork::Emit(PlannedInstruction::new(
+                FinalOpcode::Drop,
+                Operands::None,
+                call.span,
+            )));
+            work.push(ExpressionWork::Emit(PlannedInstruction::new(
+                FinalOpcode::CheckCtorReturn,
+                Operands::None,
+                call.span,
+            )));
+            work.push(ExpressionWork::Emit(PlannedInstruction::new(
+                FinalOpcode::CallConstructor,
+                Operands::NPop { argument_count },
+                call.span,
+            )));
+            for argument in call.arguments.iter().rev() {
+                let expression =
+                    argument
+                        .as_expression()
+                        .ok_or(LeafCompilationError::SemanticInvariant {
+                            invariant: "non-spread super constructor argument is an expression",
+                            span: Some(argument.span()),
+                        })?;
+                work.push(ExpressionWork::Visit(expression));
+            }
+            work.push(ExpressionWork::Emit(PlannedInstruction::new(
+                FinalOpcode::SpecialObject,
+                Operands::U8(3),
+                call.callee.span(),
+            )));
+            work.push(ExpressionWork::Emit(PlannedInstruction::new(
+                FinalOpcode::GetSuper,
+                Operands::None,
+                call.callee.span(),
+            )));
+            work.push(ExpressionWork::Emit(PlannedInstruction::new(
+                FinalOpcode::SpecialObject,
+                Operands::U8(4),
+                call.callee.span(),
+            )));
+            return Ok(());
+        }
         if let Some(spread) = call.arguments.iter().position(Argument::is_spread) {
             let member = Self::member_callee(&call.callee)?;
             let dense_prefix = spread;

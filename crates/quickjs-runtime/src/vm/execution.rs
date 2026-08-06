@@ -143,7 +143,13 @@ pub(super) fn plan_frame(
         .flags()
         .is_derived_class_constructor()
     {
-        ConstructorProfile::DerivedDefault
+        if control_flow.instructions().iter().any(|instruction| {
+            instruction.decoded().instruction().opcode() == FinalOpcode::InitCtor
+        }) {
+            ConstructorProfile::DerivedDefault
+        } else {
+            ConstructorProfile::Derived
+        }
     } else {
         ConstructorProfile::OrdinaryOrNone
     };
@@ -580,7 +586,7 @@ pub(super) fn create_frame(
         dynamic_return,
         native_returns,
         transient_cleanup_pending: false,
-        constructor_state: if plan.construction && plan.constructor_profile.is_derived_default() {
+        constructor_state: if plan.construction && plan.constructor_profile.is_derived() {
             ConstructorState::DerivedUninitialized
         } else {
             ConstructorState::NonConstructor
@@ -729,6 +735,11 @@ pub(super) fn execute_one(
         FinalOpcode::Undefined => push(frame, StoredValue::Undefined),
         FinalOpcode::Null => push(frame, StoredValue::Null),
         FinalOpcode::PushThis => {
+            if frame.constructor_state == ConstructorState::DerivedUninitialized {
+                return Ok(Step::Abrupt(derived_this_uninitialized_exception(
+                    runtime, frame, source_pc,
+                )?));
+            }
             push(frame, frame.receiver.duplicate());
         }
         FinalOpcode::PushFalse => push(frame, StoredValue::Boolean(false)),
@@ -773,55 +784,62 @@ pub(super) fn execute_one(
             let Operands::U8(selector) = operands else {
                 return unsupported_dispatch(opcode);
             };
-            if selector == 3 {
-                push(
+            match selector {
+                3 => push(
                     frame,
                     frame
                         .new_target
                         .map_or(StoredValue::Undefined, StoredValue::Function),
-                );
-            } else {
-                let arguments_kind @ (0 | 1) = selector else {
-                    return unsupported_dispatch(opcode);
-                };
-                let arguments = if frame.arguments_snapshot_use.has_rest_parameter() {
-                    let argument_count = frame
-                        .arguments_snapshot
-                        .as_ref()
-                        .ok_or(EngineFault::RuntimeInvariant {
-                            message: "arguments object was initialized more than once",
-                        })?
-                        .len();
-                    execution_budget.charge_instructions(usize_to_u64(argument_count))?;
-                    duplicate_arguments_snapshot(frame)?
-                } else {
-                    frame
-                        .arguments_snapshot
-                        .take()
-                        .ok_or(EngineFault::RuntimeInvariant {
-                            message: "arguments object was initialized more than once",
-                        })?
-                };
-                let realm = code(runtime, frame.code)?.realm;
-                let object = if arguments_kind == 0 {
-                    runtime.allocate_unmapped_arguments_object(realm, arguments)?
-                } else {
-                    let mapped_arguments = mapped_arguments_authority(runtime, frame)?;
-                    let supplied_count = arguments.len();
-                    let active_count = mapped_arguments
-                        .partition_point(|index| (*index as usize) < supplied_count);
-                    let active_arguments = &mapped_arguments[..active_count];
-                    preflight_mapped_arguments_frame(frame, active_arguments)?;
-                    let object = runtime.allocate_mapped_arguments_object(
-                        realm,
-                        frame.function,
-                        arguments,
-                        &mapped_arguments,
-                    )?;
-                    install_mapped_arguments_cells(runtime, frame, object, active_arguments)?;
-                    object
-                };
-                push(frame, StoredValue::Object(object));
+                ),
+                4 => {
+                    if frame.constructor_state != ConstructorState::DerivedUninitialized {
+                        return Ok(Step::Abrupt(derived_this_uninitialized_exception(
+                            runtime, frame, source_pc,
+                        )?));
+                    }
+                    push(frame, StoredValue::Function(frame.function));
+                }
+                arguments_kind @ (0 | 1) => {
+                    let arguments = if frame.arguments_snapshot_use.has_rest_parameter() {
+                        let argument_count = frame
+                            .arguments_snapshot
+                            .as_ref()
+                            .ok_or(EngineFault::RuntimeInvariant {
+                                message: "arguments object was initialized more than once",
+                            })?
+                            .len();
+                        execution_budget.charge_instructions(usize_to_u64(argument_count))?;
+                        duplicate_arguments_snapshot(frame)?
+                    } else {
+                        frame
+                            .arguments_snapshot
+                            .take()
+                            .ok_or(EngineFault::RuntimeInvariant {
+                                message: "arguments object was initialized more than once",
+                            })?
+                    };
+                    let realm = code(runtime, frame.code)?.realm;
+                    let object = if arguments_kind == 0 {
+                        runtime.allocate_unmapped_arguments_object(realm, arguments)?
+                    } else {
+                        let mapped_arguments = mapped_arguments_authority(runtime, frame)?;
+                        let supplied_count = arguments.len();
+                        let active_count = mapped_arguments
+                            .partition_point(|index| (*index as usize) < supplied_count);
+                        let active_arguments = &mapped_arguments[..active_count];
+                        preflight_mapped_arguments_frame(frame, active_arguments)?;
+                        let object = runtime.allocate_mapped_arguments_object(
+                            realm,
+                            frame.function,
+                            arguments,
+                            &mapped_arguments,
+                        )?;
+                        install_mapped_arguments_cells(runtime, frame, object, active_arguments)?;
+                        object
+                    };
+                    push(frame, StoredValue::Object(object));
+                }
+                _ => return unsupported_dispatch(opcode),
             }
         }
         FinalOpcode::Object => {
@@ -1205,6 +1223,48 @@ pub(super) fn execute_one(
                 return_to,
                 source_pc,
             });
+        }
+        FinalOpcode::GetSuper => {
+            let StoredValue::Function(function) = pop(frame)? else {
+                return Err(EngineFault::RuntimeInvariant {
+                    message: "verified get_super did not receive its active constructor",
+                }
+                .into());
+            };
+            if function != frame.function {
+                return Err(EngineFault::RuntimeInvariant {
+                    message: "verified get_super escaped its active constructor frame",
+                }
+                .into());
+            }
+            let superclass = runtime
+                .object_record(HeapReference::Function(function))?
+                .prototype();
+            push(
+                frame,
+                superclass.map_or(StoredValue::Null, |reference| match reference {
+                    HeapReference::Function(function) => StoredValue::Function(function),
+                    HeapReference::Object(object) => StoredValue::Object(object),
+                }),
+            );
+        }
+        FinalOpcode::CheckCtorReturn => {
+            if frame.constructor_state != ConstructorState::DerivedUninitialized {
+                return Err(EngineFault::RuntimeInvariant {
+                    message: "derived super completion reached an initialized constructor frame",
+                }
+                .into());
+            }
+            let value = peek(frame)?.duplicate();
+            if value.heap_reference().is_none() {
+                return Err(EngineFault::RuntimeInvariant {
+                    message: "verified superclass construction completed without an object receiver",
+                }
+                .into());
+            }
+            frame.receiver = value;
+            frame.constructor_state = ConstructorState::DerivedInitialized;
+            push(frame, StoredValue::Boolean(false));
         }
         FinalOpcode::CheckCtor => {
             if frame.stack.is_empty() {
@@ -2921,8 +2981,18 @@ pub(super) fn execute_one(
                 source_pc,
             });
         }
-        FinalOpcode::Return | FinalOpcode::ReturnAsync => return Ok(Step::Return(pop(frame)?)),
-        FinalOpcode::ReturnUndef => return Ok(Step::Return(StoredValue::Undefined)),
+        FinalOpcode::Return | FinalOpcode::ReturnAsync => {
+            return Ok(Step::Return {
+                value: pop(frame)?,
+                source_pc,
+            });
+        }
+        FinalOpcode::ReturnUndef => {
+            return Ok(Step::Return {
+                value: StoredValue::Undefined,
+                source_pc,
+            });
+        }
         FinalOpcode::Nop => {}
         _ => return unsupported_dispatch(opcode),
     }

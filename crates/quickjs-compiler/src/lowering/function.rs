@@ -560,7 +560,13 @@ impl CompilationContext<'_, '_, '_> {
             self.compiler_capture_layout(executable_id, function_scope, &layout, tree_layout)?;
         let closure_variables = self.compiled_closure_variables(executable_id, tree_layout)?;
         let realm_globals = self.compiled_realm_globals(executable_id, tree_layout, constants)?;
-        let (executable_kind, function_span, function_name, function_name_span) = match form {
+        let (
+            executable_kind,
+            function_span,
+            function_name,
+            function_name_span,
+            derived_class_constructor,
+        ) = match form {
             OrdinaryFunctionForm::Function => (
                 if generator && asynchronous {
                     CompilerExecutableKind::AsyncGeneratorFunction
@@ -577,6 +583,7 @@ impl CompilationContext<'_, '_, '_> {
                     .map(|_| constants.metadata_atom_index(CompiledMetadataAtomKey::FunctionName))
                     .transpose()?,
                 executable.name_span().map(source_byte_span),
+                false,
             ),
             OrdinaryFunctionForm::ObjectMethod {
                 property_span: source_span,
@@ -596,8 +603,12 @@ impl CompilationContext<'_, '_, '_> {
                 source_span,
                 None,
                 None,
+                false,
             ),
-            OrdinaryFunctionForm::ClassConstructor { class_span } => {
+            OrdinaryFunctionForm::ClassConstructor {
+                class_span,
+                derived,
+            } => {
                 if generator || asynchronous {
                     return unsupported(
                         UnsupportedLeafFeature::UnsupportedFunctionForm,
@@ -609,6 +620,7 @@ impl CompilationContext<'_, '_, '_> {
                     class_span,
                     None,
                     None,
+                    derived,
                 )
             }
         };
@@ -634,7 +646,7 @@ impl CompilationContext<'_, '_, '_> {
         Ok(ValidatedFunction {
             executable_kind,
             strict: executable.is_strict(),
-            derived_class_constructor: false,
+            derived_class_constructor,
             argument_count: executable.parameter_count(),
             defined_argument_count: executable.defined_parameter_count(),
             local_count: layout.local_count,

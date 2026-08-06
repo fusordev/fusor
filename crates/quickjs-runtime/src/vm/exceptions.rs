@@ -162,6 +162,42 @@ pub(super) fn not_constructor_exception(
     })
 }
 
+pub(super) fn derived_this_uninitialized_exception(
+    runtime: &Runtime,
+    frame: &Frame,
+    pc: BytecodePc,
+) -> Result<PendingException, ExecutionError> {
+    let realm = code(runtime, frame.code)?.realm;
+    Ok(PendingException {
+        realm,
+        payload: PendingExceptionPayload::EngineError {
+            kind: ExceptionKind::ReferenceError,
+            message: JsString::from_utf8(
+                "Must call super constructor in derived class before accessing 'this' or returning from derived constructor",
+            )?,
+        },
+        origin: instruction_location(runtime, frame, pc)?,
+    })
+}
+
+pub(super) fn derived_constructor_primitive_return_exception(
+    runtime: &Runtime,
+    frame: &Frame,
+    pc: BytecodePc,
+) -> Result<PendingException, ExecutionError> {
+    let realm = code(runtime, frame.code)?.realm;
+    Ok(PendingException {
+        realm,
+        payload: PendingExceptionPayload::EngineError {
+            kind: ExceptionKind::TypeError,
+            message: JsString::from_utf8(
+                "Derived constructors may only return object or undefined",
+            )?,
+        },
+        origin: instruction_location(runtime, frame, pc)?,
+    })
+}
+
 pub(super) fn function_not_constructor_message(
     runtime: &Runtime,
     function: FunctionId,

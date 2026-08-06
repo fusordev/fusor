@@ -99,6 +99,28 @@ fn a_default_derived_constructor_forwards_arguments_and_installs_both_inheritanc
 }
 
 #[test]
+fn an_explicit_derived_constructor_calls_super_with_new_target_and_initializes_this() {
+    run_with(
+        "function run(){class Base{constructor(value){this.value=value;}}class Derived extends Base{constructor(value){let receiver=super(value+1);this.superReceiver=receiver===this;this.after=2;}}let instance=new Derived(4);return instance.value===5&&instance.superReceiver&&instance.after===2;}",
+        |result| {
+            let value = result.expect("explicit derived class execution");
+            assert_eq!(value.as_boolean().expect("live Boolean"), Some(true));
+        },
+    );
+}
+
+#[test]
+fn an_explicit_derived_constructor_enforces_the_uninitialized_this_rules() {
+    run_with(
+        "function run(){class Base{}class Missing extends Base{constructor(){}}class Early extends Base{constructor(){this.value=1;super();}}class Twice extends Base{constructor(){super();super();}}class ObjectReturn extends Base{constructor(){return {marked:true};}}class PrimitiveBefore extends Base{constructor(){return 1;}}class PrimitiveAfter extends Base{constructor(){super();return 1;}}let missing=false;let early=false;let twice=false;let primitiveBefore=false;let primitiveAfter=false;try{new Missing();}catch(error){missing=error.name==='ReferenceError';}try{new Early();}catch(error){early=error.name==='ReferenceError';}try{new Twice();}catch(error){twice=error.name==='ReferenceError';}try{new PrimitiveBefore();}catch(error){primitiveBefore=error.name==='TypeError';}try{new PrimitiveAfter();}catch(error){primitiveAfter=error.name==='TypeError';}return missing&&early&&twice&&primitiveBefore&&primitiveAfter&&new ObjectReturn().marked===true;}",
+        |result| {
+            let value = result.expect("derived constructor errors are catchable");
+            assert_eq!(value.as_boolean().expect("live Boolean"), Some(true));
+        },
+    );
+}
+
+#[test]
 fn a_default_class_extending_null_fails_only_when_constructed() {
     run_with(
         "function run(){class Empty extends null{}try{new Empty();}catch(error){return error.name==='TypeError';}return false;}",

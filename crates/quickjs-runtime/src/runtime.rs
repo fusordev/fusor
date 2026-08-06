@@ -3170,8 +3170,10 @@ const fn is_supported_opcode(opcode: FinalOpcode) -> bool {
             | FinalOpcode::CallMethod
             | FinalOpcode::CallConstructor
             | FinalOpcode::Apply
+            | FinalOpcode::CheckCtorReturn
             | FinalOpcode::CheckCtor
             | FinalOpcode::InitCtor
+            | FinalOpcode::GetSuper
             | FinalOpcode::Perm3
             | FinalOpcode::Throw
             | FinalOpcode::Return

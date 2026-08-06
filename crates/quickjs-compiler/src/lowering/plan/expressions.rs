@@ -535,13 +535,12 @@ impl<'compiler, 'unit, 'arena, 'scope> ExpressionPlanner<'compiler, 'unit, 'aren
         self.plan_scope_exit(layout.executable, class.scope_id(), layout, flow)
     }
 
-    /// Lowers the verified class slice: base classes and derived classes with
-    /// the synthesized default constructor, public methods/accessors with
-    /// either static or computed names, and public static fields whose
-    /// initializers contain no `this`, `super`, or `new.target`. Explicit
-    /// derived constructors, instance or computed fields, private elements,
-    /// static blocks, and decorators stay fail-closed until their distinct
-    /// execution contracts exist.
+    /// Lowers the verified class slice: base and derived constructors,
+    /// source-level direct `super(...)`, public methods/accessors with either
+    /// static or computed names, and public static fields whose initializers
+    /// contain no `this`, `super`, or `new.target`. Instance or computed
+    /// fields, private elements, decorators, super properties, and static
+    /// blocks stay fail-closed until their distinct execution contracts exist.
     fn plan_class_heritage(
         &self,
         class: &Class<'arena>,
@@ -634,14 +633,6 @@ impl<'compiler, 'unit, 'arena, 'scope> ExpressionPlanner<'compiler, 'unit, 'aren
                 }
                 _ => return unsupported(UnsupportedLeafFeature::UnsupportedBody, element.span()),
             }
-        }
-        if class.super_class.is_some() && constructor.is_some() {
-            // An explicit derived constructor requires a deferred `this`
-            // binding and the source-level `super()` receiver transition.
-            // The synthesized constructor below owns that transition for the
-            // first derived-class slice; do not pretend an arbitrary body is
-            // equivalent to it.
-            return unsupported(UnsupportedLeafFeature::UnsupportedDeclaration, class.span);
         }
         if class.id.is_some() {
             self.plan_base_class_name_scope_entry(class, layout, flow)?;

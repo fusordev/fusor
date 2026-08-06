@@ -4767,13 +4767,13 @@ fn class_definition_pair(
         return None;
     }
     if heritage == 1
-        && (!derived_class_heritage_pair(
+        && !derived_class_heritage_pair(
             parent,
             instructions,
             predecessor_counts,
             internal_stack,
             definition_index,
-        ) || !derived_default_constructor_pair(child_function))
+        )
     {
         return None;
     }
@@ -4886,10 +4886,10 @@ fn derived_class_heritage_pair(
         && predecessor_counts.get(closure_index) == Some(&2)
 }
 
-/// The first derived-constructor admission is deliberately the spec default
-/// constructor only.  Its synthetic body must be exactly
-/// `check_ctor; init_ctor; drop; return_undef`; explicit constructors wait for
-/// the separately certified `super()`/deferred-`this` lowering.
+/// The synthesized derived constructor body is intentionally exact. Source
+/// derived constructors are separately certified through the typed
+/// `special_object(4); get_super; special_object(3); call_constructor;
+/// check_ctor_return; drop` provenance transfer above.
 fn derived_default_constructor_pair(function: &VerifiedCompilerFunction) -> bool {
     let instructions = function.control_flow().instructions();
     matches!(
@@ -6141,6 +6141,12 @@ fn verify_supported_opcodes(
                 && !method
                 && !lexical_this
                 && !is_script_authority_kind(authority_kind))
+            || (matches!(opcode, FinalOpcode::GetSuper | FinalOpcode::CheckCtorReturn)
+                && !(executable_kind == CompilerExecutableKind::ClassConstructor
+                    && flow
+                        .function_header()
+                        .flags()
+                        .is_derived_class_constructor()))
             || matches!(
                 (opcode, instruction.operands()),
                 (FinalOpcode::SpecialObject, operands)
@@ -6258,6 +6264,13 @@ fn compiler_special_object_is_authorized(
                 && mapped_arguments_authority
         }
         Operands::U8(3) => flow.function_header().flags().new_target_allowed(),
+        Operands::U8(4) => {
+            executable_kind == CompilerExecutableKind::ClassConstructor
+                && flow
+                    .function_header()
+                    .flags()
+                    .is_derived_class_constructor()
+        }
         _ => false,
     }
 }
@@ -6296,8 +6309,10 @@ const fn supported_compiler_opcode(opcode: FinalOpcode) -> bool {
             | FinalOpcode::CallMethod
             | FinalOpcode::Apply
             | FinalOpcode::ArrayFrom
+            | FinalOpcode::CheckCtorReturn
             | FinalOpcode::CheckCtor
             | FinalOpcode::InitCtor
+            | FinalOpcode::GetSuper
             | FinalOpcode::Perm3
             | FinalOpcode::Return
             | FinalOpcode::ReturnUndef
@@ -6465,6 +6480,11 @@ const fn supported_compiler_opcode(opcode: FinalOpcode) -> bool {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum InternalStackValue {
     Ordinary,
+    DerivedActiveConstructor(BytecodePc),
+    DerivedSuperConstructor(BytecodePc),
+    DerivedSuperNewTarget(BytecodePc),
+    DerivedSuperResult(BytecodePc),
+    DerivedSuperCompletion(BytecodePc),
     ForInIterator(BytecodePc),
     ForInKey(BytecodePc),
     ForInDone(BytecodePc),
@@ -6545,6 +6565,10 @@ impl JavaScriptStackValue {
             InternalStackValue::ForOfReturnValue(site) => Some(Self::ForOfReturnValue(site)),
             InternalStackValue::CatchException(site) => Some(Self::CatchException(site)),
             InternalStackValue::ForInIterator(_)
+            | InternalStackValue::DerivedActiveConstructor(_)
+            | InternalStackValue::DerivedSuperConstructor(_)
+            | InternalStackValue::DerivedSuperNewTarget(_)
+            | InternalStackValue::DerivedSuperCompletion(_)
             | InternalStackValue::ForOfIterator(_)
             | InternalStackValue::ForOfNextMethod(_)
             | InternalStackValue::ForOfCatch(_)
@@ -6564,6 +6588,7 @@ impl JavaScriptStackValue {
             | InternalStackValue::FinallyPending { .. }
             | InternalStackValue::FinallyReturn { .. } => None,
             InternalStackValue::Ordinary
+            | InternalStackValue::DerivedSuperResult(_)
             | InternalStackValue::YieldStarIteratorResult(_)
             | InternalStackValue::YieldStarDone(_)
             | InternalStackValue::YieldStarYieldResult(_)
@@ -6598,6 +6623,10 @@ impl InternalStackValue {
         !matches!(
             self,
             Self::ForInIterator(_)
+                | Self::DerivedActiveConstructor(_)
+                | Self::DerivedSuperConstructor(_)
+                | Self::DerivedSuperNewTarget(_)
+                | Self::DerivedSuperCompletion(_)
                 | Self::ForOfIterator(_)
                 | Self::ForOfNextMethod(_)
                 | Self::ForOfCatch(_)
@@ -7551,6 +7580,155 @@ fn transfer_internal_operand_stack(
     let instruction = decoded.instruction();
     let opcode = instruction.opcode();
     match opcode {
+        FinalOpcode::SpecialObject => {
+            let Operands::U8(selector) = instruction.operands() else {
+                return Err(internal_stack_error(id, decoded.pc(), opcode, state));
+            };
+            match selector {
+                // The only admitted producer of an active derived-constructor
+                // capability. `get_super` must consume it immediately in the
+                // typed stack transfer below.
+                4 => {
+                    state.try_reserve(1).map_err(|_| {
+                        BytecodeVerificationError::function(
+                            id,
+                            BytecodeVerificationErrorKind::AllocationFailed {
+                                resource: BytecodeGraphResource::FrameStateEntries,
+                                requested: 1,
+                            },
+                        )
+                    })?;
+                    state.push(InternalStackValue::DerivedActiveConstructor(decoded.pc()));
+                    return Ok(InternalStackTransfer {
+                        normal_completion: true,
+                        iteration_branch_value: None,
+                        ret_finalizer: None,
+                    });
+                }
+                // `new.target` becomes a derived-super capability only when
+                // it immediately follows the typed superclass constructor.
+                // Other source-level uses retain ordinary JavaScript-value
+                // treatment through the generic stack transfer.
+                3 if matches!(
+                    state.last(),
+                    Some(InternalStackValue::DerivedSuperConstructor(_))
+                ) =>
+                {
+                    let Some(InternalStackValue::DerivedSuperConstructor(site)) =
+                        state.last().copied()
+                    else {
+                        unreachable!("the derived superclass guard established the value")
+                    };
+                    state.try_reserve(1).map_err(|_| {
+                        BytecodeVerificationError::function(
+                            id,
+                            BytecodeVerificationErrorKind::AllocationFailed {
+                                resource: BytecodeGraphResource::FrameStateEntries,
+                                requested: 1,
+                            },
+                        )
+                    })?;
+                    state.push(InternalStackValue::DerivedSuperNewTarget(site));
+                    return Ok(InternalStackTransfer {
+                        normal_completion: true,
+                        iteration_branch_value: None,
+                        ret_finalizer: None,
+                    });
+                }
+                _ => {}
+            }
+        }
+        FinalOpcode::GetSuper => {
+            let Some(InternalStackValue::DerivedActiveConstructor(_)) = state.last().copied()
+            else {
+                return Err(internal_stack_error(id, decoded.pc(), opcode, state));
+            };
+            *state
+                .last_mut()
+                .expect("derived active constructor is present") =
+                InternalStackValue::DerivedSuperConstructor(decoded.pc());
+            return Ok(InternalStackTransfer {
+                normal_completion: true,
+                iteration_branch_value: None,
+                ret_finalizer: None,
+            });
+        }
+        FinalOpcode::CallConstructor => {
+            let Some(argument_count) = instruction.operands().dynamic_argument_count() else {
+                return Err(internal_stack_error(id, decoded.pc(), opcode, state));
+            };
+            let required = usize::from(argument_count).saturating_add(2);
+            let Some(base) = state.len().checked_sub(required) else {
+                return Err(internal_stack_error(id, decoded.pc(), opcode, state));
+            };
+            if let (
+                InternalStackValue::DerivedSuperConstructor(super_site),
+                InternalStackValue::DerivedSuperNewTarget(target_site),
+            ) = (state[base], state[base + 1])
+            {
+                if super_site != target_site
+                    || state[base + 2..]
+                        .iter()
+                        .any(|value| !value.is_javascript_value())
+                {
+                    return Err(internal_stack_error(id, decoded.pc(), opcode, state));
+                }
+                state.truncate(base);
+                state.push(InternalStackValue::DerivedSuperResult(decoded.pc()));
+                return Ok(InternalStackTransfer {
+                    normal_completion: true,
+                    iteration_branch_value: None,
+                    ret_finalizer: None,
+                });
+            }
+        }
+        FinalOpcode::CheckCtorReturn => {
+            let Some(InternalStackValue::DerivedSuperResult(site)) = state.last().copied() else {
+                return Err(internal_stack_error(id, decoded.pc(), opcode, state));
+            };
+            state.try_reserve(1).map_err(|_| {
+                BytecodeVerificationError::function(
+                    id,
+                    BytecodeVerificationErrorKind::AllocationFailed {
+                        resource: BytecodeGraphResource::FrameStateEntries,
+                        requested: 1,
+                    },
+                )
+            })?;
+            state.push(InternalStackValue::DerivedSuperCompletion(site));
+            return Ok(InternalStackTransfer {
+                normal_completion: true,
+                iteration_branch_value: None,
+                ret_finalizer: None,
+            });
+        }
+        FinalOpcode::Drop
+            if matches!(
+                state.last(),
+                Some(InternalStackValue::DerivedSuperCompletion(_))
+            ) =>
+        {
+            let Some(base) = state.len().checked_sub(2) else {
+                return Err(internal_stack_error(id, decoded.pc(), opcode, state));
+            };
+            let (
+                InternalStackValue::DerivedSuperResult(result_site),
+                InternalStackValue::DerivedSuperCompletion(completion_site),
+            ) = (state[base], state[base + 1])
+            else {
+                return Err(internal_stack_error(id, decoded.pc(), opcode, state));
+            };
+            if result_site != completion_site {
+                return Err(internal_stack_error(id, decoded.pc(), opcode, state));
+            }
+            state[base] = InternalStackValue::Ordinary;
+            state.truncate(base + 1);
+            return Ok(InternalStackTransfer {
+                normal_completion: true,
+                iteration_branch_value: None,
+                ret_finalizer: None,
+            });
+        }
         FinalOpcode::Catch => {
             invalidate_internal_value_provenance(state);
             let Some(handler) = catch_handler else {
@@ -10146,6 +10324,7 @@ fn collect_requirements(
             | FinalOpcode::Call3
             | FinalOpcode::CallMethod
             | FinalOpcode::InitCtor
+            | FinalOpcode::GetSuper
             | FinalOpcode::PushThis => {
                 push_requirement(requirements, ExecutionRequirement::Calls);
             }
@@ -10174,7 +10353,7 @@ fn collect_requirements(
                 push_requirement(requirements, ExecutionRequirement::OrdinaryObjects);
             }
             FinalOpcode::SpecialObject => match instruction.operands() {
-                Operands::U8(3) => {
+                Operands::U8(3 | 4) => {
                     push_requirement(requirements, ExecutionRequirement::Calls);
                 }
                 Operands::U8(0 | 1) => {

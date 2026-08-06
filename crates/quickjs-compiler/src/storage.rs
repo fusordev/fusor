@@ -12,7 +12,7 @@ use oxc_ast::{
         MethodDefinitionKind, Statement, VariableDeclarationKind,
     },
 };
-use oxc_semantic::{NodeId, ReferenceId, ScopeId, SymbolFlags, SymbolId};
+use oxc_semantic::{AstNodes, NodeId, ReferenceId, ScopeId, SymbolFlags, SymbolId};
 use oxc_span::GetSpan;
 use quickjs_frontend::{
     CompilationGoal, DynamicFunctionKind, ModuleExportLocalName, ParsedUnit, Span,
@@ -924,6 +924,27 @@ struct Planner<'unit, 'arena, 'scope> {
     default_class_constructors: HashMap<NodeId, ExecutableId>,
 }
 
+fn is_derived_class_constructor(nodes: &AstNodes<'_>, function_node: NodeId) -> bool {
+    let AstKind::Function(function) = nodes.kind(function_node) else {
+        return false;
+    };
+    let AstKind::MethodDefinition(method) = nodes.parent_kind(function.node_id.get()) else {
+        return false;
+    };
+    if method.kind != MethodDefinitionKind::Constructor
+        || method.value.node_id.get() != function_node
+    {
+        return false;
+    }
+    let AstKind::ClassBody(body) = nodes.parent_kind(method.node_id.get()) else {
+        return false;
+    };
+    let AstKind::Class(class) = nodes.parent_kind(body.node_id.get()) else {
+        return false;
+    };
+    class.super_class.is_some()
+}
+
 impl<'unit, 'arena, 'scope> Planner<'unit, 'arena, 'scope> {
     fn new(unit: &'unit ParsedUnit<'arena, 'scope>) -> Result<Self, CompilerError> {
         let root_span = unit.program().span;
@@ -1553,7 +1574,8 @@ impl<'unit, 'arena, 'scope> Planner<'unit, 'arena, 'scope> {
     }
 
     fn reject_synthetic_binding_uses(&self) -> Result<(), CompilerError> {
-        for node in self.unit.semantic().nodes().iter() {
+        let nodes = self.unit.semantic().nodes();
+        for (node_id, node) in nodes.iter_enumerated() {
             let (span, new_target) = match node.kind() {
                 AstKind::NewTarget(expression) => (expression.span, true),
                 AstKind::Super(expression) => (expression.span, false),
@@ -1587,6 +1609,25 @@ impl<'unit, 'arena, 'scope> Planner<'unit, 'arena, 'scope> {
                         }
                     }
                 }
+                continue;
+            }
+            let direct_super_call = matches!(
+                nodes.parent_kind(node_id),
+                AstKind::CallExpression(call)
+                    if matches!(
+                        &call.callee,
+                        oxc_ast::ast::Expression::Super(expression)
+                            if expression.node_id.get() == node_id
+                    )
+            );
+            let derived_constructor =
+                self.executable_drafts
+                    .get(owner.index())
+                    .is_some_and(|candidate| {
+                        matches!(candidate.executable.kind, ExecutableKind::Function { .. })
+                            && is_derived_class_constructor(nodes, candidate.node_id)
+                    });
+            if direct_super_call && derived_constructor {
                 continue;
             }
             return unsupported(UnsupportedFeature::FunctionSyntheticBinding, span);

@@ -101,6 +101,58 @@ fn a_base_class_without_a_constructor_uses_a_synthesized_typed_template() {
 }
 
 #[test]
+fn explicit_derived_constructors_lower_a_typed_super_construction_path() {
+    let tree = compile(
+        "function make(){class Base{constructor(value){this.value=value;}}class Derived extends Base{constructor(value){super(value+1);this.after=2;}}return Derived;}",
+        "make",
+    );
+    let (constructor_index, _) = tree
+        .functions()
+        .iter()
+        .enumerate()
+        .find(|function| {
+            function
+                .1
+                .control_flow()
+                .function_header()
+                .flags()
+                .is_derived_class_constructor()
+        })
+        .expect("derived constructor");
+    let constructor = tree
+        .verified_bytecode()
+        .function(quickjs_bytecode::FunctionTemplateId::new(
+            u32::try_from(constructor_index).expect("template index"),
+        ))
+        .expect("verified derived constructor");
+    let instructions = constructor.function().control_flow().instructions();
+    assert!(instructions.windows(3).any(|window| {
+        matches!(
+            window,
+            [active, super_constructor, new_target]
+                if matches!(
+                    active.decoded().instruction().operands(),
+                    quickjs_bytecode::Operands::U8(4)
+                )
+                    && super_constructor.decoded().instruction().opcode() == FinalOpcode::GetSuper
+                    && matches!(
+                        new_target.decoded().instruction().operands(),
+                        quickjs_bytecode::Operands::U8(3)
+                    )
+        )
+    }));
+    assert!(instructions.windows(3).any(|window| {
+        matches!(
+            window,
+            [call, completion, drop]
+                if call.decoded().instruction().opcode() == FinalOpcode::CallConstructor
+                    && completion.decoded().instruction().opcode() == FinalOpcode::CheckCtorReturn
+                    && drop.decoded().instruction().opcode() == FinalOpcode::Drop
+        )
+    }));
+}
+
+#[test]
 fn a_named_base_class_expression_uses_the_same_typed_definition_path() {
     let tree = compile(
         "function make(){let Result=class Box{static self(){return Box;}};return Result;}",

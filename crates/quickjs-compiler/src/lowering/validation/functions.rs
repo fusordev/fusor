@@ -11,7 +11,7 @@ use super::super::{
 pub(in crate::lowering) enum OrdinaryFunctionForm {
     Function,
     ObjectMethod { property_span: Span },
-    ClassConstructor { class_span: Span },
+    ClassConstructor { class_span: Span, derived: bool },
     ClassMethod { property_span: Span },
 }
 
@@ -425,6 +425,7 @@ fn class_method_form(unit: &ParsedUnit<'_, '_>, node_id: NodeId) -> Option<Ordin
     match method.kind {
         MethodDefinitionKind::Constructor => Some(OrdinaryFunctionForm::ClassConstructor {
             class_span: class.span,
+            derived: class.super_class.is_some(),
         }),
         MethodDefinitionKind::Method | MethodDefinitionKind::Get | MethodDefinitionKind::Set => {
             Some(OrdinaryFunctionForm::ClassMethod {

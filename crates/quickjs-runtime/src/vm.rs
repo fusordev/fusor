@@ -295,10 +295,15 @@ enum ConstructorState {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum ConstructorProfile {
     OrdinaryOrNone,
+    Derived,
     DerivedDefault,
 }
 
 impl ConstructorProfile {
+    const fn is_derived(self) -> bool {
+        matches!(self, Self::Derived | Self::DerivedDefault)
+    }
+
     const fn is_derived_default(self) -> bool {
         matches!(self, Self::DerivedDefault)
     }
@@ -3192,7 +3197,10 @@ enum Step {
     Yield(StoredValue),
     YieldStar(StoredValue),
     AsyncYieldStar(StoredValue),
-    Return(StoredValue),
+    Return {
+        value: StoredValue,
+        source_pc: BytecodePc,
+    },
 }
 
 enum PendingExceptionPayload {
@@ -5453,7 +5461,36 @@ fn execute_frame_loop(
                 }
                 return Ok(result);
             }
-            Step::Return(value) => {
+            Step::Return { value, source_pc } => {
+                if let Some(frame) = frames.last()
+                    && matches!(
+                        frame.constructor_state,
+                        ConstructorState::DerivedUninitialized
+                            | ConstructorState::DerivedInitialized
+                    )
+                    && value.heap_reference().is_none()
+                    && !(frame.constructor_state == ConstructorState::DerivedInitialized
+                        && matches!(value, StoredValue::Undefined))
+                {
+                    let frame = frames.last().ok_or(EngineFault::MissingInstruction {
+                        function: FunctionTemplateId::new(0),
+                        instruction: 0,
+                    })?;
+                    let pending = if matches!(value, StoredValue::Undefined) {
+                        derived_this_uninitialized_exception(runtime, frame, source_pc)?
+                    } else {
+                        derived_constructor_primitive_return_exception(runtime, frame, source_pc)?
+                    };
+                    dispatch_pending_exception(
+                        runtime,
+                        frames,
+                        active_frame_values,
+                        pending,
+                        compiler,
+                        execution_budget,
+                    )?;
+                    continue;
+                }
                 let mut finished = frames.pop().ok_or(EngineFault::MissingInstruction {
                     function: FunctionTemplateId::new(0),
                     instruction: 0,
@@ -5528,10 +5565,7 @@ fn execute_frame_loop(
                             continue;
                         }
                     }
-                } else if matches!(
-                    finished.constructor_state,
-                    ConstructorState::Ordinary | ConstructorState::DerivedInitialized
-                ) {
+                } else if finished.constructor_state == ConstructorState::Ordinary {
                     match value {
                         value @ (StoredValue::Function(_) | StoredValue::Object(_)) => value,
                         StoredValue::Undefined
@@ -5541,6 +5575,22 @@ fn execute_frame_loop(
                         | StoredValue::BigInt(_)
                         | StoredValue::String(_)
                         | StoredValue::Symbol(_) => finished.receiver,
+                    }
+                } else if finished.constructor_state == ConstructorState::DerivedInitialized {
+                    match value {
+                        value @ (StoredValue::Function(_) | StoredValue::Object(_)) => value,
+                        StoredValue::Undefined => finished.receiver,
+                        StoredValue::Null
+                        | StoredValue::Boolean(_)
+                        | StoredValue::Number(_)
+                        | StoredValue::BigInt(_)
+                        | StoredValue::String(_)
+                        | StoredValue::Symbol(_) => {
+                            return Err(EngineFault::RuntimeInvariant {
+                                message: "validated derived constructor returned an invalid primitive",
+                            }
+                            .into());
+                        }
                     }
                 } else {
                     value
