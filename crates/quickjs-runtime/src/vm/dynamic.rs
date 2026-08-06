@@ -143,6 +143,7 @@ pub(super) fn finish_dynamic_function_constructor(
         active_frames,
         active_frame_values.saturating_add(dynamic_return_values),
         0,
+        false,
     ) {
         Ok(plan) => plan,
         Err(error) => {
@@ -161,6 +162,7 @@ pub(super) fn finish_dynamic_function_constructor(
         runtime,
         plan,
         StoredValue::Object(global),
+        None,
         FrameArguments::Owned(CallArguments::empty()),
         return_to,
         None,

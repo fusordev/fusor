@@ -287,6 +287,7 @@ pub(crate) struct Frame {
     template: FunctionTemplateId,
     strict: bool,
     receiver: StoredValue,
+    new_target: Option<FunctionId>,
     instruction: InstructionIndex,
     return_to: Option<CallReturn>,
     dynamic_return: Option<DynamicFunctionReturn>,
@@ -2715,6 +2716,9 @@ pub(crate) fn trace_frame_roots(frame: &Frame, mark: &mut dyn FnMut(CollectionRo
         frame.function,
     )));
     trace_stored_value_root(&frame.receiver, mark);
+    if let Some(new_target) = frame.new_target {
+        mark(CollectionRoot::Heap(HeapReference::Function(new_target)));
+    }
     if let Some(arguments) = &frame.arguments_snapshot {
         for value in arguments {
             trace_stored_value_root(value, mark);
@@ -2864,6 +2868,7 @@ struct FramePlan {
     stack_capacity: usize,
     reserved_values: u64,
     arguments_snapshot_use: ArgumentsSnapshotUse,
+    construction: bool,
     strict: bool,
     receiver_access: ReceiverAccess,
     asynchronous: bool,
@@ -3517,11 +3522,19 @@ impl Context<'_> {
         }
 
         let supplied_argument_count = owned_arguments.as_ref().map_or(arguments.len(), Vec::len);
-        let plan = plan_frame(self.runtime, function_id, 0, 0, supplied_argument_count)?;
+        let plan = plan_frame(
+            self.runtime,
+            function_id,
+            0,
+            0,
+            supplied_argument_count,
+            false,
+        )?;
         let frame = create_frame(
             self.runtime,
             plan,
             receiver,
+            None,
             match owned_arguments {
                 Some(arguments) => FrameArguments::Owned(CallArguments::from_values(arguments)),
                 None => FrameArguments::Public(arguments),
@@ -3568,11 +3581,12 @@ impl Context<'_> {
         limits: ExecutionLimits,
         compiler: Option<&Arc<dyn OrdinaryDynamicFunctionCompiler>>,
     ) -> Result<StoredValue, ExecutionError> {
-        let plan = plan_frame(self.runtime, root.function, 0, 0, 0)?;
+        let plan = plan_frame(self.runtime, root.function, 0, 0, 0, false)?;
         let frame = create_frame(
             self.runtime,
             plan,
             receiver,
+            None,
             FrameArguments::Owned(CallArguments::empty()),
             None,
             None,
@@ -4509,6 +4523,7 @@ fn execute_frame_loop(
                     active_execution_frames(frames),
                     *active_frame_values,
                     supplied_argument_count,
+                    construction,
                 )?;
                 frames
                     .try_reserve(1)
@@ -4533,6 +4548,7 @@ fn execute_frame_loop(
                     } else {
                         inputs.receiver
                     },
+                    construction,
                     FrameArguments::Owned(inputs.arguments),
                     Some(return_to),
                     None,

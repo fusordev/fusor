@@ -44,6 +44,7 @@ pub(super) fn plan_frame(
     active_frames: usize,
     active_frame_values: u64,
     supplied_argument_count: usize,
+    construction: bool,
 ) -> Result<FramePlan, ExecutionError> {
     let observed_frames = usize_to_u64(active_frames).saturating_add(1);
     check_execution_limit(
@@ -164,6 +165,7 @@ pub(super) fn plan_frame(
         .checked_add(local_count)
         .and_then(|value| value.checked_add(stack_capacity))
         .and_then(|value| value.checked_add(1))
+        .and_then(|value| value.checked_add(usize::from(construction)))
         .and_then(|value| value.checked_add(if asynchronous { 3 } else { 0 }))
         .and_then(|value| {
             value.checked_add(if arguments_snapshot_use.is_needed() {
@@ -206,6 +208,7 @@ pub(super) fn plan_frame(
         stack_capacity,
         reserved_values: frame_values,
         arguments_snapshot_use,
+        construction,
         strict,
         receiver_access,
         asynchronous,
@@ -282,10 +285,17 @@ pub(super) fn create_frame(
     runtime: &mut Runtime,
     plan: FramePlan,
     receiver: StoredValue,
+    new_target: Option<FunctionId>,
     supplied: FrameArguments<'_>,
     return_to: Option<CallReturn>,
     dynamic_return: Option<DynamicFunctionReturn>,
 ) -> Result<Frame, ExecutionError> {
+    if plan.construction != new_target.is_some() {
+        return Err(EngineFault::RuntimeInvariant {
+            message: "frame plan construction profile changed before allocation",
+        }
+        .into());
+    }
     let function = runtime
         .functions
         .get(plan.function)
@@ -460,6 +470,7 @@ pub(super) fn create_frame(
         template: plan.template,
         strict: plan.strict,
         receiver,
+        new_target,
         instruction: plan.instruction,
         return_to,
         dynamic_return,
@@ -650,47 +661,59 @@ pub(super) fn execute_one(
             push(frame, StoredValue::Object(array));
         }
         FinalOpcode::SpecialObject => {
-            let Operands::U8(arguments_kind @ (0 | 1)) = operands else {
+            let Operands::U8(selector) = operands else {
                 return unsupported_dispatch(opcode);
             };
-            let arguments = if frame.arguments_snapshot_use.has_rest_parameter() {
-                let argument_count = frame
-                    .arguments_snapshot
-                    .as_ref()
-                    .ok_or(EngineFault::RuntimeInvariant {
-                        message: "arguments object was initialized more than once",
-                    })?
-                    .len();
-                execution_budget.charge_instructions(usize_to_u64(argument_count))?;
-                duplicate_arguments_snapshot(frame)?
+            if selector == 3 {
+                push(
+                    frame,
+                    frame
+                        .new_target
+                        .map_or(StoredValue::Undefined, StoredValue::Function),
+                );
             } else {
-                frame
-                    .arguments_snapshot
-                    .take()
-                    .ok_or(EngineFault::RuntimeInvariant {
-                        message: "arguments object was initialized more than once",
-                    })?
-            };
-            let realm = code(runtime, frame.code)?.realm;
-            let object = if arguments_kind == 0 {
-                runtime.allocate_unmapped_arguments_object(realm, arguments)?
-            } else {
-                let mapped_arguments = mapped_arguments_authority(runtime, frame)?;
-                let supplied_count = arguments.len();
-                let active_count =
-                    mapped_arguments.partition_point(|index| (*index as usize) < supplied_count);
-                let active_arguments = &mapped_arguments[..active_count];
-                preflight_mapped_arguments_frame(frame, active_arguments)?;
-                let object = runtime.allocate_mapped_arguments_object(
-                    realm,
-                    frame.function,
-                    arguments,
-                    &mapped_arguments,
-                )?;
-                install_mapped_arguments_cells(runtime, frame, object, active_arguments)?;
-                object
-            };
-            push(frame, StoredValue::Object(object));
+                let arguments_kind @ (0 | 1) = selector else {
+                    return unsupported_dispatch(opcode);
+                };
+                let arguments = if frame.arguments_snapshot_use.has_rest_parameter() {
+                    let argument_count = frame
+                        .arguments_snapshot
+                        .as_ref()
+                        .ok_or(EngineFault::RuntimeInvariant {
+                            message: "arguments object was initialized more than once",
+                        })?
+                        .len();
+                    execution_budget.charge_instructions(usize_to_u64(argument_count))?;
+                    duplicate_arguments_snapshot(frame)?
+                } else {
+                    frame
+                        .arguments_snapshot
+                        .take()
+                        .ok_or(EngineFault::RuntimeInvariant {
+                            message: "arguments object was initialized more than once",
+                        })?
+                };
+                let realm = code(runtime, frame.code)?.realm;
+                let object = if arguments_kind == 0 {
+                    runtime.allocate_unmapped_arguments_object(realm, arguments)?
+                } else {
+                    let mapped_arguments = mapped_arguments_authority(runtime, frame)?;
+                    let supplied_count = arguments.len();
+                    let active_count = mapped_arguments
+                        .partition_point(|index| (*index as usize) < supplied_count);
+                    let active_arguments = &mapped_arguments[..active_count];
+                    preflight_mapped_arguments_frame(frame, active_arguments)?;
+                    let object = runtime.allocate_mapped_arguments_object(
+                        realm,
+                        frame.function,
+                        arguments,
+                        &mapped_arguments,
+                    )?;
+                    install_mapped_arguments_cells(runtime, frame, object, active_arguments)?;
+                    object
+                };
+                push(frame, StoredValue::Object(object));
+            }
         }
         FinalOpcode::Object => {
             let realm = code(runtime, frame.code)?.realm;

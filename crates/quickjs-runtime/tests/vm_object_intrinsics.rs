@@ -1424,6 +1424,11 @@ fn reflect_construct_preserves_specification_validation_and_collection_order() {
 /// controls constructor execution and the returned object completion.
 #[test]
 fn reflect_construct_keeps_target_and_new_target_distinct() {
+    assert!(boolean(
+        "function Target(){return new.target;}\
+         function NewTarget(){}\
+         return Reflect.construct(Target,[],NewTarget)===NewTarget;"
+    ));
     assert_eq!(
         text(
             "function Target(value){this.value=value;}\

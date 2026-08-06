@@ -1487,15 +1487,16 @@ fn resolve_native_dispatch_inner(
         }
 
         let supplied_argument_count = call.arguments.remaining().len();
+        let construction = call.new_target;
         let plan = plan_frame(
             runtime,
             call.function,
             suspended_frames,
             suspended_values,
             supplied_argument_count,
+            construction.is_some(),
         )
         .map_err(NativeFailure::Execution)?;
-        let construction = call.new_target;
         let mut frame = create_frame(
             runtime,
             plan,
@@ -1504,6 +1505,7 @@ fn resolve_native_dispatch_inner(
             } else {
                 call.receiver
             },
+            construction,
             FrameArguments::Owned(call.arguments),
             call.return_to,
             None,

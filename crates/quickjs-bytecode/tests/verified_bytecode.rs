@@ -5741,6 +5741,62 @@ fn arguments_object_authority_is_single_site_mode_and_kind_exact() {
 }
 
 #[test]
+fn new_target_special_object_requires_function_header_authority() {
+    let text = "function f(){return new.target}";
+    let function_span = SourceByteSpan::new(0, u32::try_from(text.len()).expect("source length"));
+    let mappings = [(0, function_span), (2, function_span)];
+    let instructions = [
+        (FinalOpcode::SpecialObject, Operands::U8(3)),
+        (FinalOpcode::Return, Operands::None),
+    ];
+    let valid = shaped_input_with_strict(
+        &instructions,
+        &[atom("f")],
+        &[],
+        0,
+        0,
+        &[],
+        source(
+            text,
+            function_span,
+            Some(SourceByteSpan::new(9, 10)),
+            &mappings,
+        ),
+        true,
+    );
+    let verified =
+        verify_compiler_bytecode_graph(valid, BytecodeGraphVerificationLimits::default())
+            .expect("ordinary function new.target is admitted");
+    assert!(
+        verified
+            .requirements()
+            .contains(&ExecutionRequirement::Calls)
+    );
+
+    let script = profiled_single_input(
+        &instructions,
+        UnverifiedFunctionHeader::dynamic_function_script(0),
+        CompilerExecutableKind::DynamicFunctionScript,
+        &[],
+        None,
+        &[],
+        0,
+        0,
+        &[],
+        source(text, function_span, None, &mappings),
+    );
+    let error = verify_compiler_bytecode_graph(script, BytecodeGraphVerificationLimits::default())
+        .expect_err("a Script frame cannot expose new.target");
+    assert!(matches!(
+        error.kind(),
+        BytecodeVerificationErrorKind::UnsupportedCompilerOpcode {
+            pc,
+            opcode: FinalOpcode::SpecialObject,
+        } if *pc == BytecodePc::ZERO
+    ));
+}
+
+#[test]
 #[allow(
     clippy::too_many_lines,
     reason = "one certificate test covers the complete rest-site authority matrix"

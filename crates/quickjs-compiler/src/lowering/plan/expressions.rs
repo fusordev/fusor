@@ -428,6 +428,13 @@ impl<'compiler, 'unit, 'arena, 'scope> ExpressionPlanner<'compiler, 'unit, 'aren
                         Expression::ThisExpression(this) => {
                             flow.emit(self.plan_this_expression(this.span, layout)?)?;
                         }
+                        Expression::NewTarget(new_target) => {
+                            flow.emit(PlannedInstruction::new(
+                                FinalOpcode::SpecialObject,
+                                Operands::U8(3),
+                                new_target.span,
+                            ))?;
+                        }
                         _ => {
                             return unsupported(
                                 UnsupportedLeafFeature::UnsupportedExpression,

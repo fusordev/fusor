@@ -5485,7 +5485,10 @@ fn verify_supported_opcodes(
         let decoded = instruction.decoded();
         let instruction = decoded.instruction();
         let opcode = instruction.opcode();
-        if opcode == FinalOpcode::SpecialObject {
+        if matches!(
+            (opcode, instruction.operands()),
+            (FinalOpcode::SpecialObject, Operands::U8(0 | 1))
+        ) {
             arguments_object_count = arguments_object_count.saturating_add(1);
         } else if opcode == FinalOpcode::Rest {
             rest_parameter_count = rest_parameter_count.saturating_add(1);
@@ -5550,29 +5553,15 @@ fn verify_supported_opcodes(
             || matches!(
                 (opcode, instruction.operands()),
                 (FinalOpcode::SpecialObject, operands)
-                    if !matches!(
-                        (
-                            operands,
-                            flow.function_header().mode().is_strict(),
-                            simple_parameter_list,
-                        ),
-                        (Operands::U8(0), true, _)
-                            | (Operands::U8(0), false, false)
-                            | (Operands::U8(1), false, true)
-                    ) || !matches!(
+                    if !compiler_special_object_is_authorized(
+                        operands,
+                        flow,
                         executable_kind,
-                        CompilerExecutableKind::OrdinaryFunction
-                            | CompilerExecutableKind::OrdinaryMethod
-                            | CompilerExecutableKind::GeneratorFunction
-                            | CompilerExecutableKind::GeneratorMethod
-                            | CompilerExecutableKind::AsyncFunction
-                            | CompilerExecutableKind::AsyncMethod
-                            | CompilerExecutableKind::AsyncGeneratorFunction
-                            | CompilerExecutableKind::AsyncGeneratorMethod
+                        arguments_object_count,
+                        rest_parameter_count,
+                        mapped_arguments_authority,
+                        simple_parameter_list,
                     )
-                        || arguments_object_count != 1
-                        || rest_parameter_count != 0
-                        || matches!(operands, Operands::U8(kind) if (kind == 1) != mapped_arguments_authority)
             )
             || matches!(
                 (opcode, instruction.operands()),
@@ -5633,6 +5622,47 @@ fn verify_supported_opcodes(
         ));
     }
     Ok(())
+}
+
+fn compiler_special_object_is_authorized(
+    operands: Operands,
+    flow: &VerifiedControlFlow,
+    executable_kind: CompilerExecutableKind,
+    arguments_object_count: u8,
+    rest_parameter_count: u8,
+    mapped_arguments_authority: bool,
+    simple_parameter_list: bool,
+) -> bool {
+    if !matches!(
+        executable_kind,
+        CompilerExecutableKind::OrdinaryFunction
+            | CompilerExecutableKind::OrdinaryMethod
+            | CompilerExecutableKind::GeneratorFunction
+            | CompilerExecutableKind::GeneratorMethod
+            | CompilerExecutableKind::AsyncFunction
+            | CompilerExecutableKind::AsyncMethod
+            | CompilerExecutableKind::AsyncGeneratorFunction
+            | CompilerExecutableKind::AsyncGeneratorMethod
+    ) {
+        return false;
+    }
+    match operands {
+        Operands::U8(0) => {
+            (flow.function_header().mode().is_strict() || !simple_parameter_list)
+                && arguments_object_count == 1
+                && rest_parameter_count == 0
+                && !mapped_arguments_authority
+        }
+        Operands::U8(1) => {
+            !flow.function_header().mode().is_strict()
+                && simple_parameter_list
+                && arguments_object_count == 1
+                && rest_parameter_count == 0
+                && mapped_arguments_authority
+        }
+        Operands::U8(3) => flow.function_header().flags().new_target_allowed(),
+        _ => false,
+    }
 }
 
 #[allow(clippy::too_many_lines)]
@@ -9501,7 +9531,8 @@ fn collect_requirements(
         push_requirement(requirements, ExecutionRequirement::RealmGlobalBindings);
     }
     for instruction in function.control_flow().instructions() {
-        match instruction.decoded().instruction().opcode() {
+        let instruction = instruction.decoded().instruction();
+        match instruction.opcode() {
             FinalOpcode::CallConstructor
             | FinalOpcode::Call
             | FinalOpcode::Call0
@@ -9526,7 +9557,6 @@ fn collect_requirements(
                 push_requirement(requirements, ExecutionRequirement::Iterators);
             }
             FinalOpcode::Object
-            | FinalOpcode::SpecialObject
             | FinalOpcode::SetName
             | FinalOpcode::GetField
             | FinalOpcode::GetField2
@@ -9536,6 +9566,15 @@ fn collect_requirements(
             | FinalOpcode::ForInStart => {
                 push_requirement(requirements, ExecutionRequirement::OrdinaryObjects);
             }
+            FinalOpcode::SpecialObject => match instruction.operands() {
+                Operands::U8(3) => {
+                    push_requirement(requirements, ExecutionRequirement::Calls);
+                }
+                Operands::U8(0 | 1) => {
+                    push_requirement(requirements, ExecutionRequirement::OrdinaryObjects);
+                }
+                _ => unreachable!("verified compiler special-object selector"),
+            },
             FinalOpcode::ForInNext => {
                 push_requirement(requirements, ExecutionRequirement::OrdinaryObjects);
                 push_requirement(requirements, ExecutionRequirement::Strings);

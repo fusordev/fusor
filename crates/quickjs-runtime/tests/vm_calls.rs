@@ -266,6 +266,84 @@ fn function_prototype_call_continuation_retains_no_frame_values() {
 }
 
 #[test]
+fn new_target_distinguishes_calls_from_construction_paths() {
+    let authority = compile(
+        "function run(){\
+            function Target(){return new.target;}\
+            if(Target()!==void 0){return 1;}\
+            if(new Target()!==Target){return 2;}\
+            if(Target.call(null)!==void 0){return 3;}\
+            if(Target.apply(null)!==void 0){return 4;}\
+            let Bound=Target.bind(null);\
+            if(new Bound()!==Target){return 5;}\
+            return 0;\
+        }",
+        "run",
+    );
+    let mut runtime = runtime();
+    let realm = runtime.create_realm().expect("realm");
+    let mut context = runtime.context(&realm).expect("context");
+    let run = context.instantiate(authority).expect("run");
+
+    let result = context
+        .call(&run, &[], ExecutionLimits::default())
+        .expect("new.target call and direct construction paths");
+
+    assert_number(&result, 0);
+}
+
+#[test]
+fn constructor_frames_charge_the_stored_new_target_value() {
+    let authority = compile(
+        "function run(){\
+            function Target(){return new.target;}\
+            return new Target()===Target;\
+        }",
+        "run",
+    );
+    let run_values = reserved_frame_values(&authority, FunctionTemplateId::new(0));
+    let target_values = reserved_frame_values(&authority, FunctionTemplateId::new(1));
+    let expected = run_values
+        .checked_add(target_values)
+        .and_then(|value| value.checked_add(1))
+        .expect("small frame usage");
+
+    let mut constrained =
+        Runtime::try_new(RuntimeLimits::default().with_max_active_frame_values(expected - 1))
+            .expect("runtime");
+    let constrained_realm = constrained.create_realm().expect("realm");
+    let constrained_run = constrained
+        .context(&constrained_realm)
+        .expect("context")
+        .instantiate(authority.clone())
+        .expect("run");
+    assert!(matches!(
+        constrained
+            .context(&constrained_realm)
+            .expect("context")
+            .call(&constrained_run, &[], ExecutionLimits::default())
+            .expect_err("stored new.target exceeds the exact value limit"),
+        ExecutionError::LimitExceeded {
+            resource: quickjs_runtime::RuntimeResource::FrameValues,
+            limit,
+            observed,
+        } if limit == expected - 1 && observed == expected
+    ));
+
+    let mut runtime =
+        Runtime::try_new(RuntimeLimits::default().with_max_active_frame_values(expected))
+            .expect("runtime");
+    let realm = runtime.create_realm().expect("realm");
+    let mut context = runtime.context(&realm).expect("context");
+    let run = context.instantiate(authority).expect("run");
+    let result = context
+        .call(&run, &[], ExecutionLimits::default())
+        .expect("exact constructor-frame value limit");
+
+    assert_eq!(result.as_boolean().expect("live value"), Some(true));
+}
+
+#[test]
 fn function_prototype_call_forwards_into_native_targets() {
     let authority = compile(
         "function run(){\

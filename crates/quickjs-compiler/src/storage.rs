@@ -1462,15 +1462,22 @@ impl<'unit, 'arena, 'scope> Planner<'unit, 'arena, 'scope> {
 
     fn reject_synthetic_binding_uses(&self) -> Result<(), CompilerError> {
         for node in self.unit.semantic().nodes().iter() {
-            let span = match node.kind() {
-                AstKind::NewTarget(expression) => expression.span,
-                AstKind::Super(expression) => expression.span,
+            let (span, new_target) = match node.kind() {
+                AstKind::NewTarget(expression) => (expression.span, true),
+                AstKind::Super(expression) => (expression.span, false),
                 _ => continue,
             };
             let owner = self.scope_owner(node.scope_id(), Some(span))?;
-            if owner != ExecutableId(0) {
-                return unsupported(UnsupportedFeature::FunctionSyntheticBinding, span);
+            let executable = self.executable_drafts.get(owner.index()).ok_or(
+                CompilerError::SemanticInvariant {
+                    invariant: "synthetic binding owner executable exists",
+                    span: Some(span),
+                },
+            )?;
+            if new_target && matches!(executable.executable.kind, ExecutableKind::Function { .. }) {
+                continue;
             }
+            return unsupported(UnsupportedFeature::FunctionSyntheticBinding, span);
         }
         Ok(())
     }

@@ -71,8 +71,10 @@ does not imply complete ECMAScript or QuickJS compatibility.
   control flow, calls/spread, destructuring, exceptions, sync generators,
   async functions/generators, delegated `yield*`, exact large-BigInt literals,
   untagged templates with immediate spec-ordered `ToString`, and tagged
-  templates with cached frozen cooked/raw site objects. Typed suspension and
-  iterator records preserve resume, close, and `finally` order.
+  templates with cached frozen cooked/raw site objects. Ordinary `new.target`
+  preserves call, direct/bound construction, and explicit `Reflect.construct`
+  identity. Typed suspension and iterator records preserve resume, close, and
+  `finally` order.
 - [x] Explicit VM frame/continuation stacks handle bytecode and native re-entry,
   coercion, construction, abrupt completion, and traces. Deterministic fuel is
   separate from the pinned 10,000-instruction uncatchable host interrupt.
@@ -195,7 +197,9 @@ does not imply complete ECMAScript or QuickJS compatibility.
   Focused literal/delete cohorts pass 1,170/1,240; all 55 literal failures need
   direct eval, while 15 delete failures need eval, `with`, `super`, or
   non-ordinary functions. Six unary-expression cohorts pass 166/182; all 16
-  remaining failures need direct eval.
+  remaining failures need direct eval. The `new.target` cohort passes 22/26
+  executed cases with two additional skips; the four failures require deferred
+  class `super()` or `super`-property semantics.
 - [ ] Close every admitted Test262 failure and remove temporary host/module/
   async skips as those capabilities land; keep ECMA-402 explicitly low priority.
 - [ ] Establish startup, memory, interpreter, and compile benchmarks; require no

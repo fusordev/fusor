@@ -123,6 +123,35 @@ fn lexical_identifier_leaf_matches_the_quickjs_final_opcode_oracle() {
 }
 
 #[test]
+fn new_target_uses_the_typed_special_object_selector() {
+    let compiled = compile("function f(){return new.target;}", "f");
+    let instructions = compiled
+        .control_flow()
+        .instructions()
+        .iter()
+        .map(|instruction| {
+            let instruction = instruction.decoded().instruction();
+            (instruction.opcode(), instruction.operands())
+        })
+        .collect::<Vec<_>>();
+
+    assert_eq!(
+        instructions,
+        [
+            (FinalOpcode::SpecialObject, Operands::U8(3)),
+            (FinalOpcode::Return, Operands::None),
+        ]
+    );
+    assert!(
+        compiled
+            .control_flow()
+            .function_header()
+            .flags()
+            .new_target_allowed()
+    );
+}
+
+#[test]
 fn sloppy_duplicate_parameters_authorize_only_the_last_formal_positions() {
     let compiled = compile("function f(a,a,b){return arguments;}", "f");
     let flow = compiled.control_flow();
