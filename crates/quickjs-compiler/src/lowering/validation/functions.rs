@@ -1,7 +1,7 @@
 use quickjs_frontend::Span;
 
 use super::super::{
-    ArrowFunctionExpression, AstKind, CompilationContext, CompilationUnitKind, Executable,
+    ArrowFunctionExpression, AstKind, Class, CompilationContext, CompilationUnitKind, Executable,
     ExecutableId, ExecutableKind, Expression, Function, FunctionType, LeafCompilationError,
     MethodDefinitionKind, NodeId, ParsedUnit, Program, PropertyKind, UnsupportedLeafFeature,
     unsupported,
@@ -16,6 +16,81 @@ pub(in crate::lowering) enum OrdinaryFunctionForm {
 }
 
 impl<'arena> CompilationContext<'_, 'arena, '_> {
+    pub(in crate::lowering) fn selected_default_class_constructor(
+        &self,
+        executable_id: ExecutableId,
+    ) -> Result<(&Executable, &Class<'arena>), LeafCompilationError> {
+        let executable = self.planned.plan.executable(executable_id).ok_or(
+            LeafCompilationError::InvalidExecutable {
+                executable: executable_id,
+            },
+        )?;
+        let node_id = self
+            .planned
+            .identities
+            .node_by_executable
+            .get(executable_id.index())
+            .copied()
+            .ok_or(LeafCompilationError::SemanticInvariant {
+                invariant: "default class constructor has an Oxc class identity",
+                span: Some(executable.span()),
+            })?;
+        let AstKind::Class(class) = self.unit.semantic().nodes().kind(node_id) else {
+            return Err(LeafCompilationError::SemanticInvariant {
+                invariant: "default class constructor belongs to a class node",
+                span: Some(executable.span()),
+            });
+        };
+        if self
+            .planned
+            .identities
+            .default_class_constructors
+            .get(&node_id)
+            .copied()
+            != Some(executable_id)
+        {
+            return Err(LeafCompilationError::SemanticInvariant {
+                invariant: "class has its selected synthesized default constructor",
+                span: Some(class.span),
+            });
+        }
+        if executable.kind() != ExecutableKind::ClassDefaultConstructor
+            || executable.parameter_count() != 0
+            || executable.defined_parameter_count() != 0
+            || !executable.has_simple_parameter_list()
+            || executable.has_parameter_expressions()
+            || !executable.is_strict()
+            || class.id.is_none()
+            || class.super_class.is_some()
+            || !class.decorators.is_empty()
+        {
+            return Err(LeafCompilationError::SemanticInvariant {
+                invariant: "synthesized default constructor has base-class metadata",
+                span: Some(class.span),
+            });
+        }
+        if self.planned.plan.kind() != CompilationUnitKind::Script {
+            return unsupported(
+                UnsupportedLeafFeature::UnsupportedCompilationUnit,
+                class.span,
+            );
+        }
+        let unresolved = self
+            .planned
+            .plan
+            .unresolved_globals_for(executable_id)
+            .ok_or(LeafCompilationError::InvalidExecutable {
+                executable: executable_id,
+            })?;
+        if !unresolved.is_empty() {
+            return Err(LeafCompilationError::SemanticInvariant {
+                invariant: "default class constructor has no source references",
+                span: Some(class.span),
+            });
+        }
+        Ok((executable, class))
+    }
+
     pub(in crate::lowering) fn selected_arrow(
         &self,
         executable_id: ExecutableId,

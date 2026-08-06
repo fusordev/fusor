@@ -490,10 +490,10 @@ impl<'compiler, 'unit, 'arena, 'scope> ExpressionPlanner<'compiler, 'unit, 'aren
         reason = "class-definition evaluation retains the spec-ordered template, method, and binding steps"
     )]
     /// Lowers the first fully verified class slice: a named base-class
-    /// declaration with an explicit ordinary constructor and statically named
-    /// public methods/accessors. Heritage, computed names, fields, private
-    /// elements, static blocks, decorators, class expressions, and synthesized
-    /// constructors stay fail-closed until their own execution contracts exist.
+    /// declaration with an explicit ordinary or synthesized default constructor
+    /// and statically named public methods/accessors. Heritage, computed names,
+    /// fields, private elements, static blocks, decorators, and class
+    /// expressions stay fail-closed until their own execution contracts exist.
     pub(in crate::lowering) fn plan_base_class_declaration(
         &self,
         class: &Class<'arena>,
@@ -525,23 +525,38 @@ impl<'compiler, 'unit, 'arena, 'scope> ExpressionPlanner<'compiler, 'unit, 'aren
                 });
             }
         }
-        let constructor = constructor.ok_or(LeafCompilationError::Unsupported {
-            feature: UnsupportedLeafFeature::UnsupportedDeclaration,
-            span: class.body.span,
-        })?;
-
         self.plan_base_class_name_scope_entry(class, layout, flow)?;
         flow.emit(PlannedInstruction::new(
             FinalOpcode::Undefined,
             Operands::None,
             class.span,
         ))?;
-        flow.emit(self.plan_function_closure(
-            &constructor.value,
-            layout.executable,
-            tree_layout,
-            constants,
-        )?)?;
+        if let Some(constructor) = constructor {
+            flow.emit(self.plan_function_closure(
+                &constructor.value,
+                layout.executable,
+                tree_layout,
+                constants,
+            )?)?;
+        } else {
+            let child = self
+                .planned
+                .identities
+                .default_class_constructors
+                .get(&class.node_id())
+                .copied()
+                .ok_or(LeafCompilationError::SemanticInvariant {
+                    invariant: "base class without a constructor has a synthesized template",
+                    span: Some(class.body.span),
+                })?;
+            flow.emit(self.plan_child_function_closure(
+                child,
+                layout.executable,
+                class.body.span,
+                tree_layout,
+                constants,
+            )?)?;
+        }
         flow.emit(PlannedInstruction::new(
             FinalOpcode::DefineClass,
             Operands::AtomU8 {

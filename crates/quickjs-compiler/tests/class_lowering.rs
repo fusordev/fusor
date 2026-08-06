@@ -1,8 +1,5 @@
 use quickjs_bytecode::{CompilerExecutableKind, FinalOpcode, VerificationLimits};
-use quickjs_compiler::{
-    CompilationContext, CompiledFunctionTree, LeafCompilationError, UnsupportedLeafFeature,
-    WritePolicy,
-};
+use quickjs_compiler::{CompilationContext, CompiledFunctionTree, WritePolicy};
 use quickjs_frontend::{CompilationGoal, FrontendOptions, GlobalScriptGoal, with_parsed_program};
 
 fn compile(source: &str, name: &str) -> CompiledFunctionTree {
@@ -18,24 +15,6 @@ fn compile(source: &str, name: &str) -> CompiledFunctionTree {
             context
                 .compile_tree(&root, VerificationLimits::default())
                 .expect("base class tree")
-        },
-    )
-    .expect("frontend")
-}
-
-fn compile_error(source: &str, name: &str) -> LeafCompilationError {
-    with_parsed_program(
-        source,
-        FrontendOptions::for_goal(CompilationGoal::GlobalScript(GlobalScriptGoal::new())),
-        |unit| {
-            let context = CompilationContext::new(unit).expect("storage plan");
-            let root = context
-                .executables()
-                .find(|executable| executable.metadata().name() == Some(name))
-                .expect("root function");
-            context
-                .compile_tree(&root, VerificationLimits::default())
-                .expect_err("deferred class form must fail closed")
         },
     )
     .expect("frontend")
@@ -99,15 +78,23 @@ fn explicit_base_class_constructor_and_public_methods_lower_to_typed_class_bytec
 }
 
 #[test]
-fn a_class_without_an_explicit_constructor_remains_fail_closed() {
-    let source = "function make(){class Box{}}";
-    let LeafCompilationError::Unsupported { feature, span } = compile_error(source, "make") else {
-        panic!("a default class constructor must remain deferred");
-    };
-    assert_eq!(feature, UnsupportedLeafFeature::UnsupportedDeclaration);
-    assert!(
-        span.start < span.end,
-        "diagnostic must retain a source range"
+fn a_base_class_without_a_constructor_uses_a_synthesized_typed_template() {
+    let tree = compile(
+        "function make(){class Box{static answer(){return 7;}}return Box;}",
+        "make",
+    );
+    assert_eq!(
+        tree.functions().len(),
+        3,
+        "one synthesized constructor and one method template"
+    );
+    assert_eq!(
+        tree.verified_bytecode()
+            .function(quickjs_bytecode::FunctionTemplateId::new(1))
+            .expect("synthesized class constructor")
+            .metadata()
+            .executable_kind(),
+        CompilerExecutableKind::ClassConstructor
     );
 }
 

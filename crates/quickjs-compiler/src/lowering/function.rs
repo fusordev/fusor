@@ -309,8 +309,111 @@ impl CompilationContext<'_, '_, '_> {
             ExecutableKind::Arrow {
                 asynchronous: false,
             } => self.validate_arrow(executable, tree_layout, limits),
+            ExecutableKind::ClassDefaultConstructor => {
+                self.validate_default_class_constructor(executable, tree_layout, limits)
+            }
             _ => self.validate_function(executable, tree_layout, limits),
         }
+    }
+
+    fn validate_default_class_constructor(
+        &self,
+        executable_id: ExecutableId,
+        tree_layout: &FunctionTreeLayout,
+        limits: VerificationLimits,
+    ) -> Result<ValidatedFunction, LeafCompilationError> {
+        let (executable, class) = self.selected_default_class_constructor(executable_id)?;
+        let layout = FrameLayout::new(FrameLayoutInput::new(&self.planned.plan, executable_id))?;
+        if !layout.locals.is_empty() {
+            return Err(LeafCompilationError::SemanticInvariant {
+                invariant: "synthesized default constructor has no local storage",
+                span: Some(class.span),
+            });
+        }
+        let resolved = self
+            .planned
+            .plan
+            .resolved_references_for(executable_id)
+            .ok_or(LeafCompilationError::InvalidExecutable {
+                executable: executable_id,
+            })?;
+        if !resolved.is_empty() {
+            return Err(LeafCompilationError::SemanticInvariant {
+                invariant: "synthesized default constructor has no source references",
+                span: Some(class.span),
+            });
+        }
+        let captures = self.planned.plan.frame_captures_for(executable_id).ok_or(
+            LeafCompilationError::InvalidExecutable {
+                executable: executable_id,
+            },
+        )?;
+        if !captures.is_empty() {
+            return Err(LeafCompilationError::SemanticInvariant {
+                invariant: "synthesized default constructor has no frame captures",
+                span: Some(class.span),
+            });
+        }
+        if !tree_layout.children(executable_id)?.is_empty() {
+            return Err(LeafCompilationError::SemanticInvariant {
+                invariant: "synthesized default constructor has no child templates",
+                span: Some(class.span),
+            });
+        }
+        let constants = tree_layout.constant_pool(executable_id)?;
+        if !constants.entries().is_empty() || !constants.atoms().is_empty() {
+            return Err(LeafCompilationError::SemanticInvariant {
+                invariant: "synthesized default constructor has no constants",
+                span: Some(class.span),
+            });
+        }
+        let function_scope =
+            self.created_scope(Some(class.scope_id()), class.node_id(), class.span)?;
+        let capture_layout =
+            self.compiler_capture_layout(executable_id, function_scope, &layout, tree_layout)?;
+        let closure_variables = self.compiled_closure_variables(executable_id, tree_layout)?;
+        let realm_globals = self.compiled_realm_globals(executable_id, tree_layout, constants)?;
+        let variable_definitions = self.compiled_variable_definitions(
+            executable_id,
+            function_scope,
+            &layout,
+            tree_layout,
+            constants,
+        )?;
+        let closure_definitions =
+            self.compiled_closure_definitions(&closure_variables, &realm_globals, constants)?;
+        let capture_count = checked_function_entry_count(
+            closure_variables
+                .len()
+                .checked_add(realm_globals.len())
+                .ok_or(LeafCompilationError::CapacityExceeded {
+                    domain: "default class constructor closure variables",
+                })?,
+            "default class constructor closure variables",
+        )?;
+        let mut flow = PlannedControlFlow::new(limits);
+        flow.ensure_terminal(class.span)?;
+
+        Ok(ValidatedFunction {
+            executable_kind: CompilerExecutableKind::ClassConstructor,
+            strict: executable.is_strict(),
+            argument_count: 0,
+            defined_argument_count: 0,
+            local_count: layout.local_count,
+            capture_count,
+            capture_layout,
+            locals: Vec::new(),
+            constants: Arc::clone(constants.entries()),
+            atoms: Arc::clone(constants.atoms()),
+            closure_variables,
+            realm_globals,
+            function_name: None,
+            variable_definitions,
+            closure_definitions,
+            function_span: source_byte_span(class.span),
+            function_name_span: None,
+            flow,
+        })
     }
 
     fn validate_arrow(

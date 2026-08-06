@@ -8,8 +8,8 @@ use std::{
 use oxc_ast::{
     AstKind,
     ast::{
-        BindingPattern, ExportDefaultDeclarationKind, FunctionType, Statement,
-        VariableDeclarationKind,
+        BindingPattern, ClassElement, ExportDefaultDeclarationKind, FunctionType,
+        MethodDefinitionKind, Statement, VariableDeclarationKind,
     },
 };
 use oxc_semantic::{NodeId, ReferenceId, ScopeId, SymbolFlags, SymbolId};
@@ -111,6 +111,9 @@ pub enum ExecutableKind {
         /// Whether the arrow is asynchronous.
         asynchronous: bool,
     },
+    /// A compiler-synthesized base-class constructor for a class without a
+    /// source-written constructor.
+    ClassDefaultConstructor,
 }
 
 /// Compiler-owned metadata for one executable body.
@@ -580,6 +583,9 @@ pub(crate) struct OxcIdentityMap {
     pub(crate) node_by_executable: Box<[NodeId]>,
     pub(crate) binding_by_symbol: Box<[Option<BindingId>]>,
     pub(crate) binding_by_declaration: HashMap<(SymbolId, u32, u32), BindingId>,
+    /// Synthesized default constructor template for each eligible named base
+    /// class that lacks a source-written constructor.
+    pub(crate) default_class_constructors: HashMap<NodeId, ExecutableId>,
     /// The synthetic immutable class-name cell for each named class.  Oxc
     /// resolves member references to the declaration symbol, but ECMAScript
     /// gives a class body a distinct inner binding; storage redirects those
@@ -913,6 +919,7 @@ struct Planner<'unit, 'arena, 'scope> {
     exact_scope_executables: Vec<Option<ExecutableId>>,
     scope_executables: Vec<Option<ExecutableId>>,
     parameter_storage: HashMap<SymbolId, ParameterStorage>,
+    default_class_constructors: HashMap<NodeId, ExecutableId>,
 }
 
 impl<'unit, 'arena, 'scope> Planner<'unit, 'arena, 'scope> {
@@ -955,6 +962,7 @@ impl<'unit, 'arena, 'scope> Planner<'unit, 'arena, 'scope> {
             exact_scope_executables: vec![None; semantic.scoping().scopes_len()],
             scope_executables: vec![None; semantic.scoping().scopes_len()],
             parameter_storage: HashMap::new(),
+            default_class_constructors: HashMap::new(),
         })
     }
 
@@ -1078,6 +1086,7 @@ impl<'unit, 'arena, 'scope> Planner<'unit, 'arena, 'scope> {
                 node_by_executable: node_by_executable.into_boxed_slice(),
                 binding_by_symbol: symbol_bindings.into_boxed_slice(),
                 binding_by_declaration: declaration_bindings,
+                default_class_constructors: self.default_class_constructors,
                 class_name_bindings,
                 scope_by_binding: scope_by_binding.into_boxed_slice(),
                 reference_by_id: reference_by_id.into_boxed_slice(),
@@ -1240,47 +1249,76 @@ impl<'unit, 'arena, 'scope> Planner<'unit, 'arena, 'scope> {
         let semantic = self.unit.semantic();
         let nodes = semantic.nodes();
         for (node_id, node) in nodes.iter_enumerated() {
-            let (kind, scope_id, span, name, name_span, parameters) = match node.kind() {
-                AstKind::Program(program) => (
-                    self.root_executable_kind,
-                    program.scope_id(),
-                    program.span,
-                    None,
-                    None,
-                    ParameterLayout::default(),
-                ),
-                AstKind::Function(function) => {
-                    let parameters = self.validate_parameters(function.params.as_ref())?;
-                    (
-                        ExecutableKind::Function {
-                            asynchronous: function.r#async,
-                            generator: function.generator,
-                        },
-                        function.scope_id(),
-                        function.span,
-                        function
-                            .id
-                            .as_ref()
-                            .map(|identifier| Arc::<str>::from(identifier.name.as_str())),
-                        function.id.as_ref().map(|identifier| identifier.span),
-                        parameters,
-                    )
-                }
-                AstKind::ArrowFunctionExpression(arrow) => {
-                    let parameters = self.validate_parameters(arrow.params.as_ref())?;
-                    (
-                        ExecutableKind::Arrow {
-                            asynchronous: arrow.r#async,
-                        },
-                        arrow.scope_id(),
-                        arrow.span,
+            let (kind, scope_id, span, name, name_span, parameters, source_executable) =
+                match node.kind() {
+                    AstKind::Program(program) => (
+                        self.root_executable_kind,
+                        program.scope_id(),
+                        program.span,
                         None,
                         None,
-                        parameters,
-                    )
-                }
-                _ => continue,
-            };
+                        ParameterLayout::default(),
+                        true,
+                    ),
+                    AstKind::Function(function) => {
+                        let parameters = self.validate_parameters(function.params.as_ref())?;
+                        (
+                            ExecutableKind::Function {
+                                asynchronous: function.r#async,
+                                generator: function.generator,
+                            },
+                            function.scope_id(),
+                            function.span,
+                            function
+                                .id
+                                .as_ref()
+                                .map(|identifier| Arc::<str>::from(identifier.name.as_str())),
+                            function.id.as_ref().map(|identifier| identifier.span),
+                            parameters,
+                            true,
+                        )
+                    }
+                    AstKind::ArrowFunctionExpression(arrow) => {
+                        let parameters = self.validate_parameters(arrow.params.as_ref())?;
+                        (
+                            ExecutableKind::Arrow {
+                                asynchronous: arrow.r#async,
+                            },
+                            arrow.scope_id(),
+                            arrow.span,
+                            None,
+                            None,
+                            parameters,
+                            true,
+                        )
+                    }
+                    AstKind::Class(class)
+                        if class.id.is_some()
+                            && class.super_class.is_none()
+                            && class.decorators.is_empty()
+                            && !class.body.body.iter().any(|element| {
+                                matches!(
+                                    element,
+                                    ClassElement::MethodDefinition(method)
+                                        if method.kind == MethodDefinitionKind::Constructor
+                                )
+                            }) =>
+                    {
+                        (
+                            ExecutableKind::ClassDefaultConstructor,
+                            class.scope_id(),
+                            class.span,
+                            None,
+                            None,
+                            ParameterLayout {
+                                simple: true,
+                                ..ParameterLayout::default()
+                            },
+                            false,
+                        )
+                    }
+                    _ => continue,
+                };
 
             let id = executable_id(self.executable_drafts.len())?;
             let parent = if matches!(kind, ExecutableKind::Script { .. } | ExecutableKind::Module) {
@@ -1295,17 +1333,19 @@ impl<'unit, 'arena, 'scope> Planner<'unit, 'arena, 'scope> {
                     })?
                     .into()
             };
-            if semantic.scoping().get_node_id(scope_id) != node_id {
-                return Err(CompilerError::SemanticInvariant {
-                    invariant: "scope creator matches executable node",
-                    span: Some(span),
-                });
-            }
-            if self.exact_scope_executables[scope_id.index()].is_some() {
-                return Err(CompilerError::SemanticInvariant {
-                    invariant: "one executable per created scope",
-                    span: Some(span),
-                });
+            if source_executable {
+                if semantic.scoping().get_node_id(scope_id) != node_id {
+                    return Err(CompilerError::SemanticInvariant {
+                        invariant: "scope creator matches executable node",
+                        span: Some(span),
+                    });
+                }
+                if self.exact_scope_executables[scope_id.index()].is_some() {
+                    return Err(CompilerError::SemanticInvariant {
+                        invariant: "one executable per created scope",
+                        span: Some(span),
+                    });
+                }
             }
 
             let strict = semantic.scoping().scope_flags(scope_id).is_strict_mode();
@@ -1332,8 +1372,19 @@ impl<'unit, 'arena, 'scope> Planner<'unit, 'arena, 'scope> {
                 capture_start: 0,
                 capture_end: 0,
             };
-            self.node_executables[node_id.index()] = Some(id);
-            self.exact_scope_executables[scope_id.index()] = Some(id);
+            if source_executable {
+                self.node_executables[node_id.index()] = Some(id);
+                self.exact_scope_executables[scope_id.index()] = Some(id);
+            } else if self
+                .default_class_constructors
+                .insert(node_id, id)
+                .is_some()
+            {
+                return Err(CompilerError::SemanticInvariant {
+                    invariant: "one synthesized default constructor per class",
+                    span: Some(span),
+                });
+            }
             self.executable_drafts.push(ExecutableDraft {
                 executable,
                 node_id,
@@ -1529,7 +1580,9 @@ impl<'unit, 'arena, 'scope> Planner<'unit, 'arena, 'scope> {
                             };
                             current = parent;
                         }
-                        ExecutableKind::Script { .. } | ExecutableKind::Module => {
+                        ExecutableKind::ClassDefaultConstructor
+                        | ExecutableKind::Script { .. }
+                        | ExecutableKind::Module => {
                             return unsupported(UnsupportedFeature::FunctionSyntheticBinding, span);
                         }
                     }
@@ -2444,7 +2497,9 @@ impl<'unit, 'arena, 'scope> Planner<'unit, 'arena, 'scope> {
                                 span: Some(span),
                             })?;
                 }
-                ExecutableKind::Script { .. } | ExecutableKind::Module => return Ok(None),
+                ExecutableKind::ClassDefaultConstructor
+                | ExecutableKind::Script { .. }
+                | ExecutableKind::Module => return Ok(None),
             }
         }
     }

@@ -75,3 +75,14 @@ fn named_class_members_retain_the_inner_name_after_outer_reassignment() {
         },
     );
 }
+
+#[test]
+fn a_base_class_without_a_constructor_still_constructs_with_its_class_prototype() {
+    run_with(
+        "function run(){class Box{static answer(){return 7;}}let box=new Box(1,2,3);return box.constructor===Box&&Box.answer()===7;}",
+        |result| {
+            let value = result.expect("default class construction");
+            assert_eq!(value.as_boolean().expect("live Boolean"), Some(true));
+        },
+    );
+}
