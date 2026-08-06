@@ -709,8 +709,9 @@ pub enum UnsupportedFeature {
     WithStatement,
     /// Annex B's paired block-lexical and var-like function binding.
     AnnexBBlockFunction,
-    /// Class-created functions, private names, and synthetic slots.
-    ClassSyntheticSlots,
+    /// An anonymous `export default class` needs the module execution layer's
+    /// synthetic default binding and class environment.
+    AnonymousDefaultClassExport,
     /// A synthesized `this`, `new.target`, or `super` binding.
     FunctionSyntheticBinding,
 }
@@ -1884,7 +1885,7 @@ impl<'unit, 'arena, 'scope> Planner<'unit, 'arena, 'scope> {
                 })
             }
             ExportDefaultDeclarationKind::ClassDeclaration(class) => {
-                unsupported(UnsupportedFeature::ClassSyntheticSlots, class.span)
+                unsupported(UnsupportedFeature::AnonymousDefaultClassExport, class.span)
             }
             ExportDefaultDeclarationKind::TSInterfaceDeclaration(interface) => {
                 Err(CompilerError::SemanticInvariant {
