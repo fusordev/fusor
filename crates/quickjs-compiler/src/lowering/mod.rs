@@ -4,7 +4,7 @@ use oxc_ast::{
     AstKind,
     ast::{
         Argument, ArrayAssignmentTarget, ArrayExpression, ArrayExpressionElement, ArrayPattern,
-        ArrowFunctionExpression, AssignmentExpression, AssignmentTarget,
+        ArrowFunctionExpression, AssignmentExpression, AssignmentPattern, AssignmentTarget,
         AssignmentTargetMaybeDefault, AssignmentTargetProperty, AssignmentTargetRest,
         BindingIdentifier, BindingPattern, BindingRestElement, CallExpression, CatchClause,
         ChainElement, ChainExpression, Class, ClassElement, ComputedMemberExpression,

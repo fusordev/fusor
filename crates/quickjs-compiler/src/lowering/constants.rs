@@ -618,6 +618,9 @@ impl<'arena> CompilationContext<'_, 'arena, '_> {
                 {
                     return Self::direct_class_assignment_name(node_id, class, assignment);
                 }
+                AstKind::AssignmentPattern(assignment) => {
+                    return Self::direct_class_binding_default_name(node_id, class, assignment);
+                }
                 _ => {
                     return super::unsupported(
                         super::UnsupportedLeafFeature::UnsupportedExpression,
@@ -684,6 +687,39 @@ impl<'arena> CompilationContext<'_, 'arena, '_> {
         if initializer.node_id() != node_id {
             return Err(LeafCompilationError::SemanticInvariant {
                 invariant: "anonymous class name is inferred from its direct assignment target",
+                span: Some(class.span),
+            });
+        }
+        Ok((
+            compiler_identifier_string(identifier.name.as_str(), identifier.span)?,
+            identifier.span,
+        ))
+    }
+
+    fn direct_class_binding_default_name(
+        node_id: NodeId,
+        class: &super::Class<'arena>,
+        assignment: &super::AssignmentPattern<'arena>,
+    ) -> Result<(CompilerString, Span), LeafCompilationError> {
+        let BindingPattern::BindingIdentifier(identifier) = &assignment.left else {
+            return super::unsupported(
+                super::UnsupportedLeafFeature::InferredFunctionName,
+                class.span,
+            );
+        };
+        let mut initializer = &assignment.right;
+        while let Expression::ParenthesizedExpression(parenthesized) = initializer {
+            initializer = &parenthesized.expression;
+        }
+        let Expression::ClassExpression(initializer) = initializer else {
+            return Err(LeafCompilationError::SemanticInvariant {
+                invariant: "anonymous class binding default remains its direct right-hand expression",
+                span: Some(class.span),
+            });
+        };
+        if initializer.node_id() != node_id {
+            return Err(LeafCompilationError::SemanticInvariant {
+                invariant: "anonymous class name is inferred from its direct binding default",
                 span: Some(class.span),
             });
         }

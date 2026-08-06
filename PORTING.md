@@ -67,9 +67,9 @@ broad Test262.**
 - [~] Classes: named base declarations/expressions, simple-binding anonymous
   base expressions (including harmless parentheses), direct identifier
   assignments (including `||=`, `&&=`, and `??=`), and uncomputed
-  object-property anonymous base expressions with an explicit or synthesized
-  default constructor and public static/instance methods or accessors execute
-  through typed `define_class`.
+  object-property expressions and binding-pattern defaults with an explicit or
+  synthesized default constructor and public static/instance methods or
+  accessors execute through typed `define_class`.
   Member closures capture the spec-required immutable inner class-name cell,
   distinct from the mutable declaration binding. Constructors are strict,
   construct with the installed class prototype, and reject direct calls. The
@@ -81,7 +81,7 @@ broad Test262.**
   their defining class element. Uncomputed public static fields, and computed
   static fields with non-class values, evaluate into own constructor properties
   when their initializers contain no `this`, `super`, or `new.target`.
-- [ ] Class closure: anonymous/inferred-name expressions in patterns, property
+- [ ] Class closure: anonymous/inferred-name assignment patterns, property
   assignments, computed keys, and other contexts; `extends`, derived receiver
   initialization, `super()`/super properties, instance fields, computed-key
   anonymous-class name inference, class-bound static field contexts, private elements,
