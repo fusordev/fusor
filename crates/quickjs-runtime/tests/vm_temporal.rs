@@ -240,3 +240,97 @@ fn duration_compare_orders_time_units_and_requires_context_for_calendar_units() 
         ExceptionKind::RangeError
     );
 }
+
+#[test]
+fn duration_property_bags_read_and_convert_fields_in_normative_order() {
+    assert_eq!(
+        rendered(
+            "var log=[],fields={};
+             ['years','months','weeks','days','hours','minutes','seconds','milliseconds','microseconds','nanoseconds']
+               .forEach(function(name){Object.defineProperty(fields,name,{get:function(){
+                 log.push('get '+name);return {valueOf:function(){log.push('convert '+name);return 1;}};
+               }});});
+             var d=Temporal.Duration.from(fields);
+             return d.toString()+'|'+log.join(',');"
+        ),
+        "P1Y1M1W1DT1H1M1.001001001S|get days,convert days,get hours,convert hours,get microseconds,convert microseconds,get milliseconds,convert milliseconds,get minutes,convert minutes,get months,convert months,get nanoseconds,convert nanoseconds,get seconds,convert seconds,get weeks,convert weeks,get years,convert years"
+    );
+}
+
+#[test]
+fn duration_property_bags_require_one_valid_integral_field() {
+    assert_eq!(
+        thrown("return Temporal.Duration.from({});"),
+        ExceptionKind::TypeError
+    );
+    assert_eq!(
+        thrown("return Temporal.Duration.from({days:1.5});"),
+        ExceptionKind::RangeError
+    );
+    assert_eq!(
+        thrown("return Temporal.Duration.from({days:1,hours:-1});"),
+        ExceptionKind::RangeError
+    );
+    assert_eq!(
+        rendered(
+            "var a={hours:2},b={minutes:119};return [Temporal.Duration.compare(a,b),
+             Temporal.Duration.from({days:undefined,seconds:3}).toString()].join('|');"
+        ),
+        "1|PT3S"
+    );
+}
+
+#[test]
+fn duration_compare_reads_options_after_both_duration_conversions() {
+    assert_eq!(
+        rendered(
+            "var log=[];
+             function bag(label,value){var o={};Object.defineProperty(o,'hours',{get:function(){
+               log.push(label);return value;}});return o;}
+             var options={};Object.defineProperty(options,'relativeTo',{get:function(){
+               log.push('relativeTo');return undefined;}});
+             var result=Temporal.Duration.compare(bag('first',2),bag('second',1),options);
+             return result+'|'+log.join(',')+'|'+
+               Temporal.Duration.compare({hours:1},{minutes:60},{})+'|'+
+               Temporal.Duration.compare({days:31},{months:1},{relativeTo:'2019-11-01'});"
+        ),
+        "1|first,second,relativeTo|0|1"
+    );
+    assert_eq!(
+        thrown("return Temporal.Duration.compare({hours:1},{hours:1},null);"),
+        ExceptionKind::TypeError
+    );
+}
+
+#[test]
+fn duration_add_and_subtract_convert_the_other_duration_and_allocate_results() {
+    assert_eq!(
+        rendered(
+            "var log=[],other={};
+             Object.defineProperty(other,'hours',{get:function(){log.push('get hours');
+               return {valueOf:function(){log.push('convert hours');return 25;}};}});
+             var original=new Temporal.Duration(0,0,0,1),sum=original.add(other);
+             var difference=sum.subtract({hours:1});
+             return [Temporal.Duration.prototype.add.length,
+               Temporal.Duration.prototype.subtract.length,original.toString(),sum.toString(),
+               difference.toString(),sum===original,log.join(',')].join('|');"
+        ),
+        "1|1|P1D|P2DT1H|P2D|false|get hours,convert hours"
+    );
+}
+
+#[test]
+fn duration_arithmetic_enforces_brand_and_rejects_unanchored_calendar_units() {
+    assert_eq!(
+        thrown("return Temporal.Duration.prototype.add.call({}, {hours:1});"),
+        ExceptionKind::TypeError
+    );
+    assert_eq!(
+        thrown("return new Temporal.Duration(1).add(new Temporal.Duration(1));"),
+        ExceptionKind::RangeError
+    );
+    assert_eq!(
+        thrown("return new Temporal.Duration().subtract({});"),
+        ExceptionKind::TypeError
+    );
+}

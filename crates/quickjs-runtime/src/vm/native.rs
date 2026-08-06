@@ -473,6 +473,18 @@ pub(super) fn resume_native_continuations(
             NativeContinuation::DateToJson(state) => {
                 finish_date_to_json_call(state, value, return_to)?
             }
+            NativeContinuation::TemporalDurationBag(state) => {
+                advance_temporal_duration_property_bag(
+                    runtime,
+                    *state,
+                    Some(value),
+                    return_to,
+                    execution_budget,
+                )?
+            }
+            NativeContinuation::TemporalDurationCompareOptions(state) => {
+                finish_temporal_duration_compare_options(runtime, &state, value)?
+            }
             NativeContinuation::IntrinsicGet(IntrinsicGetContinuation::ArrayConstructor {
                 realm,
                 new_target,
@@ -2333,7 +2345,9 @@ pub(super) fn dispatch_native_call_with_frames(
             method,
             native.realm,
             inputs.arguments,
+            return_to,
             origin.unwrap_or_else(native_function_host_origin),
+            execution_budget,
         ),
         NativeFunctionKind::TemporalDurationPrototype(method) => {
             let origin = origin.unwrap_or_else(native_function_host_origin);
@@ -2342,7 +2356,10 @@ pub(super) fn dispatch_native_call_with_frames(
                 method,
                 native.realm,
                 &inputs.receiver,
+                inputs.arguments,
+                return_to,
                 &origin,
+                execution_budget,
             )
         }
         NativeFunctionKind::TemporalInstantConstructor => begin_temporal_instant_constructor(

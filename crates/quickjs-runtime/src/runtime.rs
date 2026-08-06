@@ -1656,6 +1656,8 @@ pub(crate) enum TemporalDurationPrototypeMethod {
     Blank,
     Abs,
     Negated,
+    Add,
+    Subtract,
     ToString,
     ToJson,
     ToLocaleString,
@@ -1687,7 +1689,7 @@ impl TemporalDurationStaticMethod {
 }
 
 impl TemporalDurationPrototypeMethod {
-    pub(crate) const ALL: [Self; 18] = [
+    pub(crate) const ALL: [Self; 20] = [
         Self::Years,
         Self::Months,
         Self::Weeks,
@@ -1702,6 +1704,8 @@ impl TemporalDurationPrototypeMethod {
         Self::Blank,
         Self::Abs,
         Self::Negated,
+        Self::Add,
+        Self::Subtract,
         Self::ToString,
         Self::ToJson,
         Self::ToLocaleString,
@@ -1724,6 +1728,8 @@ impl TemporalDurationPrototypeMethod {
             Self::Blank => "blank",
             Self::Abs => "abs",
             Self::Negated => "negated",
+            Self::Add => "add",
+            Self::Subtract => "subtract",
             Self::ToString => "toString",
             Self::ToJson => "toJSON",
             Self::ToLocaleString => "toLocaleString",
@@ -1747,6 +1753,8 @@ impl TemporalDurationPrototypeMethod {
             Self::Blank => "get blank",
             Self::Abs => "abs",
             Self::Negated => "negated",
+            Self::Add => "add",
+            Self::Subtract => "subtract",
             Self::ToString => "toString",
             Self::ToJson => "toJSON",
             Self::ToLocaleString => "toLocaleString",
@@ -1772,12 +1780,11 @@ impl TemporalDurationPrototypeMethod {
         )
     }
 
-    #[allow(
-        clippy::unused_self,
-        reason = "family entries expose one uniform method-length query"
-    )]
     pub(crate) const fn length(self) -> i32 {
-        0
+        match self {
+            Self::Add | Self::Subtract => 1,
+            _ => 0,
+        }
     }
 }
 

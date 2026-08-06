@@ -1837,6 +1837,15 @@ fn finish_operator_primitive_target(
                 execution_budget,
             )
         }
+        OperatorPrimitiveTarget::TemporalDurationBag(state) => {
+            advance_temporal_duration_property_bag(
+                runtime,
+                *state,
+                Some(value),
+                return_to,
+                execution_budget,
+            )
+        }
         OperatorPrimitiveTarget::DateSetTime { object } => {
             finish_date_set_time(runtime, object, value, realm, origin)
         }

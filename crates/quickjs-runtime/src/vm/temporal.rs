@@ -1,8 +1,9 @@
 //! Initial `Temporal.Instant` JavaScript boundary over `temporal_rs`.
 
 use temporal_rs::{
-    Duration, Instant, Sign, error::ErrorKind as TemporalErrorKind,
-    options::ToStringRoundingOptions,
+    Duration, Instant, Sign,
+    error::ErrorKind as TemporalErrorKind,
+    options::{RelativeTo, ToStringRoundingOptions},
 };
 
 #[allow(
@@ -29,6 +30,103 @@ impl TemporalDurationConstructorContinuation {
         mark(CollectionRoot::Heap(HeapReference::Function(
             self.new_target,
         )));
+    }
+}
+
+const TEMPORAL_DURATION_BAG_FIELDS: [(&str, usize); 10] = [
+    ("days", 3),
+    ("hours", 4),
+    ("microseconds", 8),
+    ("milliseconds", 7),
+    ("minutes", 5),
+    ("months", 1),
+    ("nanoseconds", 9),
+    ("seconds", 6),
+    ("weeks", 2),
+    ("years", 0),
+];
+
+enum TemporalDurationLikeTarget {
+    Allocate,
+    CompareFirst {
+        second: StoredValue,
+        options: StoredValue,
+    },
+    CompareSecond {
+        first: Duration,
+        options: StoredValue,
+    },
+    Arithmetic {
+        receiver: Duration,
+        subtract: bool,
+    },
+}
+
+impl TemporalDurationLikeTarget {
+    fn retained_values(&self) -> u64 {
+        match self {
+            Self::Allocate | Self::Arithmetic { .. } => 0,
+            Self::CompareFirst { .. } => 2,
+            Self::CompareSecond { .. } => 1,
+        }
+    }
+
+    fn trace_roots(&self, mark: &mut dyn FnMut(CollectionRoot)) {
+        match self {
+            Self::Allocate | Self::Arithmetic { .. } => {}
+            Self::CompareFirst { second, options } => {
+                trace_stored_value_root(second, mark);
+                trace_stored_value_root(options, mark);
+            }
+            Self::CompareSecond { options, .. } => trace_stored_value_root(options, mark),
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+enum TemporalDurationBagStage {
+    ReadField,
+    AwaitField,
+    AwaitConversion,
+}
+
+pub(super) struct TemporalDurationBagContinuation {
+    base: StoredValue,
+    fields: [Option<i128>; 10],
+    next: usize,
+    any: bool,
+    stage: TemporalDurationBagStage,
+    target: TemporalDurationLikeTarget,
+    realm: RealmId,
+    origin: JsStackFrame,
+}
+
+impl TemporalDurationBagContinuation {
+    pub(super) fn retained_values(&self) -> u64 {
+        1_u64.saturating_add(self.target.retained_values())
+    }
+
+    pub(super) fn trace_roots(&self, mark: &mut dyn FnMut(CollectionRoot)) {
+        trace_stored_value_root(&self.base, mark);
+        self.target.trace_roots(mark);
+    }
+}
+
+pub(super) struct TemporalDurationCompareOptionsContinuation {
+    first: Duration,
+    second: Duration,
+    options: StoredValue,
+    realm: RealmId,
+    origin: JsStackFrame,
+}
+
+impl TemporalDurationCompareOptionsContinuation {
+    pub(super) const fn retained_values() -> u64 {
+        1
+    }
+
+    pub(super) fn trace_roots(&self, mark: &mut dyn FnMut(CollectionRoot)) {
+        trace_stored_value_root(&self.options, mark);
     }
 }
 
@@ -115,35 +213,29 @@ pub(super) fn advance_temporal_duration_constructor(
         );
     }
 
-    let mut fields = [0_i64; 10];
-    for (field, value) in fields.iter_mut().zip(&state.converted) {
+    let mut fields = [0_i128; 10];
+    for (index, (field, value)) in fields.iter_mut().zip(&state.converted).enumerate() {
         let value = value.as_f64();
-        if !value.is_finite() || value.fract() != 0.0 || value.abs() > 9_007_199_254_740_991.0 {
+        let Some(integer) = temporal_duration_integer(value, index) else {
             return temporal_range_error(
                 realm,
                 origin,
                 "Temporal.Duration fields must be finite integral Numbers",
             );
-        }
-        #[allow(
-            clippy::cast_possible_truncation,
-            reason = "the preceding safe-integer validation places the value inside i64"
-        )]
-        {
-            *field = value as i64;
-        }
+        };
+        *field = integer;
     }
     let duration = match Duration::new(
-        fields[0],
-        fields[1],
-        fields[2],
-        fields[3],
-        fields[4],
-        fields[5],
-        fields[6],
-        fields[7],
-        i128::from(fields[8]),
-        i128::from(fields[9]),
+        temporal_duration_i64_field(fields[0])?,
+        temporal_duration_i64_field(fields[1])?,
+        temporal_duration_i64_field(fields[2])?,
+        temporal_duration_i64_field(fields[3])?,
+        temporal_duration_i64_field(fields[4])?,
+        temporal_duration_i64_field(fields[5])?,
+        temporal_duration_i64_field(fields[6])?,
+        temporal_duration_i64_field(fields[7])?,
+        fields[8],
+        fields[9],
     ) {
         Ok(duration) => duration,
         Err(error) => {
@@ -207,12 +299,19 @@ pub(super) fn finish_temporal_duration_constructor_wrapper(
     Ok(NativeDispatch::Immediate(StoredValue::Object(object)))
 }
 
+#[allow(
+    clippy::too_many_arguments,
+    reason = "the native method may suspend while retaining its explicit call context"
+)]
 pub(super) fn dispatch_temporal_duration_prototype(
     runtime: &mut Runtime,
     method: TemporalDurationPrototypeMethod,
     realm: RealmId,
     receiver: &StoredValue,
+    mut arguments: CallArguments,
+    return_to: Option<CallReturn>,
     origin: &JsStackFrame,
+    execution_budget: &mut ExecutionBudget,
 ) -> Result<NativeDispatch, NativeFailure> {
     let duration = require_temporal_duration(runtime, receiver, realm, origin)?;
     let number = |value| NativeDispatch::Immediate(StoredValue::Number(JsNumber::from_i64(value)));
@@ -247,6 +346,20 @@ pub(super) fn dispatch_temporal_duration_prototype(
         }
         TemporalDurationPrototypeMethod::Negated => {
             allocate_temporal_duration_result(runtime, realm, duration.negated())
+        }
+        TemporalDurationPrototypeMethod::Add | TemporalDurationPrototypeMethod::Subtract => {
+            begin_temporal_duration_like(
+                runtime,
+                arguments.take_first_or_undefined(),
+                TemporalDurationLikeTarget::Arithmetic {
+                    receiver: duration,
+                    subtract: matches!(method, TemporalDurationPrototypeMethod::Subtract),
+                },
+                realm,
+                return_to,
+                origin.clone(),
+                execution_budget,
+            )
         }
         TemporalDurationPrototypeMethod::ToString
         | TemporalDurationPrototypeMethod::ToJson
@@ -310,60 +423,100 @@ pub(super) fn dispatch_temporal_duration_static(
     method: TemporalDurationStaticMethod,
     realm: RealmId,
     mut arguments: CallArguments,
+    return_to: Option<CallReturn>,
     origin: JsStackFrame,
+    execution_budget: &mut ExecutionBudget,
 ) -> Result<NativeDispatch, NativeFailure> {
-    let first =
-        to_temporal_duration_value(runtime, arguments.take_first_or_undefined(), realm, &origin)?;
     match method {
-        TemporalDurationStaticMethod::From => {
-            allocate_temporal_duration_result(runtime, realm, first)
-        }
+        TemporalDurationStaticMethod::From => begin_temporal_duration_like(
+            runtime,
+            arguments.take_first_or_undefined(),
+            TemporalDurationLikeTarget::Allocate,
+            realm,
+            return_to,
+            origin,
+            execution_budget,
+        ),
         TemporalDurationStaticMethod::Compare => {
-            let second = to_temporal_duration_value(
+            let first = arguments.take_first_or_undefined();
+            let second = arguments.take_first_or_undefined();
+            let options = arguments.take_first_or_undefined();
+            begin_temporal_duration_like(
                 runtime,
-                arguments.take_first_or_undefined(),
+                first,
+                TemporalDurationLikeTarget::CompareFirst { second, options },
                 realm,
-                &origin,
-            )?;
-            let ordering = match first.compare(&second, None) {
-                Ok(ordering) => ordering,
-                Err(error) => {
-                    return Err(NativeFailure::Abrupt(temporal_exception_from_error(
-                        realm, &origin, error,
-                    )?));
-                }
-            };
-            let value = match ordering {
-                std::cmp::Ordering::Less => -1,
-                std::cmp::Ordering::Equal => 0,
-                std::cmp::Ordering::Greater => 1,
-            };
-            Ok(NativeDispatch::Immediate(StoredValue::Number(
-                JsNumber::from_i32(value),
-            )))
+                return_to,
+                origin,
+                execution_budget,
+            )
         }
     }
 }
 
-fn to_temporal_duration_value(
-    runtime: &Runtime,
+#[allow(
+    clippy::too_many_arguments,
+    reason = "Temporal duration conversion preserves its target and native suspension context"
+)]
+fn begin_temporal_duration_like(
+    runtime: &mut Runtime,
     value: StoredValue,
+    target: TemporalDurationLikeTarget,
     realm: RealmId,
-    origin: &JsStackFrame,
-) -> Result<Duration, NativeFailure> {
+    return_to: Option<CallReturn>,
+    origin: JsStackFrame,
+    execution_budget: &mut ExecutionBudget,
+) -> Result<NativeDispatch, NativeFailure> {
     if let StoredValue::Object(object) = value
         && let Some(duration) = runtime.temporal_duration(object)?
     {
-        return Ok(duration);
+        return continue_temporal_duration_like(
+            runtime,
+            duration,
+            target,
+            realm,
+            return_to,
+            &origin,
+            execution_budget,
+        );
     }
     if let StoredValue::String(value) = value {
         let source = value.to_utf8_lossy()?;
-        return match Duration::from_utf8(source.as_bytes()) {
-            Ok(duration) => Ok(duration),
-            Err(error) => Err(NativeFailure::Abrupt(temporal_range_exception_from_error(
-                realm, origin, error,
-            )?)),
+        let duration = match Duration::from_utf8(source.as_bytes()) {
+            Ok(duration) => duration,
+            Err(error) => {
+                return Err(NativeFailure::Abrupt(temporal_range_exception_from_error(
+                    realm, &origin, error,
+                )?));
+            }
         };
+        return continue_temporal_duration_like(
+            runtime,
+            duration,
+            target,
+            realm,
+            return_to,
+            &origin,
+            execution_budget,
+        );
+    }
+    if value.heap_reference().is_some() {
+        return advance_temporal_duration_property_bag(
+            runtime,
+            TemporalDurationBagContinuation {
+                base: value,
+                fields: [None; 10],
+                next: 0,
+                any: false,
+                stage: TemporalDurationBagStage::ReadField,
+                target,
+                realm,
+                origin,
+            },
+            None,
+            return_to,
+            execution_budget,
+        );
     }
     Err(NativeFailure::Abrupt(PendingException {
         realm,
@@ -371,8 +524,368 @@ fn to_temporal_duration_value(
             kind: ExceptionKind::TypeError,
             message: JsString::from_utf8("Temporal.Duration requires a string or property bag")?,
         },
-        origin: origin.clone(),
+        origin,
     }))
+}
+
+#[allow(
+    clippy::too_many_arguments,
+    clippy::too_many_lines,
+    reason = "the explicit state machine preserves the normative property Get and ToNumber order"
+)]
+pub(super) fn advance_temporal_duration_property_bag(
+    runtime: &mut Runtime,
+    mut state: TemporalDurationBagContinuation,
+    completion: Option<StoredValue>,
+    return_to: Option<CallReturn>,
+    execution_budget: &mut ExecutionBudget,
+) -> Result<NativeDispatch, NativeFailure> {
+    let mut completion = completion;
+    loop {
+        match state.stage {
+            TemporalDurationBagStage::ReadField => {
+                if state.next == TEMPORAL_DURATION_BAG_FIELDS.len() {
+                    if !state.any {
+                        return temporal_type_error(
+                            state.realm,
+                            &state.origin,
+                            "Temporal.Duration property bag has no duration fields",
+                        );
+                    }
+                    let duration =
+                        duration_from_partial_fields(&state.fields, state.realm, &state.origin)?;
+                    return continue_temporal_duration_like(
+                        runtime,
+                        duration,
+                        state.target,
+                        state.realm,
+                        return_to,
+                        &state.origin,
+                        execution_budget,
+                    );
+                }
+                charge_heap_property_lookup(runtime, &state.base, execution_budget)?;
+                let name = JsString::from_utf8(TEMPORAL_DURATION_BAG_FIELDS[state.next].0)?;
+                let key = runtime.property_key_from_string(&name)?;
+                state.stage = TemporalDurationBagStage::AwaitField;
+                let dispatch = begin_value_get(
+                    runtime,
+                    &state.base,
+                    key,
+                    Some(&name),
+                    state.realm,
+                    return_to,
+                    state.origin.clone(),
+                    execution_budget,
+                )?;
+                match continue_get_state_after(
+                    dispatch,
+                    state,
+                    temporal_duration_bag_continuation,
+                    "Temporal.Duration field Get produced a structured result",
+                )? {
+                    GetContinuationDispatch::Ready {
+                        state: resumed,
+                        value,
+                    } => {
+                        state = resumed;
+                        completion = Some(value);
+                    }
+                    GetContinuationDispatch::Suspended(dispatch) => return Ok(dispatch),
+                }
+            }
+            TemporalDurationBagStage::AwaitField => {
+                let value = completion.take().ok_or(EngineFault::RuntimeInvariant {
+                    message: "Temporal.Duration field Get resumed without a value",
+                })?;
+                if matches!(value, StoredValue::Undefined) {
+                    state.next = state.next.saturating_add(1);
+                    state.stage = TemporalDurationBagStage::ReadField;
+                    continue;
+                }
+                state.any = true;
+                state.stage = TemporalDurationBagStage::AwaitConversion;
+                let realm = state.realm;
+                let origin = state.origin.clone();
+                return begin_operator_primitive_conversion(
+                    runtime,
+                    value,
+                    OperatorPrimitiveHint::Number,
+                    OperatorPrimitiveTarget::TemporalDurationBag(Box::new(state)),
+                    realm,
+                    return_to,
+                    origin,
+                    execution_budget,
+                );
+            }
+            TemporalDurationBagStage::AwaitConversion => {
+                let value = completion.take().ok_or(EngineFault::RuntimeInvariant {
+                    message: "Temporal.Duration field conversion resumed without a value",
+                })?;
+                let number = operator_to_number(value, state.realm, &state.origin)?.as_f64();
+                let canonical = TEMPORAL_DURATION_BAG_FIELDS[state.next].1;
+                let Some(integer) = temporal_duration_integer(number, canonical) else {
+                    return temporal_range_error(
+                        state.realm,
+                        &state.origin,
+                        "Temporal.Duration fields must be finite integral Numbers",
+                    );
+                };
+                state.fields[canonical] = Some(integer);
+                state.next = state.next.saturating_add(1);
+                state.stage = TemporalDurationBagStage::ReadField;
+            }
+        }
+    }
+}
+
+fn temporal_duration_bag_continuation(
+    state: TemporalDurationBagContinuation,
+) -> NativeContinuation {
+    NativeContinuation::TemporalDurationBag(Box::new(state))
+}
+
+fn duration_from_partial_fields(
+    fields: &[Option<i128>; 10],
+    realm: RealmId,
+    origin: &JsStackFrame,
+) -> Result<Duration, NativeFailure> {
+    match Duration::new(
+        temporal_duration_i64_field(fields[0].unwrap_or_default())?,
+        temporal_duration_i64_field(fields[1].unwrap_or_default())?,
+        temporal_duration_i64_field(fields[2].unwrap_or_default())?,
+        temporal_duration_i64_field(fields[3].unwrap_or_default())?,
+        temporal_duration_i64_field(fields[4].unwrap_or_default())?,
+        temporal_duration_i64_field(fields[5].unwrap_or_default())?,
+        temporal_duration_i64_field(fields[6].unwrap_or_default())?,
+        temporal_duration_i64_field(fields[7].unwrap_or_default())?,
+        fields[8].unwrap_or_default(),
+        fields[9].unwrap_or_default(),
+    ) {
+        Ok(duration) => Ok(duration),
+        Err(error) => Err(NativeFailure::Abrupt(temporal_exception_from_error(
+            realm, origin, error,
+        )?)),
+    }
+}
+
+#[allow(
+    clippy::cast_possible_truncation,
+    reason = "the explicit binary64 bounds place each integral field inside its Rust domain"
+)]
+fn temporal_duration_integer(value: f64, index: usize) -> Option<i128> {
+    if !value.is_finite() || value.fract() != 0.0 {
+        return None;
+    }
+    if index < 8 {
+        if !(-9_223_372_036_854_775_808.0..9_223_372_036_854_775_808.0).contains(&value) {
+            return None;
+        }
+        return Some(i128::from(value as i64));
+    }
+    if !(-170_141_183_460_469_231_731_687_303_715_884_105_728.0
+        ..170_141_183_460_469_231_731_687_303_715_884_105_728.0)
+        .contains(&value)
+    {
+        return None;
+    }
+    Some(value as i128)
+}
+
+fn temporal_duration_i64_field(value: i128) -> Result<i64, NativeFailure> {
+    i64::try_from(value).map_err(|_| {
+        EngineFault::RuntimeInvariant {
+            message: "validated Temporal.Duration field escaped its i64 domain",
+        }
+        .into()
+    })
+}
+
+#[allow(
+    clippy::too_many_arguments,
+    reason = "each conversion target resumes with explicit realm, return, source, and fuel context"
+)]
+fn continue_temporal_duration_like(
+    runtime: &mut Runtime,
+    duration: Duration,
+    target: TemporalDurationLikeTarget,
+    realm: RealmId,
+    return_to: Option<CallReturn>,
+    origin: &JsStackFrame,
+    execution_budget: &mut ExecutionBudget,
+) -> Result<NativeDispatch, NativeFailure> {
+    match target {
+        TemporalDurationLikeTarget::Allocate => {
+            allocate_temporal_duration_result(runtime, realm, duration)
+        }
+        TemporalDurationLikeTarget::CompareFirst { second, options } => {
+            begin_temporal_duration_like(
+                runtime,
+                second,
+                TemporalDurationLikeTarget::CompareSecond {
+                    first: duration,
+                    options,
+                },
+                realm,
+                return_to,
+                origin.clone(),
+                execution_budget,
+            )
+        }
+        TemporalDurationLikeTarget::CompareSecond { first, options } => {
+            begin_temporal_duration_compare_options(
+                runtime,
+                first,
+                duration,
+                &options,
+                realm,
+                return_to,
+                origin.clone(),
+                execution_budget,
+            )
+        }
+        TemporalDurationLikeTarget::Arithmetic { receiver, subtract } => {
+            let result = if subtract {
+                receiver.subtract(&duration)
+            } else {
+                receiver.add(&duration)
+            };
+            let result = match result {
+                Ok(result) => result,
+                Err(error) => {
+                    return Err(NativeFailure::Abrupt(temporal_exception_from_error(
+                        realm, origin, error,
+                    )?));
+                }
+            };
+            allocate_temporal_duration_result(runtime, realm, result)
+        }
+    }
+}
+
+#[allow(
+    clippy::too_many_arguments,
+    reason = "the options Get retains both converted durations and the native suspension context"
+)]
+fn begin_temporal_duration_compare_options(
+    runtime: &mut Runtime,
+    first: Duration,
+    second: Duration,
+    options: &StoredValue,
+    realm: RealmId,
+    return_to: Option<CallReturn>,
+    origin: JsStackFrame,
+    execution_budget: &mut ExecutionBudget,
+) -> Result<NativeDispatch, NativeFailure> {
+    if matches!(options, StoredValue::Undefined) {
+        return complete_temporal_duration_compare(first, second, None, realm, &origin);
+    }
+    if options.heap_reference().is_none() {
+        return temporal_type_error(
+            realm,
+            &origin,
+            "Temporal.Duration.compare options must be an object",
+        );
+    }
+    charge_heap_property_lookup(runtime, options, execution_budget)?;
+    let name = JsString::from_utf8("relativeTo")?;
+    let key = runtime.property_key_from_string(&name)?;
+    let state = TemporalDurationCompareOptionsContinuation {
+        first,
+        second,
+        options: options.duplicate(),
+        realm,
+        origin: origin.clone(),
+    };
+    let dispatch = begin_value_get(
+        runtime,
+        options,
+        key,
+        Some(&name),
+        realm,
+        return_to,
+        origin,
+        execution_budget,
+    )?;
+    match continue_get_state_after(
+        dispatch,
+        state,
+        temporal_duration_compare_options_continuation,
+        "Temporal.Duration relativeTo Get produced a structured result",
+    )? {
+        GetContinuationDispatch::Ready { state, value } => {
+            finish_temporal_duration_compare_options(runtime, &state, value)
+        }
+        GetContinuationDispatch::Suspended(dispatch) => Ok(dispatch),
+    }
+}
+
+fn temporal_duration_compare_options_continuation(
+    state: TemporalDurationCompareOptionsContinuation,
+) -> NativeContinuation {
+    NativeContinuation::TemporalDurationCompareOptions(state)
+}
+
+pub(super) fn finish_temporal_duration_compare_options(
+    _runtime: &mut Runtime,
+    state: &TemporalDurationCompareOptionsContinuation,
+    relative_to: StoredValue,
+) -> Result<NativeDispatch, NativeFailure> {
+    let relative_to = match relative_to {
+        StoredValue::Undefined => None,
+        StoredValue::String(source) => {
+            let source = source.to_utf8_lossy()?;
+            match RelativeTo::try_from_str(&source) {
+                Ok(relative_to) => Some(relative_to),
+                Err(error) => {
+                    return Err(NativeFailure::Abrupt(temporal_exception_from_error(
+                        state.realm,
+                        &state.origin,
+                        error,
+                    )?));
+                }
+            }
+        }
+        _ => {
+            return temporal_type_error(
+                state.realm,
+                &state.origin,
+                "Temporal.Duration.compare relativeTo must be a string or Temporal object",
+            );
+        }
+    };
+    complete_temporal_duration_compare(
+        state.first,
+        state.second,
+        relative_to,
+        state.realm,
+        &state.origin,
+    )
+}
+
+fn complete_temporal_duration_compare(
+    first: Duration,
+    second: Duration,
+    relative_to: Option<RelativeTo>,
+    realm: RealmId,
+    origin: &JsStackFrame,
+) -> Result<NativeDispatch, NativeFailure> {
+    let ordering = match first.compare(&second, relative_to) {
+        Ok(ordering) => ordering,
+        Err(error) => {
+            return Err(NativeFailure::Abrupt(temporal_exception_from_error(
+                realm, origin, error,
+            )?));
+        }
+    };
+    let value = match ordering {
+        std::cmp::Ordering::Less => -1,
+        std::cmp::Ordering::Equal => 0,
+        std::cmp::Ordering::Greater => 1,
+    };
+    Ok(NativeDispatch::Immediate(StoredValue::Number(
+        JsNumber::from_i32(value),
+    )))
 }
 
 pub(super) fn begin_temporal_instant_constructor(

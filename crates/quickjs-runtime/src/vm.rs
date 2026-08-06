@@ -721,6 +721,8 @@ enum NativeContinuation {
     PropertyKey(PropertyKeyContinuation),
     OperatorPrimitive(OperatorPrimitiveContinuation),
     DateToJson(DateToJsonContinuation),
+    TemporalDurationBag(Box<TemporalDurationBagContinuation>),
+    TemporalDurationCompareOptions(TemporalDurationCompareOptionsContinuation),
     IntrinsicGet(IntrinsicGetContinuation),
     AggregateError(AggregateErrorContinuation),
     FromEntries(Box<FromEntriesContinuation>),
@@ -813,6 +815,10 @@ impl NativeContinuation {
             Self::PropertyKey(state) => state.retained_values(),
             Self::OperatorPrimitive(state) => state.retained_values(),
             Self::DateToJson(_) => DateToJsonContinuation::retained_values(),
+            Self::TemporalDurationBag(state) => state.retained_values(),
+            Self::TemporalDurationCompareOptions(_) => {
+                TemporalDurationCompareOptionsContinuation::retained_values()
+            }
             Self::IntrinsicGet(state) => state.retained_values(),
             Self::AggregateError(state) => state.retained_values(),
             Self::FromEntries(state) => state.retained_values(),
@@ -1901,6 +1907,7 @@ enum OperatorPrimitiveTarget {
     TemporalInstantMilliseconds,
     TemporalInstantString(Box<TemporalInstantLikeTarget>),
     TemporalDurationConstructor(Box<TemporalDurationConstructorContinuation>),
+    TemporalDurationBag(Box<TemporalDurationBagContinuation>),
     NumberToString {
         number: JsNumber,
     },
@@ -2064,6 +2071,7 @@ impl OperatorPrimitiveTarget {
             Self::DateUtc(state) => state.retained_values(),
             Self::DateConstructorComponents(state) => state.retained_values(),
             Self::TemporalDurationConstructor(state) => state.retained_values(),
+            Self::TemporalDurationBag(state) => state.retained_values(),
             Self::DateSetter(state) => state.retained_values(),
             Self::DateToJson(_) => DateToJsonContinuation::retained_values(),
             Self::TemporalInstantString(state) => state.retained_values(),
@@ -2303,6 +2311,7 @@ fn trace_operator_primitive_target_roots(
         OperatorPrimitiveTarget::DateUtc(state) => state.trace_roots(mark),
         OperatorPrimitiveTarget::DateConstructorComponents(state) => state.trace_roots(mark),
         OperatorPrimitiveTarget::TemporalDurationConstructor(state) => state.trace_roots(mark),
+        OperatorPrimitiveTarget::TemporalDurationBag(state) => state.trace_roots(mark),
         OperatorPrimitiveTarget::DateSetter(state) => state.trace_roots(mark),
         OperatorPrimitiveTarget::DateToJson(state) => state.trace_roots(mark),
         OperatorPrimitiveTarget::TemporalInstantString(state) => state.trace_roots(mark),
@@ -2477,6 +2486,8 @@ fn trace_native_continuation_roots(
             trace_operator_primitive_target_roots(&state.target, mark);
         }
         NativeContinuation::DateToJson(state) => state.trace_roots(mark),
+        NativeContinuation::TemporalDurationBag(state) => state.trace_roots(mark),
+        NativeContinuation::TemporalDurationCompareOptions(state) => state.trace_roots(mark),
         NativeContinuation::IntrinsicGet(state) => match state {
             IntrinsicGetContinuation::BooleanConstructor { new_target, .. }
             | IntrinsicGetContinuation::NumberConstructor { new_target, .. }
