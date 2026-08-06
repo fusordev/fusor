@@ -69,7 +69,9 @@ broad Test262.**
   assignments (including `||=`, `&&=`, and `??=`), and uncomputed
   object-property expressions and binding-pattern defaults with an explicit or
   synthesized default constructor and public static/instance methods or
-  accessors execute through typed `define_class`.
+  accessors execute through typed `define_class`. Empty anonymous base classes
+  also accept computed object-property or static-field names through a
+  non-escaping typed `define_class`/`set_name_computed` sequence.
   Member closures capture the spec-required immutable inner class-name cell,
   distinct from the mutable declaration binding. Constructors are strict,
   construct with the installed class prototype, and reject direct calls. The
@@ -82,7 +84,8 @@ broad Test262.**
   static fields with non-class values, evaluate into own constructor properties
   when their initializers contain no `this`, `super`, or `new.target`.
 - [ ] Class closure: anonymous/inferred-name property assignment patterns,
-  property assignments, computed keys, and other contexts; `extends`, derived receiver
+  property assignments, computed-key classes with elements, and other contexts;
+  `extends`, derived receiver
   initialization, `super()`/super properties, instance fields, computed-key
   anonymous-class name inference, class-bound static field contexts, private elements,
   decorators, and static blocks. Do not relabel these as

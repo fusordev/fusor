@@ -165,6 +165,17 @@ fn anonymous_base_class_assignment_defaults_infer_their_identifier_names() {
 }
 
 #[test]
+fn empty_anonymous_base_classes_use_computed_object_and_static_field_names() {
+    run_with(
+        "function run(){let key='Result';let holder={[key]:class{}};class Box{static[key]=class{}}return holder.Result.name==='Result'&&Box.Result.name==='Result';}",
+        |result| {
+            let value = result.expect("computed anonymous class name execution");
+            assert_eq!(value.as_boolean().expect("live Boolean"), Some(true));
+        },
+    );
+}
+
+#[test]
 fn anonymous_base_class_object_properties_infer_their_static_key_name() {
     run_with(
         "function run(){let holder={Result:class{static answer(){return 7;}}};let original=holder.Result;return original.name==='Result'&&original.answer()===7&&new original().constructor===original;}",

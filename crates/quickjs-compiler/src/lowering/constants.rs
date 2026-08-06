@@ -579,33 +579,11 @@ impl<'arena> CompilationContext<'_, 'arena, '_> {
             match nodes.kind(parent) {
                 AstKind::ParenthesizedExpression(_) => parent = nodes.parent_id(parent),
                 AstKind::VariableDeclarator(declarator) => break declarator,
-                AstKind::PropertyDefinition(field) if !field.computed => {
-                    let key = compiled_static_property_key(&field.key)?.ok_or(
-                        LeafCompilationError::Unsupported {
-                            feature: super::UnsupportedLeafFeature::InferredFunctionName,
-                            span: field.key.span(),
-                        },
-                    )?;
-                    return Ok((key.value, key.span));
+                AstKind::PropertyDefinition(field) => {
+                    return Self::class_property_definition_name(class, field);
                 }
-                AstKind::ObjectProperty(property)
-                    if !property.computed
-                        && !property.shorthand
-                        && property.kind == PropertyKind::Init =>
-                {
-                    let key = compiled_static_property_key(&property.key)?.ok_or(
-                        LeafCompilationError::Unsupported {
-                            feature: super::UnsupportedLeafFeature::InferredFunctionName,
-                            span: property.key.span(),
-                        },
-                    )?;
-                    if key.value.code_units().eq("__proto__".encode_utf16()) {
-                        return super::unsupported(
-                            super::UnsupportedLeafFeature::InferredFunctionName,
-                            class.span,
-                        );
-                    }
-                    return Ok((key.value, key.span));
+                AstKind::ObjectProperty(property) => {
+                    return Self::class_object_property_name(class, property);
                 }
                 AstKind::AssignmentExpression(assignment)
                     if matches!(
@@ -663,6 +641,55 @@ impl<'arena> CompilationContext<'_, 'arena, '_> {
             compiler_identifier_string(identifier.name.as_str(), identifier.span)?,
             identifier.span,
         ))
+    }
+
+    fn class_property_definition_name(
+        class: &super::Class<'arena>,
+        field: &super::PropertyDefinition<'arena>,
+    ) -> Result<(CompilerString, Span), LeafCompilationError> {
+        if field.computed {
+            return Ok((
+                compiler_identifier_string("<computed-class>", class.span)?,
+                class.span,
+            ));
+        }
+        let key =
+            compiled_static_property_key(&field.key)?.ok_or(LeafCompilationError::Unsupported {
+                feature: super::UnsupportedLeafFeature::InferredFunctionName,
+                span: field.key.span(),
+            })?;
+        Ok((key.value, key.span))
+    }
+
+    fn class_object_property_name(
+        class: &super::Class<'arena>,
+        property: &super::ObjectProperty<'arena>,
+    ) -> Result<(CompilerString, Span), LeafCompilationError> {
+        if property.computed {
+            return Ok((
+                compiler_identifier_string("<computed-class>", class.span)?,
+                class.span,
+            ));
+        }
+        if property.shorthand || property.kind != PropertyKind::Init {
+            return super::unsupported(
+                super::UnsupportedLeafFeature::InferredFunctionName,
+                class.span,
+            );
+        }
+        let key = compiled_static_property_key(&property.key)?.ok_or(
+            LeafCompilationError::Unsupported {
+                feature: super::UnsupportedLeafFeature::InferredFunctionName,
+                span: property.key.span(),
+            },
+        )?;
+        if key.value.code_units().eq("__proto__".encode_utf16()) {
+            return super::unsupported(
+                super::UnsupportedLeafFeature::InferredFunctionName,
+                class.span,
+            );
+        }
+        Ok((key.value, key.span))
     }
 
     fn direct_class_assignment_name(

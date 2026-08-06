@@ -236,6 +236,60 @@ fn anonymous_base_class_assignment_defaults_use_their_target_names() {
 }
 
 #[test]
+fn empty_anonymous_base_classes_use_the_typed_computed_name_path() {
+    let tree = compile(
+        "function make(key){let holder={[key]:class{}};class Box{static[key]=class{}}return [holder,Box];}",
+        "make",
+    );
+    let opcodes = tree
+        .root()
+        .control_flow()
+        .instructions()
+        .iter()
+        .map(|instruction| instruction.decoded().instruction().opcode())
+        .collect::<Vec<_>>();
+    assert_eq!(
+        opcodes
+            .iter()
+            .filter(|&&opcode| opcode == FinalOpcode::SetNameComputed)
+            .count(),
+        2
+    );
+    assert_eq!(
+        opcodes
+            .iter()
+            .filter(|&&opcode| opcode == FinalOpcode::DefineArrayEl)
+            .count(),
+        2
+    );
+}
+
+#[test]
+fn computed_anonymous_classes_with_elements_stay_fail_closed() {
+    let error = with_parsed_program(
+        "function make(key){return {[key]:class{method(){return 1;}}};}",
+        FrontendOptions::for_goal(CompilationGoal::GlobalScript(GlobalScriptGoal::new())),
+        |unit| {
+            let context = CompilationContext::new(unit).expect("storage plan");
+            let root = context
+                .executables()
+                .find(|executable| executable.metadata().name() == Some("make"))
+                .expect("root function");
+            context.compile_tree(&root, VerificationLimits::default())
+        },
+    )
+    .expect("frontend")
+    .expect_err("a computed class with elements needs an extended name certificate");
+    assert!(matches!(
+        error,
+        quickjs_compiler::LeafCompilationError::Unsupported {
+            feature: quickjs_compiler::UnsupportedLeafFeature::InferredFunctionName,
+            ..
+        }
+    ));
+}
+
+#[test]
 fn named_class_member_writes_retain_a_dedicated_immutable_class_name_capture() {
     let tree = compile(
         "function make(){class Box{static replace(){Box=0;}}return Box;}",

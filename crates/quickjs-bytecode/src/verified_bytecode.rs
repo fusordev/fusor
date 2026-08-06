@@ -1589,9 +1589,9 @@ pub enum BytecodeVerificationErrorKind {
         /// Final bytecode position of `define_class`.
         pc: BytecodePc,
     },
-    /// An inferred-name opcode is not paired with one immediately preceding
-    /// anonymous ordinary-function closure on its unique incoming edge, or a
-    /// computed name is detached from its data-property definition.
+    /// An inferred-name opcode is not paired with an anonymous ordinary
+    /// closure or isolated empty base-class definition on its unique incoming
+    /// edge, or a computed name is detached from its data-property definition.
     SetNameTemplateMismatch {
         /// Final bytecode position of the inferred-name opcode.
         pc: BytecodePc,
@@ -4384,12 +4384,11 @@ fn verify_method_definitions(
 }
 
 /// Certifies the compiler-owned named-evaluation primitives. `set_name` and
-/// `set_name_computed` may only rename the fresh anonymous ordinary closure
-/// produced immediately before them, and the instruction must have exactly
-/// one effective incoming edge. The computed form must also flow directly
-/// into the matching computed data-property definition. This prevents
-/// arbitrary function objects, methods, named templates, or control-flow
-/// joins from acquiring the intrinsic mutation authority.
+/// `set_name_computed` may rename only a fresh anonymous ordinary closure, or
+/// a fresh empty base class between its typed definition and matching computed
+/// data-property definition. Every form has exactly one effective incoming
+/// edge. This prevents arbitrary function objects, methods, named templates,
+/// or control-flow joins from acquiring the intrinsic mutation authority.
 fn verify_inferred_function_names(
     graph: &VerifiedCompilerFunctionGraph,
     metadata: &[VerifiedFunctionMetadata],
@@ -4429,6 +4428,16 @@ fn verify_inferred_function_names(
                 index,
             )
             .is_none()
+                && inferred_computed_class_name_pair(
+                    graph,
+                    parent,
+                    metadata,
+                    instructions,
+                    &predecessor_counts,
+                    internal_stack,
+                    index,
+                )
+                .is_none()
             {
                 return Err(BytecodeVerificationError::function(
                     parent_id,
@@ -4503,6 +4512,72 @@ fn inferred_function_name_pair(
             | CompilerExecutableKind::AsyncGeneratorFunction
     ) && child_metadata.function_name.is_none())
     .then_some(*child)
+}
+
+fn inferred_computed_class_name_pair(
+    graph: &VerifiedCompilerFunctionGraph,
+    parent: &VerifiedCompilerFunction,
+    metadata: &[VerifiedFunctionMetadata],
+    instructions: &[VerifiedInstruction],
+    predecessor_counts: &[u32],
+    internal_stack: &InternalStackCertificate,
+    set_name_index: usize,
+) -> Option<FunctionTemplateId> {
+    let set_name = instructions.get(set_name_index)?.decoded().instruction();
+    if !matches!(
+        (set_name.opcode(), set_name.operands()),
+        (FinalOpcode::SetNameComputed, Operands::None)
+    ) || predecessor_counts.get(set_name_index) != Some(&1)
+    {
+        return None;
+    }
+    let definition_index = set_name_index.checked_add(1)?;
+    if instructions
+        .get(definition_index)?
+        .decoded()
+        .instruction()
+        .opcode()
+        != FinalOpcode::DefineArrayEl
+        || !internal_stack.has_effective_successor(
+            instructions,
+            set_name_index,
+            usize_to_u32(definition_index),
+        )
+    {
+        return None;
+    }
+    let prototype_drop_index = set_name_index.checked_sub(1)?;
+    if instructions
+        .get(prototype_drop_index)?
+        .decoded()
+        .instruction()
+        .opcode()
+        != FinalOpcode::Drop
+        || !internal_stack.has_effective_successor(
+            instructions,
+            prototype_drop_index,
+            usize_to_u32(set_name_index),
+        )
+    {
+        return None;
+    }
+    let definition_class_index = prototype_drop_index.checked_sub(1)?;
+    let child = class_definition_pair(
+        graph,
+        parent,
+        metadata,
+        instructions,
+        predecessor_counts,
+        internal_stack,
+        definition_class_index,
+    )?;
+    internal_stack
+        .has_effective_successor(
+            instructions,
+            definition_class_index,
+            usize_to_u32(prototype_drop_index),
+        )
+        .then_some(child)
 }
 
 fn method_definition_pair(

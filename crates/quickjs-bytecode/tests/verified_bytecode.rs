@@ -1916,6 +1916,76 @@ fn final_authority_admits_computed_named_evaluation_only_for_its_data_definition
 }
 
 #[test]
+fn final_authority_admits_only_an_isolated_empty_class_computed_name_sequence() {
+    let valid = [
+        (FinalOpcode::Object, Operands::None),
+        (
+            FinalOpcode::PushAtomValue,
+            Operands::Atom(AtomPoolIndex::new(1)),
+        ),
+        (FinalOpcode::ToPropKey, Operands::None),
+        (FinalOpcode::Undefined, Operands::None),
+        (FinalOpcode::FClosure8, Operands::Const8(0)),
+        (
+            FinalOpcode::DefineClass,
+            Operands::AtomU8 {
+                atom: AtomPoolIndex::new(1),
+                value: 0,
+            },
+        ),
+        (FinalOpcode::Drop, Operands::None),
+        (FinalOpcode::SetNameComputed, Operands::None),
+        (FinalOpcode::DefineArrayEl, Operands::None),
+        (FinalOpcode::Drop, Operands::None),
+        (FinalOpcode::Return, Operands::None),
+    ];
+    let verified = verify_compiler_bytecode_graph(
+        define_method_input(&valid, CompilerExecutableKind::ClassConstructor, 0),
+        BytecodeGraphVerificationLimits::default(),
+    )
+    .expect("one isolated empty class gains computed named-evaluation authority");
+    assert!(
+        verified
+            .requirements()
+            .contains(&ExecutionRequirement::DynamicPropertyKeys)
+    );
+
+    let nonadjacent = [
+        (FinalOpcode::Object, Operands::None),
+        (
+            FinalOpcode::PushAtomValue,
+            Operands::Atom(AtomPoolIndex::new(1)),
+        ),
+        (FinalOpcode::ToPropKey, Operands::None),
+        (FinalOpcode::Undefined, Operands::None),
+        (FinalOpcode::FClosure8, Operands::Const8(0)),
+        (
+            FinalOpcode::DefineClass,
+            Operands::AtomU8 {
+                atom: AtomPoolIndex::new(1),
+                value: 0,
+            },
+        ),
+        (FinalOpcode::Drop, Operands::None),
+        (FinalOpcode::Dup, Operands::None),
+        (FinalOpcode::Drop, Operands::None),
+        (FinalOpcode::SetNameComputed, Operands::None),
+        (FinalOpcode::DefineArrayEl, Operands::None),
+        (FinalOpcode::Drop, Operands::None),
+        (FinalOpcode::Return, Operands::None),
+    ];
+    let error = verify_compiler_bytecode_graph(
+        define_method_input(&nonadjacent, CompilerExecutableKind::ClassConstructor, 0),
+        BytecodeGraphVerificationLimits::default(),
+    )
+    .expect_err("computed class naming cannot target an older class value");
+    assert!(matches!(
+        error.kind(),
+        BytecodeVerificationErrorKind::SetNameTemplateMismatch { .. }
+    ));
+}
+
+#[test]
 fn final_authority_rejects_unpaired_or_method_set_name_operands() {
     let nonadjacent = [
         (FinalOpcode::FClosure8, Operands::Const8(0)),
