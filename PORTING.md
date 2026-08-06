@@ -118,9 +118,8 @@ broad Test262.**
   order with their own lexical scope; they use the same class receiver for
   lexical `this`/`super`, give `new.target` the required `undefined`, and
   retain that receiver for nested arrows.
-- [ ] Class closure: arrow-contained `super()`; computed-key anonymous-class name
-  inference outside direct object/static-field definitions, private elements,
-  and decorators. Do not relabel these as supported
+- [ ] Class closure: arrow-contained `super()`, private elements, and
+  decorators. Do not relabel these as supported
   merely because Oxc parses them.
 - [ ] Direct/indirect `eval`, `with`, Annex B block functions, remaining opcode
   families, and complete debug/source tables. Unverified or serialized bytecode

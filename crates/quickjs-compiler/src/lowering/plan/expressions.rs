@@ -589,9 +589,10 @@ impl<'compiler, 'unit, 'arena, 'scope> ExpressionPlanner<'compiler, 'unit, 'aren
     /// source-level direct `super(...)`, public methods/accessors with either
     /// static or computed names, public static fields with lexical `this`,
     /// `new.target`, and `super` property access, and initializer-free public
-    /// instance fields. Computed or initialized instance fields, private
-    /// elements, decorators, and static blocks stay fail-closed until their
-    /// distinct execution contracts exist.
+    /// instance fields. Computed and initialized public instance fields and
+    /// static blocks have their own certified execution paths. Private
+    /// elements and decorators stay fail-closed until their distinct object
+    /// and class-definition contracts exist.
     fn plan_class_heritage(
         &self,
         class: &Class<'arena>,

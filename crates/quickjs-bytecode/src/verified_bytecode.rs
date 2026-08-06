@@ -4732,6 +4732,17 @@ fn verify_inferred_function_names(
                     index,
                 )
                 .is_none()
+                && inferred_captured_computed_class_name_pair(
+                    graph,
+                    parent,
+                    &metadata[parent_index],
+                    metadata,
+                    instructions,
+                    &predecessor_counts,
+                    internal_stack,
+                    index,
+                )
+                .is_none()
             {
                 return Err(BytecodeVerificationError::function(
                     parent_id,
@@ -4865,6 +4876,93 @@ fn inferred_computed_class_name_pair(
     }
     let sequence = [
         key_conversion_index,
+        undefined_index,
+        closure_index,
+        definition_class_index,
+        constructor_swap_index,
+        key_permutation_index,
+        set_name_index,
+    ];
+    for pair in sequence.windows(2) {
+        if !internal_stack.has_effective_successor(instructions, pair[0], usize_to_u32(pair[1])) {
+            return None;
+        }
+    }
+    Some(child)
+}
+
+/// Certifies `NamedEvaluation` for an anonymous class in a computed public
+/// instance-field initializer. The key is evaluated once during
+/// `ClassDefinitionEvaluation` and captured by every constructor, so this form
+/// reads the compiler-created immutable `ClassFieldKey` closure cell instead
+/// of evaluating `ToPropertyKey` again.
+#[allow(
+    clippy::too_many_arguments,
+    reason = "the certificate validates one complete cross-function class-name sequence"
+)]
+fn inferred_captured_computed_class_name_pair(
+    graph: &VerifiedCompilerFunctionGraph,
+    parent: &VerifiedCompilerFunction,
+    parent_metadata: &VerifiedFunctionMetadata,
+    metadata: &[VerifiedFunctionMetadata],
+    instructions: &[VerifiedInstruction],
+    predecessor_counts: &[u32],
+    internal_stack: &InternalStackCertificate,
+    set_name_index: usize,
+) -> Option<FunctionTemplateId> {
+    let set_name = instructions.get(set_name_index)?.decoded().instruction();
+    if !matches!(
+        (set_name.opcode(), set_name.operands()),
+        (FinalOpcode::SetNameComputed, Operands::None)
+    ) || predecessor_counts.get(set_name_index) != Some(&1)
+    {
+        return None;
+    }
+    let key_permutation_index = set_name_index.checked_sub(1)?;
+    let constructor_swap_index = key_permutation_index.checked_sub(1)?;
+    let definition_class_index = constructor_swap_index.checked_sub(1)?;
+    let closure_index = definition_class_index.checked_sub(1)?;
+    let undefined_index = closure_index.checked_sub(1)?;
+    let key_read_index = undefined_index.checked_sub(1)?;
+    let child = class_definition_pair(
+        graph,
+        parent,
+        metadata,
+        instructions,
+        predecessor_counts,
+        internal_stack,
+        definition_class_index,
+    )?;
+    let key_read = instructions.get(key_read_index)?.decoded().instruction();
+    let slot = closure_operand(key_read.opcode(), key_read.operands())?;
+    if key_read.opcode() != FinalOpcode::GetVarRefCheck
+        || !parent_metadata
+            .closures()
+            .get(slot as usize)
+            .is_some_and(|definition| {
+                definition.policy().kind() == CompilerBindingKind::ClassFieldKey
+            })
+    {
+        return None;
+    }
+    let expected_opcodes = [
+        (undefined_index, FinalOpcode::Undefined),
+        (closure_index, FinalOpcode::FClosure),
+        (definition_class_index, FinalOpcode::DefineClass),
+        (constructor_swap_index, FinalOpcode::Swap),
+        (key_permutation_index, FinalOpcode::Perm3),
+    ];
+    for (index, expected) in expected_opcodes {
+        let actual = instructions.get(index)?.decoded().instruction().opcode();
+        if actual != expected
+            && !(expected == FinalOpcode::FClosure
+                && matches!(actual, FinalOpcode::FClosure | FinalOpcode::FClosure8))
+        {
+            return None;
+        }
+    }
+    let sequence = [
+        key_read_index,
         undefined_index,
         closure_index,
         definition_class_index,

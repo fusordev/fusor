@@ -352,6 +352,17 @@ fn computed_anonymous_base_classes_name_themselves_before_installing_elements() 
 }
 
 #[test]
+fn computed_instance_field_anonymous_classes_use_retained_keys_for_named_evaluation() {
+    run_with(
+        "function run(){let key='Result';class Base{}class Box{[key]=class{value(){return 3;}}}class Explicit extends Base{[key]=class{}}class Default extends Base{[key]=class{}}let box=new Box;let explicit=new Explicit;let derived=new Default;return box.Result.name==='Result'&&box.Result.prototype.value.call(box.Result.prototype)===3&&explicit.Result.name==='Result'&&derived.Result.name==='Result';}",
+        |result| {
+            let value = result.expect("computed instance-field class name execution");
+            assert_eq!(value.as_boolean().expect("live Boolean"), Some(true));
+        },
+    );
+}
+
+#[test]
 fn anonymous_base_class_object_properties_infer_their_static_key_name() {
     run_with(
         "function run(){let holder={Result:class{static answer(){return 7;}}};let original=holder.Result;return original.name==='Result'&&original.answer()===7&&new original().constructor===original;}",
