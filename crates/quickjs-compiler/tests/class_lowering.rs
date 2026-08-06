@@ -180,6 +180,33 @@ fn a_direct_anonymous_base_class_assignment_uses_its_target_name() {
 }
 
 #[test]
+fn a_static_property_anonymous_base_class_assignment_uses_its_target_name() {
+    let tree = compile(
+        "function make(holder){return holder.Result=class{static answer(){return 7;}};}",
+        "make",
+    );
+    assert_eq!(tree.functions().len(), 3);
+    assert!(
+        tree.root()
+            .control_flow()
+            .instructions()
+            .iter()
+            .any(|instruction| instruction.decoded().instruction().opcode()
+                == FinalOpcode::DefineClass),
+        "the inferred name is supplied to define_class, not a post-closure SetName"
+    );
+    assert!(
+        !tree
+            .root()
+            .control_flow()
+            .instructions()
+            .iter()
+            .any(|instruction| instruction.decoded().instruction().opcode() == FinalOpcode::SetName),
+        "class inference cannot reuse the ordinary-function SetName opcode"
+    );
+}
+
+#[test]
 fn named_class_member_writes_retain_a_dedicated_immutable_class_name_capture() {
     let tree = compile(
         "function make(){class Box{static replace(){Box=0;}}return Box;}",

@@ -664,12 +664,21 @@ impl<'arena> CompilationContext<'_, 'arena, '_> {
         class: &super::Class<'arena>,
         assignment: &super::AssignmentExpression<'arena>,
     ) -> Result<(CompilerString, Span), LeafCompilationError> {
-        let super::AssignmentTarget::AssignmentTargetIdentifier(identifier) = &assignment.left
-        else {
-            return super::unsupported(
-                super::UnsupportedLeafFeature::InferredFunctionName,
-                class.span,
-            );
+        let (name, name_span) = match &assignment.left {
+            super::AssignmentTarget::AssignmentTargetIdentifier(identifier) => (
+                compiler_identifier_string(identifier.name.as_str(), identifier.span)?,
+                identifier.span,
+            ),
+            super::AssignmentTarget::StaticMemberExpression(member) if !member.optional => (
+                compiler_identifier_string(member.property.name.as_str(), member.property.span)?,
+                member.property.span,
+            ),
+            _ => {
+                return super::unsupported(
+                    super::UnsupportedLeafFeature::InferredFunctionName,
+                    class.span,
+                );
+            }
         };
         let mut initializer = &assignment.right;
         while let Expression::ParenthesizedExpression(parenthesized) = initializer {
@@ -687,10 +696,7 @@ impl<'arena> CompilationContext<'_, 'arena, '_> {
                 span: Some(class.span),
             });
         }
-        Ok((
-            compiler_identifier_string(identifier.name.as_str(), identifier.span)?,
-            identifier.span,
-        ))
+        Ok((name, name_span))
     }
 
     fn record_regexp_literal_candidate(
