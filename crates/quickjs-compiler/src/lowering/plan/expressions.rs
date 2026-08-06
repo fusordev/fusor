@@ -195,6 +195,25 @@ pub(in crate::lowering) const fn binary_opcode(operator: BinaryOperator) -> Fina
     }
 }
 
+const fn super_member_update_opcode(update: &UpdateExpression<'_>) -> FinalOpcode {
+    match (update.operator, update.prefix) {
+        (UpdateOperator::Increment, true) => FinalOpcode::Inc,
+        (UpdateOperator::Decrement, true) => FinalOpcode::Dec,
+        (UpdateOperator::Increment, false) => FinalOpcode::PostInc,
+        (UpdateOperator::Decrement, false) => FinalOpcode::PostDec,
+    }
+}
+
+const fn super_member_update_permutation(prefix: bool) -> FinalOpcode {
+    if prefix {
+        FinalOpcode::Insert4
+    } else {
+        // `post_inc` / `post_dec` leave `old, new`; `perm5` changes
+        // `receiver, base, key, old, new` into `old, receiver, base, key, new`.
+        FinalOpcode::Perm5
+    }
+}
+
 pub(in crate::lowering) enum ExpressionWork<'expression, 'arena> {
     Visit(&'expression Expression<'arena>),
     VisitOptionalChain {
@@ -375,7 +394,13 @@ impl<'compiler, 'unit, 'arena, 'scope> ExpressionPlanner<'compiler, 'unit, 'aren
                             )?;
                         }
                         Expression::UpdateExpression(update) => {
-                            self.plan_update_expression(update, layout, tree_layout, &mut work)?;
+                            self.plan_update_expression(
+                                update,
+                                layout,
+                                tree_layout,
+                                constants,
+                                &mut work,
+                            )?;
                         }
                         Expression::CallExpression(call) => {
                             Self::plan_call_expression(call, constants, &mut work)?;
@@ -2641,6 +2666,498 @@ impl<'compiler, 'unit, 'arena, 'scope> ExpressionPlanner<'compiler, 'unit, 'aren
         Ok(())
     }
 
+    fn plan_static_super_member_compound_assignment<'expression>(
+        assignment: &'expression AssignmentExpression<'arena>,
+        member: &'expression StaticMemberExpression<'arena>,
+        constants: &CompiledConstantPool,
+        work: &mut Vec<ExpressionWork<'expression, 'arena>>,
+    ) -> Result<(), LeafCompilationError> {
+        if member.optional {
+            return unsupported(
+                UnsupportedLeafFeature::UnsupportedExpression,
+                assignment.left.span(),
+            );
+        }
+        let binary = assignment.operator.to_binary_operator().ok_or(
+            LeafCompilationError::SemanticInvariant {
+                invariant: "nonlogical super member assignment has a binary operator",
+                span: Some(assignment.span),
+            },
+        )?;
+        // `dup3; get_super_value` reads once while preserving the exact
+        // receiver/base/key reference for the corresponding [[Set]].
+        work.push(ExpressionWork::Emit(PlannedInstruction::new(
+            FinalOpcode::PutSuperValue,
+            Operands::None,
+            member.span,
+        )));
+        work.push(ExpressionWork::Emit(PlannedInstruction::new(
+            FinalOpcode::Insert4,
+            Operands::None,
+            assignment.span,
+        )));
+        work.push(ExpressionWork::Emit(PlannedInstruction::new(
+            binary_opcode(binary),
+            Operands::None,
+            assignment.span,
+        )));
+        work.push(ExpressionWork::Visit(&assignment.right));
+        work.push(ExpressionWork::Emit(PlannedInstruction::new(
+            FinalOpcode::GetSuperValue,
+            Operands::None,
+            member.span,
+        )));
+        work.push(ExpressionWork::Emit(PlannedInstruction::new(
+            FinalOpcode::Dup3,
+            Operands::None,
+            member.span,
+        )));
+        work.push(ExpressionWork::Emit(PlannedInstruction::new(
+            FinalOpcode::PushAtomValue,
+            Operands::Atom(constants.property_atom_index(member.property.span)?),
+            member.property.span,
+        )));
+        work.push(ExpressionWork::Emit(PlannedInstruction::new(
+            FinalOpcode::GetSuper,
+            Operands::None,
+            member.object.span(),
+        )));
+        work.push(ExpressionWork::Emit(PlannedInstruction::new(
+            FinalOpcode::SpecialObject,
+            Operands::U8(5),
+            member.object.span(),
+        )));
+        work.push(ExpressionWork::Emit(PlannedInstruction::new(
+            FinalOpcode::PushThis,
+            Operands::None,
+            member.object.span(),
+        )));
+        Ok(())
+    }
+
+    fn plan_computed_super_member_compound_assignment<'expression>(
+        assignment: &'expression AssignmentExpression<'arena>,
+        member: &'expression ComputedMemberExpression<'arena>,
+        work: &mut Vec<ExpressionWork<'expression, 'arena>>,
+    ) -> Result<(), LeafCompilationError> {
+        if member.optional {
+            return unsupported(
+                UnsupportedLeafFeature::UnsupportedExpression,
+                assignment.left.span(),
+            );
+        }
+        let binary = assignment.operator.to_binary_operator().ok_or(
+            LeafCompilationError::SemanticInvariant {
+                invariant: "nonlogical computed super assignment has a binary operator",
+                span: Some(assignment.span),
+            },
+        )?;
+        work.push(ExpressionWork::Emit(PlannedInstruction::new(
+            FinalOpcode::PutSuperValue,
+            Operands::None,
+            member.span,
+        )));
+        work.push(ExpressionWork::Emit(PlannedInstruction::new(
+            FinalOpcode::Insert4,
+            Operands::None,
+            assignment.span,
+        )));
+        work.push(ExpressionWork::Emit(PlannedInstruction::new(
+            binary_opcode(binary),
+            Operands::None,
+            assignment.span,
+        )));
+        work.push(ExpressionWork::Visit(&assignment.right));
+        work.push(ExpressionWork::Emit(PlannedInstruction::new(
+            FinalOpcode::GetSuperValue,
+            Operands::None,
+            member.span,
+        )));
+        work.push(ExpressionWork::Emit(PlannedInstruction::new(
+            FinalOpcode::Dup3,
+            Operands::None,
+            member.span,
+        )));
+        work.push(ExpressionWork::Emit(PlannedInstruction::new(
+            FinalOpcode::ToPropKey,
+            Operands::None,
+            member.expression.span(),
+        )));
+        work.push(ExpressionWork::Visit(&member.expression));
+        work.push(ExpressionWork::Emit(PlannedInstruction::new(
+            FinalOpcode::GetSuper,
+            Operands::None,
+            member.object.span(),
+        )));
+        work.push(ExpressionWork::Emit(PlannedInstruction::new(
+            FinalOpcode::SpecialObject,
+            Operands::U8(5),
+            member.object.span(),
+        )));
+        work.push(ExpressionWork::Emit(PlannedInstruction::new(
+            FinalOpcode::PushThis,
+            Operands::None,
+            member.object.span(),
+        )));
+        Ok(())
+    }
+
+    fn plan_static_super_member_logical_assignment<'expression>(
+        assignment: &'expression AssignmentExpression<'arena>,
+        member: &'expression StaticMemberExpression<'arena>,
+        constants: &CompiledConstantPool,
+        flow: &mut PlannedControlFlow,
+        work: &mut Vec<ExpressionWork<'expression, 'arena>>,
+    ) -> Result<(), LeafCompilationError> {
+        if member.optional {
+            return unsupported(
+                UnsupportedLeafFeature::UnsupportedExpression,
+                assignment.left.span(),
+            );
+        }
+        let (short_circuit, done, branch_kind) =
+            Self::super_member_logical_labels(assignment, flow)?;
+
+        // The branch receives `receiver, base, key, old`. Its write path drops
+        // `old`; its short-circuit path removes the saved reference triple.
+        // Both join at `done` with exactly the assignment completion.
+        Self::push_super_member_short_circuit_cleanup(
+            &short_circuit,
+            &done,
+            assignment.span,
+            member.span,
+            work,
+        );
+        work.push(ExpressionWork::Emit(PlannedInstruction::new(
+            FinalOpcode::PutSuperValue,
+            Operands::None,
+            member.span,
+        )));
+        work.push(ExpressionWork::Emit(PlannedInstruction::new(
+            FinalOpcode::Insert4,
+            Operands::None,
+            assignment.span,
+        )));
+        work.push(ExpressionWork::Visit(&assignment.right));
+        work.push(ExpressionWork::Emit(PlannedInstruction::new(
+            FinalOpcode::Drop,
+            Operands::None,
+            member.span,
+        )));
+        Self::push_super_member_logical_branch(
+            assignment,
+            member.span,
+            branch_kind,
+            &short_circuit,
+            work,
+        );
+        work.push(ExpressionWork::Emit(PlannedInstruction::new(
+            FinalOpcode::GetSuperValue,
+            Operands::None,
+            member.span,
+        )));
+        work.push(ExpressionWork::Emit(PlannedInstruction::new(
+            FinalOpcode::Dup3,
+            Operands::None,
+            member.span,
+        )));
+        work.push(ExpressionWork::Emit(PlannedInstruction::new(
+            FinalOpcode::PushAtomValue,
+            Operands::Atom(constants.property_atom_index(member.property.span)?),
+            member.property.span,
+        )));
+        work.push(ExpressionWork::Emit(PlannedInstruction::new(
+            FinalOpcode::GetSuper,
+            Operands::None,
+            member.object.span(),
+        )));
+        work.push(ExpressionWork::Emit(PlannedInstruction::new(
+            FinalOpcode::SpecialObject,
+            Operands::U8(5),
+            member.object.span(),
+        )));
+        work.push(ExpressionWork::Emit(PlannedInstruction::new(
+            FinalOpcode::PushThis,
+            Operands::None,
+            member.object.span(),
+        )));
+        Ok(())
+    }
+
+    fn plan_computed_super_member_logical_assignment<'expression>(
+        assignment: &'expression AssignmentExpression<'arena>,
+        member: &'expression ComputedMemberExpression<'arena>,
+        flow: &mut PlannedControlFlow,
+        work: &mut Vec<ExpressionWork<'expression, 'arena>>,
+    ) -> Result<(), LeafCompilationError> {
+        if member.optional {
+            return unsupported(
+                UnsupportedLeafFeature::UnsupportedExpression,
+                assignment.left.span(),
+            );
+        }
+        let (short_circuit, done, branch_kind) =
+            Self::super_member_logical_labels(assignment, flow)?;
+
+        Self::push_super_member_short_circuit_cleanup(
+            &short_circuit,
+            &done,
+            assignment.span,
+            member.span,
+            work,
+        );
+        work.push(ExpressionWork::Emit(PlannedInstruction::new(
+            FinalOpcode::PutSuperValue,
+            Operands::None,
+            member.span,
+        )));
+        work.push(ExpressionWork::Emit(PlannedInstruction::new(
+            FinalOpcode::Insert4,
+            Operands::None,
+            assignment.span,
+        )));
+        work.push(ExpressionWork::Visit(&assignment.right));
+        work.push(ExpressionWork::Emit(PlannedInstruction::new(
+            FinalOpcode::Drop,
+            Operands::None,
+            member.span,
+        )));
+        Self::push_super_member_logical_branch(
+            assignment,
+            member.span,
+            branch_kind,
+            &short_circuit,
+            work,
+        );
+        work.push(ExpressionWork::Emit(PlannedInstruction::new(
+            FinalOpcode::GetSuperValue,
+            Operands::None,
+            member.span,
+        )));
+        work.push(ExpressionWork::Emit(PlannedInstruction::new(
+            FinalOpcode::Dup3,
+            Operands::None,
+            member.span,
+        )));
+        work.push(ExpressionWork::Emit(PlannedInstruction::new(
+            FinalOpcode::ToPropKey,
+            Operands::None,
+            member.expression.span(),
+        )));
+        work.push(ExpressionWork::Visit(&member.expression));
+        work.push(ExpressionWork::Emit(PlannedInstruction::new(
+            FinalOpcode::GetSuper,
+            Operands::None,
+            member.object.span(),
+        )));
+        work.push(ExpressionWork::Emit(PlannedInstruction::new(
+            FinalOpcode::SpecialObject,
+            Operands::U8(5),
+            member.object.span(),
+        )));
+        work.push(ExpressionWork::Emit(PlannedInstruction::new(
+            FinalOpcode::PushThis,
+            Operands::None,
+            member.object.span(),
+        )));
+        Ok(())
+    }
+
+    fn plan_static_super_member_update<'expression>(
+        update: &'expression UpdateExpression<'arena>,
+        member: &'expression StaticMemberExpression<'arena>,
+        constants: &CompiledConstantPool,
+        work: &mut Vec<ExpressionWork<'expression, 'arena>>,
+    ) -> Result<(), LeafCompilationError> {
+        if member.optional {
+            return unsupported(
+                UnsupportedLeafFeature::UnsupportedExpression,
+                update.argument.span(),
+            );
+        }
+        work.push(ExpressionWork::Emit(PlannedInstruction::new(
+            FinalOpcode::PutSuperValue,
+            Operands::None,
+            member.span,
+        )));
+        work.push(ExpressionWork::Emit(PlannedInstruction::new(
+            super_member_update_permutation(update.prefix),
+            Operands::None,
+            update.span,
+        )));
+        work.push(ExpressionWork::Emit(PlannedInstruction::new(
+            super_member_update_opcode(update),
+            Operands::None,
+            update.span,
+        )));
+        work.push(ExpressionWork::Emit(PlannedInstruction::new(
+            FinalOpcode::GetSuperValue,
+            Operands::None,
+            member.span,
+        )));
+        work.push(ExpressionWork::Emit(PlannedInstruction::new(
+            FinalOpcode::Dup3,
+            Operands::None,
+            member.span,
+        )));
+        work.push(ExpressionWork::Emit(PlannedInstruction::new(
+            FinalOpcode::PushAtomValue,
+            Operands::Atom(constants.property_atom_index(member.property.span)?),
+            member.property.span,
+        )));
+        work.push(ExpressionWork::Emit(PlannedInstruction::new(
+            FinalOpcode::GetSuper,
+            Operands::None,
+            member.object.span(),
+        )));
+        work.push(ExpressionWork::Emit(PlannedInstruction::new(
+            FinalOpcode::SpecialObject,
+            Operands::U8(5),
+            member.object.span(),
+        )));
+        work.push(ExpressionWork::Emit(PlannedInstruction::new(
+            FinalOpcode::PushThis,
+            Operands::None,
+            member.object.span(),
+        )));
+        Ok(())
+    }
+
+    fn plan_computed_super_member_update<'expression>(
+        update: &'expression UpdateExpression<'arena>,
+        member: &'expression ComputedMemberExpression<'arena>,
+        work: &mut Vec<ExpressionWork<'expression, 'arena>>,
+    ) -> Result<(), LeafCompilationError> {
+        if member.optional {
+            return unsupported(
+                UnsupportedLeafFeature::UnsupportedExpression,
+                update.argument.span(),
+            );
+        }
+        work.push(ExpressionWork::Emit(PlannedInstruction::new(
+            FinalOpcode::PutSuperValue,
+            Operands::None,
+            member.span,
+        )));
+        work.push(ExpressionWork::Emit(PlannedInstruction::new(
+            super_member_update_permutation(update.prefix),
+            Operands::None,
+            update.span,
+        )));
+        work.push(ExpressionWork::Emit(PlannedInstruction::new(
+            super_member_update_opcode(update),
+            Operands::None,
+            update.span,
+        )));
+        work.push(ExpressionWork::Emit(PlannedInstruction::new(
+            FinalOpcode::GetSuperValue,
+            Operands::None,
+            member.span,
+        )));
+        work.push(ExpressionWork::Emit(PlannedInstruction::new(
+            FinalOpcode::Dup3,
+            Operands::None,
+            member.span,
+        )));
+        work.push(ExpressionWork::Emit(PlannedInstruction::new(
+            FinalOpcode::ToPropKey,
+            Operands::None,
+            member.expression.span(),
+        )));
+        work.push(ExpressionWork::Visit(&member.expression));
+        work.push(ExpressionWork::Emit(PlannedInstruction::new(
+            FinalOpcode::GetSuper,
+            Operands::None,
+            member.object.span(),
+        )));
+        work.push(ExpressionWork::Emit(PlannedInstruction::new(
+            FinalOpcode::SpecialObject,
+            Operands::U8(5),
+            member.object.span(),
+        )));
+        work.push(ExpressionWork::Emit(PlannedInstruction::new(
+            FinalOpcode::PushThis,
+            Operands::None,
+            member.object.span(),
+        )));
+        Ok(())
+    }
+
+    fn super_member_logical_labels(
+        assignment: &AssignmentExpression<'arena>,
+        flow: &mut PlannedControlFlow,
+    ) -> Result<(CompilerLabel, CompilerLabel, BranchKind), LeafCompilationError> {
+        let short_circuit = flow.new_label(assignment.span)?;
+        let done = flow.new_label(assignment.span)?;
+        let branch_kind = match assignment.operator {
+            AssignmentOperator::LogicalOr => BranchKind::IfTrue,
+            AssignmentOperator::LogicalAnd | AssignmentOperator::LogicalNullish => {
+                BranchKind::IfFalse
+            }
+            _ => {
+                return Err(LeafCompilationError::SemanticInvariant {
+                    invariant: "logical super member assignment has a short-circuit branch",
+                    span: Some(assignment.span),
+                });
+            }
+        };
+        Ok((short_circuit, done, branch_kind))
+    }
+
+    fn push_super_member_short_circuit_cleanup<'expression>(
+        short_circuit: &CompilerLabel,
+        done: &CompilerLabel,
+        assignment_span: Span,
+        member_span: Span,
+        work: &mut Vec<ExpressionWork<'expression, 'arena>>,
+    ) {
+        work.push(ExpressionWork::Bind(done.clone()));
+        for _ in 0..3 {
+            work.push(ExpressionWork::Emit(PlannedInstruction::new(
+                FinalOpcode::Drop,
+                Operands::None,
+                member_span,
+            )));
+            work.push(ExpressionWork::Emit(PlannedInstruction::new(
+                FinalOpcode::Swap,
+                Operands::None,
+                member_span,
+            )));
+        }
+        work.push(ExpressionWork::Bind(short_circuit.clone()));
+        work.push(ExpressionWork::Branch {
+            kind: BranchKind::Goto,
+            target: done.clone(),
+            span: assignment_span,
+        });
+    }
+
+    fn push_super_member_logical_branch<'expression>(
+        assignment: &AssignmentExpression<'arena>,
+        member_span: Span,
+        branch_kind: BranchKind,
+        short_circuit: &CompilerLabel,
+        work: &mut Vec<ExpressionWork<'expression, 'arena>>,
+    ) {
+        work.push(ExpressionWork::Branch {
+            kind: branch_kind,
+            target: short_circuit.clone(),
+            span: assignment.span,
+        });
+        if assignment.operator == AssignmentOperator::LogicalNullish {
+            work.push(ExpressionWork::Emit(PlannedInstruction::new(
+                FinalOpcode::IsUndefinedOrNull,
+                Operands::None,
+                member_span,
+            )));
+        }
+        work.push(ExpressionWork::Emit(PlannedInstruction::new(
+            FinalOpcode::Dup,
+            Operands::None,
+            member_span,
+        )));
+    }
+
     fn plan_static_member_logical_assignment<'expression>(
         assignment: &'expression AssignmentExpression<'arena>,
         member: &'expression StaticMemberExpression<'arena>,
@@ -2648,6 +3165,11 @@ impl<'compiler, 'unit, 'arena, 'scope> ExpressionPlanner<'compiler, 'unit, 'aren
         flow: &mut PlannedControlFlow,
         work: &mut Vec<ExpressionWork<'expression, 'arena>>,
     ) -> Result<(), LeafCompilationError> {
+        if matches!(&member.object, Expression::Super(_)) {
+            return Self::plan_static_super_member_logical_assignment(
+                assignment, member, constants, flow, work,
+            );
+        }
         if member.optional {
             return unsupported(
                 UnsupportedLeafFeature::UnsupportedExpression,
@@ -2743,6 +3265,11 @@ impl<'compiler, 'unit, 'arena, 'scope> ExpressionPlanner<'compiler, 'unit, 'aren
         constants: &CompiledConstantPool,
         work: &mut Vec<ExpressionWork<'expression, 'arena>>,
     ) -> Result<(), LeafCompilationError> {
+        if matches!(&member.object, Expression::Super(_)) {
+            return Self::plan_static_super_member_compound_assignment(
+                assignment, member, constants, work,
+            );
+        }
         if member.optional {
             return unsupported(
                 UnsupportedLeafFeature::UnsupportedExpression,
@@ -2791,6 +3318,11 @@ impl<'compiler, 'unit, 'arena, 'scope> ExpressionPlanner<'compiler, 'unit, 'aren
         flow: &mut PlannedControlFlow,
         work: &mut Vec<ExpressionWork<'expression, 'arena>>,
     ) -> Result<(), LeafCompilationError> {
+        if matches!(&member.object, Expression::Super(_)) {
+            return Self::plan_computed_super_member_logical_assignment(
+                assignment, member, flow, work,
+            );
+        }
         if member.optional {
             return unsupported(
                 UnsupportedLeafFeature::UnsupportedExpression,
@@ -2896,6 +3428,9 @@ impl<'compiler, 'unit, 'arena, 'scope> ExpressionPlanner<'compiler, 'unit, 'aren
         member: &'expression ComputedMemberExpression<'arena>,
         work: &mut Vec<ExpressionWork<'expression, 'arena>>,
     ) -> Result<(), LeafCompilationError> {
+        if matches!(&member.object, Expression::Super(_)) {
+            return Self::plan_computed_super_member_compound_assignment(assignment, member, work);
+        }
         if member.optional {
             return unsupported(
                 UnsupportedLeafFeature::UnsupportedExpression,
@@ -3014,14 +3549,27 @@ impl<'compiler, 'unit, 'arena, 'scope> ExpressionPlanner<'compiler, 'unit, 'aren
         update: &'expression UpdateExpression<'arena>,
         layout: &FrameLayout,
         tree_layout: &FunctionTreeLayout,
+        constants: &CompiledConstantPool,
         work: &mut Vec<ExpressionWork<'expression, 'arena>>,
     ) -> Result<(), LeafCompilationError> {
-        let SimpleAssignmentTarget::AssignmentTargetIdentifier(identifier) = &update.argument
-        else {
-            return unsupported(
-                UnsupportedLeafFeature::UnsupportedExpression,
-                update.argument.span(),
-            );
+        let identifier = match &update.argument {
+            SimpleAssignmentTarget::StaticMemberExpression(member)
+                if matches!(&member.object, Expression::Super(_)) =>
+            {
+                return Self::plan_static_super_member_update(update, member, constants, work);
+            }
+            SimpleAssignmentTarget::ComputedMemberExpression(member)
+                if matches!(&member.object, Expression::Super(_)) =>
+            {
+                return Self::plan_computed_super_member_update(update, member, work);
+            }
+            SimpleAssignmentTarget::AssignmentTargetIdentifier(identifier) => identifier,
+            _ => {
+                return unsupported(
+                    UnsupportedLeafFeature::UnsupportedExpression,
+                    update.argument.span(),
+                );
+            }
         };
         let reference = self.lowered_reference(
             identifier.reference_id.get(),

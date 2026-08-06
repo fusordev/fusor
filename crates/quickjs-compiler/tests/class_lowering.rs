@@ -155,7 +155,7 @@ fn explicit_derived_constructors_lower_a_typed_super_construction_path() {
 #[test]
 fn class_super_properties_lower_through_home_object_and_receiver_aware_opcodes() {
     let tree = compile(
-        "function make(){class Base{get value(){return this._value;}set value(next){this._value=next;}method(){return this._value;}static get answer(){return this._answer;}static set answer(next){this._answer=next;}}class Derived extends Base{read(){return super.value;}call(){return super.method();}write(next){return super.value=next;}static read(){return super.answer;}static write(next){return super.answer=next;}}return Derived;}",
+        "function make(){class Base{get value(){return this._value;}set value(next){this._value=next;}method(){return this._value;}static get answer(){return this._answer;}static set answer(next){this._answer=next;}}class Derived extends Base{read(){return super.value;}call(){return super.method();}write(next){return super.value=next;}add(next){return super.value+=next;}assign(next){return super['value']||=next;}pre(){return ++super.value;}post(){return super['value']++;}static read(){return super.answer;}static write(next){return super.answer=next;}static add(next){return super.answer+=next;}static assign(next){return super['answer']&&=next;}static pre(){return ++super.answer;}static post(){return super.answer++;}}return Derived;}",
         "make",
     );
     let opcodes = tree
@@ -167,7 +167,9 @@ fn class_super_properties_lower_through_home_object_and_receiver_aware_opcodes()
     assert!(opcodes.contains(&FinalOpcode::GetSuper));
     assert!(opcodes.contains(&FinalOpcode::GetSuperValue));
     assert!(opcodes.contains(&FinalOpcode::PutSuperValue));
+    assert!(opcodes.contains(&FinalOpcode::Dup3));
     assert!(opcodes.contains(&FinalOpcode::Insert4));
+    assert!(opcodes.contains(&FinalOpcode::Perm5));
     assert!(tree.functions().iter().any(|function| {
         function
             .control_flow()

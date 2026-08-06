@@ -6310,6 +6310,7 @@ const fn supported_compiler_opcode(opcode: FinalOpcode) -> bool {
             | FinalOpcode::Dup
             | FinalOpcode::Dup1
             | FinalOpcode::Dup2
+            | FinalOpcode::Dup3
             | FinalOpcode::Insert2
             | FinalOpcode::Insert3
             | FinalOpcode::Insert4
@@ -6328,6 +6329,7 @@ const fn supported_compiler_opcode(opcode: FinalOpcode) -> bool {
             | FinalOpcode::GetSuperValue
             | FinalOpcode::PutSuperValue
             | FinalOpcode::Perm3
+            | FinalOpcode::Perm5
             | FinalOpcode::Return
             | FinalOpcode::ReturnUndef
             | FinalOpcode::ReturnAsync

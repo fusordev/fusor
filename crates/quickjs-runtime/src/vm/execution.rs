@@ -1082,6 +1082,17 @@ pub(super) fn execute_one(
             push(frame, left);
             push(frame, right);
         }
+        FinalOpcode::Dup3 => {
+            let third = pop(frame)?;
+            let second = pop(frame)?;
+            let first = pop(frame)?;
+            push(frame, first.duplicate());
+            push(frame, second.duplicate());
+            push(frame, third.duplicate());
+            push(frame, first);
+            push(frame, second);
+            push(frame, third);
+        }
         FinalOpcode::Insert2 => {
             let right = pop(frame)?;
             let left = pop(frame)?;
@@ -1122,6 +1133,18 @@ pub(super) fn execute_one(
             push(frame, second);
             push(frame, first);
             push(frame, third);
+        }
+        FinalOpcode::Perm5 => {
+            let fifth = pop(frame)?;
+            let fourth = pop(frame)?;
+            let third = pop(frame)?;
+            let second = pop(frame)?;
+            let first = pop(frame)?;
+            push(frame, fourth);
+            push(frame, first);
+            push(frame, second);
+            push(frame, third);
+            push(frame, fifth);
         }
         FinalOpcode::Rot3l => {
             let third = pop(frame)?;
