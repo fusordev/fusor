@@ -1535,10 +1535,12 @@ fn resolve_native_dispatch_inner(
             None,
         )
         .map_err(NativeFailure::Execution)?;
-        if let Some(new_target) = construction {
+        if let Some(new_target) = construction
+            && frame.constructor_state != ConstructorState::DerivedUninitialized
+        {
             frame.receiver =
                 StoredValue::Object(create_ordinary_constructor_receiver(runtime, new_target)?);
-            frame.ordinary_constructor = true;
+            frame.constructor_state = ConstructorState::Ordinary;
         }
         frame.native_caller = call.native_caller;
         attach_native_continuations(&mut frame, call.continuations)?;

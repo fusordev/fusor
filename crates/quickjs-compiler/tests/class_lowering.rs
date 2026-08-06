@@ -612,3 +612,73 @@ fn named_base_class_members_capture_a_distinct_immutable_class_name_cell() {
         .collect::<Vec<_>>();
     assert!(opcodes.contains(&FinalOpcode::CloseLoc));
 }
+
+#[test]
+fn derived_class_without_an_explicit_constructor_lowers_a_certified_heritage_path() {
+    let tree = compile(
+        "function make(Base){return class Derived extends Base{static answer(){return 7;}}}",
+        "make",
+    );
+    let root = tree.root();
+    let opcodes = root
+        .control_flow()
+        .instructions()
+        .iter()
+        .map(|instruction| instruction.decoded().instruction().opcode())
+        .collect::<Vec<_>>();
+
+    assert!(opcodes.windows(9).any(|window| {
+        matches!(
+            window,
+            [
+                FinalOpcode::Dup,
+                FinalOpcode::IsNull,
+                FinalOpcode::IfTrue | FinalOpcode::IfTrue8,
+                FinalOpcode::CheckCtor,
+                FinalOpcode::Dup,
+                FinalOpcode::GetField,
+                FinalOpcode::Goto | FinalOpcode::Goto8 | FinalOpcode::Goto16,
+                FinalOpcode::Null,
+                FinalOpcode::FClosure8 | FinalOpcode::FClosure,
+            ]
+        )
+    }));
+    assert!(
+        root.control_flow()
+            .instructions()
+            .iter()
+            .any(|instruction| {
+                matches!(
+                    instruction.decoded().instruction().operands(),
+                    quickjs_bytecode::Operands::AtomU8 { value: 1, .. }
+                ) && instruction.decoded().instruction().opcode() == FinalOpcode::DefineClass
+            })
+    );
+    let constructor = tree
+        .verified_bytecode()
+        .function(quickjs_bytecode::FunctionTemplateId::new(1))
+        .expect("derived class constructor");
+    assert!(
+        constructor
+            .function()
+            .control_flow()
+            .function_header()
+            .flags()
+            .is_derived_class_constructor()
+    );
+    assert_eq!(
+        constructor
+            .function()
+            .control_flow()
+            .instructions()
+            .iter()
+            .map(|instruction| instruction.decoded().instruction().opcode())
+            .collect::<Vec<_>>(),
+        vec![
+            FinalOpcode::CheckCtor,
+            FinalOpcode::InitCtor,
+            FinalOpcode::Drop,
+            FinalOpcode::ReturnUndef,
+        ]
+    );
+}

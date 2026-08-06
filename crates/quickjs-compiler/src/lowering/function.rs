@@ -6,9 +6,9 @@ use quickjs_bytecode::{
     CompilerBindingKind as VerifiedBindingKind, CompilerBindingPolicy, CompilerCaptureLayout,
     CompilerConstantLayout, CompilerExecutableKind,
     CompilerInitializationPolicy as VerifiedInitializationPolicy, CompilerSource,
-    CompilerWritePolicy as VerifiedWritePolicy, FunctionIndexDomains, PcSourceSpan, ScopeLink,
-    SourceByteSpan, UnverifiedFunctionHeader, UnverifiedFunctionMetadata, VariableDefinition,
-    VerificationLimits,
+    CompilerWritePolicy as VerifiedWritePolicy, FinalOpcode, FunctionIndexDomains, Operands,
+    PcSourceSpan, ScopeLink, SourceByteSpan, UnverifiedFunctionHeader, UnverifiedFunctionMetadata,
+    VariableDefinition, VerificationLimits,
 };
 use quickjs_frontend::Span;
 
@@ -16,8 +16,9 @@ use super::{
     CompilationContext, CompiledClosureVariable, CompiledConstant, CompiledConstantPool,
     CompiledFunction, CompiledMetadataAtomKey, CompiledRealmGlobal, FrameLayout, FrameLayoutInput,
     FunctionTreeLayout, LeafCompilationError, LocalSlot, LoweredLocal, OrdinaryFunctionForm,
-    PlannedControlFlow, StatementCompletion, StatementControlStack, StatementPlanningState,
-    StatementWork, UnsupportedLeafFeature, checked_function_entry_count, unsupported,
+    PlannedControlFlow, PlannedInstruction, StatementCompletion, StatementControlStack,
+    StatementPlanningState, StatementWork, UnsupportedLeafFeature, checked_function_entry_count,
+    unsupported,
 };
 use crate::storage::{ExecutableId, ExecutableKind};
 
@@ -40,6 +41,38 @@ fn script_completion_variable_definition(
 
 const fn source_byte_span(span: Span) -> SourceByteSpan {
     SourceByteSpan::new(span.start, span.end)
+}
+
+fn synthesized_class_constructor_flow(
+    derived: bool,
+    span: Span,
+    limits: VerificationLimits,
+) -> Result<PlannedControlFlow, LeafCompilationError> {
+    let mut flow = PlannedControlFlow::new(limits);
+    if derived {
+        // The synthesized `constructor(...args) { super(...args); }`
+        // delegates argument forwarding and deferred receiver setup to the
+        // typed derived-constructor opcodes. `init_ctor` leaves the superclass
+        // completion on the stack just as QuickJS does; the synthetic body
+        // immediately discards it.
+        flow.emit(PlannedInstruction::new(
+            FinalOpcode::CheckCtor,
+            Operands::None,
+            span,
+        ))?;
+        flow.emit(PlannedInstruction::new(
+            FinalOpcode::InitCtor,
+            Operands::None,
+            span,
+        ))?;
+        flow.emit(PlannedInstruction::new(
+            FinalOpcode::Drop,
+            Operands::None,
+            span,
+        ))?;
+    }
+    flow.ensure_terminal(span)?;
+    Ok(flow)
 }
 
 #[derive(Clone, Copy)]
@@ -118,9 +151,9 @@ impl<'compiler, 'statement, 'unit, 'arena, 'scope, 'layout>
             },
         ];
         if function.generator {
-            work.push(StatementWork::Emit(super::PlannedInstruction::new(
-                quickjs_bytecode::FinalOpcode::InitialYield,
-                quickjs_bytecode::Operands::None,
+            work.push(StatementWork::Emit(PlannedInstruction::new(
+                FinalOpcode::InitialYield,
+                Operands::None,
                 function.span,
             )));
         }
@@ -171,9 +204,9 @@ impl<'compiler, 'statement, 'unit, 'arena, 'scope, 'layout>
             }
             vec![
                 StatementWork::PopScope(function_scope),
-                StatementWork::Emit(super::PlannedInstruction::new(
-                    quickjs_bytecode::FinalOpcode::Return,
-                    quickjs_bytecode::Operands::None,
+                StatementWork::Emit(PlannedInstruction::new(
+                    FinalOpcode::Return,
+                    Operands::None,
                     arrow.body.span,
                 )),
                 StatementWork::Expression(&expression.expression),
@@ -391,12 +424,14 @@ impl CompilationContext<'_, '_, '_> {
                 })?,
             "default class constructor closure variables",
         )?;
-        let mut flow = PlannedControlFlow::new(limits);
-        flow.ensure_terminal(class.span)?;
+        let derived_class_constructor = class.super_class.is_some();
+        let flow =
+            synthesized_class_constructor_flow(derived_class_constructor, class.span, limits)?;
 
         Ok(ValidatedFunction {
             executable_kind: CompilerExecutableKind::ClassConstructor,
             strict: executable.is_strict(),
+            derived_class_constructor,
             argument_count: 0,
             defined_argument_count: 0,
             local_count: layout.local_count,
@@ -460,6 +495,7 @@ impl CompilationContext<'_, '_, '_> {
         Ok(ValidatedFunction {
             executable_kind: CompilerExecutableKind::OrdinaryArrow,
             strict: executable.is_strict(),
+            derived_class_constructor: false,
             argument_count: executable.parameter_count(),
             defined_argument_count: executable.defined_parameter_count(),
             local_count: layout.local_count,
@@ -598,6 +634,7 @@ impl CompilationContext<'_, '_, '_> {
         Ok(ValidatedFunction {
             executable_kind,
             strict: executable.is_strict(),
+            derived_class_constructor: false,
             argument_count: executable.parameter_count(),
             defined_argument_count: executable.defined_parameter_count(),
             local_count: layout.local_count,
@@ -684,6 +721,7 @@ impl CompilationContext<'_, '_, '_> {
         Ok(ValidatedFunction {
             executable_kind,
             strict: executable.is_strict(),
+            derived_class_constructor: false,
             argument_count: 0,
             defined_argument_count: 0,
             local_count: layout.local_count,
@@ -714,6 +752,7 @@ impl CompilationContext<'_, '_, '_> {
 struct ValidatedFunction {
     executable_kind: CompilerExecutableKind,
     strict: bool,
+    derived_class_constructor: bool,
     argument_count: u32,
     defined_argument_count: u32,
     local_count: u32,
@@ -735,6 +774,7 @@ struct ValidatedFunction {
 const fn executable_header(
     kind: CompilerExecutableKind,
     strict: bool,
+    derived_class_constructor: bool,
     simple_parameter_list: bool,
     defined_argument_count: u32,
     variable_reference_count: u32,
@@ -765,11 +805,19 @@ const fn executable_header(
             )
         }
         CompilerExecutableKind::ClassConstructor => {
-            UnverifiedFunctionHeader::class_constructor_with_variable_references(
-                strict,
-                defined_argument_count,
-                variable_reference_count,
-            )
+            if derived_class_constructor {
+                UnverifiedFunctionHeader::derived_class_constructor_with_variable_references(
+                    strict,
+                    defined_argument_count,
+                    variable_reference_count,
+                )
+            } else {
+                UnverifiedFunctionHeader::class_constructor_with_variable_references(
+                    strict,
+                    defined_argument_count,
+                    variable_reference_count,
+                )
+            }
         }
         CompilerExecutableKind::GeneratorFunction => {
             UnverifiedFunctionHeader::generator_source_function_with_variable_references(
@@ -831,6 +879,7 @@ impl CompilationContext<'_, '_, '_> {
         let ValidatedFunction {
             executable_kind,
             strict,
+            derived_class_constructor,
             argument_count,
             defined_argument_count,
             local_count,
@@ -870,6 +919,7 @@ impl CompilationContext<'_, '_, '_> {
         let header = executable_header(
             executable_kind,
             strict,
+            derived_class_constructor,
             self.planned
                 .plan
                 .executable(executable)

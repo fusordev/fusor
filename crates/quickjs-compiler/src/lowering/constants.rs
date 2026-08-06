@@ -447,6 +447,15 @@ impl<'arena> CompilationContext<'_, 'arena, '_> {
                     CompiledPropertyAtomKey::Source(class.span),
                     atom_candidates,
                 )?;
+                if class.super_class.is_some() {
+                    record_property_candidate_for(
+                        owner,
+                        compiler_identifier_string("prototype", class.span)?,
+                        class.span,
+                        CompiledPropertyAtomKey::ClassHeritagePrototype { class: class.span },
+                        atom_candidates,
+                    )?;
+                }
                 for element in &class.body.body {
                     match element {
                         super::ClassElement::MethodDefinition(method)
@@ -1408,6 +1417,16 @@ impl CompiledConstantPool {
         span: Span,
     ) -> Result<AtomPoolIndex, LeafCompilationError> {
         self.property_atom_index_for(CompiledPropertyAtomKey::ArrayLength { array }, span)
+    }
+
+    pub(in crate::lowering) fn class_heritage_prototype_atom_index(
+        &self,
+        class: Span,
+    ) -> Result<AtomPoolIndex, LeafCompilationError> {
+        self.property_atom_index_for(
+            CompiledPropertyAtomKey::ClassHeritagePrototype { class },
+            class,
+        )
     }
 
     pub(in crate::lowering) fn yield_star_done_atom_index(

@@ -2603,7 +2603,7 @@ fn verify_header(
         }
         CompilerExecutableKind::ClassConstructor => {
             if header.kind() != FunctionKind::Normal
-                || !matches!(header.flags().bits(), 0x0748 | 0x074a)
+                || !matches!(header.flags().bits(), 0x0748 | 0x074a | 0x07cc | 0x07ce)
                 || !header.mode().is_strict()
             {
                 return Err(BytecodeVerificationError::function(
@@ -4236,6 +4236,62 @@ fn verify_method_definitions(
                     BytecodeVerificationErrorKind::DefineClassTemplateMismatch { pc: decoded.pc() },
                 ));
             }
+            if instruction.opcode() == FinalOpcode::CheckCtor {
+                let default_constructor_check = metadata[parent_index].executable_kind
+                    == CompilerExecutableKind::ClassConstructor
+                    && parent
+                        .control_flow()
+                        .function_header()
+                        .flags()
+                        .is_derived_class_constructor()
+                    && index == 0
+                    && derived_default_constructor_pair(parent);
+                let heritage_check = index.checked_add(6).is_some_and(|definition_index| {
+                    matches!(
+                        instructions.get(definition_index).map(|instruction| {
+                            let instruction = instruction.decoded().instruction();
+                            (instruction.opcode(), instruction.operands())
+                        }),
+                        Some((FinalOpcode::DefineClass, Operands::AtomU8 { value: 1, .. }))
+                    ) && class_definition_pair(
+                        graph,
+                        parent,
+                        metadata,
+                        instructions,
+                        &predecessor_counts,
+                        internal_stack,
+                        definition_index,
+                    )
+                    .is_some()
+                });
+                if !default_constructor_check && !heritage_check {
+                    return Err(BytecodeVerificationError::function(
+                        parent_id,
+                        BytecodeVerificationErrorKind::UnsupportedCompilerOpcode {
+                            pc: decoded.pc(),
+                            opcode: instruction.opcode(),
+                        },
+                    ));
+                }
+            }
+            if instruction.opcode() == FinalOpcode::InitCtor
+                && !(metadata[parent_index].executable_kind
+                    == CompilerExecutableKind::ClassConstructor
+                    && parent
+                        .control_flow()
+                        .function_header()
+                        .flags()
+                        .is_derived_class_constructor()
+                    && derived_default_constructor_pair(parent))
+            {
+                return Err(BytecodeVerificationError::function(
+                    parent_id,
+                    BytecodeVerificationErrorKind::UnsupportedCompilerOpcode {
+                        pc: decoded.pc(),
+                        opcode: instruction.opcode(),
+                    },
+                ));
+            }
 
             let Some(constant) = closure_constant(instruction.opcode(), instruction.operands())
             else {
@@ -4667,14 +4723,19 @@ fn class_definition_pair(
 ) -> Option<FunctionTemplateId> {
     let definition = instructions.get(definition_index)?;
     let definition_instruction = definition.decoded().instruction();
-    if !matches!(
-        (
-            definition_instruction.opcode(),
-            definition_instruction.operands()
-        ),
-        (FinalOpcode::DefineClass, Operands::AtomU8 { value: 0, .. })
-    ) || predecessor_counts.get(definition_index) != Some(&1)
-    {
+    let (
+        FinalOpcode::DefineClass,
+        Operands::AtomU8 {
+            value: heritage, ..
+        },
+    ) = (
+        definition_instruction.opcode(),
+        definition_instruction.operands(),
+    )
+    else {
+        return None;
+    };
+    if heritage > 1 || predecessor_counts.get(definition_index) != Some(&1) {
         return None;
     }
     let closure_index = definition_index.checked_sub(1)?;
@@ -4696,8 +4757,154 @@ fn class_definition_pair(
     if child_metadata.executable_kind != CompilerExecutableKind::ClassConstructor {
         return None;
     }
-    graph.function(*child)?;
+    let child_function = graph.function(*child)?;
+    let derived = child_function
+        .control_flow()
+        .function_header()
+        .flags()
+        .is_derived_class_constructor();
+    if derived != (heritage == 1) {
+        return None;
+    }
+    if heritage == 1
+        && (!derived_class_heritage_pair(
+            parent,
+            instructions,
+            predecessor_counts,
+            internal_stack,
+            definition_index,
+        ) || !derived_default_constructor_pair(child_function))
+    {
+        return None;
+    }
     Some(*child)
+}
+
+/// Proves that the derived `define_class` received the pair produced by
+/// `ClassDefinitionEvaluation`: the one evaluated superclass (or `null`) and
+/// the exactly-once observed `superclass.prototype` value.  The shape also
+/// makes `check_ctor` admissible only at this semantic site.
+fn derived_class_heritage_pair(
+    parent: &VerifiedCompilerFunction,
+    instructions: &[VerifiedInstruction],
+    predecessor_counts: &[u32],
+    internal_stack: &InternalStackCertificate,
+    definition_index: usize,
+) -> bool {
+    let Some(closure_index) = definition_index.checked_sub(1) else {
+        return false;
+    };
+    let Some(null_index) = closure_index.checked_sub(1) else {
+        return false;
+    };
+    let Some(goto_index) = null_index.checked_sub(1) else {
+        return false;
+    };
+    let Some(get_prototype_index) = goto_index.checked_sub(1) else {
+        return false;
+    };
+    let Some(duplicate_constructor_index) = get_prototype_index.checked_sub(1) else {
+        return false;
+    };
+    let Some(check_constructor_index) = duplicate_constructor_index.checked_sub(1) else {
+        return false;
+    };
+    let Some(if_null_index) = check_constructor_index.checked_sub(1) else {
+        return false;
+    };
+    let Some(null_test_index) = if_null_index.checked_sub(1) else {
+        return false;
+    };
+    let Some(duplicate_heritage_index) = null_test_index.checked_sub(1) else {
+        return false;
+    };
+
+    let is_prototype_read = instructions
+        .get(get_prototype_index)
+        .map(|instruction| instruction.decoded().instruction())
+        .is_some_and(
+            |instruction| match (instruction.opcode(), instruction.operands()) {
+                (FinalOpcode::GetField, Operands::Atom(atom)) => usize::try_from(atom.get())
+                    .ok()
+                    .and_then(|index| parent.atoms().get(index))
+                    .is_some_and(|candidate| {
+                        candidate.string().latin1_units() == Some(b"prototype")
+                    }),
+                _ => false,
+            },
+        );
+    if !is_prototype_read {
+        return false;
+    }
+
+    let expected_opcodes = [
+        (duplicate_heritage_index, FinalOpcode::Dup),
+        (null_test_index, FinalOpcode::IsNull),
+        (check_constructor_index, FinalOpcode::CheckCtor),
+        (duplicate_constructor_index, FinalOpcode::Dup),
+        (null_index, FinalOpcode::Null),
+    ];
+    if expected_opcodes.into_iter().any(|(index, expected)| {
+        instructions
+            .get(index)
+            .is_none_or(|instruction| instruction.decoded().instruction().opcode() != expected)
+    }) {
+        return false;
+    }
+    if !matches!(
+        instructions
+            .get(if_null_index)
+            .map(|instruction| instruction.decoded().instruction().opcode()),
+        Some(FinalOpcode::IfTrue | FinalOpcode::IfTrue8)
+    ) || !matches!(
+        instructions
+            .get(goto_index)
+            .map(|instruction| instruction.decoded().instruction().opcode()),
+        Some(FinalOpcode::Goto | FinalOpcode::Goto8 | FinalOpcode::Goto16)
+    ) {
+        return false;
+    }
+    let sequence = [
+        (duplicate_heritage_index, null_test_index),
+        (null_test_index, if_null_index),
+        (if_null_index, check_constructor_index),
+        (if_null_index, null_index),
+        (check_constructor_index, duplicate_constructor_index),
+        (duplicate_constructor_index, get_prototype_index),
+        (get_prototype_index, goto_index),
+        (goto_index, closure_index),
+        (null_index, closure_index),
+        (closure_index, definition_index),
+    ];
+    if sequence.into_iter().any(|(from, to)| {
+        !internal_stack.has_effective_successor(instructions, from, usize_to_u32(to))
+    }) {
+        return false;
+    }
+    predecessor_counts.get(null_index) == Some(&1)
+        && predecessor_counts.get(check_constructor_index) == Some(&1)
+        && predecessor_counts.get(closure_index) == Some(&2)
+}
+
+/// The first derived-constructor admission is deliberately the spec default
+/// constructor only.  Its synthetic body must be exactly
+/// `check_ctor; init_ctor; drop; return_undef`; explicit constructors wait for
+/// the separately certified `super()`/deferred-`this` lowering.
+fn derived_default_constructor_pair(function: &VerifiedCompilerFunction) -> bool {
+    let instructions = function.control_flow().instructions();
+    matches!(
+        instructions,
+        [
+            check_constructor,
+            initialize_constructor,
+            drop_result,
+            return_undefined,
+        ]
+        if check_constructor.decoded().instruction().opcode() == FinalOpcode::CheckCtor
+            && initialize_constructor.decoded().instruction().opcode() == FinalOpcode::InitCtor
+            && drop_result.decoded().instruction().opcode() == FinalOpcode::Drop
+            && return_undefined.decoded().instruction().opcode() == FinalOpcode::ReturnUndef
+    )
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -4806,17 +5013,38 @@ fn verify_object_definition_provenance(
         }
         verify_linear_append_inputs(id, decoded, function, &state)?;
         match opcode {
-            FinalOpcode::DefineClass
-                if !matches!(
-                    state.get(state.len().saturating_sub(2)),
-                    Some(ObjectDefinitionProvenance::LiteralUndefined)
-                ) =>
-            {
-                return Err(BytecodeVerificationError::function(
-                    id,
-                    BytecodeVerificationErrorKind::DefineClassTemplateMismatch { pc: decoded.pc() },
-                ));
-            }
+            FinalOpcode::DefineClass => match instruction.operands() {
+                Operands::AtomU8 { value: 0, .. }
+                    if !matches!(
+                        state.get(state.len().saturating_sub(2)),
+                        Some(ObjectDefinitionProvenance::LiteralUndefined)
+                    ) =>
+                {
+                    return Err(BytecodeVerificationError::function(
+                        id,
+                        BytecodeVerificationErrorKind::DefineClassTemplateMismatch {
+                            pc: decoded.pc(),
+                        },
+                    ));
+                }
+                Operands::AtomU8 { value: 1, .. } if state.len() < 3 => {
+                    return Err(BytecodeVerificationError::function(
+                        id,
+                        BytecodeVerificationErrorKind::DefineClassTemplateMismatch {
+                            pc: decoded.pc(),
+                        },
+                    ));
+                }
+                Operands::AtomU8 { value: 0 | 1, .. } => {}
+                _ => {
+                    return Err(BytecodeVerificationError::function(
+                        id,
+                        BytecodeVerificationErrorKind::DefineClassTemplateMismatch {
+                            pc: decoded.pc(),
+                        },
+                    ));
+                }
+            },
             FinalOpcode::DefineMethod
                 if !matches!(
                     state.get(state.len().saturating_sub(2)),
@@ -5006,7 +5234,12 @@ fn transfer_object_definition_provenance(
         ))),
         FinalOpcode::DefineClass => {
             let site = usize_to_u32(instruction_index);
-            state.truncate(state.len() - 2);
+            let heritage = match instruction.operands() {
+                Operands::AtomU8 { value: 0, .. } => 0,
+                Operands::AtomU8 { value: 1, .. } => 1,
+                _ => return Err(object_definition_error(id, decoded.pc())),
+            };
+            state.truncate(state.len() - 2 - heritage);
             state.push(ObjectDefinitionProvenance::ClassConstructor(site));
             state.push(ObjectDefinitionProvenance::ClassPrototype(site));
         }
@@ -6063,6 +6296,8 @@ const fn supported_compiler_opcode(opcode: FinalOpcode) -> bool {
             | FinalOpcode::CallMethod
             | FinalOpcode::Apply
             | FinalOpcode::ArrayFrom
+            | FinalOpcode::CheckCtor
+            | FinalOpcode::InitCtor
             | FinalOpcode::Perm3
             | FinalOpcode::Return
             | FinalOpcode::ReturnUndef
@@ -6159,6 +6394,7 @@ const fn supported_compiler_opcode(opcode: FinalOpcode) -> bool {
             | FinalOpcode::And
             | FinalOpcode::Xor
             | FinalOpcode::Or
+            | FinalOpcode::IsNull
             | FinalOpcode::IsUndefinedOrNull
             | FinalOpcode::PushBigIntI32
             | FinalOpcode::Nop
@@ -9909,6 +10145,7 @@ fn collect_requirements(
             | FinalOpcode::Call2
             | FinalOpcode::Call3
             | FinalOpcode::CallMethod
+            | FinalOpcode::InitCtor
             | FinalOpcode::PushThis => {
                 push_requirement(requirements, ExecutionRequirement::Calls);
             }

@@ -138,6 +138,15 @@ pub(super) fn plan_frame(
 
     let control_flow = verified.function().control_flow();
     let asynchronous = control_flow.function_header().kind() == FunctionKind::Async;
+    let constructor_profile = if control_flow
+        .function_header()
+        .flags()
+        .is_derived_class_constructor()
+    {
+        ConstructorProfile::DerivedDefault
+    } else {
+        ConstructorProfile::OrdinaryOrNone
+    };
     let domains = control_flow.domains();
     let argument_count = domains.argument_count() as usize;
     let local_count = domains.local_count() as usize;
@@ -168,11 +177,13 @@ pub(super) fn plan_frame(
         .and_then(|value| value.checked_add(usize::from(construction)))
         .and_then(|value| value.checked_add(if asynchronous { 3 } else { 0 }))
         .and_then(|value| {
-            value.checked_add(if arguments_snapshot_use.is_needed() {
-                supplied_argument_count
-            } else {
-                0
-            })
+            value.checked_add(
+                if arguments_snapshot_use.is_needed() || constructor_profile.is_derived_default() {
+                    supplied_argument_count
+                } else {
+                    0
+                },
+            )
         })
         .map_or(u64::MAX, usize_to_u64);
     let observed_frame_values = active_frame_values.saturating_add(frame_values);
@@ -209,6 +220,7 @@ pub(super) fn plan_frame(
         reserved_values: frame_values,
         arguments_snapshot_use,
         construction,
+        constructor_profile,
         strict,
         receiver_access,
         asynchronous,
@@ -354,7 +366,49 @@ pub(super) fn create_frame(
             additional: plan.argument_count,
         })?;
     let mut arguments_snapshot = None;
+    let mut constructor_arguments = None;
     match supplied {
+        FrameArguments::Public(supplied) if plan.constructor_profile.is_derived_default() => {
+            if plan.arguments_snapshot_use.is_needed() {
+                return Err(EngineFault::RuntimeInvariant {
+                    message: "derived class constructor unexpectedly requested an arguments snapshot",
+                }
+                .into());
+            }
+            let mut forwarded = Vec::new();
+            forwarded.try_reserve_exact(supplied.len()).map_err(|_| {
+                ExecutionError::AllocationFailed {
+                    resource: RuntimeResource::FrameValues,
+                    additional: supplied.len(),
+                }
+            })?;
+            for value in supplied {
+                forwarded.push(value.stored()?.duplicate());
+            }
+            for index in 0..plan.argument_count {
+                let value = forwarded
+                    .get(index)
+                    .map_or(StoredValue::Undefined, StoredValue::duplicate);
+                arguments.push(FrameBinding::Direct(SlotValue::Value(value)));
+            }
+            constructor_arguments = Some(forwarded);
+        }
+        FrameArguments::Owned(supplied) if plan.constructor_profile.is_derived_default() => {
+            if plan.arguments_snapshot_use.is_needed() {
+                return Err(EngineFault::RuntimeInvariant {
+                    message: "derived class constructor unexpectedly requested an arguments snapshot",
+                }
+                .into());
+            }
+            let forwarded = supplied.into_remaining_values();
+            for index in 0..plan.argument_count {
+                let value = forwarded
+                    .get(index)
+                    .map_or(StoredValue::Undefined, StoredValue::duplicate);
+                arguments.push(FrameBinding::Direct(SlotValue::Value(value)));
+            }
+            constructor_arguments = Some(forwarded);
+        }
         FrameArguments::Public(supplied) if plan.arguments_snapshot_use.is_needed() => {
             let mut snapshot = Vec::new();
             snapshot.try_reserve_exact(supplied.len()).map_err(|_| {
@@ -526,7 +580,11 @@ pub(super) fn create_frame(
         dynamic_return,
         native_returns,
         transient_cleanup_pending: false,
-        ordinary_constructor: false,
+        constructor_state: if plan.construction && plan.constructor_profile.is_derived_default() {
+            ConstructorState::DerivedUninitialized
+        } else {
+            ConstructorState::NonConstructor
+        },
         native_caller: None,
         generator_resume: None,
         generator_result: None,
@@ -534,6 +592,7 @@ pub(super) fn create_frame(
         reserved_values: plan.reserved_values,
         arguments_snapshot_use: plan.arguments_snapshot_use,
         arguments_snapshot,
+        constructor_arguments,
         arguments,
         locals,
         own_cells,
@@ -1143,6 +1202,70 @@ pub(super) fn execute_one(
                     argument_count,
                     kind: CallKind::Constructor,
                 },
+                return_to,
+                source_pc,
+            });
+        }
+        FinalOpcode::CheckCtor => {
+            if frame.stack.is_empty() {
+                if frame.constructor_state != ConstructorState::DerivedUninitialized
+                    || frame.new_target.is_none()
+                {
+                    return Ok(Step::Abrupt(not_constructor_exception(
+                        runtime, frame, source_pc,
+                    )?));
+                }
+            } else {
+                let StoredValue::Function(function) = peek(frame)? else {
+                    return Ok(Step::Abrupt(not_constructor_exception(
+                        runtime, frame, source_pc,
+                    )?));
+                };
+                if !function_is_constructor(runtime, *function)? {
+                    return Ok(Step::Abrupt(not_constructor_exception(
+                        runtime, frame, source_pc,
+                    )?));
+                }
+            }
+        }
+        FinalOpcode::InitCtor => {
+            if frame.constructor_state != ConstructorState::DerivedUninitialized {
+                return Err(EngineFault::RuntimeInvariant {
+                    message: "init_ctor reached a non-default derived constructor frame",
+                }
+                .into());
+            }
+            let new_target = frame.new_target.ok_or(EngineFault::RuntimeInvariant {
+                message: "derived constructor has no new.target",
+            })?;
+            let superclass = runtime
+                .object_record(HeapReference::Function(frame.function))?
+                .prototype();
+            let Some(HeapReference::Function(superclass)) = superclass else {
+                return Ok(Step::Abrupt(not_constructor_exception(
+                    runtime, frame, source_pc,
+                )?));
+            };
+            let arguments = frame.constructor_arguments.take().ok_or(
+                EngineFault::RuntimeInvariant {
+                    message: "derived default constructor forwarded its arguments more than once",
+                },
+            )?;
+            let return_to = CallReturn::initialize_derived_this(
+                verified_instruction.successors().fallthrough().ok_or(
+                    EngineFault::InvalidSuccessor {
+                        function: frame.template,
+                        pc: source_pc,
+                    },
+                )?,
+            );
+            return Ok(Step::Call {
+                function: superclass,
+                inputs: CallInputSource::Prepared(CallInputs {
+                    receiver: StoredValue::Undefined,
+                    arguments: CallArguments::from_values(arguments),
+                    new_target: Some(new_target),
+                }),
                 return_to,
                 source_pc,
             });
@@ -1766,7 +1889,7 @@ pub(super) fn execute_one(
             }
         }
         FinalOpcode::DefineClass => {
-            let class = define_base_class_operand(runtime, frame, operands)?;
+            let class = define_class_operand(runtime, frame, operands)?;
             let constructor = pop(frame)?;
             let StoredValue::Function(constructor) = constructor else {
                 return Err(EngineFault::RuntimeInvariant {
@@ -1774,14 +1897,73 @@ pub(super) fn execute_one(
                 }
                 .into());
             };
-            let superclass = pop(frame)?;
-            if !matches!(superclass, StoredValue::Undefined) {
-                return Err(EngineFault::RuntimeInvariant {
-                    message: "base define_class did not receive undefined superclass",
+            let (constructor_parent, prototype_parent) = if class.has_heritage {
+                let prototype_parent = match pop(frame)? {
+                    StoredValue::Function(function) => Some(HeapReference::Function(function)),
+                    StoredValue::Object(object) => Some(HeapReference::Object(object)),
+                    StoredValue::Null => None,
+                    StoredValue::Undefined
+                    | StoredValue::Boolean(_)
+                    | StoredValue::Number(_)
+                    | StoredValue::BigInt(_)
+                    | StoredValue::String(_)
+                    | StoredValue::Symbol(_) => {
+                        let realm = code(runtime, frame.code)?.realm;
+                        return Ok(Step::Abrupt(PendingException {
+                            realm,
+                            payload: PendingExceptionPayload::EngineError {
+                                kind: ExceptionKind::TypeError,
+                                message: JsString::from_utf8(
+                                    "class extends value has a non-object prototype property",
+                                )?,
+                            },
+                            origin: instruction_location(runtime, frame, source_pc)?,
+                        }));
+                    }
+                };
+                let superclass = pop(frame)?;
+                let constructor_parent = match superclass {
+                    StoredValue::Function(function) => HeapReference::Function(function),
+                    StoredValue::Null => HeapReference::Function(
+                        runtime.realm_function_prototype(code(runtime, frame.code)?.realm)?,
+                    ),
+                    StoredValue::Undefined
+                    | StoredValue::Object(_)
+                    | StoredValue::Boolean(_)
+                    | StoredValue::Number(_)
+                    | StoredValue::BigInt(_)
+                    | StoredValue::String(_)
+                    | StoredValue::Symbol(_) => {
+                        return Err(EngineFault::RuntimeInvariant {
+                            message: "verified derived define_class did not receive a constructor or null superclass",
+                        }
+                        .into());
+                    }
+                };
+                (constructor_parent, prototype_parent)
+            } else {
+                let superclass = pop(frame)?;
+                if !matches!(superclass, StoredValue::Undefined) {
+                    return Err(EngineFault::RuntimeInvariant {
+                        message: "base define_class did not receive undefined superclass",
+                    }
+                    .into());
                 }
-                .into());
-            }
-            let prototype = define_base_class(runtime, frame, constructor, class.name)?;
+                let realm = code(runtime, frame.code)?.realm;
+                (
+                    HeapReference::Function(runtime.realm_function_prototype(realm)?),
+                    Some(HeapReference::Object(
+                        runtime.realm_object_prototype(realm)?,
+                    )),
+                )
+            };
+            let prototype = define_class(
+                runtime,
+                constructor,
+                class.property.name,
+                constructor_parent,
+                prototype_parent,
+            )?;
             push(frame, StoredValue::Function(constructor));
             push(frame, StoredValue::Object(prototype));
         }
@@ -2664,6 +2846,13 @@ pub(super) fn execute_one(
             push(
                 frame,
                 StoredValue::Boolean(matches!(value, StoredValue::Undefined | StoredValue::Null)),
+            );
+        }
+        FinalOpcode::IsNull => {
+            let value = pop(frame)?;
+            push(
+                frame,
+                StoredValue::Boolean(matches!(value, StoredValue::Null)),
             );
         }
         FinalOpcode::Throw => {

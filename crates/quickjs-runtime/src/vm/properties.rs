@@ -64,6 +64,11 @@ pub(super) struct DefineMethodComputedOperand {
     pub(super) enumerable: bool,
 }
 
+pub(super) struct DefineClassOperand {
+    pub(super) property: StaticPropertyOperand,
+    pub(super) has_heritage: bool,
+}
+
 pub(super) struct GlobalReferenceOperand {
     binding: RealmGlobalBindingId,
     realm: RealmId,
@@ -214,20 +219,27 @@ pub(super) fn define_method_operand(
     })
 }
 
-/// Decodes the statically named, base-class-only `define_class` operand.
-/// Whole-graph verification has already rejected the heritage bit and all
-/// computed class forms in this initial class slice.
-pub(super) fn define_base_class_operand(
+/// Decodes the statically named, verified `define_class` operand.  The
+/// heritage bit selects the certified base (`0`) or derived (`1`) stack shape;
+/// all computed class forms remain outside this execution slice.
+pub(super) fn define_class_operand(
     runtime: &Runtime,
     frame: &Frame,
     operands: Operands,
-) -> Result<StaticPropertyOperand, EngineFault> {
-    let Operands::AtomU8 { atom, value: 0 } = operands else {
+) -> Result<DefineClassOperand, EngineFault> {
+    let Operands::AtomU8 {
+        atom,
+        value: has_heritage @ (0 | 1),
+    } = operands
+    else {
         return Err(EngineFault::RuntimeInvariant {
             message: "verified define_class operand is invalid",
         });
     };
-    static_property_at(runtime, frame, atom)
+    Ok(DefineClassOperand {
+        property: static_property_at(runtime, frame, atom)?,
+        has_heritage: has_heritage != 0,
+    })
 }
 
 pub(super) fn define_method_computed_operand(

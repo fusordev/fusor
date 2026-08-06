@@ -77,17 +77,22 @@ broad Test262.**
   name.
   Member closures capture the spec-required immutable inner class-name cell,
   distinct from the mutable declaration binding. Constructors are strict,
-  construct with the installed class prototype, and reject direct calls. The
-  certificate requires literal `undefined` as the base input and one
-  non-escaping typed constructor template. Source writes to the captured class
-  name reach a typed runtime `TypeError` without changing that cell. Public
-  computed method/accessor keys use the same typed definition path; ordinary,
-  generator, async, and async-generator method templates are certified by
-  their defining class element. Uncomputed public static fields, and computed
-  static fields with non-class values, evaluate into own constructor properties
-  when their initializers contain no `this`, `super`, or `new.target`.
-- [ ] Class closure: `extends`, derived receiver initialization, `super()`/super properties,
-  instance fields, computed-key anonymous-class
+  construct with the installed class prototype, and reject direct calls.
+  Derived classes with a synthesized default constructor support `extends`
+  (including `null`): heritage evaluates once, checks constructability before
+  reading `.prototype`, installs both inheritance links, forwards all supplied
+  arguments, and initializes the derived receiver only after superclass
+  construction. The certificate accepts literal `undefined` for base classes
+  or the exact derived-heritage branch plus one non-escaping typed constructor
+  template. Source writes to the captured class name reach a typed runtime
+  `TypeError` without changing that cell. Public computed method/accessor keys
+  use the same typed definition path; ordinary, generator, async, and
+  async-generator method templates are certified by their defining class
+  element. Uncomputed public static fields, and computed static fields with
+  non-class values, evaluate into own constructor properties when their
+  initializers contain no `this`, `super`, or `new.target`.
+- [ ] Class closure: explicit derived constructors, source `super()`/super
+  properties, instance fields, computed-key anonymous-class
   name inference outside direct object/static-field definitions, static-field
   initializers using `this`, `super`, or `new.target`, private elements,
   decorators, and static blocks. Do not relabel these as

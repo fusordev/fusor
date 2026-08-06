@@ -60,10 +60,25 @@ pub(in crate::lowering) enum CompiledAtomPurpose {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(in crate::lowering) enum CompiledPropertyAtomKey {
     Source(Span),
-    ArrayIndex { array: Span, index: u32 },
-    ArrayLength { array: Span },
-    YieldStarDone { expression: Span },
-    YieldStarValue { expression: Span },
+    ArrayIndex {
+        array: Span,
+        index: u32,
+    },
+    ArrayLength {
+        array: Span,
+    },
+    /// The `prototype` read required while evaluating one derived class's
+    /// heritage. This is distinct from source-spelled properties so the
+    /// verifier can certify the class-heritage stack contract.
+    ClassHeritagePrototype {
+        class: Span,
+    },
+    YieldStarDone {
+        expression: Span,
+    },
+    YieldStarValue {
+        expression: Span,
+    },
 }
 
 impl CompiledPropertyAtomKey {
@@ -87,14 +102,20 @@ impl CompiledPropertyAtomKey {
                 array_end: array.end,
                 index: 0,
             },
-            Self::YieldStarDone { expression } => CompiledPropertyAtomOrderKey {
+            Self::ClassHeritagePrototype { class } => CompiledPropertyAtomOrderKey {
                 kind: 3,
+                array_start: class.start,
+                array_end: class.end,
+                index: 0,
+            },
+            Self::YieldStarDone { expression } => CompiledPropertyAtomOrderKey {
+                kind: 4,
                 array_start: expression.start,
                 array_end: expression.end,
                 index: 0,
             },
             Self::YieldStarValue { expression } => CompiledPropertyAtomOrderKey {
-                kind: 4,
+                kind: 5,
                 array_start: expression.start,
                 array_end: expression.end,
                 index: 0,
@@ -106,6 +127,7 @@ impl CompiledPropertyAtomKey {
         match self {
             Self::Source(span) => span,
             Self::ArrayIndex { array, .. } | Self::ArrayLength { array } => array,
+            Self::ClassHeritagePrototype { class } => class,
             Self::YieldStarDone { expression } | Self::YieldStarValue { expression } => expression,
         }
     }

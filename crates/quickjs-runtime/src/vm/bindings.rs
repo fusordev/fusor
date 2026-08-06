@@ -140,14 +140,16 @@ pub(super) fn function_constant(
     }
 }
 
-/// Finishes the runtime half of a verified base-class definition. The paired
-/// closure already owns the code and intrinsic function slots; this installs
-/// the public prototype object and the exact class-only constructor metadata.
-pub(super) fn define_base_class(
+/// Finishes the runtime half of a verified class definition. The paired
+/// closure already owns its code and intrinsic function slots; this installs
+/// the public prototype object, the selected constructor/prototype inheritance
+/// links, and the exact class-only constructor metadata.
+pub(super) fn define_class(
     runtime: &mut Runtime,
-    frame: &Frame,
     constructor: FunctionId,
     name: JsString,
+    constructor_parent: HeapReference,
+    prototype_parent: Option<HeapReference>,
 ) -> Result<ObjectId, ExecutionError> {
     if !bytecode_function_is_class_constructor(runtime, constructor)? {
         return Err(EngineFault::RuntimeInvariant {
@@ -155,8 +157,7 @@ pub(super) fn define_base_class(
         }
         .into());
     }
-    let realm = code(runtime, frame.code)?.realm;
-    let prototype = runtime.allocate_ordinary_object(runtime.realm_object_prototype(realm)?)?;
+    let prototype = runtime.allocate_ordinary_object_with_optional_prototype(prototype_parent)?;
     let constructor_key = runtime.predefined_property_key(PredefinedAtom::Constructor);
     let prototype_key = runtime.predefined_property_key(PredefinedAtom::Prototype);
     let name_key = runtime.predefined_property_key(PredefinedAtom::Name);
@@ -167,6 +168,15 @@ pub(super) fn define_base_class(
         PropertyLayout::data(true, false, true),
         StoredValue::Function(constructor),
     )?;
+    if !runtime.replace_prototype_checked(
+        HeapReference::Function(constructor),
+        Some(constructor_parent),
+    )? {
+        return Err(EngineFault::RuntimeInvariant {
+            message: "verified class definition created a circular constructor prototype chain",
+        }
+        .into());
+    }
     runtime.append_data_property(
         HeapReference::Function(constructor),
         prototype_key,

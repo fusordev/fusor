@@ -535,13 +535,74 @@ impl<'compiler, 'unit, 'arena, 'scope> ExpressionPlanner<'compiler, 'unit, 'aren
         self.plan_scope_exit(layout.executable, class.scope_id(), layout, flow)
     }
 
-    /// Lowers the first fully verified class slice: a named base-class
-    /// definition with an explicit ordinary or synthesized default constructor
-    /// and public methods/accessors with either static or computed names, plus
-    /// public static fields whose initializers contain no `this`, `super`, or
-    /// `new.target`. Heritage, instance or computed fields, private elements,
-    /// static blocks, and decorators stay fail-closed until their own execution
-    /// contracts exist.
+    /// Lowers the verified class slice: base classes and derived classes with
+    /// the synthesized default constructor, public methods/accessors with
+    /// either static or computed names, and public static fields whose
+    /// initializers contain no `this`, `super`, or `new.target`. Explicit
+    /// derived constructors, instance or computed fields, private elements,
+    /// static blocks, and decorators stay fail-closed until their distinct
+    /// execution contracts exist.
+    fn plan_class_heritage(
+        &self,
+        class: &Class<'arena>,
+        layout: &FrameLayout,
+        tree_layout: &FunctionTreeLayout,
+        constants: &CompiledConstantPool,
+        flow: &mut PlannedControlFlow,
+    ) -> Result<bool, LeafCompilationError> {
+        let Some(heritage) = &class.super_class else {
+            flow.emit(PlannedInstruction::new(
+                FinalOpcode::Undefined,
+                Operands::None,
+                class.span,
+            ))?;
+            return Ok(false);
+        };
+
+        // ClassDefinitionEvaluation validates a constructor before it reads
+        // `.prototype`, but `null` uses the separate null-prototype path.
+        // Keep both values on the operand stack for `define_class`:
+        // `[superclass-or-null, prototype-parent-or-null]`.
+        self.plan_expression(heritage, layout, tree_layout, constants, &[], flow)?;
+        let null_heritage = flow.new_label(heritage.span())?;
+        let heritage_ready = flow.new_label(heritage.span())?;
+        flow.emit(PlannedInstruction::new(
+            FinalOpcode::Dup,
+            Operands::None,
+            heritage.span(),
+        ))?;
+        flow.emit(PlannedInstruction::new(
+            FinalOpcode::IsNull,
+            Operands::None,
+            heritage.span(),
+        ))?;
+        flow.branch(BranchKind::IfTrue, &null_heritage, heritage.span())?;
+        flow.emit(PlannedInstruction::new(
+            FinalOpcode::CheckCtor,
+            Operands::None,
+            heritage.span(),
+        ))?;
+        flow.emit(PlannedInstruction::new(
+            FinalOpcode::Dup,
+            Operands::None,
+            heritage.span(),
+        ))?;
+        flow.emit(PlannedInstruction::new(
+            FinalOpcode::GetField,
+            Operands::Atom(constants.class_heritage_prototype_atom_index(class.span)?),
+            heritage.span(),
+        ))?;
+        flow.branch(BranchKind::Goto, &heritage_ready, heritage.span())?;
+        flow.bind(&null_heritage)?;
+        flow.emit(PlannedInstruction::new(
+            FinalOpcode::Null,
+            Operands::None,
+            heritage.span(),
+        ))?;
+        flow.bind(&heritage_ready)?;
+        Ok(true)
+    }
+
     fn plan_base_class_definition(
         &self,
         class: &Class<'arena>,
@@ -550,7 +611,7 @@ impl<'compiler, 'unit, 'arena, 'scope> ExpressionPlanner<'compiler, 'unit, 'aren
         constants: &CompiledConstantPool,
         flow: &mut PlannedControlFlow,
     ) -> Result<(), LeafCompilationError> {
-        if class.super_class.is_some() || !class.decorators.is_empty() {
+        if !class.decorators.is_empty() {
             return unsupported(UnsupportedLeafFeature::UnsupportedDeclaration, class.span);
         }
 
@@ -574,14 +635,18 @@ impl<'compiler, 'unit, 'arena, 'scope> ExpressionPlanner<'compiler, 'unit, 'aren
                 _ => return unsupported(UnsupportedLeafFeature::UnsupportedBody, element.span()),
             }
         }
+        if class.super_class.is_some() && constructor.is_some() {
+            // An explicit derived constructor requires a deferred `this`
+            // binding and the source-level `super()` receiver transition.
+            // The synthesized constructor below owns that transition for the
+            // first derived-class slice; do not pretend an arbitrary body is
+            // equivalent to it.
+            return unsupported(UnsupportedLeafFeature::UnsupportedDeclaration, class.span);
+        }
         if class.id.is_some() {
             self.plan_base_class_name_scope_entry(class, layout, flow)?;
         }
-        flow.emit(PlannedInstruction::new(
-            FinalOpcode::Undefined,
-            Operands::None,
-            class.span,
-        ))?;
+        let has_heritage = self.plan_class_heritage(class, layout, tree_layout, constants, flow)?;
         if let Some(constructor) = constructor {
             flow.emit(self.plan_function_closure(
                 &constructor.value,
@@ -612,7 +677,7 @@ impl<'compiler, 'unit, 'arena, 'scope> ExpressionPlanner<'compiler, 'unit, 'aren
             FinalOpcode::DefineClass,
             Operands::AtomU8 {
                 atom: constants.property_atom_index(class.span)?,
-                value: 0,
+                value: u8::from(has_heritage),
             },
             class.span,
         ))?;

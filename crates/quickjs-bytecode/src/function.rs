@@ -172,6 +172,12 @@ impl UnverifiedFunctionHeader {
     // home object available to the class machinery.
     const CLASS_CONSTRUCTOR_FLAGS: u16 =
         (1 << 1) | (1 << 3) | (1 << 6) | (1 << 8) | (1 << 9) | (1 << 10);
+    // A derived class constructor keeps the class home-object and argument
+    // capabilities, but additionally records both the deferred receiver and
+    // `super()` permissions. Its receiver is initialized only after the
+    // superclass construction succeeds.
+    const DERIVED_CLASS_CONSTRUCTOR_FLAGS: u16 =
+        Self::CLASS_CONSTRUCTOR_FLAGS | (1 << 2) | (1 << 7);
     const GENERATOR_SOURCE_FLAGS: u16 = (1 << 1) | (1 << 4) | (1 << 6) | (1 << 9) | (1 << 10);
     const GENERATOR_METHOD_FLAGS: u16 =
         (1 << 1) | (1 << 4) | (1 << 6) | (1 << 8) | (1 << 9) | (1 << 10);
@@ -317,6 +323,26 @@ impl UnverifiedFunctionHeader {
     ) -> Self {
         Self::new(
             Self::CLASS_CONSTRUCTOR_FLAGS,
+            if strict { 1 } else { 0 },
+            defined_argument_count,
+            variable_reference_count,
+        )
+    }
+
+    /// Creates a derived-class constructor header with retained debug source
+    /// and a typed capture layout.
+    ///
+    /// Its `this` receiver is intentionally absent until superclass
+    /// construction completes, which is represented by the derived-class
+    /// flag rather than a closure-created prototype property.
+    #[must_use]
+    pub const fn derived_class_constructor_with_variable_references(
+        strict: bool,
+        defined_argument_count: u32,
+        variable_reference_count: u32,
+    ) -> Self {
+        Self::new(
+            Self::DERIVED_CLASS_CONSTRUCTOR_FLAGS,
             if strict { 1 } else { 0 },
             defined_argument_count,
             variable_reference_count,

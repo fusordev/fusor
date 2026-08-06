@@ -3170,6 +3170,8 @@ const fn is_supported_opcode(opcode: FinalOpcode) -> bool {
             | FinalOpcode::CallMethod
             | FinalOpcode::CallConstructor
             | FinalOpcode::Apply
+            | FinalOpcode::CheckCtor
+            | FinalOpcode::InitCtor
             | FinalOpcode::Perm3
             | FinalOpcode::Throw
             | FinalOpcode::Return
@@ -3261,6 +3263,7 @@ const fn is_supported_opcode(opcode: FinalOpcode) -> bool {
             | FinalOpcode::And
             | FinalOpcode::Xor
             | FinalOpcode::Or
+            | FinalOpcode::IsNull
             | FinalOpcode::IsUndefinedOrNull
             | FinalOpcode::Nop
             | FinalOpcode::PushMinus1

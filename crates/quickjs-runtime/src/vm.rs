@@ -284,6 +284,26 @@ enum OperandStackEntry {
     FinallyReturn { continuation: InstructionIndex },
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ConstructorState {
+    NonConstructor,
+    Ordinary,
+    DerivedUninitialized,
+    DerivedInitialized,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ConstructorProfile {
+    OrdinaryOrNone,
+    DerivedDefault,
+}
+
+impl ConstructorProfile {
+    const fn is_derived_default(self) -> bool {
+        matches!(self, Self::DerivedDefault)
+    }
+}
+
 pub(crate) struct Frame {
     function: FunctionId,
     code: InstalledCodeId,
@@ -296,7 +316,7 @@ pub(crate) struct Frame {
     dynamic_return: Option<DynamicFunctionReturn>,
     native_returns: Vec<NativeContinuation>,
     transient_cleanup_pending: bool,
-    ordinary_constructor: bool,
+    constructor_state: ConstructorState,
     native_caller: Option<SyntheticNativeFrame>,
     generator_resume: Option<ObjectId>,
     generator_result: Option<ObjectId>,
@@ -304,6 +324,7 @@ pub(crate) struct Frame {
     reserved_values: u64,
     arguments_snapshot_use: ArgumentsSnapshotUse,
     arguments_snapshot: Option<Vec<StoredValue>>,
+    constructor_arguments: Option<Vec<StoredValue>>,
     arguments: Vec<FrameBinding>,
     locals: Vec<FrameBinding>,
     own_cells: Vec<Option<BindingCellId>>,
@@ -2966,6 +2987,7 @@ struct FramePlan {
     reserved_values: u64,
     arguments_snapshot_use: ArgumentsSnapshotUse,
     construction: bool,
+    constructor_profile: ConstructorProfile,
     strict: bool,
     receiver_access: ReceiverAccess,
     asynchronous: bool,
@@ -3105,6 +3127,7 @@ impl CallInputSource {
 enum ReturnDisposition {
     Push,
     Discard,
+    InitializeDerivedThis,
 }
 
 #[derive(Clone, Copy)]
@@ -3125,6 +3148,13 @@ impl CallReturn {
         Self {
             instruction,
             disposition: ReturnDisposition::Discard,
+        }
+    }
+
+    const fn initialize_derived_this(instruction: InstructionIndex) -> Self {
+        Self {
+            instruction,
+            disposition: ReturnDisposition::InitializeDerivedThis,
         }
     }
 }
@@ -4678,11 +4708,13 @@ fn execute_frame_loop(
                     Some(return_to),
                     None,
                 )?;
-                if let Some(new_target) = construction {
+                if let Some(new_target) = construction
+                    && child.constructor_state != ConstructorState::DerivedUninitialized
+                {
                     child.receiver = StoredValue::Object(create_ordinary_constructor_receiver(
                         runtime, new_target,
                     )?);
-                    child.ordinary_constructor = true;
+                    child.constructor_state = ConstructorState::Ordinary;
                 }
                 *active_frame_values = active_frame_values.saturating_add(child.reserved_values);
                 frames.push(child);
@@ -5496,7 +5528,10 @@ fn execute_frame_loop(
                             continue;
                         }
                     }
-                } else if finished.ordinary_constructor {
+                } else if matches!(
+                    finished.constructor_state,
+                    ConstructorState::Ordinary | ConstructorState::DerivedInitialized
+                ) {
                     match value {
                         value @ (StoredValue::Function(_) | StoredValue::Object(_)) => value,
                         StoredValue::Undefined
@@ -5955,14 +5990,40 @@ fn push_call_result(
     value: StoredValue,
     return_to: CallReturn,
 ) -> Result<(), ExecutionError> {
-    if matches!(return_to.disposition, ReturnDisposition::Push) {
-        if parent.stack.len() == parent.stack.capacity() {
-            return Err(EngineFault::RuntimeInvariant {
-                message: "verified call result exceeds frame stack capacity",
+    match return_to.disposition {
+        ReturnDisposition::Push => {
+            if parent.stack.len() == parent.stack.capacity() {
+                return Err(EngineFault::RuntimeInvariant {
+                    message: "verified call result exceeds frame stack capacity",
+                }
+                .into());
             }
-            .into());
+            push(parent, value);
         }
-        push(parent, value);
+        ReturnDisposition::Discard => {}
+        ReturnDisposition::InitializeDerivedThis => {
+            if parent.constructor_state != ConstructorState::DerivedUninitialized {
+                return Err(EngineFault::RuntimeInvariant {
+                    message: "derived constructor completion reached an invalid parent frame",
+                }
+                .into());
+            }
+            if value.heap_reference().is_none() {
+                return Err(EngineFault::RuntimeInvariant {
+                    message: "superclass construction completed without an object receiver",
+                }
+                .into());
+            }
+            if parent.stack.len() == parent.stack.capacity() {
+                return Err(EngineFault::RuntimeInvariant {
+                    message: "verified derived constructor result exceeds frame stack capacity",
+                }
+                .into());
+            }
+            parent.receiver = value.duplicate();
+            parent.constructor_state = ConstructorState::DerivedInitialized;
+            push(parent, value);
+        }
     }
     parent.instruction = return_to.instruction;
     Ok(())
