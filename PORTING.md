@@ -173,14 +173,15 @@ does not imply complete ECMAScript or QuickJS compatibility.
   exact `sumPrecise`; and intrinsic Promise core/combinators with bounded FIFO
   jobs and typed close/order continuations (29/29, 46/46 feature tags).
 - [x] Date has Realm-owned branded `[[DateValue]]` objects, TimeClip, UTC and
-  multi-argument local construction, ISO UTC/offset parsing, UTC/local getters,
-  `getTimezoneOffset`, `setTime`, ISO/UTC/local rendering, and ordered coercion
-  over pinned `temporal_rs = 0.2.5` (11/11 focused VM cases). The broad Date
-  prototype baseline passes 484/954 admitted Test262 modes across 485 files,
-  with 16 Temporal skips; remaining failures define the unfinished surface.
-- [ ] Complete Date parsing, setters, primitive/JSON and non-Intl locale fallback
-  semantics, then Temporal on the shared `temporal_rs` kernel; next implement
-  binary data/typed arrays and Atomics.
+  multi-argument local construction, normative ISO parsing (including local
+  offsetless date-times), own-render round trips, UTC/local getters,
+  `getTimezoneOffset`, `setTime`, and ISO/UTC/local rendering over pinned
+  `temporal_rs = 0.2.5` (12/12 focused VM cases; Date.parse Test262 16/16). The
+  broad Date prototype baseline passes 484/954 admitted modes across 485 files,
+  with 16 Temporal skips.
+- [ ] Complete Date setters, primitive/JSON and non-Intl locale fallback, then
+  Temporal on the shared `temporal_rs` kernel; next implement binary data/typed
+  arrays and Atomics.
 
 ### Jobs, asynchronous semantics, and modules
 

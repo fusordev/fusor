@@ -177,6 +177,22 @@ fn date_parse_accepts_the_normative_iso_utc_and_offset_forms() {
 }
 
 #[test]
+fn date_parse_uses_local_time_without_an_offset_and_accepts_own_renderings() {
+    assert_eq!(
+        rendered(
+            "var local=new Date(1970,0,1,0,0,0,0),zero=new Date(0);
+             return [Date.parse('1970-01-01T00:00:00')===local.getTime(),
+               Date.parse('1970-01-01T00:00')===local.getTime(),
+               Date.parse('1970-01-01')===0,
+               Date.parse(zero.toString())===0,
+               Date.parse(zero.toUTCString())===0,
+               Date.parse(zero.toISOString())===0].join('|');"
+        ),
+        "true|true|true|true|true|true"
+    );
+}
+
+#[test]
 fn date_utc_getters_and_set_time_preserve_brand_and_invalid_date_rules() {
     assert_eq!(
         rendered(

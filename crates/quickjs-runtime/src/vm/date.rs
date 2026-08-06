@@ -630,15 +630,9 @@ fn date_local_from_components(values: &[JsNumber]) -> JsNumber {
     }
     let local_value = make_day(year, components[1], components[2]) * MS_PER_DAY
         + make_time(components[3], components[4], components[5], components[6]);
-    let Some(local_date_time) = plain_date_time_from_time_value(local_value) else {
+    let Some(milliseconds) = utc_time_from_local_value(local_value) else {
         return JsNumber::from_f64(f64::NAN);
     };
-    let Ok(date_time) =
-        local_date_time.to_zoned_date_time(host_time_zone(), Disambiguation::Compatible)
-    else {
-        return JsNumber::from_f64(f64::NAN);
-    };
-    let milliseconds = date_time.epoch_milliseconds();
     if milliseconds.unsigned_abs() > 8_640_000_000_000_000_u64 {
         JsNumber::from_f64(f64::NAN)
     } else {
@@ -836,6 +830,14 @@ fn temporal_local_date_time(value: f64) -> Option<ZonedDateTime> {
     temporal_date_time(value, host_time_zone())
 }
 
+fn utc_time_from_local_value(local_value: f64) -> Option<i64> {
+    let local_date_time = plain_date_time_from_time_value(local_value)?;
+    local_date_time
+        .to_zoned_date_time(host_time_zone(), Disambiguation::Compatible)
+        .ok()
+        .map(|date_time| date_time.epoch_milliseconds())
+}
+
 fn host_time_zone() -> TimeZone {
     Temporal::local_now()
         .time_zone()
@@ -860,23 +862,44 @@ fn parse_date_string(
     _origin: &JsStackFrame,
 ) -> Result<JsNumber, NativeFailure> {
     let text = value.to_utf8_lossy()?;
-    let Some(milliseconds) = parse_iso_date(&text) else {
+    let milliseconds = match parse_iso_date(&text) {
+        Some(ParsedDate::Utc(milliseconds)) => Some(milliseconds),
+        Some(ParsedDate::Local(local_value)) => utc_time_from_local_value(local_value).map(
+            #[allow(
+                clippy::cast_precision_loss,
+                reason = "Date epoch milliseconds are bounded below Number's exact-integer limit"
+            )]
+            |value| value as f64,
+        ),
+        None => parse_rendered_date(&text),
+    };
+    let Some(milliseconds) = milliseconds else {
         return Ok(JsNumber::from_f64(f64::NAN));
     };
     Ok(time_clip(milliseconds))
 }
 
-fn parse_iso_date(text: &str) -> Option<f64> {
+enum ParsedDate {
+    Utc(f64),
+    Local(f64),
+}
+
+fn parse_iso_date(text: &str) -> Option<ParsedDate> {
     let (date_text, time_text) = text
         .split_once('T')
         .map_or((text, None), |(date, time)| (date, Some(time)));
     let (year, month, date) = parse_iso_date_fields(date_text)?;
     let day = make_day(f64::from(year), f64::from(month - 1), f64::from(date));
     let Some(time_text) = time_text else {
-        return Some(day * MS_PER_DAY);
+        return Some(ParsedDate::Utc(day * MS_PER_DAY));
     };
     let (clock, offset_minutes) = parse_iso_time(time_text)?;
-    Some(day * MS_PER_DAY + clock - f64::from(offset_minutes) * MS_PER_MINUTE)
+    let date_time = day * MS_PER_DAY + clock;
+    Some(
+        offset_minutes.map_or(ParsedDate::Local(date_time), |offset| {
+            ParsedDate::Utc(date_time - f64::from(offset) * MS_PER_MINUTE)
+        }),
+    )
 }
 
 fn parse_iso_date_fields(text: &str) -> Option<(i32, u32, u32)> {
@@ -918,18 +941,21 @@ fn parse_iso_date_fields(text: &str) -> Option<(i32, u32, u32)> {
     }
 }
 
-fn parse_iso_time(text: &str) -> Option<(f64, i32)> {
+fn parse_iso_time(text: &str) -> Option<(f64, Option<i32>)> {
     let (clock, offset) = if let Some(clock) = text.strip_suffix('Z') {
-        (clock, 0)
+        (clock, Some(0))
     } else {
         let index = text
             .char_indices()
             .rev()
-            .find_map(|(index, character)| matches!(character, '+' | '-').then_some(index))?;
-        let sign = if text.as_bytes()[index] == b'-' {
-            -1
+            .find_map(|(index, character)| matches!(character, '+' | '-').then_some(index));
+        let Some(index) = index else {
+            return parse_clock(text).map(|clock| (clock, None));
+        };
+        let sign = if text.as_bytes().get(index) == Some(&b'-') {
+            -1_i32
         } else {
-            1
+            1_i32
         };
         let zone = text.get(index + 1..)?;
         if zone.len() != 5 || zone.as_bytes().get(2) != Some(&b':') {
@@ -940,8 +966,12 @@ fn parse_iso_time(text: &str) -> Option<(f64, i32)> {
         if hours > 23 || minutes > 59 {
             return None;
         }
-        (text.get(..index)?, sign * (hours * 60 + minutes))
+        (text.get(..index)?, Some(sign * (hours * 60 + minutes)))
     };
+    Some((parse_clock(clock)?, offset))
+}
+
+fn parse_clock(clock: &str) -> Option<f64> {
     let mut parts = clock.split(':');
     let hour = parse_two_digits(parts.next()?)?;
     let minute = parse_two_digits(parts.next()?)?;
@@ -953,15 +983,70 @@ fn parse_iso_time(text: &str) -> Option<(f64, i32)> {
     if second > 59 || (hour == 24 && (minute != 0 || second != 0 || millisecond != 0)) {
         return None;
     }
-    Some((
-        make_time(
-            f64::from(hour),
-            f64::from(minute),
-            f64::from(second),
-            f64::from(millisecond),
-        ),
-        offset,
+    Some(make_time(
+        f64::from(hour),
+        f64::from(minute),
+        f64::from(second),
+        f64::from(millisecond),
     ))
+}
+
+fn parse_rendered_date(text: &str) -> Option<f64> {
+    let fields = text.split_ascii_whitespace().collect::<Vec<_>>();
+    let (month, date, year, clock, offset_minutes) = match fields.as_slice() {
+        [weekday, month, date, year, clock, zone]
+            if WEEKDAYS.contains(weekday) && zone.starts_with("GMT") =>
+        {
+            (
+                parse_month_name(month)?,
+                parse_two_digits(date)?,
+                year.parse::<i32>().ok()?,
+                parse_clock(clock)?,
+                parse_rendered_offset(zone)?,
+            )
+        }
+        [weekday, date, month, year, clock, "GMT"]
+            if weekday
+                .strip_suffix(',')
+                .is_some_and(|weekday| WEEKDAYS.contains(&weekday)) =>
+        {
+            (
+                parse_month_name(month)?,
+                parse_two_digits(date)?,
+                year.parse::<i32>().ok()?,
+                parse_clock(clock)?,
+                0,
+            )
+        }
+        _ => return None,
+    };
+    if !(1..=31).contains(&date) {
+        return None;
+    }
+    let day = make_day(f64::from(year), f64::from(month - 1), f64::from(date));
+    Some(day * MS_PER_DAY + clock - f64::from(offset_minutes) * MS_PER_MINUTE)
+}
+
+fn parse_month_name(value: &str) -> Option<u32> {
+    MONTHS
+        .iter()
+        .position(|month| *month == value)
+        .and_then(|index| u32::try_from(index + 1).ok())
+}
+
+fn parse_rendered_offset(value: &str) -> Option<i32> {
+    let offset = value.strip_prefix("GMT")?;
+    let (sign, digits) = match offset.as_bytes().first().copied()? {
+        b'+' => (1_i32, offset.get(1..)?),
+        b'-' => (-1_i32, offset.get(1..)?),
+        _ => return None,
+    };
+    if digits.len() != 4 {
+        return None;
+    }
+    let hours = i32::try_from(parse_two_digits(digits.get(..2)?)?).ok()?;
+    let minutes = i32::try_from(parse_two_digits(digits.get(2..)?)?).ok()?;
+    (hours <= 23 && minutes <= 59).then_some(sign * (hours * 60 + minutes))
 }
 
 fn parse_seconds(text: &str) -> Option<(u32, u32)> {
