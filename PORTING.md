@@ -77,6 +77,12 @@ does not imply complete ECMAScript or QuickJS compatibility.
   chain, skip computed keys and arguments, stop at parentheses, preserve method
   receivers, and support spread. Typed suspension and iterator records preserve
   resume, close, and `finally` order.
+- [x] Verified synchronous arrows cover concise/block bodies, non-simple
+  parameters, inferred names, lexical `this`/`arguments`/`new.target`, nested
+  capture, non-construction/no own `prototype`, and captured-value GC edges.
+  The focused Test262 cohort passes 609/643 modes; the 34 residuals require
+  classes/`super`, direct `eval`, `with`, or numeric destructuring-property
+  support, not arrow execution.
 - [x] Explicit VM frame/continuation stacks handle bytecode and native re-entry,
   coercion, construction, abrupt completion, and traces. Deterministic fuel is
   separate from the pinned 10,000-instruction uncatchable host interrupt.
@@ -169,9 +175,9 @@ does not imply complete ECMAScript or QuickJS compatibility.
 - [x] Date has Realm-owned branded `[[DateValue]]` objects, TimeClip, UTC and
   multi-argument local construction, ISO UTC/offset parsing, UTC/local getters,
   `getTimezoneOffset`, `setTime`, ISO/UTC/local rendering, and ordered coercion
-  over pinned `temporal_rs = 0.2.5` (11/11 focused VM cases). The 93-file local
-  getter/string Test262 tranche passes 160/186 modes; all 26 residual failures
-  require deferred non-ordinary functions.
+  over pinned `temporal_rs = 0.2.5` (11/11 focused VM cases). The broad Date
+  prototype baseline passes 484/954 admitted Test262 modes across 485 files,
+  with 16 Temporal skips; remaining failures define the unfinished surface.
 - [ ] Complete Date parsing, setters, primitive/JSON and non-Intl locale fallback
   semantics, then Temporal on the shared `temporal_rs` kernel; next implement
   binary data/typed arrays and Atomics.

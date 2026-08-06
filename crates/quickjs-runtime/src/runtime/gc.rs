@@ -742,6 +742,22 @@ impl Runtime {
                             if let FunctionImplementation::Bytecode(bytecode) =
                                 &function.implementation
                             {
+                                if let Some(receiver) = &bytecode.lexical_receiver {
+                                    mark_stored_value(
+                                        receiver,
+                                        &mut marked_functions,
+                                        &mut marked_objects,
+                                        &mut work,
+                                    );
+                                }
+                                if let Some(new_target) = bytecode.lexical_new_target {
+                                    mark_heap_reference(
+                                        HeapReference::Function(new_target),
+                                        &mut marked_functions,
+                                        &mut marked_objects,
+                                        &mut work,
+                                    );
+                                }
                                 for binding in bytecode.environment.iter().copied() {
                                     if let EnvironmentBinding::Captured(cell) = binding
                                         && marked_cells.insert(cell)

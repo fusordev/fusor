@@ -304,10 +304,13 @@ pub(super) fn create_frame(
             index: plan.function.index(),
             generation: plan.function.generation(),
         })?;
-    let environment = copy_environment(
-        &function.bytecode()?.environment,
-        RuntimeResource::FrameValues,
-    )?;
+    let bytecode = function.bytecode()?;
+    let environment = copy_environment(&bytecode.environment, RuntimeResource::FrameValues)?;
+    let lexical_receiver = bytecode
+        .lexical_receiver
+        .as_ref()
+        .map(StoredValue::duplicate);
+    let lexical_new_target = bytecode.lexical_new_target;
     let code = runtime
         .code
         .get(plan.code)
@@ -451,7 +454,29 @@ pub(super) fn create_frame(
             additional: plan.stack_capacity,
         })?;
 
-    let receiver = normalize_receiver(runtime, realm, plan.receiver_access, receiver)?;
+    let (receiver, new_target) = if matches!(plan.receiver_access, ReceiverAccess::Lexical) {
+        if plan.construction || new_target.is_some() {
+            return Err(EngineFault::RuntimeInvariant {
+                message: "lexical arrow entered a construction frame",
+            }
+            .into());
+        }
+        let receiver = lexical_receiver.ok_or(EngineFault::InvalidClosureEnvironment {
+            function: plan.template,
+        })?;
+        (receiver, lexical_new_target)
+    } else {
+        if lexical_receiver.is_some() || lexical_new_target.is_some() {
+            return Err(EngineFault::InvalidClosureEnvironment {
+                function: plan.template,
+            }
+            .into());
+        }
+        (
+            normalize_receiver(runtime, realm, plan.receiver_access, receiver)?,
+            new_target,
+        )
+    };
 
     let mut native_returns = Vec::new();
     if plan.asynchronous {

@@ -1468,13 +1468,31 @@ impl<'unit, 'arena, 'scope> Planner<'unit, 'arena, 'scope> {
                 _ => continue,
             };
             let owner = self.scope_owner(node.scope_id(), Some(span))?;
-            let executable = self.executable_drafts.get(owner.index()).ok_or(
-                CompilerError::SemanticInvariant {
-                    invariant: "synthetic binding owner executable exists",
-                    span: Some(span),
-                },
-            )?;
-            if new_target && matches!(executable.executable.kind, ExecutableKind::Function { .. }) {
+            if new_target {
+                let mut current = owner;
+                loop {
+                    let candidate = self.executable_drafts.get(current.index()).ok_or(
+                        CompilerError::SemanticInvariant {
+                            invariant: "new.target owner executable exists",
+                            span: Some(span),
+                        },
+                    )?;
+                    match candidate.executable.kind {
+                        ExecutableKind::Function { .. } => break,
+                        ExecutableKind::Arrow { .. } => {
+                            let Some(parent) = candidate.executable.parent else {
+                                return Err(CompilerError::SemanticInvariant {
+                                    invariant: "arrow new.target reference has an executable parent",
+                                    span: Some(span),
+                                });
+                            };
+                            current = parent;
+                        }
+                        ExecutableKind::Script { .. } | ExecutableKind::Module => {
+                            return unsupported(UnsupportedFeature::FunctionSyntheticBinding, span);
+                        }
+                    }
+                }
                 continue;
             }
             return unsupported(UnsupportedFeature::FunctionSyntheticBinding, span);

@@ -479,6 +479,8 @@ pub(crate) struct BytecodeFunction {
     pub(crate) code: InstalledCodeId,
     pub(crate) template: FunctionTemplateId,
     pub(crate) environment: Vec<EnvironmentBinding>,
+    pub(crate) lexical_receiver: Option<StoredValue>,
+    pub(crate) lexical_new_target: Option<FunctionId>,
 }
 
 /// Which decimal rendering a `Number.prototype` method performs.
@@ -2739,6 +2741,7 @@ fn require_root_kind(
             "source function cannot execute as a dynamic-function Script"
         }
         CompilerExecutableKind::OrdinaryMethod
+        | CompilerExecutableKind::OrdinaryArrow
         | CompilerExecutableKind::GeneratorFunction
         | CompilerExecutableKind::GeneratorMethod
         | CompilerExecutableKind::AsyncFunction

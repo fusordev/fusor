@@ -175,6 +175,7 @@ pub(super) fn create_closure(
         defined_argument_count,
         has_prototype,
         function_kind,
+        executable_kind,
     ) = {
         let code = code(runtime, frame.code)?;
         let function = code
@@ -219,8 +220,10 @@ pub(super) fn create_closure(
             header.defined_argument_count(),
             header.flags().has_prototype(),
             header.kind(),
+            function.metadata().executable_kind(),
         )
     };
+    let lexical = executable_kind == CompilerExecutableKind::OrdinaryArrow;
     let generator = function_kind == FunctionKind::Generator;
     let asynchronous = function_kind == FunctionKind::Async;
     let async_generator = function_kind == FunctionKind::AsyncGenerator;
@@ -563,6 +566,8 @@ pub(super) fn create_closure(
             code: frame.code,
             template: child,
             environment,
+            lexical_receiver: lexical.then(|| frame.receiver.duplicate()),
+            lexical_new_target: if lexical { frame.new_target } else { None },
         }),
         object: function_record,
         public_roots: 0,

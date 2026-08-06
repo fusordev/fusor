@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use oxc_ast::ast::{Function, FunctionBody, Program};
+use oxc_ast::ast::{ArrowFunctionExpression, Function, FunctionBody, Program, Statement};
 use quickjs_bytecode::{
     AtomPoolIndex, ClosureVariableDefinition as VerifiedClosureVariableDefinition, CompilerAtom,
     CompilerBindingKind as VerifiedBindingKind, CompilerBindingPolicy, CompilerCaptureLayout,
@@ -145,6 +145,69 @@ impl<'compiler, 'statement, 'unit, 'arena, 'scope, 'layout>
         })
     }
 
+    pub(in crate::lowering) fn for_arrow(
+        compiler: &'compiler CompilationContext<'unit, 'arena, 'scope>,
+        arrow: &'statement ArrowFunctionExpression<'arena>,
+        planning: FunctionPlanningContext<'layout>,
+        limits: VerificationLimits,
+    ) -> Result<Self, LeafCompilationError> {
+        planning.validate_owner()?;
+        let function_scope =
+            compiler.created_scope(arrow.scope_id.get(), arrow.node_id.get(), arrow.span)?;
+        let flow = PlannedControlFlow::new(limits);
+        let mut work = if arrow.expression {
+            let [Statement::ExpressionStatement(expression)] = arrow.body.statements.as_slice()
+            else {
+                return Err(LeafCompilationError::SemanticInvariant {
+                    invariant: "concise arrow body has one expression statement",
+                    span: Some(arrow.body.span),
+                });
+            };
+            if !arrow.body.directives.is_empty() {
+                return Err(LeafCompilationError::SemanticInvariant {
+                    invariant: "concise arrow body has no directives",
+                    span: Some(arrow.body.span),
+                });
+            }
+            vec![
+                StatementWork::PopScope(function_scope),
+                StatementWork::Emit(super::PlannedInstruction::new(
+                    quickjs_bytecode::FinalOpcode::Return,
+                    quickjs_bytecode::Operands::None,
+                    arrow.body.span,
+                )),
+                StatementWork::Expression(&expression.expression),
+            ]
+        } else {
+            vec![
+                StatementWork::PopScope(function_scope),
+                StatementWork::VisitList {
+                    statements: &arrow.body.statements,
+                    next: 0,
+                },
+            ]
+        };
+        work.push(StatementWork::PushScope {
+            scope: function_scope,
+            creator: arrow.node_id.get(),
+            span: arrow.span,
+        });
+        Ok(Self {
+            compiler,
+            planning,
+            body_span: arrow.body.span,
+            state: StatementPlanningState {
+                work,
+                active_scopes: Vec::new(),
+                controls: StatementControlStack::default(),
+                abrupt_markers: Vec::new(),
+                completion: StatementCompletion::Discard,
+            },
+            flow,
+            terminal: FunctionTerminal::Ordinary,
+        })
+    }
+
     pub(in crate::lowering) fn for_program(
         compiler: &'compiler CompilationContext<'unit, 'arena, 'scope>,
         program: &'statement Program<'arena>,
@@ -243,8 +306,81 @@ impl CompilationContext<'_, '_, '_> {
             ExecutableKind::Script {
                 asynchronous: false,
             } => self.validate_script(executable, tree_layout, limits),
+            ExecutableKind::Arrow {
+                asynchronous: false,
+            } => self.validate_arrow(executable, tree_layout, limits),
             _ => self.validate_function(executable, tree_layout, limits),
         }
+    }
+
+    fn validate_arrow(
+        &self,
+        executable_id: ExecutableId,
+        tree_layout: &FunctionTreeLayout,
+        limits: VerificationLimits,
+    ) -> Result<ValidatedFunction, LeafCompilationError> {
+        let (executable, arrow) = self.selected_arrow(executable_id)?;
+        let layout = FrameLayout::new(FrameLayoutInput::new(&self.planned.plan, executable_id))?;
+        let constants = tree_layout.constant_pool(executable_id)?;
+        let planning = FunctionPlanningContext {
+            executable: executable_id,
+            layout: &layout,
+            tree_layout,
+            constants,
+        };
+        let flow = FunctionLoweringSession::for_arrow(self, arrow, planning, limits)?.lower()?;
+        let function_scope =
+            self.created_scope(arrow.scope_id.get(), arrow.node_id.get(), arrow.span)?;
+        let capture_layout =
+            self.compiler_capture_layout(executable_id, function_scope, &layout, tree_layout)?;
+        let closure_variables = self.compiled_closure_variables(executable_id, tree_layout)?;
+        let realm_globals = self.compiled_realm_globals(executable_id, tree_layout, constants)?;
+        let variable_definitions = self.compiled_variable_definitions(
+            executable_id,
+            function_scope,
+            &layout,
+            tree_layout,
+            constants,
+        )?;
+        let closure_definitions =
+            self.compiled_closure_definitions(&closure_variables, &realm_globals, constants)?;
+        let capture_count = checked_function_entry_count(
+            closure_variables
+                .len()
+                .checked_add(realm_globals.len())
+                .ok_or(LeafCompilationError::CapacityExceeded {
+                    domain: "arrow closure variables",
+                })?,
+            "arrow closure variables",
+        )?;
+
+        Ok(ValidatedFunction {
+            executable_kind: CompilerExecutableKind::OrdinaryArrow,
+            strict: executable.is_strict(),
+            argument_count: executable.parameter_count(),
+            defined_argument_count: executable.defined_parameter_count(),
+            local_count: layout.local_count,
+            capture_count,
+            capture_layout,
+            locals: layout
+                .locals
+                .iter()
+                .map(|local| LoweredLocal {
+                    binding: local.binding,
+                    slot: local.slot,
+                })
+                .collect(),
+            constants: Arc::clone(constants.entries()),
+            atoms: Arc::clone(constants.atoms()),
+            closure_variables,
+            realm_globals,
+            function_name: None,
+            variable_definitions,
+            closure_definitions,
+            function_span: source_byte_span(arrow.span),
+            function_name_span: None,
+            flow,
+        })
     }
 
     #[allow(
@@ -489,6 +625,13 @@ const fn executable_header(
         }
         CompilerExecutableKind::OrdinaryFunction => {
             UnverifiedFunctionHeader::ordinary_source_function_with_variable_references(
+                strict,
+                defined_argument_count,
+                variable_reference_count,
+            )
+        }
+        CompilerExecutableKind::OrdinaryArrow => {
+            UnverifiedFunctionHeader::ordinary_arrow_with_variable_references(
                 strict,
                 defined_argument_count,
                 variable_reference_count,

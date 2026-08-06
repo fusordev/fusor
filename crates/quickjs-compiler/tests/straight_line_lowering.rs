@@ -4,9 +4,7 @@ use quickjs_bytecode::{
     BytecodePc, CompilerConstantValue, EncodeError, FinalOpcode, FunctionIndexDomains,
     MAX_OPERAND_STACK_DEPTH, Operands, VerificationErrorKind, VerificationLimits,
 };
-use quickjs_compiler::{
-    CompilationContext, CompiledLeafFunction, LeafCompilationError, UnsupportedLeafFeature,
-};
+use quickjs_compiler::{CompilationContext, CompiledLeafFunction, LeafCompilationError};
 use quickjs_frontend::{
     CompilationGoal, DiagnosticStage, FrontendDiagnosticCode, FrontendOptions, GlobalScriptGoal,
     with_parsed_program,
@@ -25,24 +23,6 @@ fn compile(source: &str, name: &str) -> CompiledLeafFunction {
             context
                 .compile_leaf(&executable, VerificationLimits::default())
                 .expect("straight-line compilation must succeed")
-        },
-    )
-    .expect("front-end acceptance")
-}
-
-fn compile_error(source: &str, name: &str) -> LeafCompilationError {
-    with_parsed_program(
-        source,
-        FrontendOptions::for_goal(CompilationGoal::GlobalScript(GlobalScriptGoal::new())),
-        |unit| {
-            let context = CompilationContext::new(unit).expect("storage planning must succeed");
-            let executable = context
-                .executables()
-                .find(|executable| executable.metadata().name() == Some(name))
-                .expect("named function executable");
-            context
-                .compile_leaf(&executable, VerificationLimits::default())
-                .expect_err("unsupported expression must fail closed")
         },
     )
     .expect("front-end acceptance")
@@ -532,28 +512,6 @@ fn tagged_templates_lower_to_one_exact_site_object_argument_before_substitutions
         Some(b"b".as_slice())
     );
     assert_eq!(tail.raw().latin1_units(), Some(b"b".as_slice()));
-}
-
-#[test]
-fn unsupported_expression_families_fail_closed_at_the_exact_span() {
-    let cases = [(
-        "function f(tag){ return tag?.(); }",
-        UnsupportedLeafFeature::UnsupportedExpression,
-        "tag?.()",
-    )];
-
-    for (source, expected_feature, expected_source) in cases {
-        let error = compile_error(source, "f");
-        let LeafCompilationError::Unsupported { feature, span } = error else {
-            panic!("expected unsupported expression for {source}");
-        };
-        assert_eq!(feature, expected_feature, "{source}");
-        assert_eq!(
-            &source[span.start as usize..span.end as usize],
-            expected_source,
-            "{source}"
-        );
-    }
 }
 
 #[test]

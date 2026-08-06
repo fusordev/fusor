@@ -1,12 +1,12 @@
 use super::super::{
-    ArrayExpression, ArrayExpressionElement, AssignmentExpression, AssignmentOperator,
-    AssignmentTarget, AtomPoolIndex, BinaryOperator, BranchKind, CallExpression, ChainElement,
-    ChainExpression, CompilationContext, CompiledConstantPool, CompiledMetadataAtomKey,
-    CompilerLabel, ComputedMemberExpression, ConditionalExpression, ExecutableId, ExecutableKind,
-    Expression, FinalOpcode, FrameLayout, Function, FunctionTreeLayout, GetSpan,
-    IdentifierReference, LeafCompilationError, LogicalExpression, LogicalOperator,
-    LoweredReference, ObjectExpression, ObjectProperty, ObjectPropertyKind, Operands,
-    PlannedControlFlow, PlannedInstruction, PropertyKind, SequenceExpression,
+    ArrayExpression, ArrayExpressionElement, ArrowFunctionExpression, AssignmentExpression,
+    AssignmentOperator, AssignmentTarget, AtomPoolIndex, BinaryOperator, BranchKind,
+    CallExpression, ChainElement, ChainExpression, CompilationContext, CompiledConstantPool,
+    CompiledMetadataAtomKey, CompilerLabel, ComputedMemberExpression, ConditionalExpression,
+    ExecutableId, ExecutableKind, Expression, FinalOpcode, FrameLayout, Function,
+    FunctionTreeLayout, GetSpan, IdentifierReference, LeafCompilationError, LogicalExpression,
+    LogicalOperator, LoweredReference, ObjectExpression, ObjectProperty, ObjectPropertyKind,
+    Operands, PlannedControlFlow, PlannedInstruction, PropertyKind, SequenceExpression,
     SimpleAssignmentTarget, Span, StaticMemberExpression, UnaryExpression, UnaryOperator,
     UnsupportedLeafFeature, UpdateExpression, UpdateOperator, compiled_static_property_key,
     object_method_or_accessor_span, unsupported,
@@ -22,6 +22,7 @@ pub(in crate::lowering) fn anonymous_named_evaluation_span(
     }
     match expression {
         Expression::FunctionExpression(function) if function.id.is_none() => Some(function.span),
+        Expression::ArrowFunctionExpression(arrow) => Some(arrow.span),
         Expression::ClassExpression(class) if class.id.is_none() => Some(class.span),
         _ => None,
     }
@@ -35,6 +36,7 @@ pub(in crate::lowering) fn anonymous_ordinary_function_span(
     }
     match expression {
         Expression::FunctionExpression(function) if function.id.is_none() => Some(function.span),
+        Expression::ArrowFunctionExpression(arrow) => Some(arrow.span),
         _ => None,
     }
 }
@@ -374,6 +376,14 @@ impl<'compiler, 'unit, 'arena, 'scope> ExpressionPlanner<'compiler, 'unit, 'aren
                         Expression::FunctionExpression(function) => {
                             flow.emit(self.plan_function_closure(
                                 function,
+                                layout.executable,
+                                tree_layout,
+                                constants,
+                            )?)?;
+                        }
+                        Expression::ArrowFunctionExpression(arrow) => {
+                            flow.emit(self.plan_arrow_closure(
+                                arrow,
                                 layout.executable,
                                 tree_layout,
                                 constants,
@@ -1619,6 +1629,28 @@ impl<'compiler, 'unit, 'arena, 'scope> ExpressionPlanner<'compiler, 'unit, 'aren
     ) -> Result<PlannedInstruction, LeafCompilationError> {
         let child = self.executable_for_function(function)?;
         self.plan_child_function_closure(child, parent, function.span, tree_layout, constants)
+    }
+
+    fn plan_arrow_closure(
+        &self,
+        arrow: &ArrowFunctionExpression<'arena>,
+        parent: ExecutableId,
+        tree_layout: &FunctionTreeLayout,
+        constants: &CompiledConstantPool,
+    ) -> Result<PlannedInstruction, LeafCompilationError> {
+        let node_id = arrow.node_id.get();
+        let child = self
+            .planned
+            .identities
+            .executable_by_node
+            .get(node_id.index())
+            .copied()
+            .flatten()
+            .ok_or(LeafCompilationError::SemanticInvariant {
+                invariant: "nested arrow node has a compiler executable identity",
+                span: Some(arrow.span),
+            })?;
+        self.plan_child_function_closure(child, parent, arrow.span, tree_layout, constants)
     }
 
     pub(in crate::lowering) fn executable_for_function(

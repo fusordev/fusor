@@ -5068,6 +5068,9 @@ fn define_method_input_with_root_arguments(
                     0,
                 )
             }
+            CompilerExecutableKind::OrdinaryArrow => {
+                panic!("a define_method child cannot be an arrow")
+            }
             CompilerExecutableKind::GlobalScript
             | CompilerExecutableKind::DynamicFunctionScript => {
                 panic!("a define_method child cannot be a Script")
@@ -5448,6 +5451,67 @@ fn dynamic_function_script_profile_grants_only_exact_root_script_authority() {
         error.kind(),
         &BytecodeVerificationErrorKind::UnsupportedFunctionHeader
     );
+}
+
+#[test]
+fn ordinary_arrow_profile_is_lexical_and_nonconstructable() {
+    let text = "()=>this";
+    let function_span = SourceByteSpan::new(0, u32::try_from(text.len()).expect("source length"));
+    let mappings = [(0, function_span), (1, function_span)];
+    let input = profiled_single_input(
+        &[
+            (FinalOpcode::PushThis, Operands::None),
+            (FinalOpcode::Return, Operands::None),
+        ],
+        UnverifiedFunctionHeader::ordinary_arrow_with_variable_references(false, 0, 0),
+        CompilerExecutableKind::OrdinaryArrow,
+        &[],
+        None,
+        &[],
+        0,
+        0,
+        &[],
+        source(text, function_span, None, &mappings),
+    );
+    let verified =
+        verify_compiler_bytecode_graph(input, BytecodeGraphVerificationLimits::default())
+            .expect("sloppy arrow PushThis is lexical authority");
+    let header = verified.root().function().control_flow().function_header();
+    assert_eq!(header.flags().bits(), 0x0442);
+    assert!(!header.flags().has_prototype());
+    assert!(!header.flags().arguments_allowed());
+    assert!(header.flags().new_target_allowed());
+
+    let arguments = profiled_single_input(
+        &[
+            (FinalOpcode::SpecialObject, Operands::U8(0)),
+            (FinalOpcode::Return, Operands::None),
+        ],
+        UnverifiedFunctionHeader::ordinary_arrow_with_variable_references(true, 0, 0),
+        CompilerExecutableKind::OrdinaryArrow,
+        &[],
+        None,
+        &[],
+        0,
+        0,
+        &[],
+        source(
+            text,
+            function_span,
+            None,
+            &[(0, function_span), (2, function_span)],
+        ),
+    );
+    let error =
+        verify_compiler_bytecode_graph(arguments, BytecodeGraphVerificationLimits::default())
+            .expect_err("an arrow cannot create an own arguments object");
+    assert!(matches!(
+        error.kind(),
+        BytecodeVerificationErrorKind::UnsupportedCompilerOpcode {
+            pc,
+            opcode: FinalOpcode::SpecialObject,
+        } if *pc == BytecodePc::ZERO
+    ));
 }
 
 #[test]

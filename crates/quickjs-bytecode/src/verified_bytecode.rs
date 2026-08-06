@@ -516,6 +516,8 @@ pub enum CompilerExecutableKind {
     /// An ordinary callable JavaScript function.
     #[default]
     OrdinaryFunction,
+    /// A synchronous lexical-this arrow function.
+    OrdinaryArrow,
     /// A nonconstructable ordinary object-literal method, getter, or setter.
     OrdinaryMethod,
     /// A nonconstructable synchronous generator function.
@@ -1223,6 +1225,9 @@ pub enum BytecodeVerificationErrorKind {
     /// An object method or accessor carries a source name before
     /// `define_method` assigns its property-derived observable name.
     OrdinaryMethodHasFunctionName,
+    /// An arrow carries compiler source-name metadata or a self binding even
+    /// though observable names are assigned only when its closure is created.
+    OrdinaryArrowHasFunctionName,
     /// A constructor-realm global source appears outside a Script authority
     /// root.
     ConstructorRealmGlobalSourceRequiresDynamicFunctionScript {
@@ -1674,6 +1679,9 @@ impl fmt::Display for BytecodeVerificationErrorKind {
             Self::OrdinaryMethodHasFunctionName => formatter.write_str(
                 "ordinary method carries a source name before define_method initialization",
             ),
+            Self::OrdinaryArrowHasFunctionName => {
+                formatter.write_str("ordinary arrow carries source-name metadata or a self binding")
+            }
             Self::ConstructorRealmGlobalSourceRequiresDynamicFunctionScript { closure } => write!(
                 formatter,
                 "closure slot {closure} originates a constructor-realm global outside a Script root"
@@ -2404,6 +2412,21 @@ fn verify_executable_kind(
         | CompilerExecutableKind::GeneratorFunction
         | CompilerExecutableKind::AsyncFunction
         | CompilerExecutableKind::AsyncGeneratorFunction => Ok(()),
+        CompilerExecutableKind::OrdinaryArrow => {
+            let has_function_name_binding =
+                metadata.variables.iter().any(|definition| {
+                    definition.policy.kind() == CompilerBindingKind::FunctionName
+                }) || metadata.closures.iter().any(|definition| {
+                    definition.policy().kind() == CompilerBindingKind::FunctionName
+                });
+            if metadata.function_name.is_some() || has_function_name_binding {
+                return Err(BytecodeVerificationError::function(
+                    id,
+                    BytecodeVerificationErrorKind::OrdinaryArrowHasFunctionName,
+                ));
+            }
+            Ok(())
+        }
         CompilerExecutableKind::OrdinaryMethod
         | CompilerExecutableKind::GeneratorMethod
         | CompilerExecutableKind::AsyncMethod
@@ -2481,6 +2504,29 @@ fn verify_header(
         CompilerExecutableKind::OrdinaryFunction => {
             if header.kind() != FunctionKind::Normal
                 || !matches!(header.flags().bits(), 0x0641 | 0x0643)
+                || header.mode().bits() & !1 != 0
+            {
+                return Err(BytecodeVerificationError::function(
+                    id,
+                    BytecodeVerificationErrorKind::UnsupportedFunctionHeader,
+                ));
+            }
+            if header.defined_argument_count() > arguments
+                || (header.flags().has_simple_parameter_list()
+                    && header.defined_argument_count() != arguments)
+            {
+                return Err(BytecodeVerificationError::function(
+                    id,
+                    BytecodeVerificationErrorKind::DefinedArgumentCountMismatch {
+                        defined: header.defined_argument_count(),
+                        arguments,
+                    },
+                ));
+            }
+        }
+        CompilerExecutableKind::OrdinaryArrow => {
+            if header.kind() != FunctionKind::Normal
+                || !matches!(header.flags().bits(), 0x0440 | 0x0442)
                 || header.mode().bits() & !1 != 0
             {
                 return Err(BytecodeVerificationError::function(
@@ -4319,6 +4365,7 @@ fn inferred_function_name_pair(
     (matches!(
         child_metadata.executable_kind,
         CompilerExecutableKind::OrdinaryFunction
+            | CompilerExecutableKind::OrdinaryArrow
             | CompilerExecutableKind::GeneratorFunction
             | CompilerExecutableKind::AsyncFunction
             | CompilerExecutableKind::AsyncGeneratorFunction
@@ -5475,6 +5522,7 @@ fn verify_supported_opcodes(
             | CompilerExecutableKind::AsyncMethod
             | CompilerExecutableKind::AsyncGeneratorMethod
     );
+    let lexical_this = executable_kind == CompilerExecutableKind::OrdinaryArrow;
     let mut initial_yield = None;
     let mapped_arguments_authority = flow
         .compiler_capture_layout()
@@ -5549,6 +5597,7 @@ fn verify_supported_opcodes(
             || (opcode == FinalOpcode::PushThis
                 && !flow.function_header().mode().is_strict()
                 && !method
+                && !lexical_this
                 && !is_script_authority_kind(authority_kind))
             || matches!(
                 (opcode, instruction.operands()),
@@ -5571,6 +5620,7 @@ fn verify_supported_opcodes(
                         || !matches!(
                             executable_kind,
                             CompilerExecutableKind::OrdinaryFunction
+                                | CompilerExecutableKind::OrdinaryArrow
                                 | CompilerExecutableKind::OrdinaryMethod
                                 | CompilerExecutableKind::GeneratorFunction
                                 | CompilerExecutableKind::GeneratorMethod
@@ -5636,6 +5686,7 @@ fn compiler_special_object_is_authorized(
     if !matches!(
         executable_kind,
         CompilerExecutableKind::OrdinaryFunction
+            | CompilerExecutableKind::OrdinaryArrow
             | CompilerExecutableKind::OrdinaryMethod
             | CompilerExecutableKind::GeneratorFunction
             | CompilerExecutableKind::GeneratorMethod
@@ -5648,13 +5699,15 @@ fn compiler_special_object_is_authorized(
     }
     match operands {
         Operands::U8(0) => {
-            (flow.function_header().mode().is_strict() || !simple_parameter_list)
+            executable_kind != CompilerExecutableKind::OrdinaryArrow
+                && (flow.function_header().mode().is_strict() || !simple_parameter_list)
                 && arguments_object_count == 1
                 && rest_parameter_count == 0
                 && !mapped_arguments_authority
         }
         Operands::U8(1) => {
-            !flow.function_header().mode().is_strict()
+            executable_kind != CompilerExecutableKind::OrdinaryArrow
+                && !flow.function_header().mode().is_strict()
                 && simple_parameter_list
                 && arguments_object_count == 1
                 && rest_parameter_count == 0

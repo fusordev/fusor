@@ -970,11 +970,6 @@ fn computed_anonymous_function_data_properties_use_the_exact_name_definition_seq
 fn unsupported_object_forms_fail_closed_at_the_relevant_source() {
     let cases = [
         (
-            "function make(object,key){return object?.[key];}",
-            UnsupportedLeafFeature::UnsupportedExpression,
-            "key",
-        ),
-        (
             "function make(object,key,value){return object[key]+=value;}",
             UnsupportedLeafFeature::UnsupportedExpression,
             "key",

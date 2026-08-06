@@ -753,6 +753,8 @@ impl Context<'_> {
                 code,
                 template: root_template,
                 environment: root_bindings,
+                lexical_receiver: None,
+                lexical_new_target: None,
             }),
             object: root_records.function,
             public_roots: u32::from(publication.is_public()),

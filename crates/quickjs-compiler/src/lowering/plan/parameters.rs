@@ -317,14 +317,15 @@ impl<'arena> CompilationContext<'_, 'arena, '_> {
             .get(executable.index())
             .copied()
             .ok_or(LeafCompilationError::InvalidExecutable { executable })?;
-        let function = match self.unit.semantic().nodes().kind(node) {
-            AstKind::Function(function) => function,
+        let parameters = match self.unit.semantic().nodes().kind(node) {
+            AstKind::Function(function) => function.params.as_ref(),
+            AstKind::ArrowFunctionExpression(arrow) if !arrow.r#async => arrow.params.as_ref(),
             AstKind::Program(_) => return Ok(()),
             _ => {
                 return unsupported(UnsupportedLeafFeature::NonOrdinaryFunction, metadata.span());
             }
         };
-        for (index, parameter) in function.params.items.iter().enumerate() {
+        for (index, parameter) in parameters.items.iter().enumerate() {
             if !metadata.has_parameter_expressions()
                 && matches!(parameter.pattern, BindingPattern::BindingIdentifier(_))
             {
@@ -355,8 +356,8 @@ impl<'arena> CompilationContext<'_, 'arena, '_> {
                 flow,
             )?;
         }
-        if let Some(rest) = &function.params.rest {
-            let first_argument = u16::try_from(function.params.items.len()).map_err(|_| {
+        if let Some(rest) = &parameters.rest {
+            let first_argument = u16::try_from(parameters.items.len()).map_err(|_| {
                 LeafCompilationError::CapacityExceeded {
                     domain: "formal rest first argument",
                 }

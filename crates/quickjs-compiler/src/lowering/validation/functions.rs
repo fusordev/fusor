@@ -1,9 +1,9 @@
 use quickjs_frontend::Span;
 
 use super::super::{
-    AstKind, CompilationContext, CompilationUnitKind, Executable, ExecutableId, ExecutableKind,
-    Expression, Function, FunctionType, LeafCompilationError, NodeId, ParsedUnit, Program,
-    PropertyKind, UnsupportedLeafFeature, unsupported,
+    ArrowFunctionExpression, AstKind, CompilationContext, CompilationUnitKind, Executable,
+    ExecutableId, ExecutableKind, Expression, Function, FunctionType, LeafCompilationError, NodeId,
+    ParsedUnit, Program, PropertyKind, UnsupportedLeafFeature, unsupported,
 };
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -13,6 +13,80 @@ pub(in crate::lowering) enum OrdinaryFunctionForm {
 }
 
 impl<'arena> CompilationContext<'_, 'arena, '_> {
+    pub(in crate::lowering) fn selected_arrow(
+        &self,
+        executable_id: ExecutableId,
+    ) -> Result<(&Executable, &ArrowFunctionExpression<'arena>), LeafCompilationError> {
+        let executable = self.planned.plan.executable(executable_id).ok_or(
+            LeafCompilationError::InvalidExecutable {
+                executable: executable_id,
+            },
+        )?;
+        let node_id = self
+            .planned
+            .identities
+            .node_by_executable
+            .get(executable_id.index())
+            .copied()
+            .ok_or(LeafCompilationError::SemanticInvariant {
+                invariant: "arrow executable has an Oxc node identity",
+                span: Some(executable.span()),
+            })?;
+        if self
+            .planned
+            .identities
+            .executable_by_node
+            .get(node_id.index())
+            .copied()
+            .flatten()
+            != Some(executable_id)
+        {
+            return Err(LeafCompilationError::SemanticInvariant {
+                invariant: "Oxc arrow and executable identities are bijective",
+                span: Some(executable.span()),
+            });
+        }
+        let AstKind::ArrowFunctionExpression(arrow) = self.unit.semantic().nodes().kind(node_id)
+        else {
+            return unsupported(
+                UnsupportedLeafFeature::NonOrdinaryFunction,
+                executable.span(),
+            );
+        };
+        if arrow.r#async {
+            return unsupported(UnsupportedLeafFeature::NonOrdinaryFunction, arrow.span);
+        }
+        if executable.kind()
+            != (ExecutableKind::Arrow {
+                asynchronous: false,
+            })
+        {
+            return Err(LeafCompilationError::SemanticInvariant {
+                invariant: "Oxc arrow has matching executable metadata",
+                span: Some(arrow.span),
+            });
+        }
+        if self.planned.plan.kind() != CompilationUnitKind::Script {
+            return unsupported(
+                UnsupportedLeafFeature::UnsupportedCompilationUnit,
+                arrow.span,
+            );
+        }
+        if !crate::is_supported_script_root_goal(self.unit.goal())
+            && let Some(reference) = self
+                .planned
+                .plan
+                .unresolved_globals_for(executable_id)
+                .and_then(|references| references.first())
+        {
+            return unsupported(
+                UnsupportedLeafFeature::UnresolvedReference,
+                reference.span(),
+            );
+        }
+        Ok((executable, arrow))
+    }
+
     pub(in crate::lowering) fn selected_function(
         &self,
         executable_id: ExecutableId,

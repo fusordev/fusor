@@ -2903,12 +2903,15 @@ impl ArgumentsSnapshotUse {
 #[derive(Clone, Copy)]
 enum ReceiverAccess {
     Direct,
+    Lexical,
     NormalizeSloppy,
 }
 
 impl ReceiverAccess {
     const fn for_function(strict: bool, executable_kind: CompilerExecutableKind) -> Self {
-        if strict
+        if matches!(executable_kind, CompilerExecutableKind::OrdinaryArrow) {
+            Self::Lexical
+        } else if strict
             || matches!(
                 executable_kind,
                 CompilerExecutableKind::DynamicFunctionScript
@@ -2942,6 +2945,12 @@ fn normalize_receiver(
 ) -> Result<StoredValue, ExecutionError> {
     if matches!(access, ReceiverAccess::Direct) {
         return Ok(receiver);
+    }
+    if matches!(access, ReceiverAccess::Lexical) {
+        return Err(EngineFault::RuntimeInvariant {
+            message: "lexical receiver reached dynamic receiver normalization",
+        }
+        .into());
     }
     match receiver {
         StoredValue::Undefined | StoredValue::Null => runtime
