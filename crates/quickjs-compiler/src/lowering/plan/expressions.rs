@@ -225,6 +225,10 @@ pub(in crate::lowering) enum ExpressionWork<'expression, 'arena> {
         call: &'expression CallExpression<'arena>,
         method: bool,
     },
+    SuperPropertyBase {
+        span: Span,
+        call_receiver: bool,
+    },
     InitializeInstanceFields,
     Emit(PlannedInstruction),
     Branch {
@@ -311,6 +315,10 @@ impl<'compiler, 'unit, 'arena, 'scope> ExpressionPlanner<'compiler, 'unit, 'aren
                 ExpressionWork::CallAfterCallee { call, method } => {
                     Self::plan_call_after_callee(call, method, &mut work)?;
                 }
+                ExpressionWork::SuperPropertyBase {
+                    span,
+                    call_receiver,
+                } => self.plan_super_property_base(span, call_receiver, layout, flow)?,
                 ExpressionWork::InitializeInstanceFields => {
                     self.plan_instance_field_initializations(
                         layout.executable,
@@ -577,11 +585,11 @@ impl<'compiler, 'unit, 'arena, 'scope> ExpressionPlanner<'compiler, 'unit, 'aren
 
     /// Lowers the verified class slice: base and derived constructors,
     /// source-level direct `super(...)`, public methods/accessors with either
-    /// static or computed names, public static fields with lexical `this` and
-    /// `new.target`, and initializer-free public instance fields. Computed or
-    /// initialized instance fields, private elements, decorators, static-field
-    /// `super`, super properties, and static blocks stay fail-closed until
-    /// their distinct execution contracts exist.
+    /// static or computed names, public static fields with lexical `this`,
+    /// `new.target`, and `super` property access, and initializer-free public
+    /// instance fields. Computed or initialized instance fields, private
+    /// elements, decorators, and static blocks stay fail-closed until their
+    /// distinct execution contracts exist.
     fn plan_class_heritage(
         &self,
         class: &Class<'arena>,
@@ -674,7 +682,7 @@ impl<'compiler, 'unit, 'arena, 'scope> ExpressionPlanner<'compiler, 'unit, 'aren
                     }
                 }
                 ClassElement::PropertyDefinition(field) => {
-                    self.validate_base_class_field(field)?;
+                    Self::validate_base_class_field(field)?;
                 }
                 _ => return unsupported(UnsupportedLeafFeature::UnsupportedBody, element.span()),
             }
@@ -820,7 +828,6 @@ impl<'compiler, 'unit, 'arena, 'scope> ExpressionPlanner<'compiler, 'unit, 'aren
     }
 
     fn validate_base_class_field(
-        &self,
         field: &PropertyDefinition<'arena>,
     ) -> Result<(), LeafCompilationError> {
         if !field.decorators.is_empty() {
@@ -858,19 +865,6 @@ impl<'compiler, 'unit, 'arena, 'scope> ExpressionPlanner<'compiler, 'unit, 'aren
         }
         if field.value.is_none() {
             return Ok(());
-        }
-        let nodes = self.unit.semantic().nodes();
-        for (node_id, node) in nodes.iter_enumerated() {
-            let span = match node.kind() {
-                AstKind::Super(expression) => expression.span,
-                _ => continue,
-            };
-            if self
-                .static_field_initializer_class_for_node(node_id)?
-                .is_some()
-            {
-                return unsupported(UnsupportedLeafFeature::UnsupportedExpression, span);
-            }
         }
         Ok(())
     }
@@ -2218,7 +2212,7 @@ impl<'compiler, 'unit, 'arena, 'scope> ExpressionPlanner<'compiler, 'unit, 'aren
             .get(&class_node)
             .copied()
             .ok_or(LeafCompilationError::SemanticInvariant {
-                invariant: "static field this has a class receiver binding",
+                invariant: "static field lexical receiver has a class receiver binding",
                 span: Some(span),
             })?;
         let storage =
@@ -2233,17 +2227,65 @@ impl<'compiler, 'unit, 'arena, 'scope> ExpressionPlanner<'compiler, 'unit, 'aren
             || storage.placement() != StoragePlacement::Local
         {
             return Err(LeafCompilationError::SemanticInvariant {
-                invariant: "static field this uses its immutable class receiver binding",
+                invariant: "static field lexical receiver uses its immutable class receiver binding",
                 span: Some(span),
             });
         }
         let slot = layout
             .slot(binding)
             .ok_or(LeafCompilationError::SemanticInvariant {
-                invariant: "static field this binding has a frame slot",
+                invariant: "static field lexical receiver binding has a frame slot",
                 span: Some(span),
             })?;
         Ok(Some(self.plan_read_slot(binding, slot, span)?))
+    }
+
+    fn plan_super_property_base(
+        &self,
+        span: Span,
+        call_receiver: bool,
+        layout: &FrameLayout,
+        flow: &mut PlannedControlFlow,
+    ) -> Result<(), LeafCompilationError> {
+        if let Some(receiver) = self.static_field_receiver_read(span, layout)? {
+            flow.emit(receiver)?;
+            if call_receiver {
+                flow.emit(PlannedInstruction::new(
+                    FinalOpcode::Dup,
+                    Operands::None,
+                    span,
+                ))?;
+            }
+            flow.emit(PlannedInstruction::new(
+                FinalOpcode::Dup,
+                Operands::None,
+                span,
+            ))?;
+        } else {
+            flow.emit(PlannedInstruction::new(
+                FinalOpcode::PushThis,
+                Operands::None,
+                span,
+            ))?;
+            if call_receiver {
+                flow.emit(PlannedInstruction::new(
+                    FinalOpcode::Dup,
+                    Operands::None,
+                    span,
+                ))?;
+            }
+            flow.emit(PlannedInstruction::new(
+                FinalOpcode::SpecialObject,
+                Operands::U8(5),
+                span,
+            ))?;
+        }
+        flow.emit(PlannedInstruction::new(
+            FinalOpcode::GetSuper,
+            Operands::None,
+            span,
+        ))?;
+        Ok(())
     }
 
     fn static_field_initializer_class_for_span(
@@ -2255,6 +2297,7 @@ impl<'compiler, 'unit, 'arena, 'scope> ExpressionPlanner<'compiler, 'unit, 'aren
             let node_span = match node.kind() {
                 AstKind::ThisExpression(expression) => expression.span,
                 AstKind::NewTarget(expression) => expression.span,
+                AstKind::Super(expression) => expression.span,
                 _ => continue,
             };
             if node_span == span {
@@ -2262,7 +2305,7 @@ impl<'compiler, 'unit, 'arena, 'scope> ExpressionPlanner<'compiler, 'unit, 'aren
             }
         }
         Err(LeafCompilationError::SemanticInvariant {
-            invariant: "this or new.target expression retains a semantic node",
+            invariant: "lexical receiver or new.target expression retains a semantic node",
             span: Some(span),
         })
     }
@@ -3194,21 +3237,10 @@ impl<'compiler, 'unit, 'arena, 'scope> ExpressionPlanner<'compiler, 'unit, 'aren
             Operands::Atom(constants.property_atom_index(member.property.span)?),
             member.property.span,
         )));
-        work.push(ExpressionWork::Emit(PlannedInstruction::new(
-            FinalOpcode::GetSuper,
-            Operands::None,
-            member.object.span(),
-        )));
-        work.push(ExpressionWork::Emit(PlannedInstruction::new(
-            FinalOpcode::SpecialObject,
-            Operands::U8(5),
-            member.object.span(),
-        )));
-        work.push(ExpressionWork::Emit(PlannedInstruction::new(
-            FinalOpcode::PushThis,
-            Operands::None,
-            member.object.span(),
-        )));
+        work.push(ExpressionWork::SuperPropertyBase {
+            span: member.object.span(),
+            call_receiver: false,
+        });
         Ok(())
     }
 
@@ -3261,21 +3293,10 @@ impl<'compiler, 'unit, 'arena, 'scope> ExpressionPlanner<'compiler, 'unit, 'aren
             member.expression.span(),
         )));
         work.push(ExpressionWork::Visit(&member.expression));
-        work.push(ExpressionWork::Emit(PlannedInstruction::new(
-            FinalOpcode::GetSuper,
-            Operands::None,
-            member.object.span(),
-        )));
-        work.push(ExpressionWork::Emit(PlannedInstruction::new(
-            FinalOpcode::SpecialObject,
-            Operands::U8(5),
-            member.object.span(),
-        )));
-        work.push(ExpressionWork::Emit(PlannedInstruction::new(
-            FinalOpcode::PushThis,
-            Operands::None,
-            member.object.span(),
-        )));
+        work.push(ExpressionWork::SuperPropertyBase {
+            span: member.object.span(),
+            call_receiver: false,
+        });
         Ok(())
     }
 
@@ -3343,21 +3364,10 @@ impl<'compiler, 'unit, 'arena, 'scope> ExpressionPlanner<'compiler, 'unit, 'aren
             Operands::Atom(constants.property_atom_index(member.property.span)?),
             member.property.span,
         )));
-        work.push(ExpressionWork::Emit(PlannedInstruction::new(
-            FinalOpcode::GetSuper,
-            Operands::None,
-            member.object.span(),
-        )));
-        work.push(ExpressionWork::Emit(PlannedInstruction::new(
-            FinalOpcode::SpecialObject,
-            Operands::U8(5),
-            member.object.span(),
-        )));
-        work.push(ExpressionWork::Emit(PlannedInstruction::new(
-            FinalOpcode::PushThis,
-            Operands::None,
-            member.object.span(),
-        )));
+        work.push(ExpressionWork::SuperPropertyBase {
+            span: member.object.span(),
+            call_receiver: false,
+        });
         Ok(())
     }
 
@@ -3422,21 +3432,10 @@ impl<'compiler, 'unit, 'arena, 'scope> ExpressionPlanner<'compiler, 'unit, 'aren
             member.expression.span(),
         )));
         work.push(ExpressionWork::Visit(&member.expression));
-        work.push(ExpressionWork::Emit(PlannedInstruction::new(
-            FinalOpcode::GetSuper,
-            Operands::None,
-            member.object.span(),
-        )));
-        work.push(ExpressionWork::Emit(PlannedInstruction::new(
-            FinalOpcode::SpecialObject,
-            Operands::U8(5),
-            member.object.span(),
-        )));
-        work.push(ExpressionWork::Emit(PlannedInstruction::new(
-            FinalOpcode::PushThis,
-            Operands::None,
-            member.object.span(),
-        )));
+        work.push(ExpressionWork::SuperPropertyBase {
+            span: member.object.span(),
+            call_receiver: false,
+        });
         Ok(())
     }
 
@@ -3482,21 +3481,10 @@ impl<'compiler, 'unit, 'arena, 'scope> ExpressionPlanner<'compiler, 'unit, 'aren
             Operands::Atom(constants.property_atom_index(member.property.span)?),
             member.property.span,
         )));
-        work.push(ExpressionWork::Emit(PlannedInstruction::new(
-            FinalOpcode::GetSuper,
-            Operands::None,
-            member.object.span(),
-        )));
-        work.push(ExpressionWork::Emit(PlannedInstruction::new(
-            FinalOpcode::SpecialObject,
-            Operands::U8(5),
-            member.object.span(),
-        )));
-        work.push(ExpressionWork::Emit(PlannedInstruction::new(
-            FinalOpcode::PushThis,
-            Operands::None,
-            member.object.span(),
-        )));
+        work.push(ExpressionWork::SuperPropertyBase {
+            span: member.object.span(),
+            call_receiver: false,
+        });
         Ok(())
     }
 
@@ -3542,21 +3530,10 @@ impl<'compiler, 'unit, 'arena, 'scope> ExpressionPlanner<'compiler, 'unit, 'aren
             member.expression.span(),
         )));
         work.push(ExpressionWork::Visit(&member.expression));
-        work.push(ExpressionWork::Emit(PlannedInstruction::new(
-            FinalOpcode::GetSuper,
-            Operands::None,
-            member.object.span(),
-        )));
-        work.push(ExpressionWork::Emit(PlannedInstruction::new(
-            FinalOpcode::SpecialObject,
-            Operands::U8(5),
-            member.object.span(),
-        )));
-        work.push(ExpressionWork::Emit(PlannedInstruction::new(
-            FinalOpcode::PushThis,
-            Operands::None,
-            member.object.span(),
-        )));
+        work.push(ExpressionWork::SuperPropertyBase {
+            span: member.object.span(),
+            call_receiver: false,
+        });
         Ok(())
     }
 

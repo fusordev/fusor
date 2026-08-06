@@ -1,10 +1,7 @@
 use quickjs_bytecode::{
     CompilerBindingKind, CompilerExecutableKind, FinalOpcode, VerificationLimits,
 };
-use quickjs_compiler::{
-    CompilationContext, CompiledFunctionTree, CompilerError, DeclarationKind, UnsupportedFeature,
-    WritePolicy, build_storage_plan,
-};
+use quickjs_compiler::{CompilationContext, CompiledFunctionTree, DeclarationKind, WritePolicy};
 use quickjs_frontend::{CompilationGoal, FrontendOptions, GlobalScriptGoal, with_parsed_program};
 
 fn compile(source: &str, name: &str) -> CompiledFunctionTree {
@@ -702,21 +699,36 @@ fn static_field_initializers_use_a_dedicated_class_receiver_cell() {
 }
 
 #[test]
-fn static_field_super_reports_its_specific_deferred_contract() {
-    let error = with_parsed_program(
+fn static_field_super_uses_the_lexical_class_receiver() {
+    let tree = compile(
         "function make(Base){class Box extends Base{static inherited=super.value;}return Box;}",
-        FrontendOptions::for_goal(CompilationGoal::GlobalScript(GlobalScriptGoal::new())),
-        build_storage_plan,
-    )
-    .expect("frontend")
-    .expect_err("static-field super remains separately deferred");
-    assert!(matches!(
-        error,
-        CompilerError::Unsupported {
-            feature: UnsupportedFeature::StaticFieldSuper,
-            ..
-        }
-    ));
+        "make",
+    );
+    let root = tree.root();
+    assert!(
+        tree.verified_bytecode()
+            .function(quickjs_bytecode::FunctionTemplateId::new(0))
+            .expect("root verified function")
+            .metadata()
+            .variables()
+            .iter()
+            .any(
+                |definition| definition.policy().kind() == CompilerBindingKind::ClassStaticReceiver
+            )
+    );
+    let instructions = root.control_flow().instructions();
+    assert!(instructions.iter().any(|instruction| {
+        instruction.decoded().instruction().opcode() == FinalOpcode::GetSuper
+    }));
+    assert!(instructions.iter().any(|instruction| {
+        instruction.decoded().instruction().opcode() == FinalOpcode::GetLocCheck
+    }));
+    assert!(!instructions.iter().any(|instruction| {
+        matches!(
+            instruction.decoded().instruction().operands(),
+            quickjs_bytecode::Operands::U8(5)
+        )
+    }));
 }
 
 #[test]

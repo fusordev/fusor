@@ -100,8 +100,10 @@ broad Test262.**
   method templates are certified by their defining class element. Public static
   fields, including computed fields, evaluate into own constructor properties.
   Their initializers bind lexical `this` to that constructor and `new.target`
-  to `undefined`, including arrow captures; static-field `super` is still
-  deferred. Uncomputed public instance fields evaluate in declaration order on
+  to `undefined`, including arrow captures, and support static/computed
+  `super` property reads, calls, simple/compound/logical assignments, and
+  prefix/postfix updates. Uncomputed public instance fields evaluate in
+  declaration order on
   every receiver (including `undefined`
   fields): before a base constructor body and immediately after derived
   `super()` (including synthesized derived constructors). Their expressions may
@@ -113,8 +115,8 @@ broad Test262.**
   cell captured by the constructor; its certificate admits only typed field
   definition, including synthesized derived constructors.
 - [ ] Class closure: arrow-contained `super()`; computed-key anonymous-class name
-  inference outside direct object/static-field definitions, static-field `super`,
-  private elements, decorators, and static blocks. Do not relabel these as supported
+  inference outside direct object/static-field definitions, private elements,
+  decorators, and static blocks. Do not relabel these as supported
   merely because Oxc parses them.
 - [ ] Direct/indirect `eval`, `with`, Annex B block functions, remaining opcode
   families, and complete debug/source tables. Unverified or serialized bytecode

@@ -740,9 +740,6 @@ pub enum UnsupportedFeature {
     AnonymousDefaultClassExport,
     /// A synthesized `this`, `new.target`, or `super` binding.
     FunctionSyntheticBinding,
-    /// `super` in a static field initializer needs the class home-object
-    /// lowering that is intentionally not part of the current class slice.
-    StaticFieldSuper,
 }
 
 /// Storage-planning failure.
@@ -1800,7 +1797,9 @@ impl<'unit, 'arena, 'scope> Planner<'unit, 'arena, 'scope> {
                 continue;
             }
             if !new_target && static_field_owner.is_some() {
-                return unsupported(UnsupportedFeature::StaticFieldSuper, span);
+                // Static field `super` property access is lowered through the
+                // same immutable class receiver cell as lexical `this`.
+                continue;
             }
             let instance_field_owner = self.instance_field_initializer_owner(node_id)?;
             let owner =
@@ -2400,8 +2399,9 @@ impl<'unit, 'arena, 'scope> Planner<'unit, 'arena, 'scope> {
     }
 
     /// Adds the class-definition receiver cell only when a static field value
-    /// lexically observes `this`. The class scope owns the cell, while arrow
-    /// function frames capture it like every other lexical binding.
+    /// lexically observes `this` or resolves a `super` property. The class
+    /// scope owns the cell, while arrow function frames capture it like every
+    /// other lexical binding.
     fn add_class_static_receiver_bindings(
         &self,
         bindings: &mut Vec<BindingDraft>,
@@ -2435,7 +2435,7 @@ impl<'unit, 'arena, 'scope> Planner<'unit, 'arena, 'scope> {
     fn class_static_receiver_is_used(&self, class_node: NodeId) -> Result<bool, CompilerError> {
         let nodes = self.unit.semantic().nodes();
         for (node_id, node) in nodes.iter_enumerated() {
-            if !matches!(node.kind(), AstKind::ThisExpression(_)) {
+            if !matches!(node.kind(), AstKind::ThisExpression(_) | AstKind::Super(_)) {
                 continue;
             }
             if self.static_field_initializer_class_for_node(node_id)? == Some(class_node) {
@@ -2453,8 +2453,10 @@ impl<'unit, 'arena, 'scope> Planner<'unit, 'arena, 'scope> {
         let nodes = self.unit.semantic().nodes();
         let mut requests = Vec::new();
         for (node_id, node) in nodes.iter_enumerated() {
-            let AstKind::ThisExpression(expression) = node.kind() else {
-                continue;
+            let span = match node.kind() {
+                AstKind::ThisExpression(expression) => expression.span,
+                AstKind::Super(expression) => expression.span,
+                _ => continue,
             };
             let Some(class_node) = self.static_field_initializer_class_for_node(node_id)? else {
                 continue;
@@ -2463,30 +2465,30 @@ impl<'unit, 'arena, 'scope> Planner<'unit, 'arena, 'scope> {
                 .get(&class_node)
                 .copied()
                 .ok_or(CompilerError::SemanticInvariant {
-                    invariant: "static field this has a class receiver binding",
-                    span: Some(expression.span),
+                    invariant: "static field lexical receiver has a class receiver binding",
+                    span: Some(span),
                 })?;
             let storage =
                 bindings
                     .get(binding.index())
                     .ok_or(CompilerError::SemanticInvariant {
                         invariant: "class static-receiver capture binding exists",
-                        span: Some(expression.span),
+                        span: Some(span),
                     })?;
             if storage.placement != StoragePlacement::Local
                 || storage.policy.kind != DeclarationKind::ClassStaticReceiver
             {
                 return Err(CompilerError::SemanticInvariant {
                     invariant: "class static-receiver capture uses an immutable local binding",
-                    span: Some(expression.span),
+                    span: Some(span),
                 });
             }
-            let executable = self.scope_owner(node.scope_id(), Some(expression.span))?;
+            let executable = self.scope_owner(node.scope_id(), Some(span))?;
             if executable != storage.executable {
                 requests.push(CaptureRequest {
                     executable,
                     binding,
-                    span: expression.span,
+                    span,
                 });
             }
         }

@@ -47,7 +47,8 @@ pub enum CompilerBindingKind {
     /// computed public instance-field key.
     ClassFieldKey,
     /// The compiler-created immutable class-scope receiver cell used by
-    /// static field initializers that lexically observe `this`.
+    /// static field initializers that lexically observe `this` or resolve a
+    /// `super` property.
     ClassStaticReceiver,
     /// A function declaration.
     Function,
@@ -2359,7 +2360,7 @@ fn verify_function_metadata(
         &metadata.closures,
     )?;
     verify_source(id, flow, metadata)?;
-    verify_supported_opcodes(id, flow, metadata.executable_kind, authority_kind)?;
+    verify_supported_opcodes(id, flow, metadata, authority_kind)?;
     let mut internal_stack = verify_internal_operand_stack(id, function, limits, usage)?;
     let realm_global_initializer_prefix = verify_realm_global_function_initializers(
         id,
@@ -6518,9 +6519,10 @@ fn atom_contents(
 fn verify_supported_opcodes(
     id: FunctionTemplateId,
     flow: &VerifiedControlFlow,
-    executable_kind: CompilerExecutableKind,
+    metadata: &UnverifiedFunctionMetadata,
     authority_kind: CompilerExecutableKind,
 ) -> Result<(), BytecodeVerificationError> {
+    let executable_kind = metadata.executable_kind;
     let mut arguments_object_count = 0_u8;
     let mut rest_parameter_count = 0_u8;
     let generator = matches!(
@@ -6551,6 +6553,17 @@ fn verify_supported_opcodes(
             | CompilerExecutableKind::AsyncGeneratorMethod
     );
     let lexical_this = executable_kind == CompilerExecutableKind::OrdinaryArrow;
+    let static_field_super = metadata
+        .variables
+        .iter()
+        .map(VariableDefinition::policy)
+        .chain(
+            metadata
+                .closures
+                .iter()
+                .map(ClosureVariableDefinition::policy),
+        )
+        .any(|policy| policy.kind() == CompilerBindingKind::ClassStaticReceiver);
     let mut initial_yield = None;
     let mapped_arguments_authority = flow
         .compiler_capture_layout()
@@ -6643,7 +6656,7 @@ fn verify_supported_opcodes(
                     | CompilerExecutableKind::AsyncMethod
                     | CompilerExecutableKind::AsyncGeneratorMethod
                     | CompilerExecutableKind::ClassConstructor
-            ))
+            ) && !static_field_super)
             || matches!(
                 (opcode, instruction.operands()),
                 (FinalOpcode::SpecialObject, operands)
@@ -8148,11 +8161,16 @@ fn transfer_internal_operand_stack(
                 _ => {}
             }
         }
-        FinalOpcode::GetSuper => {
-            let Some(InternalStackValue::DerivedActiveConstructor(_)) = state.last().copied()
-            else {
-                return Err(internal_stack_error(id, decoded.pc(), opcode, state));
-            };
+        FinalOpcode::GetSuper
+            if matches!(
+                state.last(),
+                Some(InternalStackValue::DerivedActiveConstructor(_))
+            ) =>
+        {
+            // In a derived constructor `get_super` consumes the typed
+            // superclass-constructor capability. In a method (or a static
+            // field initializer) it instead consumes an ordinary home object
+            // and follows the generic JavaScript-value transfer below.
             *state
                 .last_mut()
                 .expect("derived active constructor is present") =

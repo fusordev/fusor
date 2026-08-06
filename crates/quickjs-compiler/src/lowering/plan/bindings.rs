@@ -758,6 +758,7 @@ impl<'arena> CompilationContext<'_, 'arena, '_> {
                         }
                         ExpressionWork::VisitOptionalChain { .. }
                         | ExpressionWork::CallAfterCallee { .. }
+                        | ExpressionWork::SuperPropertyBase { .. }
                         | ExpressionWork::InitializeInstanceFields => {
                             return Err(LeafCompilationError::SemanticInvariant {
                                 invariant: "assignment-target scheduling delegates complete expressions",
