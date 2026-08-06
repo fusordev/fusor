@@ -1,6 +1,7 @@
 use quickjs_bytecode::{CompilerExecutableKind, FinalOpcode, VerificationLimits};
 use quickjs_compiler::{
     CompilationContext, CompiledFunctionTree, LeafCompilationError, UnsupportedLeafFeature,
+    WritePolicy,
 };
 use quickjs_frontend::{CompilationGoal, FrontendOptions, GlobalScriptGoal, with_parsed_program};
 
@@ -111,14 +112,35 @@ fn a_class_without_an_explicit_constructor_remains_fail_closed() {
 }
 
 #[test]
-fn named_base_class_members_do_not_capture_the_mutable_declaration_cell() {
-    let source = "function make(){class Box{constructor(){}static self(){return Box;}}}";
-    let LeafCompilationError::Unsupported { feature, span } = compile_error(source, "make") else {
-        panic!("class inner-name capture must not use the declaration cell");
-    };
-    assert_eq!(feature, UnsupportedLeafFeature::UnsupportedDeclaration);
-    assert!(
-        source[span.start as usize..span.end as usize].contains("static self"),
-        "diagnostic must identify the self-capturing member"
+fn named_base_class_members_capture_a_distinct_immutable_class_name_cell() {
+    let tree = compile(
+        "function make(){class Box{constructor(){}static self(){return Box;}}}",
+        "make",
     );
+    let class_bindings = tree
+        .root()
+        .storage_plan()
+        .bindings()
+        .iter()
+        .filter(|binding| binding.name() == "Box")
+        .collect::<Vec<_>>();
+    assert_eq!(
+        class_bindings.len(),
+        2,
+        "outer and inner class names differ"
+    );
+    assert!(
+        class_bindings.iter().any(|binding| {
+            binding.is_frame_captured() && binding.policy().writes() == WritePolicy::Immutable
+        }),
+        "the method must capture the immutable synthetic class-name cell"
+    );
+    let opcodes = tree
+        .root()
+        .control_flow()
+        .instructions()
+        .iter()
+        .map(|instruction| instruction.decoded().instruction().opcode())
+        .collect::<Vec<_>>();
+    assert!(opcodes.contains(&FinalOpcode::CloseLoc));
 }

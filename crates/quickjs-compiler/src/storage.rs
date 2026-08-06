@@ -580,6 +580,11 @@ pub(crate) struct OxcIdentityMap {
     pub(crate) node_by_executable: Box<[NodeId]>,
     pub(crate) binding_by_symbol: Box<[Option<BindingId>]>,
     pub(crate) binding_by_declaration: HashMap<(SymbolId, u32, u32), BindingId>,
+    /// The synthetic immutable class-name cell for each named class.  Oxc
+    /// resolves member references to the declaration symbol, but ECMAScript
+    /// gives a class body a distinct inner binding; storage redirects those
+    /// references before capture planning.
+    pub(crate) class_name_bindings: HashMap<NodeId, BindingId>,
     pub(crate) scope_by_binding: Box<[Option<ScopeId>]>,
     pub(crate) reference_by_id: Box<[Option<NativeReferenceId>]>,
 }
@@ -806,6 +811,7 @@ struct ExecutableDraft {
 struct BindingDraft {
     symbol_id: Option<SymbolId>,
     primary_symbol_binding: bool,
+    class_node: Option<NodeId>,
     executable: ExecutableId,
     name: Arc<str>,
     declaration_spans: Arc<[Span]>,
@@ -819,6 +825,7 @@ struct FrozenBindings {
     primary_by_symbol: Vec<Option<BindingId>>,
     source_symbols: Vec<Option<SymbolId>>,
     by_declaration: HashMap<(SymbolId, u32, u32), BindingId>,
+    class_name_bindings: HashMap<NodeId, BindingId>,
 }
 
 #[derive(Default)]
@@ -964,6 +971,7 @@ impl<'unit, 'arena, 'scope> Planner<'unit, 'arena, 'scope> {
         let mut binding_drafts = self.binding_drafts()?;
         let implicit_arguments_references = self.add_arguments_bindings(&mut binding_drafts)?;
         self.add_synthetic_default_binding(&mut binding_drafts)?;
+        self.add_class_name_bindings(&mut binding_drafts)?;
         binding_drafts.sort_by_key(|binding| {
             let first = binding
                 .declaration_spans
@@ -983,13 +991,19 @@ impl<'unit, 'arena, 'scope> Planner<'unit, 'arena, 'scope> {
             primary_by_symbol: symbol_bindings,
             source_symbols,
             by_declaration: declaration_bindings,
+            class_name_bindings,
         } = self.freeze_binding_drafts(binding_drafts)?;
-        let scope_by_binding =
-            self.binding_scope_map(&symbol_bindings, &source_symbols, &bindings)?;
+        let scope_by_binding = self.binding_scope_map(
+            &symbol_bindings,
+            &source_symbols,
+            &class_name_bindings,
+            &bindings,
+        )?;
 
         let mut resolved_drafts = self.resolved_drafts(
             &symbol_bindings,
             &source_symbols,
+            &class_name_bindings,
             &bindings,
             &implicit_arguments_references,
         )?;
@@ -1064,6 +1078,7 @@ impl<'unit, 'arena, 'scope> Planner<'unit, 'arena, 'scope> {
                 node_by_executable: node_by_executable.into_boxed_slice(),
                 binding_by_symbol: symbol_bindings.into_boxed_slice(),
                 binding_by_declaration: declaration_bindings,
+                class_name_bindings,
                 scope_by_binding: scope_by_binding.into_boxed_slice(),
                 reference_by_id: reference_by_id.into_boxed_slice(),
             },
@@ -1081,6 +1096,7 @@ impl<'unit, 'arena, 'scope> Planner<'unit, 'arena, 'scope> {
         &self,
         symbol_bindings: &[Option<BindingId>],
         source_symbols: &[Option<SymbolId>],
+        class_name_bindings: &HashMap<NodeId, BindingId>,
         bindings: &[BindingStorage],
     ) -> Result<Vec<Option<ScopeId>>, CompilerError> {
         let scoping = self.unit.semantic().scoping();
@@ -1144,6 +1160,28 @@ impl<'unit, 'arena, 'scope> Planner<'unit, 'arena, 'scope> {
                         span: binding.declaration_spans.first().copied(),
                     });
                 }
+            }
+        }
+        for (&node_id, &binding) in class_name_bindings {
+            let AstKind::Class(class) = self.unit.semantic().nodes().kind(node_id) else {
+                return Err(CompilerError::SemanticInvariant {
+                    invariant: "synthetic class-name binding belongs to a class node",
+                    span: None,
+                });
+            };
+            let scope = class.scope_id();
+            let target =
+                scopes
+                    .get_mut(binding.index())
+                    .ok_or(CompilerError::SemanticInvariant {
+                        invariant: "class-name binding scope index is in range",
+                        span: Some(class.span),
+                    })?;
+            if target.replace(scope).is_some() {
+                return Err(CompilerError::SemanticInvariant {
+                    invariant: "synthetic class-name binding has one class scope",
+                    span: Some(class.span),
+                });
             }
         }
         Ok(scopes)
@@ -1548,6 +1586,7 @@ impl<'unit, 'arena, 'scope> Planner<'unit, 'arena, 'scope> {
                 drafts.push(BindingDraft {
                     symbol_id: Some(symbol_id),
                     primary_symbol_binding: false,
+                    class_node: None,
                     executable: owner,
                     name: Arc::clone(&name),
                     declaration_spans: parameter_spans.into(),
@@ -1563,6 +1602,7 @@ impl<'unit, 'arena, 'scope> Planner<'unit, 'arena, 'scope> {
                 drafts.push(BindingDraft {
                     symbol_id: Some(symbol_id),
                     primary_symbol_binding: true,
+                    class_node: None,
                     executable: owner,
                     name,
                     declaration_spans: body_spans.into(),
@@ -1583,6 +1623,7 @@ impl<'unit, 'arena, 'scope> Planner<'unit, 'arena, 'scope> {
             drafts.push(BindingDraft {
                 symbol_id: Some(symbol_id),
                 primary_symbol_binding: true,
+                class_node: None,
                 executable: owner,
                 name,
                 declaration_spans,
@@ -1831,6 +1872,7 @@ impl<'unit, 'arena, 'scope> Planner<'unit, 'arena, 'scope> {
         bindings.push(BindingDraft {
             symbol_id: None,
             primary_symbol_binding: false,
+            class_node: None,
             executable: ExecutableId(0),
             name: Arc::from("*default*"),
             declaration_spans: synthetic_spans.into(),
@@ -1838,6 +1880,39 @@ impl<'unit, 'arena, 'scope> Planner<'unit, 'arena, 'scope> {
             policy,
             arguments_object: false,
         });
+        Ok(())
+    }
+
+    /// Adds the lexical class-name environment required by
+    /// `ClassDefinitionEvaluation`.  It deliberately has no Oxc symbol: Oxc
+    /// represents the declaration name once, while ECMAScript gives member
+    /// closures a second, immutable binding whose lifetime ends only after
+    /// those closures have captured it.
+    fn add_class_name_bindings(
+        &self,
+        bindings: &mut Vec<BindingDraft>,
+    ) -> Result<(), CompilerError> {
+        let semantic = self.unit.semantic();
+        for (node_id, node) in semantic.nodes().iter_enumerated() {
+            let AstKind::Class(class) = node.kind() else {
+                continue;
+            };
+            let Some(identifier) = class.id.as_ref() else {
+                continue;
+            };
+            let owner = self.scope_owner(class.scope_id(), Some(class.span))?;
+            bindings.push(BindingDraft {
+                symbol_id: None,
+                primary_symbol_binding: false,
+                class_node: Some(node_id),
+                executable: owner,
+                name: Arc::from(identifier.name.as_str()),
+                declaration_spans: Arc::from([identifier.span]),
+                placement: StoragePlacement::Local,
+                policy: self.declaration_policy(owner, DeclarationKind::Const, false),
+                arguments_object: false,
+            });
+        }
         Ok(())
     }
 
@@ -1905,6 +1980,7 @@ impl<'unit, 'arena, 'scope> Planner<'unit, 'arena, 'scope> {
         &self,
         symbol_bindings: &[Option<BindingId>],
         source_symbols: &[Option<SymbolId>],
+        class_name_bindings: &HashMap<NodeId, BindingId>,
         bindings: &[BindingStorage],
         implicit_arguments_references: &HashMap<ReferenceId, ExecutableId>,
     ) -> Result<Vec<ResolvedDraft>, CompilerError> {
@@ -1965,6 +2041,13 @@ impl<'unit, 'arena, 'scope> Planner<'unit, 'arena, 'scope> {
                 } else {
                     source_binding
                 };
+                let binding = self
+                    .class_name_binding_for_reference(
+                        reference.node_id(),
+                        symbol_id,
+                        class_name_bindings,
+                    )
+                    .unwrap_or(binding);
                 drafts.push(ResolvedDraft {
                     reference_id,
                     executable,
@@ -1978,6 +2061,23 @@ impl<'unit, 'arena, 'scope> Planner<'unit, 'arena, 'scope> {
             }
         }
         Ok(drafts)
+    }
+
+    fn class_name_binding_for_reference(
+        &self,
+        reference_node: NodeId,
+        symbol: SymbolId,
+        class_name_bindings: &HashMap<NodeId, BindingId>,
+    ) -> Option<BindingId> {
+        let nodes = self.unit.semantic().nodes();
+        nodes.ancestor_ids(reference_node).find_map(|node_id| {
+            let AstKind::Class(class) = nodes.kind(node_id) else {
+                return None;
+            };
+            (class.id.as_ref()?.symbol_id.get() == Some(symbol))
+                .then(|| class_name_bindings.get(&node_id).copied())
+                .flatten()
+        })
     }
 
     fn unresolved_drafts(&self) -> Result<Vec<UnresolvedDraft>, CompilerError> {
@@ -2047,6 +2147,7 @@ impl<'unit, 'arena, 'scope> Planner<'unit, 'arena, 'scope> {
             bindings.push(BindingDraft {
                 symbol_id: None,
                 primary_symbol_binding: false,
+                class_node: None,
                 executable: owner,
                 name: Arc::from("arguments"),
                 declaration_spans: Arc::from([span]),
@@ -2467,6 +2568,7 @@ fn freeze_bindings(
     let mut symbol_bindings = vec![None; symbol_count];
     let mut source_symbols = Vec::with_capacity(drafts.len());
     let mut declaration_bindings = HashMap::new();
+    let mut class_name_bindings = HashMap::new();
     for (index, draft) in drafts.into_iter().enumerate() {
         let id = u32::try_from(index)
             .map(BindingId)
@@ -2497,6 +2599,14 @@ fn freeze_bindings(
                 }
             }
         }
+        if let Some(class_node) = draft.class_node
+            && class_name_bindings.insert(class_node, id).is_some()
+        {
+            return Err(CompilerError::SemanticInvariant {
+                invariant: "one synthetic class-name binding per class node",
+                span: draft.declaration_spans.first().copied(),
+            });
+        }
         source_symbols.push(draft.symbol_id);
         bindings.push(BindingStorage {
             id,
@@ -2520,6 +2630,7 @@ fn freeze_bindings(
         primary_by_symbol: symbol_bindings,
         source_symbols,
         by_declaration: declaration_bindings,
+        class_name_bindings,
     })
 }
 

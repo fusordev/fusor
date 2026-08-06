@@ -1,10 +1,10 @@
 use super::super::{
     ArrayExpression, ArrayExpressionElement, ArrowFunctionExpression, AssignmentExpression,
-    AssignmentOperator, AssignmentTarget, AtomPoolIndex, BinaryOperator, BindingId, BranchKind,
+    AssignmentOperator, AssignmentTarget, AtomPoolIndex, BinaryOperator, BranchKind,
     CallExpression, ChainElement, ChainExpression, Class, ClassElement, CompilationContext,
     CompiledConstantPool, CompiledMetadataAtomKey, CompilerLabel, ComputedMemberExpression,
     ConditionalExpression, ExecutableId, ExecutableKind, Expression, FinalOpcode, FrameLayout,
-    Function, FunctionTreeLayout, GetSpan, IdentifierReference, LeafCompilationError,
+    FrameSlot, Function, FunctionTreeLayout, GetSpan, IdentifierReference, LeafCompilationError,
     LogicalExpression, LogicalOperator, LoweredReference, MethodDefinition, MethodDefinitionKind,
     ObjectExpression, ObjectProperty, ObjectPropertyKind, Operands, PlannedControlFlow,
     PlannedInstruction, PropertyKind, SequenceExpression, SimpleAssignmentTarget, Span,
@@ -506,8 +506,6 @@ impl<'compiler, 'unit, 'arena, 'scope> ExpressionPlanner<'compiler, 'unit, 'aren
             feature: UnsupportedLeafFeature::UnsupportedDeclaration,
             span: class.span,
         })?;
-        let class_binding =
-            self.binding_for_identifier(identifier.symbol_id.get(), identifier.span)?;
         if class.super_class.is_some() || !class.decorators.is_empty() {
             return unsupported(UnsupportedLeafFeature::UnsupportedDeclaration, class.span);
         }
@@ -518,7 +516,6 @@ impl<'compiler, 'unit, 'arena, 'scope> ExpressionPlanner<'compiler, 'unit, 'aren
                 return unsupported(UnsupportedLeafFeature::UnsupportedBody, element.span());
             };
             Self::validate_base_class_method(method)?;
-            self.reject_base_class_name_capture(method, class_binding)?;
             if method.kind == MethodDefinitionKind::Constructor
                 && constructor.replace(method.as_ref()).is_some()
             {
@@ -533,6 +530,7 @@ impl<'compiler, 'unit, 'arena, 'scope> ExpressionPlanner<'compiler, 'unit, 'aren
             span: class.body.span,
         })?;
 
+        self.plan_base_class_name_scope_entry(class, layout, flow)?;
         flow.emit(PlannedInstruction::new(
             FinalOpcode::Undefined,
             Operands::None,
@@ -552,6 +550,7 @@ impl<'compiler, 'unit, 'arena, 'scope> ExpressionPlanner<'compiler, 'unit, 'aren
             },
             class.span,
         ))?;
+        self.plan_base_class_name_initialization(class, layout, flow)?;
 
         for element in &class.body.body {
             let ClassElement::MethodDefinition(method) = element else {
@@ -609,7 +608,8 @@ impl<'compiler, 'unit, 'arena, 'scope> ExpressionPlanner<'compiler, 'unit, 'aren
             Operands::None,
             class.span,
         ))?;
-        self.plan_base_class_declaration_binding(identifier, layout, tree_layout, flow)
+        self.plan_base_class_declaration_binding(identifier, layout, tree_layout, flow)?;
+        self.plan_scope_exit(layout.executable, class.scope_id(), layout, flow)
     }
 
     fn validate_base_class_method(
@@ -631,29 +631,91 @@ impl<'compiler, 'unit, 'arena, 'scope> ExpressionPlanner<'compiler, 'unit, 'aren
         Ok(())
     }
 
-    /// A named class creates an inner immutable name binding that method
-    /// closures retain even when the declaration binding is later reassigned.
-    /// The current storage plan has only the outer declaration cell, so accept
-    /// no self-capturing member until the synthetic class environment is
-    /// represented end-to-end rather than silently capturing the wrong cell.
-    fn reject_base_class_name_capture(
+    fn base_class_name_binding(
         &self,
-        method: &MethodDefinition<'arena>,
-        class_binding: BindingId,
-    ) -> Result<(), LeafCompilationError> {
-        let executable = self.executable_for_function(&method.value)?;
-        let captures = self
+        class: &Class<'arena>,
+        layout: &FrameLayout,
+    ) -> Result<super::super::LocalSlot, LeafCompilationError> {
+        let binding = self
             .planned
-            .plan
-            .frame_captures_for(executable)
-            .ok_or(LeafCompilationError::InvalidExecutable { executable })?;
-        if captures
-            .iter()
-            .any(|capture| capture.binding() == class_binding)
+            .identities
+            .class_name_bindings
+            .get(&class.node_id())
+            .copied()
+            .ok_or(LeafCompilationError::SemanticInvariant {
+                invariant: "named class has a synthetic inner-name binding",
+                span: Some(class.span),
+            })?;
+        let storage =
+            self.planned
+                .plan
+                .binding(binding)
+                .ok_or(LeafCompilationError::SemanticInvariant {
+                    invariant: "synthetic class-name binding exists",
+                    span: Some(class.span),
+                })?;
+        let FrameSlot::Local(slot) =
+            layout
+                .slot(binding)
+                .ok_or(LeafCompilationError::SemanticInvariant {
+                    invariant: "synthetic class-name binding has a frame slot",
+                    span: Some(class.span),
+                })?
+        else {
+            return Err(LeafCompilationError::SemanticInvariant {
+                invariant: "synthetic class-name binding uses local storage",
+                span: Some(class.span),
+            });
+        };
+        if storage.executable() != layout.executable
+            || storage.placement() != StoragePlacement::Local
+            || !storage.policy().has_temporal_dead_zone()
         {
-            return unsupported(UnsupportedLeafFeature::UnsupportedDeclaration, method.span);
+            return Err(LeafCompilationError::SemanticInvariant {
+                invariant: "synthetic class-name binding is lexical local storage",
+                span: Some(class.span),
+            });
         }
-        Ok(())
+        Ok(slot)
+    }
+
+    fn plan_base_class_name_scope_entry(
+        &self,
+        class: &Class<'arena>,
+        layout: &FrameLayout,
+        flow: &mut PlannedControlFlow,
+    ) -> Result<(), LeafCompilationError> {
+        let slot = self.base_class_name_binding(class, layout)?;
+        flow.emit(PlannedInstruction::new(
+            FinalOpcode::SetLocUninitialized,
+            Operands::Loc(slot.index()),
+            class.span,
+        ))
+    }
+
+    fn plan_base_class_name_initialization(
+        &self,
+        class: &Class<'arena>,
+        layout: &FrameLayout,
+        flow: &mut PlannedControlFlow,
+    ) -> Result<(), LeafCompilationError> {
+        let slot = self.base_class_name_binding(class, layout)?;
+        flow.emit(PlannedInstruction::new(
+            FinalOpcode::Swap,
+            Operands::None,
+            class.span,
+        ))?;
+        flow.emit(PlannedInstruction::new(
+            FinalOpcode::Dup,
+            Operands::None,
+            class.span,
+        ))?;
+        flow.emit(plan_put_slot(FrameSlot::Local(slot), class.span))?;
+        flow.emit(PlannedInstruction::new(
+            FinalOpcode::Swap,
+            Operands::None,
+            class.span,
+        ))
     }
 
     fn plan_base_class_declaration_binding(

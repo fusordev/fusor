@@ -64,3 +64,14 @@ fn a_class_constructor_rejects_direct_calls_but_remains_constructable() {
         },
     );
 }
+
+#[test]
+fn named_class_members_retain_the_inner_name_after_outer_reassignment() {
+    run_with(
+        "function run(){class Box{constructor(){}static self(){return Box;}}let original=Box;Box=0;return original.self()===original;}",
+        |result| {
+            let value = result.expect("class execution");
+            assert_eq!(value.as_boolean().expect("live Boolean"), Some(true));
+        },
+    );
+}
