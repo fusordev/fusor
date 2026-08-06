@@ -220,6 +220,17 @@ fn anonymous_base_classes_in_ordinary_expression_contexts_keep_an_empty_name() {
 }
 
 #[test]
+fn anonymous_base_classes_in_logical_static_property_assignments_keep_an_empty_name() {
+    run_with(
+        "function run(){let targets=0;let reads=0;let written;let holder={and:1,andKeep:0,nullish:null,nullishKeep:1,keep:true,get or(){reads++;return 0;},set or(value){written=value;}};function target(){targets++;return holder;}let Or=target().or||=class{static answer(){return 3;}};let And=holder.and&&=class{static answer(){return 4;}};let Nullish=holder.nullish??=class{static answer(){return 5;}};let kept=holder.keep||=class{};let keptAnd=holder.andKeep&&=class{};let keptNullish=holder.nullishKeep??=class{};return targets===1&&reads===1&&written===Or&&Or.name===''&&And.name===''&&Nullish.name===''&&Or.answer()===3&&And.answer()===4&&Nullish.answer()===5&&kept===true&&keptAnd===0&&keptNullish===1;}",
+        |result| {
+            let value = result.expect("anonymous logical property-assignment class execution");
+            assert_eq!(value.as_boolean().expect("live Boolean"), Some(true));
+        },
+    );
+}
+
+#[test]
 fn named_class_member_writes_throw_without_mutating_the_inner_name_cell() {
     run_with(
         "function run(){class Box{static replace(){Box=0;}}try{Box.replace();}catch(error){return error.name==='TypeError'&&Box.name==='Box';}return false;}",

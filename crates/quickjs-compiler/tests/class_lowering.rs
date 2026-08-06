@@ -458,6 +458,37 @@ fn ordinary_expression_contexts_use_typed_empty_class_name_atoms() {
 }
 
 #[test]
+fn logical_static_property_class_assignments_use_the_typed_empty_name_path() {
+    let tree = compile(
+        "function make(holder){holder.or||=class{static answer(){return 3;}};holder.and&&=class{static answer(){return 4;}};holder.nullish??=class{static answer(){return 5;}};holder.andKeep&&=class{};holder.nullishKeep??=class{};return holder;}",
+        "make",
+    );
+    let root = tree.root();
+    assert_eq!(
+        root.control_flow()
+            .instructions()
+            .iter()
+            .filter(|instruction| instruction.decoded().instruction().opcode()
+                == FinalOpcode::DefineClass)
+            .count(),
+        5,
+    );
+    assert!(
+        root.atoms()
+            .iter()
+            .any(|atom| atom.is_static_property_only() && atom.string().is_empty())
+    );
+    assert!(
+        root.control_flow()
+            .instructions()
+            .iter()
+            .any(|instruction| {
+                instruction.decoded().instruction().opcode() == FinalOpcode::Swap
+            })
+    );
+}
+
+#[test]
 fn static_field_initializers_requiring_a_class_receiver_stay_fail_closed() {
     let error = with_parsed_program(
         "function make(){class Box{static receiver=this;}return Box;}",
