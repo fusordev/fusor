@@ -108,3 +108,14 @@ fn a_direct_anonymous_base_class_initializer_infers_its_binding_name() {
         },
     );
 }
+
+#[test]
+fn named_class_member_writes_throw_without_mutating_the_inner_name_cell() {
+    run_with(
+        "function run(){class Box{static replace(){Box=0;}}try{Box.replace();}catch(error){return error.name==='TypeError'&&Box.name==='Box';}return false;}",
+        |result| {
+            let value = result.expect("class name assignment completion");
+            assert_eq!(value.as_boolean().expect("live Boolean"), Some(true));
+        },
+    );
+}

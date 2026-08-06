@@ -261,6 +261,8 @@ pub enum DeclarationKind {
     Const,
     /// A class declaration. Classes are mutable lexical bindings with a TDZ.
     Class,
+    /// The compiler-created immutable inner binding for a named class.
+    ClassName,
     /// A function declaration.
     Function,
     /// A named function-expression binding.
@@ -1791,6 +1793,7 @@ impl<'unit, 'arena, 'scope> Planner<'unit, 'arena, 'scope> {
                     Ok(StoragePlacement::GlobalObject)
                 }
                 DeclarationKind::FunctionName
+                | DeclarationKind::ClassName
                 | DeclarationKind::Parameter
                 | DeclarationKind::Catch
                 | DeclarationKind::Import
@@ -1809,6 +1812,7 @@ impl<'unit, 'arena, 'scope> Planner<'unit, 'arena, 'scope> {
                 | DeclarationKind::Class
                 | DeclarationKind::Function => Ok(StoragePlacement::ModuleLocal),
                 DeclarationKind::FunctionName
+                | DeclarationKind::ClassName
                 | DeclarationKind::Parameter
                 | DeclarationKind::Catch
                 | DeclarationKind::SyntheticDefault => Err(CompilerError::SemanticInvariant {
@@ -1843,7 +1847,7 @@ impl<'unit, 'arena, 'scope> Planner<'unit, 'arena, 'scope> {
                 WritePolicy::Mutable,
                 true,
             ),
-            DeclarationKind::Const => (
+            DeclarationKind::Const | DeclarationKind::ClassName => (
                 InitializationPolicy::AtDeclaration,
                 WritePolicy::Immutable,
                 true,
@@ -1961,7 +1965,7 @@ impl<'unit, 'arena, 'scope> Planner<'unit, 'arena, 'scope> {
                 name: Arc::from(identifier.name.as_str()),
                 declaration_spans: Arc::from([identifier.span]),
                 placement: StoragePlacement::Local,
-                policy: self.declaration_policy(owner, DeclarationKind::Const, false),
+                policy: self.declaration_policy(owner, DeclarationKind::ClassName, false),
                 arguments_object: false,
             });
         }

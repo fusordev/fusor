@@ -1,4 +1,6 @@
-use quickjs_bytecode::{CompilerExecutableKind, FinalOpcode, VerificationLimits};
+use quickjs_bytecode::{
+    CompilerBindingKind, CompilerExecutableKind, FinalOpcode, VerificationLimits,
+};
 use quickjs_compiler::{CompilationContext, CompiledFunctionTree, WritePolicy};
 use quickjs_frontend::{CompilationGoal, FrontendOptions, GlobalScriptGoal, with_parsed_program};
 
@@ -147,6 +149,25 @@ fn a_direct_anonymous_base_class_initializer_uses_its_binding_name() {
             .iter()
             .any(|instruction| instruction.decoded().instruction().opcode() == FinalOpcode::SetName),
         "class inference cannot reuse the ordinary-function SetName opcode"
+    );
+}
+
+#[test]
+fn named_class_member_writes_retain_a_dedicated_immutable_class_name_capture() {
+    let tree = compile(
+        "function make(){class Box{static replace(){Box=0;}}return Box;}",
+        "make",
+    );
+    let method = tree
+        .verified_bytecode()
+        .function(quickjs_bytecode::FunctionTemplateId::new(2))
+        .expect("static method template");
+    assert!(
+        method
+            .metadata()
+            .closures()
+            .iter()
+            .any(|definition| { definition.policy().kind() == CompilerBindingKind::ClassName })
     );
 }
 

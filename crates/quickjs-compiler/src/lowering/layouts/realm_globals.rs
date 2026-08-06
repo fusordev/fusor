@@ -108,6 +108,7 @@ impl<'plan> RealmGlobalLayoutBuilder<'plan> {
                     && binding.policy().has_temporal_dead_zone()
             }
             DeclarationKind::FunctionName
+            | DeclarationKind::ClassName
             | DeclarationKind::Parameter
             | DeclarationKind::Catch
             | DeclarationKind::Import

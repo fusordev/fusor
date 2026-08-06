@@ -839,7 +839,7 @@ fn each_missing_semantic_capability_fails_closed_with_a_typed_reason() {
         (
             encode(&[
                 (
-                    FinalOpcode::DefineClass,
+                    FinalOpcode::DefineClassComputed,
                     Operands::AtomU8 {
                         atom: AtomPoolIndex::new(0),
                         value: 1,

@@ -41,6 +41,8 @@ pub enum CompilerBindingKind {
     Let,
     /// A lexical immutable binding.
     Const,
+    /// The immutable inner binding created for a named class definition.
+    ClassName,
     /// A function declaration.
     Function,
     /// A named function-expression self binding.
@@ -138,7 +140,10 @@ impl CompilerBindingPolicy {
     const fn has_scope(self) -> bool {
         matches!(
             self.kind,
-            CompilerBindingKind::Let | CompilerBindingKind::Const | CompilerBindingKind::Catch
+            CompilerBindingKind::Let
+                | CompilerBindingKind::Const
+                | CompilerBindingKind::ClassName
+                | CompilerBindingKind::Catch
         ) || matches!(
             self.initialization,
             CompilerInitializationPolicy::FunctionAtScopeEntry
@@ -165,7 +170,7 @@ impl CompilerBindingPolicy {
                 ) && matches!(self.writes, CompilerWritePolicy::Mutable)
                     && self.temporal_dead_zone
             }
-            CompilerBindingKind::Const => {
+            CompilerBindingKind::Const | CompilerBindingKind::ClassName => {
                 matches!(
                     self.initialization,
                     CompilerInitializationPolicy::AtDeclaration
@@ -3853,6 +3858,7 @@ const fn realm_global_policy_supported(policy: CompilerBindingPolicy) -> bool {
         }
         CompilerBindingKind::Parameter
         | CompilerBindingKind::FunctionName
+        | CompilerBindingKind::ClassName
         | CompilerBindingKind::Catch => false,
     }
 }
@@ -9043,7 +9049,10 @@ fn verify_closure_opcode(
             },
         ));
     }
-    if is_closure_write(opcode) && policy.writes != CompilerWritePolicy::Mutable {
+    if is_closure_write(opcode)
+        && policy.writes != CompilerWritePolicy::Mutable
+        && policy.kind() != CompilerBindingKind::ClassName
+    {
         return Err(policy_error(
             id,
             slot,

@@ -277,6 +277,31 @@ fn duplicate_arguments_snapshot(frame: &Frame) -> Result<Vec<StoredValue>, Execu
     Ok(duplicate)
 }
 
+fn is_class_name_capture_write(
+    runtime: &Runtime,
+    frame: &Frame,
+    index: u32,
+) -> Result<bool, EngineFault> {
+    let code = code(runtime, frame.code)?;
+    let function =
+        code.authority
+            .function(frame.template)
+            .ok_or(EngineFault::InvalidClosureEnvironment {
+                function: frame.template,
+            })?;
+    let definition = function.metadata().closures().get(index as usize).ok_or(
+        EngineFault::MissingPoolEntry {
+            pool: "closure environment",
+            index,
+        },
+    )?;
+    Ok(matches!(
+        definition.binding(),
+        CompilerClosureBinding::Captured(policy)
+            if policy.kind() == CompilerBindingKind::ClassName
+    ))
+}
+
 #[allow(
     clippy::too_many_lines,
     reason = "failure-atomic frame allocation and initialization remain one transaction"
@@ -1942,6 +1967,14 @@ pub(super) fn execute_one(
         | FinalOpcode::PutVarRef2
         | FinalOpcode::PutVarRef3 => {
             let index = closure_index(opcode, operands)?;
+            if is_class_name_capture_write(runtime, frame, index)? {
+                return Ok(Step::Abrupt(immutable_binding_exception(
+                    runtime,
+                    frame,
+                    BindingName::Closure(index),
+                    source_pc,
+                )?));
+            }
             let value = pop(frame)?;
             write_environment(runtime, frame, index, SlotValue::Value(value))?;
         }
@@ -1951,6 +1984,14 @@ pub(super) fn execute_one(
         | FinalOpcode::SetVarRef2
         | FinalOpcode::SetVarRef3 => {
             let index = closure_index(opcode, operands)?;
+            if is_class_name_capture_write(runtime, frame, index)? {
+                return Ok(Step::Abrupt(immutable_binding_exception(
+                    runtime,
+                    frame,
+                    BindingName::Closure(index),
+                    source_pc,
+                )?));
+            }
             let value = peek(frame)?.duplicate();
             write_environment(runtime, frame, index, SlotValue::Value(value))?;
         }
@@ -2020,6 +2061,14 @@ pub(super) fn execute_one(
             let index = closure_index(opcode, operands)?;
             if environment_is_uninitialized(runtime, frame, index)? {
                 return Ok(Step::Abrupt(tdz_exception(
+                    runtime,
+                    frame,
+                    BindingName::Closure(index),
+                    source_pc,
+                )?));
+            }
+            if is_class_name_capture_write(runtime, frame, index)? {
+                return Ok(Step::Abrupt(immutable_binding_exception(
                     runtime,
                     frame,
                     BindingName::Closure(index),
