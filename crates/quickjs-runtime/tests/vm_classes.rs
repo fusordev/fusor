@@ -119,3 +119,27 @@ fn named_class_member_writes_throw_without_mutating_the_inner_name_cell() {
         },
     );
 }
+
+#[test]
+fn computed_public_class_methods_observe_instance_and_static_targets() {
+    run_with(
+        "function run(){let key='instance';class Box{[key](){return 3;}static[key+'Static'](){return 7;}}return new Box()[key]()+Box[key+'Static']();}",
+        |result| {
+            let value = result.expect("computed class method execution");
+            let number = value.as_number().expect("live Number").expect("number");
+            assert!(number.strict_equals(JsNumber::from_i32(10)));
+        },
+    );
+}
+
+#[test]
+fn computed_public_class_accessors_define_their_respective_targets() {
+    run_with(
+        "function run(){let key='value';class Box{get[key](){return this._value;}set[key](value){this._value=value;}static get[key+'Static'](){return 4;}}let box=new Box;box[key]=6;return box[key]+Box[key+'Static'];}",
+        |result| {
+            let value = result.expect("computed class accessor execution");
+            let number = value.as_number().expect("live Number").expect("number");
+            assert!(number.strict_equals(JsNumber::from_i32(10)));
+        },
+    );
+}

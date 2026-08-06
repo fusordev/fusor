@@ -541,9 +541,9 @@ impl<'compiler, 'unit, 'arena, 'scope> ExpressionPlanner<'compiler, 'unit, 'aren
     )]
     /// Lowers the first fully verified class slice: a named base-class
     /// definition with an explicit ordinary or synthesized default constructor
-    /// and statically named public methods/accessors. Heritage, computed names,
-    /// fields, private elements, static blocks, and decorators stay fail-closed
-    /// until their own execution contracts exist.
+    /// and public methods/accessors with either static or computed names.
+    /// Heritage, fields, private elements, static blocks, and decorators stay
+    /// fail-closed until their own execution contracts exist.
     fn plan_base_class_definition(
         &self,
         class: &Class<'arena>,
@@ -627,18 +627,54 @@ impl<'compiler, 'unit, 'arena, 'scope> ExpressionPlanner<'compiler, 'unit, 'aren
             if method.kind == MethodDefinitionKind::Constructor {
                 continue;
             }
-            let key = compiled_static_property_key(&method.key)?.ok_or(
-                LeafCompilationError::Unsupported {
-                    feature: UnsupportedLeafFeature::UnsupportedDeclaration,
-                    span: method.key.span(),
-                },
-            )?;
             let flags = match method.kind {
                 MethodDefinitionKind::Method => 4,
                 MethodDefinitionKind::Get => 5,
                 MethodDefinitionKind::Set => 6,
                 MethodDefinitionKind::Constructor => unreachable!("constructors were skipped"),
             };
+            if method.computed {
+                let key = method
+                    .key
+                    .as_expression()
+                    .ok_or(LeafCompilationError::Unsupported {
+                        feature: UnsupportedLeafFeature::UnsupportedDeclaration,
+                        span: method.key.span(),
+                    })?;
+                if method.r#static {
+                    flow.emit(PlannedInstruction::new(
+                        FinalOpcode::Swap,
+                        Operands::None,
+                        method.span,
+                    ))?;
+                }
+                self.plan_expression(key, layout, tree_layout, constants, &[], flow)?;
+                flow.emit(self.plan_function_closure(
+                    &method.value,
+                    layout.executable,
+                    tree_layout,
+                    constants,
+                )?)?;
+                flow.emit(PlannedInstruction::new(
+                    FinalOpcode::DefineMethodComputed,
+                    Operands::U8(flags),
+                    method.span,
+                ))?;
+                if method.r#static {
+                    flow.emit(PlannedInstruction::new(
+                        FinalOpcode::Swap,
+                        Operands::None,
+                        method.span,
+                    ))?;
+                }
+                continue;
+            }
+            let key = compiled_static_property_key(&method.key)?.ok_or(
+                LeafCompilationError::Unsupported {
+                    feature: UnsupportedLeafFeature::UnsupportedDeclaration,
+                    span: method.key.span(),
+                },
+            )?;
             if method.r#static {
                 flow.emit(PlannedInstruction::new(
                     FinalOpcode::Swap,
@@ -678,12 +714,21 @@ impl<'compiler, 'unit, 'arena, 'scope> ExpressionPlanner<'compiler, 'unit, 'aren
     fn validate_base_class_method(
         method: &MethodDefinition<'arena>,
     ) -> Result<(), LeafCompilationError> {
-        if method.computed || !method.decorators.is_empty() {
+        if !method.decorators.is_empty() {
             return unsupported(UnsupportedLeafFeature::UnsupportedDeclaration, method.span);
         }
         if method.kind == MethodDefinitionKind::Constructor {
-            if method.r#static {
+            if method.r#static || method.computed {
                 return unsupported(UnsupportedLeafFeature::UnsupportedDeclaration, method.span);
+            }
+            return Ok(());
+        }
+        if method.computed {
+            if method.key.as_expression().is_none() {
+                return unsupported(
+                    UnsupportedLeafFeature::UnsupportedDeclaration,
+                    method.key.span(),
+                );
             }
             return Ok(());
         }

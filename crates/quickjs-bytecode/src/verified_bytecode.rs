@@ -4749,7 +4749,11 @@ fn verify_object_definition_provenance(
             FinalOpcode::DefineMethodComputed
                 if !matches!(
                     state.get(state.len().saturating_sub(3)),
-                    Some(ObjectDefinitionProvenance::FreshObject(_))
+                    Some(
+                        ObjectDefinitionProvenance::FreshObject(_)
+                            | ObjectDefinitionProvenance::ClassConstructor(_)
+                            | ObjectDefinitionProvenance::ClassPrototype(_)
+                    )
                 ) =>
             {
                 return Err(method_target_error(id, decoded.pc()));

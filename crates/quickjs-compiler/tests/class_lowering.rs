@@ -172,6 +172,25 @@ fn named_class_member_writes_retain_a_dedicated_immutable_class_name_capture() {
 }
 
 #[test]
+fn computed_public_class_methods_use_the_typed_computed_definition_path() {
+    let tree = compile(
+        "function make(key){class Box{[key](){return 3;}static[key+'Static'](){return 7;}}return Box;}",
+        "make",
+    );
+    assert_eq!(
+        tree.root()
+            .control_flow()
+            .instructions()
+            .iter()
+            .filter(|instruction| {
+                instruction.decoded().instruction().opcode() == FinalOpcode::DefineMethodComputed
+            })
+            .count(),
+        2
+    );
+}
+
+#[test]
 fn named_base_class_members_capture_a_distinct_immutable_class_name_cell() {
     let tree = compile(
         "function make(){class Box{constructor(){}static self(){return Box;}}}",
