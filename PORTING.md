@@ -64,11 +64,11 @@ broad Test262.**
   construction/`new.target`.
 - [x] Global Script evaluation preserves realm `var`, lexical bindings, TDZ,
   declaration conflicts, and source identity across evaluations.
-- [~] Classes: named base declarations/expressions and simple-binding anonymous
-  base expressions (including harmless parentheses) with an explicit or
-  synthesized default constructor and public static/instance methods or
-  accessors execute through
-  typed `define_class`.
+- [~] Classes: named base declarations/expressions, simple-binding anonymous
+  base expressions (including harmless parentheses), and uncomputed
+  object-property anonymous base expressions with an explicit or synthesized
+  default constructor and public static/instance methods or accessors execute
+  through typed `define_class`.
   Member closures capture the spec-required immutable inner class-name cell,
   distinct from the mutable declaration binding. Constructors are strict,
   construct with the installed class prototype, and reject direct calls. The
@@ -80,10 +80,10 @@ broad Test262.**
   their defining class element. Uncomputed public static fields, and computed
   static fields with non-class values, evaluate into own constructor properties
   when their initializers contain no `this`, `super`, or `new.target`.
-- [ ] Class closure: anonymous/inferred-name expressions outside a direct
-  simple binding initializer, `extends`, derived receiver initialization,
-  `super()`/super properties, instance fields, computed-key anonymous-class
-  name inference, class-bound static field contexts, private elements,
+- [ ] Class closure: anonymous/inferred-name expressions in assignments,
+  patterns, computed keys, and other contexts; `extends`, derived receiver
+  initialization, `super()`/super properties, instance fields, computed-key
+  anonymous-class name inference, class-bound static field contexts, private elements,
   decorators, and static blocks. Do not relabel these as
   supported merely because Oxc parses them.
 - [ ] Direct/indirect `eval`, `with`, Annex B block functions, remaining opcode

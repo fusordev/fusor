@@ -16,10 +16,10 @@ use super::{
     ArrayExpression, ArrayExpressionElement, AssignmentTargetProperty, AstKind, BindingPattern,
     CompilationContext, CompiledConstant, CompiledFunctionConstant, Executable, Expression,
     ExpressionPlanner, FunctionTreeLayoutSeed, GetSpan, LeafCompilationError, NodeId,
-    OxcPropertyKey, ParsedUnit, PlannedInstruction, RegExpLiteral, StoragePlacement, UnaryOperator,
-    checked_function_entry_count, compiled_static_property_key, compiler_identifier_string,
-    decode_compiler_string, exact_i32, exact_negated_i32, record_property_candidate,
-    record_property_candidate_for, record_string_candidate,
+    OxcPropertyKey, ParsedUnit, PlannedInstruction, PropertyKind, RegExpLiteral, StoragePlacement,
+    UnaryOperator, checked_function_entry_count, compiled_static_property_key,
+    compiler_identifier_string, decode_compiler_string, exact_i32, exact_negated_i32,
+    record_property_candidate, record_property_candidate_for, record_string_candidate,
 };
 
 impl<'arena> CompilationContext<'_, 'arena, '_> {
@@ -586,6 +586,25 @@ impl<'arena> CompilationContext<'_, 'arena, '_> {
                             span: field.key.span(),
                         },
                     )?;
+                    return Ok((key.value, key.span));
+                }
+                AstKind::ObjectProperty(property)
+                    if !property.computed
+                        && !property.shorthand
+                        && property.kind == PropertyKind::Init =>
+                {
+                    let key = compiled_static_property_key(&property.key)?.ok_or(
+                        LeafCompilationError::Unsupported {
+                            feature: super::UnsupportedLeafFeature::InferredFunctionName,
+                            span: property.key.span(),
+                        },
+                    )?;
+                    if key.value.code_units().eq("__proto__".encode_utf16()) {
+                        return super::unsupported(
+                            super::UnsupportedLeafFeature::InferredFunctionName,
+                            class.span,
+                        );
+                    }
                     return Ok((key.value, key.span));
                 }
                 _ => {
