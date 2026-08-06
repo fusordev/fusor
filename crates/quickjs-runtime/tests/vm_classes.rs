@@ -97,3 +97,14 @@ fn a_named_base_class_expression_retains_its_inner_name_and_constructs() {
         },
     );
 }
+
+#[test]
+fn a_direct_anonymous_base_class_initializer_infers_its_binding_name() {
+    run_with(
+        "function run(){let Result=class{static answer(){return 7;}};let original=Result;Result=0;return original.name==='Result'&&original.answer()===7&&new original().constructor===original;}",
+        |result| {
+            let value = result.expect("anonymous class expression execution");
+            assert_eq!(value.as_boolean().expect("live Boolean"), Some(true));
+        },
+    );
+}

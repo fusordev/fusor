@@ -14,9 +14,9 @@ pub(in crate::lowering) use bindings::{
 pub(in crate::lowering) use control::StatementControlStack;
 pub(in crate::lowering) use destructuring::DestructuringBindingInitialization;
 pub(in crate::lowering) use expressions::{
-    ExpressionPlanner, ExpressionWork, anonymous_named_evaluation_span,
-    anonymous_ordinary_function_span, binary_opcode, exact_i32, exact_negated_i32,
-    plan_push_integer,
+    ExpressionPlanner, ExpressionWork, anonymous_class_expression_span,
+    anonymous_named_evaluation_span, anonymous_ordinary_function_span, binary_opcode, exact_i32,
+    exact_negated_i32, plan_push_integer,
 };
 pub(in crate::lowering) use parameters::LogicalCompilerScope;
 pub(in crate::lowering) use statements::{

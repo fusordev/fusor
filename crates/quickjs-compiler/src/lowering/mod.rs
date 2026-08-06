@@ -87,9 +87,10 @@ use plan::control::{ControlRegion, LoopJump};
 use plan::{
     DestructuringBindingInitialization, ExpressionPlanner, ExpressionWork, LogicalCompilerScope,
     LoweredReference, ScopeEntryInitialization, StatementCompletion, StatementControlStack,
-    StatementPlanningState, StatementWork, anonymous_named_evaluation_span,
-    anonymous_ordinary_function_span, binary_opcode, compact_get_argument, compact_get_local,
-    compact_put_local, exact_i32, exact_negated_i32, plan_push_integer, plan_put_slot,
+    StatementPlanningState, StatementWork, anonymous_class_expression_span,
+    anonymous_named_evaluation_span, anonymous_ordinary_function_span, binary_opcode,
+    compact_get_argument, compact_get_local, compact_put_local, exact_i32, exact_negated_i32,
+    plan_push_integer, plan_put_slot,
 };
 use validation::{OrdinaryFunctionForm, object_method_or_accessor_span};
 

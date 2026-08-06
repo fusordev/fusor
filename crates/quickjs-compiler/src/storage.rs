@@ -1293,8 +1293,7 @@ impl<'unit, 'arena, 'scope> Planner<'unit, 'arena, 'scope> {
                         )
                     }
                     AstKind::Class(class)
-                        if class.id.is_some()
-                            && class.super_class.is_none()
+                        if class.super_class.is_none()
                             && class.decorators.is_empty()
                             && !class.body.body.iter().any(|element| {
                                 matches!(

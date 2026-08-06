@@ -14,9 +14,9 @@ use super::atoms::{
 };
 use super::{
     ArrayExpression, ArrayExpressionElement, AssignmentTargetProperty, AstKind, BindingPattern,
-    CompilationContext, CompiledConstant, CompiledFunctionConstant, Executable, ExpressionPlanner,
-    FunctionTreeLayoutSeed, GetSpan, LeafCompilationError, NodeId, OxcPropertyKey, ParsedUnit,
-    PlannedInstruction, RegExpLiteral, StoragePlacement, UnaryOperator,
+    CompilationContext, CompiledConstant, CompiledFunctionConstant, Executable, Expression,
+    ExpressionPlanner, FunctionTreeLayoutSeed, GetSpan, LeafCompilationError, NodeId,
+    OxcPropertyKey, ParsedUnit, PlannedInstruction, RegExpLiteral, StoragePlacement, UnaryOperator,
     checked_function_entry_count, compiled_static_property_key, compiler_identifier_string,
     decode_compiler_string, exact_i32, exact_negated_i32, record_property_candidate,
     record_property_candidate_for, record_string_candidate,
@@ -439,14 +439,12 @@ impl<'arena> CompilationContext<'_, 'arena, '_> {
                 }
             }
             AstKind::Class(class) => {
-                let identifier = class.id.as_ref().ok_or(LeafCompilationError::Unsupported {
-                    feature: super::UnsupportedLeafFeature::UnsupportedDeclaration,
-                    span: class.span,
-                })?;
-                record_property_candidate(
+                let (name, name_span) = self.class_definition_name(node_id, class)?;
+                record_property_candidate_for(
                     owner,
-                    compiler_identifier_string(identifier.name.as_str(), identifier.span)?,
-                    identifier.span,
+                    name,
+                    name_span,
+                    CompiledPropertyAtomKey::Source(class.span),
                     atom_candidates,
                 )?;
                 for element in &class.body.body {
@@ -543,6 +541,48 @@ impl<'arena> CompilationContext<'_, 'arena, '_> {
             _ => {}
         }
         Ok(())
+    }
+
+    fn class_definition_name(
+        &self,
+        node_id: NodeId,
+        class: &super::Class<'arena>,
+    ) -> Result<(CompilerString, Span), LeafCompilationError> {
+        if let Some(identifier) = class.id.as_ref() {
+            return Ok((
+                compiler_identifier_string(identifier.name.as_str(), identifier.span)?,
+                identifier.span,
+            ));
+        }
+        let nodes = self.unit.semantic().nodes();
+        let AstKind::VariableDeclarator(declarator) = nodes.parent_kind(node_id) else {
+            return super::unsupported(
+                super::UnsupportedLeafFeature::UnsupportedExpression,
+                class.span,
+            );
+        };
+        let BindingPattern::BindingIdentifier(identifier) = &declarator.id else {
+            return super::unsupported(
+                super::UnsupportedLeafFeature::InferredFunctionName,
+                class.span,
+            );
+        };
+        let Some(Expression::ClassExpression(initializer)) = declarator.init.as_ref() else {
+            return Err(LeafCompilationError::SemanticInvariant {
+                invariant: "anonymous class variable initializer remains a class expression",
+                span: Some(class.span),
+            });
+        };
+        if initializer.node_id() != node_id {
+            return Err(LeafCompilationError::SemanticInvariant {
+                invariant: "anonymous class name is inferred from its direct initializer binding",
+                span: Some(class.span),
+            });
+        }
+        Ok((
+            compiler_identifier_string(identifier.name.as_str(), identifier.span)?,
+            identifier.span,
+        ))
     }
 
     fn record_regexp_literal_candidate(

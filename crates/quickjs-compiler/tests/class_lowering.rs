@@ -116,6 +116,41 @@ fn a_named_base_class_expression_uses_the_same_typed_definition_path() {
 }
 
 #[test]
+fn a_direct_anonymous_base_class_initializer_uses_its_binding_name() {
+    let tree = compile(
+        "function make(){let Result=class{static answer(){return 7;}};return Result;}",
+        "make",
+    );
+    assert_eq!(tree.functions().len(), 3);
+    assert_eq!(
+        tree.verified_bytecode()
+            .function(quickjs_bytecode::FunctionTemplateId::new(1))
+            .expect("synthesized anonymous class constructor")
+            .metadata()
+            .executable_kind(),
+        CompilerExecutableKind::ClassConstructor
+    );
+    assert!(
+        tree.root()
+            .control_flow()
+            .instructions()
+            .iter()
+            .any(|instruction| instruction.decoded().instruction().opcode()
+                == FinalOpcode::DefineClass),
+        "the inferred name is supplied to define_class, not a post-closure SetName"
+    );
+    assert!(
+        !tree
+            .root()
+            .control_flow()
+            .instructions()
+            .iter()
+            .any(|instruction| instruction.decoded().instruction().opcode() == FinalOpcode::SetName),
+        "class inference cannot reuse the ordinary-function SetName opcode"
+    );
+}
+
+#[test]
 fn named_base_class_members_capture_a_distinct_immutable_class_name_cell() {
     let tree = compile(
         "function make(){class Box{constructor(){}static self(){return Box;}}}",

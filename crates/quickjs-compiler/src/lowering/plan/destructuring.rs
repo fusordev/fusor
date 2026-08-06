@@ -8,8 +8,8 @@ use super::super::{
     FinalOpcode, FrameLayout, FunctionTreeLayout, GetSpan, IdentifierReference,
     InitializationPolicy, LeafCompilationError, LoweredReference, ObjectAssignmentTarget,
     ObjectPattern, Operands, PlannedControlFlow, PlannedInstruction, Span, StoragePlacement,
-    UnsupportedLeafFeature, WritePolicy, anonymous_named_evaluation_span,
-    anonymous_ordinary_function_span, plan_put_slot, unsupported,
+    UnsupportedLeafFeature, WritePolicy, anonymous_class_expression_span,
+    anonymous_named_evaluation_span, anonymous_ordinary_function_span, plan_put_slot, unsupported,
 };
 use super::abrupt::{AbruptMarker, AbruptMarkerKind};
 
@@ -701,6 +701,9 @@ impl<'arena> CompilationContext<'_, 'arena, '_> {
         let Some(span) = anonymous_named_evaluation_span(initializer) else {
             return Ok(None);
         };
+        if anonymous_class_expression_span(initializer).is_some() {
+            return Ok(None);
+        }
         if anonymous_ordinary_function_span(initializer).is_none() {
             return unsupported(UnsupportedLeafFeature::InferredFunctionName, span);
         }

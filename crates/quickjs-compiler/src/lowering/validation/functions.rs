@@ -60,7 +60,6 @@ impl<'arena> CompilationContext<'_, 'arena, '_> {
             || !executable.has_simple_parameter_list()
             || executable.has_parameter_expressions()
             || !executable.is_strict()
-            || class.id.is_none()
             || class.super_class.is_some()
             || !class.decorators.is_empty()
         {

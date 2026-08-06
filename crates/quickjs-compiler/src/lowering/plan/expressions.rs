@@ -42,6 +42,18 @@ pub(in crate::lowering) fn anonymous_ordinary_function_span(
     }
 }
 
+pub(in crate::lowering) fn anonymous_class_expression_span(
+    mut expression: &Expression<'_>,
+) -> Option<Span> {
+    while let Expression::ParenthesizedExpression(parenthesized) = expression {
+        expression = &parenthesized.expression;
+    }
+    match expression {
+        Expression::ClassExpression(class) if class.id.is_none() => Some(class.span),
+        _ => None,
+    }
+}
+
 pub(in crate::lowering) fn plan_literal(
     expression: &Expression<'_>,
     constants: &CompiledConstantPool,
@@ -540,10 +552,6 @@ impl<'compiler, 'unit, 'arena, 'scope> ExpressionPlanner<'compiler, 'unit, 'aren
         constants: &CompiledConstantPool,
         flow: &mut PlannedControlFlow,
     ) -> Result<(), LeafCompilationError> {
-        let identifier = class.id.as_ref().ok_or(LeafCompilationError::Unsupported {
-            feature: UnsupportedLeafFeature::UnsupportedExpression,
-            span: class.span,
-        })?;
         if class.super_class.is_some() || !class.decorators.is_empty() {
             return unsupported(UnsupportedLeafFeature::UnsupportedDeclaration, class.span);
         }
@@ -563,7 +571,9 @@ impl<'compiler, 'unit, 'arena, 'scope> ExpressionPlanner<'compiler, 'unit, 'aren
                 });
             }
         }
-        self.plan_base_class_name_scope_entry(class, layout, flow)?;
+        if class.id.is_some() {
+            self.plan_base_class_name_scope_entry(class, layout, flow)?;
+        }
         flow.emit(PlannedInstruction::new(
             FinalOpcode::Undefined,
             Operands::None,
@@ -598,12 +608,14 @@ impl<'compiler, 'unit, 'arena, 'scope> ExpressionPlanner<'compiler, 'unit, 'aren
         flow.emit(PlannedInstruction::new(
             FinalOpcode::DefineClass,
             Operands::AtomU8 {
-                atom: constants.property_atom_index(identifier.span)?,
+                atom: constants.property_atom_index(class.span)?,
                 value: 0,
             },
             class.span,
         ))?;
-        self.plan_base_class_name_initialization(class, layout, flow)?;
+        if class.id.is_some() {
+            self.plan_base_class_name_initialization(class, layout, flow)?;
+        }
 
         for element in &class.body.body {
             let ClassElement::MethodDefinition(method) = element else {
@@ -1916,6 +1928,9 @@ impl<'compiler, 'unit, 'arena, 'scope> ExpressionPlanner<'compiler, 'unit, 'aren
         let Some(span) = anonymous_named_evaluation_span(initializer) else {
             return Ok(None);
         };
+        if anonymous_class_expression_span(initializer).is_some() {
+            return Ok(None);
+        }
         if anonymous_ordinary_function_span(initializer).is_none() {
             return unsupported(UnsupportedLeafFeature::InferredFunctionName, span);
         }
@@ -1964,14 +1979,17 @@ impl<'compiler, 'unit, 'arena, 'scope> ExpressionPlanner<'compiler, 'unit, 'aren
             return Ok(());
         }
         let inferred_name = if let Some(span) = anonymous_named_evaluation_span(&property.value) {
-            if anonymous_ordinary_function_span(&property.value).is_none() {
+            if anonymous_class_expression_span(&property.value).is_some() {
+                None
+            } else if anonymous_ordinary_function_span(&property.value).is_none() {
                 return unsupported(UnsupportedLeafFeature::InferredFunctionName, span);
+            } else {
+                Some(PlannedInstruction::new(
+                    FinalOpcode::SetNameComputed,
+                    Operands::None,
+                    span,
+                ))
             }
-            Some(PlannedInstruction::new(
-                FinalOpcode::SetNameComputed,
-                Operands::None,
-                span,
-            ))
         } else {
             None
         };
@@ -2271,6 +2289,9 @@ impl<'compiler, 'unit, 'arena, 'scope> ExpressionPlanner<'compiler, 'unit, 'aren
         let Some(span) = anonymous_named_evaluation_span(initializer) else {
             return Ok(None);
         };
+        if anonymous_class_expression_span(initializer).is_some() {
+            return Ok(None);
+        }
         if anonymous_ordinary_function_span(initializer).is_none() {
             return unsupported(UnsupportedLeafFeature::InferredFunctionName, span);
         }
