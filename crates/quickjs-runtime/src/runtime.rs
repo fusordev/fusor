@@ -492,6 +492,10 @@ pub(crate) struct BytecodeFunction {
     pub(crate) environment: Vec<EnvironmentBinding>,
     pub(crate) lexical_receiver: Option<StoredValue>,
     pub(crate) lexical_new_target: Option<FunctionId>,
+    /// The ECMAScript `[[HomeObject]]` installed when this closure becomes a
+    /// class method, class constructor, or object-literal method.  It is an
+    /// internal GC edge, not a JavaScript-visible property.
+    pub(crate) home_object: Option<HeapReference>,
 }
 
 /// Which decimal rendering a `Number.prototype` method performs.
@@ -3163,6 +3167,7 @@ const fn is_supported_opcode(opcode: FinalOpcode) -> bool {
             | FinalOpcode::Dup2
             | FinalOpcode::Insert2
             | FinalOpcode::Insert3
+            | FinalOpcode::Insert4
             | FinalOpcode::Swap
             | FinalOpcode::Rot3l
             | FinalOpcode::Rot3r
@@ -3174,6 +3179,8 @@ const fn is_supported_opcode(opcode: FinalOpcode) -> bool {
             | FinalOpcode::CheckCtor
             | FinalOpcode::InitCtor
             | FinalOpcode::GetSuper
+            | FinalOpcode::GetSuperValue
+            | FinalOpcode::PutSuperValue
             | FinalOpcode::Perm3
             | FinalOpcode::Throw
             | FinalOpcode::Return

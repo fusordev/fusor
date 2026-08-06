@@ -1630,6 +1630,44 @@ impl<'unit, 'arena, 'scope> Planner<'unit, 'arena, 'scope> {
             if direct_super_call && derived_constructor {
                 continue;
             }
+            let direct_super_property = match nodes.parent_kind(node_id) {
+                AstKind::StaticMemberExpression(member) => {
+                    !member.optional
+                        && matches!(
+                            &member.object,
+                            oxc_ast::ast::Expression::Super(expression)
+                                if expression.node_id.get() == node_id
+                        )
+                }
+                AstKind::ComputedMemberExpression(member) => {
+                    !member.optional
+                        && matches!(
+                            &member.object,
+                            oxc_ast::ast::Expression::Super(expression)
+                                if expression.node_id.get() == node_id
+                        )
+                }
+                _ => false,
+            };
+            let class_method = self
+                .executable_drafts
+                .get(owner.index())
+                .is_some_and(|candidate| {
+                    matches!(
+                        candidate.executable.kind,
+                        ExecutableKind::Function {
+                            asynchronous: false,
+                            generator: false,
+                        }
+                    ) && matches!(
+                        nodes.parent_kind(candidate.node_id),
+                        AstKind::MethodDefinition(method)
+                            if method.value.node_id.get() == candidate.node_id
+                    )
+                });
+            if direct_super_property && class_method {
+                continue;
+            }
             return unsupported(UnsupportedFeature::FunctionSyntheticBinding, span);
         }
         Ok(())

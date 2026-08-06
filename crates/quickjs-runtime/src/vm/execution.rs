@@ -799,6 +799,29 @@ pub(super) fn execute_one(
                     }
                     push(frame, StoredValue::Function(frame.function));
                 }
+                5 => {
+                    let function = runtime.functions.get(frame.function).ok_or(
+                        EngineFault::StaleHeapEdge {
+                            edge: "active function home object",
+                            index: frame.function.index(),
+                            generation: frame.function.generation(),
+                        },
+                    )?;
+                    let home_object =
+                        function
+                            .bytecode()?
+                            .home_object
+                            .ok_or(EngineFault::RuntimeInvariant {
+                                message: "verified super property access has no method home object",
+                            })?;
+                    push(
+                        frame,
+                        match home_object {
+                            HeapReference::Function(function) => StoredValue::Function(function),
+                            HeapReference::Object(object) => StoredValue::Object(object),
+                        },
+                    );
+                }
                 arguments_kind @ (0 | 1) => {
                     let arguments = if frame.arguments_snapshot_use.has_rest_parameter() {
                         let argument_count = frame
@@ -1075,6 +1098,17 @@ pub(super) fn execute_one(
             push(frame, second);
             push(frame, third);
         }
+        FinalOpcode::Insert4 => {
+            let fourth = pop(frame)?;
+            let third = pop(frame)?;
+            let second = pop(frame)?;
+            let first = pop(frame)?;
+            push(frame, fourth.duplicate());
+            push(frame, first);
+            push(frame, second);
+            push(frame, third);
+            push(frame, fourth);
+        }
         FinalOpcode::Swap => {
             let right = pop(frame)?;
             let left = pop(frame)?;
@@ -1225,27 +1259,115 @@ pub(super) fn execute_one(
             });
         }
         FinalOpcode::GetSuper => {
-            let StoredValue::Function(function) = pop(frame)? else {
+            let value = pop(frame)?;
+            let Some(reference) = value.heap_reference() else {
                 return Err(EngineFault::RuntimeInvariant {
-                    message: "verified get_super did not receive its active constructor",
+                    message: "verified get_super did not receive a home object",
                 }
                 .into());
             };
-            if function != frame.function {
+            if matches!(value, StoredValue::Function(function) if function == frame.function)
+                && frame.constructor_state != ConstructorState::DerivedUninitialized
+            {
                 return Err(EngineFault::RuntimeInvariant {
-                    message: "verified get_super escaped its active constructor frame",
+                    message: "derived get_super escaped its uninitialized constructor frame",
                 }
                 .into());
             }
-            let superclass = runtime
-                .object_record(HeapReference::Function(function))?
-                .prototype();
+            let superclass = runtime.object_record(reference)?.prototype();
             push(
                 frame,
                 superclass.map_or(StoredValue::Null, |reference| match reference {
                     HeapReference::Function(function) => StoredValue::Function(function),
                     HeapReference::Object(object) => StoredValue::Object(object),
                 }),
+            );
+        }
+        FinalOpcode::GetSuperValue => {
+            let realm = code(runtime, frame.code)?.realm;
+            let key = pop(frame)?;
+            let base = pop(frame)?;
+            let receiver = pop(frame)?;
+            let property = computed_property_operand(runtime, &key)?;
+            let Some(reference) = base.heap_reference() else {
+                let failure = if matches!(base, StoredValue::Null) {
+                    PropertyFailure::ReadNull
+                } else {
+                    PropertyFailure::ReadUndefined
+                };
+                return Ok(Step::Abrupt(property_exception_at(
+                    realm,
+                    instruction_location(runtime, frame, source_pc)?,
+                    Some(&property.name),
+                    failure,
+                )?));
+            };
+            let return_to =
+                CallReturn::push(verified_instruction.successors().fallthrough().ok_or(
+                    EngineFault::InvalidSuccessor {
+                        function: frame.template,
+                        pc: source_pc,
+                    },
+                )?);
+            let origin = instruction_location(runtime, frame, source_pc)?;
+            return native_step(
+                begin_internal_get(
+                    runtime,
+                    reference,
+                    receiver,
+                    property.key,
+                    realm,
+                    Some(return_to),
+                    origin,
+                    execution_budget,
+                ),
+                return_to,
+            );
+        }
+        FinalOpcode::PutSuperValue => {
+            let realm = code(runtime, frame.code)?.realm;
+            let value = pop(frame)?;
+            let key = pop(frame)?;
+            let base = pop(frame)?;
+            let receiver = pop(frame)?;
+            let property = computed_property_operand(runtime, &key)?;
+            let Some(reference) = base.heap_reference() else {
+                let failure = if matches!(base, StoredValue::Null) {
+                    PropertyFailure::WriteNull
+                } else {
+                    PropertyFailure::WriteUndefined
+                };
+                return Ok(Step::Abrupt(property_exception_at(
+                    realm,
+                    instruction_location(runtime, frame, source_pc)?,
+                    Some(&property.name),
+                    failure,
+                )?));
+            };
+            let return_to =
+                CallReturn::discard(verified_instruction.successors().fallthrough().ok_or(
+                    EngineFault::InvalidSuccessor {
+                        function: frame.template,
+                        pc: source_pc,
+                    },
+                )?);
+            let origin = instruction_location(runtime, frame, source_pc)?;
+            return native_step(
+                begin_internal_set(
+                    runtime,
+                    reference,
+                    property.key,
+                    property.name,
+                    value,
+                    receiver,
+                    frame.strict,
+                    false,
+                    realm,
+                    Some(return_to),
+                    origin,
+                    execution_budget,
+                ),
+                return_to,
             );
         }
         FinalOpcode::CheckCtorReturn => {

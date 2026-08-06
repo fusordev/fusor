@@ -1479,6 +1479,7 @@ pub(super) fn define_static_method(
         }
         .into());
     }
+    set_function_home_object(runtime, function, reference)?;
     runtime.collection_pending = true;
     Ok(PropertyDefinitionOutcome::Complete)
 }

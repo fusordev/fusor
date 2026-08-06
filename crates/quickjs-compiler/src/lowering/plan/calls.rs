@@ -26,6 +26,10 @@ pub(in crate::lowering) fn plan_direct_call(argument_count: u16, span: Span) -> 
 }
 
 impl<'arena> ExpressionPlanner<'_, '_, 'arena, '_> {
+    #[expect(
+        clippy::too_many_lines,
+        reason = "tagged-template planning keeps the reverse work-list schedule visible as one operation"
+    )]
     pub(in crate::lowering) fn plan_tagged_template_expression<'expression>(
         tagged: &'expression TaggedTemplateExpression<'arena>,
         constants: &CompiledConstantPool,
@@ -67,21 +71,91 @@ impl<'arena> ExpressionPlanner<'_, '_, 'arena, '_> {
         ));
         match member {
             Some(MemberCallee::Static(member)) => {
-                work.push(ExpressionWork::Emit(PlannedInstruction::new(
-                    FinalOpcode::GetField2,
-                    Operands::Atom(constants.property_atom_index(member.property.span)?),
-                    member.span,
-                )));
-                work.push(ExpressionWork::Visit(&member.object));
+                if matches!(&member.object, Expression::Super(_)) {
+                    // A `super` method reference has an explicit receiver
+                    // below the lookup triple so getter invocation and the
+                    // eventual call both observe the actual `this` value.
+                    work.push(ExpressionWork::Emit(PlannedInstruction::new(
+                        FinalOpcode::GetSuperValue,
+                        Operands::None,
+                        member.span,
+                    )));
+                    work.push(ExpressionWork::Emit(PlannedInstruction::new(
+                        FinalOpcode::PushAtomValue,
+                        Operands::Atom(constants.property_atom_index(member.property.span)?),
+                        member.property.span,
+                    )));
+                    work.push(ExpressionWork::Emit(PlannedInstruction::new(
+                        FinalOpcode::GetSuper,
+                        Operands::None,
+                        member.object.span(),
+                    )));
+                    work.push(ExpressionWork::Emit(PlannedInstruction::new(
+                        FinalOpcode::SpecialObject,
+                        Operands::U8(5),
+                        member.object.span(),
+                    )));
+                    work.push(ExpressionWork::Emit(PlannedInstruction::new(
+                        FinalOpcode::Dup,
+                        Operands::None,
+                        member.object.span(),
+                    )));
+                    work.push(ExpressionWork::Emit(PlannedInstruction::new(
+                        FinalOpcode::PushThis,
+                        Operands::None,
+                        member.object.span(),
+                    )));
+                } else {
+                    work.push(ExpressionWork::Emit(PlannedInstruction::new(
+                        FinalOpcode::GetField2,
+                        Operands::Atom(constants.property_atom_index(member.property.span)?),
+                        member.span,
+                    )));
+                    work.push(ExpressionWork::Visit(&member.object));
+                }
             }
             Some(MemberCallee::Computed(member)) => {
-                work.push(ExpressionWork::Emit(PlannedInstruction::new(
-                    FinalOpcode::GetArrayEl2,
-                    Operands::None,
-                    member.span,
-                )));
-                work.push(ExpressionWork::Visit(&member.expression));
-                work.push(ExpressionWork::Visit(&member.object));
+                if matches!(&member.object, Expression::Super(_)) {
+                    work.push(ExpressionWork::Emit(PlannedInstruction::new(
+                        FinalOpcode::GetSuperValue,
+                        Operands::None,
+                        member.span,
+                    )));
+                    work.push(ExpressionWork::Emit(PlannedInstruction::new(
+                        FinalOpcode::ToPropKey,
+                        Operands::None,
+                        member.expression.span(),
+                    )));
+                    work.push(ExpressionWork::Visit(&member.expression));
+                    work.push(ExpressionWork::Emit(PlannedInstruction::new(
+                        FinalOpcode::GetSuper,
+                        Operands::None,
+                        member.object.span(),
+                    )));
+                    work.push(ExpressionWork::Emit(PlannedInstruction::new(
+                        FinalOpcode::SpecialObject,
+                        Operands::U8(5),
+                        member.object.span(),
+                    )));
+                    work.push(ExpressionWork::Emit(PlannedInstruction::new(
+                        FinalOpcode::Dup,
+                        Operands::None,
+                        member.object.span(),
+                    )));
+                    work.push(ExpressionWork::Emit(PlannedInstruction::new(
+                        FinalOpcode::PushThis,
+                        Operands::None,
+                        member.object.span(),
+                    )));
+                } else {
+                    work.push(ExpressionWork::Emit(PlannedInstruction::new(
+                        FinalOpcode::GetArrayEl2,
+                        Operands::None,
+                        member.span,
+                    )));
+                    work.push(ExpressionWork::Visit(&member.expression));
+                    work.push(ExpressionWork::Visit(&member.object));
+                }
             }
             Some(MemberCallee::Chain(chain)) => {
                 work.push(ExpressionWork::VisitOptionalChain {
@@ -312,21 +386,88 @@ impl<'arena> ExpressionPlanner<'_, '_, 'arena, '_> {
         }
         match member {
             Some(MemberCallee::Static(member)) => {
-                work.push(ExpressionWork::Emit(PlannedInstruction::new(
-                    FinalOpcode::GetField2,
-                    Operands::Atom(constants.property_atom_index(member.property.span)?),
-                    member.span,
-                )));
-                work.push(ExpressionWork::Visit(&member.object));
+                if matches!(&member.object, Expression::Super(_)) {
+                    work.push(ExpressionWork::Emit(PlannedInstruction::new(
+                        FinalOpcode::GetSuperValue,
+                        Operands::None,
+                        member.span,
+                    )));
+                    work.push(ExpressionWork::Emit(PlannedInstruction::new(
+                        FinalOpcode::PushAtomValue,
+                        Operands::Atom(constants.property_atom_index(member.property.span)?),
+                        member.property.span,
+                    )));
+                    work.push(ExpressionWork::Emit(PlannedInstruction::new(
+                        FinalOpcode::GetSuper,
+                        Operands::None,
+                        member.object.span(),
+                    )));
+                    work.push(ExpressionWork::Emit(PlannedInstruction::new(
+                        FinalOpcode::SpecialObject,
+                        Operands::U8(5),
+                        member.object.span(),
+                    )));
+                    work.push(ExpressionWork::Emit(PlannedInstruction::new(
+                        FinalOpcode::Dup,
+                        Operands::None,
+                        member.object.span(),
+                    )));
+                    work.push(ExpressionWork::Emit(PlannedInstruction::new(
+                        FinalOpcode::PushThis,
+                        Operands::None,
+                        member.object.span(),
+                    )));
+                } else {
+                    work.push(ExpressionWork::Emit(PlannedInstruction::new(
+                        FinalOpcode::GetField2,
+                        Operands::Atom(constants.property_atom_index(member.property.span)?),
+                        member.span,
+                    )));
+                    work.push(ExpressionWork::Visit(&member.object));
+                }
             }
             Some(MemberCallee::Computed(member)) => {
-                work.push(ExpressionWork::Emit(PlannedInstruction::new(
-                    FinalOpcode::GetArrayEl2,
-                    Operands::None,
-                    member.span,
-                )));
-                work.push(ExpressionWork::Visit(&member.expression));
-                work.push(ExpressionWork::Visit(&member.object));
+                if matches!(&member.object, Expression::Super(_)) {
+                    work.push(ExpressionWork::Emit(PlannedInstruction::new(
+                        FinalOpcode::GetSuperValue,
+                        Operands::None,
+                        member.span,
+                    )));
+                    work.push(ExpressionWork::Emit(PlannedInstruction::new(
+                        FinalOpcode::ToPropKey,
+                        Operands::None,
+                        member.expression.span(),
+                    )));
+                    work.push(ExpressionWork::Visit(&member.expression));
+                    work.push(ExpressionWork::Emit(PlannedInstruction::new(
+                        FinalOpcode::GetSuper,
+                        Operands::None,
+                        member.object.span(),
+                    )));
+                    work.push(ExpressionWork::Emit(PlannedInstruction::new(
+                        FinalOpcode::SpecialObject,
+                        Operands::U8(5),
+                        member.object.span(),
+                    )));
+                    work.push(ExpressionWork::Emit(PlannedInstruction::new(
+                        FinalOpcode::Dup,
+                        Operands::None,
+                        member.object.span(),
+                    )));
+                    work.push(ExpressionWork::Emit(PlannedInstruction::new(
+                        FinalOpcode::PushThis,
+                        Operands::None,
+                        member.object.span(),
+                    )));
+                } else {
+                    work.push(ExpressionWork::Emit(PlannedInstruction::new(
+                        FinalOpcode::GetArrayEl2,
+                        Operands::None,
+                        member.span,
+                    )));
+                    work.push(ExpressionWork::Visit(&member.expression));
+                    work.push(ExpressionWork::Visit(&member.object));
+                }
             }
             Some(MemberCallee::Chain(chain)) => {
                 work.push(ExpressionWork::VisitOptionalChain {
@@ -641,6 +782,34 @@ impl<'arena> ExpressionPlanner<'_, '_, 'arena, '_> {
         if member.optional {
             return unsupported(UnsupportedLeafFeature::UnsupportedExpression, member.span);
         }
+        if matches!(&member.object, Expression::Super(_)) {
+            work.push(ExpressionWork::Emit(PlannedInstruction::new(
+                FinalOpcode::GetSuperValue,
+                Operands::None,
+                member.span,
+            )));
+            work.push(ExpressionWork::Emit(PlannedInstruction::new(
+                FinalOpcode::PushAtomValue,
+                Operands::Atom(constants.property_atom_index(member.property.span)?),
+                member.property.span,
+            )));
+            work.push(ExpressionWork::Emit(PlannedInstruction::new(
+                FinalOpcode::GetSuper,
+                Operands::None,
+                member.object.span(),
+            )));
+            work.push(ExpressionWork::Emit(PlannedInstruction::new(
+                FinalOpcode::SpecialObject,
+                Operands::U8(5),
+                member.object.span(),
+            )));
+            work.push(ExpressionWork::Emit(PlannedInstruction::new(
+                FinalOpcode::PushThis,
+                Operands::None,
+                member.object.span(),
+            )));
+            return Ok(());
+        }
         work.push(ExpressionWork::Emit(PlannedInstruction::new(
             FinalOpcode::GetField,
             Operands::Atom(constants.property_atom_index(member.property.span)?),
@@ -656,6 +825,35 @@ impl<'arena> ExpressionPlanner<'_, '_, 'arena, '_> {
     ) -> Result<(), LeafCompilationError> {
         if member.optional {
             return unsupported(UnsupportedLeafFeature::UnsupportedExpression, member.span);
+        }
+        if matches!(&member.object, Expression::Super(_)) {
+            work.push(ExpressionWork::Emit(PlannedInstruction::new(
+                FinalOpcode::GetSuperValue,
+                Operands::None,
+                member.span,
+            )));
+            work.push(ExpressionWork::Emit(PlannedInstruction::new(
+                FinalOpcode::ToPropKey,
+                Operands::None,
+                member.expression.span(),
+            )));
+            work.push(ExpressionWork::Visit(&member.expression));
+            work.push(ExpressionWork::Emit(PlannedInstruction::new(
+                FinalOpcode::GetSuper,
+                Operands::None,
+                member.object.span(),
+            )));
+            work.push(ExpressionWork::Emit(PlannedInstruction::new(
+                FinalOpcode::SpecialObject,
+                Operands::U8(5),
+                member.object.span(),
+            )));
+            work.push(ExpressionWork::Emit(PlannedInstruction::new(
+                FinalOpcode::PushThis,
+                Operands::None,
+                member.object.span(),
+            )));
+            return Ok(());
         }
         work.push(ExpressionWork::Emit(PlannedInstruction::new(
             FinalOpcode::GetArrayEl,
@@ -678,6 +876,40 @@ impl<'arena> ExpressionPlanner<'_, '_, 'arena, '_> {
                 UnsupportedLeafFeature::UnsupportedExpression,
                 assignment.left.span(),
             );
+        }
+        if matches!(&member.object, Expression::Super(_)) {
+            work.push(ExpressionWork::Emit(PlannedInstruction::new(
+                FinalOpcode::PutSuperValue,
+                Operands::None,
+                member.span,
+            )));
+            work.push(ExpressionWork::Emit(PlannedInstruction::new(
+                FinalOpcode::Insert4,
+                Operands::None,
+                assignment.span,
+            )));
+            work.push(ExpressionWork::Visit(&assignment.right));
+            work.push(ExpressionWork::Emit(PlannedInstruction::new(
+                FinalOpcode::PushAtomValue,
+                Operands::Atom(constants.property_atom_index(member.property.span)?),
+                member.property.span,
+            )));
+            work.push(ExpressionWork::Emit(PlannedInstruction::new(
+                FinalOpcode::GetSuper,
+                Operands::None,
+                member.object.span(),
+            )));
+            work.push(ExpressionWork::Emit(PlannedInstruction::new(
+                FinalOpcode::SpecialObject,
+                Operands::U8(5),
+                member.object.span(),
+            )));
+            work.push(ExpressionWork::Emit(PlannedInstruction::new(
+                FinalOpcode::PushThis,
+                Operands::None,
+                member.object.span(),
+            )));
+            return Ok(());
         }
         work.push(ExpressionWork::Emit(PlannedInstruction::new(
             FinalOpcode::PutField,
@@ -704,6 +936,41 @@ impl<'arena> ExpressionPlanner<'_, '_, 'arena, '_> {
                 UnsupportedLeafFeature::UnsupportedExpression,
                 assignment.left.span(),
             );
+        }
+        if matches!(&member.object, Expression::Super(_)) {
+            work.push(ExpressionWork::Emit(PlannedInstruction::new(
+                FinalOpcode::PutSuperValue,
+                Operands::None,
+                member.span,
+            )));
+            work.push(ExpressionWork::Emit(PlannedInstruction::new(
+                FinalOpcode::Insert4,
+                Operands::None,
+                assignment.span,
+            )));
+            work.push(ExpressionWork::Visit(&assignment.right));
+            work.push(ExpressionWork::Emit(PlannedInstruction::new(
+                FinalOpcode::ToPropKey,
+                Operands::None,
+                member.expression.span(),
+            )));
+            work.push(ExpressionWork::Visit(&member.expression));
+            work.push(ExpressionWork::Emit(PlannedInstruction::new(
+                FinalOpcode::GetSuper,
+                Operands::None,
+                member.object.span(),
+            )));
+            work.push(ExpressionWork::Emit(PlannedInstruction::new(
+                FinalOpcode::SpecialObject,
+                Operands::U8(5),
+                member.object.span(),
+            )));
+            work.push(ExpressionWork::Emit(PlannedInstruction::new(
+                FinalOpcode::PushThis,
+                Operands::None,
+                member.object.span(),
+            )));
+            return Ok(());
         }
         work.push(ExpressionWork::Emit(PlannedInstruction::new(
             FinalOpcode::PutArrayEl,

@@ -773,6 +773,14 @@ impl Runtime {
                                         &mut work,
                                     );
                                 }
+                                if let Some(home_object) = bytecode.home_object {
+                                    mark_heap_reference(
+                                        home_object,
+                                        &mut marked_functions,
+                                        &mut marked_objects,
+                                        &mut work,
+                                    );
+                                }
                                 for binding in bytecode.environment.iter().copied() {
                                     if let EnvironmentBinding::Captured(cell) = binding
                                         && marked_cells.insert(cell)

@@ -6141,12 +6141,19 @@ fn verify_supported_opcodes(
                 && !method
                 && !lexical_this
                 && !is_script_authority_kind(authority_kind))
-            || (matches!(opcode, FinalOpcode::GetSuper | FinalOpcode::CheckCtorReturn)
+            || (opcode == FinalOpcode::CheckCtorReturn
                 && !(executable_kind == CompilerExecutableKind::ClassConstructor
                     && flow
                         .function_header()
                         .flags()
                         .is_derived_class_constructor()))
+            || (matches!(
+                opcode,
+                FinalOpcode::GetSuper | FinalOpcode::GetSuperValue | FinalOpcode::PutSuperValue
+            ) && !matches!(
+                executable_kind,
+                CompilerExecutableKind::OrdinaryMethod | CompilerExecutableKind::ClassConstructor
+            ))
             || matches!(
                 (opcode, instruction.operands()),
                 (FinalOpcode::SpecialObject, operands)
@@ -6271,6 +6278,10 @@ fn compiler_special_object_is_authorized(
                     .flags()
                     .is_derived_class_constructor()
         }
+        Operands::U8(5) => matches!(
+            executable_kind,
+            CompilerExecutableKind::OrdinaryMethod | CompilerExecutableKind::ClassConstructor
+        ),
         _ => false,
     }
 }
@@ -6301,6 +6312,7 @@ const fn supported_compiler_opcode(opcode: FinalOpcode) -> bool {
             | FinalOpcode::Dup2
             | FinalOpcode::Insert2
             | FinalOpcode::Insert3
+            | FinalOpcode::Insert4
             | FinalOpcode::Swap
             | FinalOpcode::Rot3l
             | FinalOpcode::Rot3r
@@ -6313,6 +6325,8 @@ const fn supported_compiler_opcode(opcode: FinalOpcode) -> bool {
             | FinalOpcode::CheckCtor
             | FinalOpcode::InitCtor
             | FinalOpcode::GetSuper
+            | FinalOpcode::GetSuperValue
+            | FinalOpcode::PutSuperValue
             | FinalOpcode::Perm3
             | FinalOpcode::Return
             | FinalOpcode::ReturnUndef
@@ -10325,6 +10339,8 @@ fn collect_requirements(
             | FinalOpcode::CallMethod
             | FinalOpcode::InitCtor
             | FinalOpcode::GetSuper
+            | FinalOpcode::GetSuperValue
+            | FinalOpcode::PutSuperValue
             | FinalOpcode::PushThis => {
                 push_requirement(requirements, ExecutionRequirement::Calls);
             }
@@ -10353,7 +10369,7 @@ fn collect_requirements(
                 push_requirement(requirements, ExecutionRequirement::OrdinaryObjects);
             }
             FinalOpcode::SpecialObject => match instruction.operands() {
-                Operands::U8(3 | 4) => {
+                Operands::U8(3..=5) => {
                     push_requirement(requirements, ExecutionRequirement::Calls);
                 }
                 Operands::U8(0 | 1) => {

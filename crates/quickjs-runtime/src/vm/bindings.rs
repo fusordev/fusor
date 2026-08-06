@@ -196,7 +196,40 @@ pub(super) fn define_class(
         }
         .into());
     }
+    set_function_home_object(runtime, constructor, HeapReference::Object(prototype))?;
     Ok(prototype)
+}
+
+/// Installs the non-observable `[[HomeObject]]` edge for one compiler-created
+/// method-like closure.  A closure receives this exactly once, at its paired
+/// class or method definition site.
+pub(super) fn set_function_home_object(
+    runtime: &mut Runtime,
+    function: FunctionId,
+    home_object: HeapReference,
+) -> Result<(), ExecutionError> {
+    let function = runtime
+        .functions
+        .get_mut(function)
+        .ok_or(EngineFault::StaleHeapEdge {
+            edge: "function home object",
+            index: function.index(),
+            generation: function.generation(),
+        })?;
+    let FunctionImplementation::Bytecode(bytecode) = &mut function.implementation else {
+        return Err(EngineFault::RuntimeInvariant {
+            message: "method definition received a non-bytecode closure",
+        }
+        .into());
+    };
+    if bytecode.home_object.replace(home_object).is_some() {
+        return Err(EngineFault::RuntimeInvariant {
+            message: "method closure received its home object twice",
+        }
+        .into());
+    }
+    runtime.collection_pending = true;
+    Ok(())
 }
 
 #[allow(
@@ -627,6 +660,7 @@ pub(super) fn create_closure(
             environment,
             lexical_receiver: lexical.then(|| frame.receiver.duplicate()),
             lexical_new_target: if lexical { frame.new_target } else { None },
+            home_object: None,
         }),
         object: function_record,
         public_roots: 0,
