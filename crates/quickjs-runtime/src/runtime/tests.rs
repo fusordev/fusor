@@ -1335,6 +1335,7 @@ fn array_spread_opcodes_are_admitted_without_public_iterator_markers() {
 
     assert!(is_supported_opcode(FinalOpcode::Append));
     assert!(is_supported_opcode(FinalOpcode::Dup1));
+    assert!(is_supported_opcode(FinalOpcode::Dup2));
     assert!(is_supported_opcode(FinalOpcode::Rot3r));
     assert!(is_supported_opcode(FinalOpcode::ForOfStart));
     assert!(is_supported_opcode(FinalOpcode::ForOfNext));

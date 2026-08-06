@@ -489,6 +489,41 @@ fn logical_static_property_class_assignments_use_the_typed_empty_name_path() {
 }
 
 #[test]
+fn logical_computed_property_class_assignments_preserve_the_raw_key_for_read_and_write() {
+    let tree = compile(
+        "function make(holder,orKey,andKey,nullishKey){holder[orKey]||=class{static answer(){return 3;}};holder[andKey]&&=class{static answer(){return 4;}};holder[nullishKey]??=class{static answer(){return 5;}};return holder;}",
+        "make",
+    );
+    let root = tree.root();
+    assert_eq!(
+        root.control_flow()
+            .instructions()
+            .iter()
+            .filter(|instruction| instruction.decoded().instruction().opcode()
+                == FinalOpcode::DefineClass)
+            .count(),
+        3,
+    );
+    assert_eq!(
+        root.control_flow()
+            .instructions()
+            .iter()
+            .filter(|instruction| instruction.decoded().instruction().opcode() == FinalOpcode::Dup2)
+            .count(),
+        3,
+    );
+    assert_eq!(
+        root.control_flow()
+            .instructions()
+            .iter()
+            .filter(|instruction| instruction.decoded().instruction().opcode()
+                == FinalOpcode::GetArrayEl)
+            .count(),
+        3,
+    );
+}
+
+#[test]
 fn static_field_initializers_requiring_a_class_receiver_stay_fail_closed() {
     let error = with_parsed_program(
         "function make(){class Box{static receiver=this;}return Box;}",

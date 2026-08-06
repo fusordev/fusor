@@ -3160,6 +3160,7 @@ const fn is_supported_opcode(opcode: FinalOpcode) -> bool {
             | FinalOpcode::NipCatch
             | FinalOpcode::Dup
             | FinalOpcode::Dup1
+            | FinalOpcode::Dup2
             | FinalOpcode::Insert2
             | FinalOpcode::Insert3
             | FinalOpcode::Swap

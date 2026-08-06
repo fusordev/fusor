@@ -591,6 +591,25 @@ fn final_authority_admits_only_the_trailing_elision_dup1_length_shape() {
 }
 
 #[test]
+fn final_authority_admits_pair_duplication_with_nonescaping_values() {
+    let instructions = [
+        (FinalOpcode::Object, Operands::None),
+        (FinalOpcode::PushTrue, Operands::None),
+        (FinalOpcode::Dup2, Operands::None),
+        (FinalOpcode::Drop, Operands::None),
+        (FinalOpcode::Drop, Operands::None),
+        (FinalOpcode::Drop, Operands::None),
+        (FinalOpcode::Drop, Operands::None),
+        (FinalOpcode::ReturnUndef, Operands::None),
+    ];
+    verify_compiler_bytecode_graph(
+        typed_stack_input(&instructions, &[], &[]),
+        BytecodeGraphVerificationLimits::default(),
+    )
+    .expect("dup2 duplicates an ordinary operand pair without exposing authority");
+}
+
+#[test]
 fn final_authority_rejects_forged_moved_or_aliased_array_append_pairs() {
     let cases = [
         vec![

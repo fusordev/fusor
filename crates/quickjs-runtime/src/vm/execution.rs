@@ -974,6 +974,14 @@ pub(super) fn execute_one(
             push(frame, value);
             push(frame, top);
         }
+        FinalOpcode::Dup2 => {
+            let right = pop(frame)?;
+            let left = pop(frame)?;
+            push(frame, left.duplicate());
+            push(frame, right.duplicate());
+            push(frame, left);
+            push(frame, right);
+        }
         FinalOpcode::Insert2 => {
             let right = pop(frame)?;
             let left = pop(frame)?;

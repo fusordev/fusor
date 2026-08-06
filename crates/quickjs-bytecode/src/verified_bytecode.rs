@@ -5043,6 +5043,13 @@ fn transfer_object_definition_provenance(
             state[pair + 1] = ObjectDefinitionProvenance::AppendLengthTarget(site);
             state.push(ObjectDefinitionProvenance::AppendLengthCursor(site));
         }
+        FinalOpcode::Dup2 => {
+            let left_index = state.len() - 2;
+            let left = shuffled_object_definition_provenance(state[left_index]);
+            let right = shuffled_object_definition_provenance(state[left_index + 1]);
+            state.push(left);
+            state.push(right);
+        }
         FinalOpcode::Insert2 => {
             let left_index = state.len() - 2;
             let left = shuffled_object_definition_provenance(state[left_index]);
@@ -6045,6 +6052,7 @@ const fn supported_compiler_opcode(opcode: FinalOpcode) -> bool {
             | FinalOpcode::Nip
             | FinalOpcode::Dup
             | FinalOpcode::Dup1
+            | FinalOpcode::Dup2
             | FinalOpcode::Insert2
             | FinalOpcode::Insert3
             | FinalOpcode::Swap

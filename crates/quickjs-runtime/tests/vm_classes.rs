@@ -231,6 +231,17 @@ fn anonymous_base_classes_in_logical_static_property_assignments_keep_an_empty_n
 }
 
 #[test]
+fn anonymous_base_classes_in_logical_computed_property_assignments_keep_an_empty_name() {
+    run_with(
+        "function run(){let events=[];function field(name){events.push('class-'+name);return 3;}function key(name){return {toString(){events.push('key-'+name);return name;}};}let written;let holder={and:1,nullish:null,get or(){events.push('get-or');return 0;},set or(value){events.push('set-or');written=value;}};let Or=holder[key('or')]||=class{static answer=field('or');};let And=holder[key('and')]&&=class{static answer=field('and');};let Nullish=holder[key('nullish')]??=class{static answer=field('nullish');};return Or.name===''&&And.name===''&&Nullish.name===''&&written===Or&&Or.answer===3&&And.answer===3&&Nullish.answer===3&&events.join(',')==='key-or,get-or,class-or,key-or,set-or,key-and,class-and,key-and,key-nullish,class-nullish,key-nullish';}",
+        |result| {
+            let value = result.expect("anonymous logical computed-property class execution");
+            assert_eq!(value.as_boolean().expect("live Boolean"), Some(true));
+        },
+    );
+}
+
+#[test]
 fn named_class_member_writes_throw_without_mutating_the_inner_name_cell() {
     run_with(
         "function run(){class Box{static replace(){Box=0;}}try{Box.replace();}catch(error){return error.name==='TypeError'&&Box.name==='Box';}return false;}",

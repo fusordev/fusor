@@ -2398,6 +2398,16 @@ impl<'compiler, 'unit, 'arena, 'scope> ExpressionPlanner<'compiler, 'unit, 'aren
             return Self::plan_static_member_assignment(assignment, member, constants, work);
         }
         if let AssignmentTarget::ComputedMemberExpression(member) = &assignment.left {
+            if matches!(
+                assignment.operator,
+                AssignmentOperator::LogicalOr
+                    | AssignmentOperator::LogicalAnd
+                    | AssignmentOperator::LogicalNullish
+            ) {
+                return Self::plan_computed_member_logical_assignment(
+                    assignment, member, flow, work,
+                );
+            }
             return Self::plan_computed_member_assignment(assignment, member, work);
         }
         if let AssignmentTarget::ArrayAssignmentTarget(pattern) = &assignment.left {
@@ -2659,6 +2669,112 @@ impl<'compiler, 'unit, 'arena, 'scope> ExpressionPlanner<'compiler, 'unit, 'aren
             Operands::None,
             member.span,
         )));
+        work.push(ExpressionWork::Visit(&member.object));
+        Ok(())
+    }
+
+    fn plan_computed_member_logical_assignment<'expression>(
+        assignment: &'expression AssignmentExpression<'arena>,
+        member: &'expression ComputedMemberExpression<'arena>,
+        flow: &mut PlannedControlFlow,
+        work: &mut Vec<ExpressionWork<'expression, 'arena>>,
+    ) -> Result<(), LeafCompilationError> {
+        if member.optional {
+            return unsupported(
+                UnsupportedLeafFeature::UnsupportedExpression,
+                assignment.left.span(),
+            );
+        }
+        let short_circuit = flow.new_label(assignment.span)?;
+        let done = flow.new_label(assignment.span)?;
+        let branch_kind = match assignment.operator {
+            AssignmentOperator::LogicalOr => BranchKind::IfTrue,
+            AssignmentOperator::LogicalAnd | AssignmentOperator::LogicalNullish => {
+                BranchKind::IfFalse
+            }
+            _ => {
+                return Err(LeafCompilationError::SemanticInvariant {
+                    invariant: "logical computed member assignment has a short-circuit branch",
+                    span: Some(assignment.span),
+                });
+            }
+        };
+
+        // `dup2; get_array_el` preserves the raw base/key pair for the
+        // possible write while reading the old value. The key conversion is
+        // deliberately observable once for the read and again for the write.
+        // The short-circuit and write paths both leave exactly one completion.
+        work.push(ExpressionWork::Bind(done.clone()));
+        work.push(ExpressionWork::Emit(PlannedInstruction::new(
+            FinalOpcode::Drop,
+            Operands::None,
+            member.span,
+        )));
+        work.push(ExpressionWork::Emit(PlannedInstruction::new(
+            FinalOpcode::Swap,
+            Operands::None,
+            member.span,
+        )));
+        work.push(ExpressionWork::Emit(PlannedInstruction::new(
+            FinalOpcode::Drop,
+            Operands::None,
+            member.span,
+        )));
+        work.push(ExpressionWork::Emit(PlannedInstruction::new(
+            FinalOpcode::Swap,
+            Operands::None,
+            member.span,
+        )));
+        work.push(ExpressionWork::Bind(short_circuit.clone()));
+        work.push(ExpressionWork::Branch {
+            kind: BranchKind::Goto,
+            target: done,
+            span: assignment.span,
+        });
+        work.push(ExpressionWork::Emit(PlannedInstruction::new(
+            FinalOpcode::PutArrayEl,
+            Operands::None,
+            member.span,
+        )));
+        work.push(ExpressionWork::Emit(PlannedInstruction::new(
+            FinalOpcode::Insert3,
+            Operands::None,
+            assignment.span,
+        )));
+        work.push(ExpressionWork::Visit(&assignment.right));
+        work.push(ExpressionWork::Emit(PlannedInstruction::new(
+            FinalOpcode::Drop,
+            Operands::None,
+            member.span,
+        )));
+        work.push(ExpressionWork::Branch {
+            kind: branch_kind,
+            target: short_circuit,
+            span: assignment.span,
+        });
+        if assignment.operator == AssignmentOperator::LogicalNullish {
+            work.push(ExpressionWork::Emit(PlannedInstruction::new(
+                FinalOpcode::IsUndefinedOrNull,
+                Operands::None,
+                member.span,
+            )));
+        }
+        work.push(ExpressionWork::Emit(PlannedInstruction::new(
+            FinalOpcode::Dup,
+            Operands::None,
+            member.span,
+        )));
+        work.push(ExpressionWork::Emit(PlannedInstruction::new(
+            FinalOpcode::GetArrayEl,
+            Operands::None,
+            member.span,
+        )));
+        work.push(ExpressionWork::Emit(PlannedInstruction::new(
+            FinalOpcode::Dup2,
+            Operands::None,
+            member.span,
+        )));
+        work.push(ExpressionWork::Visit(&member.expression));
         work.push(ExpressionWork::Visit(&member.object));
         Ok(())
     }
