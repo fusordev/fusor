@@ -121,6 +121,17 @@ fn a_parenthesized_anonymous_base_class_initializer_infers_its_binding_name() {
 }
 
 #[test]
+fn an_anonymous_base_class_assignment_infers_its_identifier_name() {
+    run_with(
+        "function run(){let Result;let assigned=(Result=class{static answer(){return 7;}});return assigned===Result&&Result.name==='Result'&&Result.answer()===7&&new Result().constructor===Result;}",
+        |result| {
+            let value = result.expect("anonymous class assignment execution");
+            assert_eq!(value.as_boolean().expect("live Boolean"), Some(true));
+        },
+    );
+}
+
+#[test]
 fn anonymous_base_class_object_properties_infer_their_static_key_name() {
     run_with(
         "function run(){let holder={Result:class{static answer(){return 7;}}};let original=holder.Result;return original.name==='Result'&&original.answer()===7&&new original().constructor===original;}",
