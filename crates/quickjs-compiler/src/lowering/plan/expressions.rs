@@ -7,12 +7,13 @@ use super::super::{
     Expression, FinalOpcode, FrameLayout, FrameSlot, Function, FunctionPlanningContext,
     FunctionTreeLayout, GetSpan, IdentifierReference, InitializationPolicy, LeafCompilationError,
     LogicalExpression, LogicalOperator, LoweredReference, MethodDefinition, MethodDefinitionKind,
-    NodeId, ObjectExpression, ObjectProperty, ObjectPropertyKind, Operands, PlannedControlFlow,
-    PlannedInstruction, PropertyDefinition, PropertyKind, SequenceExpression,
-    SimpleAssignmentTarget, Span, StatementCompletion, StatementControlStack,
-    StatementPlanningState, StatementWork, StaticMemberExpression, StoragePlacement,
-    UnaryExpression, UnaryOperator, UnsupportedLeafFeature, UpdateExpression, UpdateOperator,
-    compiled_static_property_key, object_method_or_accessor_span, plan_put_slot, unsupported,
+    NodeId, ObjectExpression, ObjectProperty, ObjectPropertyKind, Operands, OxcPropertyKey,
+    PlannedControlFlow, PlannedInstruction, PrivateFieldExpression, PropertyDefinition,
+    PropertyKind, SequenceExpression, SimpleAssignmentTarget, Span, StatementCompletion,
+    StatementControlStack, StatementPlanningState, StatementWork, StaticMemberExpression,
+    StoragePlacement, UnaryExpression, UnaryOperator, UnsupportedLeafFeature, UpdateExpression,
+    UpdateOperator, compiled_static_property_key, object_method_or_accessor_span, plan_put_slot,
+    unsupported,
 };
 use super::abrupt::{AbruptMarker, AbruptMarkerKind};
 use super::calls::MemberCallee;
@@ -401,6 +402,9 @@ impl<'compiler, 'unit, 'arena, 'scope> ExpressionPlanner<'compiler, 'unit, 'aren
                         Expression::ComputedMemberExpression(member) => {
                             Self::plan_computed_member_read(member, &mut work)?;
                         }
+                        Expression::PrivateFieldExpression(member) => {
+                            self.plan_private_member_read(member, layout, &mut work)?;
+                        }
                         Expression::ChainExpression(chain) => {
                             Self::plan_optional_chain(chain, false, constants, flow, &mut work)?;
                         }
@@ -654,6 +658,123 @@ impl<'compiler, 'unit, 'arena, 'scope> ExpressionPlanner<'compiler, 'unit, 'aren
         Ok(true)
     }
 
+    fn plan_private_member_read<'expression>(
+        &self,
+        member: &'expression PrivateFieldExpression<'arena>,
+        layout: &FrameLayout,
+        work: &mut Vec<ExpressionWork<'expression, 'arena>>,
+    ) -> Result<(), LeafCompilationError> {
+        if member.optional {
+            return unsupported(UnsupportedLeafFeature::UnsupportedExpression, member.span);
+        }
+        let (binding, slot) = self.private_name_binding_for_access(member, layout)?;
+        work.push(ExpressionWork::Emit(PlannedInstruction::new(
+            FinalOpcode::GetPrivateField,
+            Operands::None,
+            member.span,
+        )));
+        work.push(ExpressionWork::Emit(self.plan_read_slot(
+            binding,
+            slot,
+            member.field.span,
+        )?));
+        work.push(ExpressionWork::Visit(&member.object));
+        Ok(())
+    }
+
+    fn private_name_binding_for_access(
+        &self,
+        member: &PrivateFieldExpression<'arena>,
+        layout: &FrameLayout,
+    ) -> Result<(BindingId, FrameSlot), LeafCompilationError> {
+        let nodes = self.unit.semantic().nodes();
+        for ancestor in nodes.ancestor_ids(member.node_id.get()) {
+            let AstKind::Class(class) = nodes.kind(ancestor) else {
+                continue;
+            };
+            for element in &class.body.body {
+                let ClassElement::PropertyDefinition(field) = element else {
+                    continue;
+                };
+                let OxcPropertyKey::PrivateIdentifier(identifier) = &field.key else {
+                    continue;
+                };
+                if identifier.name != member.field.name {
+                    continue;
+                }
+                let binding = self
+                    .planned
+                    .identities
+                    .class_private_name_bindings
+                    .get(&field.node_id.get())
+                    .copied()
+                    .ok_or(LeafCompilationError::Unsupported {
+                        feature: UnsupportedLeafFeature::UnsupportedExpression,
+                        span: member.span,
+                    })?;
+                let storage = self.planned.plan.binding(binding).ok_or(
+                    LeafCompilationError::SemanticInvariant {
+                        invariant: "private field access binding exists",
+                        span: Some(member.span),
+                    },
+                )?;
+                if storage.policy().kind() != DeclarationKind::ClassPrivateName
+                    || storage.placement() != StoragePlacement::Local
+                {
+                    return Err(LeafCompilationError::SemanticInvariant {
+                        invariant: "private field access uses immutable class private-name storage",
+                        span: Some(member.span),
+                    });
+                }
+                let slot = layout
+                    .slot(binding)
+                    .ok_or(LeafCompilationError::SemanticInvariant {
+                        invariant: "private field access binding has a frame slot",
+                        span: Some(member.span),
+                    })?;
+                return Ok((binding, slot));
+            }
+        }
+        unsupported(UnsupportedLeafFeature::UnsupportedExpression, member.span)
+    }
+
+    fn plan_private_member_assignment<'expression>(
+        &self,
+        assignment: &'expression AssignmentExpression<'arena>,
+        member: &'expression PrivateFieldExpression<'arena>,
+        layout: &FrameLayout,
+        work: &mut Vec<ExpressionWork<'expression, 'arena>>,
+    ) -> Result<(), LeafCompilationError> {
+        if assignment.operator != AssignmentOperator::Assign || member.optional {
+            return unsupported(
+                UnsupportedLeafFeature::UnsupportedExpression,
+                assignment.left.span(),
+            );
+        }
+        let (binding, slot) = self.private_name_binding_for_access(member, layout)?;
+        // As with computed-member assignment, preserve the RHS as the
+        // assignment completion below the receiver/name/value triple consumed
+        // by `put_private_field`.
+        work.push(ExpressionWork::Emit(PlannedInstruction::new(
+            FinalOpcode::PutPrivateField,
+            Operands::None,
+            member.span,
+        )));
+        work.push(ExpressionWork::Emit(PlannedInstruction::new(
+            FinalOpcode::Insert3,
+            Operands::None,
+            assignment.span,
+        )));
+        work.push(ExpressionWork::Visit(&assignment.right));
+        work.push(ExpressionWork::Emit(self.plan_read_slot(
+            binding,
+            slot,
+            member.field.span,
+        )?));
+        work.push(ExpressionWork::Visit(&member.object));
+        Ok(())
+    }
+
     #[allow(
         clippy::too_many_lines,
         reason = "class definition lowering preserves its stack topology in one audited sequence"
@@ -746,6 +867,7 @@ impl<'compiler, 'unit, 'arena, 'scope> ExpressionPlanner<'compiler, 'unit, 'aren
         if class.id.is_some() {
             self.plan_base_class_name_initialization(class, layout, flow)?;
         }
+        self.plan_base_class_private_name_initializations(class, layout, constants, flow)?;
         self.plan_base_class_static_receiver_initialization(class, layout, flow)?;
 
         for element in &class.body.body {
@@ -848,6 +970,9 @@ impl<'compiler, 'unit, 'arena, 'scope> ExpressionPlanner<'compiler, 'unit, 'aren
             return unsupported(UnsupportedLeafFeature::UnsupportedDeclaration, field.span);
         }
         if !field.r#static {
+            if matches!(field.key, OxcPropertyKey::PrivateIdentifier(_)) {
+                return Ok(());
+            }
             if field.computed {
                 field
                     .key
@@ -879,6 +1004,72 @@ impl<'compiler, 'unit, 'arena, 'scope> ExpressionPlanner<'compiler, 'unit, 'aren
         }
         if field.value.is_none() {
             return Ok(());
+        }
+        Ok(())
+    }
+
+    fn plan_base_class_private_name_initializations(
+        &self,
+        class: &Class<'arena>,
+        layout: &FrameLayout,
+        constants: &CompiledConstantPool,
+        flow: &mut PlannedControlFlow,
+    ) -> Result<(), LeafCompilationError> {
+        for element in &class.body.body {
+            let ClassElement::PropertyDefinition(field) = element else {
+                continue;
+            };
+            let OxcPropertyKey::PrivateIdentifier(identifier) = &field.key else {
+                continue;
+            };
+            if field.r#static {
+                return unsupported(UnsupportedLeafFeature::UnsupportedDeclaration, field.span);
+            }
+            let binding = self
+                .planned
+                .identities
+                .class_private_name_bindings
+                .get(&field.node_id.get())
+                .copied()
+                .ok_or(LeafCompilationError::SemanticInvariant {
+                    invariant: "private field has a class-scope name binding",
+                    span: Some(identifier.span),
+                })?;
+            let storage = self.planned.plan.binding(binding).ok_or(
+                LeafCompilationError::SemanticInvariant {
+                    invariant: "private field name binding exists",
+                    span: Some(identifier.span),
+                },
+            )?;
+            if storage.executable() != layout.executable
+                || storage.placement() != StoragePlacement::Local
+                || storage.policy().kind() != DeclarationKind::ClassPrivateName
+                || !storage.policy().has_temporal_dead_zone()
+            {
+                return Err(LeafCompilationError::SemanticInvariant {
+                    invariant: "private field name is lexical class local storage",
+                    span: Some(identifier.span),
+                });
+            }
+            let FrameSlot::Local(slot) =
+                layout
+                    .slot(binding)
+                    .ok_or(LeafCompilationError::SemanticInvariant {
+                        invariant: "private field name binding has a local frame slot",
+                        span: Some(identifier.span),
+                    })?
+            else {
+                return Err(LeafCompilationError::SemanticInvariant {
+                    invariant: "private field name binding uses local storage",
+                    span: Some(identifier.span),
+                });
+            };
+            flow.emit(PlannedInstruction::new(
+                FinalOpcode::PrivateSymbol,
+                Operands::Atom(constants.property_atom_index(identifier.span)?),
+                identifier.span,
+            ))?;
+            flow.emit(plan_put_slot(FrameSlot::Local(slot), identifier.span))?;
         }
         Ok(())
     }
@@ -1228,6 +1419,16 @@ impl<'compiler, 'unit, 'arena, 'scope> ExpressionPlanner<'compiler, 'unit, 'aren
         synthesized_default: bool,
         flow: &mut PlannedControlFlow,
     ) -> Result<(), LeafCompilationError> {
+        if matches!(field.key, OxcPropertyKey::PrivateIdentifier(_)) {
+            return self.plan_private_instance_field_initialization(
+                field,
+                layout,
+                tree_layout,
+                constants,
+                synthesized_default,
+                flow,
+            );
+        }
         if field.computed {
             return self.plan_computed_instance_field_initialization(
                 field,
@@ -1277,6 +1478,64 @@ impl<'compiler, 'unit, 'arena, 'scope> ExpressionPlanner<'compiler, 'unit, 'aren
         flow.emit(PlannedInstruction::new(
             FinalOpcode::DefineField,
             Operands::Atom(atom),
+            field.span,
+        ))?;
+        flow.emit(PlannedInstruction::new(
+            FinalOpcode::Drop,
+            Operands::None,
+            field.span,
+        ))?;
+        if synthesized_default {
+            flow.emit(PlannedInstruction::new(
+                FinalOpcode::Nop,
+                Operands::None,
+                field.span,
+            ))?;
+        }
+        Ok(())
+    }
+
+    fn plan_private_instance_field_initialization(
+        &self,
+        field: &PropertyDefinition<'arena>,
+        layout: &FrameLayout,
+        tree_layout: &FunctionTreeLayout,
+        constants: &CompiledConstantPool,
+        synthesized_default: bool,
+        flow: &mut PlannedControlFlow,
+    ) -> Result<(), LeafCompilationError> {
+        let (binding, slot) = self.private_instance_field_name_binding(field, layout)?;
+        let FrameSlot::Capture(_) = slot else {
+            return Err(LeafCompilationError::SemanticInvariant {
+                invariant: "instance constructor captures its private field name",
+                span: Some(field.key.span()),
+            });
+        };
+        if synthesized_default {
+            flow.emit(PlannedInstruction::new(
+                FinalOpcode::Nop,
+                Operands::None,
+                field.span,
+            ))?;
+        }
+        flow.emit(PlannedInstruction::new(
+            FinalOpcode::PushThis,
+            Operands::None,
+            field.span,
+        ))?;
+        flow.emit(self.plan_read_slot(binding, slot, field.key.span())?)?;
+        if let Some(value) = &field.value {
+            self.plan_expression(value, layout, tree_layout, constants, &[], flow)?;
+        } else {
+            flow.emit(PlannedInstruction::new(
+                FinalOpcode::Undefined,
+                Operands::None,
+                field.span,
+            ))?;
+        }
+        flow.emit(PlannedInstruction::new(
+            FinalOpcode::DefinePrivateField,
+            Operands::None,
             field.span,
         ))?;
         flow.emit(PlannedInstruction::new(
@@ -1402,6 +1661,52 @@ impl<'compiler, 'unit, 'arena, 'scope> ExpressionPlanner<'compiler, 'unit, 'aren
             .slot(binding)
             .ok_or(LeafCompilationError::SemanticInvariant {
                 invariant: "computed instance-field key binding has a frame slot",
+                span: Some(field.key.span()),
+            })?;
+        Ok((binding, slot))
+    }
+
+    fn private_instance_field_name_binding(
+        &self,
+        field: &PropertyDefinition<'arena>,
+        layout: &FrameLayout,
+    ) -> Result<(BindingId, FrameSlot), LeafCompilationError> {
+        if field.r#static || !matches!(field.key, OxcPropertyKey::PrivateIdentifier(_)) {
+            return Err(LeafCompilationError::SemanticInvariant {
+                invariant: "private field name binding belongs to a private instance field",
+                span: Some(field.span),
+            });
+        }
+        let binding = self
+            .planned
+            .identities
+            .class_private_name_bindings
+            .get(&field.node_id.get())
+            .copied()
+            .ok_or(LeafCompilationError::SemanticInvariant {
+                invariant: "private instance field has a class-scope name binding",
+                span: Some(field.key.span()),
+            })?;
+        let storage =
+            self.planned
+                .plan
+                .binding(binding)
+                .ok_or(LeafCompilationError::SemanticInvariant {
+                    invariant: "private instance field name binding exists",
+                    span: Some(field.key.span()),
+                })?;
+        if storage.policy().kind() != DeclarationKind::ClassPrivateName
+            || storage.placement() != StoragePlacement::Local
+        {
+            return Err(LeafCompilationError::SemanticInvariant {
+                invariant: "private instance field name is immutable local storage",
+                span: Some(field.key.span()),
+            });
+        }
+        let slot = layout
+            .slot(binding)
+            .ok_or(LeafCompilationError::SemanticInvariant {
+                invariant: "private instance field name binding has a frame slot",
                 span: Some(field.key.span()),
             })?;
         Ok((binding, slot))
@@ -3066,6 +3371,9 @@ impl<'compiler, 'unit, 'arena, 'scope> ExpressionPlanner<'compiler, 'unit, 'aren
         flow: &mut PlannedControlFlow,
         work: &mut Vec<ExpressionWork<'expression, 'arena>>,
     ) -> Result<(), LeafCompilationError> {
+        if let AssignmentTarget::PrivateFieldExpression(member) = &assignment.left {
+            return self.plan_private_member_assignment(assignment, member, layout, work);
+        }
         if let AssignmentTarget::StaticMemberExpression(member) = &assignment.left {
             if matches!(
                 assignment.operator,

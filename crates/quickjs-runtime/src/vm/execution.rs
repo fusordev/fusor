@@ -27,6 +27,7 @@
 
 use super::async_function::allocate_async_function_settlement;
 use super::instanceof::begin_instance_of;
+use crate::AtomKind;
 
 #[allow(
     clippy::wildcard_imports,
@@ -728,6 +729,27 @@ pub(super) fn execute_one(
                     })?
             };
             push(frame, StoredValue::String(string));
+        }
+        FinalOpcode::PrivateSymbol => {
+            let Operands::Atom(index) = operands else {
+                return unsupported_dispatch(opcode);
+            };
+            let description = {
+                let installed = installed_template(runtime, frame.code, frame.template)?;
+                installed
+                    .atoms
+                    .get(index.get() as usize)
+                    .and_then(AtomDescription::description)
+                    .cloned()
+                    .ok_or(EngineFault::MissingPoolEntry {
+                        pool: "atom",
+                        index: index.get(),
+                    })?
+            };
+            push(
+                frame,
+                StoredValue::Symbol(runtime.new_private_name(&description)?),
+            );
         }
         FinalOpcode::PushEmptyString => {
             push(frame, StoredValue::String(JsString::empty()));
@@ -1943,6 +1965,35 @@ pub(super) fn execute_one(
                 }
             }
         }
+        FinalOpcode::GetPrivateField => {
+            let private_name = pop(frame)?;
+            let base = pop(frame)?;
+            let Some(key) = private_field_key(private_name) else {
+                return Ok(Step::Abrupt(private_field_exception(
+                    runtime,
+                    frame,
+                    source_pc,
+                    "invalid private field name",
+                )?));
+            };
+            let Some(reference) = base.heap_reference() else {
+                return Ok(Step::Abrupt(private_field_exception(
+                    runtime,
+                    frame,
+                    source_pc,
+                    "private field access requires an object receiver",
+                )?));
+            };
+            let Some(value) = runtime.private_own_data_property(reference, &key)? else {
+                return Ok(Step::Abrupt(private_field_exception(
+                    runtime,
+                    frame,
+                    source_pc,
+                    "private field is not present on this object",
+                )?));
+            };
+            push(frame, value);
+        }
         FinalOpcode::PutField => {
             let realm = code(runtime, frame.code)?.realm;
             let property = static_property_operand(runtime, frame, operands)?;
@@ -2055,6 +2106,35 @@ pub(super) fn execute_one(
                 }
             }
         }
+        FinalOpcode::PutPrivateField => {
+            let value = pop(frame)?;
+            let private_name = pop(frame)?;
+            let base = pop(frame)?;
+            let Some(key) = private_field_key(private_name) else {
+                return Ok(Step::Abrupt(private_field_exception(
+                    runtime,
+                    frame,
+                    source_pc,
+                    "invalid private field name",
+                )?));
+            };
+            let Some(reference) = base.heap_reference() else {
+                return Ok(Step::Abrupt(private_field_exception(
+                    runtime,
+                    frame,
+                    source_pc,
+                    "private field access requires an object receiver",
+                )?));
+            };
+            if !runtime.replace_private_own_data_property(reference, &key, value)? {
+                return Ok(Step::Abrupt(private_field_exception(
+                    runtime,
+                    frame,
+                    source_pc,
+                    "private field is not present on this object",
+                )?));
+            }
+        }
         FinalOpcode::DefineField => {
             let property = static_property_operand(runtime, frame, operands)?;
             let value = pop(frame)?;
@@ -2070,6 +2150,44 @@ pub(super) fn execute_one(
                     failure,
                 )?));
             }
+        }
+        FinalOpcode::DefinePrivateField => {
+            let value = pop(frame)?;
+            let private_name = pop(frame)?;
+            let base = peek(frame)?.duplicate();
+            let Some(key) = private_field_key(private_name) else {
+                return Ok(Step::Abrupt(private_field_exception(
+                    runtime,
+                    frame,
+                    source_pc,
+                    "invalid private field name",
+                )?));
+            };
+            let Some(reference) = base.heap_reference() else {
+                return Ok(Step::Abrupt(private_field_exception(
+                    runtime,
+                    frame,
+                    source_pc,
+                    "private field initialization requires an object receiver",
+                )?));
+            };
+            if runtime
+                .private_own_data_property(reference, &key)?
+                .is_some()
+            {
+                return Ok(Step::Abrupt(private_field_exception(
+                    runtime,
+                    frame,
+                    source_pc,
+                    "private field is already initialized on this object",
+                )?));
+            }
+            runtime.append_data_property(
+                reference,
+                key,
+                PropertyLayout::data(true, false, false),
+                value,
+            )?;
         }
         FinalOpcode::DefineMethod => {
             let method = define_method_operand(runtime, frame, operands)?;
@@ -3159,6 +3277,15 @@ pub(super) fn execute_one(
                 pc: source_pc,
             })?;
     Ok(Step::Continue)
+}
+
+/// Converts the VM-only private-symbol value into the backing key used by the
+/// object's internal slots. Public `ToPropertyKey` never reaches this path.
+fn private_field_key(value: StoredValue) -> Option<PropertyKey> {
+    let StoredValue::Symbol(atom) = value else {
+        return None;
+    };
+    (atom.kind() == AtomKind::Private).then(|| PropertyKey::from_private_atom(atom))
 }
 
 fn mapped_arguments_authority(runtime: &Runtime, frame: &Frame) -> Result<Arc<[u32]>, EngineFault> {

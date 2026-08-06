@@ -80,6 +80,31 @@ fn explicit_base_class_constructor_and_public_methods_lower_to_typed_class_bytec
 }
 
 #[test]
+fn public_private_instance_fields_receive_fresh_class_scope_names() {
+    let tree = compile(
+        "function make(){class Box{#value=1;read(){return this.#value;}write(next){return this.#value=next;}}return Box;}",
+        "make",
+    );
+    let opcodes = tree
+        .functions()
+        .iter()
+        .flat_map(|function| function.control_flow().instructions())
+        .map(|instruction| instruction.decoded().instruction().opcode())
+        .collect::<Vec<_>>();
+
+    assert!(opcodes.contains(&FinalOpcode::PrivateSymbol));
+    assert!(opcodes.contains(&FinalOpcode::DefinePrivateField));
+    assert!(opcodes.contains(&FinalOpcode::GetPrivateField));
+    assert!(opcodes.contains(&FinalOpcode::PutPrivateField));
+    assert!(tree.functions().iter().any(|function| {
+        function
+            .closure_variables()
+            .iter()
+            .any(|closure| closure.policy().kind() == DeclarationKind::ClassPrivateName)
+    }));
+}
+
+#[test]
 fn a_base_class_without_a_constructor_uses_a_synthesized_typed_template() {
     let tree = compile(
         "function make(){class Box{static answer(){return 7;}}return Box;}",

@@ -198,6 +198,27 @@ pub(super) fn derived_constructor_primitive_return_exception(
     })
 }
 
+/// Constructs the `TypeError` used by the private-element abstract
+/// operations. The private name itself deliberately stays out of the message:
+/// it is an internal identity and must not become observable through a public
+/// property conversion.
+pub(super) fn private_field_exception(
+    runtime: &Runtime,
+    frame: &Frame,
+    pc: BytecodePc,
+    message: &'static str,
+) -> Result<PendingException, ExecutionError> {
+    let realm = code(runtime, frame.code)?.realm;
+    Ok(PendingException {
+        realm,
+        payload: PendingExceptionPayload::EngineError {
+            kind: ExceptionKind::TypeError,
+            message: JsString::from_utf8(message)?,
+        },
+        origin: instruction_location(runtime, frame, pc)?,
+    })
+}
+
 pub(super) fn function_not_constructor_message(
     runtime: &Runtime,
     function: FunctionId,

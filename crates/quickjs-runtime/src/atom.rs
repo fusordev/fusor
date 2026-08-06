@@ -246,6 +246,14 @@ impl PropertyKey {
         Self::from_atom(atom)
     }
 
+    /// Creates an internal private-name key. This is deliberately
+    /// crate-private: ECMAScript `ToPropertyKey` and public reflection must
+    /// continue to reject private names.
+    pub(crate) fn from_private_atom(atom: Atom) -> Self {
+        debug_assert_eq!(atom.kind(), AtomKind::Private);
+        Self::from_atom(atom)
+    }
+
     /// Returns the array index when this is an integer property key.
     #[must_use]
     pub const fn as_index(&self) -> Option<ArrayIndex> {

@@ -46,6 +46,9 @@ pub enum CompilerBindingKind {
     /// The compiler-created immutable class-scope cell for one evaluated
     /// computed public instance-field key.
     ClassFieldKey,
+    /// The compiler-created immutable class-scope cell for one fresh private
+    /// instance-field name.
+    ClassPrivateName,
     /// The compiler-created immutable class-scope receiver cell used by
     /// static field initializers that lexically observe `this` or resolve a
     /// `super` property.
@@ -151,6 +154,7 @@ impl CompilerBindingPolicy {
                 | CompilerBindingKind::Const
                 | CompilerBindingKind::ClassName
                 | CompilerBindingKind::ClassFieldKey
+                | CompilerBindingKind::ClassPrivateName
                 | CompilerBindingKind::ClassStaticReceiver
                 | CompilerBindingKind::Catch
         ) || matches!(
@@ -182,6 +186,7 @@ impl CompilerBindingPolicy {
             CompilerBindingKind::Const
             | CompilerBindingKind::ClassName
             | CompilerBindingKind::ClassFieldKey
+            | CompilerBindingKind::ClassPrivateName
             | CompilerBindingKind::ClassStaticReceiver => {
                 matches!(
                     self.initialization,
@@ -3873,6 +3878,7 @@ const fn realm_global_policy_supported(policy: CompilerBindingPolicy) -> bool {
         | CompilerBindingKind::FunctionName
         | CompilerBindingKind::ClassName
         | CompilerBindingKind::ClassFieldKey
+        | CompilerBindingKind::ClassPrivateName
         | CompilerBindingKind::ClassStaticReceiver
         | CompilerBindingKind::Catch => false,
     }
@@ -6972,11 +6978,14 @@ const fn supported_compiler_opcode(opcode: FinalOpcode) -> bool {
             | FinalOpcode::GetVarRefCheck
             | FinalOpcode::PutVarRefCheck
             | FinalOpcode::CloseLoc
+            | FinalOpcode::PrivateSymbol
             | FinalOpcode::GetField
             | FinalOpcode::GetField2
+            | FinalOpcode::GetPrivateField
             | FinalOpcode::GetArrayEl
             | FinalOpcode::GetArrayEl2
             | FinalOpcode::PutField
+            | FinalOpcode::PutPrivateField
             | FinalOpcode::PutArrayEl
             | FinalOpcode::Delete
             | FinalOpcode::SetProto
@@ -6984,6 +6993,7 @@ const fn supported_compiler_opcode(opcode: FinalOpcode) -> bool {
             | FinalOpcode::ToPropKey
             | FinalOpcode::CopyDataProperties
             | FinalOpcode::DefineField
+            | FinalOpcode::DefinePrivateField
             | FinalOpcode::DefineArrayEl
             | FinalOpcode::Append
             | FinalOpcode::DefineClass

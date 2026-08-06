@@ -72,6 +72,10 @@ impl Runtime {
         self.atoms.new_unique_symbol(description)
     }
 
+    pub(crate) fn new_private_name(&mut self, description: &JsString) -> Result<Atom, AtomError> {
+        self.atoms.new_private_name(description)
+    }
+
     pub(crate) fn intern_global_symbol(
         &mut self,
         description: &JsString,

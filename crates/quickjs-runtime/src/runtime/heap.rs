@@ -1444,6 +1444,44 @@ impl Runtime {
         Ok(())
     }
 
+    /// Reads an internal private-name data slot without walking prototypes or
+    /// invoking Proxy traps. Private fields are deliberately not ordinary
+    /// property accesses, even though their storage shares the ordinary shape
+    /// backing for GC and transition interning.
+    pub(crate) fn private_own_data_property(
+        &self,
+        reference: HeapReference,
+        key: &PropertyKey,
+    ) -> Result<Option<StoredValue>, crate::ExecutionError> {
+        Ok(match self.object_record(reference)?.own_property(key) {
+            Some(OwnProperty::Data { value, .. }) => Some(value),
+            Some(OwnProperty::Accessor { .. }) => {
+                return Err(crate::EngineFault::RuntimeInvariant {
+                    message: "private field storage became an accessor",
+                }
+                .into());
+            }
+            None => None,
+        })
+    }
+
+    /// Replaces an existing internal private-name data slot. The operation
+    /// never falls back to a prototype, setter, or Proxy trap.
+    pub(crate) fn replace_private_own_data_property(
+        &mut self,
+        reference: HeapReference,
+        key: &PropertyKey,
+        value: StoredValue,
+    ) -> Result<bool, crate::ExecutionError> {
+        let replaced = self
+            .object_record_mut(reference)?
+            .replace_existing_data(key, value);
+        if replaced {
+            self.collection_pending = true;
+        }
+        Ok(replaced)
+    }
+
     /// Creates the ordinary arguments object used by strict functions.
     ///
     /// The object carries the `[[ParameterMap]]` brand for

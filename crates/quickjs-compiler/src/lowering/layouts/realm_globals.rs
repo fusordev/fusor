@@ -110,6 +110,7 @@ impl<'plan> RealmGlobalLayoutBuilder<'plan> {
             DeclarationKind::FunctionName
             | DeclarationKind::ClassName
             | DeclarationKind::ClassFieldKey
+            | DeclarationKind::ClassPrivateName
             | DeclarationKind::ClassStaticReceiver
             | DeclarationKind::Parameter
             | DeclarationKind::Catch

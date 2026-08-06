@@ -390,6 +390,16 @@ impl<'arena> CompilationContext<'_, 'arena, '_> {
                 )?;
                 record_string_candidate(owner, value, literal.span, candidates, atom_candidates)?;
             }
+            AstKind::PrivateIdentifier(identifier)
+                if matches!(nodes.parent_kind(node_id), AstKind::PropertyDefinition(_)) =>
+            {
+                record_property_candidate(
+                    owner,
+                    compiler_identifier_string(identifier.name.as_str(), identifier.span)?,
+                    identifier.span,
+                    atom_candidates,
+                )?;
+            }
             AstKind::TaggedTemplateExpression(tagged) => {
                 let template = &tagged.quasi;
                 if template.quasis.len() != template.expressions.len().saturating_add(1) {

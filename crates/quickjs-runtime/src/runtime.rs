@@ -3144,6 +3144,7 @@ const fn is_supported_opcode(opcode: FinalOpcode) -> bool {
             | FinalOpcode::SetName
             | FinalOpcode::SetNameComputed
             | FinalOpcode::PushAtomValue
+            | FinalOpcode::PrivateSymbol
             | FinalOpcode::PushBigIntI32
             | FinalOpcode::Undefined
             | FinalOpcode::Null
@@ -3225,9 +3226,11 @@ const fn is_supported_opcode(opcode: FinalOpcode) -> bool {
             | FinalOpcode::IteratorCheckObject
             | FinalOpcode::GetField
             | FinalOpcode::GetField2
+            | FinalOpcode::GetPrivateField
             | FinalOpcode::GetArrayEl
             | FinalOpcode::GetArrayEl2
             | FinalOpcode::PutField
+            | FinalOpcode::PutPrivateField
             | FinalOpcode::PutArrayEl
             | FinalOpcode::Delete
             | FinalOpcode::DeleteVar
@@ -3236,6 +3239,7 @@ const fn is_supported_opcode(opcode: FinalOpcode) -> bool {
             | FinalOpcode::ToPropKey
             | FinalOpcode::CopyDataProperties
             | FinalOpcode::DefineField
+            | FinalOpcode::DefinePrivateField
             | FinalOpcode::DefineArrayEl
             | FinalOpcode::DefineClass
             | FinalOpcode::DefineMethod

@@ -110,6 +110,17 @@ fn initializer_free_public_instance_fields_define_on_each_receiver_at_constructo
 }
 
 #[test]
+fn private_instance_fields_have_fresh_class_identities_and_bypass_public_properties() {
+    run_with(
+        "function run(){class First{#value=1;read(){return this.#value;}write(next){return this.#value=next;}}class Second{#value=2;read(){return this.#value;}}let first=new First;let second=new Second;let own=first.hasOwnProperty('#value')===false;let values=first.read()===1&&first.write(4)===4&&first.read()===4&&second.read()===2;let rejected=false;try{First.prototype.read.call(second);}catch(error){rejected=error.name==='TypeError';}return own&&values&&rejected;}",
+        |result| {
+            let value = result.expect("private instance field execution");
+            assert_eq!(value.as_boolean().expect("live Boolean"), Some(true));
+        },
+    );
+}
+
+#[test]
 fn uncomputed_public_instance_field_initializers_run_at_constructor_boundaries() {
     run_with(
         "function run(){let seed=7;class Base{value=seed;copy=this.value;constructor(){this.baseBeforeBody=this.copy;}}class Explicit extends Base{next=seed+1;constructor(){super();this.derivedBeforeBody=this.next;}}class Default extends Base{forward=seed+2;}let base=new Base;let explicit=new Explicit;let forwarded=new Default;return base.value===7&&base.copy===7&&base.baseBeforeBody===7&&explicit.value===7&&explicit.copy===7&&explicit.next===8&&explicit.baseBeforeBody===7&&explicit.derivedBeforeBody===8&&forwarded.value===7&&forwarded.copy===7&&forwarded.forward===9&&forwarded.baseBeforeBody===7;}",

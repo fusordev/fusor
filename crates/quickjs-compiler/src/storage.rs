@@ -9,7 +9,7 @@ use oxc_ast::{
     AstKind,
     ast::{
         BindingPattern, ClassElement, ExportDefaultDeclarationKind, Expression, FunctionType,
-        MethodDefinitionKind, PropertyKind, Statement, VariableDeclarationKind,
+        MethodDefinitionKind, PropertyKey, PropertyKind, Statement, VariableDeclarationKind,
     },
 };
 use oxc_semantic::{AstNodes, NodeId, ReferenceId, ScopeId, SymbolFlags, SymbolId};
@@ -266,6 +266,9 @@ pub enum DeclarationKind {
     /// The compiler-created immutable cell that retains one evaluated
     /// computed public instance-field key for its class definition.
     ClassFieldKey,
+    /// The compiler-created immutable class-scope cell that holds one fresh
+    /// private name for a public private instance field.
+    ClassPrivateName,
     /// The compiler-created immutable class-scope cell that holds a class
     /// constructor while its static field initializers execute.
     ClassStaticReceiver,
@@ -603,6 +606,10 @@ pub(crate) struct OxcIdentityMap {
     /// field. Constructors capture these cells so field construction never
     /// re-evaluates an observable key expression.
     pub(crate) class_field_key_bindings: HashMap<NodeId, BindingId>,
+    /// The immutable class-scope private-name cell for each supported private
+    /// instance field. Constructors and member closures capture the cell so
+    /// each evaluation of a class expression receives a fresh identity.
+    pub(crate) class_private_name_bindings: HashMap<NodeId, BindingId>,
     /// The immutable class-scope receiver cell for each class whose static
     /// field initializer lexically observes `this`.
     pub(crate) class_static_receiver_bindings: HashMap<NodeId, BindingId>,
@@ -834,6 +841,7 @@ struct BindingDraft {
     primary_symbol_binding: bool,
     class_node: Option<NodeId>,
     class_field_node: Option<NodeId>,
+    class_private_name_node: Option<NodeId>,
     class_static_receiver_node: Option<NodeId>,
     executable: ExecutableId,
     name: Arc<str>,
@@ -850,6 +858,7 @@ struct FrozenBindings {
     by_declaration: HashMap<(SymbolId, u32, u32), BindingId>,
     class_name_bindings: HashMap<NodeId, BindingId>,
     class_field_key_bindings: HashMap<NodeId, BindingId>,
+    class_private_name_bindings: HashMap<NodeId, BindingId>,
     class_static_receiver_bindings: HashMap<NodeId, BindingId>,
 }
 
@@ -1044,6 +1053,7 @@ impl<'unit, 'arena, 'scope> Planner<'unit, 'arena, 'scope> {
         self.add_synthetic_default_binding(&mut binding_drafts)?;
         self.add_class_name_bindings(&mut binding_drafts)?;
         self.add_class_field_key_bindings(&mut binding_drafts)?;
+        self.add_class_private_name_bindings(&mut binding_drafts)?;
         self.add_class_static_receiver_bindings(&mut binding_drafts)?;
         binding_drafts.sort_by_key(|binding| {
             let first = binding
@@ -1066,6 +1076,7 @@ impl<'unit, 'arena, 'scope> Planner<'unit, 'arena, 'scope> {
             by_declaration: declaration_bindings,
             class_name_bindings,
             class_field_key_bindings,
+            class_private_name_bindings,
             class_static_receiver_bindings,
         } = self.freeze_binding_drafts(binding_drafts)?;
         let scope_by_binding = self.binding_scope_map(
@@ -1073,6 +1084,7 @@ impl<'unit, 'arena, 'scope> Planner<'unit, 'arena, 'scope> {
             &source_symbols,
             &class_name_bindings,
             &class_field_key_bindings,
+            &class_private_name_bindings,
             &class_static_receiver_bindings,
             &bindings,
         )?;
@@ -1102,9 +1114,12 @@ impl<'unit, 'arena, 'scope> Planner<'unit, 'arena, 'scope> {
         });
         let class_field_key_captures =
             self.class_field_key_capture_requests(&class_field_key_bindings, &bindings)?;
+        let class_private_name_captures =
+            self.class_private_name_capture_requests(&class_private_name_bindings, &bindings)?;
         let class_static_receiver_captures = self
             .class_static_receiver_capture_requests(&class_static_receiver_bindings, &bindings)?;
         let mut synthetic_captures = class_field_key_captures;
+        synthetic_captures.extend(class_private_name_captures);
         synthetic_captures.extend(class_static_receiver_captures);
         synthetic_captures.sort_unstable_by_key(|request| {
             (
@@ -1176,6 +1191,7 @@ impl<'unit, 'arena, 'scope> Planner<'unit, 'arena, 'scope> {
                 default_class_constructors: self.default_class_constructors,
                 class_name_bindings,
                 class_field_key_bindings,
+                class_private_name_bindings,
                 class_static_receiver_bindings,
                 scope_by_binding: scope_by_binding.into_boxed_slice(),
                 reference_by_id: reference_by_id.into_boxed_slice(),
@@ -1190,12 +1206,17 @@ impl<'unit, 'arena, 'scope> Planner<'unit, 'arena, 'scope> {
         freeze_bindings(drafts, self.unit.semantic().scoping().symbols_len())
     }
 
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "all synthetic binding maps must be assigned against the same frozen scope table"
+    )]
     fn binding_scope_map(
         &self,
         symbol_bindings: &[Option<BindingId>],
         source_symbols: &[Option<SymbolId>],
         class_name_bindings: &HashMap<NodeId, BindingId>,
         class_field_key_bindings: &HashMap<NodeId, BindingId>,
+        class_private_name_bindings: &HashMap<NodeId, BindingId>,
         class_static_receiver_bindings: &HashMap<NodeId, BindingId>,
         bindings: &[BindingStorage],
     ) -> Result<Vec<Option<ScopeId>>, CompilerError> {
@@ -1285,6 +1306,7 @@ impl<'unit, 'arena, 'scope> Planner<'unit, 'arena, 'scope> {
             }
         }
         self.bind_class_field_key_scopes(&mut scopes, class_field_key_bindings)?;
+        self.bind_class_private_name_scopes(&mut scopes, class_private_name_bindings)?;
         self.bind_class_static_receiver_scopes(&mut scopes, class_static_receiver_bindings)?;
         Ok(scopes)
     }
@@ -1331,6 +1353,55 @@ impl<'unit, 'arena, 'scope> Planner<'unit, 'arena, 'scope> {
             if target.replace(class.scope_id()).is_some() {
                 return Err(CompilerError::SemanticInvariant {
                     invariant: "synthetic class-field key binding has one class scope",
+                    span: Some(field.span),
+                });
+            }
+        }
+        Ok(())
+    }
+
+    fn bind_class_private_name_scopes(
+        &self,
+        scopes: &mut [Option<ScopeId>],
+        class_private_name_bindings: &HashMap<NodeId, BindingId>,
+    ) -> Result<(), CompilerError> {
+        for (&node_id, &binding) in class_private_name_bindings {
+            let AstKind::PropertyDefinition(field) = self.unit.semantic().nodes().kind(node_id)
+            else {
+                return Err(CompilerError::SemanticInvariant {
+                    invariant: "private-name binding belongs to a property definition",
+                    span: None,
+                });
+            };
+            if field.r#static || !matches!(field.key, PropertyKey::PrivateIdentifier(_)) {
+                return Err(CompilerError::SemanticInvariant {
+                    invariant: "private-name binding belongs to a private instance field",
+                    span: Some(field.span),
+                });
+            }
+            let nodes = self.unit.semantic().nodes();
+            let AstKind::ClassBody(body) = nodes.parent_kind(node_id) else {
+                return Err(CompilerError::SemanticInvariant {
+                    invariant: "private instance field belongs to a class body",
+                    span: Some(field.span),
+                });
+            };
+            let AstKind::Class(class) = nodes.parent_kind(body.node_id.get()) else {
+                return Err(CompilerError::SemanticInvariant {
+                    invariant: "private instance-field class body belongs to a class",
+                    span: Some(body.span),
+                });
+            };
+            let target =
+                scopes
+                    .get_mut(binding.index())
+                    .ok_or(CompilerError::SemanticInvariant {
+                        invariant: "private-name binding scope index is in range",
+                        span: Some(field.span),
+                    })?;
+            if target.replace(class.scope_id()).is_some() {
+                return Err(CompilerError::SemanticInvariant {
+                    invariant: "private-name binding has one class scope",
                     span: Some(field.span),
                 });
             }
@@ -1942,6 +2013,7 @@ impl<'unit, 'arena, 'scope> Planner<'unit, 'arena, 'scope> {
                     primary_symbol_binding: false,
                     class_node: None,
                     class_field_node: None,
+                    class_private_name_node: None,
                     class_static_receiver_node: None,
                     executable: owner,
                     name: Arc::clone(&name),
@@ -1960,6 +2032,7 @@ impl<'unit, 'arena, 'scope> Planner<'unit, 'arena, 'scope> {
                     primary_symbol_binding: true,
                     class_node: None,
                     class_field_node: None,
+                    class_private_name_node: None,
                     class_static_receiver_node: None,
                     executable: owner,
                     name,
@@ -1983,6 +2056,7 @@ impl<'unit, 'arena, 'scope> Planner<'unit, 'arena, 'scope> {
                 primary_symbol_binding: true,
                 class_node: None,
                 class_field_node: None,
+                class_private_name_node: None,
                 class_static_receiver_node: None,
                 executable: owner,
                 name,
@@ -2101,6 +2175,7 @@ impl<'unit, 'arena, 'scope> Planner<'unit, 'arena, 'scope> {
                 DeclarationKind::FunctionName
                 | DeclarationKind::ClassName
                 | DeclarationKind::ClassFieldKey
+                | DeclarationKind::ClassPrivateName
                 | DeclarationKind::ClassStaticReceiver
                 | DeclarationKind::Parameter
                 | DeclarationKind::Catch
@@ -2122,6 +2197,7 @@ impl<'unit, 'arena, 'scope> Planner<'unit, 'arena, 'scope> {
                 DeclarationKind::FunctionName
                 | DeclarationKind::ClassName
                 | DeclarationKind::ClassFieldKey
+                | DeclarationKind::ClassPrivateName
                 | DeclarationKind::ClassStaticReceiver
                 | DeclarationKind::Parameter
                 | DeclarationKind::Catch
@@ -2160,6 +2236,7 @@ impl<'unit, 'arena, 'scope> Planner<'unit, 'arena, 'scope> {
             DeclarationKind::Const
             | DeclarationKind::ClassName
             | DeclarationKind::ClassFieldKey
+            | DeclarationKind::ClassPrivateName
             | DeclarationKind::ClassStaticReceiver => (
                 InitializationPolicy::AtDeclaration,
                 WritePolicy::Immutable,
@@ -2243,6 +2320,7 @@ impl<'unit, 'arena, 'scope> Planner<'unit, 'arena, 'scope> {
             primary_symbol_binding: false,
             class_node: None,
             class_field_node: None,
+            class_private_name_node: None,
             class_static_receiver_node: None,
             executable: ExecutableId(0),
             name: Arc::from("*default*"),
@@ -2277,6 +2355,7 @@ impl<'unit, 'arena, 'scope> Planner<'unit, 'arena, 'scope> {
                 primary_symbol_binding: false,
                 class_node: Some(node_id),
                 class_field_node: None,
+                class_private_name_node: None,
                 class_static_receiver_node: None,
                 executable: owner,
                 name: Arc::from(identifier.name.as_str()),
@@ -2315,6 +2394,7 @@ impl<'unit, 'arena, 'scope> Planner<'unit, 'arena, 'scope> {
                     primary_symbol_binding: false,
                     class_node: None,
                     class_field_node: Some(field_node),
+                    class_private_name_node: None,
                     class_static_receiver_node: None,
                     executable: owner,
                     name: Arc::from(format!("[[class-field-key:{}]]", field_node.index())),
@@ -2399,6 +2479,190 @@ impl<'unit, 'arena, 'scope> Planner<'unit, 'arena, 'scope> {
         Ok(requests)
     }
 
+    /// Creates one immutable class-scope cell for every supported public
+    /// private instance field. `private_symbol` fills the cell once during
+    /// `ClassDefinitionEvaluation`; no source-visible binding carries the
+    /// identity.
+    fn add_class_private_name_bindings(
+        &self,
+        bindings: &mut Vec<BindingDraft>,
+    ) -> Result<(), CompilerError> {
+        let semantic = self.unit.semantic();
+        for (_class_node, node) in semantic.nodes().iter_enumerated() {
+            let AstKind::Class(class) = node.kind() else {
+                continue;
+            };
+            let owner = self.scope_owner(class.scope_id(), Some(class.span))?;
+            for element in &class.body.body {
+                let ClassElement::PropertyDefinition(field) = element else {
+                    continue;
+                };
+                let PropertyKey::PrivateIdentifier(identifier) = &field.key else {
+                    continue;
+                };
+                if field.r#static {
+                    continue;
+                }
+                let field_node = field.node_id.get();
+                bindings.push(BindingDraft {
+                    symbol_id: None,
+                    primary_symbol_binding: false,
+                    class_node: None,
+                    class_field_node: None,
+                    class_private_name_node: Some(field_node),
+                    class_static_receiver_node: None,
+                    executable: owner,
+                    name: Arc::from(format!("[[class-private-name:{}]]", field_node.index())),
+                    declaration_spans: Arc::from([identifier.span]),
+                    placement: StoragePlacement::Local,
+                    policy: self.declaration_policy(
+                        owner,
+                        DeclarationKind::ClassPrivateName,
+                        false,
+                    ),
+                    arguments_object: false,
+                });
+            }
+        }
+        Ok(())
+    }
+
+    /// Captures private-name cells into each constructor that installs the
+    /// corresponding field and into every nested executable that directly
+    /// accesses one. The identity therefore follows lexical class scope,
+    /// rather than the spelling of the private name.
+    fn class_private_name_capture_requests(
+        &self,
+        class_private_name_bindings: &HashMap<NodeId, BindingId>,
+        bindings: &[BindingStorage],
+    ) -> Result<Vec<CaptureRequest>, CompilerError> {
+        let nodes = self.unit.semantic().nodes();
+        let mut requests = Vec::new();
+
+        for (&field_node, &binding) in class_private_name_bindings {
+            let AstKind::PropertyDefinition(field) = nodes.kind(field_node) else {
+                return Err(CompilerError::SemanticInvariant {
+                    invariant: "private-name binding belongs to a property definition",
+                    span: None,
+                });
+            };
+            if field.r#static || !matches!(field.key, PropertyKey::PrivateIdentifier(_)) {
+                return Err(CompilerError::SemanticInvariant {
+                    invariant: "private-name binding belongs to a private instance field",
+                    span: Some(field.span),
+                });
+            }
+            let AstKind::ClassBody(body) = nodes.parent_kind(field_node) else {
+                return Err(CompilerError::SemanticInvariant {
+                    invariant: "private instance field belongs to a class body",
+                    span: Some(field.span),
+                });
+            };
+            let AstKind::Class(class) = nodes.parent_kind(body.node_id.get()) else {
+                return Err(CompilerError::SemanticInvariant {
+                    invariant: "private instance-field class body belongs to a class",
+                    span: Some(body.span),
+                });
+            };
+            let storage =
+                bindings
+                    .get(binding.index())
+                    .ok_or(CompilerError::SemanticInvariant {
+                        invariant: "private-name capture binding exists",
+                        span: Some(field.key.span()),
+                    })?;
+            if storage.placement != StoragePlacement::Local
+                || storage.policy.kind != DeclarationKind::ClassPrivateName
+            {
+                return Err(CompilerError::SemanticInvariant {
+                    invariant: "private-name capture uses immutable local storage",
+                    span: Some(field.key.span()),
+                });
+            }
+            let constructor = self.instance_field_constructor_owner(class.node_id.get(), class)?;
+            if constructor == storage.executable {
+                return Err(CompilerError::SemanticInvariant {
+                    invariant: "class constructor captures a distinct class private-name binding",
+                    span: Some(field.key.span()),
+                });
+            }
+            requests.push(CaptureRequest {
+                executable: constructor,
+                binding,
+                span: field.key.span(),
+            });
+        }
+
+        for (node_id, node) in nodes.iter_enumerated() {
+            let AstKind::PrivateFieldExpression(access) = node.kind() else {
+                continue;
+            };
+            let Some(binding) = self.private_name_binding_for_access(
+                node_id,
+                access.field.name.as_str(),
+                class_private_name_bindings,
+            ) else {
+                continue;
+            };
+            let storage =
+                bindings
+                    .get(binding.index())
+                    .ok_or(CompilerError::SemanticInvariant {
+                        invariant: "private access capture binding exists",
+                        span: Some(access.span),
+                    })?;
+            let executable = self
+                .instance_field_initializer_owner(node_id)?
+                .unwrap_or(self.scope_owner(node.scope_id(), Some(access.span))?);
+            if executable != storage.executable {
+                requests.push(CaptureRequest {
+                    executable,
+                    binding,
+                    span: access.span,
+                });
+            }
+        }
+        requests.sort_unstable_by_key(|request| {
+            (
+                request.executable.index(),
+                request.binding.index(),
+                request.span.start,
+                request.span.end,
+            )
+        });
+        requests.dedup_by_key(|request| (request.executable, request.binding));
+        Ok(requests)
+    }
+
+    fn private_name_binding_for_access(
+        &self,
+        access_node: NodeId,
+        name: &str,
+        class_private_name_bindings: &HashMap<NodeId, BindingId>,
+    ) -> Option<BindingId> {
+        let nodes = self.unit.semantic().nodes();
+        for ancestor in nodes.ancestor_ids(access_node) {
+            let AstKind::Class(class) = nodes.kind(ancestor) else {
+                continue;
+            };
+            for element in &class.body.body {
+                let ClassElement::PropertyDefinition(field) = element else {
+                    continue;
+                };
+                let PropertyKey::PrivateIdentifier(identifier) = &field.key else {
+                    continue;
+                };
+                if identifier.name.as_str() != name {
+                    continue;
+                }
+                return class_private_name_bindings
+                    .get(&field.node_id.get())
+                    .copied();
+            }
+        }
+        None
+    }
+
     /// Adds the class-definition receiver cell only when a static field value
     /// lexically observes `this` or resolves a `super` property. The class
     /// scope owns the cell, while arrow function frames capture it like every
@@ -2421,6 +2685,7 @@ impl<'unit, 'arena, 'scope> Planner<'unit, 'arena, 'scope> {
                 primary_symbol_binding: false,
                 class_node: None,
                 class_field_node: None,
+                class_private_name_node: None,
                 class_static_receiver_node: Some(class_node),
                 executable: owner,
                 name: Arc::from(format!("[[class-static-receiver:{}]]", class_node.index())),
@@ -2796,6 +3061,7 @@ impl<'unit, 'arena, 'scope> Planner<'unit, 'arena, 'scope> {
                 primary_symbol_binding: false,
                 class_node: None,
                 class_field_node: None,
+                class_private_name_node: None,
                 class_static_receiver_node: None,
                 executable: owner,
                 name: Arc::from("arguments"),
@@ -3290,6 +3556,7 @@ fn freeze_bindings(
     let mut declaration_bindings = HashMap::new();
     let mut class_name_bindings = HashMap::new();
     let mut class_field_key_bindings = HashMap::new();
+    let mut class_private_name_bindings = HashMap::new();
     let mut class_static_receiver_bindings = HashMap::new();
     for (index, draft) in drafts.into_iter().enumerate() {
         let id = u32::try_from(index)
@@ -3337,6 +3604,14 @@ fn freeze_bindings(
                 span: draft.declaration_spans.first().copied(),
             });
         }
+        if let Some(field_node) = draft.class_private_name_node
+            && class_private_name_bindings.insert(field_node, id).is_some()
+        {
+            return Err(CompilerError::SemanticInvariant {
+                invariant: "one synthetic private-name binding per field node",
+                span: draft.declaration_spans.first().copied(),
+            });
+        }
         if let Some(class_node) = draft.class_static_receiver_node
             && class_static_receiver_bindings
                 .insert(class_node, id)
@@ -3372,6 +3647,7 @@ fn freeze_bindings(
         by_declaration: declaration_bindings,
         class_name_bindings,
         class_field_key_bindings,
+        class_private_name_bindings,
         class_static_receiver_bindings,
     })
 }

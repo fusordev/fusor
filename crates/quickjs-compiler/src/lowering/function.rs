@@ -140,7 +140,11 @@ impl CompilationContext<'_, '_, '_> {
             if !field.decorators.is_empty() {
                 return unsupported(UnsupportedLeafFeature::UnsupportedDeclaration, field.span);
             }
-            if field.computed {
+            if matches!(field.key, super::OxcPropertyKey::PrivateIdentifier(_)) {
+                // The class-definition planner creates the fresh private name
+                // and the constructor installs the field through the typed
+                // private-field opcode.
+            } else if field.computed {
                 field
                     .key
                     .as_expression()
