@@ -1385,37 +1385,61 @@ impl DateStaticMethod {
     }
 }
 
-/// UTC/time-value methods in the first `%Date.prototype%` tranche.
+/// Implemented methods on `%Date.prototype%` in pinned `QuickJS` publication order.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum DatePrototypeMethod {
     ValueOf,
+    ToString,
     ToUtcString,
     ToIsoString,
+    ToDateString,
+    ToTimeString,
+    GetTimezoneOffset,
     GetTime,
+    GetFullYear,
     GetUtcFullYear,
+    GetMonth,
     GetUtcMonth,
+    GetDate,
     GetUtcDate,
+    GetHours,
     GetUtcHours,
+    GetMinutes,
     GetUtcMinutes,
+    GetSeconds,
     GetUtcSeconds,
+    GetMilliseconds,
     GetUtcMilliseconds,
+    GetDay,
     GetUtcDay,
     SetTime,
 }
 
 impl DatePrototypeMethod {
-    pub(crate) const ALL: [Self; 13] = [
+    pub(crate) const ALL: [Self; 25] = [
         Self::ValueOf,
+        Self::ToString,
         Self::ToUtcString,
         Self::ToIsoString,
+        Self::ToDateString,
+        Self::ToTimeString,
+        Self::GetTimezoneOffset,
         Self::GetTime,
+        Self::GetFullYear,
         Self::GetUtcFullYear,
+        Self::GetMonth,
         Self::GetUtcMonth,
+        Self::GetDate,
         Self::GetUtcDate,
+        Self::GetHours,
         Self::GetUtcHours,
+        Self::GetMinutes,
         Self::GetUtcMinutes,
+        Self::GetSeconds,
         Self::GetUtcSeconds,
+        Self::GetMilliseconds,
         Self::GetUtcMilliseconds,
+        Self::GetDay,
         Self::GetUtcDay,
         Self::SetTime,
     ];
@@ -1423,16 +1447,28 @@ impl DatePrototypeMethod {
     pub(crate) const fn name(self) -> &'static str {
         match self {
             Self::ValueOf => "valueOf",
+            Self::ToString => "toString",
             Self::ToUtcString => "toUTCString",
             Self::ToIsoString => "toISOString",
+            Self::ToDateString => "toDateString",
+            Self::ToTimeString => "toTimeString",
+            Self::GetTimezoneOffset => "getTimezoneOffset",
             Self::GetTime => "getTime",
+            Self::GetFullYear => "getFullYear",
             Self::GetUtcFullYear => "getUTCFullYear",
+            Self::GetMonth => "getMonth",
             Self::GetUtcMonth => "getUTCMonth",
+            Self::GetDate => "getDate",
             Self::GetUtcDate => "getUTCDate",
+            Self::GetHours => "getHours",
             Self::GetUtcHours => "getUTCHours",
+            Self::GetMinutes => "getMinutes",
             Self::GetUtcMinutes => "getUTCMinutes",
+            Self::GetSeconds => "getSeconds",
             Self::GetUtcSeconds => "getUTCSeconds",
+            Self::GetMilliseconds => "getMilliseconds",
             Self::GetUtcMilliseconds => "getUTCMilliseconds",
+            Self::GetDay => "getDay",
             Self::GetUtcDay => "getUTCDay",
             Self::SetTime => "setTime",
         }
@@ -1442,16 +1478,28 @@ impl DatePrototypeMethod {
         match self {
             Self::SetTime => 1,
             Self::ValueOf
+            | Self::ToString
             | Self::ToUtcString
             | Self::ToIsoString
+            | Self::ToDateString
+            | Self::ToTimeString
+            | Self::GetTimezoneOffset
             | Self::GetTime
+            | Self::GetFullYear
             | Self::GetUtcFullYear
+            | Self::GetMonth
             | Self::GetUtcMonth
+            | Self::GetDate
             | Self::GetUtcDate
+            | Self::GetHours
             | Self::GetUtcHours
+            | Self::GetMinutes
             | Self::GetUtcMinutes
+            | Self::GetSeconds
             | Self::GetUtcSeconds
+            | Self::GetMilliseconds
             | Self::GetUtcMilliseconds
+            | Self::GetDay
             | Self::GetUtcDay => 0,
         }
     }

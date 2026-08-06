@@ -630,7 +630,7 @@ fn array_iterator_creation_boxes_a_primitive_receiver_once() {
 #[test]
 fn array_iterator_primitive_boxing_preflights_the_complete_transaction() {
     let mut runtime =
-        Runtime::try_new(RuntimeLimits::default().with_max_heap_objects(41)).expect("runtime");
+        Runtime::try_new(RuntimeLimits::default().with_max_heap_objects(42)).expect("runtime");
     let realm = runtime.create_realm().expect("realm");
     let realm_id = runtime.context(&realm).expect("context").realm;
     let usage = runtime.usage();
@@ -647,8 +647,8 @@ fn array_iterator_primitive_boxing_preflights_the_complete_transaction() {
         result,
         Err(NativeFailure::Execution(ExecutionError::LimitExceeded {
             resource: RuntimeResource::HeapObjects,
-            limit: 41,
-            observed: 43,
+            limit: 42,
+            observed: 44,
         }))
     ));
     assert_eq!(runtime.usage(), usage);
@@ -4966,7 +4966,7 @@ fn define_method_property_limit_failure_does_not_publish_or_charge_the_target_sl
             }",
         "make",
     );
-    let mut runtime = Runtime::try_new(RuntimeLimits::default().with_max_object_properties(1_186))
+    let mut runtime = Runtime::try_new(RuntimeLimits::default().with_max_object_properties(1_275))
         .expect("runtime");
     let realm = runtime.create_realm().expect("realm");
     let maker = runtime
@@ -4989,8 +4989,8 @@ fn define_method_property_limit_failure_does_not_publish_or_charge_the_target_sl
             error,
             ExecutionError::LimitExceeded {
                 resource: RuntimeResource::ObjectProperties,
-                limit: 1_186,
-                observed: 1_187,
+                limit: 1_275,
+                observed: 1_276,
             }
         ),
         "{error:?}"

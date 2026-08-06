@@ -36,18 +36,32 @@ pub(super) fn visit_functions(visit: FunctionSink<'_>) {
     for method in DatePrototypeMethod::ALL {
         let name = match method {
             DatePrototypeMethod::ValueOf => IntrinsicNameSpec::Predefined(PredefinedAtom::ValueOf),
+            DatePrototypeMethod::ToString => {
+                IntrinsicNameSpec::Predefined(PredefinedAtom::ToString)
+            }
             DatePrototypeMethod::ToIsoString => {
                 IntrinsicNameSpec::Predefined(PredefinedAtom::ToIsoString)
             }
             DatePrototypeMethod::ToUtcString
+            | DatePrototypeMethod::ToDateString
+            | DatePrototypeMethod::ToTimeString
+            | DatePrototypeMethod::GetTimezoneOffset
             | DatePrototypeMethod::GetTime
+            | DatePrototypeMethod::GetFullYear
             | DatePrototypeMethod::GetUtcFullYear
+            | DatePrototypeMethod::GetMonth
             | DatePrototypeMethod::GetUtcMonth
+            | DatePrototypeMethod::GetDate
             | DatePrototypeMethod::GetUtcDate
+            | DatePrototypeMethod::GetHours
             | DatePrototypeMethod::GetUtcHours
+            | DatePrototypeMethod::GetMinutes
             | DatePrototypeMethod::GetUtcMinutes
+            | DatePrototypeMethod::GetSeconds
             | DatePrototypeMethod::GetUtcSeconds
+            | DatePrototypeMethod::GetMilliseconds
             | DatePrototypeMethod::GetUtcMilliseconds
+            | DatePrototypeMethod::GetDay
             | DatePrototypeMethod::GetUtcDay
             | DatePrototypeMethod::SetTime => {
                 IntrinsicNameSpec::RealmName(RealmNameId::DatePrototype(method))
@@ -85,18 +99,32 @@ pub(super) fn visit_properties(visit: PropertySink<'_>) {
             DatePrototypeMethod::ValueOf => {
                 IntrinsicKeySpec::PredefinedString(PredefinedAtom::ValueOf)
             }
+            DatePrototypeMethod::ToString => {
+                IntrinsicKeySpec::PredefinedString(PredefinedAtom::ToString)
+            }
             DatePrototypeMethod::ToIsoString => {
                 IntrinsicKeySpec::PredefinedString(PredefinedAtom::ToIsoString)
             }
             DatePrototypeMethod::ToUtcString
+            | DatePrototypeMethod::ToDateString
+            | DatePrototypeMethod::ToTimeString
+            | DatePrototypeMethod::GetTimezoneOffset
             | DatePrototypeMethod::GetTime
+            | DatePrototypeMethod::GetFullYear
             | DatePrototypeMethod::GetUtcFullYear
+            | DatePrototypeMethod::GetMonth
             | DatePrototypeMethod::GetUtcMonth
+            | DatePrototypeMethod::GetDate
             | DatePrototypeMethod::GetUtcDate
+            | DatePrototypeMethod::GetHours
             | DatePrototypeMethod::GetUtcHours
+            | DatePrototypeMethod::GetMinutes
             | DatePrototypeMethod::GetUtcMinutes
+            | DatePrototypeMethod::GetSeconds
             | DatePrototypeMethod::GetUtcSeconds
+            | DatePrototypeMethod::GetMilliseconds
             | DatePrototypeMethod::GetUtcMilliseconds
+            | DatePrototypeMethod::GetDay
             | DatePrototypeMethod::GetUtcDay
             | DatePrototypeMethod::SetTime => {
                 IntrinsicKeySpec::InternedString(RealmNameId::DatePrototype(method_id))

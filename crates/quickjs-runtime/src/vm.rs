@@ -1846,6 +1846,8 @@ enum OperatorPrimitiveTarget {
     DateParse,
     /// One supplied `Date.UTC` component, after `ToNumber`.
     DateUtc(Box<DateUtcContinuation>),
+    /// One supplied multi-argument Date constructor component, after `ToNumber`.
+    DateConstructorComponents(Box<DateConstructorContinuation>),
     /// `Date.prototype.setTime`, after its branded receiver check and `ToNumber`.
     DateSetTime {
         object: ObjectId,
@@ -2005,6 +2007,7 @@ impl OperatorPrimitiveTarget {
             | Self::MathBinaryFinish { .. }
             | Self::ArrayFromAsyncLength { .. } => 1,
             Self::DateUtc(state) => state.retained_values(),
+            Self::DateConstructorComponents(state) => state.retained_values(),
             Self::SetRecordSize(state) => state.retained_values(),
             Self::ErrorConstructorMessage(state) => state.retained_values(),
             Self::JsonParseText(state) => state.retained_values(),
@@ -2233,6 +2236,7 @@ fn trace_operator_primitive_target_roots(
             mark(CollectionRoot::Heap(HeapReference::Function(*new_target)));
         }
         OperatorPrimitiveTarget::DateUtc(state) => state.trace_roots(mark),
+        OperatorPrimitiveTarget::DateConstructorComponents(state) => state.trace_roots(mark),
         OperatorPrimitiveTarget::JsonParseText(state) => state.trace_roots(mark),
         OperatorPrimitiveTarget::JsonParseArrayLength(state) => state.trace_roots(mark),
         OperatorPrimitiveTarget::JsonStringifyReplacerItem(state)

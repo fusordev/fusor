@@ -25,7 +25,9 @@
 
 //! UTC and time-value foundation for the ES2025 `%Date%` intrinsic.
 
-use temporal_rs::{Calendar, Temporal, TimeZone, ZonedDateTime};
+use temporal_rs::{
+    Calendar, PlainDateTime, Temporal, TimeZone, ZonedDateTime, options::Disambiguation,
+};
 
 #[allow(
     clippy::wildcard_imports,
@@ -46,6 +48,27 @@ const MONTHS: [&str; 12] = [
 pub(super) struct DateUtcContinuation {
     arguments: Vec<StoredValue>,
     converted: Vec<JsNumber>,
+}
+
+pub(super) struct DateConstructorContinuation {
+    arguments: Vec<StoredValue>,
+    converted: Vec<JsNumber>,
+    new_target: FunctionId,
+}
+
+impl DateConstructorContinuation {
+    pub(super) fn retained_values(&self) -> u64 {
+        usize_to_u64(self.arguments.len()).saturating_add(1)
+    }
+
+    pub(super) fn trace_roots(&self, mark: &mut dyn FnMut(CollectionRoot)) {
+        for argument in &self.arguments {
+            trace_stored_value_root(argument, mark);
+        }
+        mark(CollectionRoot::Heap(HeapReference::Function(
+            self.new_target,
+        )));
+    }
 }
 
 impl DateUtcContinuation {
@@ -111,11 +134,86 @@ pub(super) fn begin_date_constructor(
                 execution_budget,
             )
         }
-        _ => Err(EngineFault::RuntimeInvariant {
-            message: "multi-argument Date construction requires local-time semantics",
-        }
-        .into()),
+        _ => begin_date_constructor_components(
+            runtime,
+            arguments,
+            new_target,
+            realm,
+            return_to,
+            &origin,
+            execution_budget,
+        ),
     }
+}
+
+fn begin_date_constructor_components(
+    runtime: &mut Runtime,
+    mut arguments: Vec<StoredValue>,
+    new_target: FunctionId,
+    realm: RealmId,
+    return_to: Option<CallReturn>,
+    origin: &JsStackFrame,
+    execution_budget: &mut ExecutionBudget,
+) -> Result<NativeDispatch, NativeFailure> {
+    arguments.truncate(7);
+    let mut converted = Vec::new();
+    converted
+        .try_reserve_exact(arguments.len())
+        .map_err(|_| ExecutionError::AllocationFailed {
+            resource: RuntimeResource::FrameValues,
+            additional: arguments.len(),
+        })?;
+    advance_date_constructor_components(
+        runtime,
+        DateConstructorContinuation {
+            arguments,
+            converted,
+            new_target,
+        },
+        None,
+        realm,
+        return_to,
+        origin,
+        execution_budget,
+    )
+}
+
+pub(super) fn advance_date_constructor_components(
+    runtime: &mut Runtime,
+    mut state: DateConstructorContinuation,
+    completion: Option<JsNumber>,
+    realm: RealmId,
+    return_to: Option<CallReturn>,
+    origin: &JsStackFrame,
+    execution_budget: &mut ExecutionBudget,
+) -> Result<NativeDispatch, NativeFailure> {
+    if let Some(value) = completion {
+        state.converted.push(value);
+    }
+    if state.converted.len() == state.arguments.len() {
+        let value = date_local_from_components(&state.converted);
+        return begin_date_constructor_wrapper(
+            runtime,
+            realm,
+            state.new_target,
+            value,
+            return_to,
+            Some(origin.clone()),
+            execution_budget,
+        );
+    }
+    let index = state.converted.len();
+    let argument = std::mem::replace(&mut state.arguments[index], StoredValue::Undefined);
+    begin_operator_primitive_conversion(
+        runtime,
+        argument,
+        OperatorPrimitiveHint::Number,
+        OperatorPrimitiveTarget::DateConstructorComponents(Box::new(state)),
+        realm,
+        return_to,
+        origin.clone(),
+        execution_budget,
+    )
 }
 
 pub(super) fn begin_date_constructor_wrapper(
@@ -337,6 +435,14 @@ pub(super) fn dispatch_date_prototype(
         DatePrototypeMethod::ValueOf | DatePrototypeMethod::GetTime => {
             Ok(NativeDispatch::Immediate(StoredValue::Number(value)))
         }
+        DatePrototypeMethod::ToString
+        | DatePrototypeMethod::ToDateString
+        | DatePrototypeMethod::ToTimeString => {
+            let rendered = local_date_string(method, value.as_f64());
+            Ok(NativeDispatch::Immediate(StoredValue::String(
+                JsString::from_utf8(&rendered)?,
+            )))
+        }
         DatePrototypeMethod::ToIsoString => {
             let Some(rendered) = to_iso_string(value.as_f64()) else {
                 return Err(NativeFailure::Abrupt(PendingException {
@@ -368,6 +474,17 @@ pub(super) fn dispatch_date_prototype(
         | DatePrototypeMethod::GetUtcDay => Ok(NativeDispatch::Immediate(StoredValue::Number(
             utc_component(method, value.as_f64()),
         ))),
+        DatePrototypeMethod::GetFullYear
+        | DatePrototypeMethod::GetMonth
+        | DatePrototypeMethod::GetDate
+        | DatePrototypeMethod::GetHours
+        | DatePrototypeMethod::GetMinutes
+        | DatePrototypeMethod::GetSeconds
+        | DatePrototypeMethod::GetMilliseconds
+        | DatePrototypeMethod::GetDay
+        | DatePrototypeMethod::GetTimezoneOffset => Ok(NativeDispatch::Immediate(
+            StoredValue::Number(local_component(method, value.as_f64())),
+        )),
         DatePrototypeMethod::SetTime => begin_operator_primitive_conversion(
             runtime,
             arguments.take_first_or_undefined(),
@@ -419,10 +536,27 @@ fn current_local_date_string() -> Result<String, EngineFault> {
 }
 
 fn format_local_date_string(date_time: &ZonedDateTime) -> String {
+    format!(
+        "{} {}",
+        format_date_string(date_time),
+        format_time_string(date_time)
+    )
+}
+
+fn format_date_string(date_time: &ZonedDateTime) -> String {
     let year = date_time.year();
     let year_sign = if year < 0 { "-" } else { "" };
     let year = year.unsigned_abs();
 
+    format!(
+        "{weekday} {month_name} {date:02} {year_sign}{year:04}",
+        weekday = WEEKDAYS[usize::from(date_time.day_of_week() % 7)],
+        month_name = MONTHS[usize::from(date_time.month()) - 1],
+        date = date_time.day(),
+    )
+}
+
+fn format_time_string(date_time: &ZonedDateTime) -> String {
     // TimeZoneString first truncates the nanosecond offset to milliseconds,
     // then renders only its hour and minute components. The optional
     // implementation-defined parenthesized time-zone name is intentionally
@@ -434,15 +568,23 @@ fn format_local_date_string(date_time: &ZonedDateTime) -> String {
     let offset_minute = (absolute_offset / 60_000) % 60;
 
     format!(
-        "{weekday} {month_name} {date:02} {year_sign}{year:04} \
-         {hour:02}:{minute:02}:{second:02} GMT{offset_sign}{offset_hour:02}{offset_minute:02}",
-        weekday = WEEKDAYS[usize::from(date_time.day_of_week() % 7)],
-        month_name = MONTHS[usize::from(date_time.month()) - 1],
-        date = date_time.day(),
+        "{hour:02}:{minute:02}:{second:02} GMT{offset_sign}{offset_hour:02}{offset_minute:02}",
         hour = date_time.hour(),
         minute = date_time.minute(),
         second = date_time.second(),
     )
+}
+
+fn local_date_string(method: DatePrototypeMethod, value: f64) -> String {
+    let Some(date_time) = temporal_local_date_time(value) else {
+        return "Invalid Date".to_owned();
+    };
+    match method {
+        DatePrototypeMethod::ToString => format_local_date_string(&date_time),
+        DatePrototypeMethod::ToDateString => format_date_string(&date_time),
+        DatePrototypeMethod::ToTimeString => format_time_string(&date_time),
+        _ => unreachable!("non-string Date method"),
+    }
 }
 
 pub(super) fn time_clip(value: f64) -> JsNumber {
@@ -471,6 +613,70 @@ fn date_utc_from_components(values: &[JsNumber]) -> JsNumber {
     let day = make_day(year, components[1], components[2]);
     let time = make_time(components[3], components[4], components[5], components[6]);
     time_clip(day * MS_PER_DAY + time)
+}
+
+fn date_local_from_components(values: &[JsNumber]) -> JsNumber {
+    let mut components = [0.0; 7];
+    components[2] = 1.0;
+    for (index, value) in values.iter().enumerate() {
+        components[index] = value.as_f64();
+    }
+    if components.iter().any(|value| !value.is_finite()) {
+        return JsNumber::from_f64(f64::NAN);
+    }
+    let mut year = components[0].trunc();
+    if (0.0..=99.0).contains(&year) {
+        year += 1_900.0;
+    }
+    let local_value = make_day(year, components[1], components[2]) * MS_PER_DAY
+        + make_time(components[3], components[4], components[5], components[6]);
+    let Some(local_date_time) = plain_date_time_from_time_value(local_value) else {
+        return JsNumber::from_f64(f64::NAN);
+    };
+    let Ok(date_time) =
+        local_date_time.to_zoned_date_time(host_time_zone(), Disambiguation::Compatible)
+    else {
+        return JsNumber::from_f64(f64::NAN);
+    };
+    let milliseconds = date_time.epoch_milliseconds();
+    if milliseconds.unsigned_abs() > 8_640_000_000_000_000_u64 {
+        JsNumber::from_f64(f64::NAN)
+    } else {
+        JsNumber::from_i64(milliseconds)
+    }
+}
+
+#[allow(
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss,
+    reason = "finite integral Date fields are bounded before conversion to Temporal components"
+)]
+fn plain_date_time_from_time_value(value: f64) -> Option<PlainDateTime> {
+    if !value.is_finite() || value.fract() != 0.0 {
+        return None;
+    }
+    let day = (value / MS_PER_DAY).floor();
+    if day.abs() > 400_000_000.0 {
+        return None;
+    }
+    let within_day = value - day * MS_PER_DAY;
+    let hour = (within_day / MS_PER_HOUR).floor();
+    let minute = ((within_day % MS_PER_HOUR) / MS_PER_MINUTE).floor();
+    let second = ((within_day % MS_PER_MINUTE) / MS_PER_SECOND).floor();
+    let millisecond = within_day % MS_PER_SECOND;
+    let (year, month, date) = civil_from_days(day as i64)?;
+    PlainDateTime::try_new_iso(
+        year,
+        month,
+        date,
+        hour as u8,
+        minute as u8,
+        second as u8,
+        millisecond as u16,
+        0,
+        0,
+    )
+    .ok()
 }
 
 #[allow(
@@ -520,12 +726,49 @@ fn utc_component(method: DatePrototypeMethod, value: f64) -> JsNumber {
         // numbers Sunday as 0 through Saturday as 6.
         DatePrototypeMethod::GetUtcDay => i64::from(fields.day_of_week % 7),
         DatePrototypeMethod::ValueOf
+        | DatePrototypeMethod::ToString
         | DatePrototypeMethod::ToUtcString
         | DatePrototypeMethod::ToIsoString
+        | DatePrototypeMethod::ToDateString
+        | DatePrototypeMethod::ToTimeString
+        | DatePrototypeMethod::GetTimezoneOffset
         | DatePrototypeMethod::GetTime
+        | DatePrototypeMethod::GetFullYear
+        | DatePrototypeMethod::GetMonth
+        | DatePrototypeMethod::GetDate
+        | DatePrototypeMethod::GetHours
+        | DatePrototypeMethod::GetMinutes
+        | DatePrototypeMethod::GetSeconds
+        | DatePrototypeMethod::GetMilliseconds
+        | DatePrototypeMethod::GetDay
         | DatePrototypeMethod::SetTime => unreachable!("non-component Date method"),
     };
     JsNumber::from_i64(component)
+}
+
+fn local_component(method: DatePrototypeMethod, value: f64) -> JsNumber {
+    let Some(fields) = temporal_local_date_time(value) else {
+        return JsNumber::from_f64(f64::NAN);
+    };
+    match method {
+        DatePrototypeMethod::GetFullYear => JsNumber::from_i64(i64::from(fields.year())),
+        DatePrototypeMethod::GetMonth => JsNumber::from_i64(i64::from(fields.month()) - 1),
+        DatePrototypeMethod::GetDate => JsNumber::from_i64(i64::from(fields.day())),
+        DatePrototypeMethod::GetHours => JsNumber::from_i64(i64::from(fields.hour())),
+        DatePrototypeMethod::GetMinutes => JsNumber::from_i64(i64::from(fields.minute())),
+        DatePrototypeMethod::GetSeconds => JsNumber::from_i64(i64::from(fields.second())),
+        DatePrototypeMethod::GetMilliseconds => JsNumber::from_i64(i64::from(fields.millisecond())),
+        DatePrototypeMethod::GetDay => JsNumber::from_i64(i64::from(fields.day_of_week() % 7)),
+        DatePrototypeMethod::GetTimezoneOffset => {
+            #[allow(
+                clippy::cast_precision_loss,
+                reason = "time-zone offsets are far below Number's exact-integer boundary"
+            )]
+            let offset_nanoseconds = fields.offset_nanoseconds() as f64;
+            JsNumber::from_f64(-offset_nanoseconds / (MS_PER_MINUTE * 1_000_000.0))
+        }
+        _ => unreachable!("non-local-component Date method"),
+    }
 }
 
 fn to_iso_string(value: f64) -> Option<String> {
@@ -576,16 +819,7 @@ struct UtcDateFields {
 }
 
 fn temporal_utc_fields(value: f64) -> Option<UtcDateFields> {
-    if !value.is_finite() || value.fract() != 0.0 {
-        return None;
-    }
-    #[allow(
-        clippy::cast_possible_truncation,
-        reason = "the value is finite, integral, and already constrained by the Date TimeClip domain"
-    )]
-    let epoch_nanoseconds = value as i128 * 1_000_000;
-    let date_time =
-        ZonedDateTime::try_new(epoch_nanoseconds, TimeZone::utc(), Calendar::ISO).ok()?;
+    let date_time = temporal_date_time(value, TimeZone::utc())?;
     Some(UtcDateFields {
         year: date_time.year(),
         month: date_time.month(),
@@ -596,6 +830,28 @@ fn temporal_utc_fields(value: f64) -> Option<UtcDateFields> {
         millisecond: date_time.millisecond(),
         day_of_week: date_time.day_of_week(),
     })
+}
+
+fn temporal_local_date_time(value: f64) -> Option<ZonedDateTime> {
+    temporal_date_time(value, host_time_zone())
+}
+
+fn host_time_zone() -> TimeZone {
+    Temporal::local_now()
+        .time_zone()
+        .unwrap_or_else(|_| TimeZone::utc())
+}
+
+fn temporal_date_time(value: f64, time_zone: TimeZone) -> Option<ZonedDateTime> {
+    if !value.is_finite() || value.fract() != 0.0 {
+        return None;
+    }
+    #[allow(
+        clippy::cast_possible_truncation,
+        reason = "the value is finite, integral, and already constrained by the Date TimeClip domain"
+    )]
+    let epoch_nanoseconds = value as i128 * 1_000_000;
+    ZonedDateTime::try_new(epoch_nanoseconds, time_zone, Calendar::ISO).ok()
 }
 
 fn parse_date_string(
@@ -746,6 +1002,25 @@ fn days_from_civil(mut year: i64, month: u32, date: u32) -> i64 {
     era * 146_097 + day_of_era - 719_468
 }
 
+fn civil_from_days(days: i64) -> Option<(i32, u8, u8)> {
+    let shifted = days.checked_add(719_468)?;
+    let era = shifted.div_euclid(146_097);
+    let day_of_era = shifted - era * 146_097;
+    let year_of_era =
+        (day_of_era - day_of_era / 1_460 + day_of_era / 36_524 - day_of_era / 146_096) / 365;
+    let mut year = year_of_era + era * 400;
+    let day_of_year = day_of_era - (365 * year_of_era + year_of_era / 4 - year_of_era / 100);
+    let shifted_month = (5 * day_of_year + 2) / 153;
+    let date = day_of_year - (153 * shifted_month + 2) / 5 + 1;
+    let month = shifted_month + if shifted_month < 10 { 3 } else { -9 };
+    year += i64::from(month <= 2);
+    Some((
+        i32::try_from(year).ok()?,
+        u8::try_from(month).ok()?,
+        u8::try_from(date).ok()?,
+    ))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -787,9 +1062,38 @@ mod tests {
         let eastern = TimeZone::try_from_identifier_str("-05:00").expect("fixed offset");
         let date_time =
             ZonedDateTime::try_new(0, eastern, Calendar::ISO).expect("local Unix epoch");
+        assert_eq!(format_date_string(&date_time), "Wed Dec 31 1969");
+        assert_eq!(format_time_string(&date_time), "19:00:00 GMT-0500");
         assert_eq!(
             format_local_date_string(&date_time),
             "Wed Dec 31 1969 19:00:00 GMT-0500"
+        );
+    }
+
+    #[test]
+    fn civil_day_inverse_covers_negative_time_and_date_boundaries() {
+        for (year, month, date) in [
+            (1970_i32, 1_u8, 1_u8),
+            (1969, 12, 31),
+            (2000, 2, 29),
+            (-271_821, 4, 20),
+            (275_760, 9, 13),
+        ] {
+            let days = days_from_civil(i64::from(year), u32::from(month), u32::from(date));
+            assert_eq!(civil_from_days(days), Some((year, month, date)));
+        }
+        let before_epoch = plain_date_time_from_time_value(-1.0).expect("pre-epoch instant");
+        assert_eq!(
+            (
+                before_epoch.year(),
+                before_epoch.month(),
+                before_epoch.day(),
+                before_epoch.hour(),
+                before_epoch.minute(),
+                before_epoch.second(),
+                before_epoch.millisecond(),
+            ),
+            (1969, 12, 31, 23, 59, 59, 999)
         );
     }
 }

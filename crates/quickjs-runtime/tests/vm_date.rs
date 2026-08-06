@@ -136,6 +136,21 @@ fn date_constructor_clips_numbers_copies_dates_and_preserves_negative_boundaries
 }
 
 #[test]
+fn date_local_constructor_converts_left_to_right_and_normalizes_components() {
+    assert_eq!(
+        rendered(
+            "var log=[];function value(label,value){return {valueOf:function(){log.push(label);return value}}}
+             var d=new Date(value('year',2020),value('month',12),value('date',1),
+               value('hour',2),value('minute',3),value('second',4),value('ms',5));
+             return [d.getFullYear(),d.getMonth(),d.getDate(),d.getHours(),d.getMinutes(),
+               d.getSeconds(),d.getMilliseconds()].join(',')+'|'+log.join(',')+'|'+
+               new Date(99,0,1).getFullYear()+'|'+Number.isNaN(new Date(2020,NaN).getTime());"
+        ),
+        "2021,0,1,2,3,4,5|year,month,date,hour,minute,second,ms|1999|true"
+    );
+}
+
+#[test]
 fn date_utc_converts_arguments_left_to_right_and_normalizes_calendar_fields() {
     assert_eq!(
         rendered(
@@ -180,6 +195,83 @@ fn date_utc_getters_and_set_time_preserve_brand_and_invalid_date_rules() {
     assert_eq!(
         thrown("return new Date(NaN).toISOString();"),
         ExceptionKind::RangeError
+    );
+}
+
+#[test]
+fn date_local_getters_use_one_host_time_zone_projection() {
+    assert_eq!(
+        rendered(
+            "var d=new Date(0),offset=d.getTimezoneOffset();
+             var projected=new Date(-offset*60000);
+             var actual=[d.getFullYear(),d.getMonth(),d.getDate(),d.getDay(),
+               d.getHours(),d.getMinutes(),d.getSeconds(),d.getMilliseconds()];
+             var expected=[projected.getUTCFullYear(),projected.getUTCMonth(),
+               projected.getUTCDate(),projected.getUTCDay(),projected.getUTCHours(),
+               projected.getUTCMinutes(),projected.getUTCSeconds(),
+               projected.getUTCMilliseconds()];
+             return (actual.join(',')===expected.join(','))+'|'+
+               (offset===d.getTimezoneOffset());"
+        ),
+        "true|true"
+    );
+
+    assert_eq!(
+        rendered(
+            "var d=new Date(NaN),names=['getFullYear','getMonth','getDate','getDay',
+               'getHours','getMinutes','getSeconds','getMilliseconds','getTimezoneOffset'];
+             for(var i=0;i<names.length;i++){if(!Number.isNaN(d[names[i]]()))return 'false'}
+             return 'true';"
+        ),
+        "true"
+    );
+    assert_eq!(
+        rendered(
+            "return [Number.isNaN(new Date(8640000000000000).getTimezoneOffset()),
+               Number.isNaN(new Date(-8640000000000000).getTimezoneOffset())].join('|');"
+        ),
+        "false|false"
+    );
+    assert_eq!(
+        thrown("return Date.prototype.getFullYear.call({});"),
+        ExceptionKind::TypeError
+    );
+}
+
+#[test]
+fn date_local_string_methods_have_spec_shapes_and_invalid_date_rules() {
+    assert_eq!(
+        rendered(
+            "var d=new Date(0),whole=d.toString(),date=d.toDateString(),time=d.toTimeString();
+             return [whole===date+' '+time,
+               /^(Sun|Mon|Tue|Wed|Thu|Fri|Sat) (Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec) [0-9]{2} -?[0-9]{4,}$/.test(date),
+               /^[0-9]{2}:[0-9]{2}:[0-9]{2} GMT[+-][0-9]{4}$/.test(time),
+               new Date(NaN).toString(),new Date(NaN).toDateString(),
+               new Date(NaN).toTimeString()].join('|');"
+        ),
+        "true|true|true|Invalid Date|Invalid Date|Invalid Date"
+    );
+    assert_eq!(
+        thrown("return Date.prototype.toString.call({});"),
+        ExceptionKind::TypeError
+    );
+}
+
+#[test]
+fn date_local_read_methods_have_exact_intrinsic_names_and_lengths() {
+    assert_eq!(
+        rendered(
+            "var expected={toString:0,toDateString:0,toTimeString:0,getFullYear:0,
+               getMonth:0,getDate:0,getDay:0,getHours:0,getMinutes:0,getSeconds:0,
+               getMilliseconds:0,getTimezoneOffset:0},actual=[];
+             for(var name in expected){var method=Date.prototype[name];
+               actual.push(typeof method+':'+method.name+':'+method.length)}
+             return actual.join('|');"
+        ),
+        "function:toString:0|function:toDateString:0|function:toTimeString:0|\
+         function:getFullYear:0|function:getMonth:0|function:getDate:0|\
+         function:getDay:0|function:getHours:0|function:getMinutes:0|\
+         function:getSeconds:0|function:getMilliseconds:0|function:getTimezoneOffset:0"
     );
 }
 

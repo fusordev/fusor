@@ -166,14 +166,15 @@ does not imply complete ECMAScript or QuickJS compatibility.
 - [x] Iterative `%JSON%` plus `rawJSON`; complete pinned `%Math%`, including
   exact `sumPrecise`; and intrinsic Promise core/combinators with bounded FIFO
   jobs and typed close/order continuations (29/29, 46/46 feature tags).
-- [x] Date has Realm-owned branded `[[DateValue]]` objects, TimeClip, exact UTC
-  construction/parsing/getters, `setTime`, ISO/UTC rendering, observable
-  coercion order, spec-shaped callable local-time rendering that ignores its
-  arguments, and full clipped-year coverage through pinned
-  `temporal_rs = 0.2.5` (7/7 focused cases). Local-time construction and the
-  remaining legacy prototype methods stay fail closed.
-- [ ] Complete Date local-time/prototype semantics and Temporal on the shared
-  `temporal_rs` kernel; then implement binary data/typed arrays and Atomics.
+- [x] Date has Realm-owned branded `[[DateValue]]` objects, TimeClip, UTC and
+  multi-argument local construction, ISO UTC/offset parsing, UTC/local getters,
+  `getTimezoneOffset`, `setTime`, ISO/UTC/local rendering, and ordered coercion
+  over pinned `temporal_rs = 0.2.5` (11/11 focused VM cases). The 93-file local
+  getter/string Test262 tranche passes 160/186 modes; all 26 residual failures
+  require deferred non-ordinary functions.
+- [ ] Complete Date parsing, setters, primitive/JSON and non-Intl locale fallback
+  semantics, then Temporal on the shared `temporal_rs` kernel; next implement
+  binary data/typed arrays and Atomics.
 
 ### Jobs, asynchronous semantics, and modules
 

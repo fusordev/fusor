@@ -243,7 +243,9 @@ fn visit_realm_name_order(
     for method in DatePrototypeMethod::ALL {
         if !matches!(
             method,
-            DatePrototypeMethod::ValueOf | DatePrototypeMethod::ToIsoString
+            DatePrototypeMethod::ValueOf
+                | DatePrototypeMethod::ToString
+                | DatePrototypeMethod::ToIsoString
         ) {
             visit(RealmNameId::DatePrototype(method))?;
         }
@@ -473,8 +475,8 @@ mod tests {
         let schema = RealmIntrinsicSchema::try_new().expect("Realm schema");
         let plan = RealmAtomPlan::try_new(&schema).expect("atom plan");
 
-        assert_eq!(plan.len(), 217);
-        assert_eq!(plan.description_code_units(), 1_737);
+        assert_eq!(plan.len(), 228);
+        assert_eq!(plan.description_code_units(), 1_853);
     }
 
     #[test]
