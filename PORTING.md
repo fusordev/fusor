@@ -66,9 +66,10 @@ broad Test262.**
   declaration conflicts, and source identity across evaluations.
 - [~] Classes: named base declarations/expressions, simple-binding anonymous
   base expressions (including harmless parentheses), direct identifier
-  assignments, and uncomputed object-property anonymous base expressions with
-  an explicit or synthesized default constructor and public static/instance
-  methods or accessors execute through typed `define_class`.
+  assignments (including `||=`, `&&=`, and `??=`), and uncomputed
+  object-property anonymous base expressions with an explicit or synthesized
+  default constructor and public static/instance methods or accessors execute
+  through typed `define_class`.
   Member closures capture the spec-required immutable inner class-name cell,
   distinct from the mutable declaration binding. Constructors are strict,
   construct with the installed class prototype, and reject direct calls. The

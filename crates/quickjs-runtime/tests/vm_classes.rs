@@ -132,6 +132,17 @@ fn an_anonymous_base_class_assignment_infers_its_identifier_name() {
 }
 
 #[test]
+fn anonymous_base_class_logical_assignments_infer_their_identifier_names() {
+    run_with(
+        "function run(){let Or=0;Or||=class{};let And=1;And&&=class{};let Nullish=null;Nullish??=class{};return Or.name==='Or'&&And.name==='And'&&Nullish.name==='Nullish';}",
+        |result| {
+            let value = result.expect("anonymous class logical assignment execution");
+            assert_eq!(value.as_boolean().expect("live Boolean"), Some(true));
+        },
+    );
+}
+
+#[test]
 fn anonymous_base_class_object_properties_infer_their_static_key_name() {
     run_with(
         "function run(){let holder={Result:class{static answer(){return 7;}}};let original=holder.Result;return original.name==='Result'&&original.answer()===7&&new original().constructor===original;}",
