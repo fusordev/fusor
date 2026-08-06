@@ -292,11 +292,16 @@ impl<'arena> CompilationContext<'_, 'arena, '_> {
         node_id: NodeId,
     ) -> Result<Option<ExecutableId>, LeafCompilationError> {
         let nodes = self.unit.semantic().nodes();
+        let node_span = nodes.kind(node_id).span();
         for ancestor in nodes.ancestor_ids(node_id) {
             match nodes.kind(ancestor) {
                 AstKind::Function(_) | AstKind::ArrowFunctionExpression(_) => return Ok(None),
                 AstKind::PropertyDefinition(field)
-                    if !field.r#static && !field.computed && field.value.is_some() =>
+                    if !field.r#static
+                        && field.value.as_ref().is_some_and(|value| {
+                            let value_span = value.span();
+                            value_span.start <= node_span.start && node_span.end <= value_span.end
+                        }) =>
                 {
                     let AstKind::ClassBody(body) = nodes.parent_kind(field.node_id.get()) else {
                         return Err(LeafCompilationError::SemanticInvariant {

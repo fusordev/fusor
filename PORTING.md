@@ -105,8 +105,11 @@ broad Test262.**
   synthesized derived constructors). Their expressions may use lexical
   captures, `this`, `new.target`, source-derived `super` property access, and
   arrow or ordinary function closures in the constructor environment.
-- [ ] Class closure: spread or arrow-contained `super()`; computed instance
-  fields; computed-key anonymous-class
+  Computed public instance-field keys evaluate once in class-element order,
+  convert through `ToPropertyKey`, and live in a typed immutable class-scope
+  cell captured by the constructor; its certificate admits only typed field
+  definition, including synthesized derived constructors.
+- [ ] Class closure: spread or arrow-contained `super()`; computed-key anonymous-class
   name inference outside direct object/static-field definitions, static-field
   initializers using `this`, `super`, or `new.target`, private elements,
   decorators, and static blocks. Do not relabel these as

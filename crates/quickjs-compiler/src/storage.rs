@@ -263,6 +263,9 @@ pub enum DeclarationKind {
     Class,
     /// The compiler-created immutable inner binding for a named class.
     ClassName,
+    /// The compiler-created immutable cell that retains one evaluated
+    /// computed public instance-field key for its class definition.
+    ClassFieldKey,
     /// A function declaration.
     Function,
     /// A named function-expression binding.
@@ -593,6 +596,10 @@ pub(crate) struct OxcIdentityMap {
     /// gives a class body a distinct inner binding; storage redirects those
     /// references before capture planning.
     pub(crate) class_name_bindings: HashMap<NodeId, BindingId>,
+    /// The immutable class-scope key cell for each computed public instance
+    /// field. Constructors capture these cells so field construction never
+    /// re-evaluates an observable key expression.
+    pub(crate) class_field_key_bindings: HashMap<NodeId, BindingId>,
     pub(crate) scope_by_binding: Box<[Option<ScopeId>]>,
     pub(crate) reference_by_id: Box<[Option<NativeReferenceId>]>,
 }
@@ -820,6 +827,7 @@ struct BindingDraft {
     symbol_id: Option<SymbolId>,
     primary_symbol_binding: bool,
     class_node: Option<NodeId>,
+    class_field_node: Option<NodeId>,
     executable: ExecutableId,
     name: Arc<str>,
     declaration_spans: Arc<[Span]>,
@@ -834,6 +842,7 @@ struct FrozenBindings {
     source_symbols: Vec<Option<SymbolId>>,
     by_declaration: HashMap<(SymbolId, u32, u32), BindingId>,
     class_name_bindings: HashMap<NodeId, BindingId>,
+    class_field_key_bindings: HashMap<NodeId, BindingId>,
 }
 
 #[derive(Default)]
@@ -848,6 +857,13 @@ struct ResolvedDraft {
     binding: BindingId,
     span: Span,
     access: ReferenceAccess,
+}
+
+#[derive(Clone, Copy)]
+struct CaptureRequest {
+    executable: ExecutableId,
+    binding: BindingId,
+    span: Span,
 }
 
 struct UnresolvedDraft {
@@ -1019,6 +1035,7 @@ impl<'unit, 'arena, 'scope> Planner<'unit, 'arena, 'scope> {
         let implicit_arguments_references = self.add_arguments_bindings(&mut binding_drafts)?;
         self.add_synthetic_default_binding(&mut binding_drafts)?;
         self.add_class_name_bindings(&mut binding_drafts)?;
+        self.add_class_field_key_bindings(&mut binding_drafts)?;
         binding_drafts.sort_by_key(|binding| {
             let first = binding
                 .declaration_spans
@@ -1039,11 +1056,13 @@ impl<'unit, 'arena, 'scope> Planner<'unit, 'arena, 'scope> {
             source_symbols,
             by_declaration: declaration_bindings,
             class_name_bindings,
+            class_field_key_bindings,
         } = self.freeze_binding_drafts(binding_drafts)?;
         let scope_by_binding = self.binding_scope_map(
             &symbol_bindings,
             &source_symbols,
             &class_name_bindings,
+            &class_field_key_bindings,
             &bindings,
         )?;
 
@@ -1070,8 +1089,14 @@ impl<'unit, 'arena, 'scope> Planner<'unit, 'arena, 'scope> {
                 reference.reference_id.index(),
             )
         });
-        let frame_captures =
-            plan_frame_captures(&self.executable_drafts, &mut bindings, &resolved_drafts)?;
+        let class_field_key_captures =
+            self.class_field_key_capture_requests(&class_field_key_bindings, &bindings)?;
+        let frame_captures = plan_frame_captures(
+            &self.executable_drafts,
+            &mut bindings,
+            &resolved_drafts,
+            &class_field_key_captures,
+        )?;
 
         unresolved_drafts.sort_by_key(|reference| {
             (
@@ -1127,6 +1152,7 @@ impl<'unit, 'arena, 'scope> Planner<'unit, 'arena, 'scope> {
                 binding_by_declaration: declaration_bindings,
                 default_class_constructors: self.default_class_constructors,
                 class_name_bindings,
+                class_field_key_bindings,
                 scope_by_binding: scope_by_binding.into_boxed_slice(),
                 reference_by_id: reference_by_id.into_boxed_slice(),
             },
@@ -1145,6 +1171,7 @@ impl<'unit, 'arena, 'scope> Planner<'unit, 'arena, 'scope> {
         symbol_bindings: &[Option<BindingId>],
         source_symbols: &[Option<SymbolId>],
         class_name_bindings: &HashMap<NodeId, BindingId>,
+        class_field_key_bindings: &HashMap<NodeId, BindingId>,
         bindings: &[BindingStorage],
     ) -> Result<Vec<Option<ScopeId>>, CompilerError> {
         let scoping = self.unit.semantic().scoping();
@@ -1232,7 +1259,57 @@ impl<'unit, 'arena, 'scope> Planner<'unit, 'arena, 'scope> {
                 });
             }
         }
+        self.bind_class_field_key_scopes(&mut scopes, class_field_key_bindings)?;
         Ok(scopes)
+    }
+
+    fn bind_class_field_key_scopes(
+        &self,
+        scopes: &mut [Option<ScopeId>],
+        class_field_key_bindings: &HashMap<NodeId, BindingId>,
+    ) -> Result<(), CompilerError> {
+        for (&node_id, &binding) in class_field_key_bindings {
+            let AstKind::PropertyDefinition(field) = self.unit.semantic().nodes().kind(node_id)
+            else {
+                return Err(CompilerError::SemanticInvariant {
+                    invariant: "synthetic class-field key binding belongs to a property definition",
+                    span: None,
+                });
+            };
+            if field.r#static || !field.computed {
+                return Err(CompilerError::SemanticInvariant {
+                    invariant: "synthetic class-field key binding belongs to a computed instance field",
+                    span: Some(field.span),
+                });
+            }
+            let nodes = self.unit.semantic().nodes();
+            let AstKind::ClassBody(body) = nodes.parent_kind(node_id) else {
+                return Err(CompilerError::SemanticInvariant {
+                    invariant: "computed instance field belongs to a class body",
+                    span: Some(field.span),
+                });
+            };
+            let AstKind::Class(class) = nodes.parent_kind(body.node_id.get()) else {
+                return Err(CompilerError::SemanticInvariant {
+                    invariant: "computed instance field class body belongs to a class",
+                    span: Some(body.span),
+                });
+            };
+            let target =
+                scopes
+                    .get_mut(binding.index())
+                    .ok_or(CompilerError::SemanticInvariant {
+                        invariant: "class-field key binding scope index is in range",
+                        span: Some(field.span),
+                    })?;
+            if target.replace(class.scope_id()).is_some() {
+                return Err(CompilerError::SemanticInvariant {
+                    invariant: "synthetic class-field key binding has one class scope",
+                    span: Some(field.span),
+                });
+            }
+        }
+        Ok(())
     }
 
     fn reject_preflight_features(&self) -> Result<(), CompilerError> {
@@ -1793,6 +1870,7 @@ impl<'unit, 'arena, 'scope> Planner<'unit, 'arena, 'scope> {
                     symbol_id: Some(symbol_id),
                     primary_symbol_binding: false,
                     class_node: None,
+                    class_field_node: None,
                     executable: owner,
                     name: Arc::clone(&name),
                     declaration_spans: parameter_spans.into(),
@@ -1809,6 +1887,7 @@ impl<'unit, 'arena, 'scope> Planner<'unit, 'arena, 'scope> {
                     symbol_id: Some(symbol_id),
                     primary_symbol_binding: true,
                     class_node: None,
+                    class_field_node: None,
                     executable: owner,
                     name,
                     declaration_spans: body_spans.into(),
@@ -1830,6 +1909,7 @@ impl<'unit, 'arena, 'scope> Planner<'unit, 'arena, 'scope> {
                 symbol_id: Some(symbol_id),
                 primary_symbol_binding: true,
                 class_node: None,
+                class_field_node: None,
                 executable: owner,
                 name,
                 declaration_spans,
@@ -1946,6 +2026,7 @@ impl<'unit, 'arena, 'scope> Planner<'unit, 'arena, 'scope> {
                 }
                 DeclarationKind::FunctionName
                 | DeclarationKind::ClassName
+                | DeclarationKind::ClassFieldKey
                 | DeclarationKind::Parameter
                 | DeclarationKind::Catch
                 | DeclarationKind::Import
@@ -1965,6 +2046,7 @@ impl<'unit, 'arena, 'scope> Planner<'unit, 'arena, 'scope> {
                 | DeclarationKind::Function => Ok(StoragePlacement::ModuleLocal),
                 DeclarationKind::FunctionName
                 | DeclarationKind::ClassName
+                | DeclarationKind::ClassFieldKey
                 | DeclarationKind::Parameter
                 | DeclarationKind::Catch
                 | DeclarationKind::SyntheticDefault => Err(CompilerError::SemanticInvariant {
@@ -1999,7 +2081,9 @@ impl<'unit, 'arena, 'scope> Planner<'unit, 'arena, 'scope> {
                 WritePolicy::Mutable,
                 true,
             ),
-            DeclarationKind::Const | DeclarationKind::ClassName => (
+            DeclarationKind::Const
+            | DeclarationKind::ClassName
+            | DeclarationKind::ClassFieldKey => (
                 InitializationPolicy::AtDeclaration,
                 WritePolicy::Immutable,
                 true,
@@ -2081,6 +2165,7 @@ impl<'unit, 'arena, 'scope> Planner<'unit, 'arena, 'scope> {
             symbol_id: None,
             primary_symbol_binding: false,
             class_node: None,
+            class_field_node: None,
             executable: ExecutableId(0),
             name: Arc::from("*default*"),
             declaration_spans: synthetic_spans.into(),
@@ -2113,6 +2198,7 @@ impl<'unit, 'arena, 'scope> Planner<'unit, 'arena, 'scope> {
                 symbol_id: None,
                 primary_symbol_binding: false,
                 class_node: Some(node_id),
+                class_field_node: None,
                 executable: owner,
                 name: Arc::from(identifier.name.as_str()),
                 declaration_spans: Arc::from([identifier.span]),
@@ -2122,6 +2208,115 @@ impl<'unit, 'arena, 'scope> Planner<'unit, 'arena, 'scope> {
             });
         }
         Ok(())
+    }
+
+    /// Adds one fresh class-scope cell for every computed public instance
+    /// field. The constructor captures the cell; class definition evaluation
+    /// stores the once-converted property key before the constructor can run.
+    fn add_class_field_key_bindings(
+        &self,
+        bindings: &mut Vec<BindingDraft>,
+    ) -> Result<(), CompilerError> {
+        let semantic = self.unit.semantic();
+        for (_class_node, node) in semantic.nodes().iter_enumerated() {
+            let AstKind::Class(class) = node.kind() else {
+                continue;
+            };
+            let owner = self.scope_owner(class.scope_id(), Some(class.span))?;
+            for element in &class.body.body {
+                let ClassElement::PropertyDefinition(field) = element else {
+                    continue;
+                };
+                if field.r#static || !field.computed {
+                    continue;
+                }
+                let field_node = field.node_id.get();
+                bindings.push(BindingDraft {
+                    symbol_id: None,
+                    primary_symbol_binding: false,
+                    class_node: None,
+                    class_field_node: Some(field_node),
+                    executable: owner,
+                    name: Arc::from(format!("[[class-field-key:{}]]", field_node.index())),
+                    declaration_spans: Arc::from([field.key.span()]),
+                    placement: StoragePlacement::Local,
+                    policy: self.declaration_policy(owner, DeclarationKind::ClassFieldKey, false),
+                    arguments_object: false,
+                });
+            }
+        }
+        Ok(())
+    }
+
+    fn class_field_key_capture_requests(
+        &self,
+        class_field_key_bindings: &HashMap<NodeId, BindingId>,
+        bindings: &[BindingStorage],
+    ) -> Result<Vec<CaptureRequest>, CompilerError> {
+        let nodes = self.unit.semantic().nodes();
+        let mut requests = Vec::with_capacity(class_field_key_bindings.len());
+        for (&field_node, &binding) in class_field_key_bindings {
+            let AstKind::PropertyDefinition(field) = nodes.kind(field_node) else {
+                return Err(CompilerError::SemanticInvariant {
+                    invariant: "class-field key capture belongs to a property definition",
+                    span: None,
+                });
+            };
+            if field.r#static || !field.computed {
+                return Err(CompilerError::SemanticInvariant {
+                    invariant: "class-field key capture belongs to a computed instance field",
+                    span: Some(field.span),
+                });
+            }
+            let AstKind::ClassBody(body) = nodes.parent_kind(field_node) else {
+                return Err(CompilerError::SemanticInvariant {
+                    invariant: "computed instance field belongs to a class body",
+                    span: Some(field.span),
+                });
+            };
+            let AstKind::Class(class) = nodes.parent_kind(body.node_id.get()) else {
+                return Err(CompilerError::SemanticInvariant {
+                    invariant: "computed instance field class body belongs to a class",
+                    span: Some(body.span),
+                });
+            };
+            let storage =
+                bindings
+                    .get(binding.index())
+                    .ok_or(CompilerError::SemanticInvariant {
+                        invariant: "class-field key capture binding exists",
+                        span: Some(field.key.span()),
+                    })?;
+            if storage.placement != StoragePlacement::Local
+                || storage.policy.kind != DeclarationKind::ClassFieldKey
+            {
+                return Err(CompilerError::SemanticInvariant {
+                    invariant: "class-field key capture uses an immutable local binding",
+                    span: Some(field.key.span()),
+                });
+            }
+            let constructor = self.instance_field_constructor_owner(class.node_id.get(), class)?;
+            if constructor == storage.executable {
+                return Err(CompilerError::SemanticInvariant {
+                    invariant: "class constructor captures a distinct class-scope key binding",
+                    span: Some(field.key.span()),
+                });
+            }
+            requests.push(CaptureRequest {
+                executable: constructor,
+                binding,
+                span: field.key.span(),
+            });
+        }
+        requests.sort_unstable_by_key(|request| {
+            (
+                request.executable.index(),
+                request.binding.index(),
+                request.span.start,
+                request.span.end,
+            )
+        });
+        Ok(requests)
     }
 
     fn synthetic_default_policy(&self) -> Result<DeclarationPolicy, CompilerError> {
@@ -2360,6 +2555,7 @@ impl<'unit, 'arena, 'scope> Planner<'unit, 'arena, 'scope> {
                 symbol_id: None,
                 primary_symbol_binding: false,
                 class_node: None,
+                class_field_node: None,
                 executable: owner,
                 name: Arc::from("arguments"),
                 declaration_spans: Arc::from([span]),
@@ -2682,11 +2878,16 @@ impl<'unit, 'arena, 'scope> Planner<'unit, 'arena, 'scope> {
         node_id: NodeId,
     ) -> Result<Option<ExecutableId>, CompilerError> {
         let nodes = self.unit.semantic().nodes();
+        let node_span = nodes.kind(node_id).span();
         for ancestor in nodes.ancestor_ids(node_id) {
             match nodes.kind(ancestor) {
                 AstKind::Function(_) | AstKind::ArrowFunctionExpression(_) => return Ok(None),
                 AstKind::PropertyDefinition(field)
-                    if !field.r#static && !field.computed && field.value.is_some() =>
+                    if !field.r#static
+                        && field
+                            .value
+                            .as_ref()
+                            .is_some_and(|value| span_within(node_span, value.span())) =>
                 {
                     let AstKind::ClassBody(body) = nodes.parent_kind(field.node_id.get()) else {
                         return Err(CompilerError::SemanticInvariant {
@@ -2847,6 +3048,7 @@ fn freeze_bindings(
     let mut source_symbols = Vec::with_capacity(drafts.len());
     let mut declaration_bindings = HashMap::new();
     let mut class_name_bindings = HashMap::new();
+    let mut class_field_key_bindings = HashMap::new();
     for (index, draft) in drafts.into_iter().enumerate() {
         let id = u32::try_from(index)
             .map(BindingId)
@@ -2885,6 +3087,14 @@ fn freeze_bindings(
                 span: draft.declaration_spans.first().copied(),
             });
         }
+        if let Some(field_node) = draft.class_field_node
+            && class_field_key_bindings.insert(field_node, id).is_some()
+        {
+            return Err(CompilerError::SemanticInvariant {
+                invariant: "one synthetic class-field key binding per field node",
+                span: draft.declaration_spans.first().copied(),
+            });
+        }
         source_symbols.push(draft.symbol_id);
         bindings.push(BindingStorage {
             id,
@@ -2909,6 +3119,7 @@ fn freeze_bindings(
         source_symbols,
         by_declaration: declaration_bindings,
         class_name_bindings,
+        class_field_key_bindings,
     })
 }
 
@@ -2955,8 +3166,9 @@ fn plan_frame_captures(
     executables: &[ExecutableDraft],
     bindings: &mut [BindingStorage],
     resolved: &[ResolvedDraft],
+    additional: &[CaptureRequest],
 ) -> Result<Vec<FrameCapture>, CompilerError> {
-    let capture_keys = collect_capture_keys(executables, bindings, resolved)?;
+    let capture_keys = collect_capture_keys(executables, bindings, resolved, additional)?;
     let slots = assign_capture_slots(&capture_keys, bindings)?;
     freeze_frame_captures(executables, bindings, capture_keys, &slots)
 }
@@ -2967,58 +3179,88 @@ fn collect_capture_keys(
     executables: &[ExecutableDraft],
     bindings: &[BindingStorage],
     resolved: &[ResolvedDraft],
+    additional: &[CaptureRequest],
 ) -> Result<Vec<CaptureKey>, CompilerError> {
     let mut capture_keys = HashSet::new();
     for reference in resolved {
-        let binding =
-            bindings
-                .get(reference.binding.index())
-                .ok_or(CompilerError::SemanticInvariant {
-                    invariant: "resolved compiler binding exists",
-                    span: Some(reference.span),
-                })?;
-        if reference.executable == binding.executable
-            || !matches!(
-                binding.placement,
-                StoragePlacement::Argument { .. } | StoragePlacement::Local
-            )
-        {
-            continue;
-        }
-
-        let owner = binding.executable;
-        let mut current = reference.executable;
-        while current != owner {
-            if !capture_keys.insert((current, reference.binding)) {
-                break;
-            }
-            let executable =
-                executables
-                    .get(current.index())
-                    .ok_or(CompilerError::SemanticInvariant {
-                        invariant: "capturing executable exists",
-                        span: Some(reference.span),
-                    })?;
-            let parent = executable
-                .executable
-                .parent
-                .ok_or(CompilerError::SemanticInvariant {
-                    invariant: "frame binding owner is an executable ancestor",
-                    span: Some(reference.span),
-                })?;
-            if parent >= current {
-                return Err(CompilerError::SemanticInvariant {
-                    invariant: "executable parent precedes child",
-                    span: Some(reference.span),
-                });
-            }
-            current = parent;
-        }
+        collect_capture_path(
+            executables,
+            bindings,
+            reference.executable,
+            reference.binding,
+            reference.span,
+            &mut capture_keys,
+        )?;
+    }
+    for request in additional {
+        collect_capture_path(
+            executables,
+            bindings,
+            request.executable,
+            request.binding,
+            request.span,
+            &mut capture_keys,
+        )?;
     }
 
     let mut capture_keys = capture_keys.into_iter().collect::<Vec<_>>();
     capture_keys.sort_unstable();
     Ok(capture_keys)
+}
+
+fn collect_capture_path(
+    executables: &[ExecutableDraft],
+    bindings: &[BindingStorage],
+    executable: ExecutableId,
+    binding: BindingId,
+    span: Span,
+    capture_keys: &mut HashSet<CaptureKey>,
+) -> Result<(), CompilerError> {
+    let binding_storage =
+        bindings
+            .get(binding.index())
+            .ok_or(CompilerError::SemanticInvariant {
+                invariant: "captured compiler binding exists",
+                span: Some(span),
+            })?;
+    if executable == binding_storage.executable
+        || !matches!(
+            binding_storage.placement,
+            StoragePlacement::Argument { .. } | StoragePlacement::Local
+        )
+    {
+        return Ok(());
+    }
+
+    let owner = binding_storage.executable;
+    let mut current = executable;
+    while current != owner {
+        if !capture_keys.insert((current, binding)) {
+            break;
+        }
+        let executable =
+            executables
+                .get(current.index())
+                .ok_or(CompilerError::SemanticInvariant {
+                    invariant: "capturing executable exists",
+                    span: Some(span),
+                })?;
+        let parent = executable
+            .executable
+            .parent
+            .ok_or(CompilerError::SemanticInvariant {
+                invariant: "frame binding owner is an executable ancestor",
+                span: Some(span),
+            })?;
+        if parent >= current {
+            return Err(CompilerError::SemanticInvariant {
+                invariant: "executable parent precedes child",
+                span: Some(span),
+            });
+        }
+        current = parent;
+    }
+    Ok(())
 }
 
 fn assign_capture_slots(

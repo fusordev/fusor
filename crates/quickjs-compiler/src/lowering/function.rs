@@ -137,13 +137,25 @@ impl CompilationContext<'_, '_, '_> {
             if field.r#static {
                 continue;
             }
-            if !field.decorators.is_empty() || field.computed {
+            if !field.decorators.is_empty() {
                 return unsupported(UnsupportedLeafFeature::UnsupportedDeclaration, field.span);
             }
-            compiled_static_property_key(&field.key)?.ok_or(LeafCompilationError::Unsupported {
-                feature: UnsupportedLeafFeature::UnsupportedDeclaration,
-                span: field.key.span(),
-            })?;
+            if field.computed {
+                field
+                    .key
+                    .as_expression()
+                    .ok_or(LeafCompilationError::Unsupported {
+                        feature: UnsupportedLeafFeature::UnsupportedDeclaration,
+                        span: field.key.span(),
+                    })?;
+            } else {
+                compiled_static_property_key(&field.key)?.ok_or(
+                    LeafCompilationError::Unsupported {
+                        feature: UnsupportedLeafFeature::UnsupportedDeclaration,
+                        span: field.key.span(),
+                    },
+                )?;
+            }
             fields.push(field.node_id.get());
         }
         Ok(Some(InstanceFieldDefinitions {

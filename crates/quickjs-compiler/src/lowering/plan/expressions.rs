@@ -1,16 +1,17 @@
 use super::super::{
     ArrayExpression, ArrayExpressionElement, ArrowFunctionExpression, AssignmentExpression,
-    AssignmentOperator, AssignmentTarget, AstKind, AtomPoolIndex, BinaryOperator, BranchKind,
-    CallExpression, ChainElement, ChainExpression, Class, ClassElement, CompilationContext,
-    CompiledConstantPool, CompiledMetadataAtomKey, CompilerLabel, ComputedMemberExpression,
-    ConditionalExpression, ExecutableId, ExecutableKind, Expression, FinalOpcode, FrameLayout,
-    FrameSlot, Function, FunctionTreeLayout, GetSpan, IdentifierReference, InitializationPolicy,
-    LeafCompilationError, LogicalExpression, LogicalOperator, LoweredReference, MethodDefinition,
-    MethodDefinitionKind, ObjectExpression, ObjectProperty, ObjectPropertyKind, Operands,
-    PlannedControlFlow, PlannedInstruction, PropertyDefinition, PropertyKind, SequenceExpression,
-    SimpleAssignmentTarget, Span, StaticMemberExpression, StoragePlacement, UnaryExpression,
-    UnaryOperator, UnsupportedLeafFeature, UpdateExpression, UpdateOperator,
-    compiled_static_property_key, object_method_or_accessor_span, plan_put_slot, unsupported,
+    AssignmentOperator, AssignmentTarget, AstKind, AtomPoolIndex, BinaryOperator, BindingId,
+    BranchKind, CallExpression, ChainElement, ChainExpression, Class, ClassElement,
+    CompilationContext, CompiledConstantPool, CompiledMetadataAtomKey, CompilerLabel,
+    ComputedMemberExpression, ConditionalExpression, DeclarationKind, ExecutableId, ExecutableKind,
+    Expression, FinalOpcode, FrameLayout, FrameSlot, Function, FunctionTreeLayout, GetSpan,
+    IdentifierReference, InitializationPolicy, LeafCompilationError, LogicalExpression,
+    LogicalOperator, LoweredReference, MethodDefinition, MethodDefinitionKind, ObjectExpression,
+    ObjectProperty, ObjectPropertyKind, Operands, PlannedControlFlow, PlannedInstruction,
+    PropertyDefinition, PropertyKind, SequenceExpression, SimpleAssignmentTarget, Span,
+    StaticMemberExpression, StoragePlacement, UnaryExpression, UnaryOperator,
+    UnsupportedLeafFeature, UpdateExpression, UpdateOperator, compiled_static_property_key,
+    object_method_or_accessor_span, plan_put_slot, unsupported,
 };
 use super::abrupt::{AbruptMarker, AbruptMarkerKind};
 use super::calls::MemberCallee;
@@ -674,9 +675,7 @@ impl<'compiler, 'unit, 'arena, 'scope> ExpressionPlanner<'compiler, 'unit, 'aren
                 _ => return unsupported(UnsupportedLeafFeature::UnsupportedBody, element.span()),
             }
         }
-        if class.id.is_some() {
-            self.plan_base_class_name_scope_entry(class, layout, flow)?;
-        }
+        self.plan_base_class_name_scope_entry(class, layout, flow)?;
         let has_heritage = self.plan_class_heritage(class, layout, tree_layout, constants, flow)?;
         if let Some(constructor) = constructor {
             flow.emit(self.plan_function_closure(
@@ -740,6 +739,14 @@ impl<'compiler, 'unit, 'arena, 'scope> ExpressionPlanner<'compiler, 'unit, 'aren
                 ClassElement::PropertyDefinition(field) => {
                     if field.r#static {
                         self.plan_base_class_static_field(
+                            field,
+                            layout,
+                            tree_layout,
+                            constants,
+                            flow,
+                        )?;
+                    } else if field.computed {
+                        self.plan_base_class_computed_instance_field_key(
                             field,
                             layout,
                             tree_layout,
@@ -816,7 +823,14 @@ impl<'compiler, 'unit, 'arena, 'scope> ExpressionPlanner<'compiler, 'unit, 'aren
         }
         if !field.r#static {
             if field.computed {
-                return unsupported(UnsupportedLeafFeature::UnsupportedDeclaration, field.span);
+                field
+                    .key
+                    .as_expression()
+                    .ok_or(LeafCompilationError::Unsupported {
+                        feature: UnsupportedLeafFeature::UnsupportedDeclaration,
+                        span: field.key.span(),
+                    })?;
+                return Ok(());
             }
             compiled_static_property_key(&field.key)?.ok_or(LeafCompilationError::Unsupported {
                 feature: UnsupportedLeafFeature::UnsupportedDeclaration,
@@ -1065,6 +1079,46 @@ impl<'compiler, 'unit, 'arena, 'scope> ExpressionPlanner<'compiler, 'unit, 'aren
         ))
     }
 
+    fn plan_base_class_computed_instance_field_key(
+        &self,
+        field: &PropertyDefinition<'arena>,
+        layout: &FrameLayout,
+        tree_layout: &FunctionTreeLayout,
+        constants: &CompiledConstantPool,
+        flow: &mut PlannedControlFlow,
+    ) -> Result<(), LeafCompilationError> {
+        let key = field
+            .key
+            .as_expression()
+            .ok_or(LeafCompilationError::Unsupported {
+                feature: UnsupportedLeafFeature::UnsupportedDeclaration,
+                span: field.key.span(),
+            })?;
+        let (binding, slot) = self.computed_instance_field_key_binding(field, layout)?;
+        self.plan_expression(key, layout, tree_layout, constants, &[], flow)?;
+        flow.emit(PlannedInstruction::new(
+            FinalOpcode::ToPropKey,
+            Operands::None,
+            field.key.span(),
+        ))?;
+        flow.emit(plan_put_slot(slot, field.key.span()))?;
+        let storage =
+            self.planned
+                .plan
+                .binding(binding)
+                .ok_or(LeafCompilationError::SemanticInvariant {
+                    invariant: "computed instance-field key binding exists after planning",
+                    span: Some(field.key.span()),
+                })?;
+        if storage.policy().kind() != DeclarationKind::ClassFieldKey {
+            return Err(LeafCompilationError::SemanticInvariant {
+                invariant: "computed instance-field key writes only its synthetic binding",
+                span: Some(field.key.span()),
+            });
+        }
+        Ok(())
+    }
+
     pub(in crate::lowering) fn plan_instance_field_initializations(
         &self,
         executable: ExecutableId,
@@ -1113,6 +1167,16 @@ impl<'compiler, 'unit, 'arena, 'scope> ExpressionPlanner<'compiler, 'unit, 'aren
         synthesized_default: bool,
         flow: &mut PlannedControlFlow,
     ) -> Result<(), LeafCompilationError> {
+        if field.computed {
+            return self.plan_computed_instance_field_initialization(
+                field,
+                layout,
+                tree_layout,
+                constants,
+                synthesized_default,
+                flow,
+            );
+        }
         let key =
             compiled_static_property_key(&field.key)?.ok_or(LeafCompilationError::Unsupported {
                 feature: UnsupportedLeafFeature::UnsupportedDeclaration,
@@ -1167,6 +1231,119 @@ impl<'compiler, 'unit, 'arena, 'scope> ExpressionPlanner<'compiler, 'unit, 'aren
             ))?;
         }
         Ok(())
+    }
+
+    fn plan_computed_instance_field_initialization(
+        &self,
+        field: &PropertyDefinition<'arena>,
+        layout: &FrameLayout,
+        tree_layout: &FunctionTreeLayout,
+        constants: &CompiledConstantPool,
+        synthesized_default: bool,
+        flow: &mut PlannedControlFlow,
+    ) -> Result<(), LeafCompilationError> {
+        let (binding, slot) = self.computed_instance_field_key_binding(field, layout)?;
+        let FrameSlot::Capture(_) = slot else {
+            return Err(LeafCompilationError::SemanticInvariant {
+                invariant: "instance constructor captures its computed field key",
+                span: Some(field.key.span()),
+            });
+        };
+        if synthesized_default {
+            flow.emit(PlannedInstruction::new(
+                FinalOpcode::Nop,
+                Operands::None,
+                field.span,
+            ))?;
+        }
+        flow.emit(PlannedInstruction::new(
+            FinalOpcode::PushThis,
+            Operands::None,
+            field.span,
+        ))?;
+        flow.emit(self.plan_read_slot(binding, slot, field.key.span())?)?;
+        if let Some(value) = &field.value {
+            let inferred_name = Self::plan_inferred_computed_property_name_for_initializer(value)?;
+            self.plan_expression(value, layout, tree_layout, constants, &[], flow)?;
+            if let Some(inferred_name) = inferred_name {
+                flow.emit(inferred_name)?;
+            }
+        } else {
+            flow.emit(PlannedInstruction::new(
+                FinalOpcode::Undefined,
+                Operands::None,
+                field.span,
+            ))?;
+        }
+        flow.emit(PlannedInstruction::new(
+            FinalOpcode::DefineArrayEl,
+            Operands::None,
+            field.span,
+        ))?;
+        flow.emit(PlannedInstruction::new(
+            FinalOpcode::Drop,
+            Operands::None,
+            field.span,
+        ))?;
+        flow.emit(PlannedInstruction::new(
+            FinalOpcode::Drop,
+            Operands::None,
+            field.span,
+        ))?;
+        if synthesized_default {
+            flow.emit(PlannedInstruction::new(
+                FinalOpcode::Nop,
+                Operands::None,
+                field.span,
+            ))?;
+        }
+        Ok(())
+    }
+
+    fn computed_instance_field_key_binding(
+        &self,
+        field: &PropertyDefinition<'arena>,
+        layout: &FrameLayout,
+    ) -> Result<(BindingId, FrameSlot), LeafCompilationError> {
+        if field.r#static || !field.computed {
+            return Err(LeafCompilationError::SemanticInvariant {
+                invariant: "computed instance-field key binding belongs to a computed instance field",
+                span: Some(field.span),
+            });
+        }
+        let binding = self
+            .planned
+            .identities
+            .class_field_key_bindings
+            .get(&field.node_id.get())
+            .copied()
+            .ok_or(LeafCompilationError::SemanticInvariant {
+                invariant: "computed instance field has a class-scope key binding",
+                span: Some(field.key.span()),
+            })?;
+        let storage =
+            self.planned
+                .plan
+                .binding(binding)
+                .ok_or(LeafCompilationError::SemanticInvariant {
+                    invariant: "computed instance-field key binding exists",
+                    span: Some(field.key.span()),
+                })?;
+        if storage.policy().kind() != DeclarationKind::ClassFieldKey
+            || storage.placement() != StoragePlacement::Local
+        {
+            return Err(LeafCompilationError::SemanticInvariant {
+                invariant: "computed instance-field key binding is immutable local storage",
+                span: Some(field.key.span()),
+            });
+        }
+        let slot = layout
+            .slot(binding)
+            .ok_or(LeafCompilationError::SemanticInvariant {
+                invariant: "computed instance-field key binding has a frame slot",
+                span: Some(field.key.span()),
+            })?;
+        Ok((binding, slot))
     }
 
     fn base_class_name_binding(

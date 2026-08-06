@@ -1,7 +1,7 @@
 use quickjs_bytecode::{
     CompilerBindingKind, CompilerExecutableKind, FinalOpcode, VerificationLimits,
 };
-use quickjs_compiler::{CompilationContext, CompiledFunctionTree, WritePolicy};
+use quickjs_compiler::{CompilationContext, CompiledFunctionTree, DeclarationKind, WritePolicy};
 use quickjs_frontend::{CompilationGoal, FrontendOptions, GlobalScriptGoal, with_parsed_program};
 
 fn compile(source: &str, name: &str) -> CompiledFunctionTree {
@@ -715,28 +715,65 @@ fn uncomputed_public_instance_field_initializers_lower_into_each_constructor() {
 }
 
 #[test]
-fn computed_public_instance_fields_stay_fail_closed() {
-    let error = with_parsed_program(
-        "function make(){class Box{[key];}return Box;}",
-        FrontendOptions::for_goal(CompilationGoal::GlobalScript(GlobalScriptGoal::new())),
-        |unit| {
-            let context = CompilationContext::new(unit).expect("storage plan");
-            let root = context
-                .executables()
-                .find(|executable| executable.metadata().name() == Some("make"))
-                .expect("root function");
-            context.compile_tree(&root, VerificationLimits::default())
-        },
-    )
-    .expect("frontend")
-    .expect_err("computed keys require a class-owned evaluated key slot");
-    assert!(matches!(
-        error,
-        quickjs_compiler::LeafCompilationError::Unsupported {
-            feature: quickjs_compiler::UnsupportedLeafFeature::UnsupportedDeclaration,
-            ..
-        }
-    ));
+fn computed_public_instance_fields_capture_a_once_evaluated_class_key() {
+    let tree = compile(
+        "function make(key){class Box{[key]=key;}return Box;}",
+        "make",
+    );
+    assert!(
+        tree.root()
+            .storage_plan()
+            .bindings()
+            .iter()
+            .any(|binding| { binding.policy().kind() == DeclarationKind::ClassFieldKey })
+    );
+    assert!(
+        tree.root()
+            .control_flow()
+            .instructions()
+            .windows(2)
+            .any(|pair| {
+                pair[0].decoded().instruction().opcode() == FinalOpcode::ToPropKey
+                    && matches!(
+                        pair[1].decoded().instruction().opcode(),
+                        FinalOpcode::PutLoc
+                            | FinalOpcode::PutLoc8
+                            | FinalOpcode::PutLoc0
+                            | FinalOpcode::PutLoc1
+                            | FinalOpcode::PutLoc2
+                            | FinalOpcode::PutLoc3
+                    )
+            })
+    );
+    let constructor_index = tree
+        .functions()
+        .iter()
+        .enumerate()
+        .find_map(|(index, _)| {
+            (tree
+                .verified_bytecode()
+                .function(quickjs_bytecode::FunctionTemplateId::new(
+                    u32::try_from(index).expect("template index"),
+                ))
+                .expect("verified function")
+                .metadata()
+                .executable_kind()
+                == CompilerExecutableKind::ClassConstructor)
+                .then_some(index)
+        })
+        .expect("class constructor");
+    let opcodes = tree.functions()[constructor_index]
+        .control_flow()
+        .instructions()
+        .iter()
+        .map(|instruction| instruction.decoded().instruction().opcode())
+        .collect::<Vec<_>>();
+    assert!(
+        opcodes
+            .windows(2)
+            .any(|pair| { pair == [FinalOpcode::PushThis, FinalOpcode::GetVarRefCheck] })
+    );
+    assert!(opcodes.contains(&FinalOpcode::DefineArrayEl));
 }
 
 #[test]

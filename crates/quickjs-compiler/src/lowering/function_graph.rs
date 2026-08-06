@@ -32,6 +32,7 @@ fn verified_binding_policy(
         DeclarationKind::Let | DeclarationKind::Class => VerifiedBindingKind::Let,
         DeclarationKind::Const => VerifiedBindingKind::Const,
         DeclarationKind::ClassName => VerifiedBindingKind::ClassName,
+        DeclarationKind::ClassFieldKey => VerifiedBindingKind::ClassFieldKey,
         DeclarationKind::Function => VerifiedBindingKind::Function,
         DeclarationKind::FunctionName => VerifiedBindingKind::FunctionName,
         DeclarationKind::Catch => VerifiedBindingKind::Catch,
@@ -132,6 +133,7 @@ const fn binding_has_scope(policy: DeclarationPolicy) -> bool {
             | DeclarationKind::Class
             | DeclarationKind::Const
             | DeclarationKind::ClassName
+            | DeclarationKind::ClassFieldKey
             | DeclarationKind::Catch
     ) || matches!(
         policy.initialization(),

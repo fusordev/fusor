@@ -43,6 +43,9 @@ pub enum CompilerBindingKind {
     Const,
     /// The immutable inner binding created for a named class definition.
     ClassName,
+    /// The compiler-created immutable class-scope cell for one evaluated
+    /// computed public instance-field key.
+    ClassFieldKey,
     /// A function declaration.
     Function,
     /// A named function-expression self binding.
@@ -143,6 +146,7 @@ impl CompilerBindingPolicy {
             CompilerBindingKind::Let
                 | CompilerBindingKind::Const
                 | CompilerBindingKind::ClassName
+                | CompilerBindingKind::ClassFieldKey
                 | CompilerBindingKind::Catch
         ) || matches!(
             self.initialization,
@@ -170,7 +174,9 @@ impl CompilerBindingPolicy {
                 ) && matches!(self.writes, CompilerWritePolicy::Mutable)
                     && self.temporal_dead_zone
             }
-            CompilerBindingKind::Const | CompilerBindingKind::ClassName => {
+            CompilerBindingKind::Const
+            | CompilerBindingKind::ClassName
+            | CompilerBindingKind::ClassFieldKey => {
                 matches!(
                     self.initialization,
                     CompilerInitializationPolicy::AtDeclaration
@@ -2079,6 +2085,7 @@ pub fn verify_compiler_bytecode_graph(
         verified.push(record);
     }
     verify_closure_metadata(&graph, &verified)?;
+    verify_class_field_key_bindings(&graph, &verified)?;
     verify_inferred_function_names(&graph, &verified)?;
     verify_method_definitions(&graph, &verified, limits, &mut usage)?;
 
@@ -3859,6 +3866,7 @@ const fn realm_global_policy_supported(policy: CompilerBindingPolicy) -> bool {
         CompilerBindingKind::Parameter
         | CompilerBindingKind::FunctionName
         | CompilerBindingKind::ClassName
+        | CompilerBindingKind::ClassFieldKey
         | CompilerBindingKind::Catch => false,
     }
 }
@@ -4157,6 +4165,214 @@ fn verify_closure_metadata(
     Ok(())
 }
 
+/// Certifies the synthetic cell that carries one computed public
+/// instance-field key from `ClassDefinitionEvaluation` into its constructor.
+/// The cell is not source-addressable: it has one lexical activation, one
+/// immediately-post-`to_prop_key` initialization, and one direct capture by
+/// the class constructor template it belongs to.  This is what lets the
+/// object-definition provenance pass distinguish a retained, once-evaluated
+/// field key from an arbitrary captured value.
+#[allow(
+    clippy::too_many_lines,
+    reason = "local initialization and every parent-child capture edge are one certificate"
+)]
+fn verify_class_field_key_bindings(
+    graph: &VerifiedCompilerFunctionGraph,
+    metadata: &[VerifiedFunctionMetadata],
+) -> Result<(), BytecodeVerificationError> {
+    for (parent_index, parent) in graph.functions().iter().enumerate() {
+        let parent_id = function_id(parent_index)?;
+        let parent_metadata = &metadata[parent_index];
+        let arguments = parent.control_flow().domains().argument_count() as usize;
+        let mut captures = try_filled_vec(
+            parent_id,
+            parent_metadata.variables.len(),
+            0_u32,
+            BytecodeGraphResource::VariableDefinitions,
+        )?;
+
+        for (definition_index, definition) in parent_metadata.variables.iter().enumerate() {
+            if definition.policy.kind() != CompilerBindingKind::ClassFieldKey {
+                continue;
+            }
+            let Some(local) = definition_index
+                .checked_sub(arguments)
+                .and_then(|index| u32::try_from(index).ok())
+            else {
+                return Err(policy_error(
+                    parent_id,
+                    BindingSlot::Argument(usize_to_u32(definition_index)),
+                    None,
+                    BindingPolicyViolationReason::InvalidDeclarationPolicy,
+                ));
+            };
+            if !definition.has_scope
+                || definition.variable_reference.is_none()
+                || definition.function_initializer.is_some()
+            {
+                return Err(policy_error(
+                    parent_id,
+                    BindingSlot::Local(local),
+                    None,
+                    BindingPolicyViolationReason::InvalidDeclarationPolicy,
+                ));
+            }
+
+            let instructions = parent.control_flow().instructions();
+            let mut initialization = None;
+            let mut initialization_count = 0_u32;
+            for index in 1..instructions.len() {
+                let instruction = instructions[index].decoded().instruction();
+                if local_operand(instruction.opcode(), instruction.operands()) != Some(local)
+                    || !is_unchecked_local_put(instruction.opcode())
+                {
+                    continue;
+                }
+                initialization_count = initialization_count.saturating_add(1);
+                let prior = instructions[index - 1].decoded().instruction();
+                if prior.opcode() != FinalOpcode::ToPropKey
+                    || !parent_metadata.internal_stack.has_effective_successor(
+                        instructions,
+                        index - 1,
+                        usize_to_u32(index),
+                    )
+                {
+                    return Err(policy_error(
+                        parent_id,
+                        BindingSlot::Local(local),
+                        Some(instructions[index].decoded().pc()),
+                        BindingPolicyViolationReason::InvalidLexicalInitialization,
+                    ));
+                }
+                initialization = Some(index);
+            }
+            if initialization_count != 1 {
+                return Err(policy_error(
+                    parent_id,
+                    BindingSlot::Local(local),
+                    initialization.and_then(|index| {
+                        instructions
+                            .get(index)
+                            .map(|instruction| instruction.decoded().pc())
+                    }),
+                    BindingPolicyViolationReason::InvalidLexicalInitialization,
+                ));
+            }
+        }
+
+        for constant in parent.constants() {
+            let crate::CompilerConstant::Function(child_id) = constant else {
+                continue;
+            };
+            let child_index = usize::try_from(child_id.get()).map_err(|_| {
+                BytecodeVerificationError::function(
+                    *child_id,
+                    BytecodeVerificationErrorKind::ClosureMetadataMismatch {
+                        child: *child_id,
+                        closure: 0,
+                    },
+                )
+            })?;
+            let child = graph.function(*child_id).ok_or_else(|| {
+                BytecodeVerificationError::function(
+                    *child_id,
+                    BytecodeVerificationErrorKind::ClosureMetadataMismatch {
+                        child: *child_id,
+                        closure: 0,
+                    },
+                )
+            })?;
+            let child_metadata = &metadata[child_index];
+            for (closure_index, (closure, source)) in child_metadata
+                .closures
+                .iter()
+                .zip(child.closure_sources())
+                .enumerate()
+            {
+                if closure.policy().kind() != CompilerBindingKind::ClassFieldKey {
+                    continue;
+                }
+                let CompilerClosureSource::ParentVariableReference(reference) = *source else {
+                    return Err(BytecodeVerificationError::function(
+                        *child_id,
+                        BytecodeVerificationErrorKind::ClosureMetadataMismatch {
+                            child: *child_id,
+                            closure: usize_to_u32(closure_index),
+                        },
+                    ));
+                };
+                let Some(CompilerCapturedBinding::ScopedLocal(local)) = parent
+                    .control_flow()
+                    .compiler_capture_layout()
+                    .and_then(|layout| layout.binding_for_variable_reference(reference))
+                else {
+                    return Err(BytecodeVerificationError::function(
+                        *child_id,
+                        BytecodeVerificationErrorKind::ClosureMetadataMismatch {
+                            child: *child_id,
+                            closure: usize_to_u32(closure_index),
+                        },
+                    ));
+                };
+                let Some(definition_index) =
+                    arguments.checked_add(local as usize).filter(|&index| {
+                        parent_metadata
+                            .variables
+                            .get(index)
+                            .is_some_and(|definition| {
+                                definition.policy.kind() == CompilerBindingKind::ClassFieldKey
+                            })
+                    })
+                else {
+                    return Err(BytecodeVerificationError::function(
+                        *child_id,
+                        BytecodeVerificationErrorKind::ClosureMetadataMismatch {
+                            child: *child_id,
+                            closure: usize_to_u32(closure_index),
+                        },
+                    ));
+                };
+                if child_metadata.executable_kind != CompilerExecutableKind::ClassConstructor {
+                    return Err(BytecodeVerificationError::function(
+                        *child_id,
+                        BytecodeVerificationErrorKind::ClosureMetadataMismatch {
+                            child: *child_id,
+                            closure: usize_to_u32(closure_index),
+                        },
+                    ));
+                }
+                captures[definition_index] = captures[definition_index].saturating_add(1);
+            }
+        }
+
+        for (definition_index, definition) in parent_metadata.variables.iter().enumerate() {
+            if definition.policy.kind() != CompilerBindingKind::ClassFieldKey {
+                continue;
+            }
+            let local = definition_index
+                .checked_sub(arguments)
+                .and_then(|index| u32::try_from(index).ok())
+                .ok_or_else(|| {
+                    policy_error(
+                        parent_id,
+                        BindingSlot::Argument(usize_to_u32(definition_index)),
+                        None,
+                        BindingPolicyViolationReason::InvalidDeclarationPolicy,
+                    )
+                })?;
+            if captures[definition_index] != 1 {
+                return Err(policy_error(
+                    parent_id,
+                    BindingSlot::Local(local),
+                    None,
+                    BindingPolicyViolationReason::InvalidLexicalInitialization,
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
 #[allow(
     clippy::too_many_lines,
     reason = "typed class/method closure pairing, unique CFG entry, arity, and ownership form one definition certificate"
@@ -4400,7 +4616,14 @@ fn verify_method_definitions(
                     | FinalOpcode::Dup1
             )
         }) {
-            verify_object_definition_provenance(parent_id, parent, internal_stack, limits, usage)?;
+            verify_object_definition_provenance(
+                parent_id,
+                parent,
+                &metadata[parent_index],
+                internal_stack,
+                limits,
+                usage,
+            )?;
         }
     }
 
@@ -5005,7 +5228,7 @@ fn derived_default_constructor_pair(
         let Some(region) = fields.get(next.saturating_add(1)..close) else {
             return false;
         };
-        if !matches!(
+        let static_field_region = matches!(
             region,
             [push_this, .., define, drop]
                 if push_this.decoded().instruction().opcode() == FinalOpcode::PushThis
@@ -5014,13 +5237,31 @@ fn derived_default_constructor_pair(
                         (FinalOpcode::DefineField, Operands::Atom(_))
                     )
                     && drop.decoded().instruction().opcode() == FinalOpcode::Drop
-        ) {
+        );
+        let computed_field_region = matches!(
+            region,
+            [push_this, key, .., define, first_drop, second_drop]
+                if push_this.decoded().instruction().opcode() == FinalOpcode::PushThis
+                    && key.decoded().instruction().opcode() == FinalOpcode::GetVarRefCheck
+                    && matches!(
+                        (define.decoded().instruction().opcode(), define.decoded().instruction().operands()),
+                        (FinalOpcode::DefineArrayEl, Operands::None)
+                    )
+                    && first_drop.decoded().instruction().opcode() == FinalOpcode::Drop
+                    && second_drop.decoded().instruction().opcode() == FinalOpcode::Drop
+        );
+        if !static_field_region && !computed_field_region {
             return false;
         }
         let open_index = fields_start.saturating_add(next);
         let push_this_index = open_index.saturating_add(1);
         let close_index = fields_start.saturating_add(close);
-        let define_index = close_index.saturating_sub(2);
+        let define_index = if computed_field_region {
+            close_index.saturating_sub(3)
+        } else {
+            close_index.saturating_sub(2)
+        };
+        let first_drop_index = computed_field_region.then(|| close_index.saturating_sub(2));
         let drop_index = close_index.saturating_sub(1);
         let next_after_close = if close_index == fields_end {
             final_drop_index
@@ -5029,6 +5270,7 @@ fn derived_default_constructor_pair(
         };
         if predecessor_counts.get(open_index) != Some(&1)
             || predecessor_counts.get(push_this_index) != Some(&1)
+            || first_drop_index.is_some_and(|index| predecessor_counts.get(index) != Some(&1))
             || predecessor_counts.get(drop_index) != Some(&1)
             || predecessor_counts.get(close_index) != Some(&1)
             || !has_only_effective_successor(
@@ -5041,8 +5283,16 @@ fn derived_default_constructor_pair(
                 internal_stack,
                 instructions,
                 define_index,
-                usize_to_u32(drop_index),
+                usize_to_u32(first_drop_index.unwrap_or(drop_index)),
             )
+            || first_drop_index.is_some_and(|index| {
+                !has_only_effective_successor(
+                    internal_stack,
+                    instructions,
+                    index,
+                    usize_to_u32(drop_index),
+                )
+            })
             || !has_only_effective_successor(
                 internal_stack,
                 instructions,
@@ -5095,8 +5345,17 @@ enum ObjectDefinitionProvenance {
     FreshObject(u32),
     ClassConstructor(u32),
     ClassPrototype(u32),
-    FreshArray { site: u32, minimum_cursor: u32 },
-    ArrayCursorCandidate { site: u32, value: u32 },
+    /// `this` in a class constructor. It is accepted as a dynamic
+    /// `define_array_el` target only with a verified class-field key cell.
+    ClassFieldReceiver(u32),
+    FreshArray {
+        site: u32,
+        minimum_cursor: u32,
+    },
+    ArrayCursorCandidate {
+        site: u32,
+        value: u32,
+    },
     AppendDestination(u32),
     CheckedAppendCursor(u32),
     AppendCursorAfterElision(u32),
@@ -5104,6 +5363,9 @@ enum ObjectDefinitionProvenance {
     AppendLengthTarget(u32),
     AppendLengthCursor(u32),
     ConvertedPropertyKey(u32),
+    /// A property key that class definition evaluation converted exactly once
+    /// and stored in the constructor's captured class-field-key cell.
+    ClassFieldKey(u32),
 }
 
 #[allow(
@@ -5113,6 +5375,7 @@ enum ObjectDefinitionProvenance {
 fn verify_object_definition_provenance(
     id: FunctionTemplateId,
     function: &VerifiedCompilerFunction,
+    metadata: &VerifiedFunctionMetadata,
     internal_stack: &InternalStackCertificate,
     limits: BytecodeGraphVerificationLimits,
     usage: &mut BytecodeGraphUsage,
@@ -5267,8 +5530,16 @@ fn verify_object_definition_provenance(
                         Some(ObjectDefinitionProvenance::ConvertedPropertyKey(_))
                     )
                 );
+                let computed_instance_field = matches!(
+                    (object, key),
+                    (
+                        Some(ObjectDefinitionProvenance::ClassFieldReceiver(_)),
+                        Some(ObjectDefinitionProvenance::ClassFieldKey(_))
+                    )
+                );
                 if !object_literal
                     && !static_class_field
+                    && !computed_instance_field
                     && append_pair_for_element(&state).is_none()
                 {
                     return Err(define_array_element_key_error(id, decoded.pc()));
@@ -5306,6 +5577,7 @@ fn verify_object_definition_provenance(
             decoded,
             internal_stack.nip_catch_transform(index),
             function,
+            metadata,
             &mut state,
         )? {
             continue;
@@ -5375,6 +5647,7 @@ fn transfer_object_definition_provenance(
     decoded: crate::DecodedInstruction,
     nip_catch_transform: Option<CertifiedNipCatchTransform>,
     function: &VerifiedCompilerFunction,
+    metadata: &VerifiedFunctionMetadata,
     state: &mut Vec<ObjectDefinitionProvenance>,
 ) -> Result<bool, BytecodeVerificationError> {
     let instruction = decoded.instruction();
@@ -5410,6 +5683,29 @@ fn transfer_object_definition_provenance(
 
     match instruction.opcode() {
         FinalOpcode::Undefined => state.push(ObjectDefinitionProvenance::LiteralUndefined),
+        FinalOpcode::PushThis
+            if metadata.executable_kind == CompilerExecutableKind::ClassConstructor =>
+        {
+            state.push(ObjectDefinitionProvenance::ClassFieldReceiver(
+                usize_to_u32(instruction_index),
+            ));
+        }
+        FinalOpcode::GetVarRefCheck
+            if closure_operand(instruction.opcode(), instruction.operands()).is_some_and(
+                |slot| {
+                    metadata
+                        .closures
+                        .get(slot as usize)
+                        .is_some_and(|definition| {
+                            definition.policy().kind() == CompilerBindingKind::ClassFieldKey
+                        })
+                },
+            ) =>
+        {
+            state.push(ObjectDefinitionProvenance::ClassFieldKey(usize_to_u32(
+                instruction_index,
+            )));
+        }
         FinalOpcode::Object => state.push(ObjectDefinitionProvenance::FreshObject(usize_to_u32(
             instruction_index,
         ))),

@@ -121,6 +121,50 @@ fn uncomputed_public_instance_field_initializers_run_at_constructor_boundaries()
 }
 
 #[test]
+fn computed_instance_field_keys_evaluate_once_per_class_and_are_retained_by_constructors() {
+    run_with(
+        "function run(){let evaluations=0;function key(){evaluations=evaluations+1;return evaluations===1?'base':'derived';}class Base{[key()]=10;constructor(){this.baseSaw=evaluations;}}class Derived extends Base{[key()]=20;constructor(){super();this.derivedSaw=evaluations;}}let first=new Derived;let second=new Derived;return evaluations===2&&first.base===10&&first.derived===20&&first.baseSaw===2&&first.derivedSaw===2&&second.base===10&&second.derived===20&&second.baseSaw===2&&second.derivedSaw===2;}",
+        |result| {
+            let value = result.expect("computed instance field execution");
+            assert_eq!(value.as_boolean().expect("live Boolean"), Some(true));
+        },
+    );
+}
+
+#[test]
+fn computed_instance_field_keys_work_in_a_synthesized_derived_constructor() {
+    run_with(
+        "function run(){let evaluations=0;function key(){evaluations=evaluations+1;return 'field';}class Base{[key()]=1;}class Derived extends Base{[key()]=2;}let first=new Derived;let second=new Derived;return evaluations===2&&first.field===2&&second.field===2;}",
+        |result| {
+            let value = result.expect("default derived computed instance field execution");
+            assert_eq!(value.as_boolean().expect("live Boolean"), Some(true));
+        },
+    );
+}
+
+#[test]
+fn multiple_computed_instance_field_keys_keep_their_own_captured_cells() {
+    run_with(
+        "function run(){let calls=0;function key(){calls=calls+1;return calls===1?'left':'right';}class Box{[key()]=1;[key()]=2;}let first=new Box;let second=new Box;return calls===2&&first.left===1&&first.right===2&&second.left===1&&second.right===2;}",
+        |result| {
+            let value = result.expect("multiple computed instance field execution");
+            assert_eq!(value.as_boolean().expect("live Boolean"), Some(true));
+        },
+    );
+}
+
+#[test]
+fn computed_instance_field_keys_follow_class_element_evaluation_order() {
+    run_with(
+        "function run(){let order='';function key(label){order=order+label;return label;}class Box{[key('first')]=1;static[key('static')]=2;[key('last')]=3;}let value=new Box;return order==='firststaticlast'&&Box.static===2&&value.first===1&&value.last===3;}",
+        |result| {
+            let value = result.expect("computed class element ordering");
+            assert_eq!(value.as_boolean().expect("live Boolean"), Some(true));
+        },
+    );
+}
+
+#[test]
 fn uncomputed_instance_field_initializers_observe_this_super_and_new_target() {
     run_with(
         "function run(){class Base{constructor(value){this._value=value;}get value(){return this._value;}}class Derived extends Base{fromSuper=super.value;target=new.target;constructor(value){super(value);this.bodySeesFields=this.fromSuper===value&&this.target===Derived;}}let value=new Derived(7);return value.fromSuper===7&&value.target===Derived&&value.bodySeesFields;}",

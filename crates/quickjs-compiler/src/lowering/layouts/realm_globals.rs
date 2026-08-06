@@ -109,6 +109,7 @@ impl<'plan> RealmGlobalLayoutBuilder<'plan> {
             }
             DeclarationKind::FunctionName
             | DeclarationKind::ClassName
+            | DeclarationKind::ClassFieldKey
             | DeclarationKind::Parameter
             | DeclarationKind::Catch
             | DeclarationKind::Import
