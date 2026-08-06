@@ -26,7 +26,7 @@
 //! UTC and time-value foundation for the ES2025 `%Date%` intrinsic.
 
 use temporal_rs::{
-    Calendar, PlainDateTime, Temporal, TimeZone, ZonedDateTime, options::Disambiguation,
+    Calendar, Instant, PlainDateTime, Temporal, TimeZone, ZonedDateTime, options::Disambiguation,
 };
 
 #[allow(
@@ -934,6 +934,31 @@ pub(super) fn dispatch_date_prototype(
                 JsString::from_utf8(&rendered)?,
             )))
         }
+        DatePrototypeMethod::ToTemporalInstant => {
+            let milliseconds = value.as_f64();
+            if !milliseconds.is_finite() {
+                return Err(NativeFailure::Abrupt(PendingException {
+                    realm,
+                    payload: PendingExceptionPayload::EngineError {
+                        kind: ExceptionKind::RangeError,
+                        message: JsString::from_utf8("invalid time value")?,
+                    },
+                    origin: origin.clone(),
+                }));
+            }
+            #[allow(
+                clippy::cast_possible_truncation,
+                reason = "a branded finite Date value is an integral TimeClip result within i64"
+            )]
+            let instant = Instant::from_epoch_milliseconds(milliseconds as i64).map_err(|_| {
+                EngineFault::RuntimeInvariant {
+                    message: "a valid Date escaped the shared Temporal.Instant range",
+                }
+            })?;
+            let prototype = HeapReference::Object(runtime.realm_temporal_instant_prototype(realm)?);
+            let object = runtime.allocate_temporal_instant(prototype, instant)?;
+            Ok(NativeDispatch::Immediate(StoredValue::Object(object)))
+        }
         DatePrototypeMethod::GetUtcFullYear
         | DatePrototypeMethod::GetUtcMonth
         | DatePrototypeMethod::GetUtcDate
@@ -1250,6 +1275,7 @@ fn utc_component(method: DatePrototypeMethod, value: f64) -> JsNumber {
         | DatePrototypeMethod::SetUtcMonth
         | DatePrototypeMethod::SetFullYear
         | DatePrototypeMethod::SetUtcFullYear
+        | DatePrototypeMethod::ToTemporalInstant
         | DatePrototypeMethod::ToJson
         | DatePrototypeMethod::SymbolToPrimitive => {
             unreachable!("non-component Date method")

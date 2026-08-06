@@ -107,7 +107,7 @@ does not imply complete ECMAScript or QuickJS compatibility.
 - [x] Typed same-site iterator state covers Array/String iteration, spread,
   destructuring, `for-of`, `IteratorClose`, and original-abrupt precedence.
 - [x] Validated schemas derive Realm allocation and rollback. The normalized
-  snapshot pins 449 Realm-local identities and 1,363 ordered properties.
+  snapshot pins 450 Realm-local identities and 1,366 ordered properties.
 - [x] Proxy and exotic-object integration covers all 11 internal methods,
   revocation/invariants, reflection, descriptors/integrity, constructors,
   iterators, Arrays, strings, RegExp, Promise, and JSON. Audited built-in
@@ -180,7 +180,7 @@ does not imply complete ECMAScript or QuickJS compatibility.
   recovery, left-to-right setter coercion, generic `toJSON`, `@@toPrimitive`,
   signed UTC years, and deterministic non-Intl locale fallbacks follow
   ECMA-262 (17/17 focused VM cases; Date.parse Test262 16/16; Date prototype
-  Test262 954/954 admitted modes across 485 files, with 16 Temporal skips).
+  Test262 970/970 admitted modes across 485 files, with no feature skips).
 - [ ] Temporal is staged on the shared `temporal_rs` kernel. `%Temporal%` and
   branded `%Temporal.Instant%` now provide construction, epoch-millisecond and
   epoch-nanosecond factories/accessors, string/instance `from`, ordered
@@ -188,9 +188,10 @@ does not imply complete ECMAScript or QuickJS compatibility.
   selection, and `valueOf` rejection. Focused Test262 admission runs one
   skipped feature inside an explicit subtree without weakening the global
   baseline: this slice passes 224/256 modes; all 32 non-passes stop in deferred
-  class or lexical-initialization lowering before Temporal executes. Complete
-  Instant arithmetic/rounding/zoned operations, the other Temporal types, and
-  Date interop; then implement binary data/typed arrays and Atomics.
+  class or lexical-initialization lowering before Temporal executes.
+  `Date.prototype.toTemporalInstant` interop is complete (16/16 modes). Complete
+  Instant arithmetic/rounding/zoned operations and the other Temporal types;
+  then implement binary data/typed arrays and Atomics.
 
 ### Jobs, asynchronous semantics, and modules
 

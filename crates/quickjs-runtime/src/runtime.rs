@@ -1444,12 +1444,13 @@ pub(crate) enum DatePrototypeMethod {
     SetUtcMonth,
     SetFullYear,
     SetUtcFullYear,
+    ToTemporalInstant,
     ToJson,
     SymbolToPrimitive,
 }
 
 impl DatePrototypeMethod {
-    pub(crate) const ALL: [Self; 44] = [
+    pub(crate) const ALL: [Self; 45] = [
         Self::ValueOf,
         Self::ToString,
         Self::ToUtcString,
@@ -1492,6 +1493,7 @@ impl DatePrototypeMethod {
         Self::SetUtcMonth,
         Self::SetFullYear,
         Self::SetUtcFullYear,
+        Self::ToTemporalInstant,
         Self::ToJson,
         Self::SymbolToPrimitive,
     ];
@@ -1540,6 +1542,7 @@ impl DatePrototypeMethod {
             Self::SetUtcMonth => "setUTCMonth",
             Self::SetFullYear => "setFullYear",
             Self::SetUtcFullYear => "setUTCFullYear",
+            Self::ToTemporalInstant => "toTemporalInstant",
             Self::ToJson => "toJSON",
             Self::SymbolToPrimitive => "[Symbol.toPrimitive]",
         }
@@ -1583,7 +1586,8 @@ impl DatePrototypeMethod {
             | Self::GetMilliseconds
             | Self::GetUtcMilliseconds
             | Self::GetDay
-            | Self::GetUtcDay => 0,
+            | Self::GetUtcDay
+            | Self::ToTemporalInstant => 0,
         }
     }
 }

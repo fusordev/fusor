@@ -505,6 +505,28 @@ fn temporal_instant_from_compare_and_equals_share_spec_ordered_string_conversion
 }
 
 #[test]
+fn date_to_temporal_instant_preserves_the_clipped_epoch_and_brand_order() {
+    assert_eq!(
+        rendered(
+            "var instant=new Date(-1234).toTemporalInstant(),descriptor=
+               Object.getOwnPropertyDescriptor(Date.prototype,'toTemporalInstant');
+             return [instant instanceof Temporal.Instant,instant.epochNanoseconds,
+               Date.prototype.toTemporalInstant.name,Date.prototype.toTemporalInstant.length,
+               descriptor.writable,descriptor.enumerable,descriptor.configurable].join('|');"
+        ),
+        "true|-1234000000|toTemporalInstant|0|true|false|true"
+    );
+    assert_eq!(
+        thrown("return new Date(NaN).toTemporalInstant();"),
+        ExceptionKind::RangeError
+    );
+    assert_eq!(
+        thrown("return Date.prototype.toTemporalInstant.call({});"),
+        ExceptionKind::TypeError
+    );
+}
+
+#[test]
 fn callable_date_returns_a_local_time_string_without_observing_arguments() {
     let result = rendered(
         "var touched=false;
