@@ -935,12 +935,14 @@ pub(super) fn function_is_constructor(
                     .ok_or(EngineFault::InvalidClosureEnvironment {
                         function: bytecode.template,
                     })?;
-                return Ok(template
-                    .function()
-                    .control_flow()
-                    .function_header()
-                    .flags()
-                    .has_prototype());
+                return Ok(template.metadata().executable_kind()
+                    == CompilerExecutableKind::ClassConstructor
+                    || template
+                        .function()
+                        .control_flow()
+                        .function_header()
+                        .flags()
+                        .has_prototype());
             }
             FunctionImplementation::Native(native) => return Ok(native.kind.is_constructor()),
             FunctionImplementation::PromiseResolving(_)
@@ -982,12 +984,37 @@ pub(super) fn bytecode_function_is_constructor(
         .ok_or(EngineFault::InvalidClosureEnvironment {
             function: bytecode.template,
         })?;
-    Ok(template
-        .function()
-        .control_flow()
-        .function_header()
-        .flags()
-        .has_prototype())
+    Ok(
+        template.metadata().executable_kind() == CompilerExecutableKind::ClassConstructor
+            || template
+                .function()
+                .control_flow()
+                .function_header()
+                .flags()
+                .has_prototype(),
+    )
+}
+
+pub(super) fn bytecode_function_is_class_constructor(
+    runtime: &Runtime,
+    function: FunctionId,
+) -> Result<bool, ExecutionError> {
+    let bytecode = runtime
+        .functions
+        .get(function)
+        .ok_or(EngineFault::StaleHeapEdge {
+            edge: "function",
+            index: function.index(),
+            generation: function.generation(),
+        })?
+        .bytecode()?;
+    let template = code(runtime, bytecode.code)?
+        .authority
+        .function(bytecode.template)
+        .ok_or(EngineFault::InvalidClosureEnvironment {
+            function: bytecode.template,
+        })?;
+    Ok(template.metadata().executable_kind() == CompilerExecutableKind::ClassConstructor)
 }
 
 pub(super) fn create_ordinary_constructor_receiver(

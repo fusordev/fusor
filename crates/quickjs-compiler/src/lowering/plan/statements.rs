@@ -2,12 +2,12 @@ use std::sync::Arc;
 
 use super::super::{
     BindingPattern, CatchClause, CompilationContext, CompiledConstantPool, DeclarationKind,
-    DoWhileStatement, ExecutableKind, ExpressionStatement, FinalOpcode, ForInStatement,
-    ForOfStatement, ForStatement, ForStatementInit, FrameLayout, FunctionPlanningContext,
-    FunctionTreeLayout, GetSpan, IfStatement, InitializationPolicy, LabelIdentifier,
-    LabeledStatement, LeafCompilationError, Operands, PlannedControlFlow, ReturnStatement,
-    StoragePlacement, ThrowStatement, TryStatement, UnsupportedLeafFeature, WhileStatement,
-    WritePolicy, compact_put_local, plan_put_slot, unsupported,
+    DoWhileStatement, ExecutableKind, ExpressionPlanner, ExpressionStatement, FinalOpcode,
+    ForInStatement, ForOfStatement, ForStatement, ForStatementInit, FrameLayout,
+    FunctionPlanningContext, FunctionTreeLayout, GetSpan, IfStatement, InitializationPolicy,
+    LabelIdentifier, LabeledStatement, LeafCompilationError, Operands, PlannedControlFlow,
+    ReturnStatement, StoragePlacement, ThrowStatement, TryStatement, UnsupportedLeafFeature,
+    WhileStatement, WritePolicy, compact_put_local, plan_put_slot, unsupported,
 };
 
 use oxc_ast::ast::{
@@ -350,6 +350,15 @@ impl<'arena> CompilationContext<'_, 'arena, '_> {
                     layout.executable,
                     tree_layout,
                     state.active_scopes.last().copied(),
+                )?;
+            }
+            Statement::ClassDeclaration(class) => {
+                ExpressionPlanner::new(self).plan_base_class_declaration(
+                    class,
+                    layout,
+                    tree_layout,
+                    constants,
+                    flow,
                 )?;
             }
             Statement::VariableDeclaration(declaration) => {

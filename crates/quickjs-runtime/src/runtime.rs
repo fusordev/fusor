@@ -3076,6 +3076,7 @@ fn require_root_kind(
             "source function cannot execute as a dynamic-function Script"
         }
         CompilerExecutableKind::OrdinaryMethod
+        | CompilerExecutableKind::ClassConstructor
         | CompilerExecutableKind::OrdinaryArrow
         | CompilerExecutableKind::GeneratorFunction
         | CompilerExecutableKind::GeneratorMethod
@@ -3222,6 +3223,7 @@ const fn is_supported_opcode(opcode: FinalOpcode) -> bool {
             | FinalOpcode::CopyDataProperties
             | FinalOpcode::DefineField
             | FinalOpcode::DefineArrayEl
+            | FinalOpcode::DefineClass
             | FinalOpcode::DefineMethod
             | FinalOpcode::DefineMethodComputed
             | FinalOpcode::IfFalse

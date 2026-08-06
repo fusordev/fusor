@@ -1140,7 +1140,6 @@ fn unsupported_dynamic_binding_cases_fail_closed_at_exact_spans() {
     let cases = [
         ("eval('code')", UnsupportedFeature::DirectEval),
         ("with (object) value;", UnsupportedFeature::WithStatement),
-        ("class Box {}", UnsupportedFeature::ClassSyntheticSlots),
     ];
 
     for (source, expected) in cases {

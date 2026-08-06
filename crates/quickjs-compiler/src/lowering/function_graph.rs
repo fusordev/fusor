@@ -29,7 +29,7 @@ fn verified_binding_policy(
     let kind = match policy.kind() {
         DeclarationKind::Parameter => VerifiedBindingKind::Parameter,
         DeclarationKind::Var => VerifiedBindingKind::Var,
-        DeclarationKind::Let => VerifiedBindingKind::Let,
+        DeclarationKind::Let | DeclarationKind::Class => VerifiedBindingKind::Let,
         DeclarationKind::Const => VerifiedBindingKind::Const,
         DeclarationKind::Function => VerifiedBindingKind::Function,
         DeclarationKind::FunctionName => VerifiedBindingKind::FunctionName,
@@ -127,7 +127,10 @@ fn raw_parameter_definition(
 const fn binding_has_scope(policy: DeclarationPolicy) -> bool {
     matches!(
         policy.kind(),
-        DeclarationKind::Let | DeclarationKind::Const | DeclarationKind::Catch
+        DeclarationKind::Let
+            | DeclarationKind::Class
+            | DeclarationKind::Const
+            | DeclarationKind::Catch
     ) || matches!(
         policy.initialization(),
         InitializationPolicy::FunctionAtScopeEntry

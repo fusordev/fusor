@@ -183,6 +183,30 @@ pub(super) fn function_not_constructor_message(
     Ok(name.concat(&JsString::from_utf8(" is not a constructor")?)?)
 }
 
+pub(super) fn class_constructor_call_message(
+    runtime: &Runtime,
+    function: FunctionId,
+) -> Result<JsString, ExecutionError> {
+    let name_key = runtime.predefined_property_key(PredefinedAtom::Name);
+    let name = match runtime
+        .object_record(HeapReference::Function(function))?
+        .own_property(&name_key)
+    {
+        Some(OwnProperty::Data {
+            value: StoredValue::String(name),
+            ..
+        }) if !name.is_empty() => name,
+        Some(OwnProperty::Data { .. } | OwnProperty::Accessor { .. }) | None => {
+            return Ok(JsString::from_utf8(
+                "Class constructor cannot be invoked without 'new'",
+            )?);
+        }
+    };
+    Ok(JsString::from_utf8("Class constructor ")?
+        .concat(&name)?
+        .concat(&JsString::from_utf8(" cannot be invoked without 'new'")?)?)
+}
+
 pub(super) fn property_exception(
     runtime: &Runtime,
     frame: &Frame,

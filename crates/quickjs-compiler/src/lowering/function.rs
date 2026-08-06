@@ -17,7 +17,7 @@ use super::{
     CompiledFunction, CompiledMetadataAtomKey, CompiledRealmGlobal, FrameLayout, FrameLayoutInput,
     FunctionTreeLayout, LeafCompilationError, LocalSlot, LoweredLocal, OrdinaryFunctionForm,
     PlannedControlFlow, StatementCompletion, StatementControlStack, StatementPlanningState,
-    StatementWork, UnsupportedLeafFeature, checked_function_entry_count,
+    StatementWork, UnsupportedLeafFeature, checked_function_entry_count, unsupported,
 };
 use crate::storage::{ExecutableId, ExecutableKind};
 
@@ -441,6 +441,9 @@ impl CompilationContext<'_, '_, '_> {
             ),
             OrdinaryFunctionForm::ObjectMethod {
                 property_span: source_span,
+            }
+            | OrdinaryFunctionForm::ClassMethod {
+                property_span: source_span,
             } => (
                 if generator && asynchronous {
                     CompilerExecutableKind::AsyncGeneratorMethod
@@ -455,6 +458,20 @@ impl CompilationContext<'_, '_, '_> {
                 None,
                 None,
             ),
+            OrdinaryFunctionForm::ClassConstructor { class_span } => {
+                if generator || asynchronous {
+                    return unsupported(
+                        UnsupportedLeafFeature::UnsupportedFunctionForm,
+                        class_span,
+                    );
+                }
+                (
+                    CompilerExecutableKind::ClassConstructor,
+                    class_span,
+                    None,
+                    None,
+                )
+            }
         };
         let variable_definitions = self.compiled_variable_definitions(
             executable_id,
@@ -639,6 +656,13 @@ const fn executable_header(
         }
         CompilerExecutableKind::OrdinaryMethod => {
             UnverifiedFunctionHeader::ordinary_method_with_variable_references(
+                strict,
+                defined_argument_count,
+                variable_reference_count,
+            )
+        }
+        CompilerExecutableKind::ClassConstructor => {
+            UnverifiedFunctionHeader::class_constructor_with_variable_references(
                 strict,
                 defined_argument_count,
                 variable_reference_count,

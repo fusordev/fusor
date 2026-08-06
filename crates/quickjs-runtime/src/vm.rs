@@ -4622,6 +4622,25 @@ fn execute_frame_loop(
                     )?;
                     continue;
                 }
+                if !construction && bytecode_function_is_class_constructor(runtime, function)? {
+                    let pending = PendingException {
+                        realm: operation_realm,
+                        payload: PendingExceptionPayload::EngineError {
+                            kind: ExceptionKind::TypeError,
+                            message: class_constructor_call_message(runtime, function)?,
+                        },
+                        origin,
+                    };
+                    dispatch_pending_exception(
+                        runtime,
+                        frames,
+                        active_frame_values,
+                        pending,
+                        compiler,
+                        execution_budget,
+                    )?;
+                    continue;
+                }
                 let supplied_argument_count = inputs.argument_count();
                 let plan = plan_frame(
                     runtime,

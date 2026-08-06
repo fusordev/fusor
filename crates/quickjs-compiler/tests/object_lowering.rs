@@ -1006,21 +1006,13 @@ fn unsupported_object_forms_fail_closed_at_the_relevant_source() {
 }
 
 #[test]
-fn anonymous_class_computed_data_properties_remain_fail_closed_before_lowering() {
+fn anonymous_class_computed_data_properties_fail_closed_at_compilation() {
     let source = "function make(key){return {[key]:class {}};}";
-    with_parsed_program(
-        source,
-        FrontendOptions::for_goal(CompilationGoal::GlobalScript(GlobalScriptGoal::new())),
-        |unit| {
-            let Err(CompilerError::Unsupported { feature, span }) = CompilationContext::new(unit)
-            else {
-                panic!("anonymous computed class data must remain fail closed");
-            };
-            assert_eq!(feature, UnsupportedFeature::ClassSyntheticSlots);
-            assert_eq!(&source[span.start as usize..span.end as usize], "class {}");
-        },
-    )
-    .expect("front-end acceptance");
+    let LeafCompilationError::Unsupported { feature, span } = compile_error(source, "make") else {
+        panic!("anonymous computed class data must remain fail closed");
+    };
+    assert_eq!(feature, UnsupportedLeafFeature::UnsupportedDeclaration);
+    assert_eq!(&source[span.start as usize..span.end as usize], "class {}");
 }
 
 /// `delete` lowers to the pinned `OP_delete` shape: the base, then the key,

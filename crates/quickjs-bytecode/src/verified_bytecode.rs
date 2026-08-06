@@ -520,6 +520,9 @@ pub enum CompilerExecutableKind {
     OrdinaryArrow,
     /// A nonconstructable ordinary object-literal method, getter, or setter.
     OrdinaryMethod,
+    /// A strict constructable base-class constructor. Its public prototype
+    /// object is installed by the paired `define_class` instruction.
+    ClassConstructor,
     /// A nonconstructable synchronous generator function.
     GeneratorFunction,
     /// A synchronous generator object-literal method.
@@ -1575,6 +1578,12 @@ pub enum BytecodeVerificationErrorKind {
         /// Final bytecode position of `define_method`.
         pc: BytecodePc,
     },
+    /// `define_class` is not paired with one immediately preceding typed
+    /// base-class constructor closure.
+    DefineClassTemplateMismatch {
+        /// Final bytecode position of `define_class`.
+        pc: BytecodePc,
+    },
     /// An inferred-name opcode is not paired with one immediately preceding
     /// anonymous ordinary-function closure on its unique incoming edge, or a
     /// computed name is detached from its data-property definition.
@@ -1587,6 +1596,14 @@ pub enum BytecodeVerificationErrorKind {
     DefineMethodTargetMismatch {
         /// Final bytecode position of `define_method`.
         pc: BytecodePc,
+    },
+    /// A base-class constructor closure was not consumed by exactly one
+    /// paired `define_class` instruction.
+    ClassConstructorTemplateOwnershipMismatch {
+        /// Class-constructor template with the invalid ownership count.
+        child: FunctionTemplateId,
+        /// Number of paired `define_class` instructions that consumed it.
+        definitions: u32,
     },
     /// `define_array_el` did not receive a key converted by `to_propkey`
     /// before its value was evaluated on the same fresh object literal.
@@ -1936,13 +1953,21 @@ impl fmt::Display for BytecodeVerificationErrorKind {
                 formatter,
                 "define_method at PC {pc} is not paired with one typed method closure"
             ),
+            Self::DefineClassTemplateMismatch { pc } => write!(
+                formatter,
+                "define_class at PC {pc} is not paired with one typed class-constructor closure"
+            ),
             Self::SetNameTemplateMismatch { pc } => write!(
                 formatter,
                 "inferred-name opcode at PC {pc} is not paired with one anonymous ordinary-function closure and its required definition"
             ),
             Self::DefineMethodTargetMismatch { pc } => write!(
                 formatter,
-                "define_method at PC {pc} does not target one fresh object literal"
+                "define_method at PC {pc} does not target one certified object or class slot"
+            ),
+            Self::ClassConstructorTemplateOwnershipMismatch { child, definitions } => write!(
+                formatter,
+                "class-constructor template {child:?} is consumed by {definitions} define_class instructions"
             ),
             Self::DefineArrayElementKeyMismatch { pc } => write!(
                 formatter,
@@ -2430,7 +2455,8 @@ fn verify_executable_kind(
         CompilerExecutableKind::OrdinaryMethod
         | CompilerExecutableKind::GeneratorMethod
         | CompilerExecutableKind::AsyncMethod
-        | CompilerExecutableKind::AsyncGeneratorMethod => {
+        | CompilerExecutableKind::AsyncGeneratorMethod
+        | CompilerExecutableKind::ClassConstructor => {
             let has_function_name_binding =
                 metadata.variables.iter().any(|definition| {
                     definition.policy.kind() == CompilerBindingKind::FunctionName
@@ -2551,6 +2577,29 @@ fn verify_header(
             if header.kind() != FunctionKind::Normal
                 || !matches!(header.flags().bits(), 0x0740 | 0x0742)
                 || header.mode().bits() & !1 != 0
+            {
+                return Err(BytecodeVerificationError::function(
+                    id,
+                    BytecodeVerificationErrorKind::UnsupportedFunctionHeader,
+                ));
+            }
+            if header.defined_argument_count() > arguments
+                || (header.flags().has_simple_parameter_list()
+                    && header.defined_argument_count() != arguments)
+            {
+                return Err(BytecodeVerificationError::function(
+                    id,
+                    BytecodeVerificationErrorKind::DefinedArgumentCountMismatch {
+                        defined: header.defined_argument_count(),
+                        arguments,
+                    },
+                ));
+            }
+        }
+        CompilerExecutableKind::ClassConstructor => {
+            if header.kind() != FunctionKind::Normal
+                || !matches!(header.flags().bits(), 0x0748 | 0x074a)
+                || !header.mode().is_strict()
             {
                 return Err(BytecodeVerificationError::function(
                     id,
@@ -4104,7 +4153,7 @@ fn verify_closure_metadata(
 
 #[allow(
     clippy::too_many_lines,
-    reason = "typed closure pairing, unique CFG entry, arity, and ownership form one method-definition certificate"
+    reason = "typed class/method closure pairing, unique CFG entry, arity, and ownership form one definition certificate"
 )]
 fn verify_method_definitions(
     graph: &VerifiedCompilerFunctionGraph,
@@ -4112,7 +4161,13 @@ fn verify_method_definitions(
     limits: BytecodeGraphVerificationLimits,
     usage: &mut BytecodeGraphUsage,
 ) -> Result<(), BytecodeVerificationError> {
-    let mut definition_counts = try_filled_vec(
+    let mut method_definition_counts = try_filled_vec(
+        graph.root_id(),
+        graph.functions().len(),
+        0_u32,
+        BytecodeGraphResource::VerifiedMetadata,
+    )?;
+    let mut class_definition_counts = try_filled_vec(
         graph.root_id(),
         graph.functions().len(),
         0_u32,
@@ -4158,6 +4213,23 @@ fn verify_method_definitions(
                     },
                 ));
             }
+            if is_class_definition_opcode(instruction.opcode())
+                && class_definition_pair(
+                    graph,
+                    parent,
+                    metadata,
+                    instructions,
+                    &predecessor_counts,
+                    internal_stack,
+                    index,
+                )
+                .is_none()
+            {
+                return Err(BytecodeVerificationError::function(
+                    parent_id,
+                    BytecodeVerificationErrorKind::DefineClassTemplateMismatch { pc: decoded.pc() },
+                ));
+            }
 
             let Some(constant) = closure_constant(instruction.opcode(), instruction.operands())
             else {
@@ -4174,6 +4246,38 @@ fn verify_method_definitions(
             else {
                 continue;
             };
+            if child_metadata.executable_kind == CompilerExecutableKind::ClassConstructor {
+                let pair = index.checked_add(1).and_then(|definition_index| {
+                    class_definition_pair(
+                        graph,
+                        parent,
+                        metadata,
+                        instructions,
+                        &predecessor_counts,
+                        internal_stack,
+                        definition_index,
+                    )
+                });
+                if pair != Some(*child) {
+                    return Err(BytecodeVerificationError::function(
+                        parent_id,
+                        BytecodeVerificationErrorKind::DefineClassTemplateMismatch {
+                            pc: decoded.pc(),
+                        },
+                    ));
+                }
+                let child_index = usize::try_from(child.get()).map_err(|_| {
+                    BytecodeVerificationError::function(
+                        *child,
+                        BytecodeVerificationErrorKind::DefineClassTemplateMismatch {
+                            pc: decoded.pc(),
+                        },
+                    )
+                })?;
+                let count = &mut class_definition_counts[child_index];
+                *count = count.saturating_add(1);
+                continue;
+            }
             if !matches!(
                 child_metadata.executable_kind,
                 CompilerExecutableKind::OrdinaryMethod
@@ -4211,7 +4315,7 @@ fn verify_method_definitions(
                     },
                 )
             })?;
-            let count = &mut definition_counts[child_index];
+            let count = &mut method_definition_counts[child_index];
             *count = count.saturating_add(1);
         }
         if instructions.iter().any(|instruction| {
@@ -4219,6 +4323,7 @@ fn verify_method_definitions(
                 instruction.decoded().instruction().opcode(),
                 FinalOpcode::DefineMethod
                     | FinalOpcode::DefineMethodComputed
+                    | FinalOpcode::DefineClass
                     | FinalOpcode::DefineArrayEl
                     | FinalOpcode::Append
                     | FinalOpcode::Dup1
@@ -4228,7 +4333,9 @@ fn verify_method_definitions(
         }
     }
 
-    for (index, (metadata, &definitions)) in metadata.iter().zip(&definition_counts).enumerate() {
+    for (index, (metadata, &definitions)) in
+        metadata.iter().zip(&method_definition_counts).enumerate()
+    {
         if !matches!(
             metadata.executable_kind,
             CompilerExecutableKind::OrdinaryMethod
@@ -4242,6 +4349,23 @@ fn verify_method_definitions(
             return Err(BytecodeVerificationError::function(
                 child,
                 BytecodeVerificationErrorKind::OrdinaryMethodTemplateOwnershipMismatch {
+                    child,
+                    definitions,
+                },
+            ));
+        }
+    }
+    for (index, (metadata, &definitions)) in
+        metadata.iter().zip(&class_definition_counts).enumerate()
+    {
+        if metadata.executable_kind != CompilerExecutableKind::ClassConstructor {
+            continue;
+        }
+        let child = function_id(index)?;
+        if definitions != 1 {
+            return Err(BytecodeVerificationError::function(
+                child,
+                BytecodeVerificationErrorKind::ClassConstructorTemplateOwnershipMismatch {
                     child,
                     definitions,
                 },
@@ -4439,10 +4563,61 @@ const fn is_method_definition_opcode(opcode: FinalOpcode) -> bool {
     )
 }
 
+const fn is_class_definition_opcode(opcode: FinalOpcode) -> bool {
+    matches!(opcode, FinalOpcode::DefineClass)
+}
+
+fn class_definition_pair(
+    graph: &VerifiedCompilerFunctionGraph,
+    parent: &VerifiedCompilerFunction,
+    metadata: &[VerifiedFunctionMetadata],
+    instructions: &[VerifiedInstruction],
+    predecessor_counts: &[u32],
+    internal_stack: &InternalStackCertificate,
+    definition_index: usize,
+) -> Option<FunctionTemplateId> {
+    let definition = instructions.get(definition_index)?;
+    let definition_instruction = definition.decoded().instruction();
+    if !matches!(
+        (
+            definition_instruction.opcode(),
+            definition_instruction.operands()
+        ),
+        (FinalOpcode::DefineClass, Operands::AtomU8 { value: 0, .. })
+    ) || predecessor_counts.get(definition_index) != Some(&1)
+    {
+        return None;
+    }
+    let closure_index = definition_index.checked_sub(1)?;
+    if !internal_stack.has_effective_successor(
+        instructions,
+        closure_index,
+        usize_to_u32(definition_index),
+    ) {
+        return None;
+    }
+    let closure = instructions.get(closure_index)?.decoded().instruction();
+    let constant = closure_constant(closure.opcode(), closure.operands())?;
+    let crate::CompilerConstant::Function(child) = parent.constants().get(constant as usize)?
+    else {
+        return None;
+    };
+    let child_index = usize::try_from(child.get()).ok()?;
+    let child_metadata = metadata.get(child_index)?;
+    if child_metadata.executable_kind != CompilerExecutableKind::ClassConstructor {
+        return None;
+    }
+    graph.function(*child)?;
+    Some(*child)
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum ObjectDefinitionProvenance {
     Unknown,
+    LiteralUndefined,
     FreshObject(u32),
+    ClassConstructor(u32),
+    ClassPrototype(u32),
     FreshArray { site: u32, minimum_cursor: u32 },
     ArrayCursorCandidate { site: u32, value: u32 },
     AppendDestination(u32),
@@ -4542,10 +4717,25 @@ fn verify_object_definition_provenance(
         }
         verify_linear_append_inputs(id, decoded, function, &state)?;
         match opcode {
+            FinalOpcode::DefineClass
+                if !matches!(
+                    state.get(state.len().saturating_sub(2)),
+                    Some(ObjectDefinitionProvenance::LiteralUndefined)
+                ) =>
+            {
+                return Err(BytecodeVerificationError::function(
+                    id,
+                    BytecodeVerificationErrorKind::DefineClassTemplateMismatch { pc: decoded.pc() },
+                ));
+            }
             FinalOpcode::DefineMethod
                 if !matches!(
                     state.get(state.len().saturating_sub(2)),
-                    Some(ObjectDefinitionProvenance::FreshObject(_))
+                    Some(
+                        ObjectDefinitionProvenance::FreshObject(_)
+                            | ObjectDefinitionProvenance::ClassConstructor(_)
+                            | ObjectDefinitionProvenance::ClassPrototype(_)
+                    )
                 ) =>
             {
                 return Err(method_target_error(id, decoded.pc()));
@@ -4707,9 +4897,16 @@ fn transfer_object_definition_provenance(
     }
 
     match instruction.opcode() {
+        FinalOpcode::Undefined => state.push(ObjectDefinitionProvenance::LiteralUndefined),
         FinalOpcode::Object => state.push(ObjectDefinitionProvenance::FreshObject(usize_to_u32(
             instruction_index,
         ))),
+        FinalOpcode::DefineClass => {
+            let site = usize_to_u32(instruction_index);
+            state.truncate(state.len() - 2);
+            state.push(ObjectDefinitionProvenance::ClassConstructor(site));
+            state.push(ObjectDefinitionProvenance::ClassPrototype(site));
+        }
         FinalOpcode::ArrayFrom => {
             let Some(argument_count) = instruction.operands().dynamic_argument_count() else {
                 return Err(append_stack_error(id, decoded.pc(), instruction.opcode()));
@@ -5518,6 +5715,7 @@ fn verify_supported_opcodes(
     let method = matches!(
         executable_kind,
         CompilerExecutableKind::OrdinaryMethod
+            | CompilerExecutableKind::ClassConstructor
             | CompilerExecutableKind::GeneratorMethod
             | CompilerExecutableKind::AsyncMethod
             | CompilerExecutableKind::AsyncGeneratorMethod
@@ -5622,6 +5820,7 @@ fn verify_supported_opcodes(
                             CompilerExecutableKind::OrdinaryFunction
                                 | CompilerExecutableKind::OrdinaryArrow
                                 | CompilerExecutableKind::OrdinaryMethod
+                                | CompilerExecutableKind::ClassConstructor
                                 | CompilerExecutableKind::GeneratorFunction
                                 | CompilerExecutableKind::GeneratorMethod
                                 | CompilerExecutableKind::AsyncFunction
@@ -5688,6 +5887,7 @@ fn compiler_special_object_is_authorized(
         CompilerExecutableKind::OrdinaryFunction
             | CompilerExecutableKind::OrdinaryArrow
             | CompilerExecutableKind::OrdinaryMethod
+            | CompilerExecutableKind::ClassConstructor
             | CompilerExecutableKind::GeneratorFunction
             | CompilerExecutableKind::GeneratorMethod
             | CompilerExecutableKind::AsyncFunction
@@ -5803,6 +6003,7 @@ const fn supported_compiler_opcode(opcode: FinalOpcode) -> bool {
             | FinalOpcode::DefineField
             | FinalOpcode::DefineArrayEl
             | FinalOpcode::Append
+            | FinalOpcode::DefineClass
             | FinalOpcode::DefineMethod
             | FinalOpcode::DefineMethodComputed
             | FinalOpcode::ForInStart
@@ -9615,6 +9816,7 @@ fn collect_requirements(
             | FinalOpcode::GetField2
             | FinalOpcode::PutField
             | FinalOpcode::DefineField
+            | FinalOpcode::DefineClass
             | FinalOpcode::DefineMethod
             | FinalOpcode::ForInStart => {
                 push_requirement(requirements, ExecutionRequirement::OrdinaryObjects);

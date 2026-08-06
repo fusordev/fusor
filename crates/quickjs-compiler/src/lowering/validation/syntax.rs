@@ -5,6 +5,48 @@ use super::super::{
 };
 
 impl CompilationContext<'_, '_, '_> {
+    pub(in crate::lowering) fn validate_realm_global_class_declaration(
+        &self,
+        storage: &crate::storage::BindingStorage,
+        span: Span,
+    ) -> Result<(), LeafCompilationError> {
+        let valid = storage.placement() == StoragePlacement::GlobalLexical
+            && storage.policy().kind() == DeclarationKind::Class
+            && storage.policy().initialization() == InitializationPolicy::AtDeclaration
+            && storage.policy().writes() == WritePolicy::Mutable
+            && storage.policy().has_temporal_dead_zone();
+        if !crate::is_supported_script_root_goal(self.unit.goal()) || !valid {
+            return unsupported(UnsupportedLeafFeature::UnsupportedDeclaration, span);
+        }
+        Ok(())
+    }
+
+    pub(in crate::lowering) fn validate_class_declaration_storage(
+        &self,
+        binding: BindingId,
+        frame_slot: FrameSlot,
+        span: Span,
+    ) -> Result<(), LeafCompilationError> {
+        let storage =
+            self.planned
+                .plan
+                .binding(binding)
+                .ok_or(LeafCompilationError::SemanticInvariant {
+                    invariant: "class declaration compiler binding exists",
+                    span: Some(span),
+                })?;
+        let valid = storage.placement() == StoragePlacement::Local
+            && storage.policy().kind() == DeclarationKind::Class
+            && storage.policy().initialization() == InitializationPolicy::AtDeclaration
+            && storage.policy().writes() == WritePolicy::Mutable
+            && storage.policy().has_temporal_dead_zone()
+            && matches!(frame_slot, FrameSlot::Local(_));
+        if !valid {
+            return unsupported(UnsupportedLeafFeature::UnsupportedBinding, span);
+        }
+        Ok(())
+    }
+
     pub(in crate::lowering) fn validate_realm_global_declaration(
         &self,
         declaration_kind: VariableDeclarationKind,

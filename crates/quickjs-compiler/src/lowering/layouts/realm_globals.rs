@@ -99,7 +99,7 @@ impl<'plan> RealmGlobalLayoutBuilder<'plan> {
                 binding.policy().writes() == WritePolicy::Mutable
                     && !binding.policy().has_temporal_dead_zone()
             }
-            DeclarationKind::Let => {
+            DeclarationKind::Let | DeclarationKind::Class => {
                 binding.policy().writes() == WritePolicy::Mutable
                     && binding.policy().has_temporal_dead_zone()
             }

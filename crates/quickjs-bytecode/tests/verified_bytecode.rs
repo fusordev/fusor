@@ -2106,6 +2106,105 @@ fn final_authority_admits_only_enumerable_static_define_method_kinds() {
 }
 
 #[test]
+fn final_authority_admits_only_typed_base_class_templates() {
+    let base_class = [
+        (FinalOpcode::Undefined, Operands::None),
+        (FinalOpcode::FClosure8, Operands::Const8(0)),
+        (
+            FinalOpcode::DefineClass,
+            Operands::AtomU8 {
+                atom: AtomPoolIndex::new(1),
+                value: 0,
+            },
+        ),
+        (FinalOpcode::Drop, Operands::None),
+        (FinalOpcode::Return, Operands::None),
+    ];
+    let verified = verify_compiler_bytecode_graph(
+        define_method_input(&base_class, CompilerExecutableKind::ClassConstructor, 0),
+        BytecodeGraphVerificationLimits::default(),
+    )
+    .expect("a base class consumes one typed strict constructor template");
+
+    assert_eq!(
+        verified.requirements(),
+        [
+            ExecutionRequirement::CoreValues,
+            ExecutionRequirement::Strings,
+            ExecutionRequirement::Closures,
+            ExecutionRequirement::OrdinaryObjects,
+        ]
+    );
+    let child = verified
+        .function(FunctionTemplateId::new(1))
+        .expect("class constructor child");
+    assert_eq!(
+        child.metadata().executable_kind(),
+        CompilerExecutableKind::ClassConstructor
+    );
+    assert!(
+        !child
+            .function()
+            .control_flow()
+            .function_header()
+            .flags()
+            .has_prototype(),
+        "define_class, rather than the function header, owns the class prototype"
+    );
+
+    let arbitrary_parent = [
+        (FinalOpcode::PushTrue, Operands::None),
+        (FinalOpcode::FClosure8, Operands::Const8(0)),
+        (
+            FinalOpcode::DefineClass,
+            Operands::AtomU8 {
+                atom: AtomPoolIndex::new(1),
+                value: 0,
+            },
+        ),
+        (FinalOpcode::Drop, Operands::None),
+        (FinalOpcode::Return, Operands::None),
+    ];
+    let error = verify_compiler_bytecode_graph(
+        define_method_input(
+            &arbitrary_parent,
+            CompilerExecutableKind::ClassConstructor,
+            0,
+        ),
+        BytecodeGraphVerificationLimits::default(),
+    )
+    .expect_err("a base class cannot substitute an arbitrary superclass input");
+    assert!(
+        matches!(
+            error.kind(),
+            BytecodeVerificationErrorKind::DefineClassTemplateMismatch { .. }
+        ),
+        "{error:?}"
+    );
+
+    let escaping_template = [
+        (FinalOpcode::FClosure8, Operands::Const8(0)),
+        (FinalOpcode::Return, Operands::None),
+    ];
+    let error = verify_compiler_bytecode_graph(
+        define_method_input(
+            &escaping_template,
+            CompilerExecutableKind::ClassConstructor,
+            0,
+        ),
+        BytecodeGraphVerificationLimits::default(),
+    )
+    .expect_err("a class constructor template cannot escape without define_class");
+    assert!(
+        matches!(
+            error.kind(),
+            BytecodeVerificationErrorKind::DefineClassTemplateMismatch { .. }
+        ),
+        "{error:?}"
+    );
+}
+
+#[test]
 fn final_authority_rejects_non_enumerable_method_definitions() {
     for flags in 0..=2 {
         for (opcode, operands) in [
@@ -5064,6 +5163,13 @@ fn define_method_input_with_root_arguments(
             CompilerExecutableKind::OrdinaryMethod => {
                 UnverifiedFunctionHeader::ordinary_method_with_variable_references(
                     false,
+                    child_arguments,
+                    0,
+                )
+            }
+            CompilerExecutableKind::ClassConstructor => {
+                UnverifiedFunctionHeader::class_constructor_with_variable_references(
+                    true,
                     child_arguments,
                     0,
                 )

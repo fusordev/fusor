@@ -1732,6 +1732,26 @@ pub(super) fn execute_one(
                 }
             }
         }
+        FinalOpcode::DefineClass => {
+            let class = define_base_class_operand(runtime, frame, operands)?;
+            let constructor = pop(frame)?;
+            let StoredValue::Function(constructor) = constructor else {
+                return Err(EngineFault::RuntimeInvariant {
+                    message: "verified define_class did not receive a closure",
+                }
+                .into());
+            };
+            let superclass = pop(frame)?;
+            if !matches!(superclass, StoredValue::Undefined) {
+                return Err(EngineFault::RuntimeInvariant {
+                    message: "base define_class did not receive undefined superclass",
+                }
+                .into());
+            }
+            let prototype = define_base_class(runtime, frame, constructor, class.name)?;
+            push(frame, StoredValue::Function(constructor));
+            push(frame, StoredValue::Object(prototype));
+        }
         FinalOpcode::GetArg
         | FinalOpcode::GetArg0
         | FinalOpcode::GetArg1

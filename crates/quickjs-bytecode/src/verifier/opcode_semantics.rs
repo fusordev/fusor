@@ -69,12 +69,10 @@ pub(super) const fn opcode_semantics(opcode: FinalOpcode) -> OpcodeSemantics {
             SuccessorShape::Fallthrough,
         ),
 
-        FinalOpcode::DefineClass | FinalOpcode::DefineClassComputed => {
-            OpcodeSemantics::Unsupported(
-                UnsupportedVerifierFeature::RawFunctionStack,
-                SuccessorShape::Fallthrough,
-            )
-        }
+        FinalOpcode::DefineClassComputed => OpcodeSemantics::Unsupported(
+            UnsupportedVerifierFeature::RawFunctionStack,
+            SuccessorShape::Fallthrough,
+        ),
 
         FinalOpcode::Eval | FinalOpcode::ApplyEval => OpcodeSemantics::Unsupported(
             UnsupportedVerifierFeature::EvalScopeMetadata,
@@ -116,7 +114,8 @@ pub(super) const fn opcode_semantics(opcode: FinalOpcode) -> OpcodeSemantics {
             SuccessorShape::Fallthrough,
         ),
 
-        FinalOpcode::NipCatch
+        FinalOpcode::DefineClass
+        | FinalOpcode::NipCatch
         | FinalOpcode::PushI32
         | FinalOpcode::InitialYield
         | FinalOpcode::Yield
@@ -341,8 +340,8 @@ mod tests {
         }
 
         assert_eq!(invalid, 1);
-        assert_eq!(supported, 216);
-        assert_eq!(unsupported, 27);
+        assert_eq!(supported, 217);
+        assert_eq!(unsupported, 26);
         assert_eq!(invalid + supported + unsupported, ALL_FINAL_OPCODES.len());
         assert_eq!(
             opcode_semantics(FinalOpcode::Invalid),

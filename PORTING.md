@@ -92,6 +92,12 @@ does not imply complete ECMAScript or QuickJS compatibility.
   TDZ, immutable writes, sloppy identifier deletion, destructuring
   initialization, exact source identity, and abrupt-completion instantiation
   follow Global Environment Record semantics.
+- [ ] Language closure comes before broad Test262. Named base-class declarations
+  with explicit constructors plus public static/instance methods and accessors
+  now lower through typed `define_class`, construct with the class prototype,
+  and reject direct calls. Class expressions/default constructors, `extends`,
+  `super`, fields, private elements, computed keys, decorators, and static
+  blocks remain deliberately fail closed.
 - [ ] Complete remaining opcode families, debug/source tables, and
   direct/indirect `eval`. Raw or serialized unverified bytecode and `eval`
   remain fail closed.
@@ -198,7 +204,8 @@ does not imply complete ECMAScript or QuickJS compatibility.
   methods; `with` 28/44 and `total` 42/152). `Date.prototype.toTemporalInstant`
   is complete (16/16). Complete class execution before further built-in
   expansion, then Duration rounding and Instant arithmetic/rounding/zoned
-  operations and the remaining Temporal types; next implement binary
+  operations and the remaining Temporal types; continue derived-class and
+  `super` semantics before further built-in expansion, then implement binary
   data/typed arrays and Atomics.
 
 ### Jobs, asynchronous semantics, and modules

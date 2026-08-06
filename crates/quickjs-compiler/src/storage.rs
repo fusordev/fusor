@@ -256,6 +256,8 @@ pub enum DeclarationKind {
     Let,
     /// A `const` declaration.
     Const,
+    /// A class declaration. Classes are mutable lexical bindings with a TDZ.
+    Class,
     /// A function declaration.
     Function,
     /// A named function-expression binding.
@@ -856,6 +858,7 @@ impl DeclarationFacts {
     const CATCH: u16 = 1 << 6;
     const IMPORT: u16 = 1 << 7;
     const NAMESPACE_IMPORT: u16 = 1 << 8;
+    const CLASS: u16 = 1 << 9;
 
     fn insert(&mut self, fact: u16) {
         self.bits |= fact;
@@ -876,6 +879,8 @@ impl DeclarationFacts {
             Some(DeclarationKind::Catch)
         } else if self.contains(Self::FUNCTION) {
             Some(DeclarationKind::Function)
+        } else if self.contains(Self::CLASS) {
+            Some(DeclarationKind::Class)
         } else if self.contains(Self::CONST) {
             Some(DeclarationKind::Const)
         } else if self.contains(Self::LET) {
@@ -1155,9 +1160,6 @@ impl<'unit, 'arena, 'scope> Planner<'unit, 'arena, 'scope> {
                 }
                 AstKind::WithStatement(statement) => {
                     return unsupported(UnsupportedFeature::WithStatement, statement.span);
-                }
-                AstKind::Class(class) => {
-                    return unsupported(UnsupportedFeature::ClassSyntheticSlots, class.span);
                 }
                 AstKind::Function(function)
                     if function.r#type == FunctionType::FunctionDeclaration
@@ -1635,15 +1637,13 @@ impl<'unit, 'arena, 'scope> Planner<'unit, 'arena, 'scope> {
                             !scoping.scope_flags(declaration_scope).is_var();
                     }
                 }
+                AstKind::Class(_) => facts.insert(DeclarationFacts::CLASS),
                 AstKind::CatchParameter(_) => facts.insert(DeclarationFacts::CATCH),
                 AstKind::ImportSpecifier(_) | AstKind::ImportDefaultSpecifier(_) => {
                     facts.insert(DeclarationFacts::IMPORT);
                 }
                 AstKind::ImportNamespaceSpecifier(_) => {
                     facts.insert(DeclarationFacts::NAMESPACE_IMPORT);
-                }
-                AstKind::Class(class) => {
-                    return unsupported(UnsupportedFeature::ClassSyntheticSlots, class.span);
                 }
                 other => {
                     return Err(CompilerError::SemanticInvariant {
@@ -1685,12 +1685,12 @@ impl<'unit, 'arena, 'scope> Planner<'unit, 'arena, 'scope> {
         }
         match self.kind {
             CompilationUnitKind::Script => match kind {
-                DeclarationKind::Let | DeclarationKind::Const
+                DeclarationKind::Let | DeclarationKind::Const | DeclarationKind::Class
                     if crate::is_supported_dynamic_function_goal(self.unit.goal()) =>
                 {
                     Ok(StoragePlacement::Local)
                 }
-                DeclarationKind::Let | DeclarationKind::Const => {
+                DeclarationKind::Let | DeclarationKind::Const | DeclarationKind::Class => {
                     Ok(StoragePlacement::GlobalLexical)
                 }
                 DeclarationKind::Var | DeclarationKind::Function => {
@@ -1712,6 +1712,7 @@ impl<'unit, 'arena, 'scope> Planner<'unit, 'arena, 'scope> {
                 | DeclarationKind::Var
                 | DeclarationKind::Let
                 | DeclarationKind::Const
+                | DeclarationKind::Class
                 | DeclarationKind::Function => Ok(StoragePlacement::ModuleLocal),
                 DeclarationKind::FunctionName
                 | DeclarationKind::Parameter
@@ -1743,7 +1744,7 @@ impl<'unit, 'arena, 'scope> Planner<'unit, 'arena, 'scope> {
                 WritePolicy::Mutable,
                 false,
             ),
-            DeclarationKind::Let => (
+            DeclarationKind::Let | DeclarationKind::Class => (
                 InitializationPolicy::AtDeclaration,
                 WritePolicy::Mutable,
                 true,

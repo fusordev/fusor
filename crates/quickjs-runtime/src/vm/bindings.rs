@@ -140,6 +140,55 @@ pub(super) fn function_constant(
     }
 }
 
+/// Finishes the runtime half of a verified base-class definition. The paired
+/// closure already owns the code and intrinsic function slots; this installs
+/// the public prototype object and the exact class-only constructor metadata.
+pub(super) fn define_base_class(
+    runtime: &mut Runtime,
+    frame: &Frame,
+    constructor: FunctionId,
+    name: JsString,
+) -> Result<ObjectId, ExecutionError> {
+    if !bytecode_function_is_class_constructor(runtime, constructor)? {
+        return Err(EngineFault::RuntimeInvariant {
+            message: "define_class did not receive a class-constructor closure",
+        }
+        .into());
+    }
+    let realm = code(runtime, frame.code)?.realm;
+    let prototype = runtime.allocate_ordinary_object(runtime.realm_object_prototype(realm)?)?;
+    let constructor_key = runtime.predefined_property_key(PredefinedAtom::Constructor);
+    let prototype_key = runtime.predefined_property_key(PredefinedAtom::Prototype);
+    let name_key = runtime.predefined_property_key(PredefinedAtom::Name);
+
+    runtime.append_data_property(
+        HeapReference::Object(prototype),
+        constructor_key,
+        PropertyLayout::data(true, false, true),
+        StoredValue::Function(constructor),
+    )?;
+    runtime.append_data_property(
+        HeapReference::Function(constructor),
+        prototype_key,
+        PropertyLayout::data(false, false, false),
+        StoredValue::Object(prototype),
+    )?;
+    let renamed = runtime
+        .object_record_mut(HeapReference::Function(constructor))?
+        .replace_existing_with_data(
+            &name_key,
+            PropertyLayout::data(false, false, true),
+            StoredValue::String(name),
+        );
+    if renamed.is_none() {
+        return Err(EngineFault::RuntimeInvariant {
+            message: "class-constructor closure lost its name property",
+        }
+        .into());
+    }
+    Ok(prototype)
+}
+
 #[allow(
     clippy::too_many_lines,
     reason = "closure validation, capture materialization, and publication are one transaction"

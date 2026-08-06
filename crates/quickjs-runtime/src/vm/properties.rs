@@ -214,6 +214,22 @@ pub(super) fn define_method_operand(
     })
 }
 
+/// Decodes the statically named, base-class-only `define_class` operand.
+/// Whole-graph verification has already rejected the heritage bit and all
+/// computed class forms in this initial class slice.
+pub(super) fn define_base_class_operand(
+    runtime: &Runtime,
+    frame: &Frame,
+    operands: Operands,
+) -> Result<StaticPropertyOperand, EngineFault> {
+    let Operands::AtomU8 { atom, value: 0 } = operands else {
+        return Err(EngineFault::RuntimeInvariant {
+            message: "verified define_class operand is invalid",
+        });
+    };
+    static_property_at(runtime, frame, atom)
+}
+
 pub(super) fn define_method_computed_operand(
     operands: Operands,
 ) -> Result<DefineMethodComputedOperand, EngineFault> {

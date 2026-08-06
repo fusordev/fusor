@@ -2,14 +2,17 @@ use quickjs_frontend::Span;
 
 use super::super::{
     ArrowFunctionExpression, AstKind, CompilationContext, CompilationUnitKind, Executable,
-    ExecutableId, ExecutableKind, Expression, Function, FunctionType, LeafCompilationError, NodeId,
-    ParsedUnit, Program, PropertyKind, UnsupportedLeafFeature, unsupported,
+    ExecutableId, ExecutableKind, Expression, Function, FunctionType, LeafCompilationError,
+    MethodDefinitionKind, NodeId, ParsedUnit, Program, PropertyKind, UnsupportedLeafFeature,
+    unsupported,
 };
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(in crate::lowering) enum OrdinaryFunctionForm {
     Function,
     ObjectMethod { property_span: Span },
+    ClassConstructor { class_span: Span },
+    ClassMethod { property_span: Span },
 }
 
 impl<'arena> CompilationContext<'_, 'arena, '_> {
@@ -144,10 +147,12 @@ impl<'arena> CompilationContext<'_, 'arena, '_> {
                 function.span,
             );
         }
-        let form = object_method_or_accessor_span(self.unit, node_id)
-            .map_or(OrdinaryFunctionForm::Function, |property_span| {
-                OrdinaryFunctionForm::ObjectMethod { property_span }
-            });
+        let form = class_method_form(self.unit, node_id).unwrap_or_else(|| {
+            object_method_or_accessor_span(self.unit, node_id)
+                .map_or(OrdinaryFunctionForm::Function, |property_span| {
+                    OrdinaryFunctionForm::ObjectMethod { property_span }
+                })
+        });
         if executable.kind()
             != (ExecutableKind::Function {
                 asynchronous: function.r#async,
@@ -329,4 +334,29 @@ pub(in crate::lowering) fn object_method_or_accessor_span(
     (value.node_id.get() == node_id
         && (property.method || !matches!(property.kind, PropertyKind::Init)))
     .then_some(property.span)
+}
+
+fn class_method_form(unit: &ParsedUnit<'_, '_>, node_id: NodeId) -> Option<OrdinaryFunctionForm> {
+    let AstKind::MethodDefinition(method) = unit.semantic().nodes().parent_kind(node_id) else {
+        return None;
+    };
+    if method.value.node_id.get() != node_id {
+        return None;
+    }
+    let AstKind::ClassBody(body) = unit.semantic().nodes().parent_kind(method.node_id.get()) else {
+        return None;
+    };
+    let AstKind::Class(class) = unit.semantic().nodes().parent_kind(body.node_id.get()) else {
+        return None;
+    };
+    match method.kind {
+        MethodDefinitionKind::Constructor => Some(OrdinaryFunctionForm::ClassConstructor {
+            class_span: class.span,
+        }),
+        MethodDefinitionKind::Method | MethodDefinitionKind::Get | MethodDefinitionKind::Set => {
+            Some(OrdinaryFunctionForm::ClassMethod {
+                property_span: method.span,
+            })
+        }
+    }
 }

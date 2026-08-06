@@ -1,15 +1,16 @@
 use super::super::{
     ArrayExpression, ArrayExpressionElement, ArrowFunctionExpression, AssignmentExpression,
     AssignmentOperator, AssignmentTarget, AtomPoolIndex, BinaryOperator, BranchKind,
-    CallExpression, ChainElement, ChainExpression, CompilationContext, CompiledConstantPool,
-    CompiledMetadataAtomKey, CompilerLabel, ComputedMemberExpression, ConditionalExpression,
-    ExecutableId, ExecutableKind, Expression, FinalOpcode, FrameLayout, Function,
-    FunctionTreeLayout, GetSpan, IdentifierReference, LeafCompilationError, LogicalExpression,
-    LogicalOperator, LoweredReference, ObjectExpression, ObjectProperty, ObjectPropertyKind,
-    Operands, PlannedControlFlow, PlannedInstruction, PropertyKind, SequenceExpression,
-    SimpleAssignmentTarget, Span, StaticMemberExpression, UnaryExpression, UnaryOperator,
+    CallExpression, ChainElement, ChainExpression, Class, ClassElement, CompilationContext,
+    CompiledConstantPool, CompiledMetadataAtomKey, CompilerLabel, ComputedMemberExpression,
+    ConditionalExpression, ExecutableId, ExecutableKind, Expression, FinalOpcode, FrameLayout,
+    Function, FunctionTreeLayout, GetSpan, IdentifierReference, LeafCompilationError,
+    LogicalExpression, LogicalOperator, LoweredReference, MethodDefinition, MethodDefinitionKind,
+    ObjectExpression, ObjectProperty, ObjectPropertyKind, Operands, PlannedControlFlow,
+    PlannedInstruction, PropertyKind, SequenceExpression, SimpleAssignmentTarget, Span,
+    StaticMemberExpression, StoragePlacement, UnaryExpression, UnaryOperator,
     UnsupportedLeafFeature, UpdateExpression, UpdateOperator, compiled_static_property_key,
-    object_method_or_accessor_span, unsupported,
+    object_method_or_accessor_span, plan_put_slot, unsupported,
 };
 use super::abrupt::{AbruptMarker, AbruptMarkerKind};
 use super::calls::MemberCallee;
@@ -482,6 +483,204 @@ impl<'compiler, 'unit, 'arena, 'scope> ExpressionPlanner<'compiler, 'unit, 'aren
             }
         }
         Ok(())
+    }
+
+    #[expect(
+        clippy::too_many_lines,
+        reason = "class-definition evaluation retains the spec-ordered template, method, and binding steps"
+    )]
+    /// Lowers the first fully verified class slice: a named base-class
+    /// declaration with an explicit ordinary constructor and statically named
+    /// public methods/accessors. Heritage, computed names, fields, private
+    /// elements, static blocks, decorators, class expressions, and synthesized
+    /// constructors stay fail-closed until their own execution contracts exist.
+    pub(in crate::lowering) fn plan_base_class_declaration(
+        &self,
+        class: &Class<'arena>,
+        layout: &FrameLayout,
+        tree_layout: &FunctionTreeLayout,
+        constants: &CompiledConstantPool,
+        flow: &mut PlannedControlFlow,
+    ) -> Result<(), LeafCompilationError> {
+        let identifier = class.id.as_ref().ok_or(LeafCompilationError::Unsupported {
+            feature: UnsupportedLeafFeature::UnsupportedDeclaration,
+            span: class.span,
+        })?;
+        if class.super_class.is_some() || !class.decorators.is_empty() {
+            return unsupported(UnsupportedLeafFeature::UnsupportedDeclaration, class.span);
+        }
+
+        let mut constructor = None;
+        for element in &class.body.body {
+            let ClassElement::MethodDefinition(method) = element else {
+                return unsupported(UnsupportedLeafFeature::UnsupportedBody, element.span());
+            };
+            Self::validate_base_class_method(method)?;
+            if method.kind == MethodDefinitionKind::Constructor
+                && constructor.replace(method.as_ref()).is_some()
+            {
+                return Err(LeafCompilationError::SemanticInvariant {
+                    invariant: "class has at most one constructor method",
+                    span: Some(method.span),
+                });
+            }
+        }
+        let constructor = constructor.ok_or(LeafCompilationError::Unsupported {
+            feature: UnsupportedLeafFeature::UnsupportedDeclaration,
+            span: class.body.span,
+        })?;
+
+        flow.emit(PlannedInstruction::new(
+            FinalOpcode::Undefined,
+            Operands::None,
+            class.span,
+        ))?;
+        flow.emit(self.plan_function_closure(
+            &constructor.value,
+            layout.executable,
+            tree_layout,
+            constants,
+        )?)?;
+        flow.emit(PlannedInstruction::new(
+            FinalOpcode::DefineClass,
+            Operands::AtomU8 {
+                atom: constants.property_atom_index(identifier.span)?,
+                value: 0,
+            },
+            class.span,
+        ))?;
+
+        for element in &class.body.body {
+            let ClassElement::MethodDefinition(method) = element else {
+                return Err(LeafCompilationError::SemanticInvariant {
+                    invariant: "validated class body contains only method definitions",
+                    span: Some(element.span()),
+                });
+            };
+            if method.kind == MethodDefinitionKind::Constructor {
+                continue;
+            }
+            let key = compiled_static_property_key(&method.key)?.ok_or(
+                LeafCompilationError::Unsupported {
+                    feature: UnsupportedLeafFeature::UnsupportedDeclaration,
+                    span: method.key.span(),
+                },
+            )?;
+            let flags = match method.kind {
+                MethodDefinitionKind::Method => 4,
+                MethodDefinitionKind::Get => 5,
+                MethodDefinitionKind::Set => 6,
+                MethodDefinitionKind::Constructor => unreachable!("constructors were skipped"),
+            };
+            if method.r#static {
+                flow.emit(PlannedInstruction::new(
+                    FinalOpcode::Swap,
+                    Operands::None,
+                    method.span,
+                ))?;
+            }
+            flow.emit(self.plan_function_closure(
+                &method.value,
+                layout.executable,
+                tree_layout,
+                constants,
+            )?)?;
+            flow.emit(PlannedInstruction::new(
+                FinalOpcode::DefineMethod,
+                Operands::AtomU8 {
+                    atom: constants.property_atom_index(key.span)?,
+                    value: flags,
+                },
+                method.span,
+            ))?;
+            if method.r#static {
+                flow.emit(PlannedInstruction::new(
+                    FinalOpcode::Swap,
+                    Operands::None,
+                    method.span,
+                ))?;
+            }
+        }
+        flow.emit(PlannedInstruction::new(
+            FinalOpcode::Drop,
+            Operands::None,
+            class.span,
+        ))?;
+        self.plan_base_class_declaration_binding(identifier, layout, tree_layout, flow)
+    }
+
+    fn validate_base_class_method(
+        method: &MethodDefinition<'arena>,
+    ) -> Result<(), LeafCompilationError> {
+        if method.computed || !method.decorators.is_empty() {
+            return unsupported(UnsupportedLeafFeature::UnsupportedDeclaration, method.span);
+        }
+        if method.kind == MethodDefinitionKind::Constructor {
+            if method.r#static {
+                return unsupported(UnsupportedLeafFeature::UnsupportedDeclaration, method.span);
+            }
+            return Ok(());
+        }
+        compiled_static_property_key(&method.key)?.ok_or(LeafCompilationError::Unsupported {
+            feature: UnsupportedLeafFeature::UnsupportedDeclaration,
+            span: method.key.span(),
+        })?;
+        Ok(())
+    }
+
+    fn plan_base_class_declaration_binding(
+        &self,
+        identifier: &super::super::BindingIdentifier<'arena>,
+        layout: &FrameLayout,
+        tree_layout: &FunctionTreeLayout,
+        flow: &mut PlannedControlFlow,
+    ) -> Result<(), LeafCompilationError> {
+        let binding = self.binding_for_identifier(identifier.symbol_id.get(), identifier.span)?;
+        let storage =
+            self.planned
+                .plan
+                .binding(binding)
+                .ok_or(LeafCompilationError::SemanticInvariant {
+                    invariant: "class declaration binding exists",
+                    span: Some(identifier.span),
+                })?;
+        match storage.placement() {
+            StoragePlacement::GlobalLexical => {
+                self.validate_realm_global_class_declaration(storage, identifier.span)?;
+                let global = tree_layout.realm_globals.for_binding(binding).ok_or(
+                    LeafCompilationError::SemanticInvariant {
+                        invariant: "Program class binding has a realm-global identity",
+                        span: Some(identifier.span),
+                    },
+                )?;
+                let slot = tree_layout.realm_globals.closure_slot(
+                    &self.planned.plan,
+                    layout.executable,
+                    global,
+                )?;
+                flow.emit(PlannedInstruction::new(
+                    FinalOpcode::PutVarInit,
+                    Operands::VarRef(slot),
+                    identifier.span,
+                ))
+            }
+            StoragePlacement::Local => {
+                let slot = layout
+                    .slot(binding)
+                    .ok_or(LeafCompilationError::Unsupported {
+                        feature: UnsupportedLeafFeature::UnsupportedBinding,
+                        span: identifier.span,
+                    })?;
+                self.validate_class_declaration_storage(binding, slot, identifier.span)?;
+                flow.emit(plan_put_slot(slot, identifier.span))
+            }
+            StoragePlacement::Argument { .. }
+            | StoragePlacement::GlobalObject
+            | StoragePlacement::ModuleLocal
+            | StoragePlacement::ModuleImport => {
+                unsupported(UnsupportedLeafFeature::UnsupportedBinding, identifier.span)
+            }
+        }
     }
 
     #[expect(

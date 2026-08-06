@@ -438,6 +438,29 @@ impl<'arena> CompilationContext<'_, 'arena, '_> {
                     record_property_candidate(owner, key.value, key.span, atom_candidates)?;
                 }
             }
+            AstKind::Class(class) => {
+                let identifier = class.id.as_ref().ok_or(LeafCompilationError::Unsupported {
+                    feature: super::UnsupportedLeafFeature::UnsupportedDeclaration,
+                    span: class.span,
+                })?;
+                record_property_candidate(
+                    owner,
+                    compiler_identifier_string(identifier.name.as_str(), identifier.span)?,
+                    identifier.span,
+                    atom_candidates,
+                )?;
+                for element in &class.body.body {
+                    let super::ClassElement::MethodDefinition(method) = element else {
+                        continue;
+                    };
+                    if !method.computed
+                        && method.kind != super::MethodDefinitionKind::Constructor
+                        && let Some(key) = compiled_static_property_key(&method.key)?
+                    {
+                        record_property_candidate(owner, key.value, key.span, atom_candidates)?;
+                    }
+                }
+            }
             AstKind::ObjectPattern(pattern) => {
                 for property in &pattern.properties {
                     if !property.computed
