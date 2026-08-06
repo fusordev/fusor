@@ -65,12 +65,13 @@ broad Test262 alignment. Checked entries have focused regressions.
   Private **instance data fields** (`#x = initializer`) are now admitted
   end-to-end: each class evaluation creates a fresh opaque private name, the
   constructor and class methods capture that identity, and direct read/simple
-  write use VM-only own slots. Those slots are non-enumerable/non-configurable,
-  cannot be obtained by string reflection, do not walk prototypes, and do not
-  invoke Proxy traps. Missing brands and primitive receivers throw `TypeError`.
+  write plus `#x in object` use VM-only own slots. Those slots are
+  non-enumerable/non-configurable, cannot be obtained by string reflection, do
+  not walk prototypes, and do not invoke Proxy traps. Missing brands and
+  primitive receivers throw `TypeError`.
 - [ ] Class closure: arrow-contained `super()`, private methods/accessors,
-  static private elements, `#x in object`, private-element anonymous
-  `SetFunctionName`, compound/logical/update private writes, and decorators.
+  static private elements, private-element anonymous `SetFunctionName`,
+  compound/logical/update private writes, and decorators.
   Oxc parsing these forms is not execution support.
 - [ ] Direct/indirect `eval`, `with`, Annex B block functions, remaining opcode
   families, and complete debug/source tables. `eval` and unverified bytecode

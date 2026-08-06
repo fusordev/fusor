@@ -82,7 +82,7 @@ fn explicit_base_class_constructor_and_public_methods_lower_to_typed_class_bytec
 #[test]
 fn public_private_instance_fields_receive_fresh_class_scope_names() {
     let tree = compile(
-        "function make(){class Box{#value=1;read(){return this.#value;}write(next){return this.#value=next;}}return Box;}",
+        "function make(){class Box{#value=1;read(){return this.#value;}write(next){return this.#value=next;}static has(candidate){return #value in candidate;}}return Box;}",
         "make",
     );
     let opcodes = tree
@@ -96,6 +96,7 @@ fn public_private_instance_fields_receive_fresh_class_scope_names() {
     assert!(opcodes.contains(&FinalOpcode::DefinePrivateField));
     assert!(opcodes.contains(&FinalOpcode::GetPrivateField));
     assert!(opcodes.contains(&FinalOpcode::PutPrivateField));
+    assert!(opcodes.contains(&FinalOpcode::PrivateIn));
     assert!(tree.functions().iter().any(|function| {
         function
             .closure_variables()

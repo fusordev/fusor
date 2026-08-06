@@ -1994,6 +1994,34 @@ pub(super) fn execute_one(
             };
             push(frame, value);
         }
+        FinalOpcode::PrivateIn => {
+            let base = pop(frame)?;
+            let private_name = pop(frame)?;
+            let Some(key) = private_field_key(private_name) else {
+                return Ok(Step::Abrupt(private_field_exception(
+                    runtime,
+                    frame,
+                    source_pc,
+                    "invalid private field name",
+                )?));
+            };
+            let Some(reference) = base.heap_reference() else {
+                return Ok(Step::Abrupt(private_field_exception(
+                    runtime,
+                    frame,
+                    source_pc,
+                    "private field membership requires an object receiver",
+                )?));
+            };
+            push(
+                frame,
+                StoredValue::Boolean(
+                    runtime
+                        .private_own_data_property(reference, &key)?
+                        .is_some(),
+                ),
+            );
+        }
         FinalOpcode::PutField => {
             let realm = code(runtime, frame.code)?.realm;
             let property = static_property_operand(runtime, frame, operands)?;

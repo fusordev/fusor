@@ -6982,6 +6982,7 @@ const fn supported_compiler_opcode(opcode: FinalOpcode) -> bool {
             | FinalOpcode::GetField
             | FinalOpcode::GetField2
             | FinalOpcode::GetPrivateField
+            | FinalOpcode::PrivateIn
             | FinalOpcode::GetArrayEl
             | FinalOpcode::GetArrayEl2
             | FinalOpcode::PutField

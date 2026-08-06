@@ -2594,14 +2594,18 @@ impl<'unit, 'arena, 'scope> Planner<'unit, 'arena, 'scope> {
         }
 
         for (node_id, node) in nodes.iter_enumerated() {
-            let AstKind::PrivateFieldExpression(access) = node.kind() else {
-                continue;
+            let (name, span) = match node.kind() {
+                AstKind::PrivateFieldExpression(access) => {
+                    (access.field.name.as_str(), access.span)
+                }
+                AstKind::PrivateInExpression(private_in) => {
+                    (private_in.left.name.as_str(), private_in.span)
+                }
+                _ => continue,
             };
-            let Some(binding) = self.private_name_binding_for_access(
-                node_id,
-                access.field.name.as_str(),
-                class_private_name_bindings,
-            ) else {
+            let Some(binding) =
+                self.private_name_binding_for_access(node_id, name, class_private_name_bindings)
+            else {
                 continue;
             };
             let storage =
@@ -2609,16 +2613,16 @@ impl<'unit, 'arena, 'scope> Planner<'unit, 'arena, 'scope> {
                     .get(binding.index())
                     .ok_or(CompilerError::SemanticInvariant {
                         invariant: "private access capture binding exists",
-                        span: Some(access.span),
+                        span: Some(span),
                     })?;
             let executable = self
                 .instance_field_initializer_owner(node_id)?
-                .unwrap_or(self.scope_owner(node.scope_id(), Some(access.span))?);
+                .unwrap_or(self.scope_owner(node.scope_id(), Some(span))?);
             if executable != storage.executable {
                 requests.push(CaptureRequest {
                     executable,
                     binding,
-                    span: access.span,
+                    span,
                 });
             }
         }

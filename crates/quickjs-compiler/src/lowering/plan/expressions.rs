@@ -8,12 +8,12 @@ use super::super::{
     FunctionTreeLayout, GetSpan, IdentifierReference, InitializationPolicy, LeafCompilationError,
     LogicalExpression, LogicalOperator, LoweredReference, MethodDefinition, MethodDefinitionKind,
     NodeId, ObjectExpression, ObjectProperty, ObjectPropertyKind, Operands, OxcPropertyKey,
-    PlannedControlFlow, PlannedInstruction, PrivateFieldExpression, PropertyDefinition,
-    PropertyKind, SequenceExpression, SimpleAssignmentTarget, Span, StatementCompletion,
-    StatementControlStack, StatementPlanningState, StatementWork, StaticMemberExpression,
-    StoragePlacement, UnaryExpression, UnaryOperator, UnsupportedLeafFeature, UpdateExpression,
-    UpdateOperator, compiled_static_property_key, object_method_or_accessor_span, plan_put_slot,
-    unsupported,
+    PlannedControlFlow, PlannedInstruction, PrivateFieldExpression, PrivateInExpression,
+    PropertyDefinition, PropertyKind, SequenceExpression, SimpleAssignmentTarget, Span,
+    StatementCompletion, StatementControlStack, StatementPlanningState, StatementWork,
+    StaticMemberExpression, StoragePlacement, UnaryExpression, UnaryOperator,
+    UnsupportedLeafFeature, UpdateExpression, UpdateOperator, compiled_static_property_key,
+    object_method_or_accessor_span, plan_put_slot, unsupported,
 };
 use super::abrupt::{AbruptMarker, AbruptMarkerKind};
 use super::calls::MemberCallee;
@@ -405,6 +405,9 @@ impl<'compiler, 'unit, 'arena, 'scope> ExpressionPlanner<'compiler, 'unit, 'aren
                         Expression::PrivateFieldExpression(member) => {
                             self.plan_private_member_read(member, layout, &mut work)?;
                         }
+                        Expression::PrivateInExpression(private_in) => {
+                            self.plan_private_in_expression(private_in, layout, &mut work)?;
+                        }
                         Expression::ChainExpression(chain) => {
                             Self::plan_optional_chain(chain, false, constants, flow, &mut work)?;
                         }
@@ -667,7 +670,12 @@ impl<'compiler, 'unit, 'arena, 'scope> ExpressionPlanner<'compiler, 'unit, 'aren
         if member.optional {
             return unsupported(UnsupportedLeafFeature::UnsupportedExpression, member.span);
         }
-        let (binding, slot) = self.private_name_binding_for_access(member, layout)?;
+        let (binding, slot) = self.private_name_binding_for_access(
+            member.node_id.get(),
+            member.field.name.as_str(),
+            member.span,
+            layout,
+        )?;
         work.push(ExpressionWork::Emit(PlannedInstruction::new(
             FinalOpcode::GetPrivateField,
             Operands::None,
@@ -684,11 +692,13 @@ impl<'compiler, 'unit, 'arena, 'scope> ExpressionPlanner<'compiler, 'unit, 'aren
 
     fn private_name_binding_for_access(
         &self,
-        member: &PrivateFieldExpression<'arena>,
+        access_node: NodeId,
+        name: &str,
+        span: Span,
         layout: &FrameLayout,
     ) -> Result<(BindingId, FrameSlot), LeafCompilationError> {
         let nodes = self.unit.semantic().nodes();
-        for ancestor in nodes.ancestor_ids(member.node_id.get()) {
+        for ancestor in nodes.ancestor_ids(access_node) {
             let AstKind::Class(class) = nodes.kind(ancestor) else {
                 continue;
             };
@@ -699,7 +709,7 @@ impl<'compiler, 'unit, 'arena, 'scope> ExpressionPlanner<'compiler, 'unit, 'aren
                 let OxcPropertyKey::PrivateIdentifier(identifier) = &field.key else {
                     continue;
                 };
-                if identifier.name != member.field.name {
+                if identifier.name.as_str() != name {
                     continue;
                 }
                 let binding = self
@@ -710,12 +720,12 @@ impl<'compiler, 'unit, 'arena, 'scope> ExpressionPlanner<'compiler, 'unit, 'aren
                     .copied()
                     .ok_or(LeafCompilationError::Unsupported {
                         feature: UnsupportedLeafFeature::UnsupportedExpression,
-                        span: member.span,
+                        span,
                     })?;
                 let storage = self.planned.plan.binding(binding).ok_or(
                     LeafCompilationError::SemanticInvariant {
                         invariant: "private field access binding exists",
-                        span: Some(member.span),
+                        span: Some(span),
                     },
                 )?;
                 if storage.policy().kind() != DeclarationKind::ClassPrivateName
@@ -723,19 +733,45 @@ impl<'compiler, 'unit, 'arena, 'scope> ExpressionPlanner<'compiler, 'unit, 'aren
                 {
                     return Err(LeafCompilationError::SemanticInvariant {
                         invariant: "private field access uses immutable class private-name storage",
-                        span: Some(member.span),
+                        span: Some(span),
                     });
                 }
                 let slot = layout
                     .slot(binding)
                     .ok_or(LeafCompilationError::SemanticInvariant {
                         invariant: "private field access binding has a frame slot",
-                        span: Some(member.span),
+                        span: Some(span),
                     })?;
                 return Ok((binding, slot));
             }
         }
-        unsupported(UnsupportedLeafFeature::UnsupportedExpression, member.span)
+        unsupported(UnsupportedLeafFeature::UnsupportedExpression, span)
+    }
+
+    fn plan_private_in_expression<'expression>(
+        &self,
+        private_in: &'expression PrivateInExpression<'arena>,
+        layout: &FrameLayout,
+        work: &mut Vec<ExpressionWork<'expression, 'arena>>,
+    ) -> Result<(), LeafCompilationError> {
+        let (binding, slot) = self.private_name_binding_for_access(
+            private_in.node_id.get(),
+            private_in.left.name.as_str(),
+            private_in.span,
+            layout,
+        )?;
+        work.push(ExpressionWork::Emit(PlannedInstruction::new(
+            FinalOpcode::PrivateIn,
+            Operands::None,
+            private_in.span,
+        )));
+        work.push(ExpressionWork::Visit(&private_in.right));
+        work.push(ExpressionWork::Emit(self.plan_read_slot(
+            binding,
+            slot,
+            private_in.left.span,
+        )?));
+        Ok(())
     }
 
     fn plan_private_member_assignment<'expression>(
@@ -751,7 +787,12 @@ impl<'compiler, 'unit, 'arena, 'scope> ExpressionPlanner<'compiler, 'unit, 'aren
                 assignment.left.span(),
             );
         }
-        let (binding, slot) = self.private_name_binding_for_access(member, layout)?;
+        let (binding, slot) = self.private_name_binding_for_access(
+            member.node_id.get(),
+            member.field.name.as_str(),
+            member.span,
+            layout,
+        )?;
         // As with computed-member assignment, preserve the RHS as the
         // assignment completion below the receiver/name/value triple consumed
         // by `put_private_field`.

@@ -13,11 +13,12 @@ use oxc_ast::{
         ForStatementLeft, Function, FunctionType, IdentifierReference, IfStatement,
         LabelIdentifier, LabeledStatement, LogicalExpression, MethodDefinition,
         MethodDefinitionKind, NewExpression, ObjectAssignmentTarget, ObjectExpression,
-        ObjectPattern, ObjectProperty, ObjectPropertyKind, PrivateFieldExpression, Program,
-        PropertyDefinition, PropertyKey as OxcPropertyKey, PropertyKind, RegExpLiteral,
-        ReturnStatement, SequenceExpression, SimpleAssignmentTarget, StaticMemberExpression,
-        TaggedTemplateExpression, ThrowStatement, TryStatement, UnaryExpression, UpdateExpression,
-        VariableDeclaration, VariableDeclarationKind, VariableDeclarator, WhileStatement,
+        ObjectPattern, ObjectProperty, ObjectPropertyKind, PrivateFieldExpression,
+        PrivateInExpression, Program, PropertyDefinition, PropertyKey as OxcPropertyKey,
+        PropertyKind, RegExpLiteral, ReturnStatement, SequenceExpression, SimpleAssignmentTarget,
+        StaticMemberExpression, TaggedTemplateExpression, ThrowStatement, TryStatement,
+        UnaryExpression, UpdateExpression, VariableDeclaration, VariableDeclarationKind,
+        VariableDeclarator, WhileStatement,
     },
 };
 use oxc_semantic::{NodeId, ReferenceId, SymbolId};
