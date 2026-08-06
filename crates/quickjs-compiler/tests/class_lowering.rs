@@ -393,6 +393,38 @@ fn static_property_class_assignments_use_a_typed_empty_name_atom() {
 }
 
 #[test]
+fn computed_property_class_assignments_use_the_same_typed_empty_name_atom() {
+    let tree = compile(
+        "function make(holder,key){return holder[key]=class{value(){return 3;}static answer(){return 4;}};}",
+        "make",
+    );
+    let root = tree.root();
+    assert!(
+        root.control_flow()
+            .instructions()
+            .iter()
+            .any(|instruction| {
+                instruction.decoded().instruction().opcode() == FinalOpcode::DefineClass
+            })
+    );
+    assert!(
+        root.atoms()
+            .iter()
+            .any(|atom| atom.is_static_property_only() && atom.string().is_empty())
+    );
+    assert!(
+        !root
+            .control_flow()
+            .instructions()
+            .iter()
+            .any(|instruction| {
+                instruction.decoded().instruction().opcode() == FinalOpcode::SetName
+            }),
+        "a computed property assignment leaves the anonymous class name empty"
+    );
+}
+
+#[test]
 fn static_field_initializers_requiring_a_class_receiver_stay_fail_closed() {
     let error = with_parsed_program(
         "function make(){class Box{static receiver=this;}return Box;}",

@@ -83,8 +83,8 @@ broad Test262.**
   their defining class element. Uncomputed public static fields, and computed
   static fields with non-class values, evaluate into own constructor properties
   when their initializers contain no `this`, `super`, or `new.target`.
-- [ ] Class closure: computed property assignments and other expression
-  contexts; `extends`, derived receiver initialization,
+- [ ] Class closure: compound member assignments and other expression contexts;
+  `extends`, derived receiver initialization,
   `super()`/super properties, instance fields, computed-key anonymous-class
   name inference outside direct object/static-field definitions, static-field
   initializers using `this`, `super`, or `new.target`, private elements,

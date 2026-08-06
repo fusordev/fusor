@@ -198,6 +198,17 @@ fn anonymous_base_classes_assigned_to_static_properties_keep_an_empty_name() {
 }
 
 #[test]
+fn anonymous_base_classes_assigned_to_computed_properties_keep_an_empty_name() {
+    run_with(
+        "function run(){let events=[];function field(){events.push('class');return 4;}let key={toString(){events.push('key');return 'Result';}};let holder={};let Result=holder[key]=class{value(){return 3;}static answer=field();};return Result===holder.Result&&Result.name===''&&new Result().value()===3&&Result.answer===4&&events.join(',')==='class,key';}",
+        |result| {
+            let value = result.expect("anonymous computed-property class execution");
+            assert_eq!(value.as_boolean().expect("live Boolean"), Some(true));
+        },
+    );
+}
+
+#[test]
 fn named_class_member_writes_throw_without_mutating_the_inner_name_cell() {
     run_with(
         "function run(){class Box{static replace(){Box=0;}}try{Box.replace();}catch(error){return error.name==='TypeError'&&Box.name==='Box';}return false;}",

@@ -725,6 +725,9 @@ impl<'arena> CompilationContext<'_, 'arena, '_> {
             super::AssignmentTarget::StaticMemberExpression(member) if !member.optional => {
                 Ok((compiler_identifier_string("", class.span)?, class.span))
             }
+            super::AssignmentTarget::ComputedMemberExpression(member) if !member.optional => {
+                Ok((compiler_identifier_string("", class.span)?, class.span))
+            }
             _ => super::unsupported(
                 super::UnsupportedLeafFeature::InferredFunctionName,
                 class.span,
