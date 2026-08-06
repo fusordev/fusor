@@ -4,13 +4,13 @@ use super::super::{
     CallExpression, ChainElement, ChainExpression, Class, ClassElement, CompilationContext,
     CompiledConstantPool, CompiledMetadataAtomKey, CompilerLabel, ComputedMemberExpression,
     ConditionalExpression, ExecutableId, ExecutableKind, Expression, FinalOpcode, FrameLayout,
-    FrameSlot, Function, FunctionTreeLayout, GetSpan, IdentifierReference, LeafCompilationError,
-    LogicalExpression, LogicalOperator, LoweredReference, MethodDefinition, MethodDefinitionKind,
-    ObjectExpression, ObjectProperty, ObjectPropertyKind, Operands, PlannedControlFlow,
-    PlannedInstruction, PropertyKind, SequenceExpression, SimpleAssignmentTarget, Span,
-    StaticMemberExpression, StoragePlacement, UnaryExpression, UnaryOperator,
-    UnsupportedLeafFeature, UpdateExpression, UpdateOperator, compiled_static_property_key,
-    object_method_or_accessor_span, plan_put_slot, unsupported,
+    FrameSlot, Function, FunctionTreeLayout, GetSpan, IdentifierReference, InitializationPolicy,
+    LeafCompilationError, LogicalExpression, LogicalOperator, LoweredReference, MethodDefinition,
+    MethodDefinitionKind, ObjectExpression, ObjectProperty, ObjectPropertyKind, Operands,
+    PlannedControlFlow, PlannedInstruction, PropertyKind, SequenceExpression,
+    SimpleAssignmentTarget, Span, StaticMemberExpression, StoragePlacement, UnaryExpression,
+    UnaryOperator, UnsupportedLeafFeature, UpdateExpression, UpdateOperator,
+    compiled_static_property_key, object_method_or_accessor_span, plan_put_slot, unsupported,
 };
 use super::abrupt::{AbruptMarker, AbruptMarkerKind};
 use super::calls::MemberCallee;
@@ -390,6 +390,15 @@ impl<'compiler, 'unit, 'arena, 'scope> ExpressionPlanner<'compiler, 'unit, 'aren
                                 constants,
                             )?)?;
                         }
+                        Expression::ClassExpression(class) => {
+                            self.plan_base_class_expression(
+                                class,
+                                layout,
+                                tree_layout,
+                                constants,
+                                flow,
+                            )?;
+                        }
                         Expression::YieldExpression(yield_expression) => {
                             let executable =
                                 self.planned.plan.executable(layout.executable).ok_or(
@@ -485,15 +494,6 @@ impl<'compiler, 'unit, 'arena, 'scope> ExpressionPlanner<'compiler, 'unit, 'aren
         Ok(())
     }
 
-    #[expect(
-        clippy::too_many_lines,
-        reason = "class-definition evaluation retains the spec-ordered template, method, and binding steps"
-    )]
-    /// Lowers the first fully verified class slice: a named base-class
-    /// declaration with an explicit ordinary or synthesized default constructor
-    /// and statically named public methods/accessors. Heritage, computed names,
-    /// fields, private elements, static blocks, decorators, and class
-    /// expressions stay fail-closed until their own execution contracts exist.
     pub(in crate::lowering) fn plan_base_class_declaration(
         &self,
         class: &Class<'arena>,
@@ -504,6 +504,44 @@ impl<'compiler, 'unit, 'arena, 'scope> ExpressionPlanner<'compiler, 'unit, 'aren
     ) -> Result<(), LeafCompilationError> {
         let identifier = class.id.as_ref().ok_or(LeafCompilationError::Unsupported {
             feature: UnsupportedLeafFeature::UnsupportedDeclaration,
+            span: class.span,
+        })?;
+        self.plan_base_class_definition(class, layout, tree_layout, constants, flow)?;
+        self.plan_base_class_declaration_binding(identifier, layout, tree_layout, flow)?;
+        self.plan_scope_exit(layout.executable, class.scope_id(), layout, flow)
+    }
+
+    pub(in crate::lowering) fn plan_base_class_expression(
+        &self,
+        class: &Class<'arena>,
+        layout: &FrameLayout,
+        tree_layout: &FunctionTreeLayout,
+        constants: &CompiledConstantPool,
+        flow: &mut PlannedControlFlow,
+    ) -> Result<(), LeafCompilationError> {
+        self.plan_base_class_definition(class, layout, tree_layout, constants, flow)?;
+        self.plan_scope_exit(layout.executable, class.scope_id(), layout, flow)
+    }
+
+    #[expect(
+        clippy::too_many_lines,
+        reason = "class-definition evaluation retains the spec-ordered template, method, and binding steps"
+    )]
+    /// Lowers the first fully verified class slice: a named base-class
+    /// definition with an explicit ordinary or synthesized default constructor
+    /// and statically named public methods/accessors. Heritage, computed names,
+    /// fields, private elements, static blocks, and decorators stay fail-closed
+    /// until their own execution contracts exist.
+    fn plan_base_class_definition(
+        &self,
+        class: &Class<'arena>,
+        layout: &FrameLayout,
+        tree_layout: &FunctionTreeLayout,
+        constants: &CompiledConstantPool,
+        flow: &mut PlannedControlFlow,
+    ) -> Result<(), LeafCompilationError> {
+        let identifier = class.id.as_ref().ok_or(LeafCompilationError::Unsupported {
+            feature: UnsupportedLeafFeature::UnsupportedExpression,
             span: class.span,
         })?;
         if class.super_class.is_some() || !class.decorators.is_empty() {
@@ -622,9 +660,7 @@ impl<'compiler, 'unit, 'arena, 'scope> ExpressionPlanner<'compiler, 'unit, 'aren
             FinalOpcode::Drop,
             Operands::None,
             class.span,
-        ))?;
-        self.plan_base_class_declaration_binding(identifier, layout, tree_layout, flow)?;
-        self.plan_scope_exit(layout.executable, class.scope_id(), layout, flow)
+        ))
     }
 
     fn validate_base_class_method(
@@ -700,12 +736,50 @@ impl<'compiler, 'unit, 'arena, 'scope> ExpressionPlanner<'compiler, 'unit, 'aren
         layout: &FrameLayout,
         flow: &mut PlannedControlFlow,
     ) -> Result<(), LeafCompilationError> {
-        let slot = self.base_class_name_binding(class, layout)?;
-        flow.emit(PlannedInstruction::new(
-            FinalOpcode::SetLocUninitialized,
-            Operands::Loc(slot.index()),
-            class.span,
-        ))
+        let scope = class.scope_id();
+        let bindings = self.planned.plan.bindings_for(layout.executable).ok_or(
+            LeafCompilationError::InvalidExecutable {
+                executable: layout.executable,
+            },
+        )?;
+        let mut slots = Vec::new();
+        for storage in bindings {
+            if self.scope_for_binding(storage.id())? != scope
+                || storage.policy().initialization() != InitializationPolicy::AtDeclaration
+                || !storage.policy().has_temporal_dead_zone()
+            {
+                continue;
+            }
+            let declaration_span = storage.declaration_spans().first().copied().ok_or(
+                LeafCompilationError::SemanticInvariant {
+                    invariant: "class-scope lexical binding has a declaration span",
+                    span: Some(class.span),
+                },
+            )?;
+            let FrameSlot::Local(slot) =
+                layout
+                    .slot(storage.id())
+                    .ok_or(LeafCompilationError::SemanticInvariant {
+                        invariant: "class-scope lexical binding has a frame slot",
+                        span: Some(declaration_span),
+                    })?
+            else {
+                return Err(LeafCompilationError::SemanticInvariant {
+                    invariant: "class-scope lexical binding uses local storage",
+                    span: Some(declaration_span),
+                });
+            };
+            slots.push((slot, declaration_span));
+        }
+        slots.sort_unstable_by_key(|(slot, _)| slot.index());
+        for (slot, declaration_span) in slots.into_iter().rev() {
+            flow.emit(PlannedInstruction::new(
+                FinalOpcode::SetLocUninitialized,
+                Operands::Loc(slot.index()),
+                declaration_span,
+            ))?;
+        }
+        Ok(())
     }
 
     fn plan_base_class_name_initialization(

@@ -86,3 +86,14 @@ fn a_base_class_without_a_constructor_still_constructs_with_its_class_prototype(
         },
     );
 }
+
+#[test]
+fn a_named_base_class_expression_retains_its_inner_name_and_constructs() {
+    run_with(
+        "function run(){let Result=class Box{static self(){return Box;}};let original=Result;Result=0;return original.self()===original&&new original().constructor===original;}",
+        |result| {
+            let value = result.expect("named class expression execution");
+            assert_eq!(value.as_boolean().expect("live Boolean"), Some(true));
+        },
+    );
+}

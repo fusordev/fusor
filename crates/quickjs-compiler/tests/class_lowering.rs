@@ -99,6 +99,23 @@ fn a_base_class_without_a_constructor_uses_a_synthesized_typed_template() {
 }
 
 #[test]
+fn a_named_base_class_expression_uses_the_same_typed_definition_path() {
+    let tree = compile(
+        "function make(){let Result=class Box{static self(){return Box;}};return Result;}",
+        "make",
+    );
+    assert_eq!(tree.functions().len(), 3);
+    assert_eq!(
+        tree.verified_bytecode()
+            .function(quickjs_bytecode::FunctionTemplateId::new(1))
+            .expect("synthesized expression class constructor")
+            .metadata()
+            .executable_kind(),
+        CompilerExecutableKind::ClassConstructor
+    );
+}
+
+#[test]
 fn named_base_class_members_capture_a_distinct_immutable_class_name_cell() {
     let tree = compile(
         "function make(){class Box{constructor(){}static self(){return Box;}}}",

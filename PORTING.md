@@ -64,18 +64,18 @@ broad Test262.**
   construction/`new.target`.
 - [x] Global Script evaluation preserves realm `var`, lexical bindings, TDZ,
   declaration conflicts, and source identity across evaluations.
-- [~] Classes: named base declarations with an explicit or synthesized default
-  constructor and public static/instance methods or accessors execute through
-  typed `define_class`.
+- [~] Classes: named base declarations and named base expressions with an
+  explicit or synthesized default constructor and public static/instance
+  methods or accessors execute through typed `define_class`.
   Member closures capture the spec-required immutable inner class-name cell,
   distinct from the mutable declaration binding. Constructors are strict,
   construct with the installed class prototype, and reject direct calls. The
   certificate requires literal `undefined` as the base input and one
   non-escaping typed constructor template.
-- [ ] Class closure: class expressions, `extends`, derived receiver
-  initialization, `super()`/super properties, class-name writes, fields,
-  private elements, computed keys, decorators, and static blocks. Do not
-  relabel these as supported merely because Oxc parses them.
+- [ ] Class closure: anonymous/inferred-name expressions, `extends`, derived
+  receiver initialization, `super()`/super properties, class-name writes,
+  fields, private elements, computed keys, decorators, and static blocks. Do
+  not relabel these as supported merely because Oxc parses them.
 - [ ] Direct/indirect `eval`, `with`, Annex B block functions, remaining opcode
   families, and complete debug/source tables. Unverified or serialized bytecode
   and unsupported `eval` remain fail closed.
