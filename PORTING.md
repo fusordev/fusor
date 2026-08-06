@@ -74,7 +74,9 @@ broad Test262.**
   certificate requires literal `undefined` as the base input and one
   non-escaping typed constructor template. Source writes to the captured class
   name reach a typed runtime `TypeError` without changing that cell. Public
-  computed method/accessor keys use the same typed definition path.
+  computed method/accessor keys use the same typed definition path; ordinary,
+  generator, async, and async-generator method templates are certified by
+  their defining class element.
 - [ ] Class closure: anonymous/inferred-name expressions outside a direct
   simple binding initializer, `extends`, derived receiver initialization,
   `super()`/super properties, fields, private elements, decorators, and static

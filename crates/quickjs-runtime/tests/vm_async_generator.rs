@@ -1123,3 +1123,22 @@ fn async_generator_object_method_uses_the_async_generator_intrinsics() {
         "3:false|AsyncGeneratorFunction"
     );
 }
+
+#[test]
+fn async_generator_class_method_uses_the_async_generator_intrinsics() {
+    assert_eq!(
+        start_and_read(
+            "function start(){\
+                let state={result:''};\
+                class Holder{async *values(){yield 3;}}\
+                let holder=new Holder;\
+                holder.values().next().then(function(result){\
+                    state.result=result.value+':'+result.done+'|'+\
+                        holder.values.constructor.name;\
+                });\
+                return state;\
+            }"
+        ),
+        "3:false|AsyncGeneratorFunction"
+    );
+}

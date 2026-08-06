@@ -191,6 +191,17 @@ fn computed_public_class_methods_use_the_typed_computed_definition_path() {
 }
 
 #[test]
+fn async_generator_class_methods_are_owned_by_their_definition() {
+    let tree = compile(
+        "function make(){class Box{async *values(){yield 1;}}return Box;}",
+        "make",
+    );
+    assert!(tree.verified_bytecode().functions().any(|function| {
+        function.metadata().executable_kind() == CompilerExecutableKind::AsyncGeneratorMethod
+    }));
+}
+
+#[test]
 fn named_base_class_members_capture_a_distinct_immutable_class_name_cell() {
     let tree = compile(
         "function make(){class Box{constructor(){}static self(){return Box;}}}",

@@ -4289,6 +4289,7 @@ fn verify_method_definitions(
                 CompilerExecutableKind::OrdinaryMethod
                     | CompilerExecutableKind::GeneratorMethod
                     | CompilerExecutableKind::AsyncMethod
+                    | CompilerExecutableKind::AsyncGeneratorMethod
             ) {
                 continue;
             }
@@ -4347,6 +4348,7 @@ fn verify_method_definitions(
             CompilerExecutableKind::OrdinaryMethod
                 | CompilerExecutableKind::GeneratorMethod
                 | CompilerExecutableKind::AsyncMethod
+                | CompilerExecutableKind::AsyncGeneratorMethod
         ) {
             continue;
         }
