@@ -351,6 +351,72 @@ fn date_local_setters_preserve_local_fields_and_coerce_left_to_right() {
 }
 
 #[test]
+fn date_to_primitive_validates_hints_and_uses_the_normative_method_order() {
+    assert_eq!(
+        rendered(
+            "var method=Date.prototype[Symbol.toPrimitive],log=[];
+             var receiver={toString:function(){log.push('string');return {}},
+               valueOf:function(){log.push('number');return 7}};
+             var first=method.call(receiver,'default'),defaultOrder=log.join(',');
+             log=[];var second=method.call(receiver,'number'),numberOrder=log.join(',');
+             var badHint=false,badThis=false;
+             try{method.call(receiver,'invalid')}catch(error){badHint=error instanceof TypeError}
+             try{method.call(1,'string')}catch(error){badThis=error instanceof TypeError}
+             return [method.name,method.length,first,defaultOrder,second,numberOrder,
+               badHint,badThis].join('|');"
+        ),
+        "[Symbol.toPrimitive]|1|7|string,number|7|number|true|true"
+    );
+}
+
+#[test]
+fn date_to_json_is_generic_and_invokes_to_iso_string_after_number_hint_coercion() {
+    assert_eq!(
+        rendered(
+            "var log=[],receiver,argumentCount;
+             var object={
+               valueOf:function(){log.push('valueOf');return 1},
+               get toISOString(){log.push('get');return function(){log.push('call');
+                 receiver=this;argumentCount=arguments.length;return 'ok'}}};
+             var result=Date.prototype.toJSON.call(object,'key');
+             var nan={valueOf:function(){return NaN},get toISOString(){throw new Error('read')}};
+             var primitive={toISOString:function(){return 'symbol'},valueOf:function(){throw 0}};
+             primitive[Symbol.toPrimitive]=function(hint){log.push(hint);return Symbol()};
+             var symbolResult=Date.prototype.toJSON.call(primitive);
+             return [Date.prototype.toJSON.name,Date.prototype.toJSON.length,result,
+               log.join(','),receiver===object,argumentCount,
+               Date.prototype.toJSON.call(nan)===null,
+               symbolResult].join('|');"
+        ),
+        "toJSON|1|ok|valueOf,get,call,number|true|0|true|symbol"
+    );
+    assert_eq!(
+        thrown("return Date.prototype.toJSON.call(null);"),
+        ExceptionKind::TypeError
+    );
+}
+
+#[test]
+fn date_no_intl_locale_fallbacks_ignore_options_and_utc_years_keep_four_digits() {
+    assert_eq!(
+        rendered(
+            "var d=new Date(0),observed=false;
+             var ignored={valueOf:function(){observed=true;throw 0}};
+             return [d.toLocaleString(ignored,ignored)===d.toString(),
+               d.toLocaleDateString(ignored,ignored)===d.toDateString(),
+               d.toLocaleTimeString(ignored,ignored)===d.toTimeString(),observed,
+               Date.prototype.toLocaleString.length,
+               Date.prototype.toLocaleDateString.length,
+               Date.prototype.toLocaleTimeString.length,
+               new Date(NaN).toLocaleString(),
+               new Date('-000001-07-01T00:00Z').toUTCString().split(' ')[3],
+               new Date('-000012-07-01T00:00Z').toUTCString().split(' ')[3]].join('|');"
+        ),
+        "true|true|true|false|0|0|0|Invalid Date|-0001|-0012"
+    );
+}
+
+#[test]
 fn callable_date_returns_a_local_time_string_without_observing_arguments() {
     let result = rendered(
         "var touched=false;

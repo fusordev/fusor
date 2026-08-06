@@ -4,7 +4,7 @@ use super::{
     FunctionSink, ObjectSink, PropertySink, data, method, object, object_prototype, ordinary,
 };
 use crate::runtime::realm::{
-    CONSTRUCTOR_PROTOTYPE_PROPERTY, NativeFunctionKind, PredefinedAtom,
+    CONSTRUCTOR_PROTOTYPE_PROPERTY, IDENTITY_PROPERTY, NativeFunctionKind, PredefinedAtom,
     schema::{
         IntrinsicFunctionId, IntrinsicIdentity, IntrinsicKeySpec, IntrinsicNameSpec,
         IntrinsicObjectId, IntrinsicObjectKind, IntrinsicValueSpec, RealmNameId,
@@ -41,6 +41,13 @@ pub(super) fn visit_functions(visit: FunctionSink<'_>) {
             }
             DatePrototypeMethod::ToIsoString => {
                 IntrinsicNameSpec::Predefined(PredefinedAtom::ToIsoString)
+            }
+            DatePrototypeMethod::ToLocaleString => {
+                IntrinsicNameSpec::Predefined(PredefinedAtom::ToLocaleString)
+            }
+            DatePrototypeMethod::ToJson => IntrinsicNameSpec::Predefined(PredefinedAtom::ToJson),
+            DatePrototypeMethod::SymbolToPrimitive => {
+                IntrinsicNameSpec::Literal("[Symbol.toPrimitive]")
             }
             _ => IntrinsicNameSpec::RealmName(RealmNameId::DatePrototype(method)),
         };
@@ -81,6 +88,23 @@ pub(super) fn visit_properties(visit: PropertySink<'_>) {
             }
             DatePrototypeMethod::ToIsoString => {
                 IntrinsicKeySpec::PredefinedString(PredefinedAtom::ToIsoString)
+            }
+            DatePrototypeMethod::ToLocaleString => {
+                IntrinsicKeySpec::PredefinedString(PredefinedAtom::ToLocaleString)
+            }
+            DatePrototypeMethod::ToJson => {
+                IntrinsicKeySpec::PredefinedString(PredefinedAtom::ToJson)
+            }
+            DatePrototypeMethod::SymbolToPrimitive => {
+                visit(data(
+                    prototype,
+                    IntrinsicKeySpec::WellKnownSymbol(PredefinedAtom::SymbolToPrimitive),
+                    IDENTITY_PROPERTY,
+                    IntrinsicValueSpec::Function(IntrinsicFunctionId(
+                        NativeFunctionKind::DatePrototype(method_id),
+                    )),
+                ));
+                continue;
             }
             _ => IntrinsicKeySpec::InternedString(RealmNameId::DatePrototype(method_id)),
         };

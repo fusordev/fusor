@@ -64,6 +64,12 @@ pub(super) struct DateSetterContinuation {
     method: DatePrototypeMethod,
 }
 
+pub(super) struct DateToJsonContinuation {
+    receiver: StoredValue,
+    realm: RealmId,
+    origin: JsStackFrame,
+}
+
 impl DateConstructorContinuation {
     pub(super) fn retained_values(&self) -> u64 {
         usize_to_u64(self.arguments.len()).saturating_add(1)
@@ -101,6 +107,16 @@ impl DateSetterContinuation {
             trace_stored_value_root(argument, mark);
         }
         mark(CollectionRoot::Heap(HeapReference::Object(self.object)));
+    }
+}
+
+impl DateToJsonContinuation {
+    pub(super) const fn retained_values() -> u64 {
+        1
+    }
+
+    pub(super) fn trace_roots(&self, mark: &mut dyn FnMut(CollectionRoot)) {
+        trace_stored_value_root(&self.receiver, mark);
     }
 }
 
@@ -437,6 +453,158 @@ pub(super) fn finish_date_set_time(
     Ok(NativeDispatch::Immediate(StoredValue::Number(value)))
 }
 
+fn begin_date_to_json(
+    runtime: &mut Runtime,
+    receiver: StoredValue,
+    realm: RealmId,
+    return_to: Option<CallReturn>,
+    origin: &JsStackFrame,
+    execution_budget: &mut ExecutionBudget,
+) -> Result<NativeDispatch, NativeFailure> {
+    let receiver = match to_object_value(runtime, realm, receiver, origin.clone())? {
+        Ok(receiver) => receiver,
+        Err(exception) => return Err(NativeFailure::Abrupt(exception)),
+    };
+    begin_operator_primitive_conversion(
+        runtime,
+        receiver.duplicate(),
+        OperatorPrimitiveHint::Number,
+        OperatorPrimitiveTarget::DateToJson(Box::new(DateToJsonContinuation {
+            receiver,
+            realm,
+            origin: origin.clone(),
+        })),
+        realm,
+        return_to,
+        origin.clone(),
+        execution_budget,
+    )
+}
+
+#[expect(
+    clippy::needless_pass_by_value,
+    reason = "operator completion ownership matches the ToPrimitive decision boundary"
+)]
+pub(super) fn begin_date_to_json_invoke(
+    runtime: &mut Runtime,
+    state: DateToJsonContinuation,
+    primitive: StoredValue,
+    return_to: Option<CallReturn>,
+    execution_budget: &mut ExecutionBudget,
+) -> Result<NativeDispatch, NativeFailure> {
+    if let StoredValue::Number(number) = primitive
+        && !number.as_f64().is_finite()
+    {
+        return Ok(NativeDispatch::Immediate(StoredValue::Null));
+    }
+    let key = runtime.predefined_property_key(PredefinedAtom::ToIsoString);
+    charge_heap_property_lookup(runtime, &state.receiver, execution_budget)?;
+    let dispatch = begin_value_get(
+        runtime,
+        &state.receiver,
+        key,
+        Some(&JsString::from_utf8("toISOString")?),
+        state.realm,
+        return_to,
+        state.origin.clone(),
+        execution_budget,
+    )?;
+    continue_get_after(
+        dispatch,
+        state,
+        NativeContinuation::DateToJson,
+        |state, method| finish_date_to_json_call(state, method, return_to),
+        "Date toJSON Get produced a structured result",
+    )
+}
+
+#[expect(
+    clippy::needless_pass_by_value,
+    reason = "Invoke completion ownership matches the dynamic Get decision boundary"
+)]
+pub(super) fn finish_date_to_json_call(
+    state: DateToJsonContinuation,
+    method: StoredValue,
+    return_to: Option<CallReturn>,
+) -> Result<NativeDispatch, NativeFailure> {
+    let StoredValue::Function(function) = method else {
+        return date_type_error(state.realm, &state.origin, "toISOString is not callable");
+    };
+    Ok(NativeDispatch::Call(NativeCall {
+        function,
+        receiver: state.receiver,
+        arguments: CallArguments::empty(),
+        return_to,
+        origin: state.origin,
+        continuations: Vec::new(),
+        pre_call: None,
+        new_target: None,
+        native_caller: None,
+    }))
+}
+
+fn begin_date_to_primitive(
+    runtime: &mut Runtime,
+    receiver: &StoredValue,
+    mut arguments: CallArguments,
+    realm: RealmId,
+    return_to: Option<CallReturn>,
+    origin: JsStackFrame,
+    execution_budget: &mut ExecutionBudget,
+) -> Result<NativeDispatch, NativeFailure> {
+    if !matches!(receiver, StoredValue::Function(_) | StoredValue::Object(_)) {
+        return date_type_error(
+            realm,
+            &origin,
+            "Date @@toPrimitive receiver is not an object",
+        );
+    }
+    let hint = match arguments.take_first_or_undefined() {
+        StoredValue::String(value) if string_equals_ascii(&value, "number") => {
+            OperatorPrimitiveHint::Number
+        }
+        StoredValue::String(value)
+            if string_equals_ascii(&value, "string") || string_equals_ascii(&value, "default") =>
+        {
+            OperatorPrimitiveHint::String
+        }
+        _ => return date_type_error(realm, &origin, "invalid Date @@toPrimitive hint"),
+    };
+    begin_ordinary_primitive_conversion(
+        runtime,
+        receiver.duplicate(),
+        hint,
+        OperatorPrimitiveTarget::DateToPrimitive,
+        realm,
+        return_to,
+        origin,
+        execution_budget,
+    )
+}
+
+fn string_equals_ascii(value: &JsString, expected: &str) -> bool {
+    usize::try_from(value.len()).ok() == Some(expected.len())
+        && expected
+            .bytes()
+            .zip(0_u32..)
+            .all(|(byte, index)| value.code_unit_at(index) == Some(u16::from(byte)))
+}
+
+fn date_type_error(
+    realm: RealmId,
+    origin: &JsStackFrame,
+    message: &str,
+) -> Result<NativeDispatch, NativeFailure> {
+    Err(NativeFailure::Abrupt(PendingException {
+        realm,
+        payload: PendingExceptionPayload::EngineError {
+            kind: ExceptionKind::TypeError,
+            message: JsString::from_utf8(message)?,
+        },
+        origin: origin.clone(),
+    }))
+}
+
 #[allow(
     clippy::too_many_arguments,
     reason = "native setter dispatch carries the receiver state plus the standard VM continuation context"
@@ -689,6 +857,7 @@ fn time_clip_local_date(local_value: f64) -> JsNumber {
 
 #[allow(
     clippy::too_many_arguments,
+    clippy::too_many_lines,
     reason = "native dispatch keeps the VM continuation inputs explicit"
 )]
 pub(super) fn dispatch_date_prototype(
@@ -701,6 +870,27 @@ pub(super) fn dispatch_date_prototype(
     origin: JsStackFrame,
     execution_budget: &mut ExecutionBudget,
 ) -> Result<NativeDispatch, NativeFailure> {
+    if matches!(method, DatePrototypeMethod::SymbolToPrimitive) {
+        return begin_date_to_primitive(
+            runtime,
+            receiver,
+            arguments,
+            realm,
+            return_to,
+            origin,
+            execution_budget,
+        );
+    }
+    if matches!(method, DatePrototypeMethod::ToJson) {
+        return begin_date_to_json(
+            runtime,
+            receiver.duplicate(),
+            realm,
+            return_to,
+            &origin,
+            execution_budget,
+        );
+    }
     let (object, value) = require_date_value(runtime, receiver, realm, &origin)?;
     match method {
         DatePrototypeMethod::ValueOf | DatePrototypeMethod::GetTime => {
@@ -708,8 +898,17 @@ pub(super) fn dispatch_date_prototype(
         }
         DatePrototypeMethod::ToString
         | DatePrototypeMethod::ToDateString
-        | DatePrototypeMethod::ToTimeString => {
-            let rendered = local_date_string(method, value.as_f64());
+        | DatePrototypeMethod::ToTimeString
+        | DatePrototypeMethod::ToLocaleString
+        | DatePrototypeMethod::ToLocaleDateString
+        | DatePrototypeMethod::ToLocaleTimeString => {
+            let render_method = match method {
+                DatePrototypeMethod::ToLocaleString => DatePrototypeMethod::ToString,
+                DatePrototypeMethod::ToLocaleDateString => DatePrototypeMethod::ToDateString,
+                DatePrototypeMethod::ToLocaleTimeString => DatePrototypeMethod::ToTimeString,
+                method => method,
+            };
+            let rendered = local_date_string(render_method, value.as_f64());
             Ok(NativeDispatch::Immediate(StoredValue::String(
                 JsString::from_utf8(&rendered)?,
             )))
@@ -790,6 +989,9 @@ pub(super) fn dispatch_date_prototype(
             &origin,
             execution_budget,
         ),
+        DatePrototypeMethod::ToJson | DatePrototypeMethod::SymbolToPrimitive => {
+            unreachable!("generic Date method dispatched through branded path")
+        }
     }
 }
 
@@ -1020,6 +1222,9 @@ fn utc_component(method: DatePrototypeMethod, value: f64) -> JsNumber {
         | DatePrototypeMethod::ToIsoString
         | DatePrototypeMethod::ToDateString
         | DatePrototypeMethod::ToTimeString
+        | DatePrototypeMethod::ToLocaleString
+        | DatePrototypeMethod::ToLocaleDateString
+        | DatePrototypeMethod::ToLocaleTimeString
         | DatePrototypeMethod::GetTimezoneOffset
         | DatePrototypeMethod::GetTime
         | DatePrototypeMethod::GetFullYear
@@ -1044,7 +1249,11 @@ fn utc_component(method: DatePrototypeMethod, value: f64) -> JsNumber {
         | DatePrototypeMethod::SetMonth
         | DatePrototypeMethod::SetUtcMonth
         | DatePrototypeMethod::SetFullYear
-        | DatePrototypeMethod::SetUtcFullYear => unreachable!("non-component Date method"),
+        | DatePrototypeMethod::SetUtcFullYear
+        | DatePrototypeMethod::ToJson
+        | DatePrototypeMethod::SymbolToPrimitive => {
+            unreachable!("non-component Date method")
+        }
     };
     JsNumber::from_i64(component)
 }
@@ -1098,12 +1307,16 @@ fn to_utc_string(value: f64) -> String {
     let Some(fields) = temporal_utc_fields(value) else {
         return "Invalid Date".to_owned();
     };
+    let year = if fields.year < 0 {
+        format!("-{abs:04}", abs = fields.year.unsigned_abs())
+    } else {
+        format!("{:04}", fields.year)
+    };
     format!(
-        "{weekday}, {date:02} {month_name} {year:04} {hour:02}:{minute:02}:{second:02} GMT",
+        "{weekday}, {date:02} {month_name} {year} {hour:02}:{minute:02}:{second:02} GMT",
         weekday = WEEKDAYS[usize::from(fields.day_of_week % 7)],
         date = fields.date,
         month_name = MONTHS[usize::from(fields.month) - 1],
-        year = fields.year,
         hour = fields.hour,
         minute = fields.minute,
         second = fields.second,

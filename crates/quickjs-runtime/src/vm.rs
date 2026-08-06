@@ -717,6 +717,7 @@ enum NativeContinuation {
     FunctionBind(FunctionBindContinuation),
     PropertyKey(PropertyKeyContinuation),
     OperatorPrimitive(OperatorPrimitiveContinuation),
+    DateToJson(DateToJsonContinuation),
     IntrinsicGet(IntrinsicGetContinuation),
     AggregateError(AggregateErrorContinuation),
     FromEntries(Box<FromEntriesContinuation>),
@@ -808,6 +809,7 @@ impl NativeContinuation {
             Self::FunctionBind(state) => state.retained_values(),
             Self::PropertyKey(state) => state.retained_values(),
             Self::OperatorPrimitive(state) => state.retained_values(),
+            Self::DateToJson(_) => DateToJsonContinuation::retained_values(),
             Self::IntrinsicGet(state) => state.retained_values(),
             Self::AggregateError(state) => state.retained_values(),
             Self::FromEntries(state) => state.retained_values(),
@@ -1854,6 +1856,10 @@ enum OperatorPrimitiveTarget {
     },
     /// One supplied local or UTC Date setter component, after `ToNumber`.
     DateSetter(Box<DateSetterContinuation>),
+    /// The final value of `Date.prototype[@@toPrimitive]`.
+    DateToPrimitive,
+    /// `Date.prototype.toJSON`, after generic `ToPrimitive(number)`.
+    DateToJson(Box<DateToJsonContinuation>),
     NumberToString {
         number: JsNumber,
     },
@@ -1981,6 +1987,7 @@ impl OperatorPrimitiveTarget {
             | Self::NumberIntrinsic { new_target: None }
             | Self::DateParse
             | Self::DateSetTime { .. }
+            | Self::DateToPrimitive
             | Self::StringIntrinsic { new_target: None }
             | Self::SymbolIntrinsic { .. }
             | Self::StringIteratorIntrinsic
@@ -2011,6 +2018,7 @@ impl OperatorPrimitiveTarget {
             Self::DateUtc(state) => state.retained_values(),
             Self::DateConstructorComponents(state) => state.retained_values(),
             Self::DateSetter(state) => state.retained_values(),
+            Self::DateToJson(_) => DateToJsonContinuation::retained_values(),
             Self::SetRecordSize(state) => state.retained_values(),
             Self::ErrorConstructorMessage(state) => state.retained_values(),
             Self::JsonParseText(state) => state.retained_values(),
@@ -2221,6 +2229,7 @@ fn trace_operator_primitive_target_roots(
         | OperatorPrimitiveTarget::NumberToString { .. }
         | OperatorPrimitiveTarget::NumberFormatDigits { .. }
         | OperatorPrimitiveTarget::DateParse
+        | OperatorPrimitiveTarget::DateToPrimitive
         | OperatorPrimitiveTarget::GlobalNumeric(_)
         | OperatorPrimitiveTarget::MathUnary(_)
         | OperatorPrimitiveTarget::GlobalUri(_)
@@ -2241,6 +2250,7 @@ fn trace_operator_primitive_target_roots(
         OperatorPrimitiveTarget::DateUtc(state) => state.trace_roots(mark),
         OperatorPrimitiveTarget::DateConstructorComponents(state) => state.trace_roots(mark),
         OperatorPrimitiveTarget::DateSetter(state) => state.trace_roots(mark),
+        OperatorPrimitiveTarget::DateToJson(state) => state.trace_roots(mark),
         OperatorPrimitiveTarget::JsonParseText(state) => state.trace_roots(mark),
         OperatorPrimitiveTarget::JsonParseArrayLength(state) => state.trace_roots(mark),
         OperatorPrimitiveTarget::JsonStringifyReplacerItem(state)
@@ -2411,6 +2421,7 @@ fn trace_native_continuation_roots(
             trace_stored_value_root(&state.receiver, mark);
             trace_operator_primitive_target_roots(&state.target, mark);
         }
+        NativeContinuation::DateToJson(state) => state.trace_roots(mark),
         NativeContinuation::IntrinsicGet(state) => match state {
             IntrinsicGetContinuation::BooleanConstructor { new_target, .. }
             | IntrinsicGetContinuation::NumberConstructor { new_target, .. }

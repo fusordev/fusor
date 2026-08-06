@@ -470,6 +470,9 @@ pub(super) fn resume_native_continuations(
                     Err(error) => return Err(error),
                 }
             }
+            NativeContinuation::DateToJson(state) => {
+                finish_date_to_json_call(state, value, return_to)?
+            }
             NativeContinuation::IntrinsicGet(IntrinsicGetContinuation::ArrayConstructor {
                 realm,
                 new_target,

@@ -1355,6 +1355,46 @@ pub(super) fn begin_operator_primitive_conversion(
     )
 }
 
+/// Starts `OrdinaryToPrimitive` without probing `@@toPrimitive`.
+///
+/// Date's own `@@toPrimitive` method selects this path after validating its
+/// string hint, so looking up the exotic method again would recurse.
+#[allow(
+    clippy::too_many_arguments,
+    reason = "ordinary conversion carries the same explicit VM continuation context as ToPrimitive"
+)]
+pub(super) fn begin_ordinary_primitive_conversion(
+    runtime: &mut Runtime,
+    value: StoredValue,
+    hint: OperatorPrimitiveHint,
+    target: OperatorPrimitiveTarget,
+    realm: RealmId,
+    return_to: Option<CallReturn>,
+    origin: JsStackFrame,
+    execution_budget: &mut ExecutionBudget,
+) -> Result<NativeDispatch, NativeFailure> {
+    if !matches!(value, StoredValue::Function(_) | StoredValue::Object(_)) {
+        return Err(EngineFault::RuntimeInvariant {
+            message: "OrdinaryToPrimitive received a primitive receiver",
+        }
+        .into());
+    }
+    advance_operator_primitive_conversion(
+        runtime,
+        OperatorPrimitiveContinuation {
+            receiver: value,
+            realm,
+            hint,
+            stage: hint.first_ordinary_stage(),
+            target,
+            origin,
+        },
+        None,
+        return_to,
+        execution_budget,
+    )
+}
+
 #[allow(
     clippy::too_many_lines,
     reason = "the explicit ToPrimitive state machine preserves every observable lookup, getter, and call boundary"
@@ -1786,6 +1826,10 @@ fn finish_operator_primitive_target(
                 origin,
                 execution_budget,
             )
+        }
+        OperatorPrimitiveTarget::DateToPrimitive => Ok(NativeDispatch::Immediate(value)),
+        OperatorPrimitiveTarget::DateToJson(state) => {
+            begin_date_to_json_invoke(runtime, *state, value, return_to, execution_budget)
         }
         OperatorPrimitiveTarget::NumberToString { number } => {
             let radix = operator_to_number(value, realm, origin)?;

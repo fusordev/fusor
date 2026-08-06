@@ -1396,6 +1396,9 @@ pub(crate) enum DatePrototypeMethod {
     ToIsoString,
     ToDateString,
     ToTimeString,
+    ToLocaleString,
+    ToLocaleDateString,
+    ToLocaleTimeString,
     GetTimezoneOffset,
     GetTime,
     GetFullYear,
@@ -1429,16 +1432,21 @@ pub(crate) enum DatePrototypeMethod {
     SetUtcMonth,
     SetFullYear,
     SetUtcFullYear,
+    ToJson,
+    SymbolToPrimitive,
 }
 
 impl DatePrototypeMethod {
-    pub(crate) const ALL: [Self; 39] = [
+    pub(crate) const ALL: [Self; 44] = [
         Self::ValueOf,
         Self::ToString,
         Self::ToUtcString,
         Self::ToIsoString,
         Self::ToDateString,
         Self::ToTimeString,
+        Self::ToLocaleString,
+        Self::ToLocaleDateString,
+        Self::ToLocaleTimeString,
         Self::GetTimezoneOffset,
         Self::GetTime,
         Self::GetFullYear,
@@ -1472,6 +1480,8 @@ impl DatePrototypeMethod {
         Self::SetUtcMonth,
         Self::SetFullYear,
         Self::SetUtcFullYear,
+        Self::ToJson,
+        Self::SymbolToPrimitive,
     ];
 
     pub(crate) const fn name(self) -> &'static str {
@@ -1482,6 +1492,9 @@ impl DatePrototypeMethod {
             Self::ToIsoString => "toISOString",
             Self::ToDateString => "toDateString",
             Self::ToTimeString => "toTimeString",
+            Self::ToLocaleString => "toLocaleString",
+            Self::ToLocaleDateString => "toLocaleDateString",
+            Self::ToLocaleTimeString => "toLocaleTimeString",
             Self::GetTimezoneOffset => "getTimezoneOffset",
             Self::GetTime => "getTime",
             Self::GetFullYear => "getFullYear",
@@ -1515,6 +1528,8 @@ impl DatePrototypeMethod {
             Self::SetUtcMonth => "setUTCMonth",
             Self::SetFullYear => "setFullYear",
             Self::SetUtcFullYear => "setUTCFullYear",
+            Self::ToJson => "toJSON",
+            Self::SymbolToPrimitive => "[Symbol.toPrimitive]",
         }
     }
 
@@ -1527,13 +1542,18 @@ impl DatePrototypeMethod {
             | Self::SetMilliseconds
             | Self::SetUtcMilliseconds
             | Self::SetDate
-            | Self::SetUtcDate => 1,
+            | Self::SetUtcDate
+            | Self::ToJson
+            | Self::SymbolToPrimitive => 1,
             Self::ValueOf
             | Self::ToString
             | Self::ToUtcString
             | Self::ToIsoString
             | Self::ToDateString
             | Self::ToTimeString
+            | Self::ToLocaleString
+            | Self::ToLocaleDateString
+            | Self::ToLocaleTimeString
             | Self::GetTimezoneOffset
             | Self::GetTime
             | Self::GetFullYear
