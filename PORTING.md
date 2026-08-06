@@ -107,7 +107,7 @@ does not imply complete ECMAScript or QuickJS compatibility.
 - [x] Typed same-site iterator state covers Array/String iteration, spread,
   destructuring, `for-of`, `IteratorClose`, and original-abrupt precedence.
 - [x] Validated schemas derive Realm allocation and rollback. The normalized
-  snapshot pins 405 Realm-local identities and 1,233 ordered properties.
+  snapshot pins 431 Realm-local identities and 1,311 ordered properties.
 - [x] Proxy and exotic-object integration covers all 11 internal methods,
   revocation/invariants, reflection, descriptors/integrity, constructors,
   iterators, Arrays, strings, RegExp, Promise, and JSON. Audited built-in
@@ -175,11 +175,12 @@ does not imply complete ECMAScript or QuickJS compatibility.
 - [x] Date has Realm-owned branded `[[DateValue]]` objects, TimeClip, UTC and
   multi-argument local construction, normative ISO parsing (including local
   offsetless date-times), own-render round trips, UTC/local getters,
-  `getTimezoneOffset`, `setTime`, and ISO/UTC/local rendering over pinned
-  `temporal_rs = 0.2.5` (12/12 focused VM cases; Date.parse Test262 16/16). The
-  broad Date prototype baseline passes 484/954 admitted modes across 485 files,
-  with 16 Temporal skips.
-- [ ] Complete Date setters, primitive/JSON and non-Intl locale fallback, then
+  `getTimezoneOffset`, every local/UTC component setter, `setTime`, and
+  ISO/UTC/local rendering over pinned `temporal_rs = 0.2.5`. Invalid-date
+  recovery and left-to-right setter coercion follow ECMA-262 (14/14 focused VM
+  cases; Date.parse Test262 16/16; broad Date prototype 876/954 admitted modes,
+  with no remaining setter failure and 16 Temporal skips).
+- [ ] Complete Date primitive/JSON and non-Intl locale fallback semantics, then
   Temporal on the shared `temporal_rs` kernel; next implement binary data/typed
   arrays and Atomics.
 

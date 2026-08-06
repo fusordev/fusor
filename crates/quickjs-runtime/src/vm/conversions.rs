@@ -1775,6 +1775,18 @@ fn finish_operator_primitive_target(
         OperatorPrimitiveTarget::DateSetTime { object } => {
             finish_date_set_time(runtime, object, value, realm, origin)
         }
+        OperatorPrimitiveTarget::DateSetter(state) => {
+            let number = operator_to_number(value, realm, origin)?;
+            advance_date_setter(
+                runtime,
+                *state,
+                Some(number),
+                realm,
+                return_to,
+                origin,
+                execution_budget,
+            )
+        }
         OperatorPrimitiveTarget::NumberToString { number } => {
             let radix = operator_to_number(value, realm, origin)?;
             finish_number_to_string_radix(number, radix, realm, origin)

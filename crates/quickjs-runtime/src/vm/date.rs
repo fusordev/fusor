@@ -56,6 +56,14 @@ pub(super) struct DateConstructorContinuation {
     new_target: FunctionId,
 }
 
+pub(super) struct DateSetterContinuation {
+    arguments: Vec<StoredValue>,
+    converted: Vec<JsNumber>,
+    object: ObjectId,
+    original: JsNumber,
+    method: DatePrototypeMethod,
+}
+
 impl DateConstructorContinuation {
     pub(super) fn retained_values(&self) -> u64 {
         usize_to_u64(self.arguments.len()).saturating_add(1)
@@ -80,6 +88,19 @@ impl DateUtcContinuation {
         for argument in &self.arguments {
             trace_stored_value_root(argument, mark);
         }
+    }
+}
+
+impl DateSetterContinuation {
+    pub(super) fn retained_values(&self) -> u64 {
+        usize_to_u64(self.arguments.len()).saturating_add(1)
+    }
+
+    pub(super) fn trace_roots(&self, mark: &mut dyn FnMut(CollectionRoot)) {
+        for argument in &self.arguments {
+            trace_stored_value_root(argument, mark);
+        }
+        mark(CollectionRoot::Heap(HeapReference::Object(self.object)));
     }
 }
 
@@ -418,6 +439,256 @@ pub(super) fn finish_date_set_time(
 
 #[allow(
     clippy::too_many_arguments,
+    reason = "native setter dispatch carries the receiver state plus the standard VM continuation context"
+)]
+fn begin_date_setter(
+    runtime: &mut Runtime,
+    method: DatePrototypeMethod,
+    object: ObjectId,
+    original: JsNumber,
+    arguments: CallArguments,
+    realm: RealmId,
+    return_to: Option<CallReturn>,
+    origin: &JsStackFrame,
+    execution_budget: &mut ExecutionBudget,
+) -> Result<NativeDispatch, NativeFailure> {
+    let limit = date_setter_argument_limit(method);
+    let mut values = arguments.into_remaining_values();
+    values.truncate(limit);
+    if values.is_empty() {
+        values
+            .try_reserve(1)
+            .map_err(|_| ExecutionError::AllocationFailed {
+                resource: RuntimeResource::FrameValues,
+                additional: 1,
+            })?;
+        values.push(StoredValue::Undefined);
+    }
+    let mut converted = Vec::new();
+    converted
+        .try_reserve_exact(values.len())
+        .map_err(|_| ExecutionError::AllocationFailed {
+            resource: RuntimeResource::FrameValues,
+            additional: values.len(),
+        })?;
+    advance_date_setter(
+        runtime,
+        DateSetterContinuation {
+            arguments: values,
+            converted,
+            object,
+            original,
+            method,
+        },
+        None,
+        realm,
+        return_to,
+        origin,
+        execution_budget,
+    )
+}
+
+pub(super) fn advance_date_setter(
+    runtime: &mut Runtime,
+    mut state: DateSetterContinuation,
+    completion: Option<JsNumber>,
+    realm: RealmId,
+    return_to: Option<CallReturn>,
+    origin: &JsStackFrame,
+    execution_budget: &mut ExecutionBudget,
+) -> Result<NativeDispatch, NativeFailure> {
+    if let Some(value) = completion {
+        state.converted.push(value);
+    }
+    if state.converted.len() == state.arguments.len() {
+        let (value, write) = apply_date_setter(state.method, state.original, &state.converted);
+        if write {
+            runtime.set_date_value(state.object, value)?;
+        }
+        return Ok(NativeDispatch::Immediate(StoredValue::Number(value)));
+    }
+    let index = state.converted.len();
+    let argument = std::mem::replace(&mut state.arguments[index], StoredValue::Undefined);
+    begin_operator_primitive_conversion(
+        runtime,
+        argument,
+        OperatorPrimitiveHint::Number,
+        OperatorPrimitiveTarget::DateSetter(Box::new(state)),
+        realm,
+        return_to,
+        origin.clone(),
+        execution_budget,
+    )
+}
+
+fn date_setter_argument_limit(method: DatePrototypeMethod) -> usize {
+    match method {
+        DatePrototypeMethod::SetHours | DatePrototypeMethod::SetUtcHours => 4,
+        DatePrototypeMethod::SetMinutes
+        | DatePrototypeMethod::SetUtcMinutes
+        | DatePrototypeMethod::SetFullYear
+        | DatePrototypeMethod::SetUtcFullYear => 3,
+        DatePrototypeMethod::SetSeconds
+        | DatePrototypeMethod::SetUtcSeconds
+        | DatePrototypeMethod::SetMonth
+        | DatePrototypeMethod::SetUtcMonth => 2,
+        DatePrototypeMethod::SetMilliseconds
+        | DatePrototypeMethod::SetUtcMilliseconds
+        | DatePrototypeMethod::SetDate
+        | DatePrototypeMethod::SetUtcDate => 1,
+        _ => unreachable!("non-component Date setter"),
+    }
+}
+
+#[derive(Clone, Copy)]
+struct DateSetterFields {
+    year: f64,
+    month: f64,
+    date: f64,
+    hour: f64,
+    minute: f64,
+    second: f64,
+    millisecond: f64,
+}
+
+fn apply_date_setter(
+    method: DatePrototypeMethod,
+    original: JsNumber,
+    converted: &[JsNumber],
+) -> (JsNumber, bool) {
+    let utc = matches!(
+        method,
+        DatePrototypeMethod::SetUtcMilliseconds
+            | DatePrototypeMethod::SetUtcSeconds
+            | DatePrototypeMethod::SetUtcMinutes
+            | DatePrototypeMethod::SetUtcHours
+            | DatePrototypeMethod::SetUtcDate
+            | DatePrototypeMethod::SetUtcMonth
+            | DatePrototypeMethod::SetUtcFullYear
+    );
+    let recovers_invalid = matches!(
+        method,
+        DatePrototypeMethod::SetFullYear | DatePrototypeMethod::SetUtcFullYear
+    );
+    let original = original.as_f64();
+    let original_invalid = original.is_nan();
+    if original_invalid && !recovers_invalid {
+        return (JsNumber::from_f64(f64::NAN), false);
+    }
+    let base = if original_invalid && recovers_invalid {
+        0.0
+    } else {
+        original
+    };
+    let Some(mut fields) = date_setter_fields(base, utc || original_invalid) else {
+        return (JsNumber::from_f64(f64::NAN), true);
+    };
+    let value = |index: usize| converted[index].as_f64();
+    match method {
+        DatePrototypeMethod::SetMilliseconds | DatePrototypeMethod::SetUtcMilliseconds => {
+            fields.millisecond = value(0);
+        }
+        DatePrototypeMethod::SetSeconds | DatePrototypeMethod::SetUtcSeconds => {
+            fields.second = value(0);
+            if converted.len() >= 2 {
+                fields.millisecond = value(1);
+            }
+        }
+        DatePrototypeMethod::SetMinutes | DatePrototypeMethod::SetUtcMinutes => {
+            fields.minute = value(0);
+            if converted.len() >= 2 {
+                fields.second = value(1);
+            }
+            if converted.len() >= 3 {
+                fields.millisecond = value(2);
+            }
+        }
+        DatePrototypeMethod::SetHours | DatePrototypeMethod::SetUtcHours => {
+            fields.hour = value(0);
+            if converted.len() >= 2 {
+                fields.minute = value(1);
+            }
+            if converted.len() >= 3 {
+                fields.second = value(2);
+            }
+            if converted.len() >= 4 {
+                fields.millisecond = value(3);
+            }
+        }
+        DatePrototypeMethod::SetDate | DatePrototypeMethod::SetUtcDate => {
+            fields.date = value(0);
+        }
+        DatePrototypeMethod::SetMonth | DatePrototypeMethod::SetUtcMonth => {
+            fields.month = value(0);
+            if converted.len() >= 2 {
+                fields.date = value(1);
+            }
+        }
+        DatePrototypeMethod::SetFullYear | DatePrototypeMethod::SetUtcFullYear => {
+            fields.year = value(0);
+            if converted.len() >= 2 {
+                fields.month = value(1);
+            }
+            if converted.len() >= 3 {
+                fields.date = value(2);
+            }
+        }
+        _ => unreachable!("non-component Date setter"),
+    }
+    let date = make_day(fields.year, fields.month, fields.date) * MS_PER_DAY
+        + make_time(
+            fields.hour,
+            fields.minute,
+            fields.second,
+            fields.millisecond,
+        );
+    let result = if utc {
+        time_clip(date)
+    } else {
+        time_clip_local_date(date)
+    };
+    (result, true)
+}
+
+fn date_setter_fields(value: f64, utc: bool) -> Option<DateSetterFields> {
+    if utc {
+        let fields = temporal_utc_fields(value)?;
+        Some(DateSetterFields {
+            year: f64::from(fields.year),
+            month: f64::from(fields.month - 1),
+            date: f64::from(fields.date),
+            hour: f64::from(fields.hour),
+            minute: f64::from(fields.minute),
+            second: f64::from(fields.second),
+            millisecond: f64::from(fields.millisecond),
+        })
+    } else {
+        let fields = temporal_local_date_time(value)?;
+        Some(DateSetterFields {
+            year: f64::from(fields.year()),
+            month: f64::from(fields.month() - 1),
+            date: f64::from(fields.day()),
+            hour: f64::from(fields.hour()),
+            minute: f64::from(fields.minute()),
+            second: f64::from(fields.second()),
+            millisecond: f64::from(fields.millisecond()),
+        })
+    }
+}
+
+fn time_clip_local_date(local_value: f64) -> JsNumber {
+    let Some(milliseconds) = utc_time_from_local_value(local_value) else {
+        return JsNumber::from_f64(f64::NAN);
+    };
+    if milliseconds.unsigned_abs() > 8_640_000_000_000_000_u64 {
+        JsNumber::from_f64(f64::NAN)
+    } else {
+        JsNumber::from_i64(milliseconds)
+    }
+}
+
+#[allow(
+    clippy::too_many_arguments,
     reason = "native dispatch keeps the VM continuation inputs explicit"
 )]
 pub(super) fn dispatch_date_prototype(
@@ -493,6 +764,30 @@ pub(super) fn dispatch_date_prototype(
             realm,
             return_to,
             origin,
+            execution_budget,
+        ),
+        DatePrototypeMethod::SetMilliseconds
+        | DatePrototypeMethod::SetUtcMilliseconds
+        | DatePrototypeMethod::SetSeconds
+        | DatePrototypeMethod::SetUtcSeconds
+        | DatePrototypeMethod::SetMinutes
+        | DatePrototypeMethod::SetUtcMinutes
+        | DatePrototypeMethod::SetHours
+        | DatePrototypeMethod::SetUtcHours
+        | DatePrototypeMethod::SetDate
+        | DatePrototypeMethod::SetUtcDate
+        | DatePrototypeMethod::SetMonth
+        | DatePrototypeMethod::SetUtcMonth
+        | DatePrototypeMethod::SetFullYear
+        | DatePrototypeMethod::SetUtcFullYear => begin_date_setter(
+            runtime,
+            method,
+            object,
+            value,
+            arguments,
+            realm,
+            return_to,
+            &origin,
             execution_budget,
         ),
     }
@@ -735,7 +1030,21 @@ fn utc_component(method: DatePrototypeMethod, value: f64) -> JsNumber {
         | DatePrototypeMethod::GetSeconds
         | DatePrototypeMethod::GetMilliseconds
         | DatePrototypeMethod::GetDay
-        | DatePrototypeMethod::SetTime => unreachable!("non-component Date method"),
+        | DatePrototypeMethod::SetTime
+        | DatePrototypeMethod::SetMilliseconds
+        | DatePrototypeMethod::SetUtcMilliseconds
+        | DatePrototypeMethod::SetSeconds
+        | DatePrototypeMethod::SetUtcSeconds
+        | DatePrototypeMethod::SetMinutes
+        | DatePrototypeMethod::SetUtcMinutes
+        | DatePrototypeMethod::SetHours
+        | DatePrototypeMethod::SetUtcHours
+        | DatePrototypeMethod::SetDate
+        | DatePrototypeMethod::SetUtcDate
+        | DatePrototypeMethod::SetMonth
+        | DatePrototypeMethod::SetUtcMonth
+        | DatePrototypeMethod::SetFullYear
+        | DatePrototypeMethod::SetUtcFullYear => unreachable!("non-component Date method"),
     };
     JsNumber::from_i64(component)
 }

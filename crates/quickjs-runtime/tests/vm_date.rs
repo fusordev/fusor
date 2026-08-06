@@ -303,6 +303,54 @@ fn date_set_time_brand_check_precedes_argument_coercion() {
 }
 
 #[test]
+fn date_utc_setters_normalize_components_and_recover_only_full_year() {
+    assert_eq!(
+        rendered(
+            "function set(name,args){var d=new Date(Date.UTC(2000,0,2,3,4,5,6));
+               var result=d[name].apply(d,args);return (result===d.getTime())+':'+d.toISOString()}
+             var invalid=new Date(NaN),touched=false;
+             var invalidDate=invalid.setUTCDate({valueOf:function(){touched=true;return 1}});
+             var recovered=new Date(NaN),recoveredValue=recovered.setUTCFullYear(2001);
+             return [set('setUTCMilliseconds',[1007]),set('setUTCSeconds',[61,8]),
+               set('setUTCMinutes',[61,7,8]),set('setUTCHours',[25,6,7,8]),
+               set('setUTCDate',[32]),set('setUTCMonth',[12,3]),
+               set('setUTCFullYear',[2001,12,3]),Number.isNaN(invalidDate),touched,
+               recoveredValue===recovered.getTime(),recovered.toISOString()].join('|');"
+        ),
+        "true:2000-01-02T03:04:06.007Z|true:2000-01-02T03:05:01.008Z|\
+         true:2000-01-02T04:01:07.008Z|true:2000-01-03T01:06:07.008Z|\
+         true:2000-02-01T03:04:05.006Z|true:2001-01-03T03:04:05.006Z|\
+         true:2002-01-03T03:04:05.006Z|true|true|true|2001-01-01T00:00:00.000Z"
+    );
+}
+
+#[test]
+fn date_local_setters_preserve_local_fields_and_coerce_left_to_right() {
+    assert_eq!(
+        rendered(
+            "function fields(d){return [d.getFullYear(),d.getMonth(),d.getDate(),d.getHours(),
+               d.getMinutes(),d.getSeconds(),d.getMilliseconds()].join(',')}
+             function set(name,args){var d=new Date(2000,0,2,3,4,5,6);
+               var result=d[name].apply(d,args);return (result===d.getTime())+':'+fields(d)}
+             var log=[],d=new Date(0);
+             function value(label,value){return {valueOf:function(){log.push(label);return value}}}
+             d.setHours(value('h',1),value('m',2),value('s',3),value('ms',4));
+             var touched=false;try{Date.prototype.setDate.call({},
+               {valueOf:function(){touched=true;return 1}})}catch(error){}
+             var recovered=new Date(NaN);recovered.setFullYear(2001);
+             return [set('setMilliseconds',[1007]),set('setSeconds',[61,8]),
+               set('setMinutes',[61,7,8]),set('setHours',[25,6,7,8]),set('setDate',[32]),
+               set('setMonth',[12,3]),set('setFullYear',[2001,12,3]),log.join(','),
+               touched,recovered.getFullYear()].join('|');"
+        ),
+        "true:2000,0,2,3,4,6,7|true:2000,0,2,3,5,1,8|\
+         true:2000,0,2,4,1,7,8|true:2000,0,3,1,6,7,8|\
+         true:2000,1,1,3,4,5,6|true:2001,0,3,3,4,5,6|\
+         true:2002,0,3,3,4,5,6|h,m,s,ms|false|2001"
+    );
+}
+
+#[test]
 fn callable_date_returns_a_local_time_string_without_observing_arguments() {
     let result = rendered(
         "var touched=false;

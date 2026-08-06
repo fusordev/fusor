@@ -42,30 +42,7 @@ pub(super) fn visit_functions(visit: FunctionSink<'_>) {
             DatePrototypeMethod::ToIsoString => {
                 IntrinsicNameSpec::Predefined(PredefinedAtom::ToIsoString)
             }
-            DatePrototypeMethod::ToUtcString
-            | DatePrototypeMethod::ToDateString
-            | DatePrototypeMethod::ToTimeString
-            | DatePrototypeMethod::GetTimezoneOffset
-            | DatePrototypeMethod::GetTime
-            | DatePrototypeMethod::GetFullYear
-            | DatePrototypeMethod::GetUtcFullYear
-            | DatePrototypeMethod::GetMonth
-            | DatePrototypeMethod::GetUtcMonth
-            | DatePrototypeMethod::GetDate
-            | DatePrototypeMethod::GetUtcDate
-            | DatePrototypeMethod::GetHours
-            | DatePrototypeMethod::GetUtcHours
-            | DatePrototypeMethod::GetMinutes
-            | DatePrototypeMethod::GetUtcMinutes
-            | DatePrototypeMethod::GetSeconds
-            | DatePrototypeMethod::GetUtcSeconds
-            | DatePrototypeMethod::GetMilliseconds
-            | DatePrototypeMethod::GetUtcMilliseconds
-            | DatePrototypeMethod::GetDay
-            | DatePrototypeMethod::GetUtcDay
-            | DatePrototypeMethod::SetTime => {
-                IntrinsicNameSpec::RealmName(RealmNameId::DatePrototype(method))
-            }
+            _ => IntrinsicNameSpec::RealmName(RealmNameId::DatePrototype(method)),
         };
         visit(ordinary(
             NativeFunctionKind::DatePrototype(method),
@@ -105,30 +82,7 @@ pub(super) fn visit_properties(visit: PropertySink<'_>) {
             DatePrototypeMethod::ToIsoString => {
                 IntrinsicKeySpec::PredefinedString(PredefinedAtom::ToIsoString)
             }
-            DatePrototypeMethod::ToUtcString
-            | DatePrototypeMethod::ToDateString
-            | DatePrototypeMethod::ToTimeString
-            | DatePrototypeMethod::GetTimezoneOffset
-            | DatePrototypeMethod::GetTime
-            | DatePrototypeMethod::GetFullYear
-            | DatePrototypeMethod::GetUtcFullYear
-            | DatePrototypeMethod::GetMonth
-            | DatePrototypeMethod::GetUtcMonth
-            | DatePrototypeMethod::GetDate
-            | DatePrototypeMethod::GetUtcDate
-            | DatePrototypeMethod::GetHours
-            | DatePrototypeMethod::GetUtcHours
-            | DatePrototypeMethod::GetMinutes
-            | DatePrototypeMethod::GetUtcMinutes
-            | DatePrototypeMethod::GetSeconds
-            | DatePrototypeMethod::GetUtcSeconds
-            | DatePrototypeMethod::GetMilliseconds
-            | DatePrototypeMethod::GetUtcMilliseconds
-            | DatePrototypeMethod::GetDay
-            | DatePrototypeMethod::GetUtcDay
-            | DatePrototypeMethod::SetTime => {
-                IntrinsicKeySpec::InternedString(RealmNameId::DatePrototype(method_id))
-            }
+            _ => IntrinsicKeySpec::InternedString(RealmNameId::DatePrototype(method_id)),
         };
         visit(method(
             prototype,

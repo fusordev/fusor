@@ -1415,10 +1415,24 @@ pub(crate) enum DatePrototypeMethod {
     GetDay,
     GetUtcDay,
     SetTime,
+    SetMilliseconds,
+    SetUtcMilliseconds,
+    SetSeconds,
+    SetUtcSeconds,
+    SetMinutes,
+    SetUtcMinutes,
+    SetHours,
+    SetUtcHours,
+    SetDate,
+    SetUtcDate,
+    SetMonth,
+    SetUtcMonth,
+    SetFullYear,
+    SetUtcFullYear,
 }
 
 impl DatePrototypeMethod {
-    pub(crate) const ALL: [Self; 25] = [
+    pub(crate) const ALL: [Self; 39] = [
         Self::ValueOf,
         Self::ToString,
         Self::ToUtcString,
@@ -1444,6 +1458,20 @@ impl DatePrototypeMethod {
         Self::GetDay,
         Self::GetUtcDay,
         Self::SetTime,
+        Self::SetMilliseconds,
+        Self::SetUtcMilliseconds,
+        Self::SetSeconds,
+        Self::SetUtcSeconds,
+        Self::SetMinutes,
+        Self::SetUtcMinutes,
+        Self::SetHours,
+        Self::SetUtcHours,
+        Self::SetDate,
+        Self::SetUtcDate,
+        Self::SetMonth,
+        Self::SetUtcMonth,
+        Self::SetFullYear,
+        Self::SetUtcFullYear,
     ];
 
     pub(crate) const fn name(self) -> &'static str {
@@ -1473,12 +1501,33 @@ impl DatePrototypeMethod {
             Self::GetDay => "getDay",
             Self::GetUtcDay => "getUTCDay",
             Self::SetTime => "setTime",
+            Self::SetMilliseconds => "setMilliseconds",
+            Self::SetUtcMilliseconds => "setUTCMilliseconds",
+            Self::SetSeconds => "setSeconds",
+            Self::SetUtcSeconds => "setUTCSeconds",
+            Self::SetMinutes => "setMinutes",
+            Self::SetUtcMinutes => "setUTCMinutes",
+            Self::SetHours => "setHours",
+            Self::SetUtcHours => "setUTCHours",
+            Self::SetDate => "setDate",
+            Self::SetUtcDate => "setUTCDate",
+            Self::SetMonth => "setMonth",
+            Self::SetUtcMonth => "setUTCMonth",
+            Self::SetFullYear => "setFullYear",
+            Self::SetUtcFullYear => "setUTCFullYear",
         }
     }
 
     pub(crate) const fn length(self) -> i32 {
         match self {
-            Self::SetTime => 1,
+            Self::SetHours | Self::SetUtcHours => 4,
+            Self::SetMinutes | Self::SetUtcMinutes | Self::SetFullYear | Self::SetUtcFullYear => 3,
+            Self::SetSeconds | Self::SetUtcSeconds | Self::SetMonth | Self::SetUtcMonth => 2,
+            Self::SetTime
+            | Self::SetMilliseconds
+            | Self::SetUtcMilliseconds
+            | Self::SetDate
+            | Self::SetUtcDate => 1,
             Self::ValueOf
             | Self::ToString
             | Self::ToUtcString

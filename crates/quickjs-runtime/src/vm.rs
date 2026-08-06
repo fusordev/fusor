@@ -1852,6 +1852,8 @@ enum OperatorPrimitiveTarget {
     DateSetTime {
         object: ObjectId,
     },
+    /// One supplied local or UTC Date setter component, after `ToNumber`.
+    DateSetter(Box<DateSetterContinuation>),
     NumberToString {
         number: JsNumber,
     },
@@ -2008,6 +2010,7 @@ impl OperatorPrimitiveTarget {
             | Self::ArrayFromAsyncLength { .. } => 1,
             Self::DateUtc(state) => state.retained_values(),
             Self::DateConstructorComponents(state) => state.retained_values(),
+            Self::DateSetter(state) => state.retained_values(),
             Self::SetRecordSize(state) => state.retained_values(),
             Self::ErrorConstructorMessage(state) => state.retained_values(),
             Self::JsonParseText(state) => state.retained_values(),
@@ -2237,6 +2240,7 @@ fn trace_operator_primitive_target_roots(
         }
         OperatorPrimitiveTarget::DateUtc(state) => state.trace_roots(mark),
         OperatorPrimitiveTarget::DateConstructorComponents(state) => state.trace_roots(mark),
+        OperatorPrimitiveTarget::DateSetter(state) => state.trace_roots(mark),
         OperatorPrimitiveTarget::JsonParseText(state) => state.trace_roots(mark),
         OperatorPrimitiveTarget::JsonParseArrayLength(state) => state.trace_roots(mark),
         OperatorPrimitiveTarget::JsonStringifyReplacerItem(state)
