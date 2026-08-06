@@ -68,9 +68,10 @@ use crate::{
         PromiseCombinatorShared, PromiseFinallyFunction, PromiseFinallyThunkKind, PromiseJob,
         PromiseResolvingFunction, PromiseResolvingKind, PromiseStatic, RealmGlobalBindingState,
         ReflectMethod, RegExpFlag, RegExpSymbolMethod, SetMethod, SetPrototypeOutcome,
-        StringArgument, StringMethod, TemporalInstantPrototypeMethod, TemporalInstantStaticMethod,
-        UriFunction, WeakMapMethod, WeakSetMethod, array_length_from_number, check_execution_limit,
-        global_declaration_error, usize_to_u64,
+        StringArgument, StringMethod, TemporalDurationPrototypeMethod,
+        TemporalInstantPrototypeMethod, TemporalInstantStaticMethod, UriFunction, WeakMapMethod,
+        WeakSetMethod, array_length_from_number, check_execution_limit, global_declaration_error,
+        usize_to_u64,
     },
     value::{HeapReference, SlotValue, StoredValue},
 };
@@ -1136,6 +1137,10 @@ enum IntrinsicGetContinuation {
         new_target: FunctionId,
         epoch_nanoseconds: i128,
     },
+    TemporalDurationConstructor {
+        new_target: FunctionId,
+        duration: temporal_rs::Duration,
+    },
     StringConstructor {
         new_target: FunctionId,
         value: JsString,
@@ -1188,6 +1193,7 @@ impl IntrinsicGetContinuation {
             | Self::NumberConstructor { .. }
             | Self::DateConstructor { .. }
             | Self::TemporalInstantConstructor { .. }
+            | Self::TemporalDurationConstructor { .. }
             | Self::StringConstructor { .. } => 1,
             Self::ArrayConstructor { arguments, .. } => {
                 1_u64.saturating_add(usize_to_u64(arguments.len()))
@@ -1894,6 +1900,7 @@ enum OperatorPrimitiveTarget {
     },
     TemporalInstantMilliseconds,
     TemporalInstantString(Box<TemporalInstantLikeTarget>),
+    TemporalDurationConstructor(Box<TemporalDurationConstructorContinuation>),
     NumberToString {
         number: JsNumber,
     },
@@ -2056,6 +2063,7 @@ impl OperatorPrimitiveTarget {
             | Self::ArrayFromAsyncLength { .. } => 1,
             Self::DateUtc(state) => state.retained_values(),
             Self::DateConstructorComponents(state) => state.retained_values(),
+            Self::TemporalDurationConstructor(state) => state.retained_values(),
             Self::DateSetter(state) => state.retained_values(),
             Self::DateToJson(_) => DateToJsonContinuation::retained_values(),
             Self::TemporalInstantString(state) => state.retained_values(),
@@ -2294,6 +2302,7 @@ fn trace_operator_primitive_target_roots(
         } => mark(CollectionRoot::Heap(HeapReference::Function(*new_target))),
         OperatorPrimitiveTarget::DateUtc(state) => state.trace_roots(mark),
         OperatorPrimitiveTarget::DateConstructorComponents(state) => state.trace_roots(mark),
+        OperatorPrimitiveTarget::TemporalDurationConstructor(state) => state.trace_roots(mark),
         OperatorPrimitiveTarget::DateSetter(state) => state.trace_roots(mark),
         OperatorPrimitiveTarget::DateToJson(state) => state.trace_roots(mark),
         OperatorPrimitiveTarget::TemporalInstantString(state) => state.trace_roots(mark),
@@ -2473,6 +2482,7 @@ fn trace_native_continuation_roots(
             | IntrinsicGetContinuation::NumberConstructor { new_target, .. }
             | IntrinsicGetContinuation::DateConstructor { new_target, .. }
             | IntrinsicGetContinuation::TemporalInstantConstructor { new_target, .. }
+            | IntrinsicGetContinuation::TemporalDurationConstructor { new_target, .. }
             | IntrinsicGetContinuation::StringConstructor { new_target, .. } => {
                 mark(CollectionRoot::Heap(HeapReference::Function(*new_target)));
             }

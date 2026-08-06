@@ -2320,6 +2320,24 @@ pub(super) fn dispatch_native_call_with_frames(
             origin.unwrap_or_else(native_function_host_origin),
             execution_budget,
         ),
+        NativeFunctionKind::TemporalDurationConstructor => begin_temporal_duration_constructor(
+            runtime,
+            native.realm,
+            inputs,
+            return_to,
+            origin.unwrap_or_else(native_function_host_origin),
+            execution_budget,
+        ),
+        NativeFunctionKind::TemporalDurationPrototype(method) => {
+            let origin = origin.unwrap_or_else(native_function_host_origin);
+            dispatch_temporal_duration_prototype(
+                runtime,
+                method,
+                native.realm,
+                &inputs.receiver,
+                &origin,
+            )
+        }
         NativeFunctionKind::TemporalInstantConstructor => begin_temporal_instant_constructor(
             runtime,
             native.realm,

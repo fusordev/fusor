@@ -388,6 +388,8 @@ impl Runtime {
                 );
                 for reference in [
                     HeapReference::Object(temporal.namespace),
+                    HeapReference::Object(temporal.duration_prototype),
+                    HeapReference::Function(temporal.duration_constructor),
                     HeapReference::Object(temporal.instant_prototype),
                     HeapReference::Function(temporal.instant_constructor),
                 ] {

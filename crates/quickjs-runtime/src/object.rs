@@ -31,7 +31,7 @@ use std::{
     rc::Rc,
     sync::{Arc, Weak},
 };
-use temporal_rs::Instant;
+use temporal_rs::{Duration, Instant};
 
 use crate::ids::ObjectId;
 use crate::{
@@ -2151,6 +2151,8 @@ pub(crate) enum HeapObjectKind {
     Date(DateState),
     /// An ECMAScript `Temporal.Instant` with an `[[EpochNanoseconds]]` slot.
     TemporalInstant(Instant),
+    /// An ECMAScript `Temporal.Duration` with its ten duration fields.
+    TemporalDuration(Duration),
     /// An ECMAScript Map object with ordered `[[MapData]]`.
     Map(MapState),
     MapIterator(MapIterator),
@@ -2289,6 +2291,7 @@ impl HeapObjectKind {
             | Self::RegExp(_)
             | Self::Date(_)
             | Self::TemporalInstant(_)
+            | Self::TemporalDuration(_)
             | Self::Map(_)
             | Self::MapIterator(_)
             | Self::Set(_)
@@ -2318,6 +2321,7 @@ impl HeapObjectKind {
             | Self::RegExp(_)
             | Self::Date(_)
             | Self::TemporalInstant(_)
+            | Self::TemporalDuration(_)
             | Self::Map(_)
             | Self::MapIterator(_)
             | Self::Set(_)
@@ -2346,6 +2350,7 @@ impl HeapObjectKind {
             | Self::RegExp(_)
             | Self::Date(_)
             | Self::TemporalInstant(_)
+            | Self::TemporalDuration(_)
             | Self::Map(_)
             | Self::MapIterator(_)
             | Self::Set(_)
@@ -2374,6 +2379,7 @@ impl HeapObjectKind {
             | Self::RegExp(_)
             | Self::Date(_)
             | Self::TemporalInstant(_)
+            | Self::TemporalDuration(_)
             | Self::Map(_)
             | Self::MapIterator(_)
             | Self::Set(_)
@@ -2402,6 +2408,7 @@ impl HeapObjectKind {
             | Self::RegExp(_)
             | Self::Date(_)
             | Self::TemporalInstant(_)
+            | Self::TemporalDuration(_)
             | Self::Map(_)
             | Self::MapIterator(_)
             | Self::Set(_)
@@ -2430,6 +2437,7 @@ impl HeapObjectKind {
             | Self::RegExp(_)
             | Self::Date(_)
             | Self::TemporalInstant(_)
+            | Self::TemporalDuration(_)
             | Self::Map(_)
             | Self::MapIterator(_)
             | Self::Set(_)
@@ -2458,6 +2466,7 @@ impl HeapObjectKind {
             | Self::RegExp(_)
             | Self::Date(_)
             | Self::TemporalInstant(_)
+            | Self::TemporalDuration(_)
             | Self::Map(_)
             | Self::MapIterator(_)
             | Self::Set(_)
@@ -2486,6 +2495,7 @@ impl HeapObjectKind {
             | Self::RegExp(_)
             | Self::Date(_)
             | Self::TemporalInstant(_)
+            | Self::TemporalDuration(_)
             | Self::Map(_)
             | Self::MapIterator(_)
             | Self::Set(_)
@@ -2514,6 +2524,7 @@ impl HeapObjectKind {
             | Self::RegExp(_)
             | Self::Date(_)
             | Self::TemporalInstant(_)
+            | Self::TemporalDuration(_)
             | Self::Map(_)
             | Self::MapIterator(_)
             | Self::Set(_)
@@ -2826,6 +2837,15 @@ impl HeapObject {
     }
 
     #[must_use]
+    pub(crate) const fn temporal_duration(record: ObjectRecord, duration: Duration) -> Self {
+        Self {
+            kind: HeapObjectKind::TemporalDuration(duration),
+            record,
+            public_roots: 0,
+        }
+    }
+
+    #[must_use]
     pub(crate) const fn map(record: ObjectRecord, state: MapState) -> Self {
         Self {
             kind: HeapObjectKind::Map(state),
@@ -2976,6 +2996,13 @@ impl HeapObject {
         }
     }
 
+    pub(crate) const fn temporal_duration_value(&self) -> Option<Duration> {
+        match &self.kind {
+            HeapObjectKind::TemporalDuration(duration) => Some(*duration),
+            _ => None,
+        }
+    }
+
     #[must_use]
     pub(crate) const fn is_arguments(&self) -> bool {
         matches!(self.kind, HeapObjectKind::Arguments(_))
@@ -2998,6 +3025,7 @@ impl HeapObject {
             | HeapObjectKind::RegExp(_)
             | HeapObjectKind::Date(_)
             | HeapObjectKind::TemporalInstant(_)
+            | HeapObjectKind::TemporalDuration(_)
             | HeapObjectKind::Map(_)
             | HeapObjectKind::MapIterator(_)
             | HeapObjectKind::Set(_)
@@ -3026,6 +3054,7 @@ impl HeapObject {
             | HeapObjectKind::RegExp(_)
             | HeapObjectKind::Date(_)
             | HeapObjectKind::TemporalInstant(_)
+            | HeapObjectKind::TemporalDuration(_)
             | HeapObjectKind::Map(_)
             | HeapObjectKind::MapIterator(_)
             | HeapObjectKind::Set(_)
@@ -3056,6 +3085,7 @@ impl HeapObject {
             | HeapObjectKind::RegExp(_)
             | HeapObjectKind::Date(_)
             | HeapObjectKind::TemporalInstant(_)
+            | HeapObjectKind::TemporalDuration(_)
             | HeapObjectKind::Map(_)
             | HeapObjectKind::MapIterator(_)
             | HeapObjectKind::Set(_)

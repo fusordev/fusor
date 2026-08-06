@@ -260,6 +260,8 @@ struct DateIntrinsics {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 struct TemporalIntrinsics {
     namespace: ObjectId,
+    duration_prototype: ObjectId,
+    duration_constructor: FunctionId,
     instant_prototype: ObjectId,
     instant_constructor: FunctionId,
 }
@@ -1242,6 +1244,8 @@ pub(crate) enum NativeFunctionKind {
     DateConstructor,
     DateStatic(DateStaticMethod),
     DatePrototype(DatePrototypeMethod),
+    TemporalDurationConstructor,
+    TemporalDurationPrototype(TemporalDurationPrototypeMethod),
     TemporalInstantConstructor,
     TemporalInstantStatic(TemporalInstantStaticMethod),
     TemporalInstantPrototype(TemporalInstantPrototypeMethod),
@@ -1633,6 +1637,123 @@ pub(crate) enum TemporalInstantPrototypeMethod {
     ToString,
     ToJson,
     ValueOf,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum TemporalDurationPrototypeMethod {
+    Years,
+    Months,
+    Weeks,
+    Days,
+    Hours,
+    Minutes,
+    Seconds,
+    Milliseconds,
+    Microseconds,
+    Nanoseconds,
+    Sign,
+    Blank,
+    Abs,
+    Negated,
+    ToString,
+    ToJson,
+    ToLocaleString,
+    ValueOf,
+}
+
+impl TemporalDurationPrototypeMethod {
+    pub(crate) const ALL: [Self; 18] = [
+        Self::Years,
+        Self::Months,
+        Self::Weeks,
+        Self::Days,
+        Self::Hours,
+        Self::Minutes,
+        Self::Seconds,
+        Self::Milliseconds,
+        Self::Microseconds,
+        Self::Nanoseconds,
+        Self::Sign,
+        Self::Blank,
+        Self::Abs,
+        Self::Negated,
+        Self::ToString,
+        Self::ToJson,
+        Self::ToLocaleString,
+        Self::ValueOf,
+    ];
+
+    pub(crate) const fn name(self) -> &'static str {
+        match self {
+            Self::Years => "years",
+            Self::Months => "months",
+            Self::Weeks => "weeks",
+            Self::Days => "days",
+            Self::Hours => "hours",
+            Self::Minutes => "minutes",
+            Self::Seconds => "seconds",
+            Self::Milliseconds => "milliseconds",
+            Self::Microseconds => "microseconds",
+            Self::Nanoseconds => "nanoseconds",
+            Self::Sign => "sign",
+            Self::Blank => "blank",
+            Self::Abs => "abs",
+            Self::Negated => "negated",
+            Self::ToString => "toString",
+            Self::ToJson => "toJSON",
+            Self::ToLocaleString => "toLocaleString",
+            Self::ValueOf => "valueOf",
+        }
+    }
+
+    pub(crate) const fn function_name(self) -> &'static str {
+        match self {
+            Self::Years => "get years",
+            Self::Months => "get months",
+            Self::Weeks => "get weeks",
+            Self::Days => "get days",
+            Self::Hours => "get hours",
+            Self::Minutes => "get minutes",
+            Self::Seconds => "get seconds",
+            Self::Milliseconds => "get milliseconds",
+            Self::Microseconds => "get microseconds",
+            Self::Nanoseconds => "get nanoseconds",
+            Self::Sign => "get sign",
+            Self::Blank => "get blank",
+            Self::Abs => "abs",
+            Self::Negated => "negated",
+            Self::ToString => "toString",
+            Self::ToJson => "toJSON",
+            Self::ToLocaleString => "toLocaleString",
+            Self::ValueOf => "valueOf",
+        }
+    }
+
+    pub(crate) const fn is_accessor(self) -> bool {
+        matches!(
+            self,
+            Self::Years
+                | Self::Months
+                | Self::Weeks
+                | Self::Days
+                | Self::Hours
+                | Self::Minutes
+                | Self::Seconds
+                | Self::Milliseconds
+                | Self::Microseconds
+                | Self::Nanoseconds
+                | Self::Sign
+                | Self::Blank
+        )
+    }
+
+    #[allow(
+        clippy::unused_self,
+        reason = "family entries expose one uniform method-length query"
+    )]
+    pub(crate) const fn length(self) -> i32 {
+        0
+    }
 }
 
 impl TemporalInstantPrototypeMethod {
@@ -2129,6 +2250,7 @@ impl NativeFunctionKind {
                 | Self::StringConstructor
                 | Self::ArrayConstructor
                 | Self::DateConstructor
+                | Self::TemporalDurationConstructor
                 | Self::TemporalInstantConstructor
                 | Self::RegExpConstructor
                 | Self::GeneratorFunctionConstructor

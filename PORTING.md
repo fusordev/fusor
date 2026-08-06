@@ -107,7 +107,7 @@ does not imply complete ECMAScript or QuickJS compatibility.
 - [x] Typed same-site iterator state covers Array/String iteration, spread,
   destructuring, `for-of`, `IteratorClose`, and original-abrupt precedence.
 - [x] Validated schemas derive Realm allocation and rollback. The normalized
-  snapshot pins 450 Realm-local identities and 1,366 ordered properties.
+  snapshot pins 470 Realm-local identities and 1,426 ordered properties.
 - [x] Proxy and exotic-object integration covers all 11 internal methods,
   revocation/invariants, reflection, descriptors/integrity, constructors,
   iterators, Arrays, strings, RegExp, Promise, and JSON. Audited built-in
@@ -179,19 +179,22 @@ does not imply complete ECMAScript or QuickJS compatibility.
   ISO/UTC/local rendering over pinned `temporal_rs = 0.2.5`. Invalid-date
   recovery, left-to-right setter coercion, generic `toJSON`, `@@toPrimitive`,
   signed UTC years, and deterministic non-Intl locale fallbacks follow
-  ECMA-262 (17/17 focused VM cases; Date.parse Test262 16/16; Date prototype
+  ECMA-262 (22/22 focused VM cases; Date.parse Test262 16/16; Date prototype
   Test262 970/970 admitted modes across 485 files, with no feature skips).
 - [ ] Temporal is staged on the shared `temporal_rs` kernel. `%Temporal%` and
-  branded `%Temporal.Instant%` now provide construction, epoch-millisecond and
-  epoch-nanosecond factories/accessors, string/instance `from`, ordered
-  `compare`, branded `equals`, default ISO/JSON rendering, subclass prototype
-  selection, and `valueOf` rejection. Focused Test262 admission runs one
-  skipped feature inside an explicit subtree without weakening the global
-  baseline: this slice passes 224/256 modes; all 32 non-passes stop in deferred
-  class or lexical-initialization lowering before Temporal executes.
-  `Date.prototype.toTemporalInstant` interop is complete (16/16 modes). Complete
-  Instant arithmetic/rounding/zoned operations and the other Temporal types;
-  then implement binary data/typed arrays and Atomics.
+  branded `%Temporal.Instant%` provide construction, epoch factories/accessors,
+  string/instance `from`, ordered `compare`, branded `equals`, default ISO/JSON,
+  subclass prototype selection, and `valueOf` rejection (224/256 selected
+  modes; all 32 non-passes stop in deferred compiler/harness features).
+  `%Temporal.Duration%` now has spec-ordered ten-field construction, branded
+  accessors, `sign`/`blank`, `abs`/`negated`, default string/JSON and non-Intl
+  locale fallback, subclass prototype selection, and primitive rejection over
+  `temporal_rs::Duration` (6/6 VM; 48/48 selected Test262 modes). The full
+  Duration subtree audit is 252/1,066 before `from`/`compare` and arithmetic/
+  rounding land. `Date.prototype.toTemporalInstant` is complete (16/16).
+  Complete Duration conversion/arithmetic, then Instant arithmetic/rounding/
+  zoned operations and the remaining Temporal types; next implement binary
+  data/typed arrays and Atomics.
 
 ### Jobs, asynchronous semantics, and modules
 

@@ -12,8 +12,8 @@ use super::{
     PropertyLayout, ReflectMethod, SetMethod, StringMethod, UriFunction,
 };
 use crate::runtime::{
-    DatePrototypeMethod, DateStaticMethod, TemporalInstantPrototypeMethod,
-    TemporalInstantStaticMethod,
+    DatePrototypeMethod, DateStaticMethod, TemporalDurationPrototypeMethod,
+    TemporalInstantPrototypeMethod, TemporalInstantStaticMethod,
 };
 
 /// Stable identity of an object allocated by Realm bootstrap.
@@ -32,6 +32,7 @@ pub(in crate::runtime) enum IntrinsicObjectId {
     ArrayPrototype,
     DatePrototype,
     Temporal,
+    TemporalDurationPrototype,
     TemporalInstantPrototype,
     RegExpPrototype,
     IteratorPrototype,
@@ -61,7 +62,7 @@ pub(in crate::runtime) enum IntrinsicObjectId {
 }
 
 impl IntrinsicObjectId {
-    pub(in crate::runtime) const ALL: [Self; 44] = [
+    pub(in crate::runtime) const ALL: [Self; 45] = [
         Self::ObjectPrototype,
         Self::GlobalObject,
         Self::ErrorPrototype(ErrorIntrinsicKind::Error),
@@ -80,6 +81,7 @@ impl IntrinsicObjectId {
         Self::ArrayPrototype,
         Self::DatePrototype,
         Self::Temporal,
+        Self::TemporalDurationPrototype,
         Self::TemporalInstantPrototype,
         Self::RegExpPrototype,
         Self::IteratorPrototype,
@@ -155,7 +157,9 @@ pub(in crate::runtime) enum RealmNameId {
     DateStatic(DateStaticMethod),
     DatePrototype(DatePrototypeMethod),
     Temporal,
+    Duration,
     Instant,
+    TemporalDurationPrototype(TemporalDurationPrototypeMethod),
     TemporalInstantStatic(TemporalInstantStaticMethod),
     TemporalInstantPrototype(TemporalInstantPrototypeMethod),
     RegExpEscape,

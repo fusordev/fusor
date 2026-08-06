@@ -532,6 +532,10 @@ pub(super) fn finish_intrinsic_get(
             epoch_nanoseconds,
             &value,
         ),
+        IntrinsicGetContinuation::TemporalDurationConstructor {
+            new_target,
+            duration,
+        } => finish_temporal_duration_constructor_wrapper(runtime, new_target, duration, &value),
         IntrinsicGetContinuation::StringConstructor {
             new_target,
             value: string_value,
@@ -1812,6 +1816,18 @@ fn finish_operator_primitive_target(
         OperatorPrimitiveTarget::DateConstructorComponents(state) => {
             let number = operator_to_number(value, realm, origin)?;
             advance_date_constructor_components(
+                runtime,
+                *state,
+                Some(number),
+                realm,
+                return_to,
+                origin,
+                execution_budget,
+            )
+        }
+        OperatorPrimitiveTarget::TemporalDurationConstructor(state) => {
+            let number = operator_to_number(value, realm, origin)?;
+            advance_temporal_duration_constructor(
                 runtime,
                 *state,
                 Some(number),
