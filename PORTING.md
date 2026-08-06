@@ -107,7 +107,7 @@ does not imply complete ECMAScript or QuickJS compatibility.
 - [x] Typed same-site iterator state covers Array/String iteration, spread,
   destructuring, `for-of`, `IteratorClose`, and original-abrupt precedence.
 - [x] Validated schemas derive Realm allocation and rollback. The normalized
-  snapshot pins 474 Realm-local identities and 1,438 ordered properties.
+  snapshot pins 476 Realm-local identities and 1,444 ordered properties.
 - [x] Proxy and exotic-object integration covers all 11 internal methods,
   revocation/invariants, reflection, descriptors/integrity, constructors,
   iterators, Arrays, strings, RegExp, Promise, and JSON. Audited built-in
@@ -191,11 +191,13 @@ does not imply complete ECMAScript or QuickJS compatibility.
   locale fallback, subclass prototype selection, primitive rejection, exact
   resumable property-bag conversion, string/branded `from`, ordered `compare`
   with string `relativeTo`, and `add`/`subtract` over
-  `temporal_rs::Duration` (13/13 VM; selected Test262: foundation 48/48,
+  `temporal_rs::Duration`, including `with` and spec-ordered context-free
+  `total` (16/16 VM; selected Test262: foundation 48/48,
   `from` 28/62, `compare` 32/100, `add` 34/68, `subtract` 34/68; most
   non-passes stop in deferred compiler/harness features or later Temporal
-  methods). `Date.prototype.toTemporalInstant` is complete (16/16). Complete
-  Duration `with`/rounding/total, then Instant arithmetic/rounding/zoned
+  methods; `with` 28/44 and `total` 42/152). `Date.prototype.toTemporalInstant`
+  is complete (16/16). Complete class execution before further built-in
+  expansion, then Duration rounding and Instant arithmetic/rounding/zoned
   operations and the remaining Temporal types; next implement binary
   data/typed arrays and Atomics.
 

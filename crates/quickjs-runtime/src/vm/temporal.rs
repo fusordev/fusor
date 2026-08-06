@@ -3,7 +3,7 @@
 use temporal_rs::{
     Duration, Instant, Sign,
     error::ErrorKind as TemporalErrorKind,
-    options::{RelativeTo, ToStringRoundingOptions},
+    options::{RelativeTo, ToStringRoundingOptions, Unit},
 };
 
 #[allow(
@@ -121,6 +121,31 @@ pub(super) struct TemporalDurationCompareOptionsContinuation {
 }
 
 impl TemporalDurationCompareOptionsContinuation {
+    pub(super) const fn retained_values() -> u64 {
+        1
+    }
+
+    pub(super) fn trace_roots(&self, mark: &mut dyn FnMut(CollectionRoot)) {
+        trace_stored_value_root(&self.options, mark);
+    }
+}
+
+#[derive(Clone, Copy)]
+enum TemporalDurationTotalStage {
+    AwaitRelativeTo,
+    AwaitUnit,
+}
+
+pub(super) struct TemporalDurationTotalContinuation {
+    duration: Duration,
+    options: StoredValue,
+    relative_to: Option<RelativeTo>,
+    stage: TemporalDurationTotalStage,
+    realm: RealmId,
+    origin: JsStackFrame,
+}
+
+impl TemporalDurationTotalContinuation {
     pub(super) const fn retained_values() -> u64 {
         1
     }
@@ -347,6 +372,15 @@ pub(super) fn dispatch_temporal_duration_prototype(
         TemporalDurationPrototypeMethod::Negated => {
             allocate_temporal_duration_result(runtime, realm, duration.negated())
         }
+        TemporalDurationPrototypeMethod::With => begin_temporal_duration_with(
+            runtime,
+            duration,
+            arguments.take_first_or_undefined(),
+            realm,
+            return_to,
+            origin.clone(),
+            execution_budget,
+        ),
         TemporalDurationPrototypeMethod::Add | TemporalDurationPrototypeMethod::Subtract => {
             begin_temporal_duration_like(
                 runtime,
@@ -361,6 +395,15 @@ pub(super) fn dispatch_temporal_duration_prototype(
                 execution_budget,
             )
         }
+        TemporalDurationPrototypeMethod::Total => begin_temporal_duration_total(
+            runtime,
+            duration,
+            arguments.take_first_or_undefined(),
+            realm,
+            return_to,
+            origin.clone(),
+            execution_budget,
+        ),
         TemporalDurationPrototypeMethod::ToString
         | TemporalDurationPrototypeMethod::ToJson
         | TemporalDurationPrototypeMethod::ToLocaleString => Ok(NativeDispatch::Immediate(
@@ -372,6 +415,255 @@ pub(super) fn dispatch_temporal_duration_prototype(
             "Temporal.Duration cannot be converted to a primitive value",
         ),
     }
+}
+
+#[allow(
+    clippy::too_many_arguments,
+    reason = "the partial-duration conversion may suspend with the native call context"
+)]
+fn begin_temporal_duration_with(
+    runtime: &mut Runtime,
+    receiver: Duration,
+    partial: StoredValue,
+    realm: RealmId,
+    return_to: Option<CallReturn>,
+    origin: JsStackFrame,
+    execution_budget: &mut ExecutionBudget,
+) -> Result<NativeDispatch, NativeFailure> {
+    if partial.heap_reference().is_none() {
+        return temporal_type_error(
+            realm,
+            &origin,
+            "Temporal.Duration.prototype.with requires an object",
+        );
+    }
+    advance_temporal_duration_property_bag(
+        runtime,
+        TemporalDurationBagContinuation {
+            base: partial,
+            fields: temporal_duration_fields(receiver),
+            next: 0,
+            any: false,
+            stage: TemporalDurationBagStage::ReadField,
+            target: TemporalDurationLikeTarget::Allocate,
+            realm,
+            origin,
+        },
+        None,
+        return_to,
+        execution_budget,
+    )
+}
+
+fn temporal_duration_fields(duration: Duration) -> [Option<i128>; 10] {
+    [
+        Some(i128::from(duration.years())),
+        Some(i128::from(duration.months())),
+        Some(i128::from(duration.weeks())),
+        Some(i128::from(duration.days())),
+        Some(i128::from(duration.hours())),
+        Some(i128::from(duration.minutes())),
+        Some(i128::from(duration.seconds())),
+        Some(i128::from(duration.milliseconds())),
+        Some(duration.microseconds()),
+        Some(duration.nanoseconds()),
+    ]
+}
+
+#[allow(
+    clippy::too_many_arguments,
+    reason = "the options reader may suspend while retaining the native call context"
+)]
+fn begin_temporal_duration_total(
+    runtime: &mut Runtime,
+    duration: Duration,
+    total_of: StoredValue,
+    realm: RealmId,
+    return_to: Option<CallReturn>,
+    origin: JsStackFrame,
+    execution_budget: &mut ExecutionBudget,
+) -> Result<NativeDispatch, NativeFailure> {
+    if let StoredValue::String(unit) = total_of {
+        let unit = temporal_duration_unit(&unit, realm, &origin)?;
+        return complete_temporal_duration_total(duration, unit, None, realm, &origin);
+    }
+    if total_of.heap_reference().is_none() {
+        return temporal_type_error(
+            realm,
+            &origin,
+            "Temporal.Duration.prototype.total requires a unit string or options object",
+        );
+    }
+    begin_temporal_duration_total_get(
+        runtime,
+        TemporalDurationTotalContinuation {
+            duration,
+            options: total_of,
+            relative_to: None,
+            stage: TemporalDurationTotalStage::AwaitRelativeTo,
+            realm,
+            origin,
+        },
+        "relativeTo",
+        TemporalDurationTotalStage::AwaitRelativeTo,
+        return_to,
+        execution_budget,
+    )
+}
+
+#[allow(
+    clippy::too_many_arguments,
+    reason = "each observable options Get carries the resumable native call context"
+)]
+fn begin_temporal_duration_total_get(
+    runtime: &mut Runtime,
+    mut state: TemporalDurationTotalContinuation,
+    name: &str,
+    next_stage: TemporalDurationTotalStage,
+    return_to: Option<CallReturn>,
+    execution_budget: &mut ExecutionBudget,
+) -> Result<NativeDispatch, NativeFailure> {
+    state.stage = next_stage;
+    charge_heap_property_lookup(runtime, &state.options, execution_budget)?;
+    let name = JsString::from_utf8(name)?;
+    let key = runtime.property_key_from_string(&name)?;
+    let realm = state.realm;
+    let origin = state.origin.clone();
+    let dispatch = begin_value_get(
+        runtime,
+        &state.options,
+        key,
+        Some(&name),
+        realm,
+        return_to,
+        origin,
+        execution_budget,
+    )?;
+    match continue_get_state_after(
+        dispatch,
+        state,
+        temporal_duration_total_continuation,
+        "Temporal.Duration total option Get produced a structured result",
+    )? {
+        GetContinuationDispatch::Ready { state, value } => advance_temporal_duration_total_options(
+            runtime,
+            state,
+            value,
+            return_to,
+            execution_budget,
+        ),
+        GetContinuationDispatch::Suspended(dispatch) => Ok(dispatch),
+    }
+}
+
+fn temporal_duration_total_continuation(
+    state: TemporalDurationTotalContinuation,
+) -> NativeContinuation {
+    NativeContinuation::TemporalDurationTotalOptions(Box::new(state))
+}
+
+pub(super) fn advance_temporal_duration_total_options(
+    runtime: &mut Runtime,
+    mut state: TemporalDurationTotalContinuation,
+    value: StoredValue,
+    return_to: Option<CallReturn>,
+    execution_budget: &mut ExecutionBudget,
+) -> Result<NativeDispatch, NativeFailure> {
+    match state.stage {
+        TemporalDurationTotalStage::AwaitRelativeTo => {
+            state.relative_to =
+                temporal_relative_to_from_value(&value, state.realm, &state.origin)?;
+            begin_temporal_duration_total_get(
+                runtime,
+                state,
+                "unit",
+                TemporalDurationTotalStage::AwaitUnit,
+                return_to,
+                execution_budget,
+            )
+        }
+        TemporalDurationTotalStage::AwaitUnit => {
+            if matches!(value, StoredValue::Undefined) {
+                return temporal_range_error(
+                    state.realm,
+                    &state.origin,
+                    "Temporal.Duration.prototype.total requires a unit",
+                );
+            }
+            let realm = state.realm;
+            let origin = state.origin.clone();
+            begin_operator_primitive_conversion(
+                runtime,
+                value,
+                OperatorPrimitiveHint::String,
+                OperatorPrimitiveTarget::TemporalDurationTotalUnit(Box::new(state)),
+                realm,
+                return_to,
+                origin,
+                execution_budget,
+            )
+        }
+    }
+}
+
+pub(super) fn finish_temporal_duration_total_unit(
+    mut state: TemporalDurationTotalContinuation,
+    value: StoredValue,
+) -> Result<NativeDispatch, NativeFailure> {
+    let unit = operator_primitive_to_string(value, state.realm, &state.origin)?;
+    let unit = temporal_duration_unit(&unit, state.realm, &state.origin)?;
+    complete_temporal_duration_total(
+        state.duration,
+        unit,
+        state.relative_to.take(),
+        state.realm,
+        &state.origin,
+    )
+}
+
+fn temporal_duration_unit(
+    source: &JsString,
+    realm: RealmId,
+    origin: &JsStackFrame,
+) -> Result<Unit, NativeFailure> {
+    let source = source.to_utf8_lossy()?;
+    let Ok(unit) = source.parse::<Unit>() else {
+        return Err(NativeFailure::Abrupt(temporal_pending_exception(
+            realm,
+            origin,
+            ExceptionKind::RangeError,
+            "invalid Temporal unit",
+        )?));
+    };
+    if unit == Unit::Auto {
+        return Err(NativeFailure::Abrupt(temporal_pending_exception(
+            realm,
+            origin,
+            ExceptionKind::RangeError,
+            "auto is not a valid Temporal unit here",
+        )?));
+    }
+    Ok(unit)
+}
+
+fn complete_temporal_duration_total(
+    duration: Duration,
+    unit: Unit,
+    relative_to: Option<RelativeTo>,
+    realm: RealmId,
+    origin: &JsStackFrame,
+) -> Result<NativeDispatch, NativeFailure> {
+    let total = match duration.total(unit, relative_to) {
+        Ok(total) => total,
+        Err(error) => {
+            return Err(NativeFailure::Abrupt(temporal_exception_from_error(
+                realm, origin, error,
+            )?));
+        }
+    };
+    Ok(NativeDispatch::Immediate(StoredValue::Number(
+        JsNumber::from_f64(total.as_inner()),
+    )))
 }
 
 fn temporal_duration_i128_number(value: i128) -> NativeDispatch {
@@ -814,7 +1106,7 @@ fn begin_temporal_duration_compare_options(
         "Temporal.Duration relativeTo Get produced a structured result",
     )? {
         GetContinuationDispatch::Ready { state, value } => {
-            finish_temporal_duration_compare_options(runtime, &state, value)
+            finish_temporal_duration_compare_options(runtime, &state, &value)
         }
         GetContinuationDispatch::Suspended(dispatch) => Ok(dispatch),
     }
@@ -829,31 +1121,9 @@ fn temporal_duration_compare_options_continuation(
 pub(super) fn finish_temporal_duration_compare_options(
     _runtime: &mut Runtime,
     state: &TemporalDurationCompareOptionsContinuation,
-    relative_to: StoredValue,
+    relative_to: &StoredValue,
 ) -> Result<NativeDispatch, NativeFailure> {
-    let relative_to = match relative_to {
-        StoredValue::Undefined => None,
-        StoredValue::String(source) => {
-            let source = source.to_utf8_lossy()?;
-            match RelativeTo::try_from_str(&source) {
-                Ok(relative_to) => Some(relative_to),
-                Err(error) => {
-                    return Err(NativeFailure::Abrupt(temporal_exception_from_error(
-                        state.realm,
-                        &state.origin,
-                        error,
-                    )?));
-                }
-            }
-        }
-        _ => {
-            return temporal_type_error(
-                state.realm,
-                &state.origin,
-                "Temporal.Duration.compare relativeTo must be a string or Temporal object",
-            );
-        }
-    };
+    let relative_to = temporal_relative_to_from_value(relative_to, state.realm, &state.origin)?;
     complete_temporal_duration_compare(
         state.first,
         state.second,
@@ -861,6 +1131,31 @@ pub(super) fn finish_temporal_duration_compare_options(
         state.realm,
         &state.origin,
     )
+}
+
+fn temporal_relative_to_from_value(
+    value: &StoredValue,
+    realm: RealmId,
+    origin: &JsStackFrame,
+) -> Result<Option<RelativeTo>, NativeFailure> {
+    match value {
+        StoredValue::Undefined => Ok(None),
+        StoredValue::String(source) => {
+            let source = source.to_utf8_lossy()?;
+            match RelativeTo::try_from_str(&source) {
+                Ok(relative_to) => Ok(Some(relative_to)),
+                Err(error) => Err(NativeFailure::Abrupt(temporal_exception_from_error(
+                    realm, origin, error,
+                )?)),
+            }
+        }
+        _ => Err(NativeFailure::Abrupt(temporal_pending_exception(
+            realm,
+            origin,
+            ExceptionKind::TypeError,
+            "Temporal relativeTo must be a string or Temporal object",
+        )?)),
+    }
 }
 
 fn complete_temporal_duration_compare(
@@ -1352,12 +1647,23 @@ fn temporal_exception(
     kind: ExceptionKind,
     message: &str,
 ) -> Result<NativeDispatch, NativeFailure> {
-    Err(NativeFailure::Abrupt(PendingException {
+    Err(NativeFailure::Abrupt(temporal_pending_exception(
+        realm, origin, kind, message,
+    )?))
+}
+
+fn temporal_pending_exception(
+    realm: RealmId,
+    origin: &JsStackFrame,
+    kind: ExceptionKind,
+    message: &str,
+) -> Result<PendingException, NativeFailure> {
+    Ok(PendingException {
         realm,
         payload: PendingExceptionPayload::EngineError {
             kind,
             message: JsString::from_utf8(message)?,
         },
         origin: origin.clone(),
-    }))
+    })
 }

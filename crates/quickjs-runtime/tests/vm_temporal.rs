@@ -334,3 +334,75 @@ fn duration_arithmetic_enforces_brand_and_rejects_unanchored_calendar_units() {
         ExceptionKind::TypeError
     );
 }
+
+#[test]
+fn duration_with_merges_defined_fields_in_normative_order() {
+    assert_eq!(
+        rendered(
+            "var log=[],partial={};
+             Object.defineProperty(partial,'days',{get:function(){log.push('get days');
+               return {valueOf:function(){log.push('convert days');return 7;}};}});
+             Object.defineProperty(partial,'hours',{get:function(){log.push('get hours');
+               return undefined;}});
+             var original=new Temporal.Duration(1,2,3,4,5,6,7,8,9,10);
+             var result=original.with(partial);
+             return [Temporal.Duration.prototype.with.length,original.toString(),
+               result.toString(),result===original,log.join(',')].join('|');"
+        ),
+        "1|P1Y2M3W4DT5H6M7.00800901S|P1Y2M3W7DT5H6M7.00800901S|false|get days,convert days,get hours"
+    );
+    assert_eq!(
+        thrown("return new Temporal.Duration().with({});"),
+        ExceptionKind::TypeError
+    );
+    assert_eq!(
+        thrown("return new Temporal.Duration(1).with({months:-1});"),
+        ExceptionKind::RangeError
+    );
+    assert_eq!(
+        thrown("return Temporal.Duration.prototype.with.call({}, {days:1});"),
+        ExceptionKind::TypeError
+    );
+}
+
+#[test]
+fn duration_total_reads_relative_to_before_coercing_unit() {
+    assert_eq!(
+        rendered(
+            "var log=[],options={};
+             Object.defineProperty(options,'relativeTo',{get:function(){log.push('relativeTo');
+               return undefined;}});
+             Object.defineProperty(options,'unit',{get:function(){log.push('unit');return {
+               toString:function(){log.push('unit toString');return 'hour';}};}});
+             var duration=new Temporal.Duration(0,0,0,2,12);
+             return [Temporal.Duration.prototype.total.length,duration.total(options),
+               duration.total('minute'),new Temporal.Duration(0,1).total({
+                 unit:'day',relativeTo:'2020-02-01'}),log.join(',')].join('|');"
+        ),
+        "1|60|3600|29|relativeTo,unit,unit toString"
+    );
+}
+
+#[test]
+fn duration_total_validates_receiver_options_and_unit() {
+    assert_eq!(
+        thrown("return Temporal.Duration.prototype.total.call({}, 'second');"),
+        ExceptionKind::TypeError
+    );
+    assert_eq!(
+        thrown("return new Temporal.Duration().total({});"),
+        ExceptionKind::RangeError
+    );
+    assert_eq!(
+        thrown("return new Temporal.Duration().total('auto');"),
+        ExceptionKind::RangeError
+    );
+    assert_eq!(
+        thrown("return new Temporal.Duration(1).total('year');"),
+        ExceptionKind::RangeError
+    );
+    assert_eq!(
+        thrown("return new Temporal.Duration().total(1);"),
+        ExceptionKind::TypeError
+    );
+}

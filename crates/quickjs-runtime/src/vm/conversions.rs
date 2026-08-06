@@ -1846,6 +1846,9 @@ fn finish_operator_primitive_target(
                 execution_budget,
             )
         }
+        OperatorPrimitiveTarget::TemporalDurationTotalUnit(state) => {
+            finish_temporal_duration_total_unit(*state, value)
+        }
         OperatorPrimitiveTarget::DateSetTime { object } => {
             finish_date_set_time(runtime, object, value, realm, origin)
         }
