@@ -1,6 +1,6 @@
 use super::super::{
     ArrayExpression, ArrayExpressionElement, ArrowFunctionExpression, AssignmentExpression,
-    AssignmentOperator, AssignmentTarget, AtomPoolIndex, BinaryOperator, BranchKind,
+    AssignmentOperator, AssignmentTarget, AstKind, AtomPoolIndex, BinaryOperator, BranchKind,
     CallExpression, ChainElement, ChainExpression, Class, ClassElement, CompilationContext,
     CompiledConstantPool, CompiledMetadataAtomKey, CompilerLabel, ComputedMemberExpression,
     ConditionalExpression, ExecutableId, ExecutableKind, Expression, FinalOpcode, FrameLayout,
@@ -538,9 +538,10 @@ impl<'compiler, 'unit, 'arena, 'scope> ExpressionPlanner<'compiler, 'unit, 'aren
     /// Lowers the first fully verified class slice: a named base-class
     /// definition with an explicit ordinary or synthesized default constructor
     /// and public methods/accessors with either static or computed names, plus
-    /// public static fields with absent or literal initializers. Heritage,
-    /// instance or computed fields, private elements, static blocks, and
-    /// decorators stay fail-closed until their own execution contracts exist.
+    /// public static fields whose initializers contain no `this`, `super`, or
+    /// `new.target`. Heritage, instance or computed fields, private elements,
+    /// static blocks, and decorators stay fail-closed until their own execution
+    /// contracts exist.
     fn plan_base_class_definition(
         &self,
         class: &Class<'arena>,
@@ -568,7 +569,7 @@ impl<'compiler, 'unit, 'arena, 'scope> ExpressionPlanner<'compiler, 'unit, 'aren
                     }
                 }
                 ClassElement::PropertyDefinition(field) => {
-                    Self::validate_base_class_static_field(field)?;
+                    self.validate_base_class_static_field(field)?;
                 }
                 _ => return unsupported(UnsupportedLeafFeature::UnsupportedBody, element.span()),
             }
@@ -625,7 +626,7 @@ impl<'compiler, 'unit, 'arena, 'scope> ExpressionPlanner<'compiler, 'unit, 'aren
                     self.plan_base_class_method(method, layout, tree_layout, constants, flow)?;
                 }
                 ClassElement::PropertyDefinition(field) => {
-                    Self::plan_base_class_static_field(field, constants, flow)?;
+                    self.plan_base_class_static_field(field, layout, tree_layout, constants, flow)?;
                 }
                 _ => {
                     return Err(LeafCompilationError::SemanticInvariant {
@@ -671,6 +672,7 @@ impl<'compiler, 'unit, 'arena, 'scope> ExpressionPlanner<'compiler, 'unit, 'aren
     }
 
     fn validate_base_class_static_field(
+        &self,
         field: &PropertyDefinition<'arena>,
     ) -> Result<(), LeafCompilationError> {
         if !field.r#static || field.computed || !field.decorators.is_empty() {
@@ -680,6 +682,26 @@ impl<'compiler, 'unit, 'arena, 'scope> ExpressionPlanner<'compiler, 'unit, 'aren
             feature: UnsupportedLeafFeature::UnsupportedDeclaration,
             span: field.key.span(),
         })?;
+        if field.value.is_none() {
+            return Ok(());
+        }
+        let field_node = field.node_id.get();
+        let nodes = self.unit.semantic().nodes();
+        for (node_id, node) in nodes.iter_enumerated() {
+            if !nodes
+                .ancestor_ids(node_id)
+                .any(|ancestor| ancestor == field_node)
+            {
+                continue;
+            }
+            let span = match node.kind() {
+                AstKind::ThisExpression(expression) => expression.span,
+                AstKind::NewTarget(expression) => expression.span,
+                AstKind::Super(expression) => expression.span,
+                _ => continue,
+            };
+            return unsupported(UnsupportedLeafFeature::UnsupportedExpression, span);
+        }
         Ok(())
     }
 
@@ -778,7 +800,10 @@ impl<'compiler, 'unit, 'arena, 'scope> ExpressionPlanner<'compiler, 'unit, 'aren
     }
 
     fn plan_base_class_static_field(
+        &self,
         field: &PropertyDefinition<'arena>,
+        layout: &FrameLayout,
+        tree_layout: &FunctionTreeLayout,
         constants: &CompiledConstantPool,
         flow: &mut PlannedControlFlow,
     ) -> Result<(), LeafCompilationError> {
@@ -793,10 +818,14 @@ impl<'compiler, 'unit, 'arena, 'scope> ExpressionPlanner<'compiler, 'unit, 'aren
             field.span,
         ))?;
         if let Some(value) = &field.value {
-            let Some(value) = plan_literal(value, constants) else {
-                return unsupported(UnsupportedLeafFeature::UnsupportedExpression, value.span());
-            };
-            flow.emit(value?)?;
+            let inferred_name = Self::plan_inferred_static_property_name_for_initializer(
+                value,
+                constants.property_atom_index(key.span)?,
+            )?;
+            self.plan_expression(value, layout, tree_layout, constants, &[], flow)?;
+            if let Some(inferred_name) = inferred_name {
+                flow.emit(inferred_name)?;
+            }
         } else {
             flow.emit(PlannedInstruction::new(
                 FinalOpcode::Undefined,

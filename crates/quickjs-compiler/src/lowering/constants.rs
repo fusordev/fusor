@@ -579,6 +579,15 @@ impl<'arena> CompilationContext<'_, 'arena, '_> {
             match nodes.kind(parent) {
                 AstKind::ParenthesizedExpression(_) => parent = nodes.parent_id(parent),
                 AstKind::VariableDeclarator(declarator) => break declarator,
+                AstKind::PropertyDefinition(field) if !field.computed => {
+                    let key = compiled_static_property_key(&field.key)?.ok_or(
+                        LeafCompilationError::Unsupported {
+                            feature: super::UnsupportedLeafFeature::InferredFunctionName,
+                            span: field.key.span(),
+                        },
+                    )?;
+                    return Ok((key.value, key.span));
+                }
                 _ => {
                     return super::unsupported(
                         super::UnsupportedLeafFeature::UnsupportedExpression,

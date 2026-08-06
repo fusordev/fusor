@@ -156,11 +156,11 @@ fn computed_public_class_accessors_define_their_respective_targets() {
 }
 
 #[test]
-fn literal_static_public_fields_are_own_constructor_properties() {
+fn static_public_fields_evaluate_on_the_constructor() {
     run_with(
-        "function run(){class Box{static answer=7;static empty;}let declared=Box.answer===7&&Box.empty===void 0&&Box.hasOwnProperty('answer')&&Box.hasOwnProperty('empty')&&Box.propertyIsEnumerable('answer');Box.answer=8;let writable=Box.answer===8;let configurable=delete Box.answer&&!Box.hasOwnProperty('answer');return declared&&writable&&configurable;}",
+        "function run(){let seed=7;class Box{static answer=seed+1;static self=Box;static Nested=class{};static empty;}let declared=Box.answer===8&&Box.self===Box&&Box.Nested.name==='Nested'&&new Box.Nested().constructor===Box.Nested&&Box.empty===void 0&&Box.hasOwnProperty('answer')&&Box.hasOwnProperty('empty')&&Box.propertyIsEnumerable('answer');Box.answer=9;let writable=Box.answer===9;let configurable=delete Box.answer&&!Box.hasOwnProperty('answer');return declared&&writable&&configurable;}",
         |result| {
-            let value = result.expect("literal static class field execution");
+            let value = result.expect("static class field execution");
             assert_eq!(value.as_boolean().expect("live Boolean"), Some(true));
         },
     );

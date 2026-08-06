@@ -202,9 +202,9 @@ fn async_generator_class_methods_are_owned_by_their_definition() {
 }
 
 #[test]
-fn literal_static_class_fields_lower_to_the_typed_field_definition_path() {
+fn static_class_fields_lower_to_the_typed_field_definition_path() {
     let tree = compile(
-        "function make(){class Box{static answer=7;static empty;}return Box;}",
+        "function make(seed){class Box{static answer=seed+1;static self=Box;static Nested=class{};static empty;}return Box;}",
         "make",
     );
     assert_eq!(
@@ -215,8 +215,33 @@ fn literal_static_class_fields_lower_to_the_typed_field_definition_path() {
             .filter(|instruction| instruction.decoded().instruction().opcode()
                 == FinalOpcode::DefineField)
             .count(),
-        2
+        4
     );
+}
+
+#[test]
+fn static_field_initializers_requiring_a_class_receiver_stay_fail_closed() {
+    let error = with_parsed_program(
+        "function make(){class Box{static receiver=this;}return Box;}",
+        FrontendOptions::for_goal(CompilationGoal::GlobalScript(GlobalScriptGoal::new())),
+        |unit| {
+            let context = CompilationContext::new(unit).expect("storage plan");
+            let root = context
+                .executables()
+                .find(|executable| executable.metadata().name() == Some("make"))
+                .expect("root function");
+            context.compile_tree(&root, VerificationLimits::default())
+        },
+    )
+    .expect("frontend")
+    .expect_err("class-bound static receiver needs its dedicated execution contract");
+    assert!(matches!(
+        error,
+        quickjs_compiler::LeafCompilationError::Unsupported {
+            feature: quickjs_compiler::UnsupportedLeafFeature::UnsupportedExpression,
+            ..
+        }
+    ));
 }
 
 #[test]
