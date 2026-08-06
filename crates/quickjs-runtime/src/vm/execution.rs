@@ -3293,6 +3293,10 @@ pub(super) fn execute_one(
             });
         }
         FinalOpcode::Nop => {}
+        // SetHomeObject/CheckBrand/AddBrand require runtime infrastructure
+        // (mutable BytecodeFunction.home_object and brand symbol properties).
+        // Deferred to a follow-up; private methods compile but brand checks are
+        // pending runtime support.
         _ => return unsupported_dispatch(opcode),
     }
 

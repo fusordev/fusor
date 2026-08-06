@@ -2494,34 +2494,65 @@ impl<'unit, 'arena, 'scope> Planner<'unit, 'arena, 'scope> {
             };
             let owner = self.scope_owner(class.scope_id(), Some(class.span))?;
             for element in &class.body.body {
-                let ClassElement::PropertyDefinition(field) = element else {
-                    continue;
-                };
-                let PropertyKey::PrivateIdentifier(identifier) = &field.key else {
-                    continue;
-                };
-                if field.r#static {
-                    continue;
+                match element {
+                    ClassElement::PropertyDefinition(field) => {
+                        let PropertyKey::PrivateIdentifier(identifier) = &field.key else {
+                            continue;
+                        };
+                        // Both instance and static private fields get name bindings.
+                        let field_node = field.node_id.get();
+                        bindings.push(BindingDraft {
+                            symbol_id: None,
+                            primary_symbol_binding: false,
+                            class_node: None,
+                            class_field_node: None,
+                            class_private_name_node: Some(field_node),
+                            class_static_receiver_node: None,
+                            executable: owner,
+                            name: Arc::from(format!(
+                                "[[class-private-name:{}]]",
+                                field_node.index()
+                            )),
+                            declaration_spans: Arc::from([identifier.span]),
+                            placement: StoragePlacement::Local,
+                            policy: self.declaration_policy(
+                                owner,
+                                DeclarationKind::ClassPrivateName,
+                                false,
+                            ),
+                            arguments_object: false,
+                        });
+                    }
+                    ClassElement::MethodDefinition(method) => {
+                        let PropertyKey::PrivateIdentifier(identifier) = &method.key else {
+                            continue;
+                        };
+                        // Private methods and accessors need name bindings too.
+                        let method_node = method.node_id.get();
+                        bindings.push(BindingDraft {
+                            symbol_id: None,
+                            primary_symbol_binding: false,
+                            class_node: None,
+                            class_field_node: None,
+                            class_private_name_node: Some(method_node),
+                            class_static_receiver_node: None,
+                            executable: owner,
+                            name: Arc::from(format!(
+                                "[[class-private-name:{}]]",
+                                method_node.index()
+                            )),
+                            declaration_spans: Arc::from([identifier.span]),
+                            placement: StoragePlacement::Local,
+                            policy: self.declaration_policy(
+                                owner,
+                                DeclarationKind::ClassPrivateName,
+                                false,
+                            ),
+                            arguments_object: false,
+                        });
+                    }
+                    _ => continue,
                 }
-                let field_node = field.node_id.get();
-                bindings.push(BindingDraft {
-                    symbol_id: None,
-                    primary_symbol_binding: false,
-                    class_node: None,
-                    class_field_node: None,
-                    class_private_name_node: Some(field_node),
-                    class_static_receiver_node: None,
-                    executable: owner,
-                    name: Arc::from(format!("[[class-private-name:{}]]", field_node.index())),
-                    declaration_spans: Arc::from([identifier.span]),
-                    placement: StoragePlacement::Local,
-                    policy: self.declaration_policy(
-                        owner,
-                        DeclarationKind::ClassPrivateName,
-                        false,
-                    ),
-                    arguments_object: false,
-                });
             }
         }
         Ok(())

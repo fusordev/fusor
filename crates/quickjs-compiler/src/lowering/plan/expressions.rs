@@ -597,9 +597,7 @@ impl<'compiler, 'unit, 'arena, 'scope> ExpressionPlanner<'compiler, 'unit, 'aren
     /// static or computed names, public static fields with lexical `this`,
     /// `new.target`, and `super` property access, and initializer-free public
     /// instance fields. Computed and initialized public instance fields and
-    /// static blocks have their own certified execution paths. Private
-    /// elements and decorators stay fail-closed until their distinct object
-    /// and class-definition contracts exist.
+    /// static blocks have their own certified execution paths.
     fn plan_class_heritage(
         &self,
         class: &Class<'arena>,
@@ -997,10 +995,16 @@ impl<'compiler, 'unit, 'arena, 'scope> ExpressionPlanner<'compiler, 'unit, 'aren
             }
             return Ok(());
         }
-        compiled_static_property_key(&method.key)?.ok_or(LeafCompilationError::Unsupported {
-            feature: UnsupportedLeafFeature::UnsupportedDeclaration,
-            span: method.key.span(),
-        })?;
+        // Private methods/accessors use PrivateIdentifier keys and have their own
+        // lowering path; public identifiers still need to be compile-time atoms.
+        if !matches!(method.key, OxcPropertyKey::PrivateIdentifier(_))
+            && compiled_static_property_key(&method.key)?.is_none()
+        {
+            return Err(LeafCompilationError::Unsupported {
+                feature: UnsupportedLeafFeature::UnsupportedDeclaration,
+                span: method.key.span(),
+            });
+        }
         Ok(())
     }
 
@@ -1057,28 +1061,34 @@ impl<'compiler, 'unit, 'arena, 'scope> ExpressionPlanner<'compiler, 'unit, 'aren
         flow: &mut PlannedControlFlow,
     ) -> Result<(), LeafCompilationError> {
         for element in &class.body.body {
-            let ClassElement::PropertyDefinition(field) = element else {
-                continue;
+            let (node_id, identifier) = match element {
+                ClassElement::PropertyDefinition(field) => {
+                    let OxcPropertyKey::PrivateIdentifier(identifier) = &field.key else {
+                        continue;
+                    };
+                    (field.node_id.get(), identifier)
+                }
+                ClassElement::MethodDefinition(method) => {
+                    let OxcPropertyKey::PrivateIdentifier(identifier) = &method.key else {
+                        continue;
+                    };
+                    (method.node_id.get(), identifier)
+                }
+                _ => continue,
             };
-            let OxcPropertyKey::PrivateIdentifier(identifier) = &field.key else {
-                continue;
-            };
-            if field.r#static {
-                return unsupported(UnsupportedLeafFeature::UnsupportedDeclaration, field.span);
-            }
             let binding = self
                 .planned
                 .identities
                 .class_private_name_bindings
-                .get(&field.node_id.get())
+                .get(&node_id)
                 .copied()
                 .ok_or(LeafCompilationError::SemanticInvariant {
-                    invariant: "private field has a class-scope name binding",
+                    invariant: "private element has a class-scope name binding",
                     span: Some(identifier.span),
                 })?;
             let storage = self.planned.plan.binding(binding).ok_or(
                 LeafCompilationError::SemanticInvariant {
-                    invariant: "private field name binding exists",
+                    invariant: "private element name binding exists",
                     span: Some(identifier.span),
                 },
             )?;
@@ -1088,7 +1098,7 @@ impl<'compiler, 'unit, 'arena, 'scope> ExpressionPlanner<'compiler, 'unit, 'aren
                 || !storage.policy().has_temporal_dead_zone()
             {
                 return Err(LeafCompilationError::SemanticInvariant {
-                    invariant: "private field name is lexical class local storage",
+                    invariant: "private element name is lexical class local storage",
                     span: Some(identifier.span),
                 });
             }
@@ -1096,12 +1106,12 @@ impl<'compiler, 'unit, 'arena, 'scope> ExpressionPlanner<'compiler, 'unit, 'aren
                 layout
                     .slot(binding)
                     .ok_or(LeafCompilationError::SemanticInvariant {
-                        invariant: "private field name binding has a local frame slot",
+                        invariant: "private element name binding has a local frame slot",
                         span: Some(identifier.span),
                     })?
             else {
                 return Err(LeafCompilationError::SemanticInvariant {
-                    invariant: "private field name binding uses local storage",
+                    invariant: "private element name binding uses local storage",
                     span: Some(identifier.span),
                 });
             };
@@ -1128,6 +1138,69 @@ impl<'compiler, 'unit, 'arena, 'scope> ExpressionPlanner<'compiler, 'unit, 'aren
         flow: &mut PlannedControlFlow,
     ) -> Result<(), LeafCompilationError> {
         if method.kind == MethodDefinitionKind::Constructor {
+            return Ok(());
+        }
+        let is_private_method = matches!(method.key, OxcPropertyKey::PrivateIdentifier(_));
+        if is_private_method {
+            // Private methods and accessors: set_home_object + set_name + scope_put_var_init
+            // ECMA-262: private elements are stored as private-name bindings in the class
+            // environment and the function's home object is set for brand checks.
+            let OxcPropertyKey::PrivateIdentifier(identifier) = &method.key else {
+                unreachable!("private method key is PrivateIdentifier");
+            };
+            let private_atom = constants.property_atom_index(identifier.span)?;
+            if method.computed {
+                // Computed private methods are not valid ECMA-262 syntax.
+                return unsupported(UnsupportedLeafFeature::UnsupportedDeclaration, method.span);
+            }
+            flow.emit(self.plan_function_closure(
+                &method.value,
+                layout.executable,
+                tree_layout,
+                constants,
+            )?)?;
+            // set_home_object: function home_object -> function home_object
+            flow.emit(PlannedInstruction::new(
+                FinalOpcode::SetHomeObject,
+                Operands::None,
+                method.span,
+            ))?;
+            // set_name: function name -> function
+            flow.emit(PlannedInstruction::new(
+                FinalOpcode::SetName,
+                Operands::Atom(private_atom),
+                method.span,
+            ))?;
+            // Write the named function into its class-scope local slot so the
+            // private-name binding initializes to the method function object.
+            let binding = self
+                .planned
+                .identities
+                .class_private_name_bindings
+                .get(&method.node_id.get())
+                .copied()
+                .ok_or(LeafCompilationError::SemanticInvariant {
+                    invariant: "private method has a class-scope name binding",
+                    span: Some(identifier.span),
+                })?;
+            let FrameSlot::Local(slot) =
+                layout
+                    .slot(binding)
+                    .ok_or(LeafCompilationError::SemanticInvariant {
+                        invariant: "private method name binding has a local frame slot",
+                        span: Some(identifier.span),
+                    })?
+            else {
+                return Err(LeafCompilationError::SemanticInvariant {
+                    invariant: "private method name binding uses local storage",
+                    span: Some(identifier.span),
+                });
+            };
+            flow.emit(PlannedInstruction::new(
+                FinalOpcode::PutLoc,
+                Operands::Loc(slot.index() as u16),
+                identifier.span,
+            ))?;
             return Ok(());
         }
         let flags = match method.kind {
