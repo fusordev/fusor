@@ -2395,6 +2395,11 @@ impl<'compiler, 'unit, 'arena, 'scope> ExpressionPlanner<'compiler, 'unit, 'aren
                     assignment, member, constants, flow, work,
                 );
             }
+            if assignment.operator != AssignmentOperator::Assign {
+                return Self::plan_static_member_compound_assignment(
+                    assignment, member, constants, work,
+                );
+            }
             return Self::plan_static_member_assignment(assignment, member, constants, work);
         }
         if let AssignmentTarget::ComputedMemberExpression(member) = &assignment.left {
@@ -2407,6 +2412,9 @@ impl<'compiler, 'unit, 'arena, 'scope> ExpressionPlanner<'compiler, 'unit, 'aren
                 return Self::plan_computed_member_logical_assignment(
                     assignment, member, flow, work,
                 );
+            }
+            if assignment.operator != AssignmentOperator::Assign {
+                return Self::plan_computed_member_compound_assignment(assignment, member, work);
             }
             return Self::plan_computed_member_assignment(assignment, member, work);
         }
@@ -2673,6 +2681,54 @@ impl<'compiler, 'unit, 'arena, 'scope> ExpressionPlanner<'compiler, 'unit, 'aren
         Ok(())
     }
 
+    fn plan_static_member_compound_assignment<'expression>(
+        assignment: &'expression AssignmentExpression<'arena>,
+        member: &'expression StaticMemberExpression<'arena>,
+        constants: &CompiledConstantPool,
+        work: &mut Vec<ExpressionWork<'expression, 'arena>>,
+    ) -> Result<(), LeafCompilationError> {
+        if member.optional {
+            return unsupported(
+                UnsupportedLeafFeature::UnsupportedExpression,
+                assignment.left.span(),
+            );
+        }
+        let binary = assignment.operator.to_binary_operator().ok_or(
+            LeafCompilationError::SemanticInvariant {
+                invariant: "nonlogical member assignment has a binary operator",
+                span: Some(assignment.span),
+            },
+        )?;
+        work.push(ExpressionWork::Emit(PlannedInstruction::new(
+            FinalOpcode::PutField,
+            Operands::Atom(constants.property_atom_index(member.property.span)?),
+            member.span,
+        )));
+        work.push(ExpressionWork::Emit(PlannedInstruction::new(
+            FinalOpcode::Insert2,
+            Operands::None,
+            assignment.span,
+        )));
+        work.push(ExpressionWork::Emit(PlannedInstruction::new(
+            binary_opcode(binary),
+            Operands::None,
+            assignment.span,
+        )));
+        work.push(ExpressionWork::Visit(&assignment.right));
+        work.push(ExpressionWork::Emit(PlannedInstruction::new(
+            FinalOpcode::GetField,
+            Operands::Atom(constants.property_atom_index(member.property.span)?),
+            member.span,
+        )));
+        work.push(ExpressionWork::Emit(PlannedInstruction::new(
+            FinalOpcode::Dup,
+            Operands::None,
+            member.span,
+        )));
+        work.push(ExpressionWork::Visit(&member.object));
+        Ok(())
+    }
+
     fn plan_computed_member_logical_assignment<'expression>(
         assignment: &'expression AssignmentExpression<'arena>,
         member: &'expression ComputedMemberExpression<'arena>,
@@ -2764,6 +2820,54 @@ impl<'compiler, 'unit, 'arena, 'scope> ExpressionPlanner<'compiler, 'unit, 'aren
             Operands::None,
             member.span,
         )));
+        work.push(ExpressionWork::Emit(PlannedInstruction::new(
+            FinalOpcode::GetArrayEl,
+            Operands::None,
+            member.span,
+        )));
+        work.push(ExpressionWork::Emit(PlannedInstruction::new(
+            FinalOpcode::Dup2,
+            Operands::None,
+            member.span,
+        )));
+        work.push(ExpressionWork::Visit(&member.expression));
+        work.push(ExpressionWork::Visit(&member.object));
+        Ok(())
+    }
+
+    fn plan_computed_member_compound_assignment<'expression>(
+        assignment: &'expression AssignmentExpression<'arena>,
+        member: &'expression ComputedMemberExpression<'arena>,
+        work: &mut Vec<ExpressionWork<'expression, 'arena>>,
+    ) -> Result<(), LeafCompilationError> {
+        if member.optional {
+            return unsupported(
+                UnsupportedLeafFeature::UnsupportedExpression,
+                assignment.left.span(),
+            );
+        }
+        let binary = assignment.operator.to_binary_operator().ok_or(
+            LeafCompilationError::SemanticInvariant {
+                invariant: "nonlogical computed member assignment has a binary operator",
+                span: Some(assignment.span),
+            },
+        )?;
+        work.push(ExpressionWork::Emit(PlannedInstruction::new(
+            FinalOpcode::PutArrayEl,
+            Operands::None,
+            member.span,
+        )));
+        work.push(ExpressionWork::Emit(PlannedInstruction::new(
+            FinalOpcode::Insert3,
+            Operands::None,
+            assignment.span,
+        )));
+        work.push(ExpressionWork::Emit(PlannedInstruction::new(
+            binary_opcode(binary),
+            Operands::None,
+            assignment.span,
+        )));
+        work.push(ExpressionWork::Visit(&assignment.right));
         work.push(ExpressionWork::Emit(PlannedInstruction::new(
             FinalOpcode::GetArrayEl,
             Operands::None,

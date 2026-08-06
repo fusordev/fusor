@@ -72,6 +72,9 @@ broad Test262.**
   accessors execute through typed `define_class`. Anonymous base classes also
   accept computed object-property or static-field names through a
   non-escaping typed `define_class`/`set_name_computed` sequence.
+  Other ordinary expression contexts and static/computed member assignments
+  use a typed empty class-name atom; only NamedEvaluation contexts infer a
+  name.
   Member closures capture the spec-required immutable inner class-name cell,
   distinct from the mutable declaration binding. Constructors are strict,
   construct with the installed class prototype, and reject direct calls. The
@@ -83,8 +86,8 @@ broad Test262.**
   their defining class element. Uncomputed public static fields, and computed
   static fields with non-class values, evaluate into own constructor properties
   when their initializers contain no `this`, `super`, or `new.target`.
-- [ ] Class closure: nonlogical compound member assignments; `extends`, derived receiver
-  initialization, `super()`/super properties, instance fields, computed-key anonymous-class
+- [ ] Class closure: `extends`, derived receiver initialization, `super()`/super properties,
+  instance fields, computed-key anonymous-class
   name inference outside direct object/static-field definitions, static-field
   initializers using `this`, `super`, or `new.target`, private elements,
   decorators, and static blocks. Do not relabel these as
