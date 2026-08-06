@@ -209,6 +209,17 @@ fn anonymous_base_classes_assigned_to_computed_properties_keep_an_empty_name() {
 }
 
 #[test]
+fn anonymous_base_classes_in_ordinary_expression_contexts_keep_an_empty_name() {
+    run_with(
+        "function run(){let values=[class{value(){return 3;}},(true?class{static answer(){return 4;}}:class{})];return values[0].name===''&&new values[0]().value()===3&&values[1].name===''&&values[1].answer()===4;}",
+        |result| {
+            let value = result.expect("anonymous expression-context class execution");
+            assert_eq!(value.as_boolean().expect("live Boolean"), Some(true));
+        },
+    );
+}
+
+#[test]
 fn named_class_member_writes_throw_without_mutating_the_inner_name_cell() {
     run_with(
         "function run(){class Box{static replace(){Box=0;}}try{Box.replace();}catch(error){return error.name==='TypeError'&&Box.name==='Box';}return false;}",

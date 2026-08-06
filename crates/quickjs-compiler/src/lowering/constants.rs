@@ -603,10 +603,10 @@ impl<'arena> CompilationContext<'_, 'arena, '_> {
                     return Self::direct_class_assignment_default_name(node_id, class, assignment);
                 }
                 _ => {
-                    return super::unsupported(
-                        super::UnsupportedLeafFeature::UnsupportedExpression,
-                        class.span,
-                    );
+                    // The remaining expression contexts do not perform
+                    // NamedEvaluation. Their anonymous class value retains
+                    // the empty default name through `define_class`.
+                    return Ok((compiler_identifier_string("", class.span)?, class.span));
                 }
             }
         };
