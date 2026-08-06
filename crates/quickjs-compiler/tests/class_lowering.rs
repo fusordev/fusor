@@ -220,6 +220,35 @@ fn static_class_fields_lower_to_the_typed_field_definition_path() {
 }
 
 #[test]
+fn computed_static_class_fields_use_the_typed_dynamic_definition_path() {
+    let tree = compile(
+        "function make(key){class Box{static[key]=1;static[key+'Fn']=function(){};}return Box;}",
+        "make",
+    );
+    let opcodes = tree
+        .root()
+        .control_flow()
+        .instructions()
+        .iter()
+        .map(|instruction| instruction.decoded().instruction().opcode())
+        .collect::<Vec<_>>();
+    assert_eq!(
+        opcodes
+            .iter()
+            .filter(|&&opcode| opcode == FinalOpcode::DefineArrayEl)
+            .count(),
+        2
+    );
+    assert_eq!(
+        opcodes
+            .iter()
+            .filter(|&&opcode| opcode == FinalOpcode::SetNameComputed)
+            .count(),
+        1
+    );
+}
+
+#[test]
 fn static_field_initializers_requiring_a_class_receiver_stay_fail_closed() {
     let error = with_parsed_program(
         "function make(){class Box{static receiver=this;}return Box;}",

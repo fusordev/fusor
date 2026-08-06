@@ -4770,7 +4770,17 @@ fn verify_object_definition_provenance(
                         Some(ObjectDefinitionProvenance::ConvertedPropertyKey(key_site))
                     ) if object_site == key_site
                 );
-                if !object_literal && append_pair_for_element(&state).is_none() {
+                let static_class_field = matches!(
+                    (object, key),
+                    (
+                        Some(ObjectDefinitionProvenance::ClassConstructor(_)),
+                        Some(ObjectDefinitionProvenance::ConvertedPropertyKey(_))
+                    )
+                );
+                if !object_literal
+                    && !static_class_field
+                    && append_pair_for_element(&state).is_none()
+                {
                     return Err(define_array_element_key_error(id, decoded.pc()));
                 }
             }
@@ -5160,7 +5170,7 @@ fn apply_nip_catch_provenance(
     Ok(())
 }
 
-// A converted key is also a temporal anchor: the fresh object must remain
+// A converted key is also a temporal anchor: the certified target must remain
 // immediately below that exact stack slot while the value is evaluated.
 // Copying or moving the marker would let a value evaluated earlier be rotated
 // across the pair and masquerade as the compiler's post-conversion RHS.
@@ -5476,7 +5486,8 @@ fn convert_property_key_provenance(state: &mut [ObjectDefinitionProvenance]) {
         .checked_sub(1)
         .and_then(|object_index| state.get(object_index))
         .and_then(|provenance| match provenance {
-            ObjectDefinitionProvenance::FreshObject(site) => Some(*site),
+            ObjectDefinitionProvenance::FreshObject(site)
+            | ObjectDefinitionProvenance::ClassConstructor(site) => Some(*site),
             _ => None,
         })
         .map_or(

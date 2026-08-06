@@ -158,7 +158,7 @@ fn computed_public_class_accessors_define_their_respective_targets() {
 #[test]
 fn static_public_fields_evaluate_on_the_constructor() {
     run_with(
-        "function run(){let seed=7;class Box{static answer=seed+1;static self=Box;static Nested=class{};static empty;}let declared=Box.answer===8&&Box.self===Box&&Box.Nested.name==='Nested'&&new Box.Nested().constructor===Box.Nested&&Box.empty===void 0&&Box.hasOwnProperty('answer')&&Box.hasOwnProperty('empty')&&Box.propertyIsEnumerable('answer');Box.answer=9;let writable=Box.answer===9;let configurable=delete Box.answer&&!Box.hasOwnProperty('answer');return declared&&writable&&configurable;}",
+        "function run(){let seed=7;let key='computed';class Box{static answer=seed+1;static self=Box;static Nested=class{};static empty;static[key]=seed+2;static[key+'Fn']=function(){};}let declared=Box.answer===8&&Box.self===Box&&Box.Nested.name==='Nested'&&new Box.Nested().constructor===Box.Nested&&Box.empty===void 0&&Box.computed===9&&Box.computedFn.name==='computedFn'&&Box.hasOwnProperty('answer')&&Box.hasOwnProperty('empty')&&Box.hasOwnProperty('computed')&&Box.propertyIsEnumerable('answer')&&Box.propertyIsEnumerable('computed');Box.answer=9;let writable=Box.answer===9;let configurable=delete Box.answer&&!Box.hasOwnProperty('answer');return declared&&writable&&configurable;}",
         |result| {
             let value = result.expect("static class field execution");
             assert_eq!(value.as_boolean().expect("live Boolean"), Some(true));

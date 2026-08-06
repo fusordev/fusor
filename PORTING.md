@@ -77,14 +77,14 @@ broad Test262.**
   name reach a typed runtime `TypeError` without changing that cell. Public
   computed method/accessor keys use the same typed definition path; ordinary,
   generator, async, and async-generator method templates are certified by
-  their defining class element. Uncomputed public static fields whose
-  initializers contain no `this`, `super`, or `new.target` evaluate into own
-  constructor properties.
+  their defining class element. Uncomputed public static fields, and computed
+  static fields with non-class values, evaluate into own constructor properties
+  when their initializers contain no `this`, `super`, or `new.target`.
 - [ ] Class closure: anonymous/inferred-name expressions outside a direct
   simple binding initializer, `extends`, derived receiver initialization,
-  `super()`/super properties, instance and computed fields, class-bound static
-  field contexts, private elements, decorators, and static blocks. Do not
-  relabel these as
+  `super()`/super properties, instance fields, computed-key anonymous-class
+  name inference, class-bound static field contexts, private elements,
+  decorators, and static blocks. Do not relabel these as
   supported merely because Oxc parses them.
 - [ ] Direct/indirect `eval`, `with`, Annex B block functions, remaining opcode
   families, and complete debug/source tables. Unverified or serialized bytecode

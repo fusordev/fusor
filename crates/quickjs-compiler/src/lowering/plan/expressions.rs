@@ -675,13 +675,22 @@ impl<'compiler, 'unit, 'arena, 'scope> ExpressionPlanner<'compiler, 'unit, 'aren
         &self,
         field: &PropertyDefinition<'arena>,
     ) -> Result<(), LeafCompilationError> {
-        if !field.r#static || field.computed || !field.decorators.is_empty() {
+        if !field.r#static || !field.decorators.is_empty() {
             return unsupported(UnsupportedLeafFeature::UnsupportedDeclaration, field.span);
         }
-        compiled_static_property_key(&field.key)?.ok_or(LeafCompilationError::Unsupported {
-            feature: UnsupportedLeafFeature::UnsupportedDeclaration,
-            span: field.key.span(),
-        })?;
+        if field.computed {
+            if field.key.as_expression().is_none() {
+                return unsupported(
+                    UnsupportedLeafFeature::UnsupportedDeclaration,
+                    field.key.span(),
+                );
+            }
+        } else {
+            compiled_static_property_key(&field.key)?.ok_or(LeafCompilationError::Unsupported {
+                feature: UnsupportedLeafFeature::UnsupportedDeclaration,
+                span: field.key.span(),
+            })?;
+        }
         if field.value.is_none() {
             return Ok(());
         }
@@ -807,6 +816,15 @@ impl<'compiler, 'unit, 'arena, 'scope> ExpressionPlanner<'compiler, 'unit, 'aren
         constants: &CompiledConstantPool,
         flow: &mut PlannedControlFlow,
     ) -> Result<(), LeafCompilationError> {
+        if field.computed {
+            return self.plan_base_class_computed_static_field(
+                field,
+                layout,
+                tree_layout,
+                constants,
+                flow,
+            );
+        }
         let key =
             compiled_static_property_key(&field.key)?.ok_or(LeafCompilationError::Unsupported {
                 feature: UnsupportedLeafFeature::UnsupportedDeclaration,
@@ -836,6 +854,62 @@ impl<'compiler, 'unit, 'arena, 'scope> ExpressionPlanner<'compiler, 'unit, 'aren
         flow.emit(PlannedInstruction::new(
             FinalOpcode::DefineField,
             Operands::Atom(constants.property_atom_index(key.span)?),
+            field.span,
+        ))?;
+        flow.emit(PlannedInstruction::new(
+            FinalOpcode::Swap,
+            Operands::None,
+            field.span,
+        ))
+    }
+
+    fn plan_base_class_computed_static_field(
+        &self,
+        field: &PropertyDefinition<'arena>,
+        layout: &FrameLayout,
+        tree_layout: &FunctionTreeLayout,
+        constants: &CompiledConstantPool,
+        flow: &mut PlannedControlFlow,
+    ) -> Result<(), LeafCompilationError> {
+        let key = field
+            .key
+            .as_expression()
+            .ok_or(LeafCompilationError::Unsupported {
+                feature: UnsupportedLeafFeature::UnsupportedDeclaration,
+                span: field.key.span(),
+            })?;
+        flow.emit(PlannedInstruction::new(
+            FinalOpcode::Swap,
+            Operands::None,
+            field.span,
+        ))?;
+        self.plan_expression(key, layout, tree_layout, constants, &[], flow)?;
+        flow.emit(PlannedInstruction::new(
+            FinalOpcode::ToPropKey,
+            Operands::None,
+            field.key.span(),
+        ))?;
+        if let Some(value) = &field.value {
+            let inferred_name = Self::plan_inferred_computed_property_name_for_initializer(value)?;
+            self.plan_expression(value, layout, tree_layout, constants, &[], flow)?;
+            if let Some(inferred_name) = inferred_name {
+                flow.emit(inferred_name)?;
+            }
+        } else {
+            flow.emit(PlannedInstruction::new(
+                FinalOpcode::Undefined,
+                Operands::None,
+                field.span,
+            ))?;
+        }
+        flow.emit(PlannedInstruction::new(
+            FinalOpcode::DefineArrayEl,
+            Operands::None,
+            field.span,
+        ))?;
+        flow.emit(PlannedInstruction::new(
+            FinalOpcode::Drop,
+            Operands::None,
             field.span,
         ))?;
         flow.emit(PlannedInstruction::new(
@@ -2088,6 +2162,25 @@ impl<'compiler, 'unit, 'arena, 'scope> ExpressionPlanner<'compiler, 'unit, 'aren
         Ok(Some(PlannedInstruction::new(
             FinalOpcode::SetName,
             Operands::Atom(atom),
+            span,
+        )))
+    }
+
+    fn plan_inferred_computed_property_name_for_initializer(
+        initializer: &Expression<'arena>,
+    ) -> Result<Option<PlannedInstruction>, LeafCompilationError> {
+        let Some(span) = anonymous_named_evaluation_span(initializer) else {
+            return Ok(None);
+        };
+        if anonymous_class_expression_span(initializer).is_some() {
+            return unsupported(UnsupportedLeafFeature::InferredFunctionName, span);
+        }
+        if anonymous_ordinary_function_span(initializer).is_none() {
+            return unsupported(UnsupportedLeafFeature::InferredFunctionName, span);
+        }
+        Ok(Some(PlannedInstruction::new(
+            FinalOpcode::SetNameComputed,
+            Operands::None,
             span,
         )))
     }
