@@ -208,6 +208,34 @@ fn anonymous_base_class_binding_defaults_use_their_binding_names() {
 }
 
 #[test]
+fn anonymous_base_class_assignment_defaults_use_their_target_names() {
+    let tree = compile(
+        "function make(){let ArrayName;[ArrayName=class{}]=[];let ObjectName;({value:ObjectName=class{}}={});return [ArrayName,ObjectName];}",
+        "make",
+    );
+    assert_eq!(
+        tree.root()
+            .control_flow()
+            .instructions()
+            .iter()
+            .filter(|instruction| instruction.decoded().instruction().opcode()
+                == FinalOpcode::DefineClass)
+            .count(),
+        2,
+        "both defaults receive their inferred name through define_class"
+    );
+    assert!(
+        !tree
+            .root()
+            .control_flow()
+            .instructions()
+            .iter()
+            .any(|instruction| instruction.decoded().instruction().opcode() == FinalOpcode::SetName),
+        "class inference cannot reuse the ordinary-function SetName opcode"
+    );
+}
+
+#[test]
 fn named_class_member_writes_retain_a_dedicated_immutable_class_name_capture() {
     let tree = compile(
         "function make(){class Box{static replace(){Box=0;}}return Box;}",

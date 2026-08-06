@@ -154,6 +154,17 @@ fn anonymous_base_class_binding_defaults_infer_their_identifier_names() {
 }
 
 #[test]
+fn anonymous_base_class_assignment_defaults_infer_their_identifier_names() {
+    run_with(
+        "function run(){let ArrayName;[ArrayName=class{}]=[];let ObjectName;({value:ObjectName=class{}}={});return ArrayName.name==='ArrayName'&&ObjectName.name==='ObjectName';}",
+        |result| {
+            let value = result.expect("anonymous class assignment default execution");
+            assert_eq!(value.as_boolean().expect("live Boolean"), Some(true));
+        },
+    );
+}
+
+#[test]
 fn anonymous_base_class_object_properties_infer_their_static_key_name() {
     run_with(
         "function run(){let holder={Result:class{static answer(){return 7;}}};let original=holder.Result;return original.name==='Result'&&original.answer()===7&&new original().constructor===original;}",
