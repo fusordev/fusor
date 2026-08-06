@@ -105,6 +105,73 @@ fn assert_thrown_number(result: Result<JsValue, ExecutionError>, expected: f64) 
 }
 
 #[test]
+fn optional_member_chains_skip_keys_and_the_remaining_syntactic_chain() {
+    let mut runtime = runtime();
+    let realm = runtime.create_realm().expect("realm");
+    let mut context = runtime.context(&realm).expect("context");
+    let run = instantiate(
+        &mut context,
+        "function run(){\
+            let hits=0;\
+            let missing=null?.[hits++].x;\
+            let base={nested:{value:7},0:9};\
+            let found=base?.nested.value;\
+            let computed=base?.[hits++];\
+            let nested=({a:null})?.a?.b;\
+            return (missing===void 0?1000:0)+(nested===void 0?100:0)+\
+                   found*10+computed+hits;\
+        }",
+        "run",
+    );
+
+    let result = context
+        .call(&run, &[], ExecutionLimits::default())
+        .expect("optional member chain");
+
+    assert_number(&result, 1180.0);
+}
+
+#[test]
+fn parentheses_end_optional_member_short_circuiting() {
+    let mut runtime = runtime();
+    let realm = runtime.create_realm().expect("realm");
+    let mut context = runtime.context(&realm).expect("context");
+    let run = instantiate(&mut context, "function run(){return (null?.a).b;}", "run");
+
+    let exception = escaping_exception(context.call(&run, &[], ExecutionLimits::default()));
+    assert_eq!(exception.kind(), Some(ExceptionKind::TypeError));
+}
+
+#[test]
+fn parenthesized_optional_members_can_supply_constructor_values() {
+    let mut runtime = runtime();
+    let realm = runtime.create_realm().expect("realm");
+    let mut context = runtime.context(&realm).expect("context");
+    let construct = instantiate(
+        &mut context,
+        "function run(){\
+            function Constructor(){return {value:7};}\
+            return new ({Constructor:Constructor}?.Constructor)().value;\
+        }",
+        "run",
+    );
+    let reject = instantiate(
+        &mut context,
+        "function reject(){return new (null?.Constructor)();}",
+        "reject",
+    );
+
+    assert_number(
+        &context
+            .call(&construct, &[], ExecutionLimits::default())
+            .expect("optional member constructor value"),
+        7.0,
+    );
+    let exception = escaping_exception(context.call(&reject, &[], ExecutionLimits::default()));
+    assert_eq!(exception.kind(), Some(ExceptionKind::TypeError));
+}
+
+#[test]
 fn unary_numeric_operators_preserve_exact_number_edges() {
     let mut runtime = runtime();
     let realm = runtime.create_realm().expect("realm");

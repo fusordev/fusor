@@ -1,14 +1,14 @@
 use super::super::{
     ArrayExpression, ArrayExpressionElement, AssignmentExpression, AssignmentOperator,
-    AssignmentTarget, AtomPoolIndex, BinaryOperator, BranchKind, CompilationContext,
-    CompiledConstantPool, CompiledMetadataAtomKey, CompilerLabel, ConditionalExpression,
-    ExecutableId, ExecutableKind, Expression, FinalOpcode, FrameLayout, Function,
-    FunctionTreeLayout, GetSpan, IdentifierReference, LeafCompilationError, LogicalExpression,
-    LogicalOperator, LoweredReference, ObjectExpression, ObjectProperty, ObjectPropertyKind,
-    Operands, PlannedControlFlow, PlannedInstruction, PropertyKind, SequenceExpression,
-    SimpleAssignmentTarget, Span, UnaryExpression, UnaryOperator, UnsupportedLeafFeature,
-    UpdateExpression, UpdateOperator, compiled_static_property_key, object_method_or_accessor_span,
-    unsupported,
+    AssignmentTarget, AtomPoolIndex, BinaryOperator, BranchKind, ChainElement, ChainExpression,
+    CompilationContext, CompiledConstantPool, CompiledMetadataAtomKey, CompilerLabel,
+    ComputedMemberExpression, ConditionalExpression, ExecutableId, ExecutableKind, Expression,
+    FinalOpcode, FrameLayout, Function, FunctionTreeLayout, GetSpan, IdentifierReference,
+    LeafCompilationError, LogicalExpression, LogicalOperator, LoweredReference, ObjectExpression,
+    ObjectProperty, ObjectPropertyKind, Operands, PlannedControlFlow, PlannedInstruction,
+    PropertyKind, SequenceExpression, SimpleAssignmentTarget, Span, StaticMemberExpression,
+    UnaryExpression, UnaryOperator, UnsupportedLeafFeature, UpdateExpression, UpdateOperator,
+    compiled_static_property_key, object_method_or_accessor_span, unsupported,
 };
 use super::abrupt::{AbruptMarker, AbruptMarkerKind};
 
@@ -323,6 +323,9 @@ impl<'compiler, 'unit, 'arena, 'scope> ExpressionPlanner<'compiler, 'unit, 'aren
                         Expression::ComputedMemberExpression(member) => {
                             Self::plan_computed_member_read(member, &mut work)?;
                         }
+                        Expression::ChainExpression(chain) => {
+                            Self::plan_optional_member_chain(chain, constants, flow, &mut work)?;
+                        }
                         Expression::AssignmentExpression(assignment) => {
                             self.plan_assignment_expression(
                                 assignment,
@@ -445,6 +448,131 @@ impl<'compiler, 'unit, 'arena, 'scope> ExpressionPlanner<'compiler, 'unit, 'aren
                 }
             }
         }
+        Ok(())
+    }
+
+    #[expect(
+        clippy::too_many_lines,
+        reason = "the complete chain-level short-circuit schedule stays visible in execution order"
+    )]
+    fn plan_optional_member_chain<'expression>(
+        chain: &'expression ChainExpression<'arena>,
+        constants: &CompiledConstantPool,
+        flow: &mut PlannedControlFlow,
+        work: &mut Vec<ExpressionWork<'expression, 'arena>>,
+    ) -> Result<(), LeafCompilationError> {
+        enum Member<'expression, 'arena> {
+            Static(&'expression StaticMemberExpression<'arena>),
+            Computed(&'expression ComputedMemberExpression<'arena>),
+        }
+
+        impl Member<'_, '_> {
+            const fn optional(&self) -> bool {
+                match self {
+                    Self::Static(member) => member.optional,
+                    Self::Computed(member) => member.optional,
+                }
+            }
+
+            const fn span(&self) -> Span {
+                match self {
+                    Self::Static(member) => member.span,
+                    Self::Computed(member) => member.span,
+                }
+            }
+        }
+
+        let mut members = Vec::new();
+        let mut root = match &chain.expression {
+            ChainElement::StaticMemberExpression(member) => {
+                members.push(Member::Static(member));
+                &member.object
+            }
+            ChainElement::ComputedMemberExpression(member) => {
+                members.push(Member::Computed(member));
+                &member.object
+            }
+            _ => {
+                return unsupported(UnsupportedLeafFeature::UnsupportedExpression, chain.span);
+            }
+        };
+        loop {
+            match root {
+                Expression::StaticMemberExpression(member) => {
+                    members.push(Member::Static(member));
+                    root = &member.object;
+                }
+                Expression::ComputedMemberExpression(member) => {
+                    members.push(Member::Computed(member));
+                    root = &member.object;
+                }
+                _ => break,
+            }
+        }
+        if !members.iter().any(Member::optional) {
+            return unsupported(UnsupportedLeafFeature::UnsupportedExpression, chain.span);
+        }
+
+        let end = flow.new_label(chain.span)?;
+        let mut planned = vec![ExpressionWork::Visit(root)];
+        for member in members.iter().rev() {
+            let span = member.span();
+            if member.optional() {
+                let non_nullish = flow.new_label(span)?;
+                planned.extend([
+                    ExpressionWork::Emit(PlannedInstruction::new(
+                        FinalOpcode::Dup,
+                        Operands::None,
+                        span,
+                    )),
+                    ExpressionWork::Emit(PlannedInstruction::new(
+                        FinalOpcode::IsUndefinedOrNull,
+                        Operands::None,
+                        span,
+                    )),
+                    ExpressionWork::Branch {
+                        kind: BranchKind::IfFalse,
+                        target: non_nullish.clone(),
+                        span,
+                    },
+                    ExpressionWork::Emit(PlannedInstruction::new(
+                        FinalOpcode::Drop,
+                        Operands::None,
+                        span,
+                    )),
+                    ExpressionWork::Emit(PlannedInstruction::new(
+                        FinalOpcode::Undefined,
+                        Operands::None,
+                        span,
+                    )),
+                    ExpressionWork::Branch {
+                        kind: BranchKind::Goto,
+                        target: end.clone(),
+                        span,
+                    },
+                    ExpressionWork::Bind(non_nullish),
+                ]);
+            }
+            match member {
+                Member::Static(member) => {
+                    planned.push(ExpressionWork::Emit(PlannedInstruction::new(
+                        FinalOpcode::GetField,
+                        Operands::Atom(constants.property_atom_index(member.property.span)?),
+                        member.span,
+                    )));
+                }
+                Member::Computed(member) => {
+                    planned.push(ExpressionWork::Visit(&member.expression));
+                    planned.push(ExpressionWork::Emit(PlannedInstruction::new(
+                        FinalOpcode::GetArrayEl,
+                        Operands::None,
+                        member.span,
+                    )));
+                }
+            }
+        }
+        planned.push(ExpressionWork::Bind(end));
+        work.extend(planned.into_iter().rev());
         Ok(())
     }
 

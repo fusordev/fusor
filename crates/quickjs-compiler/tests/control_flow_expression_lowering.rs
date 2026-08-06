@@ -189,6 +189,56 @@ fn and_and_nullish_assignment_use_their_distinct_short_circuit_tests() {
 }
 
 #[test]
+fn optional_member_chains_short_circuit_the_complete_syntactic_chain() {
+    let compiled = compile("function f(value,key){return value?.a?.[key].b;}", "f");
+
+    assert_eq!(
+        opcodes(&compiled),
+        [
+            FinalOpcode::GetArg0,
+            FinalOpcode::Dup,
+            FinalOpcode::IsUndefinedOrNull,
+            FinalOpcode::IfFalse8,
+            FinalOpcode::Drop,
+            FinalOpcode::Undefined,
+            FinalOpcode::Goto8,
+            FinalOpcode::GetField,
+            FinalOpcode::Dup,
+            FinalOpcode::IsUndefinedOrNull,
+            FinalOpcode::IfFalse8,
+            FinalOpcode::Drop,
+            FinalOpcode::Undefined,
+            FinalOpcode::Goto8,
+            FinalOpcode::GetArg1,
+            FinalOpcode::GetArrayEl,
+            FinalOpcode::GetField,
+            FinalOpcode::Return,
+        ]
+    );
+    assert_eq!(compiled.control_flow().computed_stack_size(), 2);
+
+    let exits = compiled
+        .control_flow()
+        .instructions()
+        .iter()
+        .filter(|instruction| instruction.decoded().instruction().opcode() == FinalOpcode::Goto8)
+        .map(|instruction| instruction.successors().jump_target().expect("chain exit"))
+        .collect::<Vec<_>>();
+    assert_eq!(exits.len(), 2);
+    assert_eq!(exits[0], exits[1]);
+    assert_eq!(
+        compiled
+            .control_flow()
+            .instruction(exits[0])
+            .expect("chain exit target")
+            .decoded()
+            .instruction()
+            .opcode(),
+        FinalOpcode::Return
+    );
+}
+
+#[test]
 fn immutable_identifier_mutation_fails_closed_at_the_target() {
     let source = "function f(){ const x=1; x++; }";
     let error = compile_error(source, "f");

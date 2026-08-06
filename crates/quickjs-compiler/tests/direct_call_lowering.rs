@@ -328,12 +328,12 @@ fn computed_member_calls_keep_the_receiver_and_evaluate_arguments_after_lookup()
 }
 
 #[test]
-fn optional_and_spread_calls_and_constructors_remain_fail_closed() {
+fn optional_calls_remain_fail_closed() {
     let cases = [
         ("function invoke(fn){return fn?.();}", "fn?.()"),
         (
-            "function invoke(holder){return new (holder?.Ctor)();}",
-            "holder?.Ctor",
+            "function invoke(holder){return holder?.method().value;}",
+            "holder?.method().value",
         ),
     ];
 
