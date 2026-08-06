@@ -109,3 +109,16 @@ fn a_class_without_an_explicit_constructor_remains_fail_closed() {
         "diagnostic must retain a source range"
     );
 }
+
+#[test]
+fn named_base_class_members_do_not_capture_the_mutable_declaration_cell() {
+    let source = "function make(){class Box{constructor(){}static self(){return Box;}}}";
+    let LeafCompilationError::Unsupported { feature, span } = compile_error(source, "make") else {
+        panic!("class inner-name capture must not use the declaration cell");
+    };
+    assert_eq!(feature, UnsupportedLeafFeature::UnsupportedDeclaration);
+    assert!(
+        source[span.start as usize..span.end as usize].contains("static self"),
+        "diagnostic must identify the self-capturing member"
+    );
+}

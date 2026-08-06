@@ -65,14 +65,16 @@ broad Test262.**
 - [x] Global Script evaluation preserves realm `var`, lexical bindings, TDZ,
   declaration conflicts, and source identity across evaluations.
 - [~] Classes: named base declarations with an explicit constructor and public
-  static/instance methods or accessors execute through typed `define_class`.
-  Their constructors are strict, construct with the installed class prototype,
-  and reject direct calls. The certificate requires literal `undefined` as the
-  base input and one non-escaping typed constructor template.
+  static/instance methods or accessors that do not capture the class name
+  execute through typed `define_class`. Their constructors are strict, construct
+  with the installed class prototype, and reject direct calls. The certificate
+  requires literal `undefined` as the base input and one non-escaping typed
+  constructor template.
 - [ ] Class closure: class expressions, default constructors, `extends`,
-  derived receiver initialization, `super()`/super properties, fields, private
-  elements, computed keys, decorators, and static blocks. Do not relabel these
-  as supported merely because Oxc parses them.
+  derived receiver initialization, `super()`/super properties, the hidden inner
+  class-name environment, fields, private elements, computed keys, decorators,
+  and static blocks. Do not relabel these as supported merely because Oxc
+  parses them.
 - [ ] Direct/indirect `eval`, `with`, Annex B block functions, remaining opcode
   families, and complete debug/source tables. Unverified or serialized bytecode
   and unsupported `eval` remain fail closed.

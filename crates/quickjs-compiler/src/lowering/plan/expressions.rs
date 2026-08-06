@@ -1,6 +1,6 @@
 use super::super::{
     ArrayExpression, ArrayExpressionElement, ArrowFunctionExpression, AssignmentExpression,
-    AssignmentOperator, AssignmentTarget, AtomPoolIndex, BinaryOperator, BranchKind,
+    AssignmentOperator, AssignmentTarget, AtomPoolIndex, BinaryOperator, BindingId, BranchKind,
     CallExpression, ChainElement, ChainExpression, Class, ClassElement, CompilationContext,
     CompiledConstantPool, CompiledMetadataAtomKey, CompilerLabel, ComputedMemberExpression,
     ConditionalExpression, ExecutableId, ExecutableKind, Expression, FinalOpcode, FrameLayout,
@@ -506,6 +506,8 @@ impl<'compiler, 'unit, 'arena, 'scope> ExpressionPlanner<'compiler, 'unit, 'aren
             feature: UnsupportedLeafFeature::UnsupportedDeclaration,
             span: class.span,
         })?;
+        let class_binding =
+            self.binding_for_identifier(identifier.symbol_id.get(), identifier.span)?;
         if class.super_class.is_some() || !class.decorators.is_empty() {
             return unsupported(UnsupportedLeafFeature::UnsupportedDeclaration, class.span);
         }
@@ -516,6 +518,7 @@ impl<'compiler, 'unit, 'arena, 'scope> ExpressionPlanner<'compiler, 'unit, 'aren
                 return unsupported(UnsupportedLeafFeature::UnsupportedBody, element.span());
             };
             Self::validate_base_class_method(method)?;
+            self.reject_base_class_name_capture(method, class_binding)?;
             if method.kind == MethodDefinitionKind::Constructor
                 && constructor.replace(method.as_ref()).is_some()
             {
@@ -625,6 +628,31 @@ impl<'compiler, 'unit, 'arena, 'scope> ExpressionPlanner<'compiler, 'unit, 'aren
             feature: UnsupportedLeafFeature::UnsupportedDeclaration,
             span: method.key.span(),
         })?;
+        Ok(())
+    }
+
+    /// A named class creates an inner immutable name binding that method
+    /// closures retain even when the declaration binding is later reassigned.
+    /// The current storage plan has only the outer declaration cell, so accept
+    /// no self-capturing member until the synthetic class environment is
+    /// represented end-to-end rather than silently capturing the wrong cell.
+    fn reject_base_class_name_capture(
+        &self,
+        method: &MethodDefinition<'arena>,
+        class_binding: BindingId,
+    ) -> Result<(), LeafCompilationError> {
+        let executable = self.executable_for_function(&method.value)?;
+        let captures = self
+            .planned
+            .plan
+            .frame_captures_for(executable)
+            .ok_or(LeafCompilationError::InvalidExecutable { executable })?;
+        if captures
+            .iter()
+            .any(|capture| capture.binding() == class_binding)
+        {
+            return unsupported(UnsupportedLeafFeature::UnsupportedDeclaration, method.span);
+        }
         Ok(())
     }
 
