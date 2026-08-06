@@ -113,10 +113,14 @@ broad Test262.**
   Computed public instance-field keys evaluate once in class-element order,
   convert through `ToPropertyKey`, and live in a typed immutable class-scope
   cell captured by the constructor; its certificate admits only typed field
-  definition, including synthesized derived constructors.
+  definition, including synthesized derived constructors. Static
+  initialization blocks run between neighbouring class elements in source
+  order with their own lexical scope; they use the same class receiver for
+  lexical `this`/`super`, give `new.target` the required `undefined`, and
+  retain that receiver for nested arrows.
 - [ ] Class closure: arrow-contained `super()`; computed-key anonymous-class name
   inference outside direct object/static-field definitions, private elements,
-  decorators, and static blocks. Do not relabel these as supported
+  and decorators. Do not relabel these as supported
   merely because Oxc parses them.
 - [ ] Direct/indirect `eval`, `with`, Annex B block functions, remaining opcode
   families, and complete debug/source tables. Unverified or serialized bytecode

@@ -732,6 +732,35 @@ fn static_field_super_uses_the_lexical_class_receiver() {
 }
 
 #[test]
+fn static_blocks_lower_in_class_element_order_with_a_lexical_receiver() {
+    let tree = compile(
+        "function make(Base){class Box extends Base{static first=this.value;static {let local=4;this.value=super.method(3);this.local=local;this.target=new.target;this.captured=()=>this.value;}static second=super.value;static {this.after=super.value+this.local;}}return Box;}",
+        "make",
+    );
+    let root = tree.root();
+    let instructions = root.control_flow().instructions();
+    assert!(root.storage_plan().bindings().iter().any(|binding| {
+        binding.policy().kind() == DeclarationKind::ClassStaticReceiver
+            && binding.placement() == quickjs_compiler::StoragePlacement::Local
+    }));
+    assert!(instructions.iter().any(|instruction| {
+        instruction.decoded().instruction().opcode() == FinalOpcode::GetSuper
+    }));
+    assert!(instructions.iter().any(|instruction| {
+        instruction.decoded().instruction().opcode() == FinalOpcode::Undefined
+    }));
+    assert!(tree.functions().iter().any(|function| {
+        function
+            .control_flow()
+            .instructions()
+            .iter()
+            .any(|instruction| {
+                instruction.decoded().instruction().opcode() == FinalOpcode::GetVarRefCheck
+            })
+    }));
+}
+
+#[test]
 fn derived_super_spread_uses_the_typed_constructor_apply_form() {
     let tree = compile(
         "function make(Base){return class Derived extends Base{constructor(args){super(...args);}}}",

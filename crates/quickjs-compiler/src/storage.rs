@@ -1790,15 +1790,16 @@ impl<'unit, 'arena, 'scope> Planner<'unit, 'arena, 'scope> {
                 AstKind::Super(expression) => (expression.span, false),
                 _ => continue,
             };
-            let static_field_owner = self.static_field_initializer_class_for_node(node_id)?;
-            if new_target && static_field_owner.is_some() {
+            let static_class_owner = self.static_class_initializer_class_for_node(node_id)?;
+            if new_target && static_class_owner.is_some() {
                 // ClassDefinitionEvaluation supplies `undefined`, rather than
                 // the enclosing function's new.target, for this lexical site.
                 continue;
             }
-            if !new_target && static_field_owner.is_some() {
-                // Static field `super` property access is lowered through the
-                // same immutable class receiver cell as lexical `this`.
+            if !new_target && static_class_owner.is_some() {
+                // Static class initialization resolves `super` properties
+                // through the same immutable class receiver cell as lexical
+                // `this`.
                 continue;
             }
             let instance_field_owner = self.instance_field_initializer_owner(node_id)?;
@@ -2438,7 +2439,7 @@ impl<'unit, 'arena, 'scope> Planner<'unit, 'arena, 'scope> {
             if !matches!(node.kind(), AstKind::ThisExpression(_) | AstKind::Super(_)) {
                 continue;
             }
-            if self.static_field_initializer_class_for_node(node_id)? == Some(class_node) {
+            if self.static_class_initializer_class_for_node(node_id)? == Some(class_node) {
                 return Ok(true);
             }
         }
@@ -2458,7 +2459,7 @@ impl<'unit, 'arena, 'scope> Planner<'unit, 'arena, 'scope> {
                 AstKind::Super(expression) => expression.span,
                 _ => continue,
             };
-            let Some(class_node) = self.static_field_initializer_class_for_node(node_id)? else {
+            let Some(class_node) = self.static_class_initializer_class_for_node(node_id)? else {
                 continue;
             };
             let binding = class_static_receiver_bindings
@@ -2504,10 +2505,10 @@ impl<'unit, 'arena, 'scope> Planner<'unit, 'arena, 'scope> {
         Ok(requests)
     }
 
-    /// Returns the innermost class whose static field *value* lexically owns
-    /// `node_id`. Ordinary functions establish their own `this` and
-    /// `new.target`; arrows deliberately do not.
-    fn static_field_initializer_class_for_node(
+    /// Returns the innermost class whose static field value or static block
+    /// lexically owns `node_id`. Ordinary functions establish their own
+    /// `this` and `new.target`; arrows deliberately do not.
+    fn static_class_initializer_class_for_node(
         &self,
         node_id: NodeId,
     ) -> Result<Option<NodeId>, CompilerError> {
@@ -2532,6 +2533,21 @@ impl<'unit, 'arena, 'scope> Planner<'unit, 'arena, 'scope> {
                     let AstKind::Class(class) = nodes.parent_kind(body.node_id.get()) else {
                         return Err(CompilerError::SemanticInvariant {
                             invariant: "static field class body belongs to a class",
+                            span: Some(body.span),
+                        });
+                    };
+                    return Ok(Some(class.node_id.get()));
+                }
+                AstKind::StaticBlock(block) => {
+                    let AstKind::ClassBody(body) = nodes.parent_kind(block.node_id.get()) else {
+                        return Err(CompilerError::SemanticInvariant {
+                            invariant: "static block belongs to a class body",
+                            span: Some(block.span),
+                        });
+                    };
+                    let AstKind::Class(class) = nodes.parent_kind(body.node_id.get()) else {
+                        return Err(CompilerError::SemanticInvariant {
+                            invariant: "static block class body belongs to a class",
                             span: Some(body.span),
                         });
                     };
