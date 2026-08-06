@@ -483,6 +483,23 @@ impl<'arena> CompilationContext<'_, 'arena, '_> {
                                 )?;
                             }
                         }
+                        super::ClassElement::PropertyDefinition(field)
+                            if !field.r#static
+                                && !field.computed
+                                && field.value.is_none()
+                                && field.decorators.is_empty() =>
+                        {
+                            let field_owner =
+                                self.instance_field_constructor_owner(node_id, class)?;
+                            if let Some(key) = compiled_static_property_key(&field.key)? {
+                                record_property_candidate(
+                                    field_owner,
+                                    key.value,
+                                    key.span,
+                                    atom_candidates,
+                                )?;
+                            }
+                        }
                         _ => {}
                     }
                 }
@@ -569,6 +586,41 @@ impl<'arena> CompilationContext<'_, 'arena, '_> {
             _ => {}
         }
         Ok(())
+    }
+
+    fn instance_field_constructor_owner(
+        &self,
+        class_node: NodeId,
+        class: &super::Class<'arena>,
+    ) -> Result<ExecutableId, LeafCompilationError> {
+        for element in &class.body.body {
+            let super::ClassElement::MethodDefinition(method) = element else {
+                continue;
+            };
+            if method.kind != super::MethodDefinitionKind::Constructor {
+                continue;
+            }
+            return self
+                .planned
+                .identities
+                .executable_by_node
+                .get(method.value.node_id.get().index())
+                .copied()
+                .flatten()
+                .ok_or(LeafCompilationError::SemanticInvariant {
+                    invariant: "class constructor owns its public field atoms",
+                    span: Some(method.span),
+                });
+        }
+        self.planned
+            .identities
+            .default_class_constructors
+            .get(&class_node)
+            .copied()
+            .ok_or(LeafCompilationError::SemanticInvariant {
+                invariant: "class without a source constructor owns a synthesized field template",
+                span: Some(class.span),
+            })
     }
 
     fn class_definition_name(

@@ -403,7 +403,7 @@ impl<'compiler, 'unit, 'arena, 'scope> ExpressionPlanner<'compiler, 'unit, 'aren
                             )?;
                         }
                         Expression::CallExpression(call) => {
-                            Self::plan_call_expression(call, constants, &mut work)?;
+                            self.plan_call_expression(call, layout, constants, &mut work)?;
                         }
                         Expression::TaggedTemplateExpression(tagged) => {
                             Self::plan_tagged_template_expression(tagged, constants, &mut work)?;
@@ -562,10 +562,11 @@ impl<'compiler, 'unit, 'arena, 'scope> ExpressionPlanner<'compiler, 'unit, 'aren
 
     /// Lowers the verified class slice: base and derived constructors,
     /// source-level direct `super(...)`, public methods/accessors with either
-    /// static or computed names, and public static fields whose initializers
-    /// contain no `this`, `super`, or `new.target`. Instance or computed
-    /// fields, private elements, decorators, super properties, and static
-    /// blocks stay fail-closed until their distinct execution contracts exist.
+    /// static or computed names, public static fields whose initializers
+    /// contain no `this`, `super`, or `new.target`, and initializer-free
+    /// public instance fields. Computed or initialized instance fields,
+    /// private elements, decorators, super properties, and static blocks stay
+    /// fail-closed until their distinct execution contracts exist.
     fn plan_class_heritage(
         &self,
         class: &Class<'arena>,
@@ -627,6 +628,10 @@ impl<'compiler, 'unit, 'arena, 'scope> ExpressionPlanner<'compiler, 'unit, 'aren
         Ok(true)
     }
 
+    #[allow(
+        clippy::too_many_lines,
+        reason = "class definition lowering preserves its stack topology in one audited sequence"
+    )]
     fn plan_base_class_definition(
         &self,
         class: &Class<'arena>,
@@ -654,7 +659,7 @@ impl<'compiler, 'unit, 'arena, 'scope> ExpressionPlanner<'compiler, 'unit, 'aren
                     }
                 }
                 ClassElement::PropertyDefinition(field) => {
-                    self.validate_base_class_static_field(field)?;
+                    self.validate_base_class_field(field)?;
                 }
                 _ => return unsupported(UnsupportedLeafFeature::UnsupportedBody, element.span()),
             }
@@ -723,7 +728,15 @@ impl<'compiler, 'unit, 'arena, 'scope> ExpressionPlanner<'compiler, 'unit, 'aren
                     self.plan_base_class_method(method, layout, tree_layout, constants, flow)?;
                 }
                 ClassElement::PropertyDefinition(field) => {
-                    self.plan_base_class_static_field(field, layout, tree_layout, constants, flow)?;
+                    if field.r#static {
+                        self.plan_base_class_static_field(
+                            field,
+                            layout,
+                            tree_layout,
+                            constants,
+                            flow,
+                        )?;
+                    }
                 }
                 _ => {
                     return Err(LeafCompilationError::SemanticInvariant {
@@ -784,12 +797,22 @@ impl<'compiler, 'unit, 'arena, 'scope> ExpressionPlanner<'compiler, 'unit, 'aren
         Ok(())
     }
 
-    fn validate_base_class_static_field(
+    fn validate_base_class_field(
         &self,
         field: &PropertyDefinition<'arena>,
     ) -> Result<(), LeafCompilationError> {
-        if !field.r#static || !field.decorators.is_empty() {
+        if !field.decorators.is_empty() {
             return unsupported(UnsupportedLeafFeature::UnsupportedDeclaration, field.span);
+        }
+        if !field.r#static {
+            if field.computed || field.value.is_some() {
+                return unsupported(UnsupportedLeafFeature::UnsupportedDeclaration, field.span);
+            }
+            compiled_static_property_key(&field.key)?.ok_or(LeafCompilationError::Unsupported {
+                feature: UnsupportedLeafFeature::UnsupportedDeclaration,
+                span: field.key.span(),
+            })?;
+            return Ok(());
         }
         if field.computed {
             if field.key.as_expression().is_none() {

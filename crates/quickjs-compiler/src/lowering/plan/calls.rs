@@ -1,6 +1,6 @@
 use super::super::{
     Argument, AssignmentExpression, AssignmentOperator, CallExpression, ChainExpression,
-    CompiledConstantPool, ComputedMemberExpression, Expression, FinalOpcode, GetSpan,
+    CompiledConstantPool, ComputedMemberExpression, Expression, FinalOpcode, FrameLayout, GetSpan,
     LeafCompilationError, NewExpression, Operands, PlannedInstruction, Span,
     StaticMemberExpression, TaggedTemplateExpression, UnsupportedLeafFeature, plan_push_integer,
     unsupported,
@@ -173,7 +173,9 @@ impl<'arena> ExpressionPlanner<'_, '_, 'arena, '_> {
         reason = "call planning keeps the reverse work-list schedule visible as one operation"
     )]
     pub(in crate::lowering) fn plan_call_expression<'expression>(
+        &self,
         call: &'expression CallExpression<'arena>,
+        layout: &FrameLayout,
         constants: &CompiledConstantPool,
         work: &mut Vec<ExpressionWork<'expression, 'arena>>,
     ) -> Result<(), LeafCompilationError> {
@@ -199,6 +201,21 @@ impl<'arena> ExpressionPlanner<'_, '_, 'arena, '_> {
                 Operands::None,
                 call.span,
             )));
+            let instance_fields = self
+                .instance_field_definitions(layout.executable, constants)?
+                .ok_or(LeafCompilationError::SemanticInvariant {
+                    invariant: "super constructor call belongs to a class constructor",
+                    span: Some(call.span),
+                })?;
+            if !instance_fields.derived {
+                return Err(LeafCompilationError::SemanticInvariant {
+                    invariant: "super constructor call belongs to a derived class constructor",
+                    span: Some(call.span),
+                });
+            }
+            for instruction in instance_fields.instructions.into_iter().rev() {
+                work.push(ExpressionWork::Emit(instruction));
+            }
             work.push(ExpressionWork::Emit(PlannedInstruction::new(
                 FinalOpcode::CheckCtorReturn,
                 Operands::None,

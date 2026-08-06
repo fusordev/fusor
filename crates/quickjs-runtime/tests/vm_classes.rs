@@ -99,6 +99,17 @@ fn a_default_derived_constructor_forwards_arguments_and_installs_both_inheritanc
 }
 
 #[test]
+fn initializer_free_public_instance_fields_define_on_each_receiver_at_constructor_entry() {
+    run_with(
+        "function run(){class Empty{empty;}class Base{base;constructor(){this.baseBeforeBody=this.base===void 0;}}class Explicit extends Base{own;constructor(){super();this.ownBeforeBody=this.own===void 0;}}class Default extends Base{forward;}let empty=new Empty;let base=new Base;let explicit=new Explicit;let forwarded=new Default;let fields=empty.empty===void 0&&base.base===void 0&&base.baseBeforeBody&&explicit.base===void 0&&explicit.own===void 0&&explicit.baseBeforeBody&&explicit.ownBeforeBody&&forwarded.base===void 0&&forwarded.forward===void 0;let descriptors=empty.hasOwnProperty('empty')&&empty.propertyIsEnumerable('empty')&&delete empty.empty&&!empty.hasOwnProperty('empty')&&base.hasOwnProperty('base')&&base.propertyIsEnumerable('base')&&delete base.base&&!base.hasOwnProperty('base')&&explicit.hasOwnProperty('own')&&explicit.propertyIsEnumerable('own')&&delete explicit.own&&!explicit.hasOwnProperty('own')&&forwarded.hasOwnProperty('forward')&&forwarded.propertyIsEnumerable('forward');return fields&&descriptors;}",
+        |result| {
+            let value = result.expect("instance field execution");
+            assert_eq!(value.as_boolean().expect("live Boolean"), Some(true));
+        },
+    );
+}
+
+#[test]
 fn an_explicit_derived_constructor_calls_super_with_new_target_and_initializes_this() {
     run_with(
         "function run(){class Base{constructor(value){this.value=value;}}class Derived extends Base{constructor(value){let receiver=super(value+1);this.superReceiver=receiver===this;this.after=2;}}let instance=new Derived(4);return instance.value===5&&instance.superReceiver&&instance.after===2;}",

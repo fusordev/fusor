@@ -4886,25 +4886,47 @@ fn derived_class_heritage_pair(
         && predecessor_counts.get(closure_index) == Some(&2)
 }
 
-/// The synthesized derived constructor body is intentionally exact. Source
-/// derived constructors are separately certified through the typed
-/// `special_object(4); get_super; special_object(3); call_constructor;
-/// check_ctor_return; drop` provenance transfer above.
+/// The synthesized derived constructor body is intentionally restricted to
+/// `super(...args)`, followed by zero or more compiler-shaped undefined public
+/// field definitions, then the final result drop. Source derived constructors
+/// are separately certified through the typed `special_object(4); get_super;
+/// special_object(3); call_constructor; check_ctor_return; drop` provenance
+/// transfer above.
 fn derived_default_constructor_pair(function: &VerifiedCompilerFunction) -> bool {
     let instructions = function.control_flow().instructions();
-    matches!(
-        instructions,
-        [
-            check_constructor,
-            initialize_constructor,
-            drop_result,
-            return_undefined,
-        ]
-        if check_constructor.decoded().instruction().opcode() == FinalOpcode::CheckCtor
-            && initialize_constructor.decoded().instruction().opcode() == FinalOpcode::InitCtor
-            && drop_result.decoded().instruction().opcode() == FinalOpcode::Drop
-            && return_undefined.decoded().instruction().opcode() == FinalOpcode::ReturnUndef
-    )
+    let Some((check_constructor, tail)) = instructions.split_first() else {
+        return false;
+    };
+    let Some((initialize_constructor, tail)) = tail.split_first() else {
+        return false;
+    };
+    let Some((return_undefined, tail)) = tail.split_last() else {
+        return false;
+    };
+    let Some((drop_result, fields)) = tail.split_last() else {
+        return false;
+    };
+    if check_constructor.decoded().instruction().opcode() != FinalOpcode::CheckCtor
+        || initialize_constructor.decoded().instruction().opcode() != FinalOpcode::InitCtor
+        || drop_result.decoded().instruction().opcode() != FinalOpcode::Drop
+        || return_undefined.decoded().instruction().opcode() != FinalOpcode::ReturnUndef
+    {
+        return false;
+    }
+    fields.chunks_exact(4).remainder().is_empty()
+        && fields.chunks_exact(4).all(|field| {
+            matches!(
+                field,
+                [push_this, undefined, define, drop]
+                    if push_this.decoded().instruction().opcode() == FinalOpcode::PushThis
+                        && undefined.decoded().instruction().opcode() == FinalOpcode::Undefined
+                        && matches!(
+                            (define.decoded().instruction().opcode(), define.decoded().instruction().operands()),
+                            (FinalOpcode::DefineField, Operands::Atom(_))
+                        )
+                        && drop.decoded().instruction().opcode() == FinalOpcode::Drop
+            )
+        })
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

@@ -1,6 +1,7 @@
 use std::sync::Arc;
 
 use oxc_ast::ast::{ArrowFunctionExpression, Function, FunctionBody, Program, Statement};
+use oxc_span::GetSpan;
 use quickjs_bytecode::{
     AtomPoolIndex, ClosureVariableDefinition as VerifiedClosureVariableDefinition, CompilerAtom,
     CompilerBindingKind as VerifiedBindingKind, CompilerBindingPolicy, CompilerCaptureLayout,
@@ -13,12 +14,13 @@ use quickjs_bytecode::{
 use quickjs_frontend::Span;
 
 use super::{
-    CompilationContext, CompiledClosureVariable, CompiledConstant, CompiledConstantPool,
-    CompiledFunction, CompiledMetadataAtomKey, CompiledRealmGlobal, FrameLayout, FrameLayoutInput,
-    FunctionTreeLayout, LeafCompilationError, LocalSlot, LoweredLocal, OrdinaryFunctionForm,
-    PlannedControlFlow, PlannedInstruction, StatementCompletion, StatementControlStack,
-    StatementPlanningState, StatementWork, UnsupportedLeafFeature, checked_function_entry_count,
-    unsupported,
+    AstKind, ClassElement, CompilationContext, CompiledClosureVariable, CompiledConstant,
+    CompiledConstantPool, CompiledFunction, CompiledMetadataAtomKey, CompiledRealmGlobal,
+    FrameLayout, FrameLayoutInput, FunctionTreeLayout, LeafCompilationError, LocalSlot,
+    LoweredLocal, MethodDefinitionKind, OrdinaryFunctionForm, PlannedControlFlow,
+    PlannedInstruction, StatementCompletion, StatementControlStack, StatementPlanningState,
+    StatementWork, UnsupportedLeafFeature, checked_function_entry_count,
+    compiled_static_property_key, unsupported,
 };
 use crate::storage::{ExecutableId, ExecutableKind};
 
@@ -45,6 +47,7 @@ const fn source_byte_span(span: Span) -> SourceByteSpan {
 
 fn synthesized_class_constructor_flow(
     derived: bool,
+    instance_field_definitions: &[PlannedInstruction],
     span: Span,
     limits: VerificationLimits,
 ) -> Result<PlannedControlFlow, LeafCompilationError> {
@@ -65,14 +68,116 @@ fn synthesized_class_constructor_flow(
             Operands::None,
             span,
         ))?;
+        for instruction in instance_field_definitions {
+            flow.emit(*instruction)?;
+        }
         flow.emit(PlannedInstruction::new(
             FinalOpcode::Drop,
             Operands::None,
             span,
         ))?;
+    } else {
+        for instruction in instance_field_definitions {
+            flow.emit(*instruction)?;
+        }
     }
     flow.ensure_terminal(span)?;
     Ok(flow)
+}
+
+/// The currently certified public-field subset has no initializer or computed
+/// key.  Its value is therefore always `undefined`, but it still must be
+/// defined for every new receiver at the precise constructor boundary.
+pub(in crate::lowering) struct InstanceFieldDefinitions {
+    pub(in crate::lowering) derived: bool,
+    pub(in crate::lowering) instructions: Vec<PlannedInstruction>,
+}
+
+impl CompilationContext<'_, '_, '_> {
+    pub(in crate::lowering) fn instance_field_definitions(
+        &self,
+        executable: ExecutableId,
+        constants: &CompiledConstantPool,
+    ) -> Result<Option<InstanceFieldDefinitions>, LeafCompilationError> {
+        let node_id = self
+            .planned
+            .identities
+            .node_by_executable
+            .get(executable.index())
+            .copied()
+            .ok_or(LeafCompilationError::InvalidExecutable { executable })?;
+        let nodes = self.unit.semantic().nodes();
+        let class = match nodes.kind(node_id) {
+            AstKind::Function(function) => {
+                let AstKind::MethodDefinition(method) = nodes.parent_kind(function.node_id.get())
+                else {
+                    return Ok(None);
+                };
+                if method.kind != MethodDefinitionKind::Constructor
+                    || method.value.node_id.get() != node_id
+                {
+                    return Ok(None);
+                }
+                let AstKind::ClassBody(body) = nodes.parent_kind(method.node_id.get()) else {
+                    return Err(LeafCompilationError::SemanticInvariant {
+                        invariant: "class constructor belongs to a class body",
+                        span: Some(method.span),
+                    });
+                };
+                let AstKind::Class(class) = nodes.parent_kind(body.node_id.get()) else {
+                    return Err(LeafCompilationError::SemanticInvariant {
+                        invariant: "class constructor class body belongs to a class",
+                        span: Some(body.span),
+                    });
+                };
+                class
+            }
+            AstKind::Class(class)
+                if self
+                    .planned
+                    .identities
+                    .default_class_constructors
+                    .get(&node_id)
+                    .copied()
+                    == Some(executable) =>
+            {
+                class
+            }
+            _ => return Ok(None),
+        };
+        let mut instructions = Vec::new();
+        for element in &class.body.body {
+            let ClassElement::PropertyDefinition(field) = element else {
+                continue;
+            };
+            if field.r#static {
+                continue;
+            }
+            if !field.decorators.is_empty() || field.computed || field.value.is_some() {
+                return unsupported(UnsupportedLeafFeature::UnsupportedDeclaration, field.span);
+            }
+            let key = compiled_static_property_key(&field.key)?.ok_or(
+                LeafCompilationError::Unsupported {
+                    feature: UnsupportedLeafFeature::UnsupportedDeclaration,
+                    span: field.key.span(),
+                },
+            )?;
+            instructions.extend([
+                PlannedInstruction::new(FinalOpcode::PushThis, Operands::None, field.span),
+                PlannedInstruction::new(FinalOpcode::Undefined, Operands::None, field.span),
+                PlannedInstruction::new(
+                    FinalOpcode::DefineField,
+                    Operands::Atom(constants.property_atom_index(key.span)?),
+                    field.span,
+                ),
+                PlannedInstruction::new(FinalOpcode::Drop, Operands::None, field.span),
+            ]);
+        }
+        Ok(Some(InstanceFieldDefinitions {
+            derived: class.super_class.is_some(),
+            instructions,
+        }))
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -143,6 +248,8 @@ impl<'compiler, 'statement, 'unit, 'arena, 'scope, 'layout>
         } else {
             FunctionTerminal::Ordinary
         };
+        let instance_fields =
+            compiler.instance_field_definitions(planning.executable, planning.constants)?;
         let mut work = vec![
             StatementWork::PopScope(function_scope),
             StatementWork::VisitList {
@@ -156,6 +263,13 @@ impl<'compiler, 'statement, 'unit, 'arena, 'scope, 'layout>
                 Operands::None,
                 function.span,
             )));
+        }
+        if let Some(instance_fields) = instance_fields
+            && !instance_fields.derived
+        {
+            for instruction in instance_fields.instructions.into_iter().rev() {
+                work.push(StatementWork::Emit(instruction));
+            }
         }
         work.push(StatementWork::PushScope {
             scope: function_scope,
@@ -349,6 +463,10 @@ impl CompilationContext<'_, '_, '_> {
         }
     }
 
+    #[allow(
+        clippy::too_many_lines,
+        reason = "default constructor validation keeps its synthesized-frame invariants together"
+    )]
     fn validate_default_class_constructor(
         &self,
         executable_id: ExecutableId,
@@ -394,9 +512,9 @@ impl CompilationContext<'_, '_, '_> {
             });
         }
         let constants = tree_layout.constant_pool(executable_id)?;
-        if !constants.entries().is_empty() || !constants.atoms().is_empty() {
+        if !constants.entries().is_empty() {
             return Err(LeafCompilationError::SemanticInvariant {
-                invariant: "synthesized default constructor has no constants",
+                invariant: "synthesized default constructor has no value constants",
                 span: Some(class.span),
             });
         }
@@ -425,8 +543,24 @@ impl CompilationContext<'_, '_, '_> {
             "default class constructor closure variables",
         )?;
         let derived_class_constructor = class.super_class.is_some();
-        let flow =
-            synthesized_class_constructor_flow(derived_class_constructor, class.span, limits)?;
+        let instance_fields = self
+            .instance_field_definitions(executable_id, constants)?
+            .ok_or(LeafCompilationError::SemanticInvariant {
+                invariant: "synthesized constructor owns its class fields",
+                span: Some(class.span),
+            })?;
+        if instance_fields.derived != derived_class_constructor {
+            return Err(LeafCompilationError::SemanticInvariant {
+                invariant: "synthesized constructor field plan retains derived state",
+                span: Some(class.span),
+            });
+        }
+        let flow = synthesized_class_constructor_flow(
+            derived_class_constructor,
+            &instance_fields.instructions,
+            class.span,
+            limits,
+        )?;
 
         Ok(ValidatedFunction {
             executable_kind: CompilerExecutableKind::ClassConstructor,

@@ -99,9 +99,12 @@ broad Test262.**
   method templates are certified by their defining class element. Uncomputed
   public static fields, and computed static fields with non-class values,
   evaluate into own constructor properties when their initializers contain no
-  `this`, `super`, or `new.target`.
-- [ ] Class closure: spread or arrow-contained `super()`; instance fields;
-  computed-key anonymous-class
+  `this`, `super`, or `new.target`. Initializer-free, uncomputed public
+  instance fields define enumerable, writable, configurable `undefined` own
+  properties for each receiver: before a base constructor body and immediately
+  after derived `super()` (including synthesized derived constructors).
+- [ ] Class closure: spread or arrow-contained `super()`; computed or
+  initialized instance fields; computed-key anonymous-class
   name inference outside direct object/static-field definitions, static-field
   initializers using `this`, `super`, or `new.target`, private elements,
   decorators, and static blocks. Do not relabel these as

@@ -425,6 +425,31 @@ fn static_class_fields_lower_to_the_typed_field_definition_path() {
 }
 
 #[test]
+fn initializer_free_public_instance_fields_lower_into_each_constructor() {
+    let tree = compile(
+        "function make(){class Empty{empty;}class Base{base;constructor(){}}class Explicit extends Base{own;constructor(){super();}}class Default extends Base{forward;}return [Empty,Base,Explicit,Default];}",
+        "make",
+    );
+    let constructors = tree
+        .verified_bytecode()
+        .functions()
+        .filter(|function| {
+            function.metadata().executable_kind() == CompilerExecutableKind::ClassConstructor
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(constructors.len(), 4);
+    assert_eq!(
+        tree.functions()
+            .iter()
+            .flat_map(|function| function.control_flow().instructions())
+            .filter(|instruction| instruction.decoded().instruction().opcode()
+                == FinalOpcode::DefineField)
+            .count(),
+        4,
+    );
+}
+
+#[test]
 fn computed_static_class_fields_use_the_typed_dynamic_definition_path() {
     let tree = compile(
         "function make(key){class Box{static[key]=1;static[key+'Fn']=function(){};}return Box;}",
@@ -670,6 +695,36 @@ fn static_field_initializers_requiring_a_class_receiver_stay_fail_closed() {
             ..
         }
     ));
+}
+
+#[test]
+fn initialized_or_computed_public_instance_fields_stay_fail_closed() {
+    for source in [
+        "function make(){class Box{value=1;}return Box;}",
+        "function make(){class Box{[key];}return Box;}",
+    ] {
+        let error = with_parsed_program(
+            source,
+            FrontendOptions::for_goal(CompilationGoal::GlobalScript(GlobalScriptGoal::new())),
+            |unit| {
+                let context = CompilationContext::new(unit).expect("storage plan");
+                let root = context
+                    .executables()
+                    .find(|executable| executable.metadata().name() == Some("make"))
+                    .expect("root function");
+                context.compile_tree(&root, VerificationLimits::default())
+            },
+        )
+        .expect("frontend")
+        .expect_err("instance initializer execution has a distinct lexical contract");
+        assert!(matches!(
+            error,
+            quickjs_compiler::LeafCompilationError::Unsupported {
+                feature: quickjs_compiler::UnsupportedLeafFeature::UnsupportedDeclaration,
+                ..
+            }
+        ));
+    }
 }
 
 #[test]
