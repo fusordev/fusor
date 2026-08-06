@@ -370,6 +370,41 @@ fn graph_allows_a_static_property_only_atom_for_inferred_function_names() {
 }
 
 #[test]
+fn graph_allows_a_static_property_only_atom_for_an_empty_class_name() {
+    let parent = graph_function(
+        1,
+        &[
+            (FinalOpcode::Undefined, Operands::None),
+            (FinalOpcode::FClosure8, Operands::Const8(0)),
+            (
+                FinalOpcode::DefineClass,
+                Operands::AtomU8 {
+                    atom: AtomPoolIndex::new(0),
+                    value: 0,
+                },
+            ),
+            (FinalOpcode::Drop, Operands::None),
+            (FinalOpcode::Drop, Operands::None),
+            (FinalOpcode::ReturnUndef, Operands::None),
+        ],
+        Arc::from([CompilerAtom::new_static_property_only(string(&[]))]),
+        Arc::from([CompilerConstant::Function(FunctionTemplateId::new(1))]),
+    );
+    let child = graph_function(
+        0,
+        &[(FinalOpcode::ReturnUndef, Operands::None)],
+        Arc::from([]),
+        Arc::from([]),
+    );
+
+    function_graph(
+        vec![parent, child],
+        FunctionGraphVerificationLimits::default(),
+    )
+    .expect("define_class consumes an empty static-property spelling without exposing it");
+}
+
+#[test]
 fn graph_rejects_static_property_only_atoms_as_realm_globals() {
     let mut builder = BytecodeBuilder::new();
     builder

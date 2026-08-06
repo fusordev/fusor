@@ -1722,7 +1722,10 @@ fn validate_atoms(
         if atom.is_static_property_only()
             && !matches!(
                 decoded.instruction().opcode(),
-                FinalOpcode::DefineField | FinalOpcode::DefineMethod | FinalOpcode::SetName
+                FinalOpcode::DefineField
+                    | FinalOpcode::DefineMethod
+                    | FinalOpcode::DefineClass
+                    | FinalOpcode::SetName
             )
         {
             return Err(FunctionGraphVerificationError::at_function(

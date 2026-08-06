@@ -697,13 +697,6 @@ impl<'arena> CompilationContext<'_, 'arena, '_> {
         class: &super::Class<'arena>,
         assignment: &super::AssignmentExpression<'arena>,
     ) -> Result<(CompilerString, Span), LeafCompilationError> {
-        let super::AssignmentTarget::AssignmentTargetIdentifier(identifier) = &assignment.left
-        else {
-            return super::unsupported(
-                super::UnsupportedLeafFeature::InferredFunctionName,
-                class.span,
-            );
-        };
         let mut initializer = &assignment.right;
         while let Expression::ParenthesizedExpression(parenthesized) = initializer {
             initializer = &parenthesized.expression;
@@ -720,10 +713,23 @@ impl<'arena> CompilationContext<'_, 'arena, '_> {
                 span: Some(class.span),
             });
         }
-        Ok((
-            compiler_identifier_string(identifier.name.as_str(), identifier.span)?,
-            identifier.span,
-        ))
+        match &assignment.left {
+            super::AssignmentTarget::AssignmentTargetIdentifier(identifier) => Ok((
+                compiler_identifier_string(identifier.name.as_str(), identifier.span)?,
+                identifier.span,
+            )),
+            // Assignment NamedEvaluation applies only to identifier references.
+            // A static member assignment still creates the class through the
+            // typed class-definition path, but its default name is the empty
+            // string (rather than the member property name).
+            super::AssignmentTarget::StaticMemberExpression(member) if !member.optional => {
+                Ok((compiler_identifier_string("", class.span)?, class.span))
+            }
+            _ => super::unsupported(
+                super::UnsupportedLeafFeature::InferredFunctionName,
+                class.span,
+            ),
+        }
     }
 
     fn direct_class_binding_default_name(

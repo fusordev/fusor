@@ -361,28 +361,35 @@ fn computed_static_class_fields_use_the_typed_dynamic_definition_path() {
 }
 
 #[test]
-fn static_property_class_assignments_stay_fail_closed_until_empty_name_authority_exists() {
-    let error = with_parsed_program(
-        "function make(holder){return holder.Result=class{};}",
-        FrontendOptions::for_goal(CompilationGoal::GlobalScript(GlobalScriptGoal::new())),
-        |unit| {
-            let context = CompilationContext::new(unit).expect("storage plan");
-            let root = context
-                .executables()
-                .find(|executable| executable.metadata().name() == Some("make"))
-                .expect("root function");
-            context.compile_tree(&root, VerificationLimits::default())
-        },
-    )
-    .expect("frontend")
-    .expect_err("an anonymous class property assignment needs empty-name authority");
-    assert!(matches!(
-        error,
-        quickjs_compiler::LeafCompilationError::Unsupported {
-            feature: quickjs_compiler::UnsupportedLeafFeature::InferredFunctionName,
-            ..
-        }
-    ));
+fn static_property_class_assignments_use_a_typed_empty_name_atom() {
+    let tree = compile(
+        "function make(holder){return holder.Result=class{value(){return 3;}static answer(){return 4;}};}",
+        "make",
+    );
+    let root = tree.root();
+    assert!(
+        root.control_flow()
+            .instructions()
+            .iter()
+            .any(|instruction| {
+                instruction.decoded().instruction().opcode() == FinalOpcode::DefineClass
+            })
+    );
+    assert!(
+        root.atoms()
+            .iter()
+            .any(|atom| atom.is_static_property_only() && atom.string().is_empty())
+    );
+    assert!(
+        !root
+            .control_flow()
+            .instructions()
+            .iter()
+            .any(|instruction| {
+                instruction.decoded().instruction().opcode() == FinalOpcode::SetName
+            }),
+        "a property assignment leaves the anonymous class name empty"
+    );
 }
 
 #[test]
