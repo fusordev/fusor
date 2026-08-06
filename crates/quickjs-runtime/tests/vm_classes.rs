@@ -154,3 +154,14 @@ fn computed_public_class_accessors_define_their_respective_targets() {
         },
     );
 }
+
+#[test]
+fn literal_static_public_fields_are_own_constructor_properties() {
+    run_with(
+        "function run(){class Box{static answer=7;static empty;}let declared=Box.answer===7&&Box.empty===void 0&&Box.hasOwnProperty('answer')&&Box.hasOwnProperty('empty')&&Box.propertyIsEnumerable('answer');Box.answer=8;let writable=Box.answer===8;let configurable=delete Box.answer&&!Box.hasOwnProperty('answer');return declared&&writable&&configurable;}",
+        |result| {
+            let value = result.expect("literal static class field execution");
+            assert_eq!(value.as_boolean().expect("live Boolean"), Some(true));
+        },
+    );
+}

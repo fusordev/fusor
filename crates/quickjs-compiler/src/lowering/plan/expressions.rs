@@ -7,7 +7,7 @@ use super::super::{
     FrameSlot, Function, FunctionTreeLayout, GetSpan, IdentifierReference, InitializationPolicy,
     LeafCompilationError, LogicalExpression, LogicalOperator, LoweredReference, MethodDefinition,
     MethodDefinitionKind, ObjectExpression, ObjectProperty, ObjectPropertyKind, Operands,
-    PlannedControlFlow, PlannedInstruction, PropertyKind, SequenceExpression,
+    PlannedControlFlow, PlannedInstruction, PropertyDefinition, PropertyKind, SequenceExpression,
     SimpleAssignmentTarget, Span, StaticMemberExpression, StoragePlacement, UnaryExpression,
     UnaryOperator, UnsupportedLeafFeature, UpdateExpression, UpdateOperator,
     compiled_static_property_key, object_method_or_accessor_span, plan_put_slot, unsupported,
@@ -535,15 +535,12 @@ impl<'compiler, 'unit, 'arena, 'scope> ExpressionPlanner<'compiler, 'unit, 'aren
         self.plan_scope_exit(layout.executable, class.scope_id(), layout, flow)
     }
 
-    #[expect(
-        clippy::too_many_lines,
-        reason = "class-definition evaluation retains the spec-ordered template, method, and binding steps"
-    )]
     /// Lowers the first fully verified class slice: a named base-class
     /// definition with an explicit ordinary or synthesized default constructor
-    /// and public methods/accessors with either static or computed names.
-    /// Heritage, fields, private elements, static blocks, and decorators stay
-    /// fail-closed until their own execution contracts exist.
+    /// and public methods/accessors with either static or computed names, plus
+    /// public static fields with absent or literal initializers. Heritage,
+    /// instance or computed fields, private elements, static blocks, and
+    /// decorators stay fail-closed until their own execution contracts exist.
     fn plan_base_class_definition(
         &self,
         class: &Class<'arena>,
@@ -558,17 +555,22 @@ impl<'compiler, 'unit, 'arena, 'scope> ExpressionPlanner<'compiler, 'unit, 'aren
 
         let mut constructor = None;
         for element in &class.body.body {
-            let ClassElement::MethodDefinition(method) = element else {
-                return unsupported(UnsupportedLeafFeature::UnsupportedBody, element.span());
-            };
-            Self::validate_base_class_method(method)?;
-            if method.kind == MethodDefinitionKind::Constructor
-                && constructor.replace(method.as_ref()).is_some()
-            {
-                return Err(LeafCompilationError::SemanticInvariant {
-                    invariant: "class has at most one constructor method",
-                    span: Some(method.span),
-                });
+            match element {
+                ClassElement::MethodDefinition(method) => {
+                    Self::validate_base_class_method(method)?;
+                    if method.kind == MethodDefinitionKind::Constructor
+                        && constructor.replace(method.as_ref()).is_some()
+                    {
+                        return Err(LeafCompilationError::SemanticInvariant {
+                            invariant: "class has at most one constructor method",
+                            span: Some(method.span),
+                        });
+                    }
+                }
+                ClassElement::PropertyDefinition(field) => {
+                    Self::validate_base_class_static_field(field)?;
+                }
+                _ => return unsupported(UnsupportedLeafFeature::UnsupportedBody, element.span()),
             }
         }
         if class.id.is_some() {
@@ -618,90 +620,19 @@ impl<'compiler, 'unit, 'arena, 'scope> ExpressionPlanner<'compiler, 'unit, 'aren
         }
 
         for element in &class.body.body {
-            let ClassElement::MethodDefinition(method) = element else {
-                return Err(LeafCompilationError::SemanticInvariant {
-                    invariant: "validated class body contains only method definitions",
-                    span: Some(element.span()),
-                });
-            };
-            if method.kind == MethodDefinitionKind::Constructor {
-                continue;
-            }
-            let flags = match method.kind {
-                MethodDefinitionKind::Method => 4,
-                MethodDefinitionKind::Get => 5,
-                MethodDefinitionKind::Set => 6,
-                MethodDefinitionKind::Constructor => unreachable!("constructors were skipped"),
-            };
-            if method.computed {
-                let key = method
-                    .key
-                    .as_expression()
-                    .ok_or(LeafCompilationError::Unsupported {
-                        feature: UnsupportedLeafFeature::UnsupportedDeclaration,
-                        span: method.key.span(),
-                    })?;
-                if method.r#static {
-                    flow.emit(PlannedInstruction::new(
-                        FinalOpcode::Swap,
-                        Operands::None,
-                        method.span,
-                    ))?;
+            match element {
+                ClassElement::MethodDefinition(method) => {
+                    self.plan_base_class_method(method, layout, tree_layout, constants, flow)?;
                 }
-                self.plan_expression(key, layout, tree_layout, constants, &[], flow)?;
-                flow.emit(self.plan_function_closure(
-                    &method.value,
-                    layout.executable,
-                    tree_layout,
-                    constants,
-                )?)?;
-                flow.emit(PlannedInstruction::new(
-                    FinalOpcode::DefineMethodComputed,
-                    Operands::U8(flags),
-                    method.span,
-                ))?;
-                if method.r#static {
-                    flow.emit(PlannedInstruction::new(
-                        FinalOpcode::Swap,
-                        Operands::None,
-                        method.span,
-                    ))?;
+                ClassElement::PropertyDefinition(field) => {
+                    Self::plan_base_class_static_field(field, constants, flow)?;
                 }
-                continue;
-            }
-            let key = compiled_static_property_key(&method.key)?.ok_or(
-                LeafCompilationError::Unsupported {
-                    feature: UnsupportedLeafFeature::UnsupportedDeclaration,
-                    span: method.key.span(),
-                },
-            )?;
-            if method.r#static {
-                flow.emit(PlannedInstruction::new(
-                    FinalOpcode::Swap,
-                    Operands::None,
-                    method.span,
-                ))?;
-            }
-            flow.emit(self.plan_function_closure(
-                &method.value,
-                layout.executable,
-                tree_layout,
-                constants,
-            )?)?;
-            flow.emit(PlannedInstruction::new(
-                FinalOpcode::DefineMethod,
-                Operands::AtomU8 {
-                    atom: constants.property_atom_index(key.span)?,
-                    value: flags,
-                },
-                method.span,
-            ))?;
-            if method.r#static {
-                flow.emit(PlannedInstruction::new(
-                    FinalOpcode::Swap,
-                    Operands::None,
-                    method.span,
-                ))?;
+                _ => {
+                    return Err(LeafCompilationError::SemanticInvariant {
+                        invariant: "validated class body has only methods and static fields",
+                        span: Some(element.span()),
+                    });
+                }
             }
         }
         flow.emit(PlannedInstruction::new(
@@ -737,6 +668,152 @@ impl<'compiler, 'unit, 'arena, 'scope> ExpressionPlanner<'compiler, 'unit, 'aren
             span: method.key.span(),
         })?;
         Ok(())
+    }
+
+    fn validate_base_class_static_field(
+        field: &PropertyDefinition<'arena>,
+    ) -> Result<(), LeafCompilationError> {
+        if !field.r#static || field.computed || !field.decorators.is_empty() {
+            return unsupported(UnsupportedLeafFeature::UnsupportedDeclaration, field.span);
+        }
+        compiled_static_property_key(&field.key)?.ok_or(LeafCompilationError::Unsupported {
+            feature: UnsupportedLeafFeature::UnsupportedDeclaration,
+            span: field.key.span(),
+        })?;
+        Ok(())
+    }
+
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "class method lowering needs the complete function-closure context"
+    )]
+    fn plan_base_class_method(
+        &self,
+        method: &MethodDefinition<'arena>,
+        layout: &FrameLayout,
+        tree_layout: &FunctionTreeLayout,
+        constants: &CompiledConstantPool,
+        flow: &mut PlannedControlFlow,
+    ) -> Result<(), LeafCompilationError> {
+        if method.kind == MethodDefinitionKind::Constructor {
+            return Ok(());
+        }
+        let flags = match method.kind {
+            MethodDefinitionKind::Method => 4,
+            MethodDefinitionKind::Get => 5,
+            MethodDefinitionKind::Set => 6,
+            MethodDefinitionKind::Constructor => unreachable!("constructors were skipped"),
+        };
+        if method.computed {
+            let key = method
+                .key
+                .as_expression()
+                .ok_or(LeafCompilationError::Unsupported {
+                    feature: UnsupportedLeafFeature::UnsupportedDeclaration,
+                    span: method.key.span(),
+                })?;
+            if method.r#static {
+                flow.emit(PlannedInstruction::new(
+                    FinalOpcode::Swap,
+                    Operands::None,
+                    method.span,
+                ))?;
+            }
+            self.plan_expression(key, layout, tree_layout, constants, &[], flow)?;
+            flow.emit(self.plan_function_closure(
+                &method.value,
+                layout.executable,
+                tree_layout,
+                constants,
+            )?)?;
+            flow.emit(PlannedInstruction::new(
+                FinalOpcode::DefineMethodComputed,
+                Operands::U8(flags),
+                method.span,
+            ))?;
+            if method.r#static {
+                flow.emit(PlannedInstruction::new(
+                    FinalOpcode::Swap,
+                    Operands::None,
+                    method.span,
+                ))?;
+            }
+            return Ok(());
+        }
+        let key = compiled_static_property_key(&method.key)?.ok_or(
+            LeafCompilationError::Unsupported {
+                feature: UnsupportedLeafFeature::UnsupportedDeclaration,
+                span: method.key.span(),
+            },
+        )?;
+        if method.r#static {
+            flow.emit(PlannedInstruction::new(
+                FinalOpcode::Swap,
+                Operands::None,
+                method.span,
+            ))?;
+        }
+        flow.emit(self.plan_function_closure(
+            &method.value,
+            layout.executable,
+            tree_layout,
+            constants,
+        )?)?;
+        flow.emit(PlannedInstruction::new(
+            FinalOpcode::DefineMethod,
+            Operands::AtomU8 {
+                atom: constants.property_atom_index(key.span)?,
+                value: flags,
+            },
+            method.span,
+        ))?;
+        if method.r#static {
+            flow.emit(PlannedInstruction::new(
+                FinalOpcode::Swap,
+                Operands::None,
+                method.span,
+            ))?;
+        }
+        Ok(())
+    }
+
+    fn plan_base_class_static_field(
+        field: &PropertyDefinition<'arena>,
+        constants: &CompiledConstantPool,
+        flow: &mut PlannedControlFlow,
+    ) -> Result<(), LeafCompilationError> {
+        let key =
+            compiled_static_property_key(&field.key)?.ok_or(LeafCompilationError::Unsupported {
+                feature: UnsupportedLeafFeature::UnsupportedDeclaration,
+                span: field.key.span(),
+            })?;
+        flow.emit(PlannedInstruction::new(
+            FinalOpcode::Swap,
+            Operands::None,
+            field.span,
+        ))?;
+        if let Some(value) = &field.value {
+            let Some(value) = plan_literal(value, constants) else {
+                return unsupported(UnsupportedLeafFeature::UnsupportedExpression, value.span());
+            };
+            flow.emit(value?)?;
+        } else {
+            flow.emit(PlannedInstruction::new(
+                FinalOpcode::Undefined,
+                Operands::None,
+                field.span,
+            ))?;
+        }
+        flow.emit(PlannedInstruction::new(
+            FinalOpcode::DefineField,
+            Operands::Atom(constants.property_atom_index(key.span)?),
+            field.span,
+        ))?;
+        flow.emit(PlannedInstruction::new(
+            FinalOpcode::Swap,
+            Operands::None,
+            field.span,
+        ))
     }
 
     fn base_class_name_binding(

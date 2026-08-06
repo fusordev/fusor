@@ -202,6 +202,24 @@ fn async_generator_class_methods_are_owned_by_their_definition() {
 }
 
 #[test]
+fn literal_static_class_fields_lower_to_the_typed_field_definition_path() {
+    let tree = compile(
+        "function make(){class Box{static answer=7;static empty;}return Box;}",
+        "make",
+    );
+    assert_eq!(
+        tree.root()
+            .control_flow()
+            .instructions()
+            .iter()
+            .filter(|instruction| instruction.decoded().instruction().opcode()
+                == FinalOpcode::DefineField)
+            .count(),
+        2
+    );
+}
+
+#[test]
 fn named_base_class_members_capture_a_distinct_immutable_class_name_cell() {
     let tree = compile(
         "function make(){class Box{constructor(){}static self(){return Box;}}}",

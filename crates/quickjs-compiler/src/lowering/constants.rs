@@ -448,14 +448,33 @@ impl<'arena> CompilationContext<'_, 'arena, '_> {
                     atom_candidates,
                 )?;
                 for element in &class.body.body {
-                    let super::ClassElement::MethodDefinition(method) = element else {
-                        continue;
-                    };
-                    if !method.computed
-                        && method.kind != super::MethodDefinitionKind::Constructor
-                        && let Some(key) = compiled_static_property_key(&method.key)?
-                    {
-                        record_property_candidate(owner, key.value, key.span, atom_candidates)?;
+                    match element {
+                        super::ClassElement::MethodDefinition(method)
+                            if !method.computed
+                                && method.kind != super::MethodDefinitionKind::Constructor =>
+                        {
+                            if let Some(key) = compiled_static_property_key(&method.key)? {
+                                record_property_candidate(
+                                    owner,
+                                    key.value,
+                                    key.span,
+                                    atom_candidates,
+                                )?;
+                            }
+                        }
+                        super::ClassElement::PropertyDefinition(field)
+                            if field.r#static && !field.computed =>
+                        {
+                            if let Some(key) = compiled_static_property_key(&field.key)? {
+                                record_property_candidate(
+                                    owner,
+                                    key.value,
+                                    key.span,
+                                    atom_candidates,
+                                )?;
+                            }
+                        }
+                        _ => {}
                     }
                 }
             }
