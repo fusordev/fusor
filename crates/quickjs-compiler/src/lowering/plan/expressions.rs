@@ -1,16 +1,18 @@
 use super::super::{
     ArrayExpression, ArrayExpressionElement, AssignmentExpression, AssignmentOperator,
-    AssignmentTarget, AtomPoolIndex, BinaryOperator, BranchKind, ChainElement, ChainExpression,
-    CompilationContext, CompiledConstantPool, CompiledMetadataAtomKey, CompilerLabel,
-    ComputedMemberExpression, ConditionalExpression, ExecutableId, ExecutableKind, Expression,
-    FinalOpcode, FrameLayout, Function, FunctionTreeLayout, GetSpan, IdentifierReference,
-    LeafCompilationError, LogicalExpression, LogicalOperator, LoweredReference, ObjectExpression,
-    ObjectProperty, ObjectPropertyKind, Operands, PlannedControlFlow, PlannedInstruction,
-    PropertyKind, SequenceExpression, SimpleAssignmentTarget, Span, StaticMemberExpression,
-    UnaryExpression, UnaryOperator, UnsupportedLeafFeature, UpdateExpression, UpdateOperator,
-    compiled_static_property_key, object_method_or_accessor_span, unsupported,
+    AssignmentTarget, AtomPoolIndex, BinaryOperator, BranchKind, CallExpression, ChainElement,
+    ChainExpression, CompilationContext, CompiledConstantPool, CompiledMetadataAtomKey,
+    CompilerLabel, ComputedMemberExpression, ConditionalExpression, ExecutableId, ExecutableKind,
+    Expression, FinalOpcode, FrameLayout, Function, FunctionTreeLayout, GetSpan,
+    IdentifierReference, LeafCompilationError, LogicalExpression, LogicalOperator,
+    LoweredReference, ObjectExpression, ObjectProperty, ObjectPropertyKind, Operands,
+    PlannedControlFlow, PlannedInstruction, PropertyKind, SequenceExpression,
+    SimpleAssignmentTarget, Span, StaticMemberExpression, UnaryExpression, UnaryOperator,
+    UnsupportedLeafFeature, UpdateExpression, UpdateOperator, compiled_static_property_key,
+    object_method_or_accessor_span, unsupported,
 };
 use super::abrupt::{AbruptMarker, AbruptMarkerKind};
+use super::calls::MemberCallee;
 
 pub(in crate::lowering) fn anonymous_named_evaluation_span(
     mut expression: &Expression<'_>,
@@ -180,6 +182,14 @@ pub(in crate::lowering) const fn binary_opcode(operator: BinaryOperator) -> Fina
 
 pub(in crate::lowering) enum ExpressionWork<'expression, 'arena> {
     Visit(&'expression Expression<'arena>),
+    VisitOptionalChain {
+        chain: &'expression ChainExpression<'arena>,
+        preserve_final_reference: bool,
+    },
+    CallAfterCallee {
+        call: &'expression CallExpression<'arena>,
+        method: bool,
+    },
     Emit(PlannedInstruction),
     Branch {
         kind: BranchKind,
@@ -252,6 +262,19 @@ impl<'compiler, 'unit, 'arena, 'scope> ExpressionPlanner<'compiler, 'unit, 'aren
         while let Some(task) = work.pop() {
             match task {
                 ExpressionWork::Emit(instruction) => flow.emit(instruction)?,
+                ExpressionWork::VisitOptionalChain {
+                    chain,
+                    preserve_final_reference,
+                } => Self::plan_optional_chain(
+                    chain,
+                    preserve_final_reference,
+                    constants,
+                    flow,
+                    &mut work,
+                )?,
+                ExpressionWork::CallAfterCallee { call, method } => {
+                    Self::plan_call_after_callee(call, method, &mut work)?;
+                }
                 ExpressionWork::Branch { kind, target, span } => {
                     flow.branch(kind, &target, span)?;
                 }
@@ -324,7 +347,7 @@ impl<'compiler, 'unit, 'arena, 'scope> ExpressionPlanner<'compiler, 'unit, 'aren
                             Self::plan_computed_member_read(member, &mut work)?;
                         }
                         Expression::ChainExpression(chain) => {
-                            Self::plan_optional_member_chain(chain, constants, flow, &mut work)?;
+                            Self::plan_optional_chain(chain, false, constants, flow, &mut work)?;
                         }
                         Expression::AssignmentExpression(assignment) => {
                             self.plan_assignment_expression(
@@ -455,22 +478,25 @@ impl<'compiler, 'unit, 'arena, 'scope> ExpressionPlanner<'compiler, 'unit, 'aren
         clippy::too_many_lines,
         reason = "the complete chain-level short-circuit schedule stays visible in execution order"
     )]
-    fn plan_optional_member_chain<'expression>(
+    fn plan_optional_chain<'expression>(
         chain: &'expression ChainExpression<'arena>,
+        preserve_final_reference: bool,
         constants: &CompiledConstantPool,
         flow: &mut PlannedControlFlow,
         work: &mut Vec<ExpressionWork<'expression, 'arena>>,
     ) -> Result<(), LeafCompilationError> {
-        enum Member<'expression, 'arena> {
+        enum Step<'expression, 'arena> {
             Static(&'expression StaticMemberExpression<'arena>),
             Computed(&'expression ComputedMemberExpression<'arena>),
+            Call(&'expression CallExpression<'arena>),
         }
 
-        impl Member<'_, '_> {
+        impl Step<'_, '_> {
             const fn optional(&self) -> bool {
                 match self {
                     Self::Static(member) => member.optional,
                     Self::Computed(member) => member.optional,
+                    Self::Call(call) => call.optional,
                 }
             }
 
@@ -478,101 +504,214 @@ impl<'compiler, 'unit, 'arena, 'scope> ExpressionPlanner<'compiler, 'unit, 'aren
                 match self {
                     Self::Static(member) => member.span,
                     Self::Computed(member) => member.span,
+                    Self::Call(call) => call.span,
                 }
+            }
+
+            const fn is_member(&self) -> bool {
+                matches!(self, Self::Static(_) | Self::Computed(_))
+            }
+
+            const fn is_call(&self) -> bool {
+                matches!(self, Self::Call(_))
             }
         }
 
-        let mut members = Vec::new();
+        let mut steps = Vec::new();
         let mut root = match &chain.expression {
             ChainElement::StaticMemberExpression(member) => {
-                members.push(Member::Static(member));
+                steps.push(Step::Static(member));
                 &member.object
             }
             ChainElement::ComputedMemberExpression(member) => {
-                members.push(Member::Computed(member));
+                steps.push(Step::Computed(member));
                 &member.object
             }
-            _ => {
+            ChainElement::CallExpression(call) => {
+                steps.push(Step::Call(call));
+                &call.callee
+            }
+            ChainElement::TSNonNullExpression(_) | ChainElement::PrivateFieldExpression(_) => {
                 return unsupported(UnsupportedLeafFeature::UnsupportedExpression, chain.span);
             }
         };
         loop {
             match root {
                 Expression::StaticMemberExpression(member) => {
-                    members.push(Member::Static(member));
+                    steps.push(Step::Static(member));
                     root = &member.object;
                 }
                 Expression::ComputedMemberExpression(member) => {
-                    members.push(Member::Computed(member));
+                    steps.push(Step::Computed(member));
                     root = &member.object;
+                }
+                Expression::CallExpression(call) => {
+                    steps.push(Step::Call(call));
+                    root = &call.callee;
                 }
                 _ => break,
             }
         }
-        if !members.iter().any(Member::optional) {
+        if !steps.iter().any(Step::optional) {
             return unsupported(UnsupportedLeafFeature::UnsupportedExpression, chain.span);
         }
+        steps.reverse();
+
+        let root_member = if steps.first().is_some_and(Step::is_call) {
+            Self::member_callee(root)?
+        } else {
+            None
+        };
 
         let end = flow.new_label(chain.span)?;
-        let mut planned = vec![ExpressionWork::Visit(root)];
-        for member in members.iter().rev() {
-            let span = member.span();
-            if member.optional() {
-                let non_nullish = flow.new_label(span)?;
-                planned.extend([
-                    ExpressionWork::Emit(PlannedInstruction::new(
-                        FinalOpcode::Dup,
-                        Operands::None,
-                        span,
-                    )),
-                    ExpressionWork::Emit(PlannedInstruction::new(
-                        FinalOpcode::IsUndefinedOrNull,
-                        Operands::None,
-                        span,
-                    )),
-                    ExpressionWork::Branch {
-                        kind: BranchKind::IfFalse,
-                        target: non_nullish.clone(),
-                        span,
-                    },
-                    ExpressionWork::Emit(PlannedInstruction::new(
-                        FinalOpcode::Drop,
-                        Operands::None,
-                        span,
-                    )),
-                    ExpressionWork::Emit(PlannedInstruction::new(
-                        FinalOpcode::Undefined,
-                        Operands::None,
-                        span,
-                    )),
-                    ExpressionWork::Branch {
-                        kind: BranchKind::Goto,
-                        target: end.clone(),
-                        span,
-                    },
-                    ExpressionWork::Bind(non_nullish),
-                ]);
+        let mut planned = Vec::new();
+        match root_member {
+            Some(MemberCallee::Static(member)) => {
+                planned.push(ExpressionWork::Visit(&member.object));
+                planned.push(ExpressionWork::Emit(PlannedInstruction::new(
+                    FinalOpcode::GetField2,
+                    Operands::Atom(constants.property_atom_index(member.property.span)?),
+                    member.span,
+                )));
             }
-            match member {
-                Member::Static(member) => {
+            Some(MemberCallee::Computed(member)) => {
+                planned.push(ExpressionWork::Visit(&member.object));
+                planned.push(ExpressionWork::Visit(&member.expression));
+                planned.push(ExpressionWork::Emit(PlannedInstruction::new(
+                    FinalOpcode::GetArrayEl2,
+                    Operands::None,
+                    member.span,
+                )));
+            }
+            Some(MemberCallee::Chain(chain)) => {
+                planned.push(ExpressionWork::VisitOptionalChain {
+                    chain,
+                    preserve_final_reference: true,
+                });
+            }
+            None => planned.push(ExpressionWork::Visit(root)),
+        }
+
+        for (index, step) in steps.iter().enumerate() {
+            let method = step.is_call()
+                && if index == 0 {
+                    root_member.is_some()
+                } else {
+                    steps[index - 1].is_member()
+                };
+            if step.optional() {
+                Self::append_optional_chain_guard(
+                    if method { 2 } else { 1 },
+                    if preserve_final_reference { 2 } else { 1 },
+                    step.span(),
+                    &end,
+                    flow,
+                    &mut planned,
+                )?;
+            }
+            let final_step = index + 1 == steps.len();
+            match step {
+                Step::Static(member) => {
+                    let preserve_receiver = steps.get(index + 1).is_some_and(Step::is_call)
+                        || (final_step && preserve_final_reference);
                     planned.push(ExpressionWork::Emit(PlannedInstruction::new(
-                        FinalOpcode::GetField,
+                        if preserve_receiver {
+                            FinalOpcode::GetField2
+                        } else {
+                            FinalOpcode::GetField
+                        },
                         Operands::Atom(constants.property_atom_index(member.property.span)?),
                         member.span,
                     )));
                 }
-                Member::Computed(member) => {
+                Step::Computed(member) => {
+                    let preserve_receiver = steps.get(index + 1).is_some_and(Step::is_call)
+                        || (final_step && preserve_final_reference);
                     planned.push(ExpressionWork::Visit(&member.expression));
                     planned.push(ExpressionWork::Emit(PlannedInstruction::new(
-                        FinalOpcode::GetArrayEl,
+                        if preserve_receiver {
+                            FinalOpcode::GetArrayEl2
+                        } else {
+                            FinalOpcode::GetArrayEl
+                        },
                         Operands::None,
                         member.span,
                     )));
                 }
+                Step::Call(call) => {
+                    if call.type_arguments.is_some() {
+                        return unsupported(
+                            UnsupportedLeafFeature::UnsupportedExpression,
+                            call.span,
+                        );
+                    }
+                    planned.push(ExpressionWork::CallAfterCallee { call, method });
+                }
             }
+        }
+        if preserve_final_reference && steps.last().is_some_and(Step::is_call) {
+            planned.push(ExpressionWork::Emit(PlannedInstruction::new(
+                FinalOpcode::Undefined,
+                Operands::None,
+                chain.span,
+            )));
+            planned.push(ExpressionWork::Emit(PlannedInstruction::new(
+                FinalOpcode::Swap,
+                Operands::None,
+                chain.span,
+            )));
         }
         planned.push(ExpressionWork::Bind(end));
         work.extend(planned.into_iter().rev());
+        Ok(())
+    }
+
+    fn append_optional_chain_guard<'expression>(
+        input_values: usize,
+        output_values: usize,
+        span: Span,
+        end: &CompilerLabel,
+        flow: &mut PlannedControlFlow,
+        planned: &mut Vec<ExpressionWork<'expression, 'arena>>,
+    ) -> Result<(), LeafCompilationError> {
+        let non_nullish = flow.new_label(span)?;
+        planned.extend([
+            ExpressionWork::Emit(PlannedInstruction::new(
+                FinalOpcode::Dup,
+                Operands::None,
+                span,
+            )),
+            ExpressionWork::Emit(PlannedInstruction::new(
+                FinalOpcode::IsUndefinedOrNull,
+                Operands::None,
+                span,
+            )),
+            ExpressionWork::Branch {
+                kind: BranchKind::IfFalse,
+                target: non_nullish.clone(),
+                span,
+            },
+        ]);
+        for _ in 0..input_values {
+            planned.push(ExpressionWork::Emit(PlannedInstruction::new(
+                FinalOpcode::Drop,
+                Operands::None,
+                span,
+            )));
+        }
+        for _ in 0..output_values {
+            planned.push(ExpressionWork::Emit(PlannedInstruction::new(
+                FinalOpcode::Undefined,
+                Operands::None,
+                span,
+            )));
+        }
+        planned.push(ExpressionWork::Branch {
+            kind: BranchKind::Goto,
+            target: end.clone(),
+            span,
+        });
+        planned.push(ExpressionWork::Bind(non_nullish));
         Ok(())
     }
 

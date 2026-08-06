@@ -1,8 +1,9 @@
 use super::super::{
-    Argument, AssignmentExpression, AssignmentOperator, CallExpression, CompiledConstantPool,
-    ComputedMemberExpression, Expression, FinalOpcode, GetSpan, LeafCompilationError,
-    NewExpression, Operands, PlannedInstruction, Span, StaticMemberExpression,
-    TaggedTemplateExpression, UnsupportedLeafFeature, plan_push_integer, unsupported,
+    Argument, AssignmentExpression, AssignmentOperator, CallExpression, ChainExpression,
+    CompiledConstantPool, ComputedMemberExpression, Expression, FinalOpcode, GetSpan,
+    LeafCompilationError, NewExpression, Operands, PlannedInstruction, Span,
+    StaticMemberExpression, TaggedTemplateExpression, UnsupportedLeafFeature, plan_push_integer,
+    unsupported,
 };
 use super::expressions::{ExpressionPlanner, ExpressionWork};
 
@@ -10,6 +11,7 @@ use super::expressions::{ExpressionPlanner, ExpressionWork};
 pub(in crate::lowering) enum MemberCallee<'expression, 'arena> {
     Static(&'expression StaticMemberExpression<'arena>),
     Computed(&'expression ComputedMemberExpression<'arena>),
+    Chain(&'expression ChainExpression<'arena>),
 }
 
 pub(in crate::lowering) fn plan_direct_call(argument_count: u16, span: Span) -> PlannedInstruction {
@@ -80,6 +82,12 @@ impl<'arena> ExpressionPlanner<'_, '_, 'arena, '_> {
                 )));
                 work.push(ExpressionWork::Visit(&member.expression));
                 work.push(ExpressionWork::Visit(&member.object));
+            }
+            Some(MemberCallee::Chain(chain)) => {
+                work.push(ExpressionWork::VisitOptionalChain {
+                    chain,
+                    preserve_final_reference: true,
+                });
             }
             None => work.push(ExpressionWork::Visit(&tagged.tag)),
         }
@@ -210,6 +218,12 @@ impl<'arena> ExpressionPlanner<'_, '_, 'arena, '_> {
                     work.push(ExpressionWork::Visit(&member.expression));
                     work.push(ExpressionWork::Visit(&member.object));
                 }
+                Some(MemberCallee::Chain(chain)) => {
+                    work.push(ExpressionWork::VisitOptionalChain {
+                        chain,
+                        preserve_final_reference: true,
+                    });
+                }
                 None => work.push(ExpressionWork::Visit(&call.callee)),
             }
             return Ok(());
@@ -258,7 +272,142 @@ impl<'arena> ExpressionPlanner<'_, '_, 'arena, '_> {
                 work.push(ExpressionWork::Visit(&member.expression));
                 work.push(ExpressionWork::Visit(&member.object));
             }
+            Some(MemberCallee::Chain(chain)) => {
+                work.push(ExpressionWork::VisitOptionalChain {
+                    chain,
+                    preserve_final_reference: true,
+                });
+            }
             None => work.push(ExpressionWork::Visit(&call.callee)),
+        }
+        Ok(())
+    }
+
+    #[expect(
+        clippy::too_many_lines,
+        reason = "spread argument packing remains one exact post-callee execution schedule"
+    )]
+    pub(in crate::lowering) fn plan_call_after_callee<'expression>(
+        call: &'expression CallExpression<'arena>,
+        method: bool,
+        work: &mut Vec<ExpressionWork<'expression, 'arena>>,
+    ) -> Result<(), LeafCompilationError> {
+        if call.type_arguments.is_some() {
+            return unsupported(UnsupportedLeafFeature::UnsupportedExpression, call.span);
+        }
+        if let Some(spread) = call.arguments.iter().position(Argument::is_spread) {
+            let dense_prefix = spread;
+            let argument_count = u16::try_from(dense_prefix).map_err(|_| {
+                LeafCompilationError::CapacityExceeded {
+                    domain: "spread call prefix arguments",
+                }
+            })?;
+            let dynamic_index = i32::try_from(dense_prefix).map_err(|_| {
+                LeafCompilationError::CapacityExceeded {
+                    domain: "spread call dynamic index",
+                }
+            })?;
+            work.push(ExpressionWork::Emit(PlannedInstruction::new(
+                FinalOpcode::Apply,
+                Operands::U16(0),
+                call.span,
+            )));
+            if method {
+                work.push(ExpressionWork::Emit(PlannedInstruction::new(
+                    FinalOpcode::Perm3,
+                    Operands::None,
+                    call.span,
+                )));
+            } else {
+                work.push(ExpressionWork::Emit(PlannedInstruction::new(
+                    FinalOpcode::Swap,
+                    Operands::None,
+                    call.span,
+                )));
+                work.push(ExpressionWork::Emit(PlannedInstruction::new(
+                    FinalOpcode::Undefined,
+                    Operands::None,
+                    call.span,
+                )));
+            }
+            work.push(ExpressionWork::Emit(PlannedInstruction::new(
+                FinalOpcode::Drop,
+                Operands::None,
+                call.span,
+            )));
+            for argument in call.arguments.iter().skip(dense_prefix).rev() {
+                if let Argument::SpreadElement(spread) = argument {
+                    work.push(ExpressionWork::Emit(PlannedInstruction::new(
+                        FinalOpcode::Append,
+                        Operands::None,
+                        argument.span(),
+                    )));
+                    work.push(ExpressionWork::Visit(&spread.argument));
+                } else {
+                    let expression = argument.as_expression().ok_or(
+                        LeafCompilationError::SemanticInvariant {
+                            invariant: "dynamic call argument is an expression",
+                            span: Some(argument.span()),
+                        },
+                    )?;
+                    work.push(ExpressionWork::Emit(PlannedInstruction::new(
+                        FinalOpcode::Inc,
+                        Operands::None,
+                        argument.span(),
+                    )));
+                    work.push(ExpressionWork::Emit(PlannedInstruction::new(
+                        FinalOpcode::DefineArrayEl,
+                        Operands::None,
+                        argument.span(),
+                    )));
+                    work.push(ExpressionWork::Visit(expression));
+                }
+            }
+            work.push(ExpressionWork::Emit(plan_push_integer(
+                dynamic_index,
+                call.span,
+            )));
+            work.push(ExpressionWork::Emit(PlannedInstruction::new(
+                FinalOpcode::ArrayFrom,
+                Operands::NPop { argument_count },
+                call.span,
+            )));
+            for argument in call.arguments.iter().take(dense_prefix).rev() {
+                let expression =
+                    argument
+                        .as_expression()
+                        .ok_or(LeafCompilationError::SemanticInvariant {
+                            invariant: "dense call argument is an expression",
+                            span: Some(argument.span()),
+                        })?;
+                work.push(ExpressionWork::Visit(expression));
+            }
+            return Ok(());
+        }
+
+        let argument_count = u16::try_from(call.arguments.len()).map_err(|_| {
+            LeafCompilationError::CapacityExceeded {
+                domain: "call arguments",
+            }
+        })?;
+        work.push(ExpressionWork::Emit(if method {
+            PlannedInstruction::new(
+                FinalOpcode::CallMethod,
+                Operands::NPop { argument_count },
+                call.span,
+            )
+        } else {
+            plan_direct_call(argument_count, call.span)
+        }));
+        for argument in call.arguments.iter().rev() {
+            let expression =
+                argument
+                    .as_expression()
+                    .ok_or(LeafCompilationError::SemanticInvariant {
+                        invariant: "non-spread call argument is an expression",
+                        span: Some(argument.span()),
+                    })?;
+            work.push(ExpressionWork::Visit(expression));
         }
         Ok(())
     }
@@ -413,6 +562,15 @@ impl<'arena> ExpressionPlanner<'_, '_, 'arena, '_> {
                 }
                 Expression::ComputedMemberExpression(member) => {
                     return unsupported(UnsupportedLeafFeature::UnsupportedExpression, member.span);
+                }
+                Expression::ChainExpression(chain)
+                    if matches!(
+                        chain.expression,
+                        super::super::ChainElement::StaticMemberExpression(_)
+                            | super::super::ChainElement::ComputedMemberExpression(_)
+                    ) =>
+                {
+                    return Ok(Some(MemberCallee::Chain(chain)));
                 }
                 _ => return Ok(None),
             }

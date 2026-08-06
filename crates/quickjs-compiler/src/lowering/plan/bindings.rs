@@ -753,6 +753,13 @@ impl<'arena> CompilationContext<'_, 'arena, '_> {
                                 flow,
                             )?;
                         }
+                        ExpressionWork::VisitOptionalChain { .. }
+                        | ExpressionWork::CallAfterCallee { .. } => {
+                            return Err(LeafCompilationError::SemanticInvariant {
+                                invariant: "assignment-target scheduling delegates complete expressions",
+                                span: Some(target.span()),
+                            });
+                        }
                     }
                 }
                 Ok(())

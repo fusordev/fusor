@@ -344,6 +344,38 @@ fn constructor_frames_charge_the_stored_new_target_value() {
 }
 
 #[test]
+fn optional_calls_preserve_receivers_and_skip_all_arguments_when_nullish() {
+    let authority = compile(
+        "function run(){\
+            let hits=0;\
+            let object={value:40,method:function(value){\
+                'use strict';return this.value+value;\
+            }};\
+            let missing={method:null};\
+            let first=object?.method?.(++hits);\
+            let skipped=missing.method?.(++hits);\
+            let parenthesized=(object?.method)?.(++hits);\
+            let nested=(null?.method)?.(++hits);\
+            function sum(a,b,c){return a+b+c;}\
+            let spread=sum?.(...[1,2,3]);\
+            return (skipped===void 0?100000:0)+(nested===void 0?10000:0)+\
+                   first*1000+parenthesized*10+spread+hits;\
+        }",
+        "run",
+    );
+    let mut runtime = runtime();
+    let realm = runtime.create_realm().expect("realm");
+    let mut context = runtime.context(&realm).expect("context");
+    let run = context.instantiate(authority).expect("run");
+
+    let result = context
+        .call(&run, &[], ExecutionLimits::default())
+        .expect("optional call paths");
+
+    assert_number(&result, 151_428);
+}
+
+#[test]
 fn function_prototype_call_forwards_into_native_targets() {
     let authority = compile(
         "function run(){\

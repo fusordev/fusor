@@ -239,6 +239,62 @@ fn optional_member_chains_short_circuit_the_complete_syntactic_chain() {
 }
 
 #[test]
+fn optional_method_calls_test_the_function_and_retain_the_receiver() {
+    let compiled = compile(
+        "function f(holder,arg){return holder?.method?.(arg).value;}",
+        "f",
+    );
+
+    assert_eq!(
+        opcodes(&compiled),
+        [
+            FinalOpcode::GetArg0,
+            FinalOpcode::Dup,
+            FinalOpcode::IsUndefinedOrNull,
+            FinalOpcode::IfFalse8,
+            FinalOpcode::Drop,
+            FinalOpcode::Undefined,
+            FinalOpcode::Goto8,
+            FinalOpcode::GetField2,
+            FinalOpcode::Dup,
+            FinalOpcode::IsUndefinedOrNull,
+            FinalOpcode::IfFalse8,
+            FinalOpcode::Drop,
+            FinalOpcode::Drop,
+            FinalOpcode::Undefined,
+            FinalOpcode::Goto8,
+            FinalOpcode::GetArg1,
+            FinalOpcode::CallMethod,
+            FinalOpcode::GetField,
+            FinalOpcode::Return,
+        ]
+    );
+    assert_eq!(compiled.control_flow().computed_stack_size(), 3);
+}
+
+#[test]
+fn optional_spread_calls_pack_arguments_only_after_the_nullish_guard() {
+    let compiled = compile("function f(fn,values){return fn?.(1,...values,2);}", "f");
+    let opcodes = opcodes(&compiled);
+    let guard = opcodes
+        .iter()
+        .position(|opcode| *opcode == FinalOpcode::IsUndefinedOrNull)
+        .expect("optional call guard");
+    let array = opcodes
+        .iter()
+        .position(|opcode| *opcode == FinalOpcode::ArrayFrom)
+        .expect("spread argument array");
+    let apply = opcodes
+        .iter()
+        .position(|opcode| *opcode == FinalOpcode::Apply)
+        .expect("dynamic call");
+
+    assert!(guard < array && array < apply);
+    assert!(opcodes.contains(&FinalOpcode::Append));
+    assert!(opcodes.contains(&FinalOpcode::DefineArrayEl));
+}
+
+#[test]
 fn immutable_identifier_mutation_fails_closed_at_the_target() {
     let source = "function f(){ const x=1; x++; }";
     let error = compile_error(source, "f");
