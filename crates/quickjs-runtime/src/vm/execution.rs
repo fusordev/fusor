@@ -1490,10 +1490,18 @@ pub(super) fn execute_one(
                 .into());
             }
             let callee_index = frame.stack.len() - 3;
-            let StoredValue::Function(function) = *stack_value_at(frame, callee_index)? else {
-                return Ok(Step::Abrupt(not_callable_exception(
-                    runtime, frame, source_pc,
-                )?));
+            let function = match *stack_value_at(frame, callee_index)? {
+                StoredValue::Function(function) => function,
+                _ if magic == 2 => {
+                    return Ok(Step::Abrupt(not_constructor_exception(
+                        runtime, frame, source_pc,
+                    )?));
+                }
+                _ => {
+                    return Ok(Step::Abrupt(not_callable_exception(
+                        runtime, frame, source_pc,
+                    )?));
+                }
             };
             let receiver = stack_value_at(frame, callee_index + 1)?.duplicate();
             let array_like = stack_value_at(frame, callee_index + 2)?.duplicate();

@@ -4742,30 +4742,53 @@ fn execute_frame_loop(
                 let origin = instruction_location(runtime, caller, source_pc)?;
                 let operation_realm = code(runtime, caller.code)?.realm;
                 let active_frames = active_execution_frames(frames);
-                let new_target = if magic & 1 != 0 { Some(function) } else { None };
-                let inputs = CallInputs {
-                    receiver: StoredValue::Function(function),
-                    arguments: CallArguments::from_values(vec![receiver, array_like]),
-                    new_target,
-                };
                 if frames.try_reserve(1).is_err() {
                     return Err(ExecutionError::AllocationFailed {
                         resource: RuntimeResource::Frames,
                         additional: 1,
                     });
                 }
-                let dispatch = begin_function_apply(
-                    runtime,
-                    operation_realm,
-                    inputs,
-                    Some(return_to),
-                    origin,
-                    active_frames,
-                    *active_frame_values,
-                    execution_budget,
-                    new_target,
-                    None,
-                );
+                let dispatch = if magic == 2 {
+                    let StoredValue::Function(new_target) = receiver else {
+                        return Err(EngineFault::RuntimeInvariant {
+                            message: "verified super spread apply did not receive the active new.target",
+                        }
+                        .into());
+                    };
+                    begin_array_like_call(
+                        runtime,
+                        operation_realm,
+                        function,
+                        StoredValue::Undefined,
+                        array_like,
+                        Some(return_to),
+                        origin,
+                        active_frames,
+                        *active_frame_values,
+                        execution_budget,
+                        Some(new_target),
+                        None,
+                        false,
+                    )
+                } else {
+                    let new_target = (magic & 1 != 0).then_some(function);
+                    begin_function_apply(
+                        runtime,
+                        operation_realm,
+                        CallInputs {
+                            receiver: StoredValue::Function(function),
+                            arguments: CallArguments::from_values(vec![receiver, array_like]),
+                            new_target,
+                        },
+                        Some(return_to),
+                        origin,
+                        active_frames,
+                        *active_frame_values,
+                        execution_budget,
+                        new_target,
+                        None,
+                    )
+                };
                 let dispatch = match dispatch {
                     Ok(dispatch) => dispatch,
                     Err(NativeFailure::Abrupt(pending)) => {

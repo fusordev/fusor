@@ -184,7 +184,7 @@ impl<'arena> ExpressionPlanner<'_, '_, 'arena, '_> {
         }
         if matches!(&call.callee, Expression::Super(_)) {
             if call.arguments.iter().any(Argument::is_spread) {
-                return unsupported(UnsupportedLeafFeature::UnsupportedExpression, call.span);
+                return self.plan_super_spread_call(call, layout, work);
             }
             let argument_count = u16::try_from(call.arguments.len()).map_err(|_| {
                 LeafCompilationError::CapacityExceeded {
@@ -494,6 +494,141 @@ impl<'arena> ExpressionPlanner<'_, '_, 'arena, '_> {
             }
             None => work.push(ExpressionWork::Visit(&call.callee)),
         }
+        Ok(())
+    }
+
+    #[expect(
+        clippy::too_many_lines,
+        reason = "super spread keeps its class capability and argument-list packing visible in one reverse work-list transaction"
+    )]
+    fn plan_super_spread_call<'expression>(
+        &self,
+        call: &'expression CallExpression<'arena>,
+        layout: &FrameLayout,
+        work: &mut Vec<ExpressionWork<'expression, 'arena>>,
+    ) -> Result<(), LeafCompilationError> {
+        let dense_prefix = call.arguments.iter().position(Argument::is_spread).ok_or(
+            LeafCompilationError::SemanticInvariant {
+                invariant: "super spread call has a spread argument",
+                span: Some(call.span),
+            },
+        )?;
+        let argument_count =
+            u16::try_from(dense_prefix).map_err(|_| LeafCompilationError::CapacityExceeded {
+                domain: "super spread prefix arguments",
+            })?;
+        let dynamic_index =
+            i32::try_from(dense_prefix).map_err(|_| LeafCompilationError::CapacityExceeded {
+                domain: "super spread dynamic index",
+            })?;
+
+        // `apply(2)` is the typed super-construction form. Its operand stack
+        // is `[superclass, active-new-target, argument-list]`; unlike ordinary
+        // construction spread it must retain the derived caller's new.target.
+        work.push(ExpressionWork::Emit(PlannedInstruction::new(
+            FinalOpcode::Drop,
+            Operands::None,
+            call.span,
+        )));
+        let instance_fields = self.instance_field_definitions(layout.executable)?.ok_or(
+            LeafCompilationError::SemanticInvariant {
+                invariant: "super spread call belongs to a class constructor",
+                span: Some(call.span),
+            },
+        )?;
+        if !instance_fields.derived {
+            return Err(LeafCompilationError::SemanticInvariant {
+                invariant: "super spread call belongs to a derived class constructor",
+                span: Some(call.span),
+            });
+        }
+        if !instance_fields.fields.is_empty() {
+            work.push(ExpressionWork::InitializeInstanceFields);
+        }
+        work.push(ExpressionWork::Emit(PlannedInstruction::new(
+            FinalOpcode::CheckCtorReturn,
+            Operands::None,
+            call.span,
+        )));
+        work.push(ExpressionWork::Emit(PlannedInstruction::new(
+            FinalOpcode::Apply,
+            Operands::U16(2),
+            call.span,
+        )));
+        // The array packing cursor is retained beside the argument list by
+        // `array_from` and its append operations. It is not an `apply(2)`
+        // operand, so discard it before the certified super-construction
+        // transaction; the earlier `drop` after `check_ctor_return` instead
+        // discards that operation's completion marker.
+        work.push(ExpressionWork::Emit(PlannedInstruction::new(
+            FinalOpcode::Drop,
+            Operands::None,
+            call.span,
+        )));
+
+        for argument in call.arguments.iter().skip(dense_prefix).rev() {
+            if let Argument::SpreadElement(spread) = argument {
+                work.push(ExpressionWork::Emit(PlannedInstruction::new(
+                    FinalOpcode::Append,
+                    Operands::None,
+                    argument.span(),
+                )));
+                work.push(ExpressionWork::Visit(&spread.argument));
+            } else {
+                let expression =
+                    argument
+                        .as_expression()
+                        .ok_or(LeafCompilationError::SemanticInvariant {
+                            invariant: "dynamic super argument is an expression",
+                            span: Some(argument.span()),
+                        })?;
+                work.push(ExpressionWork::Emit(PlannedInstruction::new(
+                    FinalOpcode::Inc,
+                    Operands::None,
+                    argument.span(),
+                )));
+                work.push(ExpressionWork::Emit(PlannedInstruction::new(
+                    FinalOpcode::DefineArrayEl,
+                    Operands::None,
+                    argument.span(),
+                )));
+                work.push(ExpressionWork::Visit(expression));
+            }
+        }
+        work.push(ExpressionWork::Emit(plan_push_integer(
+            dynamic_index,
+            call.span,
+        )));
+        work.push(ExpressionWork::Emit(PlannedInstruction::new(
+            FinalOpcode::ArrayFrom,
+            Operands::NPop { argument_count },
+            call.span,
+        )));
+        for argument in call.arguments.iter().take(dense_prefix).rev() {
+            let expression =
+                argument
+                    .as_expression()
+                    .ok_or(LeafCompilationError::SemanticInvariant {
+                        invariant: "dense super argument is an expression",
+                        span: Some(argument.span()),
+                    })?;
+            work.push(ExpressionWork::Visit(expression));
+        }
+        work.push(ExpressionWork::Emit(PlannedInstruction::new(
+            FinalOpcode::SpecialObject,
+            Operands::U8(3),
+            call.callee.span(),
+        )));
+        work.push(ExpressionWork::Emit(PlannedInstruction::new(
+            FinalOpcode::GetSuper,
+            Operands::None,
+            call.callee.span(),
+        )));
+        work.push(ExpressionWork::Emit(PlannedInstruction::new(
+            FinalOpcode::SpecialObject,
+            Operands::U8(4),
+            call.callee.span(),
+        )));
         Ok(())
     }
 

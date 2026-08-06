@@ -8192,6 +8192,32 @@ fn transfer_internal_operand_stack(
                 });
             }
         }
+        FinalOpcode::Apply if matches!(instruction.operands(), Operands::U16(2)) => {
+            let Some(base) = state.len().checked_sub(3) else {
+                return Err(internal_stack_error(id, decoded.pc(), opcode, state));
+            };
+            if let (
+                InternalStackValue::DerivedSuperConstructor(super_site),
+                InternalStackValue::DerivedSuperNewTarget(target_site),
+            ) = (state[base], state[base + 1])
+            {
+                if super_site != target_site || !state[base + 2].is_javascript_value() {
+                    return Err(internal_stack_error(id, decoded.pc(), opcode, state));
+                }
+                state.truncate(base);
+                state.push(InternalStackValue::DerivedSuperResult(decoded.pc()));
+                return Ok(InternalStackTransfer {
+                    normal_completion: true,
+                    iteration_branch_value: None,
+                    ret_finalizer: None,
+                });
+            }
+            // Operand mode two is reserved for the proven derived-super
+            // transaction. Do not let hand-authored bytecode fall through to
+            // ordinary `apply` transfer and reach the runtime construction
+            // path without those capabilities.
+            return Err(internal_stack_error(id, decoded.pc(), opcode, state));
+        }
         FinalOpcode::CheckCtorReturn => {
             let Some(InternalStackValue::DerivedSuperResult(site)) = state.last().copied() else {
                 return Err(internal_stack_error(id, decoded.pc(), opcode, state));
@@ -10833,6 +10859,7 @@ fn collect_requirements(
             | FinalOpcode::Call2
             | FinalOpcode::Call3
             | FinalOpcode::CallMethod
+            | FinalOpcode::Apply
             | FinalOpcode::InitCtor
             | FinalOpcode::GetSuper
             | FinalOpcode::GetSuperValue

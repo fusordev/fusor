@@ -81,9 +81,10 @@ broad Test262.**
   Derived classes support `extends` (including `null`): heritage evaluates
   once, checks constructability before reading `.prototype`, and installs both
   inheritance links. Synthesized defaults forward every supplied argument;
-  source-written derived constructors admit direct non-spread `super(...)` in
-  their own body through a typed active-constructor/superclass/new-target
-  capability. Class constructors, class methods, and object-literal concise
+  source-written derived constructors admit direct `super(...)`, including
+  spread arguments, in their own body through a typed
+  active-constructor/superclass/new-target capability. Class constructors,
+  class methods, and object-literal concise
   methods/accessors retain `[[HomeObject]]` and support direct
   static/computed `super` property reads, calls, simple/compound/logical
   assignments, and prefix/postfix updates, preserving the actual `this` for
@@ -111,10 +112,10 @@ broad Test262.**
   convert through `ToPropertyKey`, and live in a typed immutable class-scope
   cell captured by the constructor; its certificate admits only typed field
   definition, including synthesized derived constructors.
-- [ ] Class closure: spread or arrow-contained `super()`; computed-key anonymous-class
-  name inference outside direct object/static-field definitions, static-field
-  `super`, private elements, decorators, and static blocks. Do not relabel these as
-  supported merely because Oxc parses them.
+- [ ] Class closure: arrow-contained `super()`; computed-key anonymous-class name
+  inference outside direct object/static-field definitions, static-field `super`,
+  private elements, decorators, and static blocks. Do not relabel these as supported
+  merely because Oxc parses them.
 - [ ] Direct/indirect `eval`, `with`, Annex B block functions, remaining opcode
   families, and complete debug/source tables. Unverified or serialized bytecode
   and unsupported `eval` remain fail closed.

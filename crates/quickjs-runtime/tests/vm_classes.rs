@@ -462,3 +462,14 @@ fn anonymous_class_static_field_receivers_use_the_created_constructor() {
         },
     );
 }
+
+#[test]
+fn derived_super_spread_preserves_the_active_new_target_and_receiver_timing() {
+    run_with(
+        "function run(){let events=[];function args(){events.push('args');return [2,3];}class Base{constructor(...values){events.push('base');this.values=values.join(':');this.target=new.target;}}class Derived extends Base{constructor(){events.push('before');super(1,...args(),4);events.push('after');this.ready=true;}}class Leaf extends Derived{}let value=new Leaf;return value.values==='1:2:3:4'&&value.target===Leaf&&value.ready&&events.join(',')==='before,args,base,after';}",
+        |result| {
+            let value = result.expect("derived super spread execution");
+            assert_eq!(value.as_boolean().expect("live Boolean"), Some(true));
+        },
+    );
+}

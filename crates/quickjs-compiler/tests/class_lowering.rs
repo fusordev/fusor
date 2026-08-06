@@ -720,6 +720,24 @@ fn static_field_super_reports_its_specific_deferred_contract() {
 }
 
 #[test]
+fn derived_super_spread_uses_the_typed_constructor_apply_form() {
+    let tree = compile(
+        "function make(Base){return class Derived extends Base{constructor(args){super(...args);}}}",
+        "make",
+    );
+    assert!(
+        tree.functions()
+            .iter()
+            .flat_map(|function| function.control_flow().instructions())
+            .any(|instruction| {
+                let instruction = instruction.decoded().instruction();
+                instruction.opcode() == FinalOpcode::Apply
+                    && instruction.operands() == quickjs_bytecode::Operands::U16(2)
+            })
+    );
+}
+
+#[test]
 fn uncomputed_public_instance_field_initializers_lower_into_each_constructor() {
     let tree = compile(
         "function make(seed){class Base{value=seed;constructor(){}}class Derived extends Base{next=seed+1;constructor(){super();}}class Default extends Base{forward=seed+2;}return [Base,Derived,Default];}",
