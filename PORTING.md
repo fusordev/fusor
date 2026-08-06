@@ -83,13 +83,14 @@ broad Test262.**
   inheritance links. Synthesized defaults forward every supplied argument;
   source-written derived constructors admit direct non-spread `super(...)` in
   their own body through a typed active-constructor/superclass/new-target
-  capability. Synchronous class constructors and methods retain
-  `[[HomeObject]]` and support direct static/computed `super` property reads,
-  calls, simple/compound/logical assignments, and prefix/postfix updates,
-  preserving the actual `this` for inherited getters, setters, and method
-  calls. The receiver initializes only after superclass construction; early
-  or repeated `super()` and `this` before `super()` throw `ReferenceError`;
-  derived returns accept an object or `undefined` only.
+  capability. Class constructors and synchronous, async, generator, and
+  async-generator methods retain `[[HomeObject]]` and support direct
+  static/computed `super` property reads, calls, simple/compound/logical
+  assignments, and prefix/postfix updates, preserving the actual `this` for
+  inherited getters, setters, and method calls. The receiver initializes only
+  after superclass construction; early or repeated `super()` and `this` before
+  `super()` throw `ReferenceError`; derived returns accept an object or
+  `undefined` only.
   The certificate accepts literal `undefined` for base classes, the
   exact derived-heritage branch, and non-escaping typed constructor templates.
   Source writes to the captured class name reach a typed runtime `TypeError`
@@ -99,9 +100,8 @@ broad Test262.**
   public static fields, and computed static fields with non-class values,
   evaluate into own constructor properties when their initializers contain no
   `this`, `super`, or `new.target`.
-- [ ] Class closure: `super` properties in async/generator or object-literal
-  methods; spread or arrow-contained `super()`; instance fields; computed-key
-  anonymous-class
+- [ ] Class closure: object-literal `super`; spread or arrow-contained
+  `super()`; instance fields; computed-key anonymous-class
   name inference outside direct object/static-field definitions, static-field
   initializers using `this`, `super`, or `new.target`, private elements,
   decorators, and static blocks. Do not relabel these as

@@ -1653,17 +1653,12 @@ impl<'unit, 'arena, 'scope> Planner<'unit, 'arena, 'scope> {
                 .executable_drafts
                 .get(owner.index())
                 .is_some_and(|candidate| {
-                    matches!(
-                        candidate.executable.kind,
-                        ExecutableKind::Function {
-                            asynchronous: false,
-                            generator: false,
-                        }
-                    ) && matches!(
-                        nodes.parent_kind(candidate.node_id),
-                        AstKind::MethodDefinition(method)
-                            if method.value.node_id.get() == candidate.node_id
-                    )
+                    matches!(candidate.executable.kind, ExecutableKind::Function { .. })
+                        && matches!(
+                            nodes.parent_kind(candidate.node_id),
+                            AstKind::MethodDefinition(method)
+                                if method.value.node_id.get() == candidate.node_id
+                        )
                 });
             if direct_super_property && class_method {
                 continue;

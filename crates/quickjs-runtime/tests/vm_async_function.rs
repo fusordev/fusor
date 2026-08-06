@@ -63,6 +63,34 @@ fn start_and_read(start_source: &str) -> String {
 }
 
 #[test]
+fn async_class_methods_preserve_the_super_home_object_across_await() {
+    assert_eq!(
+        start_and_read(
+            "function start(){\
+                let state={result:''};\
+                class Base{\
+                    get value(){return this._value;}\
+                    set value(next){this._value=next;}\
+                    static get answer(){return this._answer;}\
+                    static set answer(next){this._answer=next;}\
+                }\
+                class Derived extends Base{\
+                    constructor(value){super();this._value=value;}\
+                    async read(){let value=await 1;return super['value']+=value;}\
+                    static async read(){let value=await 1;return super['answer']+=value;}\
+                }\
+                let value=new Derived(3);\
+                Derived._answer=4;\
+                value.read().then(function(result){state.result=state.result+'instance:'+result+'|';});\
+                Derived.read().then(function(result){state.result=state.result+'static:'+result;});\
+                return state;\
+            }"
+        ),
+        "instance:4|static:5"
+    );
+}
+
+#[test]
 fn await_always_resumes_as_a_fifo_promise_job() {
     assert_eq!(
         start_and_read(

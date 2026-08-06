@@ -119,6 +119,34 @@ fn dynamic_start_and_read(body: &str) -> String {
 }
 
 #[test]
+fn async_generator_class_methods_preserve_the_super_home_object_across_await() {
+    assert_eq!(
+        start_and_read(
+            "function start(){\
+                let state={result:''};\
+                class Base{\
+                    get value(){return this._value;}\
+                    set value(next){this._value=next;}\
+                    static get answer(){return this._answer;}\
+                    static set answer(next){this._answer=next;}\
+                }\
+                class Derived extends Base{\
+                    constructor(value){super();this._value=value;}\
+                    async *values(){let value=await 1;yield super['value']+=value;}\
+                    static async *values(){let value=await 1;yield super['answer']+=value;}\
+                }\
+                let value=new Derived(3);\
+                Derived._answer=4;\
+                value.values().next().then(function(result){state.result=state.result+'instance:'+result.value+':'+result.done+'|';});\
+                Derived.values().next().then(function(result){state.result=state.result+'static:'+result.value+':'+result.done;});\
+                return state;\
+            }"
+        ),
+        "instance:4:false|static:5:false"
+    );
+}
+
+#[test]
 fn async_generator_call_is_deferred_and_next_returns_a_promise() {
     assert_eq!(
         start_and_read(

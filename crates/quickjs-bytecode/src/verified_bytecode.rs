@@ -6152,7 +6152,11 @@ fn verify_supported_opcodes(
                 FinalOpcode::GetSuper | FinalOpcode::GetSuperValue | FinalOpcode::PutSuperValue
             ) && !matches!(
                 executable_kind,
-                CompilerExecutableKind::OrdinaryMethod | CompilerExecutableKind::ClassConstructor
+                CompilerExecutableKind::OrdinaryMethod
+                    | CompilerExecutableKind::GeneratorMethod
+                    | CompilerExecutableKind::AsyncMethod
+                    | CompilerExecutableKind::AsyncGeneratorMethod
+                    | CompilerExecutableKind::ClassConstructor
             ))
             || matches!(
                 (opcode, instruction.operands()),
@@ -6280,7 +6284,11 @@ fn compiler_special_object_is_authorized(
         }
         Operands::U8(5) => matches!(
             executable_kind,
-            CompilerExecutableKind::OrdinaryMethod | CompilerExecutableKind::ClassConstructor
+            CompilerExecutableKind::OrdinaryMethod
+                | CompilerExecutableKind::GeneratorMethod
+                | CompilerExecutableKind::AsyncMethod
+                | CompilerExecutableKind::AsyncGeneratorMethod
+                | CompilerExecutableKind::ClassConstructor
         ),
         _ => false,
     }

@@ -44,6 +44,16 @@ fn run(source: &str) -> String {
         .expect("UTF-8")
 }
 
+#[test]
+fn generator_class_methods_preserve_the_super_home_object() {
+    assert_eq!(
+        run(
+            "function run(){class Base{get value(){return this._value;}set value(next){this._value=next;}}class Derived extends Base{constructor(value){super();this._value=value;}*values(){yield super.value;yield super['value']+=1;}}let iterator=new Derived(4).values();let first=iterator.next();let second=iterator.next();return first.value+':'+first.done+'|'+second.value+':'+second.done;}"
+        ),
+        "4:false|5:false"
+    );
+}
+
 struct GeneratorAllocationCase {
     runtime: Runtime,
     realm: Realm,
