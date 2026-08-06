@@ -417,6 +417,72 @@ fn date_no_intl_locale_fallbacks_ignore_options_and_utc_years_keep_four_digits()
 }
 
 #[test]
+fn temporal_instant_constructor_exposes_exact_epoch_slots() {
+    assert_eq!(
+        rendered(
+            "var instant=new Temporal.Instant(-217175010123456789n);
+             return [typeof Temporal,Temporal.Instant.name,Temporal.Instant.length,
+               instant instanceof Temporal.Instant,
+               instant.epochMilliseconds,instant.epochNanoseconds,
+               Object.prototype.toString.call(instant),instant.toString(),
+               instant.toJSON()].join('|');"
+        ),
+        "object|Instant|1|true|-217175010124|-217175010123456789|[object Temporal.Instant]|1963-02-13T09:36:29.876543211Z|1963-02-13T09:36:29.876543211Z"
+    );
+    assert_eq!(
+        thrown("return Temporal.Instant(0n);"),
+        ExceptionKind::TypeError
+    );
+}
+
+#[test]
+fn temporal_instant_epoch_factories_validate_units_and_ignore_subclass_receivers() {
+    assert_eq!(
+        rendered(
+            "var millis=Temporal.Instant.fromEpochMilliseconds(217175010123);
+             var nanos=Temporal.Instant.fromEpochNanoseconds(217175010123456789n);
+             var borrowed=Temporal.Instant.fromEpochNanoseconds.call({},1n);
+             var bad=false;try{Temporal.Instant.fromEpochMilliseconds(1.5)}
+               catch(error){bad=error instanceof RangeError}
+             return [millis.epochNanoseconds,nanos.epochMilliseconds,
+               borrowed instanceof Temporal.Instant,borrowed.epochNanoseconds,bad,
+               Temporal.Instant.fromEpochMilliseconds.length,
+               Temporal.Instant.fromEpochNanoseconds.length].join('|');"
+        ),
+        "217175010123000000|217175010123|true|1|true|1|1"
+    );
+    assert_eq!(
+        thrown("return Temporal.Instant.prototype.epochNanoseconds;"),
+        ExceptionKind::TypeError
+    );
+    assert_eq!(
+        thrown("return new Temporal.Instant(0n).valueOf();"),
+        ExceptionKind::TypeError
+    );
+}
+
+#[test]
+fn temporal_instant_epoch_bounds_are_exact_when_the_shared_helper_cannot_compile() {
+    assert_eq!(
+        rendered(
+            "var max=8640000000000000000000n,min=-max,failures=0;
+             var maxInstant=new Temporal.Instant(max),minInstant=new Temporal.Instant(min);
+             var maxMillis=Temporal.Instant.fromEpochMilliseconds(8640000000000000);
+             var minMillis=Temporal.Instant.fromEpochMilliseconds(-8640000000000000);
+             for(var value of [max+1n,min-1n]){
+               try{new Temporal.Instant(value)}catch(error){if(error instanceof RangeError)failures++}}
+             for(var value of [8640000000000001,-8640000000000001]){
+               try{Temporal.Instant.fromEpochMilliseconds(value)}
+               catch(error){if(error instanceof RangeError)failures++}}
+             return [maxInstant.epochNanoseconds===max,minInstant.epochNanoseconds===min,
+               maxMillis.epochNanoseconds===max,minMillis.epochNanoseconds===min,
+               failures].join('|');"
+        ),
+        "true|true|true|true|4"
+    );
+}
+
+#[test]
 fn callable_date_returns_a_local_time_string_without_observing_arguments() {
     let result = rendered(
         "var touched=false;

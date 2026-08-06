@@ -48,8 +48,8 @@ use super::{
     RealmId, RealmIntrinsics, RealmState, RefCell, ReflectMethod, RegExpIntrinsics, ReleaseMailbox,
     Runtime, RuntimeError, RuntimeIdentity, RuntimeLimits, RuntimeResource, SetIntrinsics,
     SetMethod, ShapeInterner, StoredValue, StringHtmlMethod, StringIntrinsics, StringMethod,
-    SymbolIntrinsics, UriFunction, VecDeque, WeakMapIntrinsics, WeakRefIntrinsics,
-    WeakSetIntrinsics, check_limit, predefined_string, usize_to_u64,
+    SymbolIntrinsics, TemporalIntrinsics, UriFunction, VecDeque, WeakMapIntrinsics,
+    WeakRefIntrinsics, WeakSetIntrinsics, check_limit, predefined_string, usize_to_u64,
 };
 
 use allocation::IntrinsicRecords;
@@ -714,6 +714,11 @@ impl RealmBuildTransaction<'_> {
             date: DateIntrinsics {
                 prototype: object(IntrinsicObjectId::DatePrototype),
                 constructor: function(NativeFunctionKind::DateConstructor),
+            },
+            temporal: TemporalIntrinsics {
+                namespace: object(IntrinsicObjectId::Temporal),
+                instant_prototype: object(IntrinsicObjectId::TemporalInstantPrototype),
+                instant_constructor: function(NativeFunctionKind::TemporalInstantConstructor),
             },
             map: MapIntrinsics {
                 prototype: object(IntrinsicObjectId::MapPrototype),

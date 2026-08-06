@@ -35,9 +35,9 @@ use super::{
     is_supported_instruction, is_supported_opcode, usize_to_u64,
 };
 
-const REALM_OBJECT_SLOTS: u64 = 42;
-const REALM_PROPERTY_SLOTS: u64 = 1_326;
-const REALM_FUNCTION_SLOTS: u64 = 394;
+const REALM_OBJECT_SLOTS: u64 = 44;
+const REALM_PROPERTY_SLOTS: u64 = 1_354;
+const REALM_FUNCTION_SLOTS: u64 = 402;
 
 #[test]
 fn finalization_job_limit_failure_does_not_clear_weak_targets() {
@@ -2066,6 +2066,7 @@ fn realm_installs_the_exact_function_intrinsic_graph() {
         finalization_registry: _,
         regexp: _,
         date: _,
+        temporal: _,
     } = state.intrinsics
     else {
         panic!("realm intrinsics remained uninitialized");
@@ -2079,9 +2080,9 @@ fn realm_installs_the_exact_function_intrinsic_graph() {
     assert_eq!(
         runtime.atom_usage(),
         AtomUsage {
-            live_atoms: PREDEFINED_ATOM_COUNT + 242,
-            live_description_code_units: PREDEFINED_DESCRIPTION_CODE_UNITS + 2_040,
-            interner_slots: PREDEFINED_INTERNER_SLOTS + 242,
+            live_atoms: PREDEFINED_ATOM_COUNT + 248,
+            live_description_code_units: PREDEFINED_DESCRIPTION_CODE_UNITS + 2_129,
+            interner_slots: PREDEFINED_INTERNER_SLOTS + 248,
         }
     );
 
@@ -2735,9 +2736,9 @@ fn function_call_is_realm_owned_while_its_dynamic_atom_is_reused() {
     assert_eq!(
         runtime.atom_usage(),
         AtomUsage {
-            live_atoms: PREDEFINED_ATOM_COUNT + 242,
-            live_description_code_units: PREDEFINED_DESCRIPTION_CODE_UNITS + 2_040,
-            interner_slots: PREDEFINED_INTERNER_SLOTS + 242,
+            live_atoms: PREDEFINED_ATOM_COUNT + 248,
+            live_description_code_units: PREDEFINED_DESCRIPTION_CODE_UNITS + 2_129,
+            interner_slots: PREDEFINED_INTERNER_SLOTS + 248,
         }
     );
 }
@@ -2784,9 +2785,9 @@ fn function_apply_is_realm_owned_while_its_predefined_atom_is_reused() {
     assert_eq!(
         runtime.atom_usage(),
         AtomUsage {
-            live_atoms: PREDEFINED_ATOM_COUNT + 242,
-            live_description_code_units: PREDEFINED_DESCRIPTION_CODE_UNITS + 2_040,
-            interner_slots: PREDEFINED_INTERNER_SLOTS + 242,
+            live_atoms: PREDEFINED_ATOM_COUNT + 248,
+            live_description_code_units: PREDEFINED_DESCRIPTION_CODE_UNITS + 2_129,
+            interner_slots: PREDEFINED_INTERNER_SLOTS + 248,
         }
     );
 }

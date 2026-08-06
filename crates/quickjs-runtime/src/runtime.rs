@@ -65,6 +65,7 @@ mod proxies;
 mod regexps;
 mod sets;
 mod symbols;
+mod temporals;
 mod weak_collections;
 mod weak_references;
 pub(crate) use iterators::PreparedIteratorResultPlan;
@@ -98,6 +99,7 @@ enum RealmIntrinsics {
         string: StringIntrinsics,
         array: ArrayIntrinsics,
         date: DateIntrinsics,
+        temporal: TemporalIntrinsics,
         map: MapIntrinsics,
         set: SetIntrinsics,
         weak_map: WeakMapIntrinsics,
@@ -253,6 +255,13 @@ struct ArrayIntrinsics {
 struct DateIntrinsics {
     prototype: ObjectId,
     constructor: FunctionId,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct TemporalIntrinsics {
+    namespace: ObjectId,
+    instant_prototype: ObjectId,
+    instant_constructor: FunctionId,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -1233,6 +1242,9 @@ pub(crate) enum NativeFunctionKind {
     DateConstructor,
     DateStatic(DateStaticMethod),
     DatePrototype(DatePrototypeMethod),
+    TemporalInstantConstructor,
+    TemporalInstantStatic(TemporalInstantStaticMethod),
+    TemporalInstantPrototype(TemporalInstantPrototypeMethod),
     FunctionPrototypeToString,
     ErrorConstructor(ErrorIntrinsicKind),
     ErrorPrototypeToString,
@@ -1572,6 +1584,62 @@ impl DatePrototypeMethod {
             | Self::GetUtcMilliseconds
             | Self::GetDay
             | Self::GetUtcDay => 0,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum TemporalInstantStaticMethod {
+    FromEpochMilliseconds,
+    FromEpochNanoseconds,
+}
+
+impl TemporalInstantStaticMethod {
+    pub(crate) const ALL: [Self; 2] = [Self::FromEpochMilliseconds, Self::FromEpochNanoseconds];
+
+    pub(crate) const fn name(self) -> &'static str {
+        match self {
+            Self::FromEpochMilliseconds => "fromEpochMilliseconds",
+            Self::FromEpochNanoseconds => "fromEpochNanoseconds",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum TemporalInstantPrototypeMethod {
+    EpochMilliseconds,
+    EpochNanoseconds,
+    ToString,
+    ToJson,
+    ValueOf,
+}
+
+impl TemporalInstantPrototypeMethod {
+    pub(crate) const ALL: [Self; 5] = [
+        Self::EpochMilliseconds,
+        Self::EpochNanoseconds,
+        Self::ToString,
+        Self::ToJson,
+        Self::ValueOf,
+    ];
+
+    pub(crate) const fn name(self) -> &'static str {
+        match self {
+            Self::EpochMilliseconds => "epochMilliseconds",
+            Self::EpochNanoseconds => "epochNanoseconds",
+            Self::ToString => "toString",
+            Self::ToJson => "toJSON",
+            Self::ValueOf => "valueOf",
+        }
+    }
+
+    pub(crate) const fn function_name(self) -> &'static str {
+        match self {
+            Self::EpochMilliseconds => "get epochMilliseconds",
+            Self::EpochNanoseconds => "get epochNanoseconds",
+            Self::ToString => "toString",
+            Self::ToJson => "toJSON",
+            Self::ValueOf => "valueOf",
         }
     }
 }
@@ -2026,6 +2094,7 @@ impl NativeFunctionKind {
                 | Self::StringConstructor
                 | Self::ArrayConstructor
                 | Self::DateConstructor
+                | Self::TemporalInstantConstructor
                 | Self::RegExpConstructor
                 | Self::GeneratorFunctionConstructor
                 | Self::AsyncFunctionConstructor

@@ -107,7 +107,7 @@ does not imply complete ECMAScript or QuickJS compatibility.
 - [x] Typed same-site iterator state covers Array/String iteration, spread,
   destructuring, `for-of`, `IteratorClose`, and original-abrupt precedence.
 - [x] Validated schemas derive Realm allocation and rollback. The normalized
-  snapshot pins 436 Realm-local identities and 1,326 ordered properties.
+  snapshot pins 446 Realm-local identities and 1,354 ordered properties.
 - [x] Proxy and exotic-object integration covers all 11 internal methods,
   revocation/invariants, reflection, descriptors/integrity, constructors,
   iterators, Arrays, strings, RegExp, Promise, and JSON. Audited built-in
@@ -181,8 +181,16 @@ does not imply complete ECMAScript or QuickJS compatibility.
   signed UTC years, and deterministic non-Intl locale fallbacks follow
   ECMA-262 (17/17 focused VM cases; Date.parse Test262 16/16; Date prototype
   Test262 954/954 admitted modes across 485 files, with 16 Temporal skips).
-- [ ] Implement Temporal on the shared `temporal_rs` kernel; next implement
-  binary data/typed arrays and Atomics.
+- [ ] Temporal is staged on the shared `temporal_rs` kernel. `%Temporal%` and
+  branded `%Temporal.Instant%` now provide construction, epoch-millisecond and
+  epoch-nanosecond factories/accessors, default ISO/JSON rendering, subclass
+  prototype selection, and `valueOf` rejection. Focused Test262 admission runs
+  one skipped feature inside an explicit subtree without weakening the global
+  baseline: this first slice passes 60/72 modes; the other twelve stop in the
+  compiler on the shared helper's deferred `ClassSyntheticSlots`, before
+  Temporal executes. Complete Instant conversion/arithmetic/rounding/zoned
+  operations, the other Temporal types, and Date interop; then implement binary
+  data/typed arrays and Atomics.
 
 ### Jobs, asynchronous semantics, and modules
 

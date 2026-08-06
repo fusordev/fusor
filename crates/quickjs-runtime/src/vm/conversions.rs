@@ -523,6 +523,15 @@ pub(super) fn finish_intrinsic_get(
             new_target,
             value: date_value,
         } => finish_date_constructor_wrapper(runtime, new_target, date_value, &value),
+        IntrinsicGetContinuation::TemporalInstantConstructor {
+            new_target,
+            epoch_nanoseconds,
+        } => finish_temporal_instant_constructor_wrapper(
+            runtime,
+            new_target,
+            epoch_nanoseconds,
+            &value,
+        ),
         IntrinsicGetContinuation::StringConstructor {
             new_target,
             value: string_value,
@@ -1830,6 +1839,20 @@ fn finish_operator_primitive_target(
         OperatorPrimitiveTarget::DateToPrimitive => Ok(NativeDispatch::Immediate(value)),
         OperatorPrimitiveTarget::DateToJson(state) => {
             begin_date_to_json_invoke(runtime, *state, value, return_to, execution_budget)
+        }
+        OperatorPrimitiveTarget::TemporalInstantNanoseconds { new_target } => {
+            finish_temporal_instant_nanoseconds(
+                runtime,
+                &value,
+                new_target,
+                realm,
+                return_to,
+                origin,
+                execution_budget,
+            )
+        }
+        OperatorPrimitiveTarget::TemporalInstantMilliseconds => {
+            finish_temporal_instant_milliseconds(runtime, value, realm, origin)
         }
         OperatorPrimitiveTarget::NumberToString { number } => {
             let radix = operator_to_number(value, realm, origin)?;

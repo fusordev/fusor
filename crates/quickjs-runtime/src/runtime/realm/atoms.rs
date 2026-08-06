@@ -2,7 +2,10 @@
 
 use crate::{
     Atom,
-    runtime::{DatePrototypeMethod, DateStaticMethod},
+    runtime::{
+        DatePrototypeMethod, DateStaticMethod, TemporalInstantPrototypeMethod,
+        TemporalInstantStaticMethod,
+    },
 };
 
 use super::{
@@ -253,6 +256,17 @@ fn visit_realm_name_order(
             visit(RealmNameId::DatePrototype(method))?;
         }
     }
+    visit(RealmNameId::Temporal)?;
+    visit(RealmNameId::Instant)?;
+    for method in TemporalInstantStaticMethod::ALL {
+        visit(RealmNameId::TemporalInstantStatic(method))?;
+    }
+    for method in [
+        TemporalInstantPrototypeMethod::EpochMilliseconds,
+        TemporalInstantPrototypeMethod::EpochNanoseconds,
+    ] {
+        visit(RealmNameId::TemporalInstantPrototype(method))?;
+    }
     visit(RealmNameId::RegExpEscape)?;
     visit(RealmNameId::RegExpCompile)?;
     visit(RealmNameId::RegExpTest)?;
@@ -456,6 +470,10 @@ fn realm_name_description(id: RealmNameId) -> &'static str {
         RealmNameId::ArrayFromAsync => "fromAsync",
         RealmNameId::DateStatic(method) => method.name(),
         RealmNameId::DatePrototype(method) => method.name(),
+        RealmNameId::Temporal => "Temporal",
+        RealmNameId::Instant => "Instant",
+        RealmNameId::TemporalInstantStatic(method) => method.name(),
+        RealmNameId::TemporalInstantPrototype(method) => method.name(),
         RealmNameId::RegExpEscape => "escape",
         RealmNameId::RegExpCompile => "compile",
         RealmNameId::RegExpTest => "test",
@@ -478,8 +496,8 @@ mod tests {
         let schema = RealmIntrinsicSchema::try_new().expect("Realm schema");
         let plan = RealmAtomPlan::try_new(&schema).expect("atom plan");
 
-        assert_eq!(plan.len(), 244);
-        assert_eq!(plan.description_code_units(), 2_048);
+        assert_eq!(plan.len(), 250);
+        assert_eq!(plan.description_code_units(), 2_137);
     }
 
     #[test]

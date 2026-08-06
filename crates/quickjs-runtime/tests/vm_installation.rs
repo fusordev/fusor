@@ -7,9 +7,7 @@ use quickjs_frontend::{
     GlobalScriptGoal, SourceFragment, with_dynamic_function_source, with_parsed_program,
 };
 use quickjs_runtime::{
-    AtomLimits, ExecutionLimits, InstallError, PREDEFINED_ATOM_COUNT,
-    PREDEFINED_DESCRIPTION_CODE_UNITS, PREDEFINED_INTERNER_SLOTS, Runtime, RuntimeLimits,
-    RuntimeResource,
+    AtomLimits, ExecutionLimits, InstallError, Runtime, RuntimeLimits, RuntimeResource,
 };
 
 fn compile(source: &str, root_name: &str) -> Arc<quickjs_bytecode::VerifiedBytecode> {
@@ -62,10 +60,15 @@ fn atom_failure_rolls_back_the_complete_installation() {
         }",
         "fail",
     );
+    let installed_realm_atoms = {
+        let mut probe = Runtime::try_new(RuntimeLimits::default()).expect("probe runtime");
+        probe.create_realm().expect("probe realm");
+        probe.atom_usage()
+    };
     let atom_limits = AtomLimits::new(
-        PREDEFINED_ATOM_COUNT + 202,
-        PREDEFINED_DESCRIPTION_CODE_UNITS + 1_599,
-        PREDEFINED_INTERNER_SLOTS + 202,
+        installed_realm_atoms.live_atoms,
+        installed_realm_atoms.live_description_code_units,
+        installed_realm_atoms.interner_slots,
     );
     let mut runtime =
         Runtime::try_new(RuntimeLimits::default().with_atom_limits(atom_limits)).expect("runtime");
@@ -206,18 +209,24 @@ fn public_root_materializes_ordinary_function_metadata_and_constructor_prototype
 #[test]
 fn public_root_metadata_preflight_is_failure_atomic() {
     let authority = compile("function subject(first,second){}", "subject");
+    let installed_realm = {
+        let mut probe = Runtime::try_new(RuntimeLimits::default()).expect("probe runtime");
+        probe.create_realm().expect("probe realm");
+        probe.usage()
+    };
     for (limits, resource, limit, observed) in [
         (
-            RuntimeLimits::default().with_max_heap_objects(41),
+            RuntimeLimits::default().with_max_heap_objects(installed_realm.heap_objects()),
             RuntimeResource::HeapObjects,
-            41,
-            42,
+            installed_realm.heap_objects(),
+            installed_realm.heap_objects() + 1,
         ),
         (
-            RuntimeLimits::default().with_max_object_properties(1_180),
+            RuntimeLimits::default()
+                .with_max_object_properties(installed_realm.object_properties()),
             RuntimeResource::ObjectProperties,
-            1_180,
-            1_184,
+            installed_realm.object_properties(),
+            installed_realm.object_properties() + 4,
         ),
     ] {
         let mut runtime = Runtime::try_new(limits).expect("runtime");
@@ -343,10 +352,15 @@ fn one_arc_authority_installs_independently_into_two_runtimes() {
 fn long_lived_context_drains_dropped_roots_before_installation_limits() {
     let first = compile("function first(){return 1;}", "first");
     let second = compile("function second(){return 2;}", "second");
+    let installed_functions = {
+        let mut probe = Runtime::try_new(RuntimeLimits::default()).expect("probe runtime");
+        probe.create_realm().expect("probe realm");
+        probe.usage().heap_functions()
+    };
     let mut runtime = Runtime::try_new(
         RuntimeLimits::default()
             .with_max_public_roots(1)
-            .with_max_heap_functions(347),
+            .with_max_heap_functions(installed_functions + 1),
     )
     .expect("runtime");
     let realm = runtime.create_realm().expect("realm");

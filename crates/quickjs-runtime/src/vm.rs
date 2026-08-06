@@ -68,8 +68,9 @@ use crate::{
         PromiseCombinatorShared, PromiseFinallyFunction, PromiseFinallyThunkKind, PromiseJob,
         PromiseResolvingFunction, PromiseResolvingKind, PromiseStatic, RealmGlobalBindingState,
         ReflectMethod, RegExpFlag, RegExpSymbolMethod, SetMethod, SetPrototypeOutcome,
-        StringArgument, StringMethod, UriFunction, WeakMapMethod, WeakSetMethod,
-        array_length_from_number, check_execution_limit, global_declaration_error, usize_to_u64,
+        StringArgument, StringMethod, TemporalInstantPrototypeMethod, TemporalInstantStaticMethod,
+        UriFunction, WeakMapMethod, WeakSetMethod, array_length_from_number, check_execution_limit,
+        global_declaration_error, usize_to_u64,
     },
     value::{HeapReference, SlotValue, StoredValue},
 };
@@ -123,6 +124,7 @@ mod string_methods;
 mod string_raw;
 mod string_replace;
 mod string_split;
+mod temporal;
 mod uri;
 mod weak_collections;
 mod weak_references;
@@ -143,7 +145,7 @@ use {
     iterators::*, json_parse::*, json_stringify::*, locale_string::*, map::*, math::*,
     math_sum_precise::*, native::*, object_intrinsics::*, promise::*, promise_combinators::*,
     properties::*, proxy::*, reflect::*, regexp::*, set::*, stack::*, string_methods::*,
-    string_raw::*, string_replace::*, string_split::*, uri::*, weak_collections::*,
+    string_raw::*, string_replace::*, string_split::*, temporal::*, uri::*, weak_collections::*,
     weak_references::*,
 };
 
@@ -1130,6 +1132,10 @@ enum IntrinsicGetContinuation {
         new_target: FunctionId,
         value: JsNumber,
     },
+    TemporalInstantConstructor {
+        new_target: FunctionId,
+        epoch_nanoseconds: i128,
+    },
     StringConstructor {
         new_target: FunctionId,
         value: JsString,
@@ -1181,6 +1187,7 @@ impl IntrinsicGetContinuation {
             Self::BooleanConstructor { .. }
             | Self::NumberConstructor { .. }
             | Self::DateConstructor { .. }
+            | Self::TemporalInstantConstructor { .. }
             | Self::StringConstructor { .. } => 1,
             Self::ArrayConstructor { arguments, .. } => {
                 1_u64.saturating_add(usize_to_u64(arguments.len()))
@@ -1860,6 +1867,10 @@ enum OperatorPrimitiveTarget {
     DateToPrimitive,
     /// `Date.prototype.toJSON`, after generic `ToPrimitive(number)`.
     DateToJson(Box<DateToJsonContinuation>),
+    TemporalInstantNanoseconds {
+        new_target: Option<FunctionId>,
+    },
+    TemporalInstantMilliseconds,
     NumberToString {
         number: JsNumber,
     },
@@ -1988,6 +1999,8 @@ impl OperatorPrimitiveTarget {
             | Self::DateParse
             | Self::DateSetTime { .. }
             | Self::DateToPrimitive
+            | Self::TemporalInstantNanoseconds { new_target: None }
+            | Self::TemporalInstantMilliseconds
             | Self::StringIntrinsic { new_target: None }
             | Self::SymbolIntrinsic { .. }
             | Self::StringIteratorIntrinsic
@@ -2009,6 +2022,9 @@ impl OperatorPrimitiveTarget {
                 new_target: Some(_),
             }
             | Self::DateConstructor { .. }
+            | Self::TemporalInstantNanoseconds {
+                new_target: Some(_),
+            }
             | Self::StringIntrinsic {
                 new_target: Some(_),
             }
@@ -2230,6 +2246,8 @@ fn trace_operator_primitive_target_roots(
         | OperatorPrimitiveTarget::NumberFormatDigits { .. }
         | OperatorPrimitiveTarget::DateParse
         | OperatorPrimitiveTarget::DateToPrimitive
+        | OperatorPrimitiveTarget::TemporalInstantNanoseconds { new_target: None }
+        | OperatorPrimitiveTarget::TemporalInstantMilliseconds
         | OperatorPrimitiveTarget::GlobalNumeric(_)
         | OperatorPrimitiveTarget::MathUnary(_)
         | OperatorPrimitiveTarget::GlobalUri(_)
@@ -2247,6 +2265,9 @@ fn trace_operator_primitive_target_roots(
         OperatorPrimitiveTarget::DateConstructor { new_target } => {
             mark(CollectionRoot::Heap(HeapReference::Function(*new_target)));
         }
+        OperatorPrimitiveTarget::TemporalInstantNanoseconds {
+            new_target: Some(new_target),
+        } => mark(CollectionRoot::Heap(HeapReference::Function(*new_target))),
         OperatorPrimitiveTarget::DateUtc(state) => state.trace_roots(mark),
         OperatorPrimitiveTarget::DateConstructorComponents(state) => state.trace_roots(mark),
         OperatorPrimitiveTarget::DateSetter(state) => state.trace_roots(mark),
@@ -2426,6 +2447,7 @@ fn trace_native_continuation_roots(
             IntrinsicGetContinuation::BooleanConstructor { new_target, .. }
             | IntrinsicGetContinuation::NumberConstructor { new_target, .. }
             | IntrinsicGetContinuation::DateConstructor { new_target, .. }
+            | IntrinsicGetContinuation::TemporalInstantConstructor { new_target, .. }
             | IntrinsicGetContinuation::StringConstructor { new_target, .. } => {
                 mark(CollectionRoot::Heap(HeapReference::Function(*new_target)));
             }

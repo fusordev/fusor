@@ -20,6 +20,7 @@ mod regexp;
 mod set;
 mod string;
 mod symbol;
+mod temporal;
 mod weak_collections;
 mod weak_references;
 
@@ -132,12 +133,12 @@ impl RealmIntrinsicSchema {
             FamilyCardinality {
                 family: "Realm intrinsic objects",
                 actual: self.objects.len(),
-                expected: 42,
+                expected: 44,
             },
             FamilyCardinality {
                 family: "Realm native functions",
                 actual: self.specs.len(),
-                expected: 394,
+                expected: 402,
             },
         ];
         validate_intrinsic_schema(IntrinsicSchema {
@@ -162,6 +163,8 @@ pub(super) const fn is_declarative_object(id: IntrinsicObjectId) -> bool {
             | IntrinsicObjectId::StringPrototype
             | IntrinsicObjectId::ArrayPrototype
             | IntrinsicObjectId::DatePrototype
+            | IntrinsicObjectId::Temporal
+            | IntrinsicObjectId::TemporalInstantPrototype
             | IntrinsicObjectId::RegExpPrototype
             | IntrinsicObjectId::IteratorPrototype
             | IntrinsicObjectId::AsyncIteratorPrototype
@@ -287,6 +290,9 @@ pub(super) const fn is_declarative_function(id: IntrinsicFunctionId) -> bool {
             | NativeFunctionKind::JsonRawJson
             | NativeFunctionKind::JsonStringify
             | NativeFunctionKind::Math(_)
+            | NativeFunctionKind::TemporalInstantConstructor
+            | NativeFunctionKind::TemporalInstantStatic(_)
+            | NativeFunctionKind::TemporalInstantPrototype(_)
             | NativeFunctionKind::PromiseConstructor
             | NativeFunctionKind::PromiseResolve
             | NativeFunctionKind::PromiseReject
@@ -439,7 +445,10 @@ fn is_global_namespace_property(property: IntrinsicPropertySpec) -> bool {
             property.descriptor,
             IntrinsicDescriptorSpec::Data {
                 value: IntrinsicValueSpec::Object(
-                    IntrinsicObjectId::Reflect | IntrinsicObjectId::Json | IntrinsicObjectId::Math
+                    IntrinsicObjectId::Reflect
+                        | IntrinsicObjectId::Json
+                        | IntrinsicObjectId::Math
+                        | IntrinsicObjectId::Temporal
                 ),
                 ..
             }
@@ -901,6 +910,7 @@ fn visit_object_specs(visit: ObjectSink<'_>) {
     primitives::visit_objects(visit);
     array::visit_objects(visit);
     date::visit_objects(visit);
+    temporal::visit_objects(visit);
     regexp::visit_objects(visit);
     iterator::visit_objects(visit);
     generator::visit_objects(visit);
@@ -925,6 +935,7 @@ fn visit_function_specs(visit: FunctionSink<'_>) {
     string::visit_functions(visit);
     array::visit_kernel_functions(visit);
     date::visit_functions(visit);
+    temporal::visit_functions(visit);
     regexp::visit_functions(visit);
     iterator::visit_functions(visit);
     generator::visit_functions(visit);
@@ -951,6 +962,7 @@ fn visit_property_specs(visit: PropertySink<'_>) {
     string::visit_properties(visit);
     array::visit_properties(visit);
     date::visit_properties(visit);
+    temporal::visit_properties(visit);
     regexp::visit_properties(visit);
     iterator::visit_properties(visit);
     generator::visit_properties(visit);
@@ -1073,8 +1085,8 @@ mod tests {
     #[test]
     fn complete_function_schema_has_characterized_cardinality_and_unique_ids() {
         let schema = RealmIntrinsicSchema::try_new().expect("function schema");
-        assert_eq!(schema.specs().len(), 394);
-        assert_eq!(schema.constructor_prototypes.len(), 29);
+        assert_eq!(schema.specs().len(), 402);
+        assert_eq!(schema.constructor_prototypes.len(), 30);
         for (index, spec) in schema.specs().iter().enumerate() {
             assert!(
                 schema.specs()[..index]

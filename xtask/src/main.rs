@@ -347,6 +347,7 @@ Options:
   --timeout-ms N      Per-process timeout (default: {DEFAULT_TIMEOUT_MS})
   --baseline PATH     Test262 baseline artifacts (default: tests/test262/upstream)
   --filter PATH       Restrict Test262 to one file or subtree below test/
+  --admit-feature N   Admit one baseline-skipped feature within --filter
   --limit N           Stop Test262 inventory after N matching source files
   --report PATH       Write the deterministic Test262 JSON report
   --inventory-only    Verify and classify Test262 without executing cases

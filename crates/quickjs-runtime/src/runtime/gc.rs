@@ -348,6 +348,7 @@ impl Runtime {
                 promise,
                 regexp,
                 date,
+                temporal,
                 symbol,
                 iterators,
                 generators,
@@ -385,6 +386,18 @@ impl Runtime {
                     &mut marked_objects,
                     &mut work,
                 );
+                for reference in [
+                    HeapReference::Object(temporal.namespace),
+                    HeapReference::Object(temporal.instant_prototype),
+                    HeapReference::Function(temporal.instant_constructor),
+                ] {
+                    mark_heap_reference(
+                        reference,
+                        &mut marked_functions,
+                        &mut marked_objects,
+                        &mut work,
+                    );
+                }
                 for intrinsic in errors.entries {
                     mark_heap_reference(
                         HeapReference::Object(intrinsic.prototype),

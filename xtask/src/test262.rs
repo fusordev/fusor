@@ -29,6 +29,7 @@ pub struct Test262Options {
     pub suite: PathBuf,
     pub baseline: PathBuf,
     pub filter: Option<String>,
+    pub admit_feature: Option<String>,
     pub limit: Option<usize>,
     pub report: Option<PathBuf>,
     pub inventory_only: bool,
@@ -41,6 +42,7 @@ pub fn parse_options(
     let mut suite = None;
     let mut baseline = PathBuf::from(DEFAULT_BASELINE);
     let mut filter = None;
+    let mut admit_feature = None;
     let mut limit = None;
     let mut report = None;
     let mut inventory_only = false;
@@ -56,6 +58,16 @@ pub fn parse_options(
                     .into_string()
                     .map_err(|_| "--filter must be valid UTF-8".to_owned())?;
                 filter = Some(normalize_filter(&value)?);
+            }
+            "--admit-feature" => {
+                let value = required_value(&mut arguments, "--admit-feature")?;
+                let value = value
+                    .into_string()
+                    .map_err(|_| "--admit-feature must be valid UTF-8".to_owned())?;
+                if value.is_empty() {
+                    return Err("--admit-feature must not be empty".to_owned());
+                }
+                admit_feature = Some(value);
             }
             "--limit" => {
                 limit = Some(required_positive_usize(&mut arguments, "--limit")?);
@@ -73,6 +85,7 @@ pub fn parse_options(
         suite: suite.ok_or("missing required --suite TEST262_PATH")?,
         baseline,
         filter,
+        admit_feature,
         limit,
         report,
         inventory_only,
@@ -527,6 +540,7 @@ impl Inventory {
         suite: &Path,
         baseline: &Baseline,
         filter: Option<&str>,
+        admitted_feature: Option<&str>,
         limit: Option<usize>,
     ) -> Result<Self, String> {
         let test_root = suite.join("test");
@@ -557,6 +571,7 @@ impl Inventory {
                 &source,
                 &metadata,
                 &baseline.policy,
+                admitted_feature,
                 &harness_root,
             )?;
             if let Some(reason) = &skip_reason {
@@ -625,6 +640,7 @@ fn classify_skip(
     source: &str,
     metadata: &Metadata,
     policy: &BaselinePolicy,
+    admitted_feature: Option<&str>,
     harness_root: &Path,
 ) -> Result<Option<String>, String> {
     if relative.starts_with("intl402/") || relative.starts_with("staging/intl402/") {
@@ -633,11 +649,10 @@ fn classify_skip(
     if policy.excludes(relative) {
         return Ok(Some("quickjs-baseline-exclude".to_owned()));
     }
-    if let Some(feature) = metadata
-        .features
-        .iter()
-        .find(|feature| policy.skipped_features.contains(*feature))
-    {
+    if let Some(feature) = metadata.features.iter().find(|feature| {
+        policy.skipped_features.contains(*feature)
+            && admitted_feature.is_none_or(|admitted| admitted != feature.as_str())
+    }) {
         return Ok(Some(format!("quickjs-skipped-feature:{feature}")));
     }
     if metadata.flags.contains("module") {
@@ -794,9 +809,24 @@ impl HarnessSources {
 
 pub fn run_test262(options: &Test262Options) -> Result<bool, String> {
     let baseline = Baseline::load(&options.baseline)?;
+    if let Some(feature) = options.admit_feature.as_deref() {
+        if options.filter.is_none() {
+            return Err("--admit-feature requires an explicit --filter subtree".to_owned());
+        }
+        if !baseline.policy.skipped_features.contains(feature) {
+            return Err(format!(
+                "--admit-feature `{feature}` is not skipped by the pinned QuickJS baseline"
+            ));
+        }
+    }
     let suite = verify_checkout(&options.suite, &baseline)?;
-    let inventory =
-        Inventory::collect(&suite, &baseline, options.filter.as_deref(), options.limit)?;
+    let inventory = Inventory::collect(
+        &suite,
+        &baseline,
+        options.filter.as_deref(),
+        options.admit_feature.as_deref(),
+        options.limit,
+    )?;
     if inventory.plans.is_empty() {
         return Err("Test262 selection contains no runnable test source files".to_owned());
     }
@@ -1097,6 +1127,7 @@ fn build_report(
         },
         "selection": {
             "filter": options.filter,
+            "admitted_feature": options.admit_feature,
             "limit": options.limit,
             "instruction_fuel": options.instruction_fuel,
         },
@@ -1159,6 +1190,8 @@ mod tests {
             "/tmp/baseline",
             "--filter",
             "test/language/expressions",
+            "--admit-feature",
+            "Temporal",
             "--limit",
             "12",
             "--report",
@@ -1175,6 +1208,7 @@ mod tests {
                 suite: PathBuf::from("/tmp/test262"),
                 baseline: PathBuf::from("/tmp/baseline"),
                 filter: Some("language/expressions".to_owned()),
+                admit_feature: Some("Temporal".to_owned()),
                 limit: Some(12),
                 report: Some(PathBuf::from("/tmp/report.json")),
                 inventory_only: true,
@@ -1230,6 +1264,46 @@ throw new TypeError();",
         );
         assert!(policy.excludes("intl402/DateTimeFormat/basic.js"));
         assert!(!policy.excludes("built-ins/Date/basic.js"));
+    }
+
+    #[test]
+    fn focused_feature_admission_only_removes_the_named_skip() {
+        let policy = BaselinePolicy {
+            skipped_features: BTreeSet::from(["Temporal".to_owned(), "ShadowRealm".to_owned()]),
+            exclusions: Vec::new(),
+        };
+        let temporal = Metadata {
+            features: BTreeSet::from(["Temporal".to_owned()]),
+            ..Metadata::default()
+        };
+        let shadow_realm = Metadata {
+            features: BTreeSet::from(["ShadowRealm".to_owned()]),
+            ..Metadata::default()
+        };
+        let harness = Path::new("harness");
+
+        assert_eq!(
+            classify_skip(
+                "built-ins/Temporal/basic.js",
+                "",
+                &temporal,
+                &policy,
+                Some("Temporal"),
+                harness,
+            ),
+            Ok(None)
+        );
+        assert_eq!(
+            classify_skip(
+                "built-ins/ShadowRealm/basic.js",
+                "",
+                &shadow_realm,
+                &policy,
+                Some("Temporal"),
+                harness,
+            ),
+            Ok(Some("quickjs-skipped-feature:ShadowRealm".to_owned()))
+        );
     }
 
     #[test]
