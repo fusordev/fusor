@@ -254,3 +254,40 @@ fn an_installed_prototype_supplies_methods_with_the_literal_as_receiver() {
         }"
     ));
 }
+
+/// A concise method or accessor defined by an object literal retains that
+/// literal as its `[[HomeObject]]`; every `super` operation therefore starts
+/// from the literal's actual prototype while retaining the literal as the
+/// getter, setter, and method-call receiver.
+#[test]
+fn object_literal_methods_and_accessors_use_their_home_object_for_super() {
+    assert_eq!(
+        text(
+            "function run(){\
+                let base={\
+                    get value(){return this._value;},\
+                    set value(next){this._value=next;},\
+                    method(){return this._value;}\
+                };\
+                let object={\
+                    __proto__:base,_value:2,\
+                    read(){return super.value;},\
+                    call(){return super.method();},\
+                    write(next){return super.value=next;},\
+                    add(next){return super['value']+=next;},\
+                    assign(next){return super.value||=next;},\
+                    pre(){return ++super.value;},\
+                    post(){return super['value']++;},\
+                    get current(){return super.value;},\
+                    set current(next){super.value=next;}\
+                };\
+                let values=''+object.read()+','+object.call()+','+object.write(3)+',';\
+                values+=object.add(2)+','+object.assign(9)+','+object.pre()+',';\
+                values+=object.post()+','+object.current+',';\
+                object.current=8;\
+                return values+object.current;\
+            }"
+        ),
+        "2,2,3,5,5,6,6,7,8"
+    );
+}

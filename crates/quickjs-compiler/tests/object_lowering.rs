@@ -1,7 +1,7 @@
 use quickjs_bytecode::{AtomPoolIndex, BytecodePc, FinalOpcode, Operands, VerificationLimits};
 use quickjs_compiler::{
     CompilationContext, CompiledFunction, CompiledFunctionTree, CompiledLeafFunction,
-    CompilerError, LeafCompilationError, UnsupportedFeature, UnsupportedLeafFeature,
+    LeafCompilationError, UnsupportedLeafFeature,
 };
 use quickjs_frontend::{CompilationGoal, FrontendOptions, GlobalScriptGoal, with_parsed_program};
 
@@ -572,23 +572,35 @@ fn object_methods_capture_outer_cells_and_lower_their_frontend_bodies() {
 }
 
 #[test]
-fn object_method_super_remains_fail_closed_before_home_object_lowering() {
-    let source = "function make(){return {method(){return super.value;}};}";
-    let error = with_parsed_program(
-        source,
-        FrontendOptions::for_goal(CompilationGoal::GlobalScript(GlobalScriptGoal::new())),
-        |unit| match CompilationContext::new(unit) {
-            Ok(_) => panic!("super must not acquire compiler storage"),
-            Err(error) => error,
-        },
-    )
-    .expect("front-end acceptance");
-
-    let CompilerError::Unsupported { feature, span } = error else {
-        panic!("expected a structured unsupported super binding");
-    };
-    assert_eq!(feature, UnsupportedFeature::FunctionSyntheticBinding);
-    assert_eq!(&source[span.start as usize..span.end as usize], "super");
+fn object_methods_and_accessors_lower_super_through_the_home_object() {
+    let tree = compile_tree(
+        "function make(){let base={get value(){return this._value;},set value(next){this._value=next;},method(){return this._value;}};return {__proto__:base,read(){return super.value;},call(){return super.method();},write(next){return super.value=next;},add(next){return super['value']+=next;},assign(next){return super.value||=next;},pre(){return ++super.value;},post(){return super['value']++;},get current(){return super.value;},set current(next){super.value=next;}};}",
+        "make",
+    );
+    let opcodes = tree
+        .functions()
+        .iter()
+        .flat_map(|function| function.control_flow().instructions())
+        .map(|instruction| instruction.decoded().instruction().opcode())
+        .collect::<Vec<_>>();
+    assert!(opcodes.contains(&FinalOpcode::GetSuper));
+    assert!(opcodes.contains(&FinalOpcode::GetSuperValue));
+    assert!(opcodes.contains(&FinalOpcode::PutSuperValue));
+    assert!(opcodes.contains(&FinalOpcode::Dup3));
+    assert!(opcodes.contains(&FinalOpcode::Insert4));
+    assert!(opcodes.contains(&FinalOpcode::Perm5));
+    assert!(tree.functions().iter().any(|function| {
+        function
+            .control_flow()
+            .instructions()
+            .iter()
+            .any(|instruction| {
+                matches!(
+                    instruction.decoded().instruction().operands(),
+                    Operands::U8(5)
+                )
+            })
+    }));
 }
 
 #[test]
@@ -967,52 +979,28 @@ fn computed_anonymous_function_data_properties_use_the_exact_name_definition_seq
 }
 
 #[test]
-fn unsupported_object_forms_fail_closed_at_the_relevant_source() {
-    let cases = [
-        (
-            "function make(object,key,value){return object[key]+=value;}",
-            UnsupportedLeafFeature::UnsupportedExpression,
-            "key",
-        ),
-        (
-            "function make(object,key,value){return object[key]&&=value;}",
-            UnsupportedLeafFeature::UnsupportedExpression,
-            "key",
-        ),
-        (
-            "function make(value){return {...value};}",
-            UnsupportedLeafFeature::UnsupportedExpression,
-            "...value",
-        ),
-        (
-            "function make(object,key){return object[key]++;}",
-            UnsupportedLeafFeature::UnsupportedExpression,
-            "key",
-        ),
-    ];
-
-    for (source, expected_feature, expected_fragment) in cases {
-        let LeafCompilationError::Unsupported { feature, span } = compile_error(source, "make")
-        else {
-            panic!("expected unsupported object form for {source}");
-        };
-        assert_eq!(feature, expected_feature, "{source}");
-        let highlighted = &source[span.start as usize..span.end as usize];
-        assert!(
-            highlighted.contains(expected_fragment),
-            "expected diagnostic span containing {expected_fragment:?}, found {highlighted:?}: {source}"
-        );
-    }
+fn object_spread_remains_fail_closed_at_the_relevant_source() {
+    let source = "function make(value){return {...value};}";
+    let LeafCompilationError::Unsupported { feature, span } = compile_error(source, "make") else {
+        panic!("object spread must remain fail closed");
+    };
+    assert_eq!(feature, UnsupportedLeafFeature::UnsupportedExpression);
+    assert_eq!(&source[span.start as usize..span.end as usize], "...value");
 }
 
 #[test]
-fn anonymous_class_computed_data_properties_fail_closed_at_compilation() {
-    let source = "function make(key){return {[key]:class {}};}";
-    let LeafCompilationError::Unsupported { feature, span } = compile_error(source, "make") else {
-        panic!("anonymous computed class data must remain fail closed");
-    };
-    assert_eq!(feature, UnsupportedLeafFeature::UnsupportedDeclaration);
-    assert_eq!(&source[span.start as usize..span.end as usize], "class {}");
+fn anonymous_class_computed_data_properties_use_the_typed_computed_name_path() {
+    let tree = compile_tree("function make(key){return {[key]:class {}};}", "make");
+    let instructions = tree
+        .root()
+        .control_flow()
+        .instructions()
+        .iter()
+        .map(|instruction| instruction.decoded().instruction().opcode())
+        .collect::<Vec<_>>();
+    assert!(instructions.contains(&FinalOpcode::SetNameComputed));
+    assert!(instructions.contains(&FinalOpcode::DefineArrayEl));
+    assert_eq!(tree.functions().len(), 2);
 }
 
 /// `delete` lowers to the pinned `OP_delete` shape: the base, then the key,

@@ -8,8 +8,8 @@ use std::{
 use oxc_ast::{
     AstKind,
     ast::{
-        BindingPattern, ClassElement, ExportDefaultDeclarationKind, FunctionType,
-        MethodDefinitionKind, Statement, VariableDeclarationKind,
+        BindingPattern, ClassElement, ExportDefaultDeclarationKind, Expression, FunctionType,
+        MethodDefinitionKind, PropertyKind, Statement, VariableDeclarationKind,
     },
 };
 use oxc_semantic::{AstNodes, NodeId, ReferenceId, ScopeId, SymbolFlags, SymbolId};
@@ -945,6 +945,22 @@ fn is_derived_class_constructor(nodes: &AstNodes<'_>, function_node: NodeId) -> 
     class.super_class.is_some()
 }
 
+fn is_home_object_method(nodes: &AstNodes<'_>, function_node: NodeId) -> bool {
+    let AstKind::Function(function) = nodes.kind(function_node) else {
+        return false;
+    };
+    match nodes.parent_kind(function.node_id.get()) {
+        AstKind::MethodDefinition(method) => method.value.node_id.get() == function_node,
+        AstKind::ObjectProperty(property) => {
+            matches!(
+                &property.value,
+                Expression::FunctionExpression(value) if value.node_id.get() == function_node
+            ) && (property.method || property.kind != PropertyKind::Init)
+        }
+        _ => false,
+    }
+}
+
 impl<'unit, 'arena, 'scope> Planner<'unit, 'arena, 'scope> {
     fn new(unit: &'unit ParsedUnit<'arena, 'scope>) -> Result<Self, CompilerError> {
         let root_span = unit.program().span;
@@ -1616,7 +1632,7 @@ impl<'unit, 'arena, 'scope> Planner<'unit, 'arena, 'scope> {
                 AstKind::CallExpression(call)
                     if matches!(
                         &call.callee,
-                        oxc_ast::ast::Expression::Super(expression)
+                        Expression::Super(expression)
                             if expression.node_id.get() == node_id
                     )
             );
@@ -1635,7 +1651,7 @@ impl<'unit, 'arena, 'scope> Planner<'unit, 'arena, 'scope> {
                     !member.optional
                         && matches!(
                             &member.object,
-                            oxc_ast::ast::Expression::Super(expression)
+                            Expression::Super(expression)
                                 if expression.node_id.get() == node_id
                         )
                 }
@@ -1643,24 +1659,20 @@ impl<'unit, 'arena, 'scope> Planner<'unit, 'arena, 'scope> {
                     !member.optional
                         && matches!(
                             &member.object,
-                            oxc_ast::ast::Expression::Super(expression)
+                            Expression::Super(expression)
                                 if expression.node_id.get() == node_id
                         )
                 }
                 _ => false,
             };
-            let class_method = self
-                .executable_drafts
-                .get(owner.index())
-                .is_some_and(|candidate| {
-                    matches!(candidate.executable.kind, ExecutableKind::Function { .. })
-                        && matches!(
-                            nodes.parent_kind(candidate.node_id),
-                            AstKind::MethodDefinition(method)
-                                if method.value.node_id.get() == candidate.node_id
-                        )
-                });
-            if direct_super_property && class_method {
+            let home_object_method =
+                self.executable_drafts
+                    .get(owner.index())
+                    .is_some_and(|candidate| {
+                        matches!(candidate.executable.kind, ExecutableKind::Function { .. })
+                            && is_home_object_method(nodes, candidate.node_id)
+                    });
+            if direct_super_property && home_object_method {
                 continue;
             }
             return unsupported(UnsupportedFeature::FunctionSyntheticBinding, span);

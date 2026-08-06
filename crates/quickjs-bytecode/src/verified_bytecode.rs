@@ -5352,7 +5352,10 @@ fn transfer_object_definition_provenance(
             state.truncate(state.len() - 2);
             state.push(base);
         }
-        FinalOpcode::DefineMethod => {
+        // Object-literal `__proto__: value` mutates the fresh literal in
+        // place; just like `define_method`, it retains the one valid method
+        // target for a later compiler-shaped definition.
+        FinalOpcode::SetProto | FinalOpcode::DefineMethod => {
             let base = retained_object_definition_provenance(state[state.len() - 2]);
             state.truncate(state.len() - 2);
             state.push(base);

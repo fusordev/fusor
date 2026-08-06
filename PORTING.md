@@ -83,8 +83,8 @@ broad Test262.**
   inheritance links. Synthesized defaults forward every supplied argument;
   source-written derived constructors admit direct non-spread `super(...)` in
   their own body through a typed active-constructor/superclass/new-target
-  capability. Class constructors and synchronous, async, generator, and
-  async-generator methods retain `[[HomeObject]]` and support direct
+  capability. Class constructors, class methods, and object-literal concise
+  methods/accessors retain `[[HomeObject]]` and support direct
   static/computed `super` property reads, calls, simple/compound/logical
   assignments, and prefix/postfix updates, preserving the actual `this` for
   inherited getters, setters, and method calls. The receiver initializes only
@@ -100,8 +100,8 @@ broad Test262.**
   public static fields, and computed static fields with non-class values,
   evaluate into own constructor properties when their initializers contain no
   `this`, `super`, or `new.target`.
-- [ ] Class closure: object-literal `super`; spread or arrow-contained
-  `super()`; instance fields; computed-key anonymous-class
+- [ ] Class closure: spread or arrow-contained `super()`; instance fields;
+  computed-key anonymous-class
   name inference outside direct object/static-field definitions, static-field
   initializers using `this`, `super`, or `new.target`, private elements,
   decorators, and static blocks. Do not relabel these as

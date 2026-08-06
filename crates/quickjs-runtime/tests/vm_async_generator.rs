@@ -147,6 +147,28 @@ fn async_generator_class_methods_preserve_the_super_home_object_across_await() {
 }
 
 #[test]
+fn async_generator_object_methods_preserve_the_super_home_object_across_await() {
+    assert_eq!(
+        start_and_read(
+            "function start(){\
+                let state={result:''};\
+                let base={\
+                    get value(){return this._value;},\
+                    set value(next){this._value=next;}\
+                };\
+                let object={\
+                    __proto__:base,_value:3,\
+                    async *values(){let value=await 1;yield super['value']+=value;}\
+                };\
+                object.values().next().then(function(result){state.result=result.value+':'+result.done;});\
+                return state;\
+            }"
+        ),
+        "4:false"
+    );
+}
+
+#[test]
 fn async_generator_call_is_deferred_and_next_returns_a_promise() {
     assert_eq!(
         start_and_read(

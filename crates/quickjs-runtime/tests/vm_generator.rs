@@ -54,6 +54,16 @@ fn generator_class_methods_preserve_the_super_home_object() {
     );
 }
 
+#[test]
+fn generator_object_methods_preserve_the_super_home_object() {
+    assert_eq!(
+        run(
+            "function run(){let base={get value(){return this._value;},set value(next){this._value=next;}};let object={__proto__:base,_value:4,*values(){yield super.value;yield super['value']+=1;}};let iterator=object.values();let first=iterator.next();let second=iterator.next();return first.value+':'+first.done+'|'+second.value+':'+second.done;}"
+        ),
+        "4:false|5:false"
+    );
+}
+
 struct GeneratorAllocationCase {
     runtime: Runtime,
     realm: Realm,

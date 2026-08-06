@@ -91,6 +91,28 @@ fn async_class_methods_preserve_the_super_home_object_across_await() {
 }
 
 #[test]
+fn async_object_methods_preserve_the_super_home_object_across_await() {
+    assert_eq!(
+        start_and_read(
+            "function start(){\
+                let state={result:''};\
+                let base={\
+                    get value(){return this._value;},\
+                    set value(next){this._value=next;}\
+                };\
+                let object={\
+                    __proto__:base,_value:3,\
+                    async read(){let value=await 1;return super['value']+=value;}\
+                };\
+                object.read().then(function(result){state.result=''+result;});\
+                return state;\
+            }"
+        ),
+        "4"
+    );
+}
+
+#[test]
 fn await_always_resumes_as_a_fifo_promise_job() {
     assert_eq!(
         start_and_read(
