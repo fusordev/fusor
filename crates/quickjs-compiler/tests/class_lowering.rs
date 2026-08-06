@@ -236,9 +236,9 @@ fn anonymous_base_class_assignment_defaults_use_their_target_names() {
 }
 
 #[test]
-fn empty_anonymous_base_classes_use_the_typed_computed_name_path() {
+fn computed_anonymous_base_classes_use_the_typed_computed_name_path() {
     let tree = compile(
-        "function make(key){let holder={[key]:class{}};class Box{static[key]=class{}}return [holder,Box];}",
+        "function make(key){let holder={[key]:class{value(){return 3;}}};class Box{static[key]=class{static value(){return 4;}}}return [holder,Box];}",
         "make",
     );
     let opcodes = tree
@@ -262,31 +262,6 @@ fn empty_anonymous_base_classes_use_the_typed_computed_name_path() {
             .count(),
         2
     );
-}
-
-#[test]
-fn computed_anonymous_classes_with_elements_stay_fail_closed() {
-    let error = with_parsed_program(
-        "function make(key){return {[key]:class{method(){return 1;}}};}",
-        FrontendOptions::for_goal(CompilationGoal::GlobalScript(GlobalScriptGoal::new())),
-        |unit| {
-            let context = CompilationContext::new(unit).expect("storage plan");
-            let root = context
-                .executables()
-                .find(|executable| executable.metadata().name() == Some("make"))
-                .expect("root function");
-            context.compile_tree(&root, VerificationLimits::default())
-        },
-    )
-    .expect("frontend")
-    .expect_err("a computed class with elements needs an extended name certificate");
-    assert!(matches!(
-        error,
-        quickjs_compiler::LeafCompilationError::Unsupported {
-            feature: quickjs_compiler::UnsupportedLeafFeature::InferredFunctionName,
-            ..
-        }
-    ));
 }
 
 #[test]

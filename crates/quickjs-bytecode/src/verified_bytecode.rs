@@ -1590,7 +1590,7 @@ pub enum BytecodeVerificationErrorKind {
         pc: BytecodePc,
     },
     /// An inferred-name opcode is not paired with an anonymous ordinary
-    /// closure or isolated empty base-class definition on its unique incoming
+    /// closure or isolated base-class definition on its unique incoming
     /// edge, or a computed name is detached from its data-property definition.
     SetNameTemplateMismatch {
         /// Final bytecode position of the inferred-name opcode.
@@ -4385,10 +4385,10 @@ fn verify_method_definitions(
 
 /// Certifies the compiler-owned named-evaluation primitives. `set_name` and
 /// `set_name_computed` may rename only a fresh anonymous ordinary closure, or
-/// a fresh empty base class between its typed definition and matching computed
-/// data-property definition. Every form has exactly one effective incoming
-/// edge. This prevents arbitrary function objects, methods, named templates,
-/// or control-flow joins from acquiring the intrinsic mutation authority.
+/// a fresh base class immediately after a converted computed key and its typed
+/// definition. Every form has exactly one effective incoming edge. This
+/// prevents arbitrary function objects, methods, named templates, or
+/// control-flow joins from acquiring the intrinsic mutation authority.
 fn verify_inferred_function_names(
     graph: &VerifiedCompilerFunctionGraph,
     metadata: &[VerifiedFunctionMetadata],
@@ -4531,37 +4531,9 @@ fn inferred_computed_class_name_pair(
     {
         return None;
     }
-    let definition_index = set_name_index.checked_add(1)?;
-    if instructions
-        .get(definition_index)?
-        .decoded()
-        .instruction()
-        .opcode()
-        != FinalOpcode::DefineArrayEl
-        || !internal_stack.has_effective_successor(
-            instructions,
-            set_name_index,
-            usize_to_u32(definition_index),
-        )
-    {
-        return None;
-    }
-    let prototype_drop_index = set_name_index.checked_sub(1)?;
-    if instructions
-        .get(prototype_drop_index)?
-        .decoded()
-        .instruction()
-        .opcode()
-        != FinalOpcode::Drop
-        || !internal_stack.has_effective_successor(
-            instructions,
-            prototype_drop_index,
-            usize_to_u32(set_name_index),
-        )
-    {
-        return None;
-    }
-    let definition_class_index = prototype_drop_index.checked_sub(1)?;
+    let key_permutation_index = set_name_index.checked_sub(1)?;
+    let constructor_swap_index = key_permutation_index.checked_sub(1)?;
+    let definition_class_index = constructor_swap_index.checked_sub(1)?;
     let child = class_definition_pair(
         graph,
         parent,
@@ -4571,13 +4543,47 @@ fn inferred_computed_class_name_pair(
         internal_stack,
         definition_class_index,
     )?;
-    internal_stack
-        .has_effective_successor(
-            instructions,
-            definition_class_index,
-            usize_to_u32(prototype_drop_index),
-        )
-        .then_some(child)
+    let closure_index = definition_class_index.checked_sub(1)?;
+    let undefined_index = closure_index.checked_sub(1)?;
+    let key_conversion_index = undefined_index.checked_sub(1)?;
+    let expected_opcodes = [
+        (key_conversion_index, FinalOpcode::ToPropKey),
+        (undefined_index, FinalOpcode::Undefined),
+        (definition_class_index, FinalOpcode::DefineClass),
+        (constructor_swap_index, FinalOpcode::Swap),
+        (key_permutation_index, FinalOpcode::Perm3),
+    ];
+    for (index, expected) in expected_opcodes {
+        let actual = instructions.get(index)?.decoded().instruction().opcode();
+        if actual != expected {
+            return None;
+        }
+    }
+    if !matches!(
+        instructions
+            .get(closure_index)?
+            .decoded()
+            .instruction()
+            .opcode(),
+        FinalOpcode::FClosure | FinalOpcode::FClosure8
+    ) {
+        return None;
+    }
+    let sequence = [
+        key_conversion_index,
+        undefined_index,
+        closure_index,
+        definition_class_index,
+        constructor_swap_index,
+        key_permutation_index,
+        set_name_index,
+    ];
+    for pair in sequence.windows(2) {
+        if !internal_stack.has_effective_successor(instructions, pair[0], usize_to_u32(pair[1])) {
+            return None;
+        }
+    }
+    Some(child)
 }
 
 fn method_definition_pair(

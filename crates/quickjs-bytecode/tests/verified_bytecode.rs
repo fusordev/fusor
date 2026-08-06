@@ -1916,7 +1916,7 @@ fn final_authority_admits_computed_named_evaluation_only_for_its_data_definition
 }
 
 #[test]
-fn final_authority_admits_only_an_isolated_empty_class_computed_name_sequence() {
+fn final_authority_admits_only_a_fresh_class_computed_name_sequence() {
     let valid = [
         (FinalOpcode::Object, Operands::None),
         (
@@ -1933,8 +1933,12 @@ fn final_authority_admits_only_an_isolated_empty_class_computed_name_sequence() 
                 value: 0,
             },
         ),
-        (FinalOpcode::Drop, Operands::None),
+        (FinalOpcode::Swap, Operands::None),
+        (FinalOpcode::Perm3, Operands::None),
         (FinalOpcode::SetNameComputed, Operands::None),
+        (FinalOpcode::Perm3, Operands::None),
+        (FinalOpcode::Swap, Operands::None),
+        (FinalOpcode::Drop, Operands::None),
         (FinalOpcode::DefineArrayEl, Operands::None),
         (FinalOpcode::Drop, Operands::None),
         (FinalOpcode::Return, Operands::None),
@@ -1943,7 +1947,7 @@ fn final_authority_admits_only_an_isolated_empty_class_computed_name_sequence() 
         define_method_input(&valid, CompilerExecutableKind::ClassConstructor, 0),
         BytecodeGraphVerificationLimits::default(),
     )
-    .expect("one isolated empty class gains computed named-evaluation authority");
+    .expect("one fresh class gains computed named-evaluation authority");
     assert!(
         verified
             .requirements()
@@ -1966,10 +1970,14 @@ fn final_authority_admits_only_an_isolated_empty_class_computed_name_sequence() 
                 value: 0,
             },
         ),
-        (FinalOpcode::Drop, Operands::None),
+        (FinalOpcode::Swap, Operands::None),
+        (FinalOpcode::Perm3, Operands::None),
         (FinalOpcode::Dup, Operands::None),
         (FinalOpcode::Drop, Operands::None),
         (FinalOpcode::SetNameComputed, Operands::None),
+        (FinalOpcode::Perm3, Operands::None),
+        (FinalOpcode::Swap, Operands::None),
+        (FinalOpcode::Drop, Operands::None),
         (FinalOpcode::DefineArrayEl, Operands::None),
         (FinalOpcode::Drop, Operands::None),
         (FinalOpcode::Return, Operands::None),

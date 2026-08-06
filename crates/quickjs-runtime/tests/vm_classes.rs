@@ -165,11 +165,11 @@ fn anonymous_base_class_assignment_defaults_infer_their_identifier_names() {
 }
 
 #[test]
-fn empty_anonymous_base_classes_use_computed_object_and_static_field_names() {
+fn computed_anonymous_base_classes_name_themselves_before_installing_elements() {
     run_with(
-        "function run(){let key='Result';let holder={[key]:class{}};class Box{static[key]=class{}}return holder.Result.name==='Result'&&Box.Result.name==='Result';}",
+        "function run(){let key='Result';let holder={[key]:class{value(){return 3;}}};class Box{static[key]=class{static value(){return 4;}}}return holder.Result.name==='Result'&&new holder.Result().value()===3&&Box.Result.name==='Result'&&Box.Result.value()===4;}",
         |result| {
-            let value = result.expect("computed anonymous class name execution");
+            let value = result.expect("computed class name and element execution");
             assert_eq!(value.as_boolean().expect("live Boolean"), Some(true));
         },
     );

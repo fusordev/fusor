@@ -54,23 +54,6 @@ pub(in crate::lowering) fn anonymous_class_expression_span(
     }
 }
 
-fn anonymous_empty_base_class_expression<'expression, 'arena>(
-    expression: &'expression Expression<'arena>,
-) -> Option<&'expression Class<'arena>> {
-    let mut expression = expression;
-    while let Expression::ParenthesizedExpression(parenthesized) = expression {
-        expression = &parenthesized.expression;
-    }
-    let Expression::ClassExpression(class) = expression else {
-        return None;
-    };
-    (class.id.is_none()
-        && class.super_class.is_none()
-        && class.decorators.is_empty()
-        && class.body.body.is_empty())
-    .then_some(class)
-}
-
 pub(in crate::lowering) fn plan_literal(
     expression: &Expression<'_>,
     constants: &CompiledConstantPool,
@@ -633,6 +616,22 @@ impl<'compiler, 'unit, 'arena, 'scope> ExpressionPlanner<'compiler, 'unit, 'aren
             },
             class.span,
         ))?;
+        if self.class_uses_computed_name_context(class) {
+            // Before elements install methods or fields, the evaluated key is
+            // immediately below the fresh constructor/prototype pair:
+            // `[prefix, key, constructor, prototype]`. Rotate only those
+            // values so `set_name_computed` sees `[key, constructor]`, then
+            // restore the class-definition stack shape.
+            for opcode in [
+                FinalOpcode::Swap,
+                FinalOpcode::Perm3,
+                FinalOpcode::SetNameComputed,
+                FinalOpcode::Perm3,
+                FinalOpcode::Swap,
+            ] {
+                flow.emit(PlannedInstruction::new(opcode, Operands::None, class.span))?;
+            }
+        }
         if class.id.is_some() {
             self.plan_base_class_name_initialization(class, layout, flow)?;
         }
@@ -658,6 +657,22 @@ impl<'compiler, 'unit, 'arena, 'scope> ExpressionPlanner<'compiler, 'unit, 'aren
             Operands::None,
             class.span,
         ))
+    }
+
+    fn class_uses_computed_name_context(&self, class: &Class<'arena>) -> bool {
+        if class.id.is_some() {
+            return false;
+        }
+        let nodes = self.unit.semantic().nodes();
+        let mut parent = nodes.parent_id(class.node_id.get());
+        while matches!(nodes.kind(parent), AstKind::ParenthesizedExpression(_)) {
+            parent = nodes.parent_id(parent);
+        }
+        match nodes.kind(parent) {
+            AstKind::ObjectProperty(property) => property.computed,
+            AstKind::PropertyDefinition(field) => field.computed,
+            _ => false,
+        }
     }
 
     fn validate_base_class_method(
@@ -2190,14 +2205,7 @@ impl<'compiler, 'unit, 'arena, 'scope> ExpressionPlanner<'compiler, 'unit, 'aren
             return Ok(None);
         };
         if anonymous_class_expression_span(initializer).is_some() {
-            if anonymous_empty_base_class_expression(initializer).is_none() {
-                return unsupported(UnsupportedLeafFeature::InferredFunctionName, span);
-            }
-            return Ok(Some(PlannedInstruction::new(
-                FinalOpcode::SetNameComputed,
-                Operands::None,
-                span,
-            )));
+            return Ok(None);
         }
         if anonymous_ordinary_function_span(initializer).is_none() {
             return unsupported(UnsupportedLeafFeature::InferredFunctionName, span);
@@ -2248,14 +2256,7 @@ impl<'compiler, 'unit, 'arena, 'scope> ExpressionPlanner<'compiler, 'unit, 'aren
         }
         let inferred_name = if let Some(span) = anonymous_named_evaluation_span(&property.value) {
             if anonymous_class_expression_span(&property.value).is_some() {
-                if anonymous_empty_base_class_expression(&property.value).is_none() {
-                    return unsupported(UnsupportedLeafFeature::InferredFunctionName, span);
-                }
-                Some(PlannedInstruction::new(
-                    FinalOpcode::SetNameComputed,
-                    Operands::None,
-                    span,
-                ))
+                None
             } else if anonymous_ordinary_function_span(&property.value).is_none() {
                 return unsupported(UnsupportedLeafFeature::InferredFunctionName, span);
             } else {
