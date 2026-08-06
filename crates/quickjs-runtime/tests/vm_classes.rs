@@ -110,6 +110,17 @@ fn a_direct_anonymous_base_class_initializer_infers_its_binding_name() {
 }
 
 #[test]
+fn a_parenthesized_anonymous_base_class_initializer_infers_its_binding_name() {
+    run_with(
+        "function run(){let Result=(class{static answer(){return 7;}});let original=Result;Result=0;return original.name==='Result'&&original.answer()===7&&new original().constructor===original;}",
+        |result| {
+            let value = result.expect("parenthesized anonymous class expression execution");
+            assert_eq!(value.as_boolean().expect("live Boolean"), Some(true));
+        },
+    );
+}
+
+#[test]
 fn named_class_member_writes_throw_without_mutating_the_inner_name_cell() {
     run_with(
         "function run(){class Box{static replace(){Box=0;}}try{Box.replace();}catch(error){return error.name==='TypeError'&&Box.name==='Box';}return false;}",

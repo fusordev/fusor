@@ -555,11 +555,18 @@ impl<'arena> CompilationContext<'_, 'arena, '_> {
             ));
         }
         let nodes = self.unit.semantic().nodes();
-        let AstKind::VariableDeclarator(declarator) = nodes.parent_kind(node_id) else {
-            return super::unsupported(
-                super::UnsupportedLeafFeature::UnsupportedExpression,
-                class.span,
-            );
+        let mut parent = nodes.parent_id(node_id);
+        let declarator = loop {
+            match nodes.kind(parent) {
+                AstKind::ParenthesizedExpression(_) => parent = nodes.parent_id(parent),
+                AstKind::VariableDeclarator(declarator) => break declarator,
+                _ => {
+                    return super::unsupported(
+                        super::UnsupportedLeafFeature::UnsupportedExpression,
+                        class.span,
+                    );
+                }
+            }
         };
         let BindingPattern::BindingIdentifier(identifier) = &declarator.id else {
             return super::unsupported(
@@ -567,7 +574,16 @@ impl<'arena> CompilationContext<'_, 'arena, '_> {
                 class.span,
             );
         };
-        let Some(Expression::ClassExpression(initializer)) = declarator.init.as_ref() else {
+        let Some(mut initializer) = declarator.init.as_ref() else {
+            return Err(LeafCompilationError::SemanticInvariant {
+                invariant: "anonymous class variable initializer remains a class expression",
+                span: Some(class.span),
+            });
+        };
+        while let Expression::ParenthesizedExpression(parenthesized) = initializer {
+            initializer = &parenthesized.expression;
+        }
+        let Expression::ClassExpression(initializer) = initializer else {
             return Err(LeafCompilationError::SemanticInvariant {
                 invariant: "anonymous class variable initializer remains a class expression",
                 span: Some(class.span),

@@ -64,9 +64,10 @@ broad Test262.**
   construction/`new.target`.
 - [x] Global Script evaluation preserves realm `var`, lexical bindings, TDZ,
   declaration conflicts, and source identity across evaluations.
-- [~] Classes: named base declarations/expressions and direct simple-binding
-  anonymous base expressions with an explicit or synthesized default
-  constructor and public static/instance methods or accessors execute through
+- [~] Classes: named base declarations/expressions and simple-binding anonymous
+  base expressions (including harmless parentheses) with an explicit or
+  synthesized default constructor and public static/instance methods or
+  accessors execute through
   typed `define_class`.
   Member closures capture the spec-required immutable inner class-name cell,
   distinct from the mutable declaration binding. Constructors are strict,
