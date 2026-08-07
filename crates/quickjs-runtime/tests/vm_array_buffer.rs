@@ -205,3 +205,111 @@ fn shared_array_buffer_preserves_the_distinct_array_buffer_brand() {
         ExceptionKind::RangeError
     );
 }
+
+#[test]
+fn atomics_operate_on_shared_integer_views_in_specification_order() {
+    assert_eq!(
+        rendered(
+            "return [typeof Atomics,Atomics.add.length,Atomics.compareExchange.length,\
+             Atomics.isLockFree.length,Atomics.pause.length,Object.prototype.toString.call(Atomics)].join('|');"
+        ),
+        "object|3|4|1|0|[object Atomics]"
+    );
+    assert_eq!(
+        rendered(
+            "var bytes=new Int8Array(new SharedArrayBuffer(4));bytes[0]=127;\
+             var add=Atomics.add(bytes,0,2);var sub=Atomics.sub(bytes,0,1);\
+             var exchange=Atomics.exchange(bytes,0,1);\
+             var compared=Atomics.compareExchange(bytes,0,1,7);\
+             var missed=Atomics.compareExchange(bytes,0,1,9);\
+             return [add,bytes[0],sub,exchange,compared,missed].join('|');"
+        ),
+        "127|7|-127|-128|1|7"
+    );
+    assert_eq!(
+        rendered(
+            "var words=new Uint16Array(new SharedArrayBuffer(4)),ints=new Int32Array(new SharedArrayBuffer(4));\
+             words[0]=65280;var and=Atomics.and(words,0,255);var or=Atomics.or(words,0,240);\
+             var xor=Atomics.xor(words,0,15);var stored=Atomics.store(ints,0,1.9);\
+             return [and,words[0],or,xor,words[0],stored,Atomics.load(ints,0),\
+             Atomics.isLockFree(1),Atomics.isLockFree(3),Atomics.isLockFree(8)].join('|');"
+        ),
+        "65280|255|0|240|255|1|1|true|false|true"
+    );
+    assert_eq!(
+        rendered(
+            "var bigints=new BigInt64Array(new SharedArrayBuffer(8)),bytes=new Int8Array(new SharedArrayBuffer(4)),log=[];\
+             bigints[0]=1n;var add=Atomics.add(bigints,0,2n);\
+             var compared=Atomics.compareExchange(bigints,0,3n,9n);\
+             var index={valueOf:function(){log.push('index');return 0}},\
+             value={valueOf:function(){log.push('value');return 2}},\
+             replacement={valueOf:function(){log.push('replacement');return 4}};\
+             Atomics.compareExchange(bytes,index,value,replacement);\
+             return [String(add),String(bigints[0]),String(compared),log.join(',')].join('|');"
+        ),
+        "1|9|3|index,value,replacement"
+    );
+    assert_eq!(
+        rendered(
+            "var values=new BigUint64Array(new SharedArrayBuffer(8)),\
+             value={valueOf:function(){return 33n}};\
+             return String(Atomics.store(values,0,value));"
+        ),
+        "33"
+    );
+    assert_eq!(
+        rendered(
+            "var values=new BigUint64Array(new ArrayBuffer(8)),\
+             value={valueOf:function(){return 33n}};values[0]=value;return String(values[0]);"
+        ),
+        "33"
+    );
+    assert_eq!(
+        rendered("return String(BigInt({valueOf:function(){return 33n}}));"),
+        "33"
+    );
+}
+
+#[test]
+fn atomics_reject_non_shared_non_integer_and_invalid_indexed_accesses() {
+    assert_eq!(
+        thrown("return Atomics.add(new Float32Array(new SharedArrayBuffer(4)),0,1);"),
+        ExceptionKind::TypeError
+    );
+    assert_eq!(
+        thrown("return Atomics.add(new Int8Array(new SharedArrayBuffer(1)),1,1);"),
+        ExceptionKind::RangeError
+    );
+    assert_eq!(
+        thrown("return Atomics.add(new BigInt64Array(new SharedArrayBuffer(8)),0,1);"),
+        ExceptionKind::TypeError
+    );
+    assert_eq!(
+        thrown("return Atomics.add({},0,1);"),
+        ExceptionKind::TypeError
+    );
+    assert_eq!(
+        thrown("return Atomics.wait(new Int32Array(new ArrayBuffer(4)),0,0,0);"),
+        ExceptionKind::TypeError
+    );
+    assert_eq!(
+        thrown("return Atomics.notify(new Int8Array(new SharedArrayBuffer(1)),0);"),
+        ExceptionKind::TypeError
+    );
+}
+
+#[test]
+fn atomics_notify_and_wait_preserve_single_agent_and_nonshared_semantics() {
+    assert_eq!(
+        rendered(
+            "var local=new Int32Array(new ArrayBuffer(4)),shared=new Int32Array(new SharedArrayBuffer(4)),\
+             bigints=new BigInt64Array(new SharedArrayBuffer(8));\
+             var poison={valueOf:function(){throw new Error('must not convert')}};\
+             return [Atomics.notify.length,Atomics.wait.length,Atomics.add(local,0,1),Atomics.load(local,0),\
+             Atomics.notify(local,0,1),Atomics.notify(shared,0),\
+             Atomics.wait(shared,0,1,poison),Atomics.wait(shared,0,0,0),\
+             Atomics.wait(bigints,0,0n,0)].join('|');"
+        ),
+        "3|4|0|1|0|0|not-equal|timed-out|timed-out"
+    );
+}

@@ -13,8 +13,8 @@ use super::{
 };
 use crate::object::TypedArrayElementType;
 use crate::runtime::{
-    ArrayBufferPrototypeMethod, DataViewPrototypeMethod, DatePrototypeMethod, DateStaticMethod,
-    SharedArrayBufferPrototypeMethod, TemporalDurationPrototypeMethod,
+    ArrayBufferPrototypeMethod, AtomicsMethod, DataViewPrototypeMethod, DatePrototypeMethod,
+    DateStaticMethod, SharedArrayBufferPrototypeMethod, TemporalDurationPrototypeMethod,
     TemporalDurationStaticMethod, TemporalInstantPrototypeMethod, TemporalInstantStaticMethod,
     TypedArrayPrototypeMethod,
 };
@@ -67,10 +67,11 @@ pub(in crate::runtime) enum IntrinsicObjectId {
     Reflect,
     Json,
     Math,
+    Atomics,
 }
 
 impl IntrinsicObjectId {
-    pub(in crate::runtime) const ALL: [Self; 61] = [
+    pub(in crate::runtime) const ALL: [Self; 62] = [
         Self::ObjectPrototype,
         Self::GlobalObject,
         Self::ErrorPrototype(ErrorIntrinsicKind::Error),
@@ -132,6 +133,7 @@ impl IntrinsicObjectId {
         Self::Reflect,
         Self::Json,
         Self::Math,
+        Self::Atomics,
     ];
 }
 
@@ -206,6 +208,8 @@ pub(in crate::runtime) enum RealmNameId {
     ArrayFlatten(ArrayFlatten),
     MathMethod(MathMethod),
     MathConstant(&'static str),
+    Atomics,
+    AtomicsMethod(AtomicsMethod),
 }
 
 /// A reference to an intrinsic identity before arena allocation.

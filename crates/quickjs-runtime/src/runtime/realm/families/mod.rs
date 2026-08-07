@@ -4,6 +4,7 @@ mod array;
 mod array_buffer;
 mod async_function;
 mod async_generator;
+mod atomics;
 mod data_view;
 mod date;
 mod error;
@@ -137,12 +138,12 @@ impl RealmIntrinsicSchema {
             FamilyCardinality {
                 family: "Realm intrinsic objects",
                 actual: self.objects.len(),
-                expected: 61,
+                expected: 62,
             },
             FamilyCardinality {
                 family: "Realm native functions",
                 actual: self.specs.len(),
-                expected: 509,
+                expected: 522,
             },
         ];
         validate_intrinsic_schema(IntrinsicSchema {
@@ -200,6 +201,7 @@ pub(super) const fn is_declarative_object(id: IntrinsicObjectId) -> bool {
             | IntrinsicObjectId::Reflect
             | IntrinsicObjectId::Json
             | IntrinsicObjectId::Math
+            | IntrinsicObjectId::Atomics
     )
 }
 
@@ -313,6 +315,7 @@ pub(super) const fn is_declarative_function(id: IntrinsicFunctionId) -> bool {
             | NativeFunctionKind::JsonRawJson
             | NativeFunctionKind::JsonStringify
             | NativeFunctionKind::Math(_)
+            | NativeFunctionKind::Atomics(_)
             | NativeFunctionKind::TemporalDurationConstructor
             | NativeFunctionKind::TemporalDurationStatic(_)
             | NativeFunctionKind::TemporalDurationPrototype(_)
@@ -474,6 +477,7 @@ fn is_global_namespace_property(property: IntrinsicPropertySpec) -> bool {
                     IntrinsicObjectId::Reflect
                         | IntrinsicObjectId::Json
                         | IntrinsicObjectId::Math
+                        | IntrinsicObjectId::Atomics
                         | IntrinsicObjectId::Temporal
                 ),
                 ..
@@ -974,6 +978,7 @@ fn visit_object_specs(visit: ObjectSink<'_>) {
     reflect::visit_objects(visit);
     json::visit_objects(visit);
     math::visit_objects(visit);
+    atomics::visit_objects(visit);
 }
 
 fn visit_function_specs(visit: FunctionSink<'_>) {
@@ -1003,6 +1008,7 @@ fn visit_function_specs(visit: FunctionSink<'_>) {
     reflect::visit_functions(visit);
     json::visit_functions(visit);
     math::visit_functions(visit);
+    atomics::visit_functions(visit);
     globals::visit_functions(visit);
     array::visit_method_functions(visit);
 }
@@ -1035,6 +1041,7 @@ fn visit_property_specs(visit: PropertySink<'_>) {
     reflect::visit_properties(visit);
     json::visit_properties(visit);
     math::visit_properties(visit);
+    atomics::visit_properties(visit);
 }
 
 const fn object(

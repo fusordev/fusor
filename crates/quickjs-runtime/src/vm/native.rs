@@ -2380,6 +2380,15 @@ pub(super) fn dispatch_native_call_with_frames(
             origin.unwrap_or_else(native_function_host_origin),
             execution_budget,
         ),
+        NativeFunctionKind::Atomics(method) => begin_atomics_method(
+            runtime,
+            method,
+            native.realm,
+            inputs.arguments,
+            return_to,
+            origin.unwrap_or_else(native_function_host_origin),
+            execution_budget,
+        ),
         NativeFunctionKind::DateConstructor => begin_date_constructor(
             runtime,
             native.realm,
@@ -2765,11 +2774,14 @@ pub(super) fn dispatch_native_call_with_frames(
         }
         NativeFunctionKind::BigIntConstructor => {
             let mut arguments = inputs.arguments;
-            bigint_constructor(
+            begin_bigint_constructor(
+                runtime,
                 native.realm,
                 arguments.take_first(),
                 inputs.new_target,
-                &origin.unwrap_or_else(native_function_host_origin),
+                return_to,
+                origin.unwrap_or_else(native_function_host_origin),
+                execution_budget,
             )
         }
         NativeFunctionKind::BigIntPrototypeToString => {

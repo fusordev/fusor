@@ -60,22 +60,23 @@ use crate::{
     runtime::{
         ArrayBufferPrototypeMethod, ArrayCallback, ArrayCopier, ArrayDefineOutcome, ArrayFlatten,
         ArrayLengthWriteOutcome, ArrayMutator, ArrayReduction, ArraySearch, ArraySort, ArrayStatic,
-        BindingCell, BoundFunction, BytecodeFunction, CollectionRoot, DataViewElementType,
-        DataViewPrototypeMethod, DatePrototypeMethod, DateStaticMethod, EnvironmentBinding,
-        FinalizationRegistryMethod, FrameBindingAddress, FunctionImplementation,
-        GlobalNumericFunction, HeapFunction, InstalledCode, InstalledConstant, InstalledRoot,
-        InstalledTemplate, LocaleStringMethod, MapMethod, MathMethod, NativeFunction,
-        NativeFunctionKind, NumberFormat, NumberPredicate, PreparedIteratorResultPlan,
-        PromiseCapabilityCapture, PromiseCapabilityExecutor, PromiseCombinatorElementFunction,
-        PromiseCombinatorElementKind, PromiseCombinatorKind, PromiseCombinatorShared,
-        PromiseFinallyFunction, PromiseFinallyThunkKind, PromiseJob, PromiseResolvingFunction,
-        PromiseResolvingKind, PromiseStatic, RealmGlobalBindingState, ReflectMethod, RegExpFlag,
-        RegExpSymbolMethod, SetMethod, SetPrototypeOutcome, StringArgument, StringMethod,
-        TemporalDurationPrototypeMethod, TemporalDurationStaticMethod,
-        TemporalInstantPrototypeMethod, TemporalInstantStaticMethod, TypedArrayElementValue,
-        TypedArrayOwnProperty, TypedArrayPropertyKey, TypedArrayPrototypeMethod,
-        TypedArrayStoreOutcome, TypedArrayView, UriFunction, WeakMapMethod, WeakSetMethod,
-        array_length_from_number, check_execution_limit, global_declaration_error, usize_to_u64,
+        AtomicsMethod, BindingCell, BoundFunction, BytecodeFunction, CollectionRoot,
+        DataViewElementType, DataViewPrototypeMethod, DatePrototypeMethod, DateStaticMethod,
+        EnvironmentBinding, FinalizationRegistryMethod, FrameBindingAddress,
+        FunctionImplementation, GlobalNumericFunction, HeapFunction, InstalledCode,
+        InstalledConstant, InstalledRoot, InstalledTemplate, LocaleStringMethod, MapMethod,
+        MathMethod, NativeFunction, NativeFunctionKind, NumberFormat, NumberPredicate,
+        PreparedIteratorResultPlan, PromiseCapabilityCapture, PromiseCapabilityExecutor,
+        PromiseCombinatorElementFunction, PromiseCombinatorElementKind, PromiseCombinatorKind,
+        PromiseCombinatorShared, PromiseFinallyFunction, PromiseFinallyThunkKind, PromiseJob,
+        PromiseResolvingFunction, PromiseResolvingKind, PromiseStatic, RealmGlobalBindingState,
+        ReflectMethod, RegExpFlag, RegExpSymbolMethod, SetMethod, SetPrototypeOutcome,
+        StringArgument, StringMethod, TemporalDurationPrototypeMethod,
+        TemporalDurationStaticMethod, TemporalInstantPrototypeMethod, TemporalInstantStaticMethod,
+        TypedArrayElementValue, TypedArrayOwnProperty, TypedArrayPropertyKey,
+        TypedArrayPrototypeMethod, TypedArrayStoreOutcome, TypedArrayView, UriFunction,
+        WeakMapMethod, WeakSetMethod, array_length_from_number, check_execution_limit,
+        global_declaration_error, usize_to_u64,
     },
     value::{HeapReference, SlotValue, StoredValue},
 };
@@ -94,6 +95,7 @@ mod array_statics;
 mod async_from_sync;
 mod async_function;
 mod async_generator;
+mod atomics;
 mod bigint_intrinsics;
 mod bindings;
 mod conversions;
@@ -147,8 +149,8 @@ use async_function::{begin_async_await, suspend_async_function};
 use {
     aggregate_error::*, array_buffer::*, array_callbacks::*, array_copiers::*, array_flatten::*,
     array_from_async::*, array_join::*, array_mutators::*, array_search::*, array_sort::*,
-    array_statics::*, async_from_sync::*, async_generator::*, bigint_intrinsics::*, bindings::*,
-    conversions::*, data_view::*, date::*, define_property_intrinsics::*, dynamic::*,
+    array_statics::*, async_from_sync::*, async_generator::*, atomics::*, bigint_intrinsics::*,
+    bindings::*, conversions::*, data_view::*, date::*, define_property_intrinsics::*, dynamic::*,
     error_stack::*, errors::*, exceptions::*, execution::*, for_in::*, from_entries::*,
     generator::*, group_by::*, iterators::*, json_parse::*, json_stringify::*, locale_string::*,
     map::*, math::*, math_sum_precise::*, native::*, object_intrinsics::*, promise::*,
@@ -1966,6 +1968,8 @@ enum OperatorPrimitiveTarget {
     NumberIntrinsic {
         new_target: Option<FunctionId>,
     },
+    /// `%BigInt%` after `ToPrimitive(number)`.
+    BigIntConstructor,
     /// A one-argument Date construction, after `ToPrimitive(default)`.
     DateConstructor {
         new_target: FunctionId,
@@ -2032,6 +2036,16 @@ enum OperatorPrimitiveTarget {
     DataViewSetValue(Box<DataViewSetValueState>),
     /// An integer-indexed typed-array write after `ToNumber` or `ToBigInt`.
     TypedArrayElementSet(Box<TypedArrayElementSetState>),
+    /// `Atomics.isLockFree` after `ToIntegerOrInfinity`'s primitive conversion.
+    AtomicsIsLockFree,
+    /// An atomic operation's typed-array index after `ToIndex`.
+    AtomicsIndex(Box<AtomicsContinuation>),
+    /// An atomic operation's value after `ToNumber` or `ToBigInt`.
+    AtomicsValue(Box<AtomicsContinuation>),
+    /// `Atomics.compareExchange`'s replacement value after conversion.
+    AtomicsReplacement(Box<AtomicsContinuation>),
+    /// `Atomics.wait`'s timeout after validating the expected value.
+    AtomicsTimeout(Box<AtomicsContinuation>),
     /// `ArrayBuffer.prototype.resize`'s new length, after the brand checks.
     ArrayBufferResize {
         object: ObjectId,
@@ -2223,9 +2237,11 @@ impl OperatorPrimitiveTarget {
             // retain nothing beyond the operand the caller already counted.
             Self::Unary { .. }
             | Self::NumberIntrinsic { new_target: None }
+            | Self::BigIntConstructor
             | Self::DateParse
             | Self::ArrayBufferResize { .. }
             | Self::SharedArrayBufferGrow { .. }
+            | Self::AtomicsIsLockFree
             | Self::DateSetTime { .. }
             | Self::DateToPrimitive
             | Self::TemporalInstantNanoseconds { new_target: None }
@@ -2324,6 +2340,10 @@ impl OperatorPrimitiveTarget {
             Self::DataViewSetOffset(_) => DataViewSetOffsetState::retained_values(),
             Self::DataViewSetValue(_) => DataViewSetValueState::retained_values(),
             Self::TypedArrayElementSet(state) => state.retained_values(),
+            Self::AtomicsIndex(state)
+            | Self::AtomicsValue(state)
+            | Self::AtomicsReplacement(state)
+            | Self::AtomicsTimeout(state) => state.retained_values(),
             Self::TemporalDurationConstructor(state) => state.retained_values(),
             Self::TemporalDurationBag(state) => state.retained_values(),
             Self::TemporalDurationRoundLargestUnit(_state)
@@ -2564,6 +2584,8 @@ fn trace_operator_primitive_target_roots(
         | OperatorPrimitiveTarget::NumberFormatDigits { .. }
         | OperatorPrimitiveTarget::DateParse
         | OperatorPrimitiveTarget::DateToPrimitive
+        | OperatorPrimitiveTarget::AtomicsIsLockFree
+        | OperatorPrimitiveTarget::BigIntConstructor
         | OperatorPrimitiveTarget::TemporalInstantNanoseconds { new_target: None }
         | OperatorPrimitiveTarget::TemporalInstantMilliseconds
         | OperatorPrimitiveTarget::GlobalNumeric(_)
@@ -2688,6 +2710,10 @@ fn trace_operator_primitive_target_roots(
         OperatorPrimitiveTarget::DataViewSetOffset(state) => state.trace_roots(mark),
         OperatorPrimitiveTarget::DataViewSetValue(state) => state.trace_roots(mark),
         OperatorPrimitiveTarget::TypedArrayElementSet(state) => state.trace_roots(mark),
+        OperatorPrimitiveTarget::AtomicsIndex(state)
+        | OperatorPrimitiveTarget::AtomicsValue(state)
+        | OperatorPrimitiveTarget::AtomicsReplacement(state)
+        | OperatorPrimitiveTarget::AtomicsTimeout(state) => state.trace_roots(mark),
         OperatorPrimitiveTarget::ErrorConstructorMessage(state) => state.trace_roots(mark),
         OperatorPrimitiveTarget::ErrorToStringName(state)
         | OperatorPrimitiveTarget::ErrorToStringMessage(state) => state.trace_roots(mark),

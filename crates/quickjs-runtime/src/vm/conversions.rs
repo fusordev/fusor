@@ -1809,6 +1809,9 @@ fn finish_operator_primitive_target(
                 },
             )
         }
+        OperatorPrimitiveTarget::BigIntConstructor => {
+            finish_bigint_constructor(&value, realm, origin)
+        }
         OperatorPrimitiveTarget::DateConstructor { new_target } => {
             finish_date_constructor_primitive(
                 runtime,
@@ -2027,6 +2030,19 @@ fn finish_operator_primitive_target(
         OperatorPrimitiveTarget::TypedArrayElementSet(state) => {
             finish_typed_array_element_set(runtime, *state, value, return_to, execution_budget)
         }
+        OperatorPrimitiveTarget::AtomicsIsLockFree => {
+            finish_atomics_is_lock_free(value, realm, origin)
+        }
+        OperatorPrimitiveTarget::AtomicsIndex(state) => {
+            finish_atomics_index(runtime, *state, value, return_to, execution_budget)
+        }
+        OperatorPrimitiveTarget::AtomicsValue(state) => {
+            finish_atomics_value(runtime, *state, value, return_to, execution_budget)
+        }
+        OperatorPrimitiveTarget::AtomicsReplacement(state) => {
+            finish_atomics_replacement(runtime, *state, value)
+        }
+        OperatorPrimitiveTarget::AtomicsTimeout(state) => finish_atomics_timeout(&state, value),
         OperatorPrimitiveTarget::ArrayBufferResize { object } => {
             finish_array_buffer_resize(runtime, object, value, realm, origin)
         }
