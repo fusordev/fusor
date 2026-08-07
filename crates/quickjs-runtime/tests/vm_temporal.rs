@@ -436,6 +436,42 @@ fn plain_date_add_and_subtract_reuse_duration_bags_then_read_overflow() {
 }
 
 #[test]
+fn plain_date_time_add_and_subtract_reuse_duration_bags_then_read_overflow() {
+    assert_eq!(
+        rendered(
+            "var log=[];
+             var duration={
+               get years(){log.push('years');return undefined},
+               get months(){log.push('months');return {valueOf:function(){log.push('months number');return 1}}},
+               get weeks(){log.push('weeks');return undefined},
+               get days(){log.push('days');return undefined},
+               get hours(){log.push('hours');return {valueOf:function(){log.push('hours number');return 2}}},
+               get minutes(){log.push('minutes');return undefined},
+               get seconds(){log.push('seconds');return undefined},
+               get milliseconds(){log.push('milliseconds');return undefined},
+               get microseconds(){log.push('microseconds');return undefined},
+               get nanoseconds(){log.push('nanoseconds');return undefined}
+             };
+             var options={get overflow(){log.push('overflow');return {toString:function(){log.push('overflow string');return 'constrain'}}}};
+             var start=new Temporal.PlainDateTime(2020,1,31,23,30);
+             var added=start.add(duration,options);
+             var subtracted=added.subtract('P1M');
+             return [Temporal.PlainDateTime.prototype.add.length,Temporal.PlainDateTime.prototype.subtract.length,
+               added.toString(),subtracted.toString(),log.join(',')].join('|');"
+        ),
+        "1|1|2020-03-01T01:30:00|2020-02-01T01:30:00|days,hours,hours number,microseconds,milliseconds,minutes,months,months number,nanoseconds,seconds,weeks,years,overflow,overflow string"
+    );
+    assert_eq!(
+        thrown("return new Temporal.PlainDateTime(2021,1,31).add({months:1},{overflow:'reject'});"),
+        ExceptionKind::RangeError
+    );
+    assert_eq!(
+        thrown("return Temporal.PlainDateTime.prototype.add.call({}, {days:1});"),
+        ExceptionKind::TypeError
+    );
+}
+
+#[test]
 fn plain_date_with_prepares_partial_fields_before_reading_overflow() {
     assert_eq!(
         rendered(

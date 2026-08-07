@@ -228,6 +228,11 @@ enum TemporalPlainDateOverflowTarget {
     FromPartial(PartialDate),
     FromDateTime(PlainDateTime),
     FromPartialDateTime(PartialDateTime),
+    DateTimeArithmetic {
+        receiver: PlainDateTime,
+        duration: Duration,
+        subtract: bool,
+    },
     Arithmetic {
         receiver: PlainDate,
         duration: Duration,
@@ -1796,6 +1801,26 @@ fn finish_temporal_plain_date_from_options(
             };
             return allocate_temporal_plain_date_time_result(runtime, realm, date_time);
         }
+        TemporalPlainDateOverflowTarget::DateTimeArithmetic {
+            receiver,
+            duration,
+            subtract,
+        } => {
+            let result = if subtract {
+                receiver.subtract(&duration, Some(overflow))
+            } else {
+                receiver.add(&duration, Some(overflow))
+            };
+            let date_time = match result {
+                Ok(date_time) => date_time,
+                Err(error) => {
+                    return Err(NativeFailure::Abrupt(temporal_exception_from_error(
+                        realm, origin, error,
+                    )?));
+                }
+            };
+            return allocate_temporal_plain_date_time_result(runtime, realm, date_time);
+        }
         _ => {}
     }
     let date = match target {
@@ -1840,7 +1865,8 @@ fn finish_temporal_plain_date_from_options(
             }
         }
         TemporalPlainDateOverflowTarget::FromDateTime(_)
-        | TemporalPlainDateOverflowTarget::FromPartialDateTime(_) => {
+        | TemporalPlainDateOverflowTarget::FromPartialDateTime(_)
+        | TemporalPlainDateOverflowTarget::DateTimeArithmetic { .. } => {
             unreachable!("Temporal PlainDateTime overflow targets return above")
         }
     };
@@ -2655,6 +2681,19 @@ pub(super) fn dispatch_temporal_plain_date_time_prototype(
             Some(value) => number(i64::from(value)),
             None => NativeDispatch::Immediate(StoredValue::Undefined),
         }),
+        TemporalPlainDateTimePrototypeMethod::Add
+        | TemporalPlainDateTimePrototypeMethod::Subtract => {
+            begin_temporal_plain_date_time_arithmetic(
+                runtime,
+                date_time,
+                matches!(method, TemporalPlainDateTimePrototypeMethod::Subtract),
+                arguments,
+                realm,
+                return_to,
+                origin.clone(),
+                execution_budget,
+            )
+        }
         TemporalPlainDateTimePrototypeMethod::Equals => begin_temporal_plain_date_time_like(
             runtime,
             arguments.take_first_or_undefined(),
@@ -2669,19 +2708,7 @@ pub(super) fn dispatch_temporal_plain_date_time_prototype(
         TemporalPlainDateTimePrototypeMethod::ToString
         | TemporalPlainDateTimePrototypeMethod::ToJson
         | TemporalPlainDateTimePrototypeMethod::ToLocaleString => {
-            let rendered = match date_time
-                .to_ixdtf_string(ToStringRoundingOptions::default(), DisplayCalendar::Auto)
-            {
-                Ok(rendered) => rendered,
-                Err(error) => {
-                    return Err(NativeFailure::Abrupt(temporal_exception_from_error(
-                        realm, origin, error,
-                    )?));
-                }
-            };
-            Ok(NativeDispatch::Immediate(StoredValue::String(
-                JsString::from_utf8(&rendered)?,
-            )))
+            render_temporal_plain_date_time(&date_time, realm, origin)
         }
         TemporalPlainDateTimePrototypeMethod::ValueOf => temporal_type_error(
             realm,
@@ -2689,6 +2716,57 @@ pub(super) fn dispatch_temporal_plain_date_time_prototype(
             "Temporal.PlainDateTime cannot be converted to a primitive value",
         ),
     }
+}
+
+#[allow(
+    clippy::too_many_arguments,
+    reason = "the shared native arithmetic setup carries the resumed call context explicitly"
+)]
+fn begin_temporal_plain_date_time_arithmetic(
+    runtime: &mut Runtime,
+    receiver: PlainDateTime,
+    subtract: bool,
+    mut arguments: CallArguments,
+    realm: RealmId,
+    return_to: Option<CallReturn>,
+    origin: JsStackFrame,
+    execution_budget: &mut ExecutionBudget,
+) -> Result<NativeDispatch, NativeFailure> {
+    let duration = arguments.take_first_or_undefined();
+    let options = arguments.take_first_or_undefined();
+    begin_temporal_duration_like(
+        runtime,
+        duration,
+        TemporalDurationLikeTarget::PlainDateTimeArithmetic {
+            receiver,
+            subtract,
+            options,
+        },
+        realm,
+        return_to,
+        origin,
+        execution_budget,
+    )
+}
+
+fn render_temporal_plain_date_time(
+    date_time: &PlainDateTime,
+    realm: RealmId,
+    origin: &JsStackFrame,
+) -> Result<NativeDispatch, NativeFailure> {
+    let rendered = match date_time
+        .to_ixdtf_string(ToStringRoundingOptions::default(), DisplayCalendar::Auto)
+    {
+        Ok(rendered) => rendered,
+        Err(error) => {
+            return Err(NativeFailure::Abrupt(temporal_exception_from_error(
+                realm, origin, error,
+            )?));
+        }
+    };
+    Ok(NativeDispatch::Immediate(StoredValue::String(
+        JsString::from_utf8(&rendered)?,
+    )))
 }
 
 fn require_temporal_plain_date_time(
@@ -2746,6 +2824,11 @@ enum TemporalDurationLikeTarget {
         subtract: bool,
         options: StoredValue,
     },
+    PlainDateTimeArithmetic {
+        receiver: PlainDateTime,
+        subtract: bool,
+        options: StoredValue,
+    },
 }
 
 impl TemporalDurationLikeTarget {
@@ -2753,7 +2836,9 @@ impl TemporalDurationLikeTarget {
         match self {
             Self::Allocate | Self::Arithmetic { .. } | Self::InstantArithmetic { .. } => 0,
             Self::CompareFirst { .. } => 2,
-            Self::CompareSecond { .. } | Self::PlainDateArithmetic { .. } => 1,
+            Self::CompareSecond { .. }
+            | Self::PlainDateArithmetic { .. }
+            | Self::PlainDateTimeArithmetic { .. } => 1,
         }
     }
 
@@ -2764,7 +2849,9 @@ impl TemporalDurationLikeTarget {
                 trace_stored_value_root(second, mark);
                 trace_stored_value_root(options, mark);
             }
-            Self::CompareSecond { options, .. } | Self::PlainDateArithmetic { options, .. } => {
+            Self::CompareSecond { options, .. }
+            | Self::PlainDateArithmetic { options, .. }
+            | Self::PlainDateTimeArithmetic { options, .. } => {
                 trace_stored_value_root(options, mark);
             }
         }
@@ -4379,6 +4466,23 @@ fn continue_temporal_duration_like(
         } => begin_temporal_plain_date_from_options(
             runtime,
             TemporalPlainDateOverflowTarget::Arithmetic {
+                receiver,
+                duration,
+                subtract,
+            },
+            options,
+            realm,
+            return_to,
+            origin.clone(),
+            execution_budget,
+        ),
+        TemporalDurationLikeTarget::PlainDateTimeArithmetic {
+            receiver,
+            subtract,
+            options,
+        } => begin_temporal_plain_date_from_options(
+            runtime,
+            TemporalPlainDateOverflowTarget::DateTimeArithmetic {
                 receiver,
                 duration,
                 subtract,
