@@ -762,10 +762,10 @@ fn secondary_operand_domains_are_rejected_before_stack_or_capability_checks() {
         ),
         (
             FinalOpcode::DefinePrivateField,
-            Operands::U8(2),
+            Operands::U8(4),
             FunctionIndexDomains::default(),
             SecondaryOperandField::DefinePrivateFieldKind,
-            2,
+            4,
         ),
         (
             FinalOpcode::DefineClass,

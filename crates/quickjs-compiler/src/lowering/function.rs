@@ -174,8 +174,12 @@ impl CompilationContext<'_, '_, '_> {
                     if method.r#static {
                         continue;
                     }
-                    if method.kind != MethodDefinitionKind::Method
-                        || method.value.generator
+                    if !matches!(
+                        method.kind,
+                        MethodDefinitionKind::Method
+                            | MethodDefinitionKind::Get
+                            | MethodDefinitionKind::Set
+                    ) || method.value.generator
                         || method.value.r#async
                         || !method.decorators.is_empty()
                     {
@@ -489,12 +493,6 @@ impl CompilationContext<'_, '_, '_> {
     ) -> Result<ValidatedFunction, LeafCompilationError> {
         let (executable, class) = self.selected_default_class_constructor(executable_id)?;
         let layout = FrameLayout::new(FrameLayoutInput::new(&self.planned.plan, executable_id))?;
-        if !layout.locals.is_empty() {
-            return Err(LeafCompilationError::SemanticInvariant {
-                invariant: "synthesized default constructor has no local storage",
-                span: Some(class.span),
-            });
-        }
         for child in tree_layout.children(executable_id)? {
             if !self.is_direct_instance_field_initializer_child(executable_id, *child)? {
                 return Err(LeafCompilationError::SemanticInvariant {
@@ -570,7 +568,14 @@ impl CompilationContext<'_, '_, '_> {
             local_count: layout.local_count,
             capture_count,
             capture_layout,
-            locals: Vec::new(),
+            locals: layout
+                .locals
+                .iter()
+                .map(|local| LoweredLocal {
+                    binding: local.binding,
+                    slot: local.slot,
+                })
+                .collect(),
             constants: Arc::clone(constants.entries()),
             atoms: Arc::clone(constants.atoms()),
             closure_variables,

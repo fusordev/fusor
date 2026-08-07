@@ -1444,25 +1444,16 @@ impl Runtime {
         Ok(())
     }
 
-    /// Reads an internal private-name data slot without walking prototypes or
-    /// invoking Proxy traps. Private fields are deliberately not ordinary
+    /// Reads an internal private-name slot without walking prototypes or
+    /// invoking Proxy traps. Private elements are deliberately not ordinary
     /// property accesses, even though their storage shares the ordinary shape
     /// backing for GC and transition interning.
-    pub(crate) fn private_own_data_property(
+    pub(crate) fn private_own_property(
         &self,
         reference: HeapReference,
         key: &PropertyKey,
-    ) -> Result<Option<StoredValue>, crate::ExecutionError> {
-        Ok(match self.object_record(reference)?.own_property(key) {
-            Some(OwnProperty::Data { value, .. }) => Some(value),
-            Some(OwnProperty::Accessor { .. }) => {
-                return Err(crate::EngineFault::RuntimeInvariant {
-                    message: "private field storage became an accessor",
-                }
-                .into());
-            }
-            None => None,
-        })
+    ) -> Result<Option<OwnProperty>, crate::ExecutionError> {
+        Ok(self.object_record(reference)?.own_property(key))
     }
 
     /// Replaces an existing writable internal private-name data slot. The
@@ -1501,6 +1492,66 @@ impl Runtime {
         debug_assert!(replaced, "checked private data slot remains present");
         self.collection_pending = true;
         Ok(Some(true))
+    }
+
+    /// Defines one private accessor half without invoking ordinary property
+    /// machinery. Getter/setter halves merge only with the same own private
+    /// accessor slot; an existing data element is a duplicate private name.
+    ///
+    /// `getter` selects the supplied function's accessor half. `Ok(false)`
+    /// reports an existing private data slot, while `Ok(true)` publishes or
+    /// merges the accessor without walking prototypes or invoking Proxy traps.
+    pub(crate) fn define_private_accessor_property(
+        &mut self,
+        reference: HeapReference,
+        key: PropertyKey,
+        function: FunctionId,
+        is_getter: bool,
+    ) -> Result<bool, crate::ExecutionError> {
+        if !self.functions.contains(function) {
+            return Err(stale_heap_reference(HeapReference::Function(function)).into());
+        }
+        let existing = self.object_record(reference)?.own_property(&key);
+        let is_new = existing.is_none();
+        let layout = PropertyLayout::accessor(false, false);
+        let (getter_function, setter_function) = match existing {
+            None => {
+                if is_getter {
+                    (Some(function), None)
+                } else {
+                    (None, Some(function))
+                }
+            }
+            Some(OwnProperty::Data { .. }) => return Ok(false),
+            Some(OwnProperty::Accessor { getter, setter, .. }) => {
+                if is_getter {
+                    (Some(function), setter)
+                } else {
+                    (getter, Some(function))
+                }
+            }
+        };
+        if is_new {
+            self.append_accessor_property(
+                reference,
+                key,
+                layout,
+                getter_function,
+                setter_function,
+            )?;
+        } else if self
+            .object_record_mut(reference)?
+            .replace_existing_with_accessor(&key, layout, getter_function, setter_function)
+            .is_none()
+        {
+            return Err(crate::EngineFault::RuntimeInvariant {
+                message: "checked private accessor slot disappeared during definition",
+            }
+            .into());
+        } else {
+            self.collection_pending = true;
+        }
+        Ok(true)
     }
 
     /// Creates the ordinary arguments object used by strict functions.

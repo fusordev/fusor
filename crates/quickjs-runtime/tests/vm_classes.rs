@@ -143,6 +143,28 @@ fn static_private_methods_are_class_owned_immutable_and_use_the_static_home_obje
 }
 
 #[test]
+fn private_accessors_merge_by_name_and_preserve_instance_static_and_super_receivers() {
+    run_with(
+        "function run(){class Base{value(){return 'base';}static value(){return 'static';}}class Box extends Base{#seen=0;get #value(){return super.value()+':'+this.#seen;}set #value(next){this.#seen=next;}read(){return this.#value;}write(next){this.#value=next;return this.#value;}static has(candidate){return #value in candidate;}}class First extends Base{static #seen=0;static get #value(){return super.value()+':'+this.#seen;}static set #value(next){this.#seen=next;}static read(){return this.#value;}static write(next){this.#value=next;return this.#value;}static has(candidate){return #value in candidate;}}class Readonly{get #value(){return 1;}write(){this.#value=2;}}class Writeonly{set #value(next){}read(){return this.#value;}}let box=new Box;let receiverRejected=false;let setterRejected=false;let getterRejected=false;try{Box.prototype.read.call({});}catch(error){receiverRejected=error.name==='TypeError';}try{new Readonly().write();}catch(error){setterRejected=error.name==='TypeError';}try{new Writeonly().read();}catch(error){getterRejected=error.name==='TypeError';}return box.read()==='base:0'&&box.write(4)==='base:4'&&Box.has(box)&&!Box.has({})&&First.read()==='static:0'&&First.write(7)==='static:7'&&First.has(First)&&!First.has(Box)&&receiverRejected&&setterRejected&&getterRejected;}",
+        |result| {
+            let value = result.expect("private accessor execution");
+            assert_eq!(value.as_boolean().expect("live Boolean"), Some(true));
+        },
+    );
+}
+
+#[test]
+fn nested_instance_field_classes_keep_private_accessor_names_lexically_distinct() {
+    run_with(
+        "function run(){class Outer{get #value(){}Inner=class{set #value(next){}read(){return this.#value;}};}class Other{set #value(next){}Inner=class{get #value(){}};read(){return this.#value;}}let innerRejected=false;let outerRejected=false;try{new (new Outer().Inner)().read();}catch(error){innerRejected=error.name==='TypeError';}try{new Other().read();}catch(error){outerRejected=error.name==='TypeError';}return innerRejected&&outerRejected;}",
+        |result| {
+            let value = result.expect("nested private accessor execution");
+            assert_eq!(value.as_boolean().expect("live Boolean"), Some(true));
+        },
+    );
+}
+
+#[test]
 fn private_instance_methods_share_a_closure_and_preserve_the_super_home_object() {
     run_with(
         "function run(){class Base{value(){return 40;}}class Box extends Base{#method(){return super.value()+2;}call(){return this.#method();}same(other){return this.#method===other.#method;}name(){return this.#method.name;}static has(candidate){return #method in candidate;}}let first=new Box;let second=new Box;let rejected=false;try{Box.prototype.call.call({});}catch(error){rejected=error.name==='TypeError';}return first.call()===42&&first.same(second)&&first.name()==='#method'&&Box.has(first)&&!Box.has({})&&rejected;}",

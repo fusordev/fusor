@@ -50,7 +50,7 @@ pub enum SecondaryOperandField {
     ThrowErrorKind,
     /// `define_method` kind and flags.
     DefineMethodFlags,
-    /// `define_private_field` element kind.
+    /// `define_private_field` private element kind.
     DefinePrivateFieldKind,
     /// `define_class` flags.
     DefineClassFlags,

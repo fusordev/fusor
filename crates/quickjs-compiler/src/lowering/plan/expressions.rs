@@ -18,6 +18,7 @@ use super::super::{
 use super::abrupt::{AbruptMarker, AbruptMarkerKind};
 use super::calls::MemberCallee;
 use oxc_ast::ast::StaticBlock;
+use std::collections::HashSet;
 
 pub(in crate::lowering) fn anonymous_named_evaluation_span(
     mut expression: &Expression<'_>,
@@ -1034,10 +1035,14 @@ impl<'compiler, 'unit, 'arena, 'scope> ExpressionPlanner<'compiler, 'unit, 'aren
             return Ok(());
         }
         if matches!(method.key, OxcPropertyKey::PrivateIdentifier(_)) {
-            if method.kind != MethodDefinitionKind::Method
-                || method.computed
-                || method.value.generator
-                || method.value.r#async
+            if !matches!(
+                method.kind,
+                MethodDefinitionKind::Method
+                    | MethodDefinitionKind::Get
+                    | MethodDefinitionKind::Set
+            ) || method.computed
+                || (method.kind == MethodDefinitionKind::Method
+                    && (method.value.generator || method.value.r#async))
             {
                 return unsupported(UnsupportedLeafFeature::UnsupportedDeclaration, method.span);
             }
@@ -1113,6 +1118,7 @@ impl<'compiler, 'unit, 'arena, 'scope> ExpressionPlanner<'compiler, 'unit, 'aren
         constants: &CompiledConstantPool,
         flow: &mut PlannedControlFlow,
     ) -> Result<(), LeafCompilationError> {
+        let mut initialized = HashSet::new();
         for element in &class.body.body {
             let (node_id, identifier) = match element {
                 ClassElement::PropertyDefinition(field) => {
@@ -1139,6 +1145,9 @@ impl<'compiler, 'unit, 'arena, 'scope> ExpressionPlanner<'compiler, 'unit, 'aren
                     invariant: "private element has a class-scope name binding",
                     span: Some(identifier.span),
                 })?;
+            if !initialized.insert(binding) {
+                continue;
+            }
             let storage = self.planned.plan.binding(binding).ok_or(
                 LeafCompilationError::SemanticInvariant {
                     invariant: "private element name binding exists",
@@ -1335,7 +1344,12 @@ impl<'compiler, 'unit, 'arena, 'scope> ExpressionPlanner<'compiler, 'unit, 'aren
         flow: &mut PlannedControlFlow,
     ) -> Result<(), LeafCompilationError> {
         if !method.r#static
-            || method.kind != MethodDefinitionKind::Method
+            || !matches!(
+                method.kind,
+                MethodDefinitionKind::Method
+                    | MethodDefinitionKind::Get
+                    | MethodDefinitionKind::Set
+            )
             || !matches!(method.key, OxcPropertyKey::PrivateIdentifier(_))
         {
             return Err(LeafCompilationError::SemanticInvariant {
@@ -1391,9 +1405,15 @@ impl<'compiler, 'unit, 'arena, 'scope> ExpressionPlanner<'compiler, 'unit, 'aren
         ))?;
         flow.emit(self.plan_read_slot(name_binding, name_slot, method.key.span())?)?;
         flow.emit(self.plan_read_slot(function_binding, function_slot, method.key.span())?)?;
+        let private_element_kind = match method.kind {
+            MethodDefinitionKind::Method => 1,
+            MethodDefinitionKind::Get => 2,
+            MethodDefinitionKind::Set => 3,
+            MethodDefinitionKind::Constructor => unreachable!("constructors were skipped"),
+        };
         flow.emit(PlannedInstruction::new(
             FinalOpcode::DefinePrivateField,
-            Operands::U8(1),
+            Operands::U8(private_element_kind),
             method.span,
         ))?;
         flow.emit(PlannedInstruction::new(
@@ -1890,9 +1910,15 @@ impl<'compiler, 'unit, 'arena, 'scope> ExpressionPlanner<'compiler, 'unit, 'aren
         ))?;
         flow.emit(self.plan_read_slot(name_binding, name_slot, method.key.span())?)?;
         flow.emit(self.plan_read_slot(function_binding, function_slot, method.key.span())?)?;
+        let private_element_kind = match method.kind {
+            MethodDefinitionKind::Method => 1,
+            MethodDefinitionKind::Get => 2,
+            MethodDefinitionKind::Set => 3,
+            MethodDefinitionKind::Constructor => unreachable!("constructors were skipped"),
+        };
         flow.emit(PlannedInstruction::new(
             FinalOpcode::DefinePrivateField,
-            Operands::U8(1),
+            Operands::U8(private_element_kind),
             method.span,
         ))?;
         flow.emit(PlannedInstruction::new(
@@ -2088,8 +2114,10 @@ impl<'compiler, 'unit, 'arena, 'scope> ExpressionPlanner<'compiler, 'unit, 'aren
         method: &MethodDefinition<'arena>,
         layout: &FrameLayout,
     ) -> Result<(BindingId, FrameSlot), LeafCompilationError> {
-        if method.kind != MethodDefinitionKind::Method
-            || !matches!(method.key, OxcPropertyKey::PrivateIdentifier(_))
+        if !matches!(
+            method.kind,
+            MethodDefinitionKind::Method | MethodDefinitionKind::Get | MethodDefinitionKind::Set
+        ) || !matches!(method.key, OxcPropertyKey::PrivateIdentifier(_))
         {
             return Err(LeafCompilationError::SemanticInvariant {
                 invariant: "private method name binding belongs to a supported private method",
@@ -2136,8 +2164,10 @@ impl<'compiler, 'unit, 'arena, 'scope> ExpressionPlanner<'compiler, 'unit, 'aren
         method: &MethodDefinition<'arena>,
         layout: &FrameLayout,
     ) -> Result<(BindingId, FrameSlot), LeafCompilationError> {
-        if method.kind != MethodDefinitionKind::Method
-            || !matches!(method.key, OxcPropertyKey::PrivateIdentifier(_))
+        if !matches!(
+            method.kind,
+            MethodDefinitionKind::Method | MethodDefinitionKind::Get | MethodDefinitionKind::Set
+        ) || !matches!(method.key, OxcPropertyKey::PrivateIdentifier(_))
         {
             return Err(LeafCompilationError::SemanticInvariant {
                 invariant: "private method function binding belongs to a supported private method",

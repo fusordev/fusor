@@ -313,7 +313,7 @@ pub(super) fn validate_secondary_operands(
                 u32::from(value),
             ))
         }
-        (FinalOpcode::DefinePrivateField, Operands::U8(value)) if value > 1 => Err(invalid(
+        (FinalOpcode::DefinePrivateField, Operands::U8(value)) if value > 3 => Err(invalid(
             SecondaryOperandField::DefinePrivateFieldKind,
             u32::from(value),
         )),

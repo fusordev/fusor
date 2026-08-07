@@ -863,6 +863,34 @@ fn derived_super_spread_uses_the_typed_constructor_apply_form() {
 }
 
 #[test]
+fn private_accessors_share_one_name_and_lower_to_accessor_kinds() {
+    let tree = compile(
+        "function make(){class Box{get #value(){return 1;}set #value(next){}read(){return this.#value;}write(next){this.#value=next;}}return Box;}",
+        "make",
+    );
+    let instructions = tree
+        .functions()
+        .iter()
+        .flat_map(|function| function.control_flow().instructions())
+        .map(|instruction| instruction.decoded().instruction())
+        .collect::<Vec<_>>();
+
+    assert_eq!(
+        instructions
+            .iter()
+            .filter(|instruction| instruction.opcode() == FinalOpcode::PrivateSymbol)
+            .count(),
+        1
+    );
+    for kind in [2, 3] {
+        assert!(instructions.iter().any(|instruction| matches!(
+            (instruction.opcode(), instruction.operands()),
+            (FinalOpcode::DefinePrivateField, quickjs_bytecode::Operands::U8(value)) if value == kind
+        )));
+    }
+}
+
+#[test]
 fn uncomputed_public_instance_field_initializers_lower_into_each_constructor() {
     let tree = compile(
         "function make(seed){class Base{value=seed;constructor(){}}class Derived extends Base{next=seed+1;constructor(){super();}}class Default extends Base{forward=seed+2;}return [Base,Derived,Default];}",

@@ -5637,7 +5637,7 @@ fn derived_default_constructor_pair(
                     && private_name.decoded().instruction().opcode() == FinalOpcode::GetVarRefCheck
                     && matches!(
                         (define.decoded().instruction().opcode(), define.decoded().instruction().operands()),
-                        (FinalOpcode::DefinePrivateField, Operands::U8(0 | 1))
+                        (FinalOpcode::DefinePrivateField, Operands::U8(0..=3))
                     )
                     && drop.decoded().instruction().opcode() == FinalOpcode::Drop
         );
