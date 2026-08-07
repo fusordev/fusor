@@ -25,7 +25,14 @@
 
 //! Iterative execution of runtime-installed verified bytecode.
 
-use std::{cell::RefCell, collections::VecDeque, error::Error, fmt, rc::Rc, sync::Arc};
+use std::{
+    cell::RefCell,
+    collections::{HashSet, VecDeque},
+    error::Error,
+    fmt,
+    rc::Rc,
+    sync::Arc,
+};
 
 use quickjs_bytecode::{
     BytecodePc, CompilerBindingKind, CompilerClosureBinding, CompilerClosureSource,
@@ -679,9 +686,11 @@ enum ProxyOwnKeysStage {
     TrapLookup,
     TrapCall,
     ResultLength,
+    ResultIndexStart,
     ResultIndex,
     TargetKeys,
     TargetExtensible,
+    TargetDescriptorStart,
     TargetDescriptor,
 }
 
@@ -693,6 +702,7 @@ struct ProxyOwnKeysContinuation {
     length: usize,
     next_index: usize,
     trap_keys: Vec<PropertyKey>,
+    trap_key_set: HashSet<PropertyKey>,
     target_keys: Vec<PropertyKey>,
     next_target_key: usize,
     non_configurable_keys: Vec<PropertyKey>,
@@ -736,6 +746,7 @@ impl ProxyOwnKeysContinuation {
         4_u64
             .saturating_add(u64::from(self.result.is_some()))
             .saturating_add(usize_to_u64(self.trap_keys.len()))
+            .saturating_add(usize_to_u64(self.trap_key_set.len()))
             .saturating_add(usize_to_u64(self.target_keys.len()))
             .saturating_add(usize_to_u64(self.non_configurable_keys.len()))
     }
