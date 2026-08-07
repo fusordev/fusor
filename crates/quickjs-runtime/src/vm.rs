@@ -752,6 +752,7 @@ enum NativeContinuation {
     TypedArrayConstructorSequence(Box<TypedArrayConstructorSequenceState>),
     TypedArrayPrototypeSet(Box<TypedArrayPrototypeSetState>),
     TypedArrayPrototypeSubarray(Box<TypedArrayPrototypeSubarrayState>),
+    TypedArrayPrototypeSlice(Box<TypedArrayPrototypeSliceState>),
     DateToJson(DateToJsonContinuation),
     TemporalDurationBag(Box<TemporalDurationBagContinuation>),
     TemporalDurationCompareOptions(TemporalDurationCompareOptionsContinuation),
@@ -868,6 +869,7 @@ impl NativeContinuation {
             Self::TypedArrayPrototypeSubarray(_) => {
                 TypedArrayPrototypeSubarrayState::retained_values()
             }
+            Self::TypedArrayPrototypeSlice(_) => TypedArrayPrototypeSliceState::retained_values(),
             Self::DateToJson(_) => DateToJsonContinuation::retained_values(),
             Self::TemporalDurationBag(state) => state.retained_values(),
             Self::TemporalDurationCompareOptions(_) => {
@@ -1993,6 +1995,10 @@ enum OperatorPrimitiveTarget {
     TypedArrayPrototypeSubarrayBegin(Box<TypedArrayPrototypeSubarrayState>),
     /// `%TypedArray%.prototype.subarray`'s optional end index.
     TypedArrayPrototypeSubarrayEnd(Box<TypedArrayPrototypeSubarrayState>),
+    /// `%TypedArray%.prototype.slice`'s initial relative index.
+    TypedArrayPrototypeSliceStart(Box<TypedArrayPrototypeSliceState>),
+    /// `%TypedArray%.prototype.slice`'s optional end index.
+    TypedArrayPrototypeSliceEnd(Box<TypedArrayPrototypeSliceState>),
     /// `%TypedArray%.prototype.at`'s relative index.
     TypedArrayPrototypeAtIndex(Box<TypedArrayPrototypeAtState>),
     /// `%TypedArray%.prototype.includes`'s optional relative start index.
@@ -2268,6 +2274,10 @@ impl OperatorPrimitiveTarget {
             Self::TypedArrayPrototypeSubarrayBegin(_state)
             | Self::TypedArrayPrototypeSubarrayEnd(_state) => {
                 TypedArrayPrototypeSubarrayState::retained_values()
+            }
+            Self::TypedArrayPrototypeSliceStart(_state)
+            | Self::TypedArrayPrototypeSliceEnd(_state) => {
+                TypedArrayPrototypeSliceState::retained_values()
             }
             Self::TypedArrayPrototypeAtIndex(_state) => {
                 TypedArrayPrototypeAtState::retained_values()
@@ -2634,6 +2644,8 @@ fn trace_operator_primitive_target_roots(
         | OperatorPrimitiveTarget::TypedArrayPrototypeSetElement(state) => state.trace_roots(mark),
         OperatorPrimitiveTarget::TypedArrayPrototypeSubarrayBegin(state)
         | OperatorPrimitiveTarget::TypedArrayPrototypeSubarrayEnd(state) => state.trace_roots(mark),
+        OperatorPrimitiveTarget::TypedArrayPrototypeSliceStart(state)
+        | OperatorPrimitiveTarget::TypedArrayPrototypeSliceEnd(state) => state.trace_roots(mark),
         OperatorPrimitiveTarget::TypedArrayPrototypeAtIndex(state) => state.trace_roots(mark),
         OperatorPrimitiveTarget::TypedArrayPrototypeIncludesFromIndex(state) => {
             state.trace_roots(mark);
@@ -2799,6 +2811,7 @@ fn trace_native_continuation_roots(
         NativeContinuation::TypedArrayConstructorSequence(state) => state.trace_roots(mark),
         NativeContinuation::TypedArrayPrototypeSet(state) => state.trace_roots(mark),
         NativeContinuation::TypedArrayPrototypeSubarray(state) => state.trace_roots(mark),
+        NativeContinuation::TypedArrayPrototypeSlice(state) => state.trace_roots(mark),
         NativeContinuation::DateToJson(state) => state.trace_roots(mark),
         NativeContinuation::TemporalDurationBag(state) => state.trace_roots(mark),
         NativeContinuation::TemporalDurationCompareOptions(state) => state.trace_roots(mark),

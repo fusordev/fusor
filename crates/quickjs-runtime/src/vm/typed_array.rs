@@ -179,6 +179,36 @@ pub(super) struct TypedArrayPrototypeSubarrayState {
     origin: JsStackFrame,
 }
 
+#[allow(
+    clippy::enum_variant_names,
+    reason = "each name identifies the observable conversion or species boundary being awaited"
+)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum TypedArrayPrototypeSliceStage {
+    AwaitConstructor,
+    AwaitSpecies,
+    AwaitConstruct,
+}
+
+/// Resumable `%TypedArray%.prototype.slice` construction and copy.
+///
+/// The original validated source length determines the requested species
+/// result length. A fresh source witness is intentionally deferred until the
+/// species constructor returns, so resizable-buffer changes use the specified
+/// truncated copy range (and an initially empty range does not revalidate).
+pub(super) struct TypedArrayPrototypeSliceState {
+    source: ObjectId,
+    source_length: usize,
+    start: usize,
+    end: StoredValue,
+    end_index: usize,
+    count: usize,
+    element: TypedArrayElementType,
+    realm: RealmId,
+    stage: TypedArrayPrototypeSliceStage,
+    origin: JsStackFrame,
+}
+
 /// `%TypedArray%.prototype.at` after the initial validated length and before
 /// `ToIntegerOrInfinity(index)` has completed.
 pub(super) struct TypedArrayPrototypeAtState {
@@ -373,6 +403,17 @@ impl TypedArrayPrototypeSubarrayState {
     pub(super) fn trace_roots(&self, mark: &mut dyn FnMut(CollectionRoot)) {
         mark(CollectionRoot::Heap(HeapReference::Object(self.source)));
         mark(CollectionRoot::Heap(HeapReference::Object(self.buffer)));
+        trace_stored_value_root(&self.end, mark);
+    }
+}
+
+impl TypedArrayPrototypeSliceState {
+    pub(super) const fn retained_values() -> u64 {
+        2
+    }
+
+    pub(super) fn trace_roots(&self, mark: &mut dyn FnMut(CollectionRoot)) {
+        mark(CollectionRoot::Heap(HeapReference::Object(self.source)));
         trace_stored_value_root(&self.end, mark);
     }
 }
@@ -1556,6 +1597,7 @@ pub(super) fn dispatch_typed_array_prototype(
             | TypedArrayPrototypeMethod::Fill
             | TypedArrayPrototypeMethod::CopyWithin
             | TypedArrayPrototypeMethod::Reverse
+            | TypedArrayPrototypeMethod::Slice
     ) && !matches!(view, TypedArrayView::InBounds { .. })
     {
         return typed_array_type_error(realm, &origin, "TypedArray is out of bounds");
@@ -1691,6 +1733,18 @@ pub(super) fn dispatch_typed_array_prototype(
                 *object,
                 realm,
                 &origin,
+                execution_budget,
+            );
+        }
+        TypedArrayPrototypeMethod::Slice => {
+            return begin_typed_array_prototype_slice(
+                runtime,
+                *object,
+                arguments.take_first_or_undefined(),
+                arguments.take_first_or_undefined(),
+                realm,
+                return_to,
+                origin,
                 execution_budget,
             );
         }
@@ -2691,6 +2745,350 @@ fn typed_array_prototype_subarray_continuation(
     state: TypedArrayPrototypeSubarrayState,
 ) -> NativeContinuation {
     NativeContinuation::TypedArrayPrototypeSubarray(Box::new(state))
+}
+
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the native entry point preserves both relative-index operands and the standard call context"
+)]
+fn begin_typed_array_prototype_slice(
+    runtime: &mut Runtime,
+    source: ObjectId,
+    start: StoredValue,
+    end: StoredValue,
+    realm: RealmId,
+    return_to: Option<CallReturn>,
+    origin: JsStackFrame,
+    execution_budget: &mut ExecutionBudget,
+) -> Result<NativeDispatch, NativeFailure> {
+    let (source_state, source_length) =
+        typed_array_require_in_bounds(runtime, source, realm, &origin)?;
+    begin_operator_primitive_conversion(
+        runtime,
+        start,
+        OperatorPrimitiveHint::Number,
+        OperatorPrimitiveTarget::TypedArrayPrototypeSliceStart(Box::new(
+            TypedArrayPrototypeSliceState {
+                source,
+                source_length,
+                start: 0,
+                end,
+                end_index: 0,
+                count: 0,
+                element: source_state.element(),
+                realm,
+                stage: TypedArrayPrototypeSliceStage::AwaitConstructor,
+                origin: origin.clone(),
+            },
+        )),
+        realm,
+        return_to,
+        origin,
+        execution_budget,
+    )
+}
+
+pub(super) fn finish_typed_array_prototype_slice_start(
+    runtime: &mut Runtime,
+    mut state: TypedArrayPrototypeSliceState,
+    value: StoredValue,
+    return_to: Option<CallReturn>,
+    execution_budget: &mut ExecutionBudget,
+) -> Result<NativeDispatch, NativeFailure> {
+    let relative =
+        number_to_integer_or_infinity(operator_to_number(value, state.realm, &state.origin)?);
+    state.start = typed_array_relative_bound(relative, state.source_length);
+    if matches!(state.end, StoredValue::Undefined) {
+        state.end_index = state.source_length;
+        state.count = state.source_length.saturating_sub(state.start);
+        return begin_typed_array_slice_constructor_get(
+            runtime,
+            state,
+            return_to,
+            execution_budget,
+        );
+    }
+    let end = state.end.duplicate();
+    let realm = state.realm;
+    let origin = state.origin.clone();
+    begin_operator_primitive_conversion(
+        runtime,
+        end,
+        OperatorPrimitiveHint::Number,
+        OperatorPrimitiveTarget::TypedArrayPrototypeSliceEnd(Box::new(state)),
+        realm,
+        return_to,
+        origin,
+        execution_budget,
+    )
+}
+
+pub(super) fn finish_typed_array_prototype_slice_end(
+    runtime: &mut Runtime,
+    mut state: TypedArrayPrototypeSliceState,
+    value: StoredValue,
+    return_to: Option<CallReturn>,
+    execution_budget: &mut ExecutionBudget,
+) -> Result<NativeDispatch, NativeFailure> {
+    let relative =
+        number_to_integer_or_infinity(operator_to_number(value, state.realm, &state.origin)?);
+    state.end_index = typed_array_relative_bound(relative, state.source_length);
+    state.count = state.end_index.saturating_sub(state.start);
+    begin_typed_array_slice_constructor_get(runtime, state, return_to, execution_budget)
+}
+
+#[expect(
+    clippy::too_many_lines,
+    reason = "the species protocol and post-construction copy must preserve one ordered fresh-witness state machine"
+)]
+#[allow(
+    clippy::needless_pass_by_value,
+    reason = "native continuation completion values are transferred by value across every stage"
+)]
+pub(super) fn advance_typed_array_prototype_slice(
+    runtime: &mut Runtime,
+    mut state: TypedArrayPrototypeSliceState,
+    value: StoredValue,
+    return_to: Option<CallReturn>,
+    execution_budget: &mut ExecutionBudget,
+) -> Result<NativeDispatch, NativeFailure> {
+    match state.stage {
+        TypedArrayPrototypeSliceStage::AwaitConstructor => {
+            if let StoredValue::Function(function) = value
+                && function_is_constructor(runtime, function)?
+            {
+                let function_realm = runtime.function_realm(function)?;
+                if function_realm != state.realm
+                    && function
+                        == runtime.realm_typed_array_constructor(function_realm, state.element)?
+                {
+                    let constructor =
+                        runtime.realm_typed_array_constructor(state.realm, state.element)?;
+                    return begin_typed_array_slice_construct(state, constructor, return_to);
+                }
+            }
+            if matches!(value, StoredValue::Undefined) {
+                let constructor =
+                    runtime.realm_typed_array_constructor(state.realm, state.element)?;
+                return begin_typed_array_slice_construct(state, constructor, return_to);
+            }
+            if !matches!(value, StoredValue::Object(_) | StoredValue::Function(_)) {
+                return typed_array_type_error(state.realm, &state.origin, "not a constructor");
+            }
+            state.stage = TypedArrayPrototypeSliceStage::AwaitSpecies;
+            begin_typed_array_slice_species_get(runtime, state, &value, return_to, execution_budget)
+        }
+        TypedArrayPrototypeSliceStage::AwaitSpecies => {
+            let constructor = if matches!(value, StoredValue::Undefined | StoredValue::Null) {
+                runtime.realm_typed_array_constructor(state.realm, state.element)?
+            } else if let StoredValue::Function(function) = value {
+                if !function_is_constructor(runtime, function)? {
+                    return typed_array_type_error(state.realm, &state.origin, "not a constructor");
+                }
+                function
+            } else {
+                return typed_array_type_error(state.realm, &state.origin, "not a constructor");
+            };
+            begin_typed_array_slice_construct(state, constructor, return_to)
+        }
+        TypedArrayPrototypeSliceStage::AwaitConstruct => {
+            let StoredValue::Object(result) = value else {
+                return typed_array_type_error(
+                    state.realm,
+                    &state.origin,
+                    "TypedArray species constructor returned a non-TypedArray",
+                );
+            };
+            let (target_state, target_length) =
+                typed_array_require_in_bounds(runtime, result, state.realm, &state.origin)?;
+            if target_length < state.count {
+                return typed_array_type_error(
+                    state.realm,
+                    &state.origin,
+                    "TypedArray species constructor returned a too-short TypedArray",
+                );
+            }
+            if target_state.element().is_bigint() != state.element.is_bigint() {
+                return typed_array_type_error(
+                    state.realm,
+                    &state.origin,
+                    "TypedArray species constructor returned a different content type",
+                );
+            }
+            if state.count == 0 {
+                return Ok(NativeDispatch::Immediate(StoredValue::Object(result)));
+            }
+
+            let (source_state, source_length) =
+                typed_array_require_in_bounds(runtime, state.source, state.realm, &state.origin)?;
+            let end = state.end_index.min(source_length);
+            let actual_count = end.saturating_sub(state.start);
+            if actual_count == 0 {
+                return Ok(NativeDispatch::Immediate(StoredValue::Object(result)));
+            }
+            if source_state.element() == target_state.element() {
+                let byte_width = source_state.element().byte_width();
+                let source_offset = source_state
+                    .byte_offset()
+                    .checked_add(state.start.checked_mul(byte_width).ok_or(
+                        EngineFault::RuntimeInvariant {
+                            message: "TypedArray.prototype.slice source byte offset overflowed",
+                        },
+                    )?)
+                    .ok_or(EngineFault::RuntimeInvariant {
+                        message: "TypedArray.prototype.slice source byte offset overflowed",
+                    })?;
+                let byte_count =
+                    actual_count
+                        .checked_mul(byte_width)
+                        .ok_or(EngineFault::RuntimeInvariant {
+                            message: "TypedArray.prototype.slice byte count overflowed",
+                        })?;
+                runtime.copy_array_buffer_bytes_forward(
+                    source_state.buffer(),
+                    source_offset,
+                    target_state.buffer(),
+                    target_state.byte_offset(),
+                    byte_count,
+                )?;
+            } else {
+                for index in 0..actual_count {
+                    execution_budget.charge_instructions(1)?;
+                    let source_index =
+                        state
+                            .start
+                            .checked_add(index)
+                            .ok_or(EngineFault::RuntimeInvariant {
+                                message: "TypedArray.prototype.slice source index overflowed",
+                            })?;
+                    let value = runtime
+                        .typed_array_read_index(state.source, source_index)?
+                        .ok_or(EngineFault::RuntimeInvariant {
+                            message: "TypedArray.prototype.slice lost a fresh source element",
+                        })?;
+                    let stored = match value {
+                        StoredValue::Number(value) => runtime.typed_array_store_index(
+                            result,
+                            index,
+                            TypedArrayElementValue::Number(value),
+                        )?,
+                        StoredValue::BigInt(value) => runtime.typed_array_store_index(
+                            result,
+                            index,
+                            TypedArrayElementValue::BigInt(value.as_ref()),
+                        )?,
+                        _ => {
+                            return Err(EngineFault::RuntimeInvariant {
+                                message: "TypedArray.prototype.slice read an element with the wrong content type",
+                            }
+                            .into());
+                        }
+                    };
+                    if stored != TypedArrayStoreOutcome::Stored {
+                        return Err(EngineFault::RuntimeInvariant {
+                            message: "TypedArray.prototype.slice lost a validated destination element",
+                        }
+                        .into());
+                    }
+                }
+            }
+            Ok(NativeDispatch::Immediate(StoredValue::Object(result)))
+        }
+    }
+}
+
+fn begin_typed_array_slice_constructor_get(
+    runtime: &mut Runtime,
+    mut state: TypedArrayPrototypeSliceState,
+    return_to: Option<CallReturn>,
+    execution_budget: &mut ExecutionBudget,
+) -> Result<NativeDispatch, NativeFailure> {
+    state.stage = TypedArrayPrototypeSliceStage::AwaitConstructor;
+    let source = StoredValue::Object(state.source);
+    charge_heap_property_lookup(runtime, &source, execution_budget)?;
+    let dispatch = begin_value_get(
+        runtime,
+        &source,
+        runtime.predefined_property_key(PredefinedAtom::Constructor),
+        None,
+        state.realm,
+        return_to,
+        state.origin.clone(),
+        execution_budget,
+    )?;
+    continue_get_after(
+        dispatch,
+        state,
+        typed_array_prototype_slice_continuation,
+        |state, value| {
+            advance_typed_array_prototype_slice(runtime, state, value, return_to, execution_budget)
+        },
+        "TypedArray.prototype.slice constructor Get produced a structured result",
+    )
+}
+
+fn begin_typed_array_slice_species_get(
+    runtime: &mut Runtime,
+    state: TypedArrayPrototypeSliceState,
+    constructor: &StoredValue,
+    return_to: Option<CallReturn>,
+    execution_budget: &mut ExecutionBudget,
+) -> Result<NativeDispatch, NativeFailure> {
+    charge_heap_property_lookup(runtime, constructor, execution_budget)?;
+    let dispatch = begin_value_get(
+        runtime,
+        constructor,
+        runtime.predefined_symbol_property_key(PredefinedAtom::SymbolSpecies),
+        None,
+        state.realm,
+        return_to,
+        state.origin.clone(),
+        execution_budget,
+    )?;
+    continue_get_after(
+        dispatch,
+        state,
+        typed_array_prototype_slice_continuation,
+        |state, value| {
+            advance_typed_array_prototype_slice(runtime, state, value, return_to, execution_budget)
+        },
+        "TypedArray.prototype.slice species Get produced a structured result",
+    )
+}
+
+fn begin_typed_array_slice_construct(
+    mut state: TypedArrayPrototypeSliceState,
+    constructor: FunctionId,
+    return_to: Option<CallReturn>,
+) -> Result<NativeDispatch, NativeFailure> {
+    state.stage = TypedArrayPrototypeSliceStage::AwaitConstruct;
+    let count = state.count;
+    let origin = state.origin.clone();
+    let mut continuations = Vec::new();
+    continuations
+        .try_reserve_exact(1)
+        .map_err(|_| ExecutionError::AllocationFailed {
+            resource: RuntimeResource::Frames,
+            additional: 1,
+        })?;
+    continuations.push(typed_array_prototype_slice_continuation(state));
+    Ok(NativeDispatch::Call(NativeCall {
+        function: constructor,
+        receiver: StoredValue::Undefined,
+        arguments: CallArguments::from_values(vec![typed_array_usize_number(count)]),
+        return_to,
+        origin,
+        continuations,
+        pre_call: None,
+        new_target: Some(constructor),
+        native_caller: None,
+    }))
+}
+
+fn typed_array_prototype_slice_continuation(
+    state: TypedArrayPrototypeSliceState,
+) -> NativeContinuation {
+    NativeContinuation::TypedArrayPrototypeSlice(Box::new(state))
 }
 
 fn typed_array_relative_bound(value: f64, length: usize) -> usize {

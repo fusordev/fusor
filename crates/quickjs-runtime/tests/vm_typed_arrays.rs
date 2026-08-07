@@ -447,3 +447,69 @@ fn typed_array_reverse_mutates_in_place_for_number_and_bigint_content() {
         "true|3|-2|1|-2|1"
     );
 }
+
+#[test]
+fn typed_array_slice_uses_species_and_copies_without_aliasing_by_default() {
+    assert_eq!(
+        rendered(
+            "var source=new Uint16Array([1,258,3,4]),out=source.slice(1,-1),bigints=new BigInt64Array([1n,2n]).slice(1);\
+             source[1]=9;return [Uint8Array.prototype.slice.length,Uint8Array.prototype.slice.name,\
+               out.length,out[0],out[1],out.buffer===source.buffer,String(bigints[0])].join('|');"
+        ),
+        "2|slice|2|258|3|false|2"
+    );
+    assert_eq!(
+        rendered(
+            "var source=new Uint8Array([257,2,3]);source.constructor={[Symbol.species]:Uint16Array};\
+             var out=source.slice(0,2);return [out.constructor===Uint16Array,out[0],out[1]].join('|');"
+        ),
+        "true|1|2"
+    );
+    assert_eq!(
+        thrown(
+            "var source=new Uint8Array(2);source.constructor={[Symbol.species]:BigInt64Array};source.slice();"
+        ),
+        ExceptionKind::TypeError
+    );
+    assert_eq!(
+        thrown(
+            "var source=new Uint8Array([1,2]);source.constructor={[Symbol.species]:function C(){return new Uint8Array(0)}};source.slice();"
+        ),
+        ExceptionKind::TypeError
+    );
+}
+
+#[test]
+fn typed_array_slice_revalidates_after_species_and_observes_forward_overlap() {
+    assert_eq!(
+        rendered(
+            "var source=new Uint8Array([1,2,3,4]);\
+             source.constructor={[Symbol.species]:function C(n){return new Uint8Array(source.buffer,1,n)}};\
+             var out=source.slice(0,3);return [out[0],out[1],out[2],source[0],source[1],source[2],source[3]].join('|');"
+        ),
+        "1|1|1|1|1|1|1"
+    );
+    assert_eq!(
+        rendered(
+            "var buffer=new ArrayBuffer(4,{maxByteLength:4}),source=new Uint8Array(buffer);source[0]=7;\
+             source.constructor={[Symbol.species]:function C(n){buffer.resize(1);return new Uint8Array(n)}};\
+             var out=source.slice(0,4);return [out.length,out[0],out[1],out[2],out[3]].join('|');"
+        ),
+        "4|7|0|0|0"
+    );
+    assert_eq!(
+        thrown(
+            "var buffer=new ArrayBuffer(4,{maxByteLength:4}),source=new Uint8Array(buffer,2,2);\
+             source.constructor={[Symbol.species]:function C(n){buffer.resize(1);return new Uint8Array(n)}};source.slice();"
+        ),
+        ExceptionKind::TypeError
+    );
+    assert_eq!(
+        rendered(
+            "var buffer=new ArrayBuffer(4,{maxByteLength:4}),source=new Uint8Array(buffer,2,2);\
+             source.constructor={[Symbol.species]:function C(n){buffer.resize(1);return new Uint8Array(n)}};\
+             return String(source.slice(0,0).length);"
+        ),
+        "0"
+    );
+}

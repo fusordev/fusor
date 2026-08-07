@@ -1940,6 +1940,24 @@ fn finish_operator_primitive_target(
                 execution_budget,
             )
         }
+        OperatorPrimitiveTarget::TypedArrayPrototypeSliceStart(state) => {
+            finish_typed_array_prototype_slice_start(
+                runtime,
+                *state,
+                value,
+                return_to,
+                execution_budget,
+            )
+        }
+        OperatorPrimitiveTarget::TypedArrayPrototypeSliceEnd(state) => {
+            finish_typed_array_prototype_slice_end(
+                runtime,
+                *state,
+                value,
+                return_to,
+                execution_budget,
+            )
+        }
         OperatorPrimitiveTarget::TypedArrayPrototypeAtIndex(state) => {
             finish_typed_array_prototype_at_index(runtime, *state, value)
         }

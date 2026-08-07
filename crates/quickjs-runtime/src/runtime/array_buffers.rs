@@ -208,6 +208,73 @@ impl Runtime {
         Ok(())
     }
 
+    /// Copies a non-observable range in ascending byte-index order.
+    ///
+    /// `%TypedArray%.prototype.slice` uses `SetValueInBuffer` for matching
+    /// element types. If a species constructor returns another view over the
+    /// source buffer, that algorithm observes each preceding write; it is not
+    /// the overlapping-range `memmove` operation used by `set` and
+    /// `copyWithin`.
+    pub(crate) fn copy_array_buffer_bytes_forward(
+        &mut self,
+        source: ObjectId,
+        source_offset: usize,
+        target: ObjectId,
+        target_offset: usize,
+        count: usize,
+    ) -> Result<(), crate::ExecutionError> {
+        if source != target {
+            return self.copy_array_buffer_bytes_to(
+                source,
+                source_offset,
+                target,
+                target_offset,
+                count,
+            );
+        }
+
+        let state = self
+            .objects
+            .get_mut(source)
+            .ok_or(crate::EngineFault::StaleHeapEdge {
+                edge: "ArrayBuffer forward copy",
+                index: source.index(),
+                generation: source.generation(),
+            })?
+            .array_buffer_state_mut()
+            .ok_or(crate::EngineFault::RuntimeInvariant {
+                message: "ArrayBuffer forward copy lost its internal slots",
+            })?;
+        let data = state
+            .data_mut()
+            .ok_or(crate::EngineFault::RuntimeInvariant {
+                message: "ArrayBuffer forward copy source is detached",
+            })?;
+        let source_end =
+            source_offset
+                .checked_add(count)
+                .ok_or(crate::EngineFault::RuntimeInvariant {
+                    message: "ArrayBuffer forward copy source range overflowed",
+                })?;
+        let target_end =
+            target_offset
+                .checked_add(count)
+                .ok_or(crate::EngineFault::RuntimeInvariant {
+                    message: "ArrayBuffer forward copy target range overflowed",
+                })?;
+        if source_end > data.len() || target_end > data.len() {
+            return Err(crate::EngineFault::RuntimeInvariant {
+                message: "ArrayBuffer forward copy range escaped its backing store",
+            }
+            .into());
+        }
+        for index in 0..count {
+            let byte = data[source_offset + index];
+            data[target_offset + index] = byte;
+        }
+        Ok(())
+    }
+
     /// Replaces a live resizable buffer's data block after all checks and
     /// allocation work have succeeded. The operation is failure-atomic.
     pub(crate) fn resize_array_buffer(
