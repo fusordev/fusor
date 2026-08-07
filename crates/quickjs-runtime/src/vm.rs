@@ -1360,6 +1360,10 @@ enum IntrinsicGetContinuation {
         new_target: FunctionId,
         year_month: temporal_rs::PlainYearMonth,
     },
+    TemporalZonedDateTimeConstructor {
+        new_target: FunctionId,
+        date_time: temporal_rs::ZonedDateTime,
+    },
     StringConstructor {
         new_target: FunctionId,
         value: JsString,
@@ -1420,6 +1424,7 @@ impl IntrinsicGetContinuation {
             | Self::TemporalPlainTimeConstructor { .. }
             | Self::TemporalPlainMonthDayConstructor { .. }
             | Self::TemporalPlainYearMonthConstructor { .. }
+            | Self::TemporalZonedDateTimeConstructor { .. }
             | Self::StringConstructor { .. } => 1,
             Self::ArrayConstructor { arguments, .. } => {
                 1_u64.saturating_add(usize_to_u64(arguments.len()))
@@ -2221,6 +2226,7 @@ enum OperatorPrimitiveTarget {
     TemporalPlainTimeConstructor(Box<TemporalPlainTimeConstructorContinuation>),
     TemporalPlainMonthDayConstructor(Box<TemporalPlainMonthDayConstructorContinuation>),
     TemporalPlainYearMonthConstructor(Box<TemporalPlainYearMonthConstructorContinuation>),
+    TemporalZonedDateTimeConstructor(Box<TemporalZonedDateTimeConstructorContinuation>),
     TemporalPlainDateEquals(Box<temporal_rs::PlainDate>),
     TemporalPlainDateBag(Box<TemporalPlainDateBagContinuation>),
     TemporalPlainMonthDayBag(Box<TemporalPlainMonthDayBagContinuation>),
@@ -2538,6 +2544,7 @@ impl OperatorPrimitiveTarget {
             Self::TemporalPlainTimeConstructor(state) => state.retained_values(),
             Self::TemporalPlainMonthDayConstructor(state) => state.retained_values(),
             Self::TemporalPlainYearMonthConstructor(state) => state.retained_values(),
+            Self::TemporalZonedDateTimeConstructor(state) => state.retained_values(),
             Self::TemporalPlainDateBag(_) => TemporalPlainDateBagContinuation::retained_values(),
             Self::TemporalPlainMonthDayBag(_) => {
                 TemporalPlainMonthDayBagContinuation::retained_values()
@@ -2900,6 +2907,7 @@ fn trace_operator_primitive_target_roots(
         OperatorPrimitiveTarget::TemporalPlainTimeConstructor(state) => state.trace_roots(mark),
         OperatorPrimitiveTarget::TemporalPlainMonthDayConstructor(state) => state.trace_roots(mark),
         OperatorPrimitiveTarget::TemporalPlainYearMonthConstructor(state) => state.trace_roots(mark),
+        OperatorPrimitiveTarget::TemporalZonedDateTimeConstructor(state) => state.trace_roots(mark),
         OperatorPrimitiveTarget::TemporalPlainDateBag(state) => state.trace_roots(mark),
         OperatorPrimitiveTarget::TemporalPlainMonthDayBag(state) => state.trace_roots(mark),
         OperatorPrimitiveTarget::TemporalPlainYearMonthBag(state) => state.trace_roots(mark),
@@ -3268,6 +3276,7 @@ fn trace_native_continuation_roots(
             | IntrinsicGetContinuation::TemporalPlainTimeConstructor { new_target, .. }
             | IntrinsicGetContinuation::TemporalPlainMonthDayConstructor { new_target, .. }
             | IntrinsicGetContinuation::TemporalPlainYearMonthConstructor { new_target, .. }
+            | IntrinsicGetContinuation::TemporalZonedDateTimeConstructor { new_target, .. }
             | IntrinsicGetContinuation::StringConstructor { new_target, .. } => {
                 mark(CollectionRoot::Heap(HeapReference::Function(*new_target)));
             }

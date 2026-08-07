@@ -2924,6 +2924,27 @@ pub(super) fn dispatch_native_call_with_frames(
                 execution_budget,
             )
         }
+        NativeFunctionKind::TemporalZonedDateTimeConstructor => {
+            begin_temporal_zoned_date_time_constructor(
+                runtime,
+                native.realm,
+                inputs,
+                return_to,
+                origin.unwrap_or_else(native_function_host_origin),
+                execution_budget,
+            )
+        }
+        NativeFunctionKind::TemporalZonedDateTimeStatic(method) => {
+            begin_temporal_zoned_date_time_static(
+                runtime,
+                method,
+                native.realm,
+                inputs.arguments,
+                return_to,
+                origin.unwrap_or_else(native_function_host_origin),
+                execution_budget,
+            )
+        }
         NativeFunctionKind::ObjectPrototypeToString => begin_object_prototype_to_string(
             runtime,
             native.realm,

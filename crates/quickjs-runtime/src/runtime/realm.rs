@@ -713,6 +713,12 @@ impl RealmBuildTransaction<'_> {
                 plain_year_month_constructor: function(
                     NativeFunctionKind::TemporalPlainYearMonthConstructor,
                 ),
+                zoned_date_time_prototype: object(
+                    IntrinsicObjectId::TemporalZonedDateTimePrototype,
+                ),
+                zoned_date_time_constructor: function(
+                    NativeFunctionKind::TemporalZonedDateTimeConstructor,
+                ),
             },
             map: MapIntrinsics {
                 prototype: object(IntrinsicObjectId::MapPrototype),

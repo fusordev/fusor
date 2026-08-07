@@ -33,6 +33,7 @@ use std::{
 };
 use temporal_rs::{
     Duration, Instant, PlainDate, PlainDateTime, PlainMonthDay, PlainTime, PlainYearMonth,
+    ZonedDateTime,
 };
 
 use crate::ids::ObjectId;
@@ -2498,6 +2499,8 @@ pub(crate) enum HeapObjectKind {
     TemporalPlainMonthDay(PlainMonthDay),
     /// An ECMAScript `Temporal.PlainYearMonth` with ISO date and calendar slots.
     TemporalPlainYearMonth(PlainYearMonth),
+    /// An ECMAScript `Temporal.ZonedDateTime` with epoch, time-zone, and calendar slots.
+    TemporalZonedDateTime(ZonedDateTime),
     /// An ECMAScript Map object with ordered `[[MapData]]`.
     Map(MapState),
     MapIterator(MapIterator),
@@ -2645,6 +2648,7 @@ impl HeapObjectKind {
             | Self::TemporalPlainTime(_)
             | Self::TemporalPlainMonthDay(_)
             | Self::TemporalPlainYearMonth(_)
+            | Self::TemporalZonedDateTime(_)
             | Self::Map(_)
             | Self::MapIterator(_)
             | Self::Set(_)
@@ -2683,6 +2687,7 @@ impl HeapObjectKind {
             | Self::TemporalPlainTime(_)
             | Self::TemporalPlainMonthDay(_)
             | Self::TemporalPlainYearMonth(_)
+            | Self::TemporalZonedDateTime(_)
             | Self::Map(_)
             | Self::MapIterator(_)
             | Self::Set(_)
@@ -2720,6 +2725,7 @@ impl HeapObjectKind {
             | Self::TemporalPlainTime(_)
             | Self::TemporalPlainMonthDay(_)
             | Self::TemporalPlainYearMonth(_)
+            | Self::TemporalZonedDateTime(_)
             | Self::Map(_)
             | Self::MapIterator(_)
             | Self::Set(_)
@@ -2757,6 +2763,7 @@ impl HeapObjectKind {
             | Self::TemporalPlainTime(_)
             | Self::TemporalPlainMonthDay(_)
             | Self::TemporalPlainYearMonth(_)
+            | Self::TemporalZonedDateTime(_)
             | Self::Map(_)
             | Self::MapIterator(_)
             | Self::Set(_)
@@ -2794,6 +2801,7 @@ impl HeapObjectKind {
             | Self::TemporalPlainTime(_)
             | Self::TemporalPlainMonthDay(_)
             | Self::TemporalPlainYearMonth(_)
+            | Self::TemporalZonedDateTime(_)
             | Self::Map(_)
             | Self::MapIterator(_)
             | Self::Set(_)
@@ -2831,6 +2839,7 @@ impl HeapObjectKind {
             | Self::TemporalPlainTime(_)
             | Self::TemporalPlainMonthDay(_)
             | Self::TemporalPlainYearMonth(_)
+            | Self::TemporalZonedDateTime(_)
             | Self::Map(_)
             | Self::MapIterator(_)
             | Self::Set(_)
@@ -2868,6 +2877,7 @@ impl HeapObjectKind {
             | Self::TemporalPlainTime(_)
             | Self::TemporalPlainMonthDay(_)
             | Self::TemporalPlainYearMonth(_)
+            | Self::TemporalZonedDateTime(_)
             | Self::Map(_)
             | Self::MapIterator(_)
             | Self::Set(_)
@@ -2905,6 +2915,7 @@ impl HeapObjectKind {
             | Self::TemporalPlainTime(_)
             | Self::TemporalPlainMonthDay(_)
             | Self::TemporalPlainYearMonth(_)
+            | Self::TemporalZonedDateTime(_)
             | Self::Map(_)
             | Self::MapIterator(_)
             | Self::Set(_)
@@ -2942,6 +2953,7 @@ impl HeapObjectKind {
             | Self::TemporalPlainTime(_)
             | Self::TemporalPlainMonthDay(_)
             | Self::TemporalPlainYearMonth(_)
+            | Self::TemporalZonedDateTime(_)
             | Self::Map(_)
             | Self::MapIterator(_)
             | Self::Set(_)
@@ -3342,6 +3354,15 @@ impl HeapObject {
     }
 
     #[must_use]
+    pub(crate) fn temporal_zoned_date_time(record: ObjectRecord, date_time: ZonedDateTime) -> Self {
+        Self {
+            kind: HeapObjectKind::TemporalZonedDateTime(date_time),
+            record,
+            public_roots: 0,
+        }
+    }
+
+    #[must_use]
     pub(crate) const fn map(record: ObjectRecord, state: MapState) -> Self {
         Self {
             kind: HeapObjectKind::Map(state),
@@ -3565,6 +3586,14 @@ impl HeapObject {
     }
 
     #[must_use]
+    pub(crate) fn temporal_zoned_date_time_value(&self) -> Option<ZonedDateTime> {
+        match &self.kind {
+            HeapObjectKind::TemporalZonedDateTime(date_time) => Some(date_time.clone()),
+            _ => None,
+        }
+    }
+
+    #[must_use]
     pub(crate) const fn is_arguments(&self) -> bool {
         matches!(self.kind, HeapObjectKind::Arguments(_))
     }
@@ -3595,6 +3624,7 @@ impl HeapObject {
             | HeapObjectKind::TemporalPlainTime(_)
             | HeapObjectKind::TemporalPlainMonthDay(_)
             | HeapObjectKind::TemporalPlainYearMonth(_)
+            | HeapObjectKind::TemporalZonedDateTime(_)
             | HeapObjectKind::Map(_)
             | HeapObjectKind::MapIterator(_)
             | HeapObjectKind::Set(_)
@@ -3632,6 +3662,7 @@ impl HeapObject {
             | HeapObjectKind::TemporalPlainTime(_)
             | HeapObjectKind::TemporalPlainMonthDay(_)
             | HeapObjectKind::TemporalPlainYearMonth(_)
+            | HeapObjectKind::TemporalZonedDateTime(_)
             | HeapObjectKind::Map(_)
             | HeapObjectKind::MapIterator(_)
             | HeapObjectKind::Set(_)
@@ -3671,6 +3702,7 @@ impl HeapObject {
             | HeapObjectKind::TemporalPlainTime(_)
             | HeapObjectKind::TemporalPlainMonthDay(_)
             | HeapObjectKind::TemporalPlainYearMonth(_)
+            | HeapObjectKind::TemporalZonedDateTime(_)
             | HeapObjectKind::Map(_)
             | HeapObjectKind::MapIterator(_)
             | HeapObjectKind::Set(_)

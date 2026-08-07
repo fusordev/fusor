@@ -21,7 +21,7 @@ use crate::runtime::{
     TemporalPlainMonthDayPrototypeMethod, TemporalPlainMonthDayStaticMethod,
     TemporalPlainTimePrototypeMethod, TemporalPlainTimeStaticMethod,
     TemporalPlainYearMonthPrototypeMethod, TemporalPlainYearMonthStaticMethod,
-    TypedArrayPrototypeMethod,
+    TemporalZonedDateTimeStaticMethod, TypedArrayPrototypeMethod,
 };
 
 /// Stable identity of an object allocated by Realm bootstrap.
@@ -52,6 +52,7 @@ pub(in crate::runtime) enum IntrinsicObjectId {
     TemporalPlainTimePrototype,
     TemporalPlainMonthDayPrototype,
     TemporalPlainYearMonthPrototype,
+    TemporalZonedDateTimePrototype,
     RegExpPrototype,
     IteratorPrototype,
     AsyncIteratorPrototype,
@@ -81,7 +82,7 @@ pub(in crate::runtime) enum IntrinsicObjectId {
 }
 
 impl IntrinsicObjectId {
-    pub(in crate::runtime) const ALL: [Self; 67] = [
+    pub(in crate::runtime) const ALL: [Self; 68] = [
         Self::ObjectPrototype,
         Self::GlobalObject,
         Self::ErrorPrototype(ErrorIntrinsicKind::Error),
@@ -123,6 +124,7 @@ impl IntrinsicObjectId {
         Self::TemporalPlainTimePrototype,
         Self::TemporalPlainMonthDayPrototype,
         Self::TemporalPlainYearMonthPrototype,
+        Self::TemporalZonedDateTimePrototype,
         Self::RegExpPrototype,
         Self::IteratorPrototype,
         Self::AsyncIteratorPrototype,
@@ -210,6 +212,7 @@ pub(in crate::runtime) enum RealmNameId {
     PlainTime,
     PlainMonthDay,
     PlainYearMonth,
+    ZonedDateTime,
     TemporalDurationStatic(TemporalDurationStaticMethod),
     TemporalDurationPrototype(TemporalDurationPrototypeMethod),
     TemporalInstantStatic(TemporalInstantStaticMethod),
@@ -224,6 +227,7 @@ pub(in crate::runtime) enum RealmNameId {
     TemporalPlainMonthDayPrototype(TemporalPlainMonthDayPrototypeMethod),
     TemporalPlainYearMonthStatic(TemporalPlainYearMonthStaticMethod),
     TemporalPlainYearMonthPrototype(TemporalPlainYearMonthPrototypeMethod),
+    TemporalZonedDateTimeStatic(TemporalZonedDateTimeStaticMethod),
     RegExpEscape,
     RegExpCompile,
     RegExpTest,

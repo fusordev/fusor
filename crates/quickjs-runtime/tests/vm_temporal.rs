@@ -267,6 +267,30 @@ fn plain_year_month_converts_property_bags_and_preserves_observable_boundaries()
 }
 
 #[test]
+fn zoned_date_time_constructor_and_string_from_preserve_branded_slots() {
+    assert_eq!(
+        rendered(
+            "var value=new Temporal.ZonedDateTime(0n,'UTC','iso8601');
+             var from=Temporal.ZonedDateTime.from('2019-05-17T12:34Z[UTC]');
+             return [Temporal.ZonedDateTime.length,Temporal.ZonedDateTime.name,
+               Object.getPrototypeOf(value)===Temporal.ZonedDateTime.prototype,
+               Object.getPrototypeOf(from)===Temporal.ZonedDateTime.prototype,
+               Object.prototype.toString.call(value),Object.prototype.toString.call(from),
+               typeof Temporal.ZonedDateTime.from].join('|');"
+        ),
+        "2|ZonedDateTime|true|true|[object Temporal.ZonedDateTime]|[object Temporal.ZonedDateTime]|function"
+    );
+    assert_eq!(
+        thrown("return Temporal.ZonedDateTime(0n,'UTC');"),
+        ExceptionKind::TypeError
+    );
+    assert_eq!(
+        thrown("return new Temporal.ZonedDateTime(0,'UTC');"),
+        ExceptionKind::TypeError
+    );
+}
+
+#[test]
 fn plain_date_time_constructor_accessors_and_iso_formatting_are_spec_shaped() {
     assert_eq!(
         rendered(

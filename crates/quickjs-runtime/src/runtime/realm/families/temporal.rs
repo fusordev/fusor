@@ -20,6 +20,7 @@ use crate::runtime::{
     TemporalPlainMonthDayPrototypeMethod, TemporalPlainMonthDayStaticMethod,
     TemporalPlainTimePrototypeMethod, TemporalPlainTimeStaticMethod,
     TemporalPlainYearMonthPrototypeMethod, TemporalPlainYearMonthStaticMethod,
+    TemporalZonedDateTimeStaticMethod,
 };
 
 pub(super) fn visit_objects(visit: ObjectSink<'_>) {
@@ -32,6 +33,7 @@ pub(super) fn visit_objects(visit: ObjectSink<'_>) {
         IntrinsicObjectId::TemporalPlainTimePrototype,
         IntrinsicObjectId::TemporalPlainMonthDayPrototype,
         IntrinsicObjectId::TemporalPlainYearMonthPrototype,
+        IntrinsicObjectId::TemporalZonedDateTimePrototype,
     ] {
         visit(object(
             id,
@@ -362,6 +364,18 @@ pub(super) fn visit_functions(visit: FunctionSink<'_>) {
             method.length(),
         ));
     }
+    visit(ordinary(
+        NativeFunctionKind::TemporalZonedDateTimeConstructor,
+        IntrinsicNameSpec::RealmName(RealmNameId::ZonedDateTime),
+        2,
+    ));
+    for method in TemporalZonedDateTimeStaticMethod::ALL {
+        visit(ordinary(
+            NativeFunctionKind::TemporalZonedDateTimeStatic(method),
+            IntrinsicNameSpec::Predefined(PredefinedAtom::From),
+            method.length(),
+        ));
+    }
 }
 
 #[allow(
@@ -403,6 +417,11 @@ pub(super) fn visit_properties(visit: PropertySink<'_>) {
         IntrinsicIdentity::Object(IntrinsicObjectId::TemporalPlainYearMonthPrototype);
     let plain_year_month_constructor = IntrinsicIdentity::Function(IntrinsicFunctionId(
         NativeFunctionKind::TemporalPlainYearMonthConstructor,
+    ));
+    let zoned_date_time_prototype =
+        IntrinsicIdentity::Object(IntrinsicObjectId::TemporalZonedDateTimePrototype);
+    let zoned_date_time_constructor = IntrinsicIdentity::Function(IntrinsicFunctionId(
+        NativeFunctionKind::TemporalZonedDateTimeConstructor,
     ));
 
     visit(data(
@@ -926,5 +945,34 @@ pub(super) fn visit_properties(visit: PropertySink<'_>) {
         IntrinsicKeySpec::WellKnownSymbol(PredefinedAtom::SymbolToStringTag),
         PropertyLayout::data(false, false, true),
         IntrinsicValueSpec::String(IntrinsicStringSpec::Literal("Temporal.PlainYearMonth")),
+    ));
+    visit(method(
+        namespace,
+        IntrinsicKeySpec::InternedString(RealmNameId::ZonedDateTime),
+        NativeFunctionKind::TemporalZonedDateTimeConstructor,
+    ));
+    visit(data(
+        zoned_date_time_constructor,
+        IntrinsicKeySpec::PredefinedString(PredefinedAtom::Prototype),
+        CONSTRUCTOR_PROTOTYPE_PROPERTY,
+        IntrinsicValueSpec::Object(IntrinsicObjectId::TemporalZonedDateTimePrototype),
+    ));
+    visit(method(
+        zoned_date_time_prototype,
+        IntrinsicKeySpec::PredefinedString(PredefinedAtom::Constructor),
+        NativeFunctionKind::TemporalZonedDateTimeConstructor,
+    ));
+    for method_id in TemporalZonedDateTimeStaticMethod::ALL {
+        visit(method(
+            zoned_date_time_constructor,
+            IntrinsicKeySpec::PredefinedString(PredefinedAtom::From),
+            NativeFunctionKind::TemporalZonedDateTimeStatic(method_id),
+        ));
+    }
+    visit(data(
+        zoned_date_time_prototype,
+        IntrinsicKeySpec::WellKnownSymbol(PredefinedAtom::SymbolToStringTag),
+        PropertyLayout::data(false, false, true),
+        IntrinsicValueSpec::String(IntrinsicStringSpec::Literal("Temporal.ZonedDateTime")),
     ));
 }

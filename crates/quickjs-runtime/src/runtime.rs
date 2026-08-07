@@ -311,6 +311,8 @@ struct TemporalIntrinsics {
     plain_month_day_constructor: FunctionId,
     plain_year_month_prototype: ObjectId,
     plain_year_month_constructor: FunctionId,
+    zoned_date_time_prototype: ObjectId,
+    zoned_date_time_constructor: FunctionId,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -1259,6 +1261,8 @@ pub(crate) enum NativeFunctionKind {
     TemporalPlainYearMonthConstructor,
     TemporalPlainYearMonthStatic(TemporalPlainYearMonthStaticMethod),
     TemporalPlainYearMonthPrototype(TemporalPlainYearMonthPrototypeMethod),
+    TemporalZonedDateTimeConstructor,
+    TemporalZonedDateTimeStatic(TemporalZonedDateTimeStaticMethod),
     FunctionPrototypeToString,
     ErrorConstructor(ErrorIntrinsicKind),
     ErrorPrototypeToString,
@@ -2311,6 +2315,11 @@ pub(crate) enum TemporalPlainYearMonthStaticMethod {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum TemporalZonedDateTimeStaticMethod {
+    From,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum TemporalPlainDatePrototypeMethod {
     CalendarId,
     Year,
@@ -2749,6 +2758,22 @@ impl TemporalPlainYearMonthStaticMethod {
         match self {
             Self::From => 1,
             Self::Compare => 2,
+        }
+    }
+}
+
+impl TemporalZonedDateTimeStaticMethod {
+    pub(crate) const ALL: [Self; 1] = [Self::From];
+
+    pub(crate) const fn name(self) -> &'static str {
+        match self {
+            Self::From => "from",
+        }
+    }
+
+    pub(crate) const fn length(self) -> i32 {
+        match self {
+            Self::From => 1,
         }
     }
 }
@@ -3751,6 +3776,7 @@ impl NativeFunctionKind {
                 | Self::TemporalPlainTimeConstructor
                 | Self::TemporalPlainMonthDayConstructor
                 | Self::TemporalPlainYearMonthConstructor
+                | Self::TemporalZonedDateTimeConstructor
                 | Self::RegExpConstructor
                 | Self::GeneratorFunctionConstructor
                 | Self::AsyncFunctionConstructor

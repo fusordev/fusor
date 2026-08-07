@@ -3,12 +3,13 @@
 use core::str::FromStr;
 use temporal_rs::{
     Calendar, Duration, Instant, MonthCode, PlainDate, PlainDateTime, PlainMonthDay, PlainTime,
-    PlainYearMonth, Sign, TimeZone,
+    PlainYearMonth, Sign, TimeZone, ZonedDateTime,
     error::ErrorKind as TemporalErrorKind,
     fields::{CalendarFields, DateTimeFields, YearMonthCalendarFields},
     options::{
-        DifferenceSettings, DisplayCalendar, Overflow, RelativeTo, RoundingIncrement, RoundingMode,
-        RoundingOptions, ToStringRoundingOptions, Unit,
+        DifferenceSettings, Disambiguation, DisplayCalendar, OffsetDisambiguation, Overflow,
+        RelativeTo, RoundingIncrement, RoundingMode, RoundingOptions, ToStringRoundingOptions,
+        Unit,
     },
     parsers::Precision,
     partial::{PartialDate, PartialDateTime, PartialTime, PartialYearMonth},
@@ -20,6 +21,7 @@ use super::conversions::operator_primitive_to_string;
     reason = "this private VM sibling participates in the shared interpreter implementation namespace"
 )]
 use super::*;
+use crate::runtime::TemporalZonedDateTimeStaticMethod;
 
 pub(super) struct TemporalDurationConstructorContinuation {
     arguments: Vec<StoredValue>,
@@ -70,6 +72,24 @@ pub(super) struct TemporalPlainMonthDayConstructorContinuation {
 pub(super) struct TemporalPlainYearMonthConstructorContinuation {
     arguments: Vec<StoredValue>,
     converted: Vec<JsNumber>,
+    calendar: Option<Calendar>,
+    new_target: FunctionId,
+}
+
+#[derive(Clone, Copy)]
+pub(super) enum TemporalZonedDateTimeConstructorStage {
+    EpochNanoseconds,
+    TimeZone,
+    Calendar,
+}
+
+/// The `ZonedDateTime` constructor converts the epoch, time-zone identifier, and
+/// calendar in source order. The state remains rooted across primitive calls.
+pub(super) struct TemporalZonedDateTimeConstructorContinuation {
+    arguments: Vec<StoredValue>,
+    stage: TemporalZonedDateTimeConstructorStage,
+    epoch_nanoseconds: Option<i128>,
+    time_zone: Option<TimeZone>,
     calendar: Option<Calendar>,
     new_target: FunctionId,
 }
@@ -967,6 +987,21 @@ impl TemporalPlainYearMonthConstructorContinuation {
     }
 }
 
+impl TemporalZonedDateTimeConstructorContinuation {
+    pub(super) fn retained_values(&self) -> u64 {
+        usize_to_u64(self.arguments.len()).saturating_add(1)
+    }
+
+    pub(super) fn trace_roots(&self, mark: &mut dyn FnMut(CollectionRoot)) {
+        for argument in &self.arguments {
+            trace_stored_value_root(argument, mark);
+        }
+        mark(CollectionRoot::Heap(HeapReference::Function(
+            self.new_target,
+        )));
+    }
+}
+
 impl TemporalDurationConstructorContinuation {
     pub(super) fn retained_values(&self) -> u64 {
         usize_to_u64(self.arguments.len()).saturating_add(1)
@@ -1749,6 +1784,311 @@ pub(super) fn finish_temporal_plain_year_month_constructor_wrapper(
         }
     };
     let object = runtime.allocate_temporal_plain_year_month(prototype, year_month)?;
+    Ok(NativeDispatch::Immediate(StoredValue::Object(object)))
+}
+
+#[allow(
+    clippy::needless_pass_by_value,
+    clippy::too_many_arguments,
+    reason = "the ordered ZonedDateTime constructor conversion is resumable"
+)]
+pub(super) fn begin_temporal_zoned_date_time_constructor(
+    runtime: &mut Runtime,
+    realm: RealmId,
+    inputs: CallInputs,
+    return_to: Option<CallReturn>,
+    origin: JsStackFrame,
+    execution_budget: &mut ExecutionBudget,
+) -> Result<NativeDispatch, NativeFailure> {
+    let Some(new_target) = inputs.new_target else {
+        return temporal_type_error(realm, &origin, "Temporal.ZonedDateTime is not callable");
+    };
+    let mut arguments = inputs.arguments.into_remaining_values();
+    arguments.truncate(3);
+    arguments
+        .try_reserve(3_usize.saturating_sub(arguments.len()))
+        .map_err(|_| ExecutionError::AllocationFailed {
+            resource: RuntimeResource::FrameValues,
+            additional: 3_usize.saturating_sub(arguments.len()),
+        })?;
+    while arguments.len() < 3 {
+        arguments.push(StoredValue::Undefined);
+    }
+    advance_temporal_zoned_date_time_constructor(
+        runtime,
+        TemporalZonedDateTimeConstructorContinuation {
+            arguments,
+            stage: TemporalZonedDateTimeConstructorStage::EpochNanoseconds,
+            epoch_nanoseconds: None,
+            time_zone: None,
+            calendar: None,
+            new_target,
+        },
+        None,
+        realm,
+        return_to,
+        &origin,
+        execution_budget,
+    )
+}
+
+#[allow(
+    clippy::needless_pass_by_value,
+    clippy::too_many_arguments,
+    reason = "the constructor retains each converted component across primitive calls"
+)]
+pub(super) fn advance_temporal_zoned_date_time_constructor(
+    runtime: &mut Runtime,
+    mut state: TemporalZonedDateTimeConstructorContinuation,
+    mut completion: Option<StoredValue>,
+    realm: RealmId,
+    return_to: Option<CallReturn>,
+    origin: &JsStackFrame,
+    execution_budget: &mut ExecutionBudget,
+) -> Result<NativeDispatch, NativeFailure> {
+    loop {
+        match state.stage {
+            TemporalZonedDateTimeConstructorStage::EpochNanoseconds => {
+                if let Some(value) = completion.take() {
+                    let bigint = to_bigint_from_primitive(&value, realm, origin)?;
+                    let Some(epoch_nanoseconds) = bigint.to_i128() else {
+                        return temporal_range_error(
+                            realm,
+                            origin,
+                            "Temporal.ZonedDateTime epochNanoseconds is outside the supported range",
+                        );
+                    };
+                    state.epoch_nanoseconds = Some(epoch_nanoseconds);
+                    state.stage = TemporalZonedDateTimeConstructorStage::TimeZone;
+                    continue;
+                }
+                let value = std::mem::replace(&mut state.arguments[0], StoredValue::Undefined);
+                return begin_operator_primitive_conversion(
+                    runtime,
+                    value,
+                    OperatorPrimitiveHint::Number,
+                    OperatorPrimitiveTarget::TemporalZonedDateTimeConstructor(Box::new(state)),
+                    realm,
+                    return_to,
+                    origin.clone(),
+                    execution_budget,
+                );
+            }
+            TemporalZonedDateTimeConstructorStage::TimeZone => {
+                if let Some(value) = completion.take() {
+                    let source = operator_primitive_to_string(value, realm, origin)?;
+                    state.time_zone =
+                        Some(match TimeZone::try_from_str(&source.to_utf8_lossy()?) {
+                            Ok(time_zone) => time_zone,
+                            Err(error) => {
+                                return Err(NativeFailure::Abrupt(temporal_exception_from_error(
+                                    realm, origin, error,
+                                )?));
+                            }
+                        });
+                    state.stage = TemporalZonedDateTimeConstructorStage::Calendar;
+                    continue;
+                }
+                let value = std::mem::replace(&mut state.arguments[1], StoredValue::Undefined);
+                return begin_operator_primitive_conversion(
+                    runtime,
+                    value,
+                    OperatorPrimitiveHint::String,
+                    OperatorPrimitiveTarget::TemporalZonedDateTimeConstructor(Box::new(state)),
+                    realm,
+                    return_to,
+                    origin.clone(),
+                    execution_budget,
+                );
+            }
+            TemporalZonedDateTimeConstructorStage::Calendar => {
+                if let Some(value) = completion.take() {
+                    let source = operator_primitive_to_string(value, realm, origin)?;
+                    state.calendar = Some(
+                        match Calendar::try_from_utf8(source.to_utf8_lossy()?.as_bytes()) {
+                            Ok(calendar) => calendar,
+                            Err(error) => {
+                                return Err(NativeFailure::Abrupt(temporal_exception_from_error(
+                                    realm, origin, error,
+                                )?));
+                            }
+                        },
+                    );
+                } else {
+                    let value = std::mem::replace(&mut state.arguments[2], StoredValue::Undefined);
+                    if matches!(value, StoredValue::Undefined) {
+                        state.calendar = Some(Calendar::default());
+                    } else {
+                        return begin_operator_primitive_conversion(
+                            runtime,
+                            value,
+                            OperatorPrimitiveHint::String,
+                            OperatorPrimitiveTarget::TemporalZonedDateTimeConstructor(Box::new(
+                                state,
+                            )),
+                            realm,
+                            return_to,
+                            origin.clone(),
+                            execution_budget,
+                        );
+                    }
+                }
+                return complete_temporal_zoned_date_time_constructor(
+                    runtime,
+                    &state,
+                    realm,
+                    return_to,
+                    origin,
+                    execution_budget,
+                );
+            }
+        }
+    }
+}
+
+#[allow(
+    clippy::too_many_arguments,
+    reason = "the completed constructor still needs the resumable newTarget prototype lookup"
+)]
+fn complete_temporal_zoned_date_time_constructor(
+    runtime: &mut Runtime,
+    state: &TemporalZonedDateTimeConstructorContinuation,
+    realm: RealmId,
+    return_to: Option<CallReturn>,
+    origin: &JsStackFrame,
+    execution_budget: &mut ExecutionBudget,
+) -> Result<NativeDispatch, NativeFailure> {
+    let (Some(epoch_nanoseconds), Some(time_zone), Some(calendar)) = (
+        state.epoch_nanoseconds,
+        state.time_zone,
+        state.calendar.clone(),
+    ) else {
+        return Err(EngineFault::RuntimeInvariant {
+            message: "Temporal.ZonedDateTime constructor completed without all slots",
+        }
+        .into());
+    };
+    let date_time = match ZonedDateTime::try_new(epoch_nanoseconds, time_zone, calendar) {
+        Ok(date_time) => date_time,
+        Err(error) => {
+            return Err(NativeFailure::Abrupt(temporal_exception_from_error(
+                realm, origin, error,
+            )?));
+        }
+    };
+    begin_temporal_zoned_date_time_wrapper(
+        runtime,
+        realm,
+        state.new_target,
+        date_time,
+        return_to,
+        origin.clone(),
+        execution_budget,
+    )
+}
+
+#[allow(
+    clippy::needless_pass_by_value,
+    clippy::too_many_arguments,
+    reason = "newTarget prototype lookup is a resumable native operation"
+)]
+fn begin_temporal_zoned_date_time_wrapper(
+    runtime: &mut Runtime,
+    realm: RealmId,
+    new_target: FunctionId,
+    date_time: ZonedDateTime,
+    return_to: Option<CallReturn>,
+    origin: JsStackFrame,
+    execution_budget: &mut ExecutionBudget,
+) -> Result<NativeDispatch, NativeFailure> {
+    let prototype_key = runtime.predefined_property_key(PredefinedAtom::Prototype);
+    begin_intrinsic_get(
+        runtime,
+        realm,
+        HeapReference::Function(new_target),
+        StoredValue::Function(new_target),
+        &prototype_key,
+        IntrinsicGetContinuation::TemporalZonedDateTimeConstructor {
+            new_target,
+            date_time,
+        },
+        return_to,
+        Some(origin),
+        execution_budget,
+    )
+}
+
+pub(super) fn finish_temporal_zoned_date_time_constructor_wrapper(
+    runtime: &mut Runtime,
+    new_target: FunctionId,
+    date_time: ZonedDateTime,
+    requested: &StoredValue,
+) -> Result<NativeDispatch, NativeFailure> {
+    let prototype = match requested {
+        StoredValue::Function(function) => HeapReference::Function(*function),
+        StoredValue::Object(object) => HeapReference::Object(*object),
+        _ => {
+            let realm = runtime.function_realm(new_target)?;
+            HeapReference::Object(runtime.realm_temporal_zoned_date_time_prototype(realm)?)
+        }
+    };
+    let object = runtime.allocate_temporal_zoned_date_time(prototype, date_time)?;
+    Ok(NativeDispatch::Immediate(StoredValue::Object(object)))
+}
+
+#[allow(
+    clippy::needless_pass_by_value,
+    clippy::too_many_arguments,
+    reason = "the initial ZonedDateTime from boundary owns the static-call context"
+)]
+pub(super) fn begin_temporal_zoned_date_time_static(
+    runtime: &mut Runtime,
+    method: TemporalZonedDateTimeStaticMethod,
+    realm: RealmId,
+    mut arguments: CallArguments,
+    _return_to: Option<CallReturn>,
+    origin: JsStackFrame,
+    _execution_budget: &mut ExecutionBudget,
+) -> Result<NativeDispatch, NativeFailure> {
+    let value = arguments.take_first_or_undefined();
+    match method {
+        TemporalZonedDateTimeStaticMethod::From => {
+            if let StoredValue::Object(object) = value
+                && let Some(date_time) = runtime.temporal_zoned_date_time(object)?
+            {
+                return allocate_temporal_zoned_date_time_result(runtime, realm, date_time);
+            }
+            let StoredValue::String(value) = value else {
+                return temporal_type_error(
+                    realm,
+                    &origin,
+                    "Temporal.ZonedDateTime.from currently requires a string or ZonedDateTime",
+                );
+            };
+            let date_time = match ZonedDateTime::from_utf8(
+                value.to_utf8_lossy()?.as_bytes(),
+                Disambiguation::Compatible,
+                OffsetDisambiguation::Reject,
+            ) {
+                Ok(date_time) => date_time,
+                Err(error) => {
+                    return Err(NativeFailure::Abrupt(temporal_exception_from_error(
+                        realm, &origin, error,
+                    )?));
+                }
+            };
+            allocate_temporal_zoned_date_time_result(runtime, realm, date_time)
+        }
+    }
+}
+
+fn allocate_temporal_zoned_date_time_result(
+    runtime: &mut Runtime,
+    realm: RealmId,
+    date_time: ZonedDateTime,
+) -> Result<NativeDispatch, NativeFailure> {
+    let prototype = HeapReference::Object(runtime.realm_temporal_zoned_date_time_prototype(realm)?);
+    let object = runtime.allocate_temporal_zoned_date_time(prototype, date_time)?;
     Ok(NativeDispatch::Immediate(StoredValue::Object(object)))
 }
 
@@ -6078,6 +6418,12 @@ pub(super) fn advance_temporal_plain_year_month_property_bag(
                     continue;
                 }
                 if field == "calendar" {
+                    if let Some(calendar) = temporal_calendar_from_object(runtime, &value)? {
+                        state.calendar = Some(calendar);
+                        state.next = state.next.saturating_add(1);
+                        state.stage = TemporalPlainYearMonthBagStage::ReadField;
+                        continue;
+                    }
                     let StoredValue::String(value) = value else {
                         return temporal_type_error(
                             state.realm,
@@ -6177,6 +6523,31 @@ fn temporal_plain_year_month_bag_continuation(
     NativeContinuation::TemporalPlainYearMonthBag(Box::new(state))
 }
 
+fn temporal_calendar_from_object(
+    runtime: &Runtime,
+    value: &StoredValue,
+) -> Result<Option<Calendar>, NativeFailure> {
+    let StoredValue::Object(object) = value else {
+        return Ok(None);
+    };
+    if let Some(date) = runtime.temporal_plain_date(*object)? {
+        return Ok(Some(date.calendar().clone()));
+    }
+    if let Some(date_time) = runtime.temporal_plain_date_time(*object)? {
+        return Ok(Some(date_time.calendar().clone()));
+    }
+    if let Some(month_day) = runtime.temporal_plain_month_day(*object)? {
+        return Ok(Some(month_day.calendar().clone()));
+    }
+    if let Some(year_month) = runtime.temporal_plain_year_month(*object)? {
+        return Ok(Some(year_month.calendar().clone()));
+    }
+    if let Some(date_time) = runtime.temporal_zoned_date_time(*object)? {
+        return Ok(Some(date_time.calendar().clone()));
+    }
+    Ok(None)
+}
+
 fn temporal_plain_year_month_from_fields(
     fields: &TemporalPlainYearMonthFields,
     overflow: Overflow,
@@ -6269,7 +6640,8 @@ fn begin_temporal_plain_year_month_with(
             || runtime.temporal_plain_date_time(object)?.is_some()
             || runtime.temporal_plain_time(object)?.is_some()
             || runtime.temporal_plain_month_day(object)?.is_some()
-            || runtime.temporal_plain_year_month(object)?.is_some())
+            || runtime.temporal_plain_year_month(object)?.is_some()
+            || runtime.temporal_zoned_date_time(object)?.is_some())
     {
         return temporal_type_error(
             realm,
@@ -7238,6 +7610,12 @@ pub(super) fn advance_temporal_plain_month_day_property_bag(
                     continue;
                 }
                 if field == "calendar" {
+                    if let Some(calendar) = temporal_calendar_from_object(runtime, &value)? {
+                        state.calendar = Some(calendar);
+                        state.next = state.next.saturating_add(1);
+                        state.stage = TemporalPlainMonthDayBagStage::ReadField;
+                        continue;
+                    }
                     let StoredValue::String(value) = value else {
                         return temporal_type_error(
                             state.realm,
@@ -7473,7 +7851,9 @@ fn begin_temporal_plain_month_day_with(
         && (runtime.temporal_plain_date(object)?.is_some()
             || runtime.temporal_plain_date_time(object)?.is_some()
             || runtime.temporal_plain_time(object)?.is_some()
-            || runtime.temporal_plain_month_day(object)?.is_some())
+            || runtime.temporal_plain_month_day(object)?.is_some()
+            || runtime.temporal_plain_year_month(object)?.is_some()
+            || runtime.temporal_zoned_date_time(object)?.is_some())
     {
         return temporal_type_error(
             realm,

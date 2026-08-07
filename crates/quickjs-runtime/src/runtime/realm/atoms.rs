@@ -11,7 +11,7 @@ use crate::{
         TemporalPlainMonthDayPrototypeMethod, TemporalPlainMonthDayStaticMethod,
         TemporalPlainTimePrototypeMethod, TemporalPlainTimeStaticMethod,
         TemporalPlainYearMonthPrototypeMethod, TemporalPlainYearMonthStaticMethod,
-        TypedArrayPrototypeMethod,
+        TemporalZonedDateTimeStaticMethod, TypedArrayPrototypeMethod,
     },
 };
 
@@ -339,6 +339,10 @@ fn visit_realm_name_order(
     for method in TemporalPlainYearMonthPrototypeMethod::ALL {
         visit(RealmNameId::TemporalPlainYearMonthPrototype(method))?;
     }
+    visit(RealmNameId::ZonedDateTime)?;
+    for method in TemporalZonedDateTimeStaticMethod::ALL {
+        visit(RealmNameId::TemporalZonedDateTimeStatic(method))?;
+    }
     visit(RealmNameId::RegExpEscape)?;
     visit(RealmNameId::RegExpCompile)?;
     visit(RealmNameId::RegExpTest)?;
@@ -553,6 +557,7 @@ fn realm_name_description(id: RealmNameId) -> &'static str {
         RealmNameId::PlainDateTime => "PlainDateTime",
         RealmNameId::PlainMonthDay => "PlainMonthDay",
         RealmNameId::PlainYearMonth => "PlainYearMonth",
+        RealmNameId::ZonedDateTime => "ZonedDateTime",
         RealmNameId::TemporalDurationStatic(method) => method.name(),
         RealmNameId::TemporalDurationPrototype(method) => method.name(),
         RealmNameId::TemporalInstantStatic(method) => method.name(),
@@ -568,6 +573,7 @@ fn realm_name_description(id: RealmNameId) -> &'static str {
         RealmNameId::TemporalPlainMonthDayPrototype(method) => method.name(),
         RealmNameId::TemporalPlainYearMonthStatic(method) => method.name(),
         RealmNameId::TemporalPlainYearMonthPrototype(method) => method.name(),
+        RealmNameId::TemporalZonedDateTimeStatic(method) => method.name(),
         RealmNameId::RegExpEscape => "escape",
         RealmNameId::RegExpCompile => "compile",
         RealmNameId::RegExpTest => "test",
@@ -592,8 +598,8 @@ mod tests {
         let schema = RealmIntrinsicSchema::try_new().expect("Realm schema");
         let plan = RealmAtomPlan::try_new(&schema).expect("atom plan");
 
-        assert_eq!(plan.len(), 332);
-        assert_eq!(plan.description_code_units(), 2_829);
+        assert_eq!(plan.len(), 333);
+        assert_eq!(plan.description_code_units(), 2_842);
     }
 
     #[test]

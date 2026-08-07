@@ -584,6 +584,12 @@ pub(super) fn finish_intrinsic_get(
         } => finish_temporal_plain_year_month_constructor_wrapper(
             runtime, new_target, year_month, &value,
         ),
+        IntrinsicGetContinuation::TemporalZonedDateTimeConstructor {
+            new_target,
+            date_time,
+        } => finish_temporal_zoned_date_time_constructor_wrapper(
+            runtime, new_target, date_time, &value,
+        ),
         IntrinsicGetContinuation::StringConstructor {
             new_target,
             value: string_value,
@@ -2185,6 +2191,17 @@ fn finish_operator_primitive_target(
                 runtime,
                 *state,
                 Some(number),
+                realm,
+                return_to,
+                origin,
+                execution_budget,
+            )
+        }
+        OperatorPrimitiveTarget::TemporalZonedDateTimeConstructor(state) => {
+            advance_temporal_zoned_date_time_constructor(
+                runtime,
+                *state,
+                Some(value),
                 realm,
                 return_to,
                 origin,
