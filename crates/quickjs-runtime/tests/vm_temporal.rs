@@ -651,6 +651,30 @@ fn plain_date_time_with_calendar_accepts_identifiers_and_temporal_fast_paths_onl
 }
 
 #[test]
+fn plain_date_with_calendar_accepts_identifiers_and_temporal_fast_paths_only() {
+    assert_eq!(
+        rendered(
+            "var value=new Temporal.PlainDate(2020,2,29);
+             var fromString=value.withCalendar('iso8601');
+             var fromDate=value.withCalendar(new Temporal.PlainDate(2001,1,2));
+             var fromDateTime=value.withCalendar(new Temporal.PlainDateTime(2001,1,2));
+             return [Temporal.PlainDate.prototype.withCalendar.length,
+               fromString.toString(),fromDate.toString(),fromDateTime.toString(),
+               fromString===value].join('|');"
+        ),
+        "1|2020-02-29|2020-02-29|2020-02-29|false"
+    );
+    assert_eq!(
+        thrown("return new Temporal.PlainDate(2020,1,1).withCalendar();"),
+        ExceptionKind::TypeError
+    );
+    assert_eq!(
+        thrown("return new Temporal.PlainDate(2020,1,1).withCalendar({});"),
+        ExceptionKind::TypeError
+    );
+}
+
+#[test]
 fn plain_date_with_prepares_partial_fields_before_reading_overflow() {
     assert_eq!(
         rendered(
