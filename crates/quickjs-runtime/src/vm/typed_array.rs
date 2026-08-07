@@ -1602,6 +1602,7 @@ pub(super) fn dispatch_typed_array_prototype(
             | TypedArrayPrototypeMethod::Keys
             | TypedArrayPrototypeMethod::Values
             | TypedArrayPrototypeMethod::Join
+            | TypedArrayPrototypeMethod::ToReversed
     ) && !matches!(view, TypedArrayView::InBounds { .. })
     {
         return typed_array_type_error(realm, &origin, "TypedArray is out of bounds");
@@ -1791,6 +1792,15 @@ pub(super) fn dispatch_typed_array_prototype(
                 execution_budget,
             );
         }
+        TypedArrayPrototypeMethod::ToReversed => {
+            return typed_array_prototype_to_reversed(
+                runtime,
+                *object,
+                realm,
+                &origin,
+                execution_budget,
+            );
+        }
     };
     Ok(NativeDispatch::Immediate(value))
 }
@@ -1821,6 +1831,52 @@ fn typed_array_prototype_reverse(
         typed_array_reverse_store(runtime, object, right, left_value, state.element())?;
     }
     Ok(NativeDispatch::Immediate(StoredValue::Object(object)))
+}
+
+fn typed_array_prototype_to_reversed(
+    runtime: &mut Runtime,
+    source: ObjectId,
+    realm: RealmId,
+    origin: &JsStackFrame,
+    execution_budget: &mut ExecutionBudget,
+) -> Result<NativeDispatch, NativeFailure> {
+    let (source_state, length) = typed_array_require_in_bounds(runtime, source, realm, origin)?;
+    let byte_length = length
+        .checked_mul(source_state.element().byte_width())
+        .ok_or(EngineFault::RuntimeInvariant {
+            message: "TypedArray.prototype.toReversed byte length overflowed",
+        })?;
+    let buffer = runtime
+        .allocate_array_buffer(
+            HeapReference::Object(runtime.realm_array_buffer_prototype(realm)?),
+            byte_length,
+            None,
+        )
+        .map_err(NativeFailure::Execution)?;
+    let target = runtime
+        .allocate_typed_array(
+            HeapReference::Object(
+                runtime.realm_typed_array_prototype(realm, source_state.element())?,
+            ),
+            TypedArrayState::new(
+                buffer,
+                0,
+                TypedArrayLength::Fixed(length),
+                source_state.element(),
+            ),
+        )
+        .map_err(NativeFailure::Execution)?;
+    for target_index in 0..length {
+        execution_budget.charge_instructions(1)?;
+        let source_index = length.saturating_sub(target_index + 1);
+        let value = runtime
+            .typed_array_read_index(source, source_index)?
+            .ok_or(EngineFault::RuntimeInvariant {
+                message: "TypedArray.prototype.toReversed lost a validated source element",
+            })?;
+        typed_array_reverse_store(runtime, target, target_index, value, source_state.element())?;
+    }
+    Ok(NativeDispatch::Immediate(StoredValue::Object(target)))
 }
 
 fn typed_array_reverse_store(

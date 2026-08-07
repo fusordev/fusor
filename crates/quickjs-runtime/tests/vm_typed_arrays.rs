@@ -569,3 +569,22 @@ fn typed_array_join_captures_length_before_separator_conversion() {
         ExceptionKind::TypeError
     );
 }
+
+#[test]
+fn typed_array_to_reversed_creates_an_independent_same_type_copy() {
+    assert_eq!(
+        rendered(
+            "var source=new Int16Array([1,-2,3]),out=source.toReversed(),bigints=new BigInt64Array([1n,-2n]).toReversed();\
+             source[0]=9;return [Int16Array.prototype.toReversed.length,Int16Array.prototype.toReversed.name,\
+               out.constructor===Int16Array,out.buffer===source.buffer,out.length,out[0],out[1],out[2],\
+               String(bigints[0]),String(bigints[1])].join('|');"
+        ),
+        "0|toReversed|true|false|3|3|-2|1|-2|1"
+    );
+    assert_eq!(
+        thrown(
+            "var buffer=new ArrayBuffer(4,{maxByteLength:4}),values=new Uint8Array(buffer,2,2);buffer.resize(1);values.toReversed();"
+        ),
+        ExceptionKind::TypeError
+    );
+}
