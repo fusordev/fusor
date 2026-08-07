@@ -386,6 +386,18 @@ fn regexp_symbol_replace_expands_captures_and_every_substitution_form() {
 }
 
 #[test]
+fn regexp_symbol_replace_rejects_an_impossible_capture_template_before_materializing_it() {
+    assert_eq!(
+        rendered(
+            "var input='x'.repeat(4096);var template='$1'.repeat(262144);\
+             try { input.replace(/(.+)/,template); return 'missed'; }\
+             catch (error) { return error instanceof InternalError ? 'caught' : 'wrong'; }"
+        ),
+        "caught"
+    );
+}
+
+#[test]
 fn regexp_symbol_replace_passes_functional_capture_arguments() {
     assert_eq!(
         rendered(
