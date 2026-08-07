@@ -64,6 +64,9 @@ pub(super) struct ArrayJoinContinuation {
     accumulated: JsString,
     /// The element count from the single `ToLength` length read.
     length: u64,
+    /// Whether `length` comes from a prior `%TypedArray%` validation rather
+    /// than this generic join's observable `length` property read.
+    length_is_ready: bool,
     /// The next element index to read.
     next: u64,
     realm: RealmId,
@@ -122,6 +125,7 @@ pub(super) fn begin_array_join(
         separator: None,
         accumulated: JsString::empty(),
         length: 0,
+        length_is_ready: false,
         next: 0,
         realm,
         stage: ArrayJoinStage::AwaitSeparator,
@@ -135,6 +139,61 @@ pub(super) fn begin_array_join(
             let mut state = state;
             state.separator = Some(JsString::from_utf8(",")?);
             state.stage = ArrayJoinStage::AwaitLength;
+            advance_array_join(runtime, state, None, return_to, execution_budget)
+        }
+        Some(value) => begin_operator_primitive_conversion(
+            runtime,
+            value,
+            OperatorPrimitiveHint::String,
+            OperatorPrimitiveTarget::ArrayJoinSeparator(Box::new(state)),
+            realm,
+            return_to,
+            native_function_host_origin(),
+            execution_budget,
+        ),
+    }
+}
+
+/// Starts `%TypedArray%.prototype.join` after `ValidateTypedArray` has
+/// captured its required length witness.
+///
+/// Unlike generic `Array.prototype.join`, the typed-array method obtains its
+/// length before converting `separator`. A separator's `toString` may resize
+/// the backing buffer, but the subsequent indexed Gets still run against that
+/// original iteration count.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the native entry point preserves the validated typed-array witness and standard call context"
+)]
+pub(super) fn begin_typed_array_join(
+    runtime: &mut Runtime,
+    realm: RealmId,
+    receiver: StoredValue,
+    length: usize,
+    separator: Option<StoredValue>,
+    return_to: Option<CallReturn>,
+    origin: JsStackFrame,
+    execution_budget: &mut ExecutionBudget,
+) -> Result<NativeDispatch, NativeFailure> {
+    let length = u64::try_from(length).map_err(|_| EngineFault::RuntimeInvariant {
+        message: "TypedArray join length did not fit u64",
+    })?;
+    let state = ArrayJoinContinuation {
+        target: receiver,
+        separator: None,
+        accumulated: JsString::empty(),
+        length,
+        length_is_ready: true,
+        next: 0,
+        realm,
+        stage: ArrayJoinStage::AwaitSeparator,
+        origin,
+    };
+    match separator {
+        None | Some(StoredValue::Undefined) => {
+            let mut state = state;
+            state.separator = Some(JsString::from_utf8(",")?);
+            state.stage = ArrayJoinStage::NextElement;
             advance_array_join(runtime, state, None, return_to, execution_budget)
         }
         Some(value) => begin_operator_primitive_conversion(
@@ -191,7 +250,11 @@ pub(super) fn advance_array_join(
                     state.realm,
                     &state.origin,
                 )?);
-                state.stage = ArrayJoinStage::AwaitLength;
+                state.stage = if state.length_is_ready {
+                    ArrayJoinStage::NextElement
+                } else {
+                    ArrayJoinStage::AwaitLength
+                };
             }
             ArrayJoinStage::AwaitLength => {
                 let length_key = runtime.predefined_property_key(PredefinedAtom::Length);

@@ -543,3 +543,29 @@ fn typed_array_iterators_share_the_values_function_and_observe_live_views() {
         ExceptionKind::TypeError
     );
 }
+
+#[test]
+fn typed_array_join_captures_length_before_separator_conversion() {
+    assert_eq!(
+        rendered(
+            "var values=new Uint8Array([1,2,3]),bigints=new BigInt64Array([1n,-2n]);\
+             return [Uint8Array.prototype.join.length,Uint8Array.prototype.join.name,\
+               values.join(),values.join('-'),bigints.join(':')].join('|');"
+        ),
+        "1|join|1,2,3|1-2-3|1:-2"
+    );
+    assert_eq!(
+        rendered(
+            "var buffer=new ArrayBuffer(4,{maxByteLength:4}),values=new Uint8Array(buffer),log=[];\
+             values[0]=7;values[1]=8;var text=values.join({toString(){log.push(values.length);buffer.resize(1);return '-'}});\
+             return text+'|'+log.join('|');"
+        ),
+        "7---|4"
+    );
+    assert_eq!(
+        thrown(
+            "var buffer=new ArrayBuffer(4,{maxByteLength:4}),values=new Uint8Array(buffer,2,2);buffer.resize(1);values.join();"
+        ),
+        ExceptionKind::TypeError
+    );
+}

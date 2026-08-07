@@ -71,6 +71,9 @@ pub(super) fn visit_properties(visit: PropertySink<'_>) {
             TypedArrayPrototypeMethod::Values => {
                 IntrinsicKeySpec::PredefinedString(PredefinedAtom::Values)
             }
+            TypedArrayPrototypeMethod::Join => {
+                IntrinsicKeySpec::PredefinedString(PredefinedAtom::Join)
+            }
             _ => {
                 IntrinsicKeySpec::InternedString(RealmNameId::TypedArrayPrototype(prototype_method))
             }

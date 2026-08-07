@@ -1795,10 +1795,11 @@ pub(crate) enum TypedArrayPrototypeMethod {
     Entries,
     Keys,
     Values,
+    Join,
 }
 
 impl TypedArrayPrototypeMethod {
-    pub(crate) const ALL: [Self; 18] = [
+    pub(crate) const ALL: [Self; 19] = [
         Self::Buffer,
         Self::ByteLength,
         Self::ByteOffset,
@@ -1817,6 +1818,7 @@ impl TypedArrayPrototypeMethod {
         Self::Entries,
         Self::Keys,
         Self::Values,
+        Self::Join,
     ];
 
     #[must_use]
@@ -1840,6 +1842,7 @@ impl TypedArrayPrototypeMethod {
             Self::Entries => "entries",
             Self::Keys => "keys",
             Self::Values => "values",
+            Self::Join => "join",
         }
     }
 
@@ -1864,6 +1867,7 @@ impl TypedArrayPrototypeMethod {
             Self::Entries => "entries",
             Self::Keys => "keys",
             Self::Values => "values",
+            Self::Join => "join",
         }
     }
 
@@ -1884,6 +1888,7 @@ impl TypedArrayPrototypeMethod {
                 | Self::Entries
                 | Self::Keys
                 | Self::Values
+                | Self::Join
         )
     }
 
@@ -1895,7 +1900,8 @@ impl TypedArrayPrototypeMethod {
             | Self::Includes
             | Self::IndexOf
             | Self::LastIndexOf
-            | Self::Fill => 1,
+            | Self::Fill
+            | Self::Join => 1,
             Self::CopyWithin | Self::Subarray | Self::Slice => 2,
             Self::Reverse
             | Self::Entries

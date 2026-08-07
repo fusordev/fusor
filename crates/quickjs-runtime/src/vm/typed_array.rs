@@ -1601,6 +1601,7 @@ pub(super) fn dispatch_typed_array_prototype(
             | TypedArrayPrototypeMethod::Entries
             | TypedArrayPrototypeMethod::Keys
             | TypedArrayPrototypeMethod::Values
+            | TypedArrayPrototypeMethod::Join
     ) && !matches!(view, TypedArrayView::InBounds { .. })
     {
         return typed_array_type_error(realm, &origin, "TypedArray is out of bounds");
@@ -1776,6 +1777,18 @@ pub(super) fn dispatch_typed_array_prototype(
                 crate::object::ArrayIteratorKind::Value,
                 realm,
                 origin,
+            );
+        }
+        TypedArrayPrototypeMethod::Join => {
+            return begin_typed_array_join(
+                runtime,
+                realm,
+                StoredValue::Object(*object),
+                length,
+                arguments.take_first(),
+                return_to,
+                origin,
+                execution_budget,
             );
         }
     };
