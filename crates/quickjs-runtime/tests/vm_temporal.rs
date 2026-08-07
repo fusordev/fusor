@@ -340,6 +340,82 @@ fn plain_time_with_prepares_fields_before_overflow_and_rejects_temporal_inputs()
 }
 
 #[test]
+fn plain_time_until_and_since_preserve_time_only_difference_semantics() {
+    assert_eq!(
+        rendered(
+            "var earlier=new Temporal.PlainTime(9,2,3,4,5,6);
+             var later=new Temporal.PlainTime(10,17,18,19,20,21);
+             var until=earlier.until(later);
+             var since=later.since(earlier);
+             return [Temporal.PlainTime.prototype.until.name,
+               Temporal.PlainTime.prototype.until.length,
+               Temporal.PlainTime.prototype.since.name,
+               Temporal.PlainTime.prototype.since.length,
+               until.toString(),since.toString()].join('|');"
+        ),
+        "until|1|since|1|PT1H15M15.015015015S|PT1H15M15.015015015S"
+    );
+    assert_eq!(
+        rendered(
+            "var log=[];
+             function string(name,value){return {toString:function(){log.push(name+' string');return value}}}
+             function number(name,value){return {valueOf:function(){log.push(name+' number');return value}}}
+             var other={
+               get hour(){log.push('hour');return 10},
+               get microsecond(){log.push('microsecond');return 0},
+               get millisecond(){log.push('millisecond');return 0},
+               get minute(){log.push('minute');return 17},
+               get nanosecond(){log.push('nanosecond');return 0},
+               get second(){log.push('second');return 0}
+             };
+             var options={
+               get largestUnit(){log.push('largestUnit');return string('largestUnit','hour')},
+               get roundingIncrement(){log.push('roundingIncrement');return number('roundingIncrement',15)},
+               get roundingMode(){log.push('roundingMode');return string('roundingMode','floor')},
+               get smallestUnit(){log.push('smallestUnit');return string('smallestUnit','minute')}
+             };
+             var result=new Temporal.PlainTime(9,2).until(other,options);
+             return [result.toString(),log.join(',')].join('|');"
+        ),
+        "PT1H15M|hour,microsecond,millisecond,minute,nanosecond,second,largestUnit,largestUnit string,roundingIncrement,roundingIncrement number,roundingMode,roundingMode string,smallestUnit,smallestUnit string"
+    );
+    assert_eq!(
+        rendered(
+            "var time=new Temporal.PlainTime(9,2);
+             return [time.until('10:17',{smallestUnit:'minute',roundingIncrement:30}).toString(),
+               time.since('10:17',{smallestUnit:'minute',roundingMode:'floor'}).toString()].join('|');"
+        ),
+        "PT1H|-PT1H15M"
+    );
+    assert_eq!(
+        thrown(
+            "return new Temporal.PlainTime().until(new Temporal.PlainTime(), {largestUnit:'day'});"
+        ),
+        ExceptionKind::RangeError
+    );
+    assert_eq!(
+        thrown(
+            "return new Temporal.PlainTime().until(new Temporal.PlainTime(), {smallestUnit:'day'});"
+        ),
+        ExceptionKind::RangeError
+    );
+    assert_eq!(
+        thrown("return new Temporal.PlainTime().until({}, 1);"),
+        ExceptionKind::TypeError
+    );
+    assert_eq!(
+        thrown(
+            "return new Temporal.PlainTime().until({}, {get largestUnit(){throw new Error('wrong order')}});"
+        ),
+        ExceptionKind::TypeError
+    );
+    assert_eq!(
+        thrown("return Temporal.PlainTime.prototype.since.call({}, new Temporal.PlainTime());"),
+        ExceptionKind::TypeError
+    );
+}
+
+#[test]
 fn plain_date_time_constructor_preserves_order_defaults_and_branding() {
     assert_eq!(
         rendered(

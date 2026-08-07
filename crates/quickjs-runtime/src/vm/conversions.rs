@@ -2270,6 +2270,36 @@ fn finish_operator_primitive_target(
         OperatorPrimitiveTarget::TemporalPlainDateTimeDifferenceSmallestUnit(state) => {
             finish_temporal_plain_date_time_difference_smallest_unit(runtime, state.as_ref(), value)
         }
+        OperatorPrimitiveTarget::TemporalPlainTimeDifferenceLargestUnit(state) => {
+            finish_temporal_plain_time_difference_largest_unit(
+                runtime,
+                *state,
+                value,
+                return_to,
+                execution_budget,
+            )
+        }
+        OperatorPrimitiveTarget::TemporalPlainTimeDifferenceRoundingIncrement(state) => {
+            finish_temporal_plain_time_difference_rounding_increment(
+                runtime,
+                *state,
+                value,
+                return_to,
+                execution_budget,
+            )
+        }
+        OperatorPrimitiveTarget::TemporalPlainTimeDifferenceRoundingMode(state) => {
+            finish_temporal_plain_time_difference_rounding_mode(
+                runtime,
+                *state,
+                value,
+                return_to,
+                execution_budget,
+            )
+        }
+        OperatorPrimitiveTarget::TemporalPlainTimeDifferenceSmallestUnit(state) => {
+            finish_temporal_plain_time_difference_smallest_unit(runtime, state.as_ref(), value)
+        }
         OperatorPrimitiveTarget::TemporalPlainDateTimeRoundRoundingIncrement(state) => {
             finish_temporal_plain_date_time_round_rounding_increment(
                 runtime,

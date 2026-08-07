@@ -269,6 +269,11 @@ enum TemporalPlainTimeLikeTarget {
         receiver: PlainTime,
         options: StoredValue,
     },
+    Difference {
+        receiver: PlainTime,
+        options: StoredValue,
+        since: bool,
+    },
     Equals {
         receiver: PlainTime,
     },
@@ -279,7 +284,8 @@ impl TemporalPlainTimeLikeTarget {
         match self {
             Self::From { options }
             | Self::CompareFirst { second: options }
-            | Self::With { options, .. } => {
+            | Self::With { options, .. }
+            | Self::Difference { options, .. } => {
                 trace_stored_value_root(options, mark);
             }
             Self::CompareSecond { .. } | Self::Equals { .. } => {}
@@ -1508,6 +1514,21 @@ fn continue_temporal_plain_time_like(
         TemporalPlainTimeLikeTarget::With { .. } => {
             unreachable!("Temporal.PlainTime.with completes from its property-bag state")
         }
+        TemporalPlainTimeLikeTarget::Difference {
+            receiver,
+            options,
+            since,
+        } => begin_temporal_plain_time_difference(
+            runtime,
+            receiver,
+            time,
+            options,
+            since,
+            realm,
+            return_to,
+            origin,
+            execution_budget,
+        ),
         TemporalPlainTimeLikeTarget::Equals { receiver } => Ok(NativeDispatch::Immediate(
             StoredValue::Boolean(receiver == time),
         )),
@@ -4524,6 +4545,23 @@ pub(super) fn dispatch_temporal_plain_time_prototype(
             origin.clone(),
             execution_budget,
         ),
+        TemporalPlainTimePrototypeMethod::Until | TemporalPlainTimePrototypeMethod::Since => {
+            let other = arguments.take_first_or_undefined();
+            let options = arguments.take_first_or_undefined();
+            begin_temporal_plain_time_like(
+                runtime,
+                other,
+                TemporalPlainTimeLikeTarget::Difference {
+                    receiver: time,
+                    options,
+                    since: matches!(method, TemporalPlainTimePrototypeMethod::Since),
+                },
+                realm,
+                return_to,
+                origin.clone(),
+                execution_budget,
+            )
+        }
         TemporalPlainTimePrototypeMethod::Equals => begin_temporal_plain_time_like(
             runtime,
             arguments.take_first_or_undefined(),
@@ -5280,6 +5318,40 @@ pub(super) struct TemporalPlainDateTimeDifferenceContinuation {
 }
 
 impl TemporalPlainDateTimeDifferenceContinuation {
+    pub(super) const fn retained_values() -> u64 {
+        1
+    }
+
+    pub(super) fn trace_roots(&self, mark: &mut dyn FnMut(CollectionRoot)) {
+        trace_stored_value_root(&self.options, mark);
+    }
+}
+
+#[derive(Clone, Copy)]
+enum TemporalPlainTimeDifferenceStage {
+    LargestUnit,
+    RoundingIncrement,
+    RoundingMode,
+    SmallestUnit,
+}
+
+/// Resumable options state for `Temporal.PlainTime.prototype.until` and
+/// `since`. The converted time operand is retained before the first options
+/// Get, and every option conversion remains observable across suspension.
+pub(super) struct TemporalPlainTimeDifferenceContinuation {
+    receiver: PlainTime,
+    other: PlainTime,
+    options: StoredValue,
+    largest_unit: Option<Unit>,
+    rounding_increment: RoundingIncrement,
+    rounding_mode: RoundingMode,
+    since: bool,
+    stage: TemporalPlainTimeDifferenceStage,
+    realm: RealmId,
+    origin: JsStackFrame,
+}
+
+impl TemporalPlainTimeDifferenceContinuation {
     pub(super) const fn retained_values() -> u64 {
         1
     }
@@ -8724,6 +8796,358 @@ fn complete_temporal_plain_date_time_difference(
     runtime: &mut Runtime,
     receiver: &PlainDateTime,
     other: &PlainDateTime,
+    largest_unit: Option<Unit>,
+    rounding_increment: RoundingIncrement,
+    rounding_mode: RoundingMode,
+    smallest_unit: Option<Unit>,
+    since: bool,
+    realm: RealmId,
+    origin: &JsStackFrame,
+) -> Result<NativeDispatch, NativeFailure> {
+    let mut settings = DifferenceSettings::default();
+    settings.largest_unit = largest_unit;
+    settings.smallest_unit = smallest_unit;
+    settings.rounding_mode = Some(rounding_mode);
+    settings.increment = Some(rounding_increment);
+    let duration = if since {
+        receiver.since(other, settings)
+    } else {
+        receiver.until(other, settings)
+    };
+    let duration = match duration {
+        Ok(duration) => duration,
+        Err(error) => {
+            return Err(NativeFailure::Abrupt(temporal_exception_from_error(
+                realm, origin, error,
+            )?));
+        }
+    };
+    allocate_temporal_duration_result(runtime, realm, duration)
+}
+
+#[allow(
+    clippy::too_many_arguments,
+    reason = "the time operand is converted before the observable options object"
+)]
+fn begin_temporal_plain_time_difference(
+    runtime: &mut Runtime,
+    receiver: PlainTime,
+    other: PlainTime,
+    options: StoredValue,
+    since: bool,
+    realm: RealmId,
+    return_to: Option<CallReturn>,
+    origin: JsStackFrame,
+    execution_budget: &mut ExecutionBudget,
+) -> Result<NativeDispatch, NativeFailure> {
+    if matches!(options, StoredValue::Undefined) {
+        return complete_temporal_plain_time_difference(
+            runtime,
+            &receiver,
+            &other,
+            None,
+            RoundingIncrement::ONE,
+            RoundingMode::Trunc,
+            None,
+            since,
+            realm,
+            &origin,
+        );
+    }
+    if options.heap_reference().is_none() {
+        return temporal_type_error(
+            realm,
+            &origin,
+            "Temporal.PlainTime.prototype.until options must be an object",
+        );
+    }
+    begin_temporal_plain_time_difference_get(
+        runtime,
+        TemporalPlainTimeDifferenceContinuation {
+            receiver,
+            other,
+            options,
+            largest_unit: None,
+            rounding_increment: RoundingIncrement::ONE,
+            rounding_mode: RoundingMode::Trunc,
+            since,
+            stage: TemporalPlainTimeDifferenceStage::LargestUnit,
+            realm,
+            origin,
+        },
+        "largestUnit",
+        TemporalPlainTimeDifferenceStage::LargestUnit,
+        return_to,
+        execution_budget,
+    )
+}
+
+#[allow(
+    clippy::too_many_arguments,
+    reason = "each time difference option Get owns native call state across suspension"
+)]
+fn begin_temporal_plain_time_difference_get(
+    runtime: &mut Runtime,
+    mut state: TemporalPlainTimeDifferenceContinuation,
+    name: &str,
+    next_stage: TemporalPlainTimeDifferenceStage,
+    return_to: Option<CallReturn>,
+    execution_budget: &mut ExecutionBudget,
+) -> Result<NativeDispatch, NativeFailure> {
+    state.stage = next_stage;
+    charge_heap_property_lookup(runtime, &state.options, execution_budget)?;
+    let name = JsString::from_utf8(name)?;
+    let key = runtime.property_key_from_string(&name)?;
+    let realm = state.realm;
+    let origin = state.origin.clone();
+    let dispatch = begin_value_get(
+        runtime,
+        &state.options,
+        key,
+        Some(&name),
+        realm,
+        return_to,
+        origin,
+        execution_budget,
+    )?;
+    match continue_get_state_after(
+        dispatch,
+        state,
+        temporal_plain_time_difference_continuation,
+        "Temporal.PlainTime difference option Get produced a structured result",
+    )? {
+        GetContinuationDispatch::Ready { state, value } => {
+            advance_temporal_plain_time_difference_options(
+                runtime,
+                state,
+                value,
+                return_to,
+                execution_budget,
+            )
+        }
+        GetContinuationDispatch::Suspended(dispatch) => Ok(dispatch),
+    }
+}
+
+fn temporal_plain_time_difference_continuation(
+    state: TemporalPlainTimeDifferenceContinuation,
+) -> NativeContinuation {
+    NativeContinuation::TemporalPlainTimeDifferenceOptions(Box::new(state))
+}
+
+#[allow(
+    clippy::too_many_arguments,
+    clippy::too_many_lines,
+    reason = "one ordered state table preserves time difference option observation across suspension"
+)]
+pub(super) fn advance_temporal_plain_time_difference_options(
+    runtime: &mut Runtime,
+    state: TemporalPlainTimeDifferenceContinuation,
+    value: StoredValue,
+    return_to: Option<CallReturn>,
+    execution_budget: &mut ExecutionBudget,
+) -> Result<NativeDispatch, NativeFailure> {
+    match state.stage {
+        TemporalPlainTimeDifferenceStage::LargestUnit => {
+            if matches!(value, StoredValue::Undefined) {
+                return begin_temporal_plain_time_difference_get(
+                    runtime,
+                    state,
+                    "roundingIncrement",
+                    TemporalPlainTimeDifferenceStage::RoundingIncrement,
+                    return_to,
+                    execution_budget,
+                );
+            }
+            let realm = state.realm;
+            let origin = state.origin.clone();
+            begin_operator_primitive_conversion(
+                runtime,
+                value,
+                OperatorPrimitiveHint::String,
+                OperatorPrimitiveTarget::TemporalPlainTimeDifferenceLargestUnit(Box::new(state)),
+                realm,
+                return_to,
+                origin,
+                execution_budget,
+            )
+        }
+        TemporalPlainTimeDifferenceStage::RoundingIncrement => {
+            if matches!(value, StoredValue::Undefined) {
+                return begin_temporal_plain_time_difference_get(
+                    runtime,
+                    state,
+                    "roundingMode",
+                    TemporalPlainTimeDifferenceStage::RoundingMode,
+                    return_to,
+                    execution_budget,
+                );
+            }
+            let realm = state.realm;
+            let origin = state.origin.clone();
+            begin_operator_primitive_conversion(
+                runtime,
+                value,
+                OperatorPrimitiveHint::Number,
+                OperatorPrimitiveTarget::TemporalPlainTimeDifferenceRoundingIncrement(Box::new(
+                    state,
+                )),
+                realm,
+                return_to,
+                origin,
+                execution_budget,
+            )
+        }
+        TemporalPlainTimeDifferenceStage::RoundingMode => {
+            if matches!(value, StoredValue::Undefined) {
+                return begin_temporal_plain_time_difference_get(
+                    runtime,
+                    state,
+                    "smallestUnit",
+                    TemporalPlainTimeDifferenceStage::SmallestUnit,
+                    return_to,
+                    execution_budget,
+                );
+            }
+            let realm = state.realm;
+            let origin = state.origin.clone();
+            begin_operator_primitive_conversion(
+                runtime,
+                value,
+                OperatorPrimitiveHint::String,
+                OperatorPrimitiveTarget::TemporalPlainTimeDifferenceRoundingMode(Box::new(state)),
+                realm,
+                return_to,
+                origin,
+                execution_budget,
+            )
+        }
+        TemporalPlainTimeDifferenceStage::SmallestUnit => {
+            if matches!(value, StoredValue::Undefined) {
+                return complete_temporal_plain_time_difference(
+                    runtime,
+                    &state.receiver,
+                    &state.other,
+                    state.largest_unit,
+                    state.rounding_increment,
+                    state.rounding_mode,
+                    None,
+                    state.since,
+                    state.realm,
+                    &state.origin,
+                );
+            }
+            let realm = state.realm;
+            let origin = state.origin.clone();
+            begin_operator_primitive_conversion(
+                runtime,
+                value,
+                OperatorPrimitiveHint::String,
+                OperatorPrimitiveTarget::TemporalPlainTimeDifferenceSmallestUnit(Box::new(state)),
+                realm,
+                return_to,
+                origin,
+                execution_budget,
+            )
+        }
+    }
+}
+
+pub(super) fn finish_temporal_plain_time_difference_largest_unit(
+    runtime: &mut Runtime,
+    mut state: TemporalPlainTimeDifferenceContinuation,
+    value: StoredValue,
+    return_to: Option<CallReturn>,
+    execution_budget: &mut ExecutionBudget,
+) -> Result<NativeDispatch, NativeFailure> {
+    let source = operator_primitive_to_string(value, state.realm, &state.origin)?;
+    state.largest_unit = Some(temporal_round_unit(&source, state.realm, &state.origin)?);
+    begin_temporal_plain_time_difference_get(
+        runtime,
+        state,
+        "roundingIncrement",
+        TemporalPlainTimeDifferenceStage::RoundingIncrement,
+        return_to,
+        execution_budget,
+    )
+}
+
+pub(super) fn finish_temporal_plain_time_difference_rounding_increment(
+    runtime: &mut Runtime,
+    mut state: TemporalPlainTimeDifferenceContinuation,
+    value: StoredValue,
+    return_to: Option<CallReturn>,
+    execution_budget: &mut ExecutionBudget,
+) -> Result<NativeDispatch, NativeFailure> {
+    let value = operator_to_number(value, state.realm, &state.origin)?.as_f64();
+    state.rounding_increment = match RoundingIncrement::try_from(value) {
+        Ok(increment) => increment,
+        Err(error) => {
+            return Err(NativeFailure::Abrupt(temporal_exception_from_error(
+                state.realm,
+                &state.origin,
+                error,
+            )?));
+        }
+    };
+    begin_temporal_plain_time_difference_get(
+        runtime,
+        state,
+        "roundingMode",
+        TemporalPlainTimeDifferenceStage::RoundingMode,
+        return_to,
+        execution_budget,
+    )
+}
+
+pub(super) fn finish_temporal_plain_time_difference_rounding_mode(
+    runtime: &mut Runtime,
+    mut state: TemporalPlainTimeDifferenceContinuation,
+    value: StoredValue,
+    return_to: Option<CallReturn>,
+    execution_budget: &mut ExecutionBudget,
+) -> Result<NativeDispatch, NativeFailure> {
+    let source = operator_primitive_to_string(value, state.realm, &state.origin)?;
+    state.rounding_mode = temporal_rounding_mode(&source, state.realm, &state.origin)?;
+    begin_temporal_plain_time_difference_get(
+        runtime,
+        state,
+        "smallestUnit",
+        TemporalPlainTimeDifferenceStage::SmallestUnit,
+        return_to,
+        execution_budget,
+    )
+}
+
+pub(super) fn finish_temporal_plain_time_difference_smallest_unit(
+    runtime: &mut Runtime,
+    state: &TemporalPlainTimeDifferenceContinuation,
+    value: StoredValue,
+) -> Result<NativeDispatch, NativeFailure> {
+    let source = operator_primitive_to_string(value, state.realm, &state.origin)?;
+    let smallest_unit = temporal_round_unit(&source, state.realm, &state.origin)?;
+    complete_temporal_plain_time_difference(
+        runtime,
+        &state.receiver,
+        &state.other,
+        state.largest_unit,
+        state.rounding_increment,
+        state.rounding_mode,
+        Some(smallest_unit),
+        state.since,
+        state.realm,
+        &state.origin,
+    )
+}
+
+#[allow(
+    clippy::too_many_arguments,
+    reason = "the completed JavaScript time difference settings are passed explicitly to the Temporal kernel"
+)]
+fn complete_temporal_plain_time_difference(
+    runtime: &mut Runtime,
+    receiver: &PlainTime,
+    other: &PlainTime,
     largest_unit: Option<Unit>,
     rounding_increment: RoundingIncrement,
     rounding_mode: RoundingMode,
