@@ -11,6 +11,7 @@ quickjs = { path = "../crates/quickjs" }
 quickjs-frontend = { path = "../crates/quickjs-frontend" }
 quickjs-runtime = { path = "../crates/quickjs-runtime" }
 serde_json.workspace = true
+serde_yaml_ng.workspace = true
 
 [lints]
 workspace = true

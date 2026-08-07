@@ -27,6 +27,7 @@ mod interrupt;
 mod number;
 mod object;
 mod predefined_atoms;
+mod promise_rejection;
 mod property;
 mod runtime;
 mod string;
@@ -41,14 +42,21 @@ pub use atom::{
 };
 pub use bigint::{BigIntError, JsBigInt};
 pub use error::{
-    DynamicFunctionCompileFailure, DynamicFunctionScriptError, EngineFault, ExceptionKind,
-    ExecutionError, HandleError, HandleKind, InstallError, JsException, JsStackFrame, RuntimeError,
-    RuntimeResource, ValueKind,
+    DynamicFunctionCompileFailure, DynamicFunctionScriptError, EngineFault, ErrorObjectKind,
+    ExceptionKind, ExecutionError, GlobalScriptError, HandleError, HandleKind, InstallError,
+    JsException, JsStackFrame, RuntimeError, RuntimeResource, ValueKind,
 };
-pub use host::{OrdinaryDynamicFunctionCompiler, OrdinaryDynamicFunctionSource};
+pub use host::{
+    DynamicFunctionCompileRequest, DynamicFunctionCompiler, DynamicFunctionFamily,
+    OrdinaryDynamicFunctionCompiler, OrdinaryDynamicFunctionSource,
+};
 pub use interrupt::{INTERRUPT_POLL_INTERVAL, InterruptHandler};
 pub use number::JsNumber;
 pub use predefined_atoms::PredefinedAtom;
+pub use promise_rejection::{
+    OwnedPromiseRejectionEvent, PromiseRejectionEvent, PromiseRejectionOperation,
+    PromiseRejectionTracker, PromiseRejectionValue,
+};
 pub use property::{
     CompletedPropertyDescriptor, DescriptorFields, PropertyDescriptor, PropertyDescriptorError,
     PropertyDescriptorKind, PropertyLayout, PropertyLayoutKind,

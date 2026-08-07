@@ -1,0 +1,114 @@
+{
+  "schema": 1,
+  "quickjs_release": "2026-06-04",
+  "cases": [
+    {
+      "id": "yield-resume-and-completed-resume-rules",
+      "covers": ["yield", "next-first-argument", "next-resume-value", "completed-next", "completed-return", "completed-throw"],
+      "body": "function* values(first) { let resumed = yield first; return resumed + 1; }\nlet iterator = values(2);\nlet first = iterator.next(99);\nlet second = iterator.next(4);\nlet completed = iterator.next();\nlet returned = iterator.return(8);\nlet thrown;\ntry { iterator.throw(7); } catch (error) { thrown = error; }\nreturn first.value + ':' + first.done + '|' + second.value + ':' + second.done + '|' + String(completed.value) + ':' + completed.done + '|' + returned.value + ':' + returned.done + '|' + thrown;",
+      "expect": {"kind": "string", "value": "2:false|5:true|undefined:true|8:true|7"}
+    },
+    {
+      "id": "generator-call-runs-parameter-initialization",
+      "covers": ["parameter-initialization", "prestart-return", "prestart-throw"],
+      "body": "let hits = 0;\nfunction* values(value = (hits = hits + 1)) { yield value; }\nlet returned = values().return(4);\nlet thrown;\ntry { values().throw(6); } catch (error) { thrown = error; }\nreturn hits + '|' + returned.value + ':' + returned.done + '|' + thrown;",
+      "expect": {"kind": "string", "value": "2|4:true|6"}
+    },
+    {
+      "id": "throw-enters-catch-and-uncaught-throw-completes",
+      "covers": ["throw-catch", "uncaught-completes"],
+      "body": "function* caught() { try { yield 1; } catch (error) { return error + 1; } }\nlet first = caught();\nfirst.next();\nlet handled = first.throw(4);\nfunction* abrupt() { yield 2; throw 8; }\nlet second = abrupt();\nsecond.next();\nlet escaped;\ntry { second.next(); } catch (error) { escaped = error; }\nlet completed = second.next();\nreturn handled.value + ':' + handled.done + '|' + escaped + '|' + String(completed.value) + ':' + completed.done;",
+      "expect": {"kind": "string", "value": "5:true|8|undefined:true"}
+    },
+    {
+      "id": "executing-generator-rejects-reentrant-next",
+      "covers": ["reentrancy"],
+      "body": "let iterator;\nfunction* values() { try { iterator.next(); } catch (error) { return error.name; } }\niterator = values();\nlet result = iterator.next();\nreturn result.value + ':' + result.done;",
+      "expect": {"kind": "string", "value": "TypeError:true"}
+    },
+    {
+      "id": "generator-function-and-instance-prototype-chains",
+      "covers": ["function-prototype-chain", "instance-prototype-chain", "nonconstructable"],
+      "body": "let generator = function* named() {};\nlet iterator = generator();\nlet functionPrototype = Object.getPrototypeOf(generator);\nlet generatorPrototype = Object.getPrototypeOf(generator.prototype);\nlet constructError = '';\ntry { new generator(); } catch (error) { constructError = error.name; }\nreturn Object.prototype.toString.call(functionPrototype) + '|' + Object.prototype.toString.call(generatorPrototype) + '|' + (Object.getPrototypeOf(iterator) === generator.prototype) + '|' + (generatorPrototype.constructor === functionPrototype) + '|' + constructError;",
+      "expect": {"kind": "string", "value": "[object GeneratorFunction]|[object Generator]|true|true|TypeError"}
+    },
+    {
+      "id": "generator-method-call-and-apply",
+      "covers": ["generator-method", "call-apply"],
+      "body": "let object = { *values() { yield 2; } };\nlet direct = object.values.call(object).next().value;\nlet applied = object.values.apply(object, []).next().value;\nreturn direct + ':' + applied;",
+      "expect": {"kind": "string", "value": "2:2"}
+    },
+    {
+      "id": "for-of-consumes-generator-in-order",
+      "covers": ["for-of-consumption"],
+      "body": "function* values() { yield 2; yield 3; }\nlet result = '';\nfor (const value of values()) result = result + value;\nreturn result;",
+      "expect": {"kind": "string", "value": "23"}
+    },
+    {
+      "id": "return-completion-survives-yielding-finally",
+      "covers": ["return-finally"],
+      "body": "function* values() { try { yield 1; } finally { yield 2; } }\nlet iterator = values();\nlet first = iterator.next();\nlet second = iterator.return(9);\nlet third = iterator.next();\nreturn first.value + ':' + first.done + '|' + second.value + ':' + second.done + '|' + third.value + ':' + third.done;",
+      "expect": {"kind": "string", "value": "1:false|2:false|9:true"}
+    },
+    {
+      "id": "return-closes-active-nested-generator-iterator",
+      "covers": ["return-nested-close"],
+      "body": "let log = '';\nfunction* inner() { try { while (true) yield 3; } finally { log = log + 'close'; } }\nfunction* outer() { for (const value of inner()) yield value; }\nlet iterator = outer();\nlet first = iterator.next();\nlet second = iterator.return(7);\nreturn first.value + ':' + first.done + '|' + log + '|' + second.value + ':' + second.done;",
+      "expect": {"kind": "string", "value": "3:false|close|7:true"}
+    },
+    {
+      "id": "yield-star-forwards-next-and-preserves-result-identity",
+      "covers": ["yield-star", "delegate-next", "iterator-result-identity"],
+      "body": "let log = '';\nlet first = {value: 2, done: false};\nlet last = {value: 9, done: true};\nlet delegated = (function* () {})();\ndelegated.next = function(value) { log = log + String(value) + '|'; return log === 'undefined|' ? first : last; };\nfunction* outer() { let value = yield* delegated; return value + 1; }\nlet iterator = outer();\nlet yielded = iterator.next(100);\nlet completed = iterator.next(4);\nreturn (yielded === first) + '|' + yielded.value + ':' + yielded.done + '|' + completed.value + ':' + completed.done + '|' + log;",
+      "expect": {"kind": "string", "value": "true|2:false|10:true|undefined|4|"}
+    },
+    {
+      "id": "yield-star-forwards-return-and-throw",
+      "covers": ["delegate-return", "delegate-throw", "abrupt-resume-forwarding"],
+      "body": "let log = '';\nlet returnResult = {value: 3, done: false};\nlet throwResult = {value: 4, done: false};\nlet delegated = (function* () {})();\ndelegated.next = function(value) { log = log + 'n' + String(value) + '|'; return value === void 0 ? {value: 1, done: false} : {value: 8, done: true}; };\ndelegated.return = function(value) { log = log + 'r' + value + '|'; return returnResult; };\ndelegated.throw = function(value) { log = log + 't' + value + '|'; return throwResult; };\nfunction* outer() { return (yield* delegated) + 1; }\nlet returned = outer();\nreturned.next();\nlet returnYield = returned.return(6);\nlet returnDone = returned.next(7);\nlet thrown = outer();\nthrown.next();\nlet throwYield = thrown.throw(5);\nlet throwDone = thrown.next(9);\nreturn (returnYield === returnResult) + '|' + returnDone.value + ':' + returnDone.done + '|' + (throwYield === throwResult) + '|' + throwDone.value + ':' + throwDone.done + '|' + log;",
+      "expect": {"kind": "string", "value": "true|9:true|true|9:true|nundefined|r6|n7|nundefined|t5|n9|"}
+    },
+    {
+      "id": "yield-star-missing-throw-closes-without-an-argument",
+      "covers": ["missing-throw", "iterator-close", "zero-argument-close", "missing-throw-type-error"],
+      "body": "let log = '';\nlet delegated = (function* () {})();\ndelegated.next = function() { return {value: 1, done: false}; };\ndelegated.return = function() { log = log + arguments.length; return {value: 2, done: true}; };\ndelegated.throw = void 0;\nfunction* outer() { yield* delegated; }\nlet iterator = outer();\niterator.next();\nlet name;\ntry { iterator.throw(7); } catch (error) { name = error.name; }\nlet completed = iterator.next();\nreturn log + '|' + name + '|' + String(completed.value) + ':' + completed.done;",
+      "expect": {"kind": "string", "value": "0|TypeError|undefined:true"}
+    },
+    {
+      "id": "yield-star-validates-every-delegate-result",
+      "covers": ["iterator-result-validation"],
+      "body": "function iterable(methods) { let iterator = (function* () {})(); iterator.next = methods.next; iterator.return = methods.return; iterator.throw = methods.throw; return iterator; }\nfunction* outer(value) { yield* value; }\nlet nextName;\ntry { outer(iterable({next() { return 1; }})).next(); } catch (error) { nextName = error.name; }\nlet returned = outer(iterable({next() { return {value: 1, done: false}; }, return() { return 2; }}));\nreturned.next();\nlet returnName;\ntry { returned.return(3); } catch (error) { returnName = error.name; }\nlet thrown = outer(iterable({next() { return {value: 1, done: false}; }, throw() { return 4; }}));\nthrown.next();\nlet throwName;\ntry { thrown.throw(5); } catch (error) { throwName = error.name; }\nreturn nextName + '|' + returnName + '|' + throwName;",
+      "expect": {"kind": "string", "value": "TypeError|TypeError|TypeError"}
+    },
+    {
+      "id": "yield-star-missing-return-preserves-outer-finally",
+      "covers": ["missing-return", "yield-star-finally", "return-completion-propagation"],
+      "body": "let log = '';\nlet delegated = (function* () {})();\ndelegated.next = function() { return {value: 1, done: false}; };\ndelegated.return = void 0;\nfunction* outer() { try { return (yield* delegated) + 1; } finally { log = log + 'finally'; } }\nlet iterator = outer();\niterator.next();\nlet result = iterator.return(7);\nreturn log + '|' + result.value + ':' + result.done;",
+      "expect": {"kind": "string", "value": "finally|7:true"}
+    },
+    {
+      "id": "yield-star-reads-done-before-lazy-value",
+      "covers": ["done-before-value", "lazy-yield-value"],
+      "body": "let log = '';\nlet result = {};\nresult.__defineGetter__('done', function() { log = log + 'done|'; return false; });\nresult.__defineGetter__('value', function() { log = log + 'value|'; return 3; });\nlet delegated = (function* () {})();\ndelegated.next = function() { return result; };\nfunction* outer() { yield* delegated; }\nlet yielded = outer().next();\nlet before = log;\nlet value = yielded.value;\nreturn (yielded === result) + '|' + before + '|' + log + '|' + value;",
+      "expect": {"kind": "string", "value": "true|done||done|value||3"}
+    },
+    {
+      "id": "yield-star-throw-done-completes-normally",
+      "covers": ["throw-done-completion"],
+      "body": "let delegated = (function* () {})();\ndelegated.next = function() { return {value: 1, done: false}; };\ndelegated.throw = function(value) { return {value: value + 1, done: true}; };\nfunction* outer() { return (yield* delegated) + 1; }\nlet iterator = outer();\niterator.next();\nlet result = iterator.throw(4);\nreturn result.value + ':' + result.done;",
+      "expect": {"kind": "string", "value": "6:true"}
+    },
+    {
+      "id": "dynamic-generator-function-converts-source-and-executes",
+      "covers": ["dynamic-generator-function", "dynamic-generator-call", "dynamic-generator-source-order", "dynamic-generator-metadata"],
+      "body": "let log = '';\nlet parameter = {toString() { log = log + 'parameter|'; return 'value'; }};\nlet body = {toString() { log = log + 'body|'; return 'yield value; return 9;'; }};\nlet GeneratorFunction = (function* () {}).constructor;\nlet generated = GeneratorFunction(parameter, body);\nlet iterator = generated(4);\nlet first = iterator.next();\nlet second = iterator.next();\nreturn log + first.value + ':' + first.done + '|' + second.value + ':' + second.done + '|' + generated.name + ':' + generated.length + '|' + (Object.getPrototypeOf(generated) === GeneratorFunction.prototype);",
+      "expect": {"kind": "string", "value": "parameter|body|4:false|9:true|anonymous:1|true"}
+    },
+    {
+      "id": "dynamic-generator-function-honors-new-target-prototype-fallback",
+      "covers": ["dynamic-generator-new-target", "dynamic-generator-fallback-prototype"],
+      "body": "let GeneratorFunction = (function* () {}).constructor;\nlet custom = function Custom() {};\nlet expected = {marker: 1};\ncustom.prototype = expected;\nlet first = Reflect.construct(GeneratorFunction, ['yield 1;'], custom);\ncustom.prototype = 0;\nlet second = Reflect.construct(GeneratorFunction, ['yield 2;'], custom);\nreturn (Object.getPrototypeOf(first) === expected) + '|' + (Object.getPrototypeOf(second) === GeneratorFunction.prototype);",
+      "expect": {"kind": "string", "value": "true|true"}
+    }
+  ]
+}

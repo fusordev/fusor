@@ -33,6 +33,7 @@ use super::*;
 
 pub(super) fn completed_dynamic_function_source(
     arguments: Vec<StoredValue>,
+    family: DynamicFunctionFamily,
 ) -> Result<OrdinaryDynamicFunctionSource, NativeFailure> {
     let mut converted = Vec::new();
     converted
@@ -51,7 +52,8 @@ pub(super) fn completed_dynamic_function_source(
         converted.push(argument);
     }
     if converted.is_empty() {
-        return Ok(OrdinaryDynamicFunctionSource::new(
+        return Ok(OrdinaryDynamicFunctionSource::for_family(
+            family,
             Arc::from([]),
             JsString::empty(),
         ));
@@ -59,7 +61,8 @@ pub(super) fn completed_dynamic_function_source(
     let body = converted.pop().ok_or(EngineFault::RuntimeInvariant {
         message: "nonempty dynamic Function arguments lost their body",
     })?;
-    Ok(OrdinaryDynamicFunctionSource::new(
+    Ok(OrdinaryDynamicFunctionSource::for_family(
+        family,
         Arc::from(converted),
         body,
     ))
@@ -70,7 +73,7 @@ pub(super) fn completed_dynamic_function_source(
     clippy::too_many_lines,
     reason = "verified compilation, installation, rollback, and frame admission form one failure-atomic boundary"
 )]
-pub(super) fn finish_ordinary_function_constructor(
+pub(super) fn finish_dynamic_function_constructor(
     runtime: &mut Runtime,
     native: NativeFunction,
     construction: Option<FunctionId>,
@@ -83,6 +86,7 @@ pub(super) fn finish_ordinary_function_constructor(
     execution_budget: &mut ExecutionBudget,
 ) -> Result<NativeDispatch, NativeFailure> {
     execution_budget.charge_dynamic_compilation(&source)?;
+    let family = source.family();
     let authority = match compiler.compile(source) {
         Ok(authority) => authority,
         Err(DynamicFunctionCompileFailure::Syntax { message }) => {
@@ -138,6 +142,8 @@ pub(super) fn finish_ordinary_function_constructor(
         installed.function,
         active_frames,
         active_frame_values.saturating_add(dynamic_return_values),
+        0,
+        false,
     ) {
         Ok(plan) => plan,
         Err(error) => {
@@ -156,6 +162,7 @@ pub(super) fn finish_ordinary_function_constructor(
         runtime,
         plan,
         StoredValue::Object(global),
+        None,
         FrameArguments::Owned(CallArguments::empty()),
         return_to,
         None,
@@ -175,18 +182,24 @@ pub(super) fn finish_ordinary_function_constructor(
     frame.dynamic_return = Some(DynamicFunctionReturn {
         root: installed,
         realm: native.realm,
+        family,
         construction,
         origin: Some(origin),
     });
     Ok(NativeDispatch::Frame(frame))
 }
 
+#[allow(
+    clippy::too_many_lines,
+    reason = "one resumable Object.prototype.toString entry keeps every primitive wrapper and branded default-tag branch in specification order"
+)]
 pub(super) fn begin_object_prototype_to_string(
     runtime: &mut Runtime,
     realm: RealmId,
     receiver: StoredValue,
     return_to: Option<CallReturn>,
     origin: Option<JsStackFrame>,
+    execution_budget: &mut ExecutionBudget,
 ) -> Result<NativeDispatch, NativeFailure> {
     let (reference, default_tag) = match &receiver {
         StoredValue::Undefined => {
@@ -231,7 +244,14 @@ pub(super) fn begin_object_prototype_to_string(
         ),
         StoredValue::Object(object) => (
             HeapReference::Object(*object),
-            if runtime.is_array_object(*object)? {
+            if runtime.is_arguments_object(*object)? {
+                ObjectPrototypeTag::Arguments
+            } else if proxy_aware_is_array(
+                runtime,
+                receiver.duplicate(),
+                realm,
+                origin.clone().unwrap_or_else(native_function_host_origin),
+            )? {
                 ObjectPrototypeTag::Array
             } else if runtime.boxed_boolean(*object)?.is_some() {
                 ObjectPrototypeTag::Boolean
@@ -243,6 +263,10 @@ pub(super) fn begin_object_prototype_to_string(
                 ObjectPrototypeTag::String
             } else if runtime.boxed_symbol(*object)?.is_some() {
                 ObjectPrototypeTag::Symbol
+            } else if runtime.date_value(*object)?.is_some() {
+                ObjectPrototypeTag::Date
+            } else if runtime.array_buffer_state(*object)?.is_some() {
+                ObjectPrototypeTag::ArrayBuffer
             } else if runtime
                 .objects
                 .get(*object)
@@ -254,6 +278,17 @@ pub(super) fn begin_object_prototype_to_string(
                 .is_error()
             {
                 ObjectPrototypeTag::Error
+            } else if runtime
+                .objects
+                .get(*object)
+                .ok_or(EngineFault::StaleHeapEdge {
+                    edge: "object",
+                    index: object.index(),
+                    generation: object.generation(),
+                })?
+                .is_promise()
+            {
+                ObjectPrototypeTag::Promise
             } else {
                 ObjectPrototypeTag::Object
             },
@@ -271,6 +306,7 @@ pub(super) fn begin_object_prototype_to_string(
     let to_string_tag = runtime.predefined_symbol_property_key(PredefinedAtom::SymbolToStringTag);
     begin_intrinsic_get(
         runtime,
+        realm,
         reference,
         receiver,
         &to_string_tag,
@@ -280,6 +316,7 @@ pub(super) fn begin_object_prototype_to_string(
         },
         return_to,
         origin,
+        execution_budget,
     )
 }
 
@@ -670,12 +707,31 @@ fn native_function_name_to_string(
 }
 
 pub(super) fn native_function_host_origin() -> JsStackFrame {
+    dynamic_function_host_origin(NativeFunctionKind::OrdinaryFunctionConstructor)
+}
+
+pub(super) fn dynamic_function_host_origin(kind: NativeFunctionKind) -> JsStackFrame {
+    let (source_name, function_name, end) = match kind {
+        NativeFunctionKind::OrdinaryFunctionConstructor => ("<native Function>", "Function", 8),
+        NativeFunctionKind::GeneratorFunctionConstructor => {
+            ("<native GeneratorFunction>", "GeneratorFunction", 17)
+        }
+        NativeFunctionKind::AsyncFunctionConstructor => {
+            ("<native AsyncFunction>", "AsyncFunction", 13)
+        }
+        NativeFunctionKind::AsyncGeneratorFunctionConstructor => (
+            "<native AsyncGeneratorFunction>",
+            "AsyncGeneratorFunction",
+            22,
+        ),
+        _ => ("<native dynamic function>", "dynamic function", 16),
+    };
     JsStackFrame::new(
         FunctionTemplateId::new(0),
         BytecodePc::ZERO,
-        Arc::from("<native Function>"),
-        Arc::from("Function"),
-        SourceByteSpan::new(0, 8),
+        Arc::from(source_name),
+        Arc::from(function_name),
+        SourceByteSpan::new(0, end),
     )
 }
 
@@ -689,12 +745,21 @@ fn retire_failed_dynamic_root(
 }
 
 pub(super) fn dynamic_function_source_code_units(source: &OrdinaryDynamicFunctionSource) -> u64 {
-    const FIXED_WRAPPER_CODE_UNITS: u64 = 28;
+    const FUNCTION_WRAPPER_CODE_UNITS: u64 = 28;
+    const GENERATOR_WRAPPER_CODE_UNITS: u64 = 29;
+    const ASYNC_WRAPPER_CODE_UNITS: u64 = 34;
+    const ASYNC_GENERATOR_WRAPPER_CODE_UNITS: u64 = 35;
+    let wrapper_units = match source.family() {
+        DynamicFunctionFamily::Function => FUNCTION_WRAPPER_CODE_UNITS,
+        DynamicFunctionFamily::GeneratorFunction => GENERATOR_WRAPPER_CODE_UNITS,
+        DynamicFunctionFamily::AsyncFunction => ASYNC_WRAPPER_CODE_UNITS,
+        DynamicFunctionFamily::AsyncGeneratorFunction => ASYNC_GENERATOR_WRAPPER_CODE_UNITS,
+    };
     let parameter_units = source.parameters().iter().fold(0_u64, |total, parameter| {
         total.saturating_add(u64::from(parameter.len()))
     });
     let separator_units = usize_to_u64(source.parameters().len().saturating_sub(1));
-    FIXED_WRAPPER_CODE_UNITS
+    wrapper_units
         .saturating_add(parameter_units)
         .saturating_add(separator_units)
         .saturating_add(u64::from(source.body().len()))
@@ -734,7 +799,7 @@ pub(super) fn finish_dynamic_function_return(
     value: StoredValue,
 ) -> Result<DynamicFunctionCompletion, ExecutionError> {
     let completion = if let Some(new_target) = dynamic.construction {
-        apply_dynamic_constructor_prototype(runtime, new_target, value)
+        apply_dynamic_constructor_prototype(runtime, new_target, dynamic.family, value)
     } else {
         Ok(value)
     };
@@ -793,6 +858,7 @@ impl From<JsStringError> for ConstructorCompletionError {
 fn apply_dynamic_constructor_prototype(
     runtime: &mut Runtime,
     new_target: FunctionId,
+    family: DynamicFunctionFamily,
     completion: StoredValue,
 ) -> Result<StoredValue, ConstructorCompletionError> {
     let target = match &completion {
@@ -825,7 +891,20 @@ fn apply_dynamic_constructor_prototype(
         | StoredValue::String(_)
         | StoredValue::Symbol(_) => {
             let realm = runtime.function_realm(new_target)?;
-            HeapReference::Function(runtime.realm_function_prototype(realm)?)
+            match family {
+                DynamicFunctionFamily::Function => {
+                    HeapReference::Function(runtime.realm_function_prototype(realm)?)
+                }
+                DynamicFunctionFamily::GeneratorFunction => {
+                    HeapReference::Object(runtime.realm_generator_function_prototype(realm)?)
+                }
+                DynamicFunctionFamily::AsyncFunction => {
+                    HeapReference::Object(runtime.realm_async_function_prototype(realm)?)
+                }
+                DynamicFunctionFamily::AsyncGeneratorFunction => {
+                    HeapReference::Object(runtime.realm_async_generator_function_prototype(realm)?)
+                }
+            }
         }
     };
     if !runtime.replace_prototype_checked(target, Some(prototype))? {
@@ -858,14 +937,22 @@ pub(super) fn function_is_constructor(
                     .ok_or(EngineFault::InvalidClosureEnvironment {
                         function: bytecode.template,
                     })?;
-                return Ok(template
-                    .function()
-                    .control_flow()
-                    .function_header()
-                    .flags()
-                    .has_prototype());
+                return Ok(template.metadata().executable_kind()
+                    == CompilerExecutableKind::ClassConstructor
+                    || template
+                        .function()
+                        .control_flow()
+                        .function_header()
+                        .flags()
+                        .has_prototype());
             }
             FunctionImplementation::Native(native) => return Ok(native.kind.is_constructor()),
+            FunctionImplementation::PromiseResolving(_)
+            | FunctionImplementation::PromiseCapabilityExecutor(_)
+            | FunctionImplementation::PromiseFinally(_)
+            | FunctionImplementation::PromiseCombinatorElement(_)
+            | FunctionImplementation::ProxyRevoker(_) => return Ok(false),
+            FunctionImplementation::Proxy(proxy) => return Ok(proxy.constructable),
             FunctionImplementation::Bound(bound) => {
                 if remaining == 0 {
                     return Err(EngineFault::RuntimeInvariant {
@@ -899,12 +986,37 @@ pub(super) fn bytecode_function_is_constructor(
         .ok_or(EngineFault::InvalidClosureEnvironment {
             function: bytecode.template,
         })?;
-    Ok(template
-        .function()
-        .control_flow()
-        .function_header()
-        .flags()
-        .has_prototype())
+    Ok(
+        template.metadata().executable_kind() == CompilerExecutableKind::ClassConstructor
+            || template
+                .function()
+                .control_flow()
+                .function_header()
+                .flags()
+                .has_prototype(),
+    )
+}
+
+pub(super) fn bytecode_function_is_class_constructor(
+    runtime: &Runtime,
+    function: FunctionId,
+) -> Result<bool, ExecutionError> {
+    let bytecode = runtime
+        .functions
+        .get(function)
+        .ok_or(EngineFault::StaleHeapEdge {
+            edge: "function",
+            index: function.index(),
+            generation: function.generation(),
+        })?
+        .bytecode()?;
+    let template = code(runtime, bytecode.code)?
+        .authority
+        .function(bytecode.template)
+        .ok_or(EngineFault::InvalidClosureEnvironment {
+            function: bytecode.template,
+        })?;
+    Ok(template.metadata().executable_kind() == CompilerExecutableKind::ClassConstructor)
 }
 
 pub(super) fn create_ordinary_constructor_receiver(

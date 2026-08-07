@@ -39,7 +39,7 @@
 //! The module is self-contained so it can be tested without a runtime; the
 //! caller maps [`BigIntError`] onto the pinned exception messages.
 
-use std::{cmp::Ordering, collections::TryReserveError};
+use std::{cmp::Ordering, collections::TryReserveError, error::Error, fmt};
 
 /// Bits per limb, matching `JS_LIMB_BITS` for the 32-bit configuration.
 const LIMB_BITS: u32 = 32;
@@ -88,6 +88,24 @@ pub enum BigIntError {
     /// A radix fell outside `2..=36`.
     InvalidRadix,
 }
+
+impl fmt::Display for BigIntError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(match self {
+            Self::TooLarge => "BigInt is too large to allocate",
+            Self::ResultTooLarge => "BigInt result is too large",
+            Self::AllocationFailed => "BigInt allocation failed",
+            Self::NotAnInteger => "cannot convert a non-integer to BigInt",
+            Self::NotFinite => "cannot convert NaN or Infinity to BigInt",
+            Self::InvalidLiteral => "invalid BigInt literal",
+            Self::DivisionByZero => "BigInt division by zero",
+            Self::NegativeExponent => "BigInt exponent must be non-negative",
+            Self::InvalidRadix => "BigInt radix must be between 2 and 36",
+        })
+    }
+}
+
+impl Error for BigIntError {}
 
 impl From<TryReserveError> for BigIntError {
     fn from(_: TryReserveError) -> Self {
@@ -178,6 +196,34 @@ impl JsBigInt {
         Self { limbs }
     }
 
+    /// Creates a value from a signed 128-bit integer.
+    #[must_use]
+    pub fn from_i128(value: i128) -> Self {
+        let bits = value.to_le_bytes();
+        let mut limbs = vec![
+            u32::from_le_bytes([bits[0], bits[1], bits[2], bits[3]]),
+            u32::from_le_bytes([bits[4], bits[5], bits[6], bits[7]]),
+            u32::from_le_bytes([bits[8], bits[9], bits[10], bits[11]]),
+            u32::from_le_bytes([bits[12], bits[13], bits[14], bits[15]]),
+        ];
+        normalize(&mut limbs);
+        Self { limbs }
+    }
+
+    /// Returns the value as an `i128` when it fits.
+    #[must_use]
+    pub fn to_i128(&self) -> Option<i128> {
+        if self.limbs.len() > 4 {
+            return None;
+        }
+        let bits = u128::from(self.limb(0))
+            | (u128::from(self.limb(1)) << 32)
+            | (u128::from(self.limb(2)) << 64)
+            | (u128::from(self.limb(3)) << 96);
+        let value = bits.cast_signed();
+        (Self::from_i128(value) == *self).then_some(value)
+    }
+
     /// Creates a value from an unsigned 64-bit integer.
     #[must_use]
     pub fn from_u64(value: u64) -> Self {
@@ -262,6 +308,19 @@ impl JsBigInt {
         let low = u64::from(self.limb(0));
         let high = u64::from(self.limb(1));
         Some(low | (high << LIMB_BITS))
+    }
+
+    /// Returns the low 64 bits of the value's infinite two's-complement
+    /// representation.
+    ///
+    /// `BigInt64Array` and `BigUint64Array` write exactly this modulo-`2^64`
+    /// projection.  Keeping it limb-local avoids allocating an intermediate
+    /// `asIntN(64)`/`asUintN(64)` result in the typed-array element path.
+    #[must_use]
+    pub(crate) fn low_u64_twos_complement(&self) -> u64 {
+        let low = u64::from(self.limb(0));
+        let high = u64::from(self.limb(1));
+        low | (high << LIMB_BITS)
     }
 
     /// Converts the value to the nearest binary64, rounding half to even.
@@ -1101,6 +1160,20 @@ mod tests {
             assert_eq!(big.to_i64(), Some(value), "i64 {value}");
             assert_eq!(decimal(&big), value.to_string());
         }
+        for value in [0_i128, 1, -1, i128::MAX, i128::MIN, 1_i128 << 96] {
+            let big = JsBigInt::from_i128(value);
+            assert_normalized(&big);
+            assert_eq!(big.to_i128(), Some(value), "i128 {value}");
+            assert_eq!(decimal(&big), value.to_string());
+        }
+        assert_eq!(
+            parse("170141183460469231731687303715884105728").to_i128(),
+            None
+        );
+        assert_eq!(
+            parse("-170141183460469231731687303715884105729").to_i128(),
+            None
+        );
         for value in [0_u64, 1, u64::from(u32::MAX), u64::MAX, 1_u64 << 63] {
             let big = JsBigInt::from_u64(value);
             assert_normalized(&big);

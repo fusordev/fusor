@@ -1,4 +1,5 @@
-//! `Array.prototype.push`, `pop`, `shift`, `unshift`, `reverse`, and `fill`.
+//! `Array.prototype.push`, `pop`, `shift`, `unshift`, `reverse`, `fill`, and
+//! `copyWithin`.
 //!
 //! Every expectation below was produced by the pinned oracle:
 //!
@@ -27,8 +28,11 @@
 //! order: push logs getlen|set1:x|setlen:2
 //!        pop  logs getlen|get1|setlen:1
 //!        fill logs len|start|end, and never coerces its value
+//! copyWithin: [1,2,3,4,5].copyWithin(1,0,4) => "1,1,2,3,4"
+//!             overlap reads/writes in reverse: get1|set2:y|get0|set1:x
+//!             an absent source deletes its destination
 //! push past 2^53-1 !! TypeError: Array loo long
-//! lengths: push 1, pop 0, shift 0, unshift 1, reverse 0, fill 1
+//! lengths: push 1, pop 0, shift 0, unshift 1, reverse 0, fill 1, copyWithin 2
 //! ```
 
 use std::{error::Error, fmt, sync::Arc};
@@ -264,6 +268,30 @@ fn fill_writes_across_its_resolved_range() {
     ]);
 }
 
+/// `copyWithin` copies a resolved range in place and returns its receiver.
+#[test]
+fn copy_within_copies_in_place() {
+    assert_all(&[
+        ("[1,2,3,4,5].copyWithin(0,3).join()", "4,5,3,4,5"),
+        // Overlap requires a backward walk so unread sources survive.
+        ("[1,2,3,4,5].copyWithin(1,0,4).join()", "1,1,2,3,4"),
+        // Negative bounds are relative to the snapshotted length.
+        ("[1,2,3,4,5].copyWithin(-2,-4,-1).join()", "1,2,3,2,3"),
+        // Explicit `undefined`, like an absent end, copies through the length.
+        ("[1,2,3,4].copyWithin(0,2,undefined).join()", "3,4,3,4"),
+        ("[1,2,3].copyWithin(0,3,1).join()", "1,2,3"),
+        (
+            "(function(){const a=[1,2];return a.copyWithin(0,1)===a;})()",
+            "true",
+        ),
+        // `ToObject` returns a wrapper rather than the original primitive.
+        (
+            "Object.prototype.toString.call(Array.prototype.copyWithin.call(3,0,0))",
+            "[object Number]",
+        ),
+    ]);
+}
+
 /// Holes survive a move rather than becoming `undefined`.
 ///
 /// An absent source is deleted at its destination, so a sparse array stays
@@ -299,6 +327,20 @@ fn holes_are_preserved_across_moves() {
             })()",
             "0,,2|false",
         ),
+        // A missing source removes an existing destination rather than writing
+        // `undefined`; the present source still moves normally.
+        (
+            "(function(){\
+                const a=[,1,,3];\
+                a.copyWithin(1,0,3);\
+                return a.join()+'|'\
+                    +Object.prototype.hasOwnProperty.call(a,0)+'|'\
+                    +Object.prototype.hasOwnProperty.call(a,1)+'|'\
+                    +Object.prototype.hasOwnProperty.call(a,2)+'|'\
+                    +Object.prototype.hasOwnProperty.call(a,3);\
+            })()",
+            ",,1,|false|false|true|false",
+        ),
     ]);
 }
 
@@ -326,6 +368,16 @@ fn the_mutators_accept_an_array_like_receiver() {
         (
             "(function(){\
                 const o={length:'2',1:'b'};\
+                const r=Array.prototype.pop.call(o);\
+                return r+'|'+o.length;\
+            })()",
+            "b|1",
+        ),
+        // Object-valued lengths perform a resumable `ToPrimitive` before
+        // `ToLength` rather than being rejected by the native driver.
+        (
+            "(function(){\
+                const o={length:{valueOf(){return 2;}},1:'b'};\
                 const r=Array.prototype.pop.call(o);\
                 return r+'|'+o.length;\
             })()",
@@ -359,6 +411,26 @@ fn the_mutators_accept_an_array_like_receiver() {
                 return String(o[0])+'|'+o[1]+'|'+o[2]+'|'+o.length;\
             })()",
             "undefined|7|7|3",
+        ),
+        (
+            "(function(){\
+                const o={length:4,0:'a',2:'c'};\
+                const r=Array.prototype.copyWithin.call(o,1,0,3);\
+                return (r===o)+'|'+o[1]+'|'\
+                    +Object.prototype.hasOwnProperty.call(o,2)+'|'+o[3]+'|'+o.length;\
+            })()",
+            "true|a|false|c|4",
+        ),
+        // Integer indices above the Array-index domain are ordinary String
+        // keys and remain reachable under `LengthOfArrayLike`.
+        (
+            "(function(){\
+                const o={length:4294967296,0:'head','4294967295':'tail'};\
+                Array.prototype.copyWithin.call(o,0,4294967295);\
+                Array.prototype.copyWithin.call(o,4294967295,0,1);\
+                return o[0]+'|'+o['4294967295']+'|'+o.length;\
+            })()",
+            "tail|tail|4294967296",
         ),
     ]);
 }
@@ -414,7 +486,50 @@ fn the_observable_order_matches_the_oracle() {
             })()",
             "0|object",
         ),
+        // Length, target, start, and end are converted in that order. The
+        // overlapping element range is then copied from the end.
+        (
+            "(function(){\
+                let log='';\
+                const o={\
+                    get length(){log+='length|';return {valueOf(){log+='lengthValue|';return 3;}};},\
+                    get 0(){log+='get0|';return 'x';},\
+                    set 1(v){log+='set1:'+v;},\
+                    get 1(){log+='get1|';return 'y';},\
+                    set 2(v){log+='set2:'+v+'|';}\
+                };\
+                Array.prototype.copyWithin.call(\
+                    o,\
+                    {valueOf(){log+='target|';return 1;}},\
+                    {valueOf(){log+='start|';return 0;}},\
+                    {valueOf(){log+='end|';return 2;}});\
+                return log;\
+            })()",
+            "length|lengthValue|target|start|end|get1|set2:y|get0|set1:x",
+        ),
+        // `copyWithin` never writes `length` back.
+        (
+            "(function(){\
+                let log='';\
+                const o={get length(){log+='get';return 1;},set length(v){log+='set';}};\
+                Array.prototype.copyWithin.call(o,0,0);\
+                return log;\
+            })()",
+            "get",
+        ),
     ]);
+}
+
+/// Deleting an absent source's destination is the throwing abstract operation.
+#[test]
+fn copy_within_throws_when_a_destination_cannot_be_deleted() {
+    assert_throws(
+        "const o={length:2};\
+         Object.defineProperty(o,1,{value:'locked',configurable:false,writable:true});\
+         return Array.prototype.copyWithin.call(o,1,0,1);",
+        ExceptionKind::TypeError,
+        "could not delete property",
+    );
 }
 
 /// Growing past the maximum length reports upstream's misspelled message.
@@ -438,7 +553,15 @@ fn growing_past_the_maximum_length_is_rejected() {
 /// A nullish receiver is rejected before the length is read.
 #[test]
 fn a_nullish_receiver_is_rejected() {
-    for method in ["push", "pop", "shift", "unshift", "reverse", "fill"] {
+    for method in [
+        "push",
+        "pop",
+        "shift",
+        "unshift",
+        "reverse",
+        "fill",
+        "copyWithin",
+    ] {
         for receiver in ["null", "undefined"] {
             assert_throws(
                 &format!("return Array.prototype.{method}.call({receiver});"),
@@ -447,6 +570,26 @@ fn a_nullish_receiver_is_rejected() {
             );
         }
     }
+}
+
+/// Generic mutators preserve the full Proxy internal-method sequence instead
+/// of reading or writing the handler object as ordinary storage.
+#[test]
+fn reverse_uses_proxy_internal_methods() {
+    assert_all(&[(
+        "(function(){\
+            let log='';const target=[1,2];\
+            const proxy=new Proxy(target,{\
+                get:function(t,k){log+='g'+k+';';return t[k];},\
+                has:function(t,k){log+='h'+k+';';return k in t;},\
+                set:function(t,k,v){log+='s'+k+'='+v+';';t[k]=v;return true;},\
+                deleteProperty:function(t,k){log+='d'+k+';';return delete t[k];}\
+            });\
+            Array.prototype.reverse.call(proxy);\
+            return log+'|'+target.join();\
+        })()",
+        "glength;h0;g0;h1;g1;s1=1;s0=2;|2,1",
+    )]);
 }
 
 /// The installed mutators carry the pinned `name`, `length`, and descriptors.
@@ -460,9 +603,11 @@ fn the_mutators_have_the_pinned_shape() {
         ("Array.prototype.pop.length", "0"),
         ("Array.prototype.shift.length", "0"),
         ("Array.prototype.reverse.length", "0"),
+        ("Array.prototype.copyWithin.length", "2"),
         ("Array.prototype.push.name", "push"),
         ("Array.prototype.fill.name", "fill"),
         ("Array.prototype.reverse.name", "reverse"),
+        ("Array.prototype.copyWithin.name", "copyWithin"),
         (
             "Object.getOwnPropertyDescriptor(Array.prototype,'push').enumerable",
             "false",
@@ -475,5 +620,34 @@ fn the_mutators_have_the_pinned_shape() {
             "Object.getOwnPropertyDescriptor(Array.prototype,'push').configurable",
             "true",
         ),
+        (
+            "Object.prototype.hasOwnProperty.call(Array.prototype.copyWithin,'prototype')",
+            "false",
+        ),
+        (
+            "(function(){try{new Array.prototype.copyWithin();}catch(error){return error instanceof TypeError;}})()",
+            "true",
+        ),
     ]);
+}
+
+/// A long `copyWithin` scan is lazy and consumes the shared instruction fuel.
+#[test]
+fn copy_within_scans_consume_shared_instruction_fuel() {
+    let mut runtime = Runtime::try_new(RuntimeLimits::default()).expect("runtime");
+    let realm = runtime.create_realm().expect("realm");
+    let mut context = runtime.context(&realm).expect("context");
+    let run = dynamic_function(
+        &mut context,
+        "return Array.prototype.copyWithin.call({length:1000},1,0,999);",
+    );
+    let result = context.call(
+        &run,
+        &[],
+        ExecutionLimits::default().with_instruction_fuel(100),
+    );
+    assert!(matches!(
+        result,
+        Err(ExecutionError::InstructionLimitExceeded { limit: 100, .. })
+    ));
 }

@@ -5,6 +5,7 @@ members = [
     "crates/quickjs-compiler",
     "crates/quickjs-diagnostics",
     "crates/quickjs-frontend",
+    "crates/quickjs-regexp",
     "crates/quickjs-runtime",
     "xtask",
 ]
@@ -16,16 +17,24 @@ rust-version = "1.97"
 license = "MIT"
 
 [workspace.dependencies]
+icu_casemap = "=2.2.0"
+icu_locale_core = "=2.2.0"
+icu_normalizer = { version = "=2.2.0", default-features = false, features = ["compiled_data"] }
+icu_properties = "=2.2.0"
 miette = { version = "=7.6.0", default-features = false, features = ["fancy-no-syscall"] }
 oxc_allocator = "=0.142.0"
 oxc_ast = "=0.142.0"
 oxc_diagnostics = "=0.142.0"
 oxc_parser = { version = "=0.142.0", default-features = false }
+oxc_regular_expression = "=0.142.0"
 oxc_semantic = "=0.142.0"
 oxc_span = "=0.142.0"
 oxc_syntax = "=0.142.0"
 serde_json = "=1.0.151"
+serde_yaml_ng = "=0.10.0"
 sourcemap = { version = "=9.3.2", default-features = false }
+temporal_rs = "=0.2.5"
+writeable = "=0.6.3"
 
 [workspace.lints.rust]
 unsafe_code = "forbid"

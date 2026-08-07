@@ -46,6 +46,10 @@ fn policy(kind: CompilerBindingKind) -> CompilerBindingPolicy {
         ),
         CompilerBindingKind::Parameter
         | CompilerBindingKind::FunctionName
+        | CompilerBindingKind::ClassName
+        | CompilerBindingKind::ClassFieldKey
+        | CompilerBindingKind::ClassPrivateName
+        | CompilerBindingKind::ClassStaticReceiver
         | CompilerBindingKind::Catch
         | CompilerBindingKind::Let
         | CompilerBindingKind::Const => panic!("unsupported fixture policy"),
@@ -452,8 +456,16 @@ fn failed_global_function_allocation_commits_the_declaration_without_leaking_cod
             (FinalOpcode::Return, Operands::None),
         ],
     );
+    let heap_function_limit = {
+        let mut bootstrap = Runtime::try_new(RuntimeLimits::default()).expect("bootstrap runtime");
+        let realm = bootstrap.create_realm().expect("bootstrap realm");
+        let usage = bootstrap.usage();
+        drop(realm);
+        usage.heap_functions() + 1
+    };
     let mut runtime =
-        Runtime::try_new(RuntimeLimits::default().with_max_heap_functions(124)).expect("runtime");
+        Runtime::try_new(RuntimeLimits::default().with_max_heap_functions(heap_function_limit))
+            .expect("runtime");
     let realm = runtime.create_realm().expect("realm");
     let baseline = runtime.usage();
     let mut context = runtime.context(&realm).expect("context");
@@ -461,14 +473,17 @@ fn failed_global_function_allocation_commits_the_declaration_without_leaking_cod
     let error = context
         .execute_dynamic_function_script(declaration, ExecutionLimits::default())
         .expect_err("child allocation exceeds the heap-function limit");
-    assert!(matches!(
-        error,
-        DynamicFunctionScriptError::Execution(ExecutionError::LimitExceeded {
-            resource: RuntimeResource::HeapFunctions,
-            limit: 124,
-            observed: 125,
-        })
-    ));
+    assert!(
+        matches!(
+            error,
+            DynamicFunctionScriptError::Execution(ExecutionError::LimitExceeded {
+                resource: RuntimeResource::HeapFunctions,
+                limit,
+                observed,
+            }) if limit == heap_function_limit && observed == heap_function_limit + 1
+        ),
+        "unexpected global function allocation failure: {error:?}"
+    );
     let committed = context.runtime_usage();
     assert_eq!(committed.installed_code(), baseline.installed_code());
     assert_eq!(committed.heap_functions(), baseline.heap_functions());
@@ -595,8 +610,17 @@ fn global_var_property_limit_failure_is_atomic() {
             (FinalOpcode::Return, Operands::None),
         ],
     );
-    let mut runtime = Runtime::try_new(RuntimeLimits::default().with_max_object_properties(413))
-        .expect("runtime");
+    let object_property_limit = {
+        let mut bootstrap = Runtime::try_new(RuntimeLimits::default()).expect("bootstrap runtime");
+        let realm = bootstrap.create_realm().expect("bootstrap realm");
+        let usage = bootstrap.usage();
+        drop(realm);
+        usage.object_properties()
+    };
+    let mut runtime = Runtime::try_new(
+        RuntimeLimits::default().with_max_object_properties(object_property_limit),
+    )
+    .expect("runtime");
     let realm = runtime.create_realm().expect("realm");
     let baseline = runtime.usage();
     let mut context = runtime.context(&realm).expect("context");
@@ -608,9 +632,9 @@ fn global_var_property_limit_failure_is_atomic() {
         error,
         DynamicFunctionScriptError::Install(quickjs_runtime::InstallError::LimitExceeded {
             resource: RuntimeResource::ObjectProperties,
-            limit: 413,
-            observed: 414,
-        })
+            limit,
+            observed,
+        }) if limit == object_property_limit && observed == object_property_limit + 1
     ));
     assert_eq!(context.runtime_usage(), baseline);
 }

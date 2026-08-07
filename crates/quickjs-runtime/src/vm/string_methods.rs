@@ -23,8 +23,7 @@
  * THE SOFTWARE.
  */
 
-//! The `String.prototype` method surface that needs no `RegExp` or Unicode
-//! tables.
+//! The `String.prototype` method surface that needs no `RegExp`.
 //!
 //! Every one of these methods shares the same shape, which is why they share one
 //! resumable state machine rather than repeating it per method:
@@ -48,6 +47,11 @@
     reason = "this private VM sibling participates in the shared interpreter implementation namespace"
 )]
 use super::*;
+
+use icu_casemap::CaseMapperBorrowed;
+use icu_locale_core::LanguageIdentifier;
+use icu_normalizer::{ComposingNormalizerBorrowed, DecomposingNormalizerBorrowed};
+use writeable::Writeable as _;
 
 /// One already-coerced argument.
 #[derive(Clone, Debug)]
@@ -259,7 +263,7 @@ pub(super) fn advance_string_method(
                 }
 
                 let Some(value) = state.pending.get(state.next_argument) else {
-                    return finish_string_method(&state);
+                    return finish_string_method(&state, execution_budget);
                 };
                 let shape = argument_shape_at(state.method, state.next_argument);
                 let value = value.duplicate();
@@ -362,7 +366,10 @@ fn take_completion(completion: &mut Option<StoredValue>) -> Result<StoredValue, 
     clippy::too_many_lines,
     reason = "the method bodies are one flat dispatch over an already-converted argument list, which keeps every String.prototype result at a single audited site"
 )]
-fn finish_string_method(state: &StringMethodContinuation) -> Result<NativeDispatch, NativeFailure> {
+fn finish_string_method(
+    state: &StringMethodContinuation,
+    execution_budget: &mut ExecutionBudget,
+) -> Result<NativeDispatch, NativeFailure> {
     let subject = state
         .subject
         .as_ref()
@@ -508,25 +515,6 @@ fn finish_string_method(state: &StringMethodContinuation) -> Result<NativeDispat
             };
             StoredValue::String(subject.slice(start..end)?)
         }
-        StringMethod::Substr => {
-            // The Annex B `substr` takes a length rather than an end index, and
-            // a negative start counts from the end.
-            let start = relative_bound(argument(0)?.integer()?, length);
-            let count = match argument(1)? {
-                ConvertedArgument::Absent => f64::from(length - start),
-                converted => converted.integer()?,
-            };
-            let available = f64::from(length - start);
-            let count = count.clamp(0.0, available);
-            // The clamp proves the value is a non-negative integer below 2^32.
-            #[expect(
-                clippy::cast_possible_truncation,
-                clippy::cast_sign_loss,
-                reason = "the preceding clamp bounds the count by the remaining length"
-            )]
-            let count = count as u32;
-            StoredValue::String(subject.slice(start..start + count)?)
-        }
         StringMethod::Repeat => {
             let count = argument(0)?.integer()?;
             // A negative or infinite count is a `RangeError`, which the oracle
@@ -542,6 +530,17 @@ fn finish_string_method(state: &StringMethodContinuation) -> Result<NativeDispat
                 }));
             }
             StoredValue::String(repeat_string(subject, count, state)?)
+        }
+        StringMethod::Match
+        | StringMethod::MatchAll
+        | StringMethod::Replace
+        | StringMethod::ReplaceAll
+        | StringMethod::Search
+        | StringMethod::Split => {
+            return Err(EngineFault::RuntimeInvariant {
+                message: "String protocol method entered the simple String method machine",
+            }
+            .into());
         }
         StringMethod::PadStart | StringMethod::PadEnd => {
             let target = argument(0)?.integer()?;
@@ -625,8 +624,236 @@ fn finish_string_method(state: &StringMethodContinuation) -> Result<NativeDispat
         }
         StringMethod::IsWellFormed => StoredValue::Boolean(is_well_formed(subject)),
         StringMethod::ToWellFormed => StoredValue::String(to_well_formed(subject)?),
+        StringMethod::ToLowerCase | StringMethod::ToLocaleLowerCase => {
+            execution_budget.charge_instructions(u64::from(subject.len()).saturating_add(1))?;
+            let result = transform_unicode_segments(subject, UnicodeTransform::Lowercase)?;
+            execution_budget.charge_instructions(u64::from(result.len()))?;
+            StoredValue::String(result)
+        }
+        StringMethod::ToUpperCase | StringMethod::ToLocaleUpperCase => {
+            execution_budget.charge_instructions(u64::from(subject.len()).saturating_add(1))?;
+            let result = transform_unicode_segments(subject, UnicodeTransform::Uppercase)?;
+            execution_budget.charge_instructions(u64::from(result.len()))?;
+            StoredValue::String(result)
+        }
+        StringMethod::Normalize => {
+            let form = match argument(0)? {
+                ConvertedArgument::Absent => NormalizationForm::Nfc,
+                ConvertedArgument::Text(name) => {
+                    let Some(form) = normalization_form(name) else {
+                        return Err(NativeFailure::Abrupt(PendingException {
+                            realm: state.realm,
+                            payload: PendingExceptionPayload::EngineError {
+                                kind: ExceptionKind::RangeError,
+                                message: JsString::from_utf8("bad normalization form")?,
+                            },
+                            origin: state.origin.clone(),
+                        }));
+                    };
+                    form
+                }
+                ConvertedArgument::Integer(_) | ConvertedArgument::Number(_) => {
+                    return Err(EngineFault::RuntimeInvariant {
+                        message: "String.prototype.normalize lost its form String",
+                    }
+                    .into());
+                }
+            };
+            execution_budget.charge_instructions(u64::from(subject.len()).saturating_add(1))?;
+            let result = transform_unicode_segments(subject, UnicodeTransform::Normalize(form))?;
+            execution_budget.charge_instructions(u64::from(result.len()))?;
+            StoredValue::String(result)
+        }
+        StringMethod::LocaleCompare => {
+            let that = argument(0)?.text()?;
+            execution_budget.charge_instructions(
+                u64::from(subject.len())
+                    .saturating_add(u64::from(that.len()))
+                    .saturating_add(1),
+            )?;
+            let left = transform_unicode_segments(
+                subject,
+                UnicodeTransform::Normalize(NormalizationForm::Nfc),
+            )?;
+            let right = transform_unicode_segments(
+                that,
+                UnicodeTransform::Normalize(NormalizationForm::Nfc),
+            )?;
+            execution_budget.charge_instructions(
+                u64::from(left.len()).saturating_add(u64::from(right.len())),
+            )?;
+            let ordering = match left.cmp(&right) {
+                std::cmp::Ordering::Less => -1,
+                std::cmp::Ordering::Equal => 0,
+                std::cmp::Ordering::Greater => 1,
+            };
+            StoredValue::Number(JsNumber::from_i32(ordering))
+        }
     };
     Ok(NativeDispatch::Immediate(value))
+}
+
+/// One of the four normalization forms admitted by ECMA-262.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum NormalizationForm {
+    Nfc,
+    Nfd,
+    Nfkc,
+    Nfkd,
+}
+
+/// One Unicode transform applied independently to scalar runs separated by a
+/// lone surrogate.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum UnicodeTransform {
+    Lowercase,
+    Uppercase,
+    Normalize(NormalizationForm),
+}
+
+/// Resolves an exact normalization-form name without lossy UTF-8 conversion.
+fn normalization_form(name: &JsString) -> Option<NormalizationForm> {
+    if js_string_is_ascii(name, b"NFC") {
+        Some(NormalizationForm::Nfc)
+    } else if js_string_is_ascii(name, b"NFD") {
+        Some(NormalizationForm::Nfd)
+    } else if js_string_is_ascii(name, b"NFKC") {
+        Some(NormalizationForm::Nfkc)
+    } else if js_string_is_ascii(name, b"NFKD") {
+        Some(NormalizationForm::Nfkd)
+    } else {
+        None
+    }
+}
+
+fn js_string_is_ascii(value: &JsString, expected: &[u8]) -> bool {
+    usize::try_from(value.len()).ok() == Some(expected.len())
+        && value
+            .code_units()
+            .zip(expected)
+            .all(|(actual, expected)| actual == u16::from(*expected))
+}
+
+/// Applies full Unicode case conversion or normalization while preserving lone
+/// UTF-16 surrogates as ECMAScript code points.
+///
+/// ICU4X accepts Unicode scalar strings. Splitting at every unpaired surrogate
+/// is semantically exact: surrogate code points have no mapping, are not case
+/// ignorable, and break both normalization sequences and case context.
+fn transform_unicode_segments(
+    subject: &JsString,
+    transform: UnicodeTransform,
+) -> Result<JsString, JsStringError> {
+    let mut output = Vec::new();
+    let mut segment = String::new();
+    for decoded in char::decode_utf16(subject.code_units()) {
+        match decoded {
+            Ok(character) => {
+                let additional = character.len_utf8();
+                segment
+                    .try_reserve(additional)
+                    .map_err(|_| JsStringError::AllocationFailed { additional })?;
+                segment.push(character);
+            }
+            Err(error) => {
+                flush_unicode_segment(&segment, transform, &mut output)?;
+                segment.clear();
+                push_utf16_unit(&mut output, error.unpaired_surrogate())?;
+            }
+        }
+    }
+    flush_unicode_segment(&segment, transform, &mut output)?;
+    JsString::from_code_units(output)
+}
+
+/// Writes one valid scalar segment through the selected ICU4X operation.
+fn flush_unicode_segment(
+    segment: &str,
+    transform: UnicodeTransform,
+    output: &mut Vec<u16>,
+) -> Result<(), JsStringError> {
+    if segment.is_empty() {
+        return Ok(());
+    }
+    let mut sink = FallibleUtf16Sink::new(output);
+    let result = match transform {
+        UnicodeTransform::Lowercase => CaseMapperBorrowed::new()
+            .lowercase(segment, &LanguageIdentifier::UNKNOWN)
+            .write_to(&mut sink),
+        UnicodeTransform::Uppercase => CaseMapperBorrowed::new()
+            .uppercase(segment, &LanguageIdentifier::UNKNOWN)
+            .write_to(&mut sink),
+        UnicodeTransform::Normalize(NormalizationForm::Nfc) => {
+            ComposingNormalizerBorrowed::new_nfc().normalize_to(segment, &mut sink)
+        }
+        UnicodeTransform::Normalize(NormalizationForm::Nfd) => {
+            DecomposingNormalizerBorrowed::new_nfd().normalize_to(segment, &mut sink)
+        }
+        UnicodeTransform::Normalize(NormalizationForm::Nfkc) => {
+            ComposingNormalizerBorrowed::new_nfkc().normalize_to(segment, &mut sink)
+        }
+        UnicodeTransform::Normalize(NormalizationForm::Nfkd) => {
+            DecomposingNormalizerBorrowed::new_nfkd().normalize_to(segment, &mut sink)
+        }
+    };
+    if result.is_err() {
+        return Err(sink
+            .failure
+            .take()
+            .unwrap_or(JsStringError::AllocationFailed { additional: 1 }));
+    }
+    Ok(())
+}
+
+/// A `fmt::Write` sink that encodes ICU4X output back into fallibly-grown
+/// ECMAScript UTF-16 storage.
+struct FallibleUtf16Sink<'a> {
+    output: &'a mut Vec<u16>,
+    failure: Option<JsStringError>,
+}
+
+impl<'a> FallibleUtf16Sink<'a> {
+    fn new(output: &'a mut Vec<u16>) -> Self {
+        Self {
+            output,
+            failure: None,
+        }
+    }
+}
+
+impl fmt::Write for FallibleUtf16Sink<'_> {
+    fn write_str(&mut self, text: &str) -> fmt::Result {
+        let additional = text.encode_utf16().count();
+        let requested = self.output.len().saturating_add(additional);
+        if requested > MAX_STRING_CODE_UNITS as usize {
+            self.failure = Some(JsStringError::TooLong {
+                requested: u64::try_from(requested).unwrap_or(u64::MAX),
+                maximum: MAX_STRING_CODE_UNITS,
+            });
+            return Err(fmt::Error);
+        }
+        if self.output.try_reserve(additional).is_err() {
+            self.failure = Some(JsStringError::AllocationFailed { additional });
+            return Err(fmt::Error);
+        }
+        self.output.extend(text.encode_utf16());
+        Ok(())
+    }
+}
+
+fn push_utf16_unit(output: &mut Vec<u16>, unit: u16) -> Result<(), JsStringError> {
+    let requested = output.len().saturating_add(1);
+    if requested > MAX_STRING_CODE_UNITS as usize {
+        return Err(JsStringError::TooLong {
+            requested: u64::try_from(requested).unwrap_or(u64::MAX),
+            maximum: MAX_STRING_CODE_UNITS,
+        });
+    }
+    output
+        .try_reserve(1)
+        .map_err(|_| JsStringError::AllocationFailed { additional: 1 })?;
+    output.push(unit);
+    Ok(())
 }
 
 /// Converts an exact index into range, rejecting anything outside `0..length`.
@@ -669,7 +896,7 @@ fn clamp_to_length(value: f64, length: u32) -> u32 {
     clamped
 }
 
-/// Resolves a relative endpoint, as `slice` and `substr` define it.
+/// Resolves a relative endpoint for `slice`.
 fn relative_bound(value: f64, length: u32) -> u32 {
     let resolved = if value < 0.0 {
         f64::from(length) + value
@@ -719,7 +946,7 @@ fn matches_at(subject: &JsString, needle: &JsString, start: u32) -> bool {
 ///
 /// An empty needle matches at `start`, which is why `"hello".indexOf("", 99)` is
 /// the subject length rather than `-1`.
-fn find_forward(subject: &JsString, needle: &JsString, start: u32) -> Option<u32> {
+pub(super) fn find_forward(subject: &JsString, needle: &JsString, start: u32) -> Option<u32> {
     let last = subject.len().checked_sub(needle.len())?;
     (start..=last).find(|index| matches_at(subject, needle, *index))
 }

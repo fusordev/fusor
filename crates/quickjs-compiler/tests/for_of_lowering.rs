@@ -322,6 +322,9 @@ fn for_await_remains_typed_fail_closed_at_the_async_function() {
     else {
         panic!("for-await must remain outside the ordinary synchronous function family");
     };
-    assert_eq!(feature, UnsupportedLeafFeature::NonOrdinaryFunction);
-    assert_eq!(&source[span.start as usize..span.end as usize], source);
+    assert_eq!(feature, UnsupportedLeafFeature::UnsupportedBody);
+    assert_eq!(
+        &source[span.start as usize..span.end as usize],
+        "for await(const value of values){}"
+    );
 }

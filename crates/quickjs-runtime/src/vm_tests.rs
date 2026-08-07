@@ -336,6 +336,8 @@ fn array_length_and_index_mutations_precharge_shape_work_before_mutation() {
             base: StoredValue::Object(array),
             name: JsString::from_utf8("length").expect("length"),
             strict: true,
+            reflect: false,
+            definition: None,
             original: None,
             first_length: None,
         },
@@ -628,7 +630,7 @@ fn array_iterator_creation_boxes_a_primitive_receiver_once() {
 #[test]
 fn array_iterator_primitive_boxing_preflights_the_complete_transaction() {
     let mut runtime =
-        Runtime::try_new(RuntimeLimits::default().with_max_heap_objects(21)).expect("runtime");
+        Runtime::try_new(RuntimeLimits::default().with_max_heap_objects(47)).expect("runtime");
     let realm = runtime.create_realm().expect("realm");
     let realm_id = runtime.context(&realm).expect("context").realm;
     let usage = runtime.usage();
@@ -645,8 +647,8 @@ fn array_iterator_primitive_boxing_preflights_the_complete_transaction() {
         result,
         Err(NativeFailure::Execution(ExecutionError::LimitExceeded {
             resource: RuntimeResource::HeapObjects,
-            limit: 21,
-            observed: 22,
+            limit: 47,
+            observed: 49,
         }))
     ));
     assert_eq!(runtime.usage(), usage);
@@ -760,6 +762,111 @@ fn array_iterator_result_preflight_preserves_cursor_and_allows_retry() {
                     .array_iterator_snapshot(iterator)
                     .expect("Array iterator after retry")
                     .next,
+                1
+            );
+        }
+    }
+}
+
+#[test]
+#[allow(
+    clippy::too_many_lines,
+    reason = "one matrix regression proves heap and property atomicity for every Map iterator result shape"
+)]
+fn map_iterator_result_preflight_preserves_cursor_and_allows_retry() {
+    for (kind, result_objects, result_properties) in [
+        (crate::object::MapIteratorKind::Key, 1_u64, 2_u64),
+        (crate::object::MapIteratorKind::Value, 1, 2),
+        (crate::object::MapIteratorKind::KeyAndValue, 2, 5),
+    ] {
+        for constrained in [
+            RuntimeResource::HeapObjects,
+            RuntimeResource::ObjectProperties,
+        ] {
+            let (mut runtime, realm, _) = ordinary_test_frame();
+            let prototype = runtime.realm_map_prototype(realm).expect("Map.prototype");
+            let map = runtime
+                .allocate_map_object(HeapReference::Object(prototype))
+                .expect("Map");
+            runtime
+                .map_set(
+                    map,
+                    StoredValue::String(JsString::from_utf8("key").expect("key")),
+                    StoredValue::Number(JsNumber::from_i32(11)),
+                )
+                .expect("Map entry");
+            let iterator = runtime
+                .allocate_map_iterator(realm, map, kind)
+                .expect("Map iterator");
+            let baseline = runtime.usage();
+            let collection_pending = runtime.collection_pending;
+            let original_limits = runtime.limits;
+            let (limit, observed) = match constrained {
+                RuntimeResource::HeapObjects => {
+                    let observed = baseline.heap_objects() + result_objects;
+                    runtime.limits.max_heap_objects = observed - 1;
+                    (runtime.limits.max_heap_objects, observed)
+                }
+                RuntimeResource::ObjectProperties => {
+                    let observed = baseline.object_properties() + result_properties;
+                    runtime.limits.max_object_properties = observed - 1;
+                    (runtime.limits.max_object_properties, observed)
+                }
+                _ => unreachable!("the matrix only constrains iterator-result resources"),
+            };
+            let receiver = StoredValue::Object(iterator);
+            let mut execution_budget = ExecutionBudget::new(ExecutionLimits::default());
+            let failure = begin_map_iterator_next(
+                &mut runtime,
+                &receiver,
+                realm,
+                native_function_host_origin(),
+                &mut execution_budget,
+            );
+
+            assert!(matches!(
+                failure,
+                Err(NativeFailure::Execution(ExecutionError::LimitExceeded {
+                    resource,
+                    limit: actual_limit,
+                    observed: actual_observed,
+                })) if resource == constrained
+                    && actual_limit == limit
+                    && actual_observed == observed
+            ));
+            assert_eq!(runtime.usage(), baseline);
+            assert_eq!(runtime.collection_pending, collection_pending);
+            assert_eq!(
+                runtime
+                    .objects
+                    .get(iterator)
+                    .and_then(crate::object::HeapObject::map_iterator_state)
+                    .expect("Map iterator after failed preflight")
+                    .next(),
+                0
+            );
+
+            runtime.limits = original_limits;
+            let Ok(retry) = begin_map_iterator_next(
+                &mut runtime,
+                &receiver,
+                realm,
+                native_function_host_origin(),
+                &mut execution_budget,
+            ) else {
+                panic!("retry after restoring resource capacity failed");
+            };
+            assert!(matches!(
+                retry,
+                NativeDispatch::Immediate(StoredValue::Object(_))
+            ));
+            assert_eq!(
+                runtime
+                    .objects
+                    .get(iterator)
+                    .and_then(crate::object::HeapObject::map_iterator_state)
+                    .expect("Map iterator after retry")
+                    .next(),
                 1
             );
         }
@@ -1162,11 +1269,12 @@ fn for_in_next_rejects_a_non_iterator_cursor_after_verified_admission() {
         .instantiate(authority)
         .expect("function");
     let function = function.id().expect("function id");
-    let plan = plan_frame(&runtime, function, 0, 0).expect("frame plan");
+    let plan = plan_frame(&runtime, function, 0, 0, 0, false).expect("frame plan");
     let mut frame = create_frame(
         &mut runtime,
         plan,
         StoredValue::Undefined,
+        None,
         FrameArguments::Owned(CallArguments::empty()),
         None,
         None,
@@ -1214,11 +1322,12 @@ fn for_in_next_fuel_exhaustion_preserves_the_unvisited_candidate_for_retry() {
         .instantiate(authority)
         .expect("function");
     let function = function.id().expect("function id");
-    let plan = plan_frame(&runtime, function, 0, 0).expect("frame plan");
+    let plan = plan_frame(&runtime, function, 0, 0, 0, false).expect("frame plan");
     let mut frame = create_frame(
         &mut runtime,
         plan,
         StoredValue::Undefined,
+        None,
         FrameArguments::Owned(CallArguments::empty()),
         None,
         None,
@@ -1263,7 +1372,7 @@ fn for_in_next_fuel_exhaustion_preserves_the_unvisited_candidate_for_retry() {
     ));
 
     let mut budget = execution_budget_with_consumed(u64::MAX, 1);
-    execute_one(&mut runtime, &mut frame, &mut budget)
+    execute_one_and_resolve_pair(&mut runtime, &mut frame, &mut budget)
         .expect("the untouched candidate remains available");
     assert_eq!(runtime.usage().for_in_entries(), 2);
     assert!(matches!(
@@ -1327,11 +1436,12 @@ fn for_in_next_precharges_snapshot_release_before_prototype_transition() {
     assert!(state.candidate().is_none());
     let usage_before_prototype = runtime.usage().for_in_entries();
 
-    let plan = plan_frame(&runtime, function, 0, 0).expect("frame plan");
+    let plan = plan_frame(&runtime, function, 0, 0, 0, false).expect("frame plan");
     let mut prototype_frame = create_frame(
         &mut runtime,
         plan,
         StoredValue::Undefined,
+        None,
         FrameArguments::Owned(CallArguments::empty()),
         None,
         None,
@@ -1365,7 +1475,7 @@ fn for_in_next_precharges_snapshot_release_before_prototype_transition() {
     assert_eq!(runtime.usage().for_in_entries(), usage_before_prototype);
 
     let mut budget = execution_budget_with_consumed(u64::MAX, 1);
-    execute_one(&mut runtime, &mut prototype_frame, &mut budget)
+    execute_one_and_resolve_pair(&mut runtime, &mut prototype_frame, &mut budget)
         .expect("prototype transition retry");
     let state = runtime
         .objects
@@ -1428,11 +1538,12 @@ fn for_in_next_precharges_snapshot_release_before_terminal_transition() {
     assert!(terminal_snapshot_len > 0);
     let usage_before_terminal = runtime.usage().for_in_entries();
 
-    let plan = plan_frame(&runtime, function, 0, 0).expect("frame plan");
+    let plan = plan_frame(&runtime, function, 0, 0, 0, false).expect("frame plan");
     let mut terminal_frame = create_frame(
         &mut runtime,
         plan,
         StoredValue::Undefined,
+        None,
         FrameArguments::Owned(CallArguments::empty()),
         None,
         None,
@@ -1465,7 +1576,8 @@ fn for_in_next_precharges_snapshot_release_before_terminal_transition() {
     assert_eq!(runtime.usage().for_in_entries(), usage_before_terminal);
 
     let mut budget = execution_budget_with_consumed(u64::MAX, 1);
-    execute_one(&mut runtime, &mut terminal_frame, &mut budget).expect("terminal transition retry");
+    execute_one_and_resolve_pair(&mut runtime, &mut terminal_frame, &mut budget)
+        .expect("terminal transition retry");
     let state = runtime
         .objects
         .get(terminal_iterator)
@@ -1495,6 +1607,32 @@ fn execution_budget_with_consumed(limit: u64, consumed: u64) -> ExecutionBudget 
     budget
 }
 
+fn execute_one_and_resolve_pair(
+    runtime: &mut Runtime,
+    frame: &mut Frame,
+    execution_budget: &mut ExecutionBudget,
+) -> Result<(), ExecutionError> {
+    let Step::Native {
+        dispatch,
+        return_to,
+    } = execute_one(runtime, frame, execution_budget)?
+    else {
+        panic!("for-in next must produce a native dispatch");
+    };
+    let dispatch =
+        match resolve_native_dispatch(runtime, dispatch, &[], 0, 0, None, execution_budget) {
+            Ok(dispatch) => dispatch,
+            Err(NativeFailure::Execution(error)) => return Err(error),
+            Err(NativeFailure::Abrupt(_) | NativeFailure::AbruptAfterTransient(_)) => {
+                panic!("ordinary for-in dispatch failed unexpectedly");
+            }
+        };
+    let NativeDispatch::Pair(key, done) = dispatch else {
+        panic!("for-in next must resolve to a key/done pair");
+    };
+    push_operator_pair(frame, key, done, return_to)
+}
+
 fn ordinary_test_frame() -> (Runtime, RealmId, Frame) {
     let authority = compile_test_function("function run(){return 0;}", "run");
     let mut runtime = Runtime::try_new(RuntimeLimits::default()).expect("runtime");
@@ -1507,11 +1645,12 @@ fn ordinary_test_frame() -> (Runtime, RealmId, Frame) {
         .expect("function")
         .id()
         .expect("function id");
-    let plan = plan_frame(&runtime, function, 0, 0).expect("frame plan");
+    let plan = plan_frame(&runtime, function, 0, 0, 0, false).expect("frame plan");
     let frame = create_frame(
         &mut runtime,
         plan,
         StoredValue::Undefined,
+        None,
         FrameArguments::Owned(CallArguments::empty()),
         None,
         None,
@@ -1543,11 +1682,12 @@ fn array_from_test_frame() -> (Runtime, RealmId, Frame) {
         .expect("function")
         .id()
         .expect("function id");
-    let plan = plan_frame(&runtime, function, 0, 0).expect("frame plan");
+    let plan = plan_frame(&runtime, function, 0, 0, 0, false).expect("frame plan");
     let mut frame = create_frame(
         &mut runtime,
         plan,
         StoredValue::Undefined,
+        None,
         FrameArguments::Owned(CallArguments::empty()),
         None,
         None,
@@ -2338,7 +2478,7 @@ fn array_constructor_prototype_get_precedes_dense_work_fuel_charge() {
     // smaller than the 64-element dense charge, so exhaustion after the Get
     // proves the ordering. The lower bound tracks `Object.prototype`'s property
     // count, because the lookup charges its full shape scan.
-    let mut budget = ExecutionBudget::new(ExecutionLimits::default().with_instruction_fuel(24));
+    let mut budget = ExecutionBudget::new(ExecutionLimits::default().with_instruction_fuel(30));
     let Ok(dispatch) = dispatch_native_call(
         &mut runtime,
         array_constructor,
@@ -3563,6 +3703,10 @@ fn property_key_continuations_charge_every_suspended_javascript_value() {
 }
 
 #[test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "one flat target matrix keeps every retained continuation value independently auditable"
+)]
 fn operator_primitive_continuations_charge_every_suspended_javascript_value() {
     let (mut runtime, realm, constructor, _native) = runtime_with_function_constructor();
     let object = source_object(&mut runtime, realm);
@@ -3631,11 +3775,40 @@ fn operator_primitive_continuations_charge_every_suspended_javascript_value() {
         2
     );
     assert_eq!(
+        continuation(OperatorPrimitiveTarget::GlobalNumeric(
+            GlobalNumericFunction::IsFinite,
+        ))
+        .retained_values(),
+        1
+    );
+    assert_eq!(
+        continuation(OperatorPrimitiveTarget::GlobalUri(UriFunction::EncodeUri,)).retained_values(),
+        1
+    );
+    assert_eq!(
+        continuation(OperatorPrimitiveTarget::GlobalParseIntString {
+            radix: StoredValue::Object(object),
+        })
+        .retained_values(),
+        2,
+        "parseInt retains its receiver and unconverted radix"
+    );
+    assert_eq!(
+        continuation(OperatorPrimitiveTarget::GlobalParseIntRadix {
+            text: JsString::from_utf8("10").expect("input"),
+        })
+        .retained_values(),
+        2,
+        "parseInt retains its radix receiver and converted input"
+    );
+    assert_eq!(
         continuation(OperatorPrimitiveTarget::ArrayLengthWrite(
             ArrayLengthWriteState {
                 base: StoredValue::Object(array),
                 name: JsString::from_utf8("length").expect("length"),
                 strict: true,
+                reflect: false,
+                definition: None,
                 original: Some(StoredValue::Object(object)),
                 first_length: None,
             },
@@ -3650,6 +3823,8 @@ fn operator_primitive_continuations_charge_every_suspended_javascript_value() {
                 base: StoredValue::Object(array),
                 name: JsString::from_utf8("length").expect("length"),
                 strict: true,
+                reflect: false,
+                definition: None,
                 original: None,
                 first_length: Some(1),
             },
@@ -4791,8 +4966,14 @@ fn define_method_property_limit_failure_does_not_publish_or_charge_the_target_sl
             }",
         "make",
     );
-    let mut runtime = Runtime::try_new(RuntimeLimits::default().with_max_object_properties(415))
-        .expect("runtime");
+    let mut probe = Runtime::try_new(RuntimeLimits::default()).expect("probe runtime");
+    let _probe_realm = probe.create_realm().expect("probe realm");
+    // The compiled maker needs four slots at installation, then the unpublished
+    // method function needs `name` and `length` before its target property fails.
+    let property_limit = probe.usage().object_properties().saturating_add(6);
+    let mut runtime =
+        Runtime::try_new(RuntimeLimits::default().with_max_object_properties(property_limit))
+            .expect("runtime");
     let realm = runtime.create_realm().expect("realm");
     let maker = runtime
         .context(&realm)
@@ -4809,14 +4990,17 @@ fn define_method_property_limit_failure_does_not_publish_or_charge_the_target_sl
         .expect("context")
         .call(&maker, &[define], ExecutionLimits::default())
         .expect_err("target property exceeds limit");
-    assert!(matches!(
-        error,
-        ExecutionError::LimitExceeded {
-            resource: RuntimeResource::ObjectProperties,
-            limit: 415,
-            observed: 416,
-        }
-    ));
+    assert!(
+        matches!(
+            error,
+            ExecutionError::LimitExceeded {
+                resource: RuntimeResource::ObjectProperties,
+                limit,
+                observed,
+            } if limit == property_limit && observed == property_limit + 1
+        ),
+        "{error:?}"
+    );
     let failed = runtime.usage();
     assert_eq!(failed.heap_functions(), baseline.heap_functions() + 1);
     assert_eq!(failed.heap_objects(), baseline.heap_objects() + 1);
@@ -6265,8 +6449,8 @@ fn bind_length_uses_the_exact_quickjs_number_rules() {
     let (bind, native) = function_prototype_bind_native(&mut runtime, realm_id);
     let length_key = runtime.predefined_property_key(PredefinedAtom::Length);
 
-    // The instantiated root function carries no own name/length metadata, so
-    // the missing-property rule (QuickJS: no own `length` -> 0) applies.
+    // A public root carries its verified arity and source name just like every
+    // nested ordinary function.
     let bound = bind_target(
         &mut runtime,
         bind,
@@ -6275,11 +6459,11 @@ fn bind_length_uses_the_exact_quickjs_number_rules() {
         vec![StoredValue::Undefined],
     )
     .expect("plain bind");
-    assert_eq!(bound_own_length(&runtime, bound).as_f64(), 0.0);
+    assert_eq!(bound_own_length(&runtime, bound).as_f64(), 3.0);
     assert_eq!(
         bound_own_name(&runtime, bound),
-        "bound ",
-        "missing name becomes the empty string"
+        "bound target",
+        "the root's source name receives the bound prefix"
     );
 
     let set_target_length = |runtime: &mut Runtime, value: StoredValue| {
@@ -6731,13 +6915,17 @@ fn immediate_boolean_wrapper(
     new_target: FunctionId,
     value: bool,
 ) -> ObjectId {
+    let realm = runtime.function_realm(new_target).expect("newTarget Realm");
+    let mut budget = ExecutionBudget::new(ExecutionLimits::default());
     let Ok(NativeDispatch::Immediate(StoredValue::Object(wrapper))) =
         begin_boolean_constructor_wrapper(
             runtime,
+            realm,
             new_target,
             value,
             None,
             Some(native_function_host_origin()),
+            &mut budget,
         )
     else {
         panic!("data-valued newTarget.prototype must construct immediately");
@@ -6750,13 +6938,17 @@ fn immediate_number_wrapper(
     new_target: FunctionId,
     value: JsNumber,
 ) -> ObjectId {
+    let realm = runtime.function_realm(new_target).expect("newTarget Realm");
+    let mut budget = ExecutionBudget::new(ExecutionLimits::default());
     let Ok(NativeDispatch::Immediate(StoredValue::Object(wrapper))) =
         begin_number_constructor_wrapper(
             runtime,
+            realm,
             new_target,
             value,
             None,
             Some(native_function_host_origin()),
+            &mut budget,
         )
     else {
         panic!("data-valued newTarget.prototype must construct immediately");

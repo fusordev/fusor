@@ -205,6 +205,24 @@ fn aggregate_error_step_failures_close_and_preserve_the_original_completion() {
 }
 
 #[test]
+fn aggregate_error_preserves_engine_error_stack_across_throwing_close() {
+    let result = call(
+        "\
+            let log='';\
+            let errors={[Symbol.iterator](){return {\
+                next(){return {get done(){log=log+'d';return missingName;}};},\
+                return(){log=log+'r';throw 'CLOSE';}\
+            };}};\
+            try{AggregateError(errors);}\
+            catch(error){\
+                return (error instanceof ReferenceError)+'|'+log+'|'\
+                    +error.stack.includes('get done');\
+            }",
+    );
+    assert_eq!(result, "true|dr|true");
+}
+
+#[test]
 fn aggregate_error_closes_for_noncallable_next_and_nonobject_step_results() {
     let result = call(
         "\

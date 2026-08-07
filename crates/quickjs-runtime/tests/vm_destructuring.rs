@@ -95,6 +95,35 @@ fn run_text(body: &str) -> String {
 }
 
 #[test]
+fn destructuring_assignment_defaults_infer_only_identifier_target_names() {
+    assert_eq!(
+        run_text(
+            "let arrayElement,objectShorthand,objectRenamed,nestedArray,captured,bypass;\
+             function supplied(){}\
+             [arrayElement=function(){}]=[];\
+             ({objectShorthand=function(){}}={});\
+             ({key:objectRenamed=(function(){})}={});\
+             [[nestedArray=function(){}]=[]]=[];\
+             [captured=function(){}]=[];\
+             [bypass=function(){}]=[supplied];\
+             [assignmentGlobal=function(){}]=[];\
+             const holder={};\
+             [holder.array=function(){}]=[];\
+             ({key:holder.object=function(){}}={});\
+             const closure=function(){return captured;};\
+             const descriptor=Object.getOwnPropertyDescriptor(arrayElement,'name');\
+             return arrayElement.name+':'+objectShorthand.name+':'+objectRenamed.name+':'+\
+                nestedArray.name+':'+closure().name+':'+assignmentGlobal.name+':'+\
+                bypass.name+':'+\
+                (holder.array.name==='')+(holder.object.name==='')+':'+\
+                descriptor.writable+descriptor.enumerable+descriptor.configurable;",
+        ),
+        "arrayElement:objectShorthand:objectRenamed:nestedArray:captured:assignmentGlobal:\
+         supplied:truetrue:falsefalsetrue"
+    );
+}
+
+#[test]
 fn array_declaration_destructures_an_iterator_in_order() {
     let mut runtime = Runtime::try_new(RuntimeLimits::default()).expect("runtime");
     let realm = runtime.create_realm().expect("realm");
@@ -1149,6 +1178,50 @@ fn object_rest_copies_getter_values() {
         .call(&function, &[], ExecutionLimits::default())
         .expect("object rest getter");
     assert_number(&result, 4201);
+}
+
+#[test]
+fn object_rest_copies_enumerable_symbol_properties() {
+    let mut runtime = Runtime::try_new(RuntimeLimits::default()).expect("runtime");
+    let realm = runtime.create_realm().expect("realm");
+    let mut context = runtime.context(&realm).expect("context");
+    let function = dynamic_function(
+        &mut context,
+        "\
+            let symbol=Symbol('rest');let object={a:1};object[symbol]=2;\
+            let {...rest}=object;\
+            return rest.a+rest[symbol]*10+Object.getOwnPropertySymbols(rest).length*100;",
+    );
+    let result = context
+        .call(&function, &[], ExecutionLimits::default())
+        .expect("object rest Symbol result");
+    assert_number(&result, 121);
+}
+
+#[test]
+fn object_rest_rechecks_snapshotted_descriptors_after_getters() {
+    let mut runtime = Runtime::try_new(RuntimeLimits::default()).expect("runtime");
+    let realm = runtime.create_realm().expect("realm");
+    let mut context = runtime.context(&realm).expect("context");
+    let function = dynamic_function(
+        &mut context,
+        "\
+            let object={};\
+            function first(){\
+                Object.defineProperty(object,'hidden',{enumerable:true});\
+                delete object.deleted;object.added=4;return 1;\
+            }\
+            Object.defineProperty(object,'a',{get:first,enumerable:true});\
+            Object.defineProperty(object,'hidden',{value:2,configurable:true});\
+            object.deleted=3;let {...rest}=object;\
+            return rest.a*100+rest.hidden*10+\
+                (Object.hasOwn(rest,'deleted')?0:1)+\
+                (Object.hasOwn(rest,'added')?0:2);",
+    );
+    let result = context
+        .call(&function, &[], ExecutionLimits::default())
+        .expect("object rest descriptor mutation result");
+    assert_number(&result, 123);
 }
 
 #[test]

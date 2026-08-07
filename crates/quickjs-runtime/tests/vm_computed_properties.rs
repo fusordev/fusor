@@ -105,6 +105,28 @@ fn computed_assignment_coerces_after_rhs_and_preserves_the_rhs_completion() {
 }
 
 #[test]
+fn compound_member_assignments_preserve_the_member_reference_for_the_write() {
+    let source = "function run(){\
+        let conversions=0;\
+        let key={toString(){conversions++;return 'computed';}};\
+        let object={staticValue:4,computed:3};\
+        let staticCompletion=(object.staticValue+=2);\
+        let computedCompletion=(object[key]*=5);\
+        return staticCompletion===6&&computedCompletion===15&&object.staticValue===6&&object.computed===15&&conversions===2;\
+    }";
+    let authority = compile(source, "run");
+    let mut runtime = Runtime::try_new(RuntimeLimits::default()).expect("runtime");
+    let realm = runtime.create_realm().expect("realm");
+    let mut context = runtime.context(&realm).expect("context");
+    let run = context.instantiate(authority).expect("run");
+
+    let completion = context
+        .call(&run, &[], ExecutionLimits::default())
+        .expect("compound member assignment");
+    assert_boolean(&completion, true);
+}
+
+#[test]
 fn computed_data_definition_coerces_before_evaluating_its_value() {
     let source = "function run(){\
         let rhsRan=false;\
@@ -123,6 +145,42 @@ fn computed_data_definition_coerces_before_evaluating_its_value() {
     let completion = context
         .call(&run, &[], ExecutionLimits::default())
         .expect("computed data definition");
+    assert_boolean(&completion, true);
+}
+
+#[test]
+fn computed_data_definitions_infer_string_and_symbol_function_names() {
+    let authority = compile(
+        "function run(stringKey,symbolKey,emptyKey){\
+            let object={\
+                [stringKey]:function(){},\
+                [symbolKey]:(function(){}),\
+                [emptyKey]:function(){},\
+                [\"__proto__\"]:function(){}\
+            };\
+            return object[stringKey].name===\"text\"&&\
+                object[symbolKey].name===\"[token]\"&&\
+                object[emptyKey].name===\"\"&&\
+                object[\"__proto__\"].name===\"__proto__\";\
+        }",
+        "run",
+    );
+    let mut runtime = Runtime::try_new(RuntimeLimits::default()).expect("runtime");
+    let realm = runtime.create_realm().expect("realm");
+    let mut context = runtime.context(&realm).expect("context");
+    let run = context.instantiate(authority).expect("run");
+    let string_key = context.string(JsString::from_utf8("text").expect("string key"));
+    let description = JsString::from_utf8("token").expect("description");
+    let symbol_key = context.symbol(Some(&description)).expect("symbol");
+    let empty_key = context.symbol(None).expect("description-less symbol");
+
+    let completion = context
+        .call(
+            &run,
+            &[string_key, symbol_key, empty_key],
+            ExecutionLimits::default(),
+        )
+        .expect("computed inferred names");
     assert_boolean(&completion, true);
 }
 

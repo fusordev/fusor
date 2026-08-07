@@ -1,0 +1,3 @@
+/crates/quickjs-bytecode/tests/support/snapshots/*.txt text eol=lf
+/crates/quickjs-compiler/tests/support/snapshots/*.txt text eol=lf
+/tests/test262/upstream/test262.patch -whitespace

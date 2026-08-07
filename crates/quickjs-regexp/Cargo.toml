@@ -1,0 +1,16 @@
+[package]
+name = "quickjs-regexp"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+icu_casemap.workspace = true
+icu_properties.workspace = true
+oxc_allocator.workspace = true
+oxc_regular_expression.workspace = true
+oxc_span.workspace = true
+
+[lints]
+workspace = true

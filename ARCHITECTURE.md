@@ -19,7 +19,7 @@ quickjs-compiler ─────────→ quickjs-bytecode
                                  ↑
 qjs-dtoa ─┐                     │
 qjs-unicode ─→ quickjs-runtime ─┘
-qjs-regexp ┘          ↑
+quickjs-regexp ┘      ↑
                       │
                quickjs-tokio
                       ↑
@@ -220,10 +220,10 @@ cycle, reachability, nesting-depth, and capture-source checks. Capture work
 remains bounded across shared parent edges. A selected
 nested root with imported cells fails closed until an explicit verified root
 environment exists. `compile_leaf` remains the explicit nested-function-free
-API and rejects a selection with children. BigInt and RegExp runtime values,
-non-string atom namespaces, raw class/function stack entries, and inferred
-anonymous-function names stay rejected until their owned records and semantics
-exist.
+API and rejects a selection with children. BigInt and RegExp literals now own
+verified runtime records; non-string atom namespaces, raw class/function stack
+entries, and remaining inferred anonymous-function cases stay rejected until
+their owned records and semantics exist.
 
 Synchronous `for-in` is an ordinary-profile exception to the otherwise empty
 statement-stack rule. Lowering keeps one private cursor beneath the statement
@@ -369,8 +369,8 @@ QuickJS acceptance and rejection coverage wherever both are meaningful. Any
 Oxc/QuickJS mismatch must carry a unique direction, rationale, and regression
 fixture, and that record becomes invalid if the expectations converge. The
 current RegExp pattern difference is deliberate: Oxc recognizes the literal
-boundary and flags, while the future QuickJS-derived RegExp layer owns pattern
-grammar. The claim set remains an expanding review contract and does not by
+boundary and flags, while `quickjs-regexp` owns pattern grammar, early errors,
+and execution. The claim set remains an expanding review contract and does not by
 itself certify that every pinned QuickJS parser production has a fixture.
 
 Dynamic Function constructors use a dedicated adapter rather than parsing a
@@ -627,6 +627,56 @@ internal `Object.prototype` root used by its object literals. Runtime, context,
 realm, and value handles are `!Send + !Sync`, and separate runtimes cannot
 exchange JavaScript values.
 
+### Realm construction
+
+Standard intrinsic construction is an ordered, typed transaction. Family
+modules declare `IntrinsicObjectSpec`, `IntrinsicFunctionSpec`, and
+`IntrinsicPropertySpec` entries; their declaration order is semantic because
+it contributes to observable string and Symbol own-key order. The immutable
+`RealmIntrinsicSchema` validates unique and mandatory identities, all graph
+references, descriptor keys, native metadata, constructor/prototype pairs,
+and fixed family cardinalities before any Runtime heap node is allocated.
+Committed intrinsic lookup remains direct and typed; construction does not
+leave a runtime string-keyed registry behind.
+
+The validated schema feeds two complete plans. `RealmAtomPlan` derives the
+ordered Realm-local string atoms while retaining the pinned legacy interning
+order, and `RealmReservationPlan` derives atoms, Realms, objects, functions,
+global bindings, property slots, and undo-journal capacity with checked
+arithmetic. Ordinary native `name` and `length` slots are automatic. The
+property charge is the schema property count plus those automatic identity
+slots, and therefore matches the 757 installed object/function record slots;
+there is no separately maintained per-Realm property constant.
+
+`RealmBuildTransaction` pre-reserves its entire undo journal before mutation.
+It then interns atoms, allocates transaction-private object and function
+shells by typed identity, publishes generic data/accessor descriptors in
+declaration order, converts the complete table into `RealmIntrinsics`, and
+commits. No public `Realm` or `Context` handle can observe an initializing
+shell. The Realm-visible `%Math.random%` seed and logical property charge
+advance only after commit.
+
+Dropping an uncommitted transaction removes recorded atoms, bindings,
+functions, objects, and the Realm in strict reverse order. Journal recording
+after each mutation is allocation-free, and rollback never executes
+JavaScript, invokes GC, or runs a callback/finalizer. Standard intrinsic
+bootstrap remains separate from dynamic host-function installation and future
+module namespaces.
+
+Only relationships that ordinary property declarations cannot establish
+safely use narrow hooks: `%Function.prototype%` receives its callable shell
+during kernel allocation, `%Array.prototype%` receives its exotic `length`
+slot before materialization, and `%ThrowTypeError%` is made non-extensible
+after its frozen identity descriptors are published. Constructor/prototype
+links and all other ordinary descriptors remain explicit schema entries.
+
+A normalized test snapshot walks all 242 Realm-local intrinsic identities and
+pins prototypes, brands, extensibility, ordered keys, complete descriptors,
+exact primitive/reference values, and native call/construct metadata. A
+separate maintenance regression removes and restores `Error.isError` to prove
+that atom and reservation changes are derived from the schema without atom
+offsets, record arrays, insertion/publication mirrors, or rollback lists.
+
 Runtime-local nodes use generational typed IDs:
 
 ```text
@@ -789,8 +839,9 @@ until zombie-state and resurrection rules are complete.
   eval-visible bindings use heap binding cells.
 - Suspended generators and async functions own their arguments, locals,
   operand stack, and captured-cell IDs.
-- Number parsing/printing, BigInt, Unicode, and RegExp behavior are direct
-  QuickJS-derived ports rather than substitutes from another engine.
+- Number parsing/printing, BigInt, Unicode, and RegExp behavior are project-owned
+  implementations characterized against the pinned QuickJS and specification
+  oracles rather than delegated to another engine at runtime.
 
 ## Exceptions and failures
 

@@ -1,8 +1,5 @@
 use quickjs_bytecode::{FinalOpcode, VerificationLimits};
-use quickjs_compiler::{
-    CompilationContext, CompiledFunctionTree, CompiledLeafFunction, LeafCompilationError,
-    UnsupportedLeafFeature,
-};
+use quickjs_compiler::{CompilationContext, CompiledFunctionTree, CompiledLeafFunction};
 use quickjs_frontend::{
     CompilationGoal, DynamicFunctionKind, DynamicFunctionSource, FrontendLimits, FrontendOptions,
     GlobalScriptGoal, SourceFragment, with_dynamic_function_source, with_parsed_program,
@@ -39,24 +36,6 @@ fn compile_tree(source: &str, name: &str) -> CompiledFunctionTree {
             context
                 .compile_tree(&executable, VerificationLimits::default())
                 .expect("ordinary try/finally tree lowering")
-        },
-    )
-    .expect("front-end acceptance")
-}
-
-fn compile_error(source: &str, name: &str) -> LeafCompilationError {
-    with_parsed_program(
-        source,
-        FrontendOptions::for_goal(CompilationGoal::GlobalScript(GlobalScriptGoal::new())),
-        |unit| {
-            let context = CompilationContext::new(unit).expect("storage planning");
-            let executable = context
-                .executables()
-                .find(|candidate| candidate.metadata().name() == Some(name))
-                .expect("named function");
-            context
-                .compile_tree(&executable, VerificationLimits::default())
-                .expect_err("unsupported function kind must fail closed")
         },
     )
     .expect("front-end acceptance")
@@ -430,23 +409,14 @@ fn captured_cells_close_before_protected_and_finalizer_cleanup() {
 }
 
 #[test]
-fn async_and_generator_try_finally_remain_typed_fail_closed() {
-    for (source, name) in [
-        (
-            "async function asyncFinally(){try{}finally{}}",
-            "asyncFinally",
-        ),
-        (
-            "function* generatorFinally(){try{}finally{}}",
-            "generatorFinally",
-        ),
-    ] {
-        let LeafCompilationError::Unsupported { feature, .. } = compile_error(source, name) else {
-            panic!("unsupported function kind must fail closed");
-        };
-        assert!(matches!(
-            feature,
-            UnsupportedLeafFeature::UnsupportedBody | UnsupportedLeafFeature::NonOrdinaryFunction
-        ));
-    }
+fn async_try_finally_uses_the_verified_finalizer_program() {
+    let compiled = compile(
+        "async function asyncFinally(value){try{return await value;}finally{value;}}",
+        "asyncFinally",
+    );
+    let opcodes = opcodes(compiled.root());
+
+    assert!(opcodes.contains(&FinalOpcode::Await));
+    assert!(opcodes.contains(&FinalOpcode::Ret));
+    assert!(opcodes.contains(&FinalOpcode::ReturnAsync));
 }

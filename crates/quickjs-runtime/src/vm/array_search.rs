@@ -59,6 +59,8 @@ pub(super) enum ArraySearchStage {
     AwaitPosition,
     /// Ready to visit the next index.
     NextElement,
+    /// Awaiting `HasProperty` for an index-based search.
+    AwaitPresence,
     /// Awaiting an element read, which may have entered a getter.
     AwaitElement,
 }
@@ -145,6 +147,7 @@ pub(super) fn begin_array_search(
 /// Resumes the search loop.
 #[allow(
     clippy::too_many_lines,
+    clippy::needless_continue,
     reason = "the length, position, and element stages form one traced continuation shared by all three searches"
 )]
 pub(super) fn advance_array_search(
@@ -155,39 +158,43 @@ pub(super) fn advance_array_search(
     execution_budget: &mut ExecutionBudget,
 ) -> Result<NativeDispatch, NativeFailure> {
     let mut completion = completion;
+    macro_rules! await_get {
+        ($operation:expr) => {
+            match $operation? {
+                GetContinuationDispatch::Ready {
+                    state: resumed,
+                    value,
+                } => {
+                    state = resumed;
+                    completion = Some(value);
+                    continue;
+                }
+                GetContinuationDispatch::Suspended(dispatch) => return Ok(dispatch),
+            }
+        };
+    }
     loop {
         match state.stage {
             ArraySearchStage::AwaitLength => {
                 let length_key = runtime.predefined_property_key(PredefinedAtom::Length);
                 charge_search_lookup(runtime, &state.target, execution_budget)?;
-                match read_static_property(runtime, state.realm, &state.target, &length_key)? {
-                    PropertyReadOutcome::Value(value) => {
-                        completion = Some(value);
-                        state.stage = ArraySearchStage::AwaitLengthConversion;
-                    }
-                    PropertyReadOutcome::Getter { function, receiver } => {
-                        state.stage = ArraySearchStage::AwaitLengthConversion;
-                        return Ok(NativeDispatch::Call(NativeCall {
-                            function,
-                            receiver,
-                            arguments: CallArguments::empty(),
-                            return_to,
-                            origin: state.origin.clone(),
-                            continuations: search_continuation(state)?,
-                            pre_call: None,
-                            new_target: None,
-                            native_caller: None,
-                        }));
-                    }
-                    PropertyReadOutcome::Failed(failure) => {
-                        return Err(NativeFailure::Abrupt(property_exception_at(
-                            state.realm,
-                            state.origin.clone(),
-                            None,
-                            failure,
-                        )?));
-                    }
-                }
+                state.stage = ArraySearchStage::AwaitLengthConversion;
+                let dispatch = begin_value_get(
+                    runtime,
+                    &state.target,
+                    length_key,
+                    None,
+                    state.realm,
+                    return_to,
+                    state.origin.clone(),
+                    execution_budget,
+                )?;
+                await_get!(continue_get_state_after(
+                    dispatch,
+                    state,
+                    array_search_continuation,
+                    "Array search length Get produced a structured result",
+                ));
             }
             ArraySearchStage::AwaitLengthConversion => {
                 // The length is read once, before any element, and every later
@@ -232,43 +239,46 @@ pub(super) fn advance_array_search(
                 advance_cursor(&mut state);
 
                 let key = element_key(index)?;
-                charge_search_lookup(runtime, &state.target, execution_budget)?;
                 // Only the index-based searches skip a missing element, which is
                 // what makes `[1,,3].indexOf(undefined)` and
                 // `[1,,3].includes(undefined)` disagree.
-                if state.search.skips_holes()
-                    && !has_property(runtime, state.realm, &state.target, &key)?
-                {
+                if state.search.skips_holes() {
+                    charge_search_lookup(runtime, &state.target, execution_budget)?;
+                    state.stage = ArraySearchStage::AwaitPresence;
+                    let dispatch = begin_value_has(
+                        runtime,
+                        &state.target,
+                        key,
+                        state.realm,
+                        return_to,
+                        state.origin.clone(),
+                        execution_budget,
+                    )?;
+                    await_get!(continue_get_state_after(
+                        dispatch,
+                        state,
+                        array_search_continuation,
+                        "Array search HasProperty produced a structured result",
+                    ));
+                }
+                await_get!(begin_array_search_element_get(
+                    runtime,
+                    state,
+                    return_to,
+                    execution_budget,
+                ));
+            }
+            ArraySearchStage::AwaitPresence => {
+                if !take_completion(&mut completion)?.is_truthy() {
+                    state.stage = ArraySearchStage::NextElement;
                     continue;
                 }
-                match read_static_property(runtime, state.realm, &state.target, &key)? {
-                    PropertyReadOutcome::Value(value) => {
-                        completion = Some(value);
-                        state.stage = ArraySearchStage::AwaitElement;
-                    }
-                    PropertyReadOutcome::Getter { function, receiver } => {
-                        state.stage = ArraySearchStage::AwaitElement;
-                        return Ok(NativeDispatch::Call(NativeCall {
-                            function,
-                            receiver,
-                            arguments: CallArguments::empty(),
-                            return_to,
-                            origin: state.origin.clone(),
-                            continuations: search_continuation(state)?,
-                            pre_call: None,
-                            new_target: None,
-                            native_caller: None,
-                        }));
-                    }
-                    PropertyReadOutcome::Failed(failure) => {
-                        return Err(NativeFailure::Abrupt(property_exception_at(
-                            state.realm,
-                            state.origin.clone(),
-                            None,
-                            failure,
-                        )?));
-                    }
-                }
+                await_get!(begin_array_search_element_get(
+                    runtime,
+                    state,
+                    return_to,
+                    execution_budget,
+                ));
             }
             ArraySearchStage::AwaitElement => {
                 let value = take_completion(&mut completion)?;
@@ -432,19 +442,35 @@ fn charge_search_lookup(
     charge_heap_property_lookup(runtime, base, execution_budget)
 }
 
-/// Builds the one-element continuation list a nested getter call resumes into.
-fn search_continuation(
-    state: ArraySearchContinuation,
-) -> Result<Vec<NativeContinuation>, NativeFailure> {
-    let mut continuations = Vec::new();
-    continuations
-        .try_reserve_exact(1)
-        .map_err(|_| ExecutionError::AllocationFailed {
-            resource: RuntimeResource::Frames,
-            additional: 1,
-        })?;
-    continuations.push(NativeContinuation::ArraySearch(Box::new(state)));
-    Ok(continuations)
+fn array_search_continuation(state: ArraySearchContinuation) -> NativeContinuation {
+    NativeContinuation::ArraySearch(Box::new(state))
+}
+
+fn begin_array_search_element_get(
+    runtime: &mut Runtime,
+    mut state: ArraySearchContinuation,
+    return_to: Option<CallReturn>,
+    execution_budget: &mut ExecutionBudget,
+) -> Result<GetContinuationDispatch<ArraySearchContinuation>, NativeFailure> {
+    let key = element_key(state.current)?;
+    charge_search_lookup(runtime, &state.target, execution_budget)?;
+    state.stage = ArraySearchStage::AwaitElement;
+    let dispatch = begin_value_get(
+        runtime,
+        &state.target,
+        key,
+        None,
+        state.realm,
+        return_to,
+        state.origin.clone(),
+        execution_budget,
+    )?;
+    continue_get_state_after(
+        dispatch,
+        state,
+        array_search_continuation,
+        "Array search element Get produced a structured result",
+    )
 }
 
 /// Returns the property key for one element index.

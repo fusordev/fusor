@@ -123,6 +123,194 @@ fn lexical_identifier_leaf_matches_the_quickjs_final_opcode_oracle() {
 }
 
 #[test]
+fn new_target_uses_the_typed_special_object_selector() {
+    let compiled = compile("function f(){return new.target;}", "f");
+    let instructions = compiled
+        .control_flow()
+        .instructions()
+        .iter()
+        .map(|instruction| {
+            let instruction = instruction.decoded().instruction();
+            (instruction.opcode(), instruction.operands())
+        })
+        .collect::<Vec<_>>();
+
+    assert_eq!(
+        instructions,
+        [
+            (FinalOpcode::SpecialObject, Operands::U8(3)),
+            (FinalOpcode::Return, Operands::None),
+        ]
+    );
+    assert!(
+        compiled
+            .control_flow()
+            .function_header()
+            .flags()
+            .new_target_allowed()
+    );
+}
+
+#[test]
+fn sloppy_duplicate_parameters_authorize_only_the_last_formal_positions() {
+    let compiled = compile("function f(a,a,b){return arguments;}", "f");
+    let flow = compiled.control_flow();
+    let layout = flow
+        .compiler_capture_layout()
+        .expect("compiler arguments certificate");
+
+    assert_eq!(layout.mapped_arguments(), Some([1, 2].as_slice()));
+    assert!(flow.instructions().iter().any(|instruction| {
+        let instruction = instruction.decoded().instruction();
+        instruction.opcode() == FinalOpcode::SpecialObject
+            && instruction.operands() == Operands::U8(1)
+    }));
+}
+
+#[test]
+fn expression_free_parameter_patterns_have_an_unmapped_entry_prologue() {
+    let compiled = compile(
+        "function f(keep,{value},[head,...tail]){\
+            return keep+value+head+tail.length+arguments.length;}",
+        "f",
+    );
+    let flow = compiled.control_flow();
+    assert_eq!(flow.domains().argument_count(), 3);
+    assert!(!flow.function_header().flags().has_simple_parameter_list());
+    assert_eq!(
+        flow.compiler_capture_layout()
+            .expect("compiler arguments certificate")
+            .mapped_arguments(),
+        None
+    );
+
+    let instructions = flow
+        .instructions()
+        .iter()
+        .map(|instruction| {
+            let instruction = instruction.decoded().instruction();
+            (instruction.opcode(), instruction.operands())
+        })
+        .collect::<Vec<_>>();
+    assert!(instructions.contains(&(FinalOpcode::SpecialObject, Operands::U8(0))));
+    assert!(!instructions.contains(&(FinalOpcode::SpecialObject, Operands::U8(1))));
+    assert!(instructions.contains(&(FinalOpcode::GetArg1, Operands::NoneArg)));
+    assert!(instructions.contains(&(FinalOpcode::GetArg2, Operands::NoneArg)));
+    assert!(
+        instructions
+            .iter()
+            .any(|(opcode, _)| *opcode == FinalOpcode::ForOfStart)
+    );
+}
+
+#[test]
+fn formal_rest_starts_after_fixed_arguments_and_uses_the_unmapped_prologue() {
+    let compiled = compile(
+        "function f(keep,...[head,...tail]){\
+            return keep+head+tail.length+arguments.length;}",
+        "f",
+    );
+    let flow = compiled.control_flow();
+    assert_eq!(flow.domains().argument_count(), 1);
+    assert_eq!(flow.function_header().defined_argument_count(), 1);
+    assert!(!flow.function_header().flags().has_simple_parameter_list());
+
+    let instructions = flow
+        .instructions()
+        .iter()
+        .map(|instruction| {
+            let instruction = instruction.decoded().instruction();
+            (instruction.opcode(), instruction.operands())
+        })
+        .collect::<Vec<_>>();
+    let arguments_site = instructions
+        .iter()
+        .position(|instruction| *instruction == (FinalOpcode::SpecialObject, Operands::U8(0)))
+        .expect("unmapped arguments object");
+    let rest_site = instructions
+        .iter()
+        .position(|instruction| *instruction == (FinalOpcode::Rest, Operands::U16(1)))
+        .expect("formal rest allocation");
+    assert!(arguments_site < rest_site);
+    assert!(
+        instructions[rest_site + 1..]
+            .iter()
+            .any(|(opcode, _)| *opcode == FinalOpcode::ForOfStart)
+    );
+}
+
+#[test]
+fn parameter_expression_prologue_activates_tdz_bindings_before_arguments_and_values() {
+    let compiled = compile(
+        "function f(first=1,{[first]:value=2}={},...[tail=3]){\
+            return first+value+tail+arguments.length;}",
+        "f",
+    );
+    let flow = compiled.control_flow();
+    assert_eq!(flow.domains().argument_count(), 2);
+    assert_eq!(flow.function_header().defined_argument_count(), 0);
+    assert!(!flow.function_header().flags().has_simple_parameter_list());
+
+    let instructions = flow
+        .instructions()
+        .iter()
+        .map(|instruction| {
+            let instruction = instruction.decoded().instruction();
+            (instruction.opcode(), instruction.operands())
+        })
+        .collect::<Vec<_>>();
+    let activations = instructions
+        .iter()
+        .take_while(|(opcode, _)| *opcode == FinalOpcode::SetLocUninitialized)
+        .count();
+    assert_eq!(activations, 3);
+    assert_eq!(
+        instructions[activations],
+        (FinalOpcode::SpecialObject, Operands::U8(0))
+    );
+    let first_value = instructions
+        .iter()
+        .position(|instruction| *instruction == (FinalOpcode::GetArg0, Operands::NoneArg))
+        .expect("first raw argument read");
+    assert!(activations < first_value);
+    assert!(instructions.contains(&(FinalOpcode::StrictEq, Operands::None)));
+    assert!(instructions.contains(&(FinalOpcode::GetLocCheck, Operands::Loc(0))));
+    assert!(instructions.contains(&(FinalOpcode::Rest, Operands::U16(2))));
+}
+
+#[test]
+fn parameter_expression_body_var_copies_into_a_distinct_local() {
+    let compiled = compile("function f(value=1){var value;return value;}", "f");
+    let instructions = compiled
+        .control_flow()
+        .instructions()
+        .iter()
+        .map(|instruction| {
+            let instruction = instruction.decoded().instruction();
+            (instruction.opcode(), instruction.operands())
+        })
+        .collect::<Vec<_>>();
+
+    assert_eq!(
+        instructions.first(),
+        Some(&(FinalOpcode::SetLocUninitialized, Operands::Loc(0)))
+    );
+    let parameter_read = instructions
+        .iter()
+        .position(|instruction| *instruction == (FinalOpcode::GetLocCheck, Operands::Loc(0)))
+        .expect("initialized parameter cell is copied");
+    let body_write = instructions
+        .iter()
+        .position(|instruction| *instruction == (FinalOpcode::PutLoc1, Operands::NoneLoc))
+        .expect("body variable receives its copy");
+    let body_read = instructions
+        .iter()
+        .rposition(|instruction| *instruction == (FinalOpcode::GetLoc1, Operands::NoneLoc))
+        .expect("body reads select the copied variable cell");
+    assert!(parameter_read < body_write && body_write < body_read);
+}
+
+#[test]
 fn deepest_leaf_reads_forwarded_parent_cells_through_capture_slots() {
     let compiled = compile(
         "function outer(arg){ let local=1; function middle(){ function inner(){ return arg+local; } } }",
@@ -267,24 +455,14 @@ fn strictness_is_retained_without_debug_or_eval_header_bits() {
 fn unsupported_leaf_shapes_fail_closed_at_source_spans() {
     let cases = [
         (
-            "async function f(arg) { let local = arg; return local; }",
-            UnsupportedLeafFeature::NonOrdinaryFunction,
-            "async function f(arg) { let local = arg; return local; }",
-        ),
-        (
-            "function *f(arg) { let local = arg; return local; }",
-            UnsupportedLeafFeature::NonOrdinaryFunction,
-            "function *f(arg) { let local = arg; return local; }",
-        ),
-        (
             "function f(arg) { function nested() {} let local = arg; return local; }",
             UnsupportedLeafFeature::NestedExecutable,
             "function nested() {}",
         ),
         (
-            "function f(arg) { let local = missing; return local; }",
-            UnsupportedLeafFeature::UnresolvedReference,
-            "missing",
+            "function f(arg) { const fixed = 1; fixed = arg; return fixed; }",
+            UnsupportedLeafFeature::UnsupportedReference,
+            "fixed",
         ),
     ];
 

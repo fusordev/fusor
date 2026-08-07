@@ -267,26 +267,45 @@ fn async_global_script_does_not_make_nested_functions_async() {
 }
 
 #[test]
-fn async_global_script_html_comment_retry_preserves_original_source_and_comments() {
+fn async_global_script_rejects_annex_b_html_comments() {
     let source = "await promise; <!-- html-open-comment\nvalue;";
     let allocator = Allocator::new();
     let goal = GlobalScriptGoal::new().with_top_level_await(true);
-    let unit = parse(
+    let error = parse(
         &allocator,
         source,
         FrontendOptions::for_goal(CompilationGoal::GlobalScript(goal)),
     )
-    .expect("async Script HTML comment");
+    .expect_err("Annex B HTML comments must be rejected");
 
-    assert_eq!(unit.program().source_text, source);
-    assert!(unit.program().source_type.is_script());
-    assert_eq!(unit.program().comments.len(), 1);
-    let comment = unit.program().comments[0];
-    assert_eq!(
-        &source[comment.span.start as usize..comment.span.end as usize],
-        "<!-- html-open-comment"
+    assert!(
+        matches!(
+            error.stage(),
+            DiagnosticStage::Parser | DiagnosticStage::Profile
+        ),
+        "the async Script parse must reject Annex B HTML comments: {error}"
     );
-    assert!(!unit.module_record().has_module_syntax);
+}
+
+#[test]
+fn scripts_reject_annex_b_legacy_octal_literals_and_escapes() {
+    for source in ["010;", "09;", r"'\1';", r"'\8';", r"'\08';"] {
+        let allocator = Allocator::new();
+        let error = parse(
+            &allocator,
+            source,
+            FrontendOptions::for_goal(CompilationGoal::GlobalScript(GlobalScriptGoal::new())),
+        )
+        .expect_err("Annex B legacy octal syntax must be rejected");
+        assert_eq!(
+            error.stage(),
+            DiagnosticStage::Profile,
+            "{source:?}: {error}"
+        );
+        assert!(error.diagnostics().iter().any(|diagnostic| {
+            diagnostic.code == FrontendDiagnosticCode::UnsupportedAnnexBLegacyOctal
+        }));
+    }
 }
 
 #[test]
@@ -300,12 +319,8 @@ fn async_global_script_preserves_quickjs_script_context_rules() {
         "for await (const value of values) {}",
         "function nested(await) { return await; }",
         "const nested = async () => await promise;",
-        "010;",
         "with (object) { value; }",
-        "<!-- html-open-comment\nvalue;",
-        "await promise; 010;",
         "await promise; with (object) { value; }",
-        "await promise; <!-- html-open-comment\nvalue;",
         "await import('./dependency.js');",
         "function nested() { await: while (false) { break await; } }",
     ] {
@@ -323,6 +338,10 @@ fn async_global_script_preserves_quickjs_script_context_rules() {
         "import.meta;",
         "await import.meta;",
         "await: while (false) { break await; }",
+        "010;",
+        "await promise; 010;",
+        "<!-- html-open-comment\nvalue;",
+        "await promise; <!-- html-open-comment\nvalue;",
     ] {
         assert!(
             parse_global(source, goal).is_err(),
@@ -375,8 +394,11 @@ fn forced_strict_global_script_enforces_quickjs_strict_early_errors() {
         );
     }
 
-    parse_global("<!-- html-open-comment\nvalue;", goal)
-        .expect("forced strictness does not turn Script into Module");
+    let error = parse_global("<!-- html-open-comment\nvalue;", goal)
+        .expect_err("Annex B HTML comments are not supported");
+    assert!(error.diagnostics().iter().any(|diagnostic| {
+        diagnostic.code == FrontendDiagnosticCode::UnsupportedAnnexBHtmlComment
+    }));
 }
 
 #[test]

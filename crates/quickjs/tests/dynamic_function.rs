@@ -12,11 +12,211 @@ fn source<'source>(
     parameters: &'source [SourceFragment<'source>],
     body: &'source str,
 ) -> DynamicFunctionSource<'source> {
-    DynamicFunctionSource::new(
-        DynamicFunctionKind::Function,
-        parameters,
-        SourceFragment::new(body),
+    source_kind(DynamicFunctionKind::Function, parameters, body)
+}
+
+fn source_kind<'source>(
+    kind: DynamicFunctionKind,
+    parameters: &'source [SourceFragment<'source>],
+    body: &'source str,
+) -> DynamicFunctionSource<'source> {
+    DynamicFunctionSource::new(kind, parameters, SourceFragment::new(body))
+}
+
+#[test]
+fn dynamic_generator_function_compiles_and_executes_through_the_facade() {
+    let mut runtime = Runtime::try_new(RuntimeLimits::default()).expect("runtime");
+    let realm = runtime.create_realm().expect("realm");
+    let mut context = runtime.context(&realm).expect("context");
+    let parameters = [SourceFragment::new("value")];
+
+    let generated = construct_dynamic_function(
+        &mut context,
+        source_kind(
+            DynamicFunctionKind::GeneratorFunction,
+            &parameters,
+            "yield value; return 9;",
+        ),
+        DynamicFunctionLimits::default(),
     )
+    .expect("dynamic GeneratorFunction")
+    .into_value();
+    let consumer_parameters = [SourceFragment::new("factory")];
+    let consumer = construct_dynamic_function(
+        &mut context,
+        source(
+            &consumer_parameters,
+            "let iterator=factory(4);\
+             let first=iterator.next();\
+             let second=iterator.next();\
+             return first.value+':'+first.done+'|'+second.value+':'+second.done;",
+        ),
+        DynamicFunctionLimits::default(),
+    )
+    .expect("generator consumer")
+    .into_value()
+    .into_function()
+    .expect("consumer function");
+
+    let result = context
+        .call(&consumer, &[generated], ExecutionLimits::default())
+        .expect("consume dynamic generator");
+    assert_eq!(
+        result
+            .as_string()
+            .expect("live result")
+            .expect("string")
+            .to_utf8_lossy()
+            .expect("UTF-8"),
+        "4:false|9:true"
+    );
+}
+
+#[test]
+fn intrinsic_generator_function_constructor_uses_the_dynamic_compiler_service() {
+    let mut runtime = Runtime::try_new(RuntimeLimits::default()).expect("runtime");
+    let realm = runtime.create_realm().expect("realm");
+    let mut context = runtime.context(&realm).expect("context");
+    let run = construct_dynamic_function(
+        &mut context,
+        source(
+            &[],
+            "let GeneratorFunction=(function*(){}).constructor;\
+             let generated=GeneratorFunction('value','yield value; return 9;');\
+             let iterator=generated(4);\
+             let first=iterator.next();\
+             let second=iterator.next();\
+             return first.value+':'+first.done+'|'+second.value+':'+second.done+'|'+\
+                 generated.name+':'+generated.length+'|'+\
+                 (Object.getPrototypeOf(generated)===GeneratorFunction.prototype);",
+        ),
+        DynamicFunctionLimits::default(),
+    )
+    .expect("outer dynamic Function")
+    .into_value()
+    .into_function()
+    .expect("outer function");
+
+    let result = call_with_dynamic_function_support(
+        &mut context,
+        &run,
+        &[],
+        DynamicFunctionLimits::default(),
+    )
+    .expect("intrinsic GeneratorFunction");
+    assert_eq!(
+        result
+            .as_string()
+            .expect("live result")
+            .expect("string")
+            .to_utf8_lossy()
+            .expect("UTF-8"),
+        "4:false|9:true|anonymous:1|true"
+    );
+}
+
+#[test]
+fn generator_function_construction_honors_new_target_prototype_and_fallback() {
+    let mut runtime = Runtime::try_new(RuntimeLimits::default()).expect("runtime");
+    let realm = runtime.create_realm().expect("realm");
+    let mut context = runtime.context(&realm).expect("context");
+    let run = construct_dynamic_function(
+        &mut context,
+        source(
+            &[],
+            "let GeneratorFunction=(function*(){}).constructor;\
+             let custom=function Custom(){};\
+             let expected={marker:1};\
+             custom.prototype=expected;\
+             let first=Reflect.construct(GeneratorFunction,['yield 1;'],custom);\
+             custom.prototype=0;\
+             let second=Reflect.construct(GeneratorFunction,['yield 2;'],custom);\
+             return (Object.getPrototypeOf(first)===expected)+'|'+\
+                 (Object.getPrototypeOf(second)===GeneratorFunction.prototype);",
+        ),
+        DynamicFunctionLimits::default(),
+    )
+    .expect("outer dynamic Function")
+    .into_value()
+    .into_function()
+    .expect("outer function");
+
+    let result = call_with_dynamic_function_support(
+        &mut context,
+        &run,
+        &[],
+        DynamicFunctionLimits::default(),
+    )
+    .expect("GeneratorFunction construction");
+    assert_eq!(
+        result
+            .as_string()
+            .expect("live result")
+            .expect("string")
+            .to_utf8_lossy()
+            .expect("UTF-8"),
+        "true|true"
+    );
+}
+
+#[test]
+fn dynamic_generator_wrapper_escape_preserves_the_script_completion() {
+    let mut runtime = Runtime::try_new(RuntimeLimits::default()).expect("runtime");
+    let realm = runtime.create_realm().expect("realm");
+    let mut context = runtime.context(&realm).expect("context");
+
+    let completion = construct_dynamic_function(
+        &mut context,
+        source_kind(DynamicFunctionKind::GeneratorFunction, &[], "}), ({"),
+        DynamicFunctionLimits::default(),
+    )
+    .expect("QuickJS-compatible generator wrapper escape");
+    assert_eq!(
+        completion.prepared_source().generated_source(),
+        "(function* anonymous(\n) {\n}), ({\n})"
+    );
+    assert_eq!(
+        completion.value().kind().expect("live completion"),
+        ValueKind::Object
+    );
+}
+
+#[test]
+fn intrinsic_generator_function_reports_generator_syntax_errors() {
+    let mut runtime = Runtime::try_new(RuntimeLimits::default()).expect("runtime");
+    let realm = runtime.create_realm().expect("realm");
+    let mut context = runtime.context(&realm).expect("context");
+    let run = construct_dynamic_function(
+        &mut context,
+        source(
+            &[],
+            "let GeneratorFunction=(function*(){}).constructor;\
+             try{GeneratorFunction('yield (');}catch(error){return error.name;}\
+             return 'missing SyntaxError';",
+        ),
+        DynamicFunctionLimits::default(),
+    )
+    .expect("outer dynamic Function")
+    .into_value()
+    .into_function()
+    .expect("outer function");
+
+    let result = call_with_dynamic_function_support(
+        &mut context,
+        &run,
+        &[],
+        DynamicFunctionLimits::default(),
+    )
+    .expect("catch generator syntax error");
+    assert_eq!(
+        result
+            .as_string()
+            .expect("live result")
+            .expect("string")
+            .to_utf8_lossy()
+            .expect("UTF-8"),
+        "SyntaxError"
+    );
 }
 
 #[test]
@@ -759,24 +959,63 @@ fn runtime_failure_retains_the_wrapper_and_releases_internal_script_state() {
 }
 
 #[test]
-fn nonordinary_dynamic_function_families_are_rejected_before_parsing() {
-    for kind in [
-        DynamicFunctionKind::GeneratorFunction,
-        DynamicFunctionKind::AsyncFunction,
-        DynamicFunctionKind::AsyncGeneratorFunction,
-    ] {
-        let mut runtime = Runtime::try_new(RuntimeLimits::default()).expect("runtime");
-        let realm = runtime.create_realm().expect("realm");
-        let mut context = runtime.context(&realm).expect("context");
-        let input = DynamicFunctionSource::new(kind, &[], SourceFragment::new(""));
-        assert!(matches!(
-            construct_dynamic_function(
-                &mut context,
-                input,
-                DynamicFunctionLimits::default()
-            ),
-            Err(DynamicFunctionConstructionError::UnsupportedKind { kind: actual })
-                if actual == kind
-        ));
-    }
+fn dynamic_async_generator_constructs_and_executes_awaited_yield() {
+    let mut runtime = Runtime::try_new(RuntimeLimits::default()).expect("runtime");
+    let realm = runtime.create_realm().expect("realm");
+    let mut context = runtime.context(&realm).expect("context");
+    let parameters = [SourceFragment::new("value")];
+    let generated = construct_dynamic_function(
+        &mut context,
+        source_kind(
+            DynamicFunctionKind::AsyncGeneratorFunction,
+            &parameters,
+            "yield await value;",
+        ),
+        DynamicFunctionLimits::default(),
+    )
+    .expect("dynamic AsyncGeneratorFunction")
+    .into_value();
+    let consumer_parameters = [SourceFragment::new("factory")];
+    let consumer = construct_dynamic_function(
+        &mut context,
+        source(
+            &consumer_parameters,
+            "let state={result:''};\
+             factory(4).next().then(function(result){\
+                 state.result=result.value+':'+result.done;\
+             });\
+             return state;",
+        ),
+        DynamicFunctionLimits::default(),
+    )
+    .expect("async-generator consumer")
+    .into_value()
+    .into_function()
+    .expect("consumer function");
+    let read_parameters = [SourceFragment::new("state")];
+    let read = construct_dynamic_function(
+        &mut context,
+        source(&read_parameters, "return state.result;"),
+        DynamicFunctionLimits::default(),
+    )
+    .expect("state reader")
+    .into_value()
+    .into_function()
+    .expect("reader function");
+
+    let state = context
+        .call(&consumer, &[generated], ExecutionLimits::default())
+        .expect("consume async generator");
+    let result = context
+        .call(&read, &[state], ExecutionLimits::default())
+        .expect("read async result");
+    assert_eq!(
+        result
+            .as_string()
+            .expect("live result")
+            .expect("string")
+            .to_utf8_lossy()
+            .expect("UTF-8"),
+        "4:false"
+    );
 }

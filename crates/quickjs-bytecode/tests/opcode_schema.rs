@@ -119,6 +119,14 @@ fn upstream_order_constraints_remain_encoded_in_discriminants() {
         TemporaryOpcode::ScopeMakeRef,
     );
     assert_temp_adjacent(TemporaryOpcode::ScopeMakeRef, TemporaryOpcode::ScopeGetRef);
+    assert_temp_adjacent(
+        TemporaryOpcode::ScopeGetRef,
+        TemporaryOpcode::ScopePutVarInit,
+    );
+    assert_temp_adjacent(
+        TemporaryOpcode::ScopePutVarInit,
+        TemporaryOpcode::ScopeGetVarCheckThis,
+    );
 }
 
 #[test]

@@ -168,58 +168,70 @@ pub(super) fn symbol_receiver_value(
 
 pub(super) fn begin_boolean_constructor_wrapper(
     runtime: &mut Runtime,
+    realm: RealmId,
     new_target: FunctionId,
     value: bool,
     return_to: Option<CallReturn>,
     origin: Option<JsStackFrame>,
+    execution_budget: &mut ExecutionBudget,
 ) -> Result<NativeDispatch, NativeFailure> {
     let prototype_key = runtime.predefined_property_key(PredefinedAtom::Prototype);
     begin_intrinsic_get(
         runtime,
+        realm,
         HeapReference::Function(new_target),
         StoredValue::Function(new_target),
         &prototype_key,
         IntrinsicGetContinuation::BooleanConstructor { new_target, value },
         return_to,
         origin,
+        execution_budget,
     )
 }
 
 pub(super) fn begin_number_constructor_wrapper(
     runtime: &mut Runtime,
+    realm: RealmId,
     new_target: FunctionId,
     value: JsNumber,
     return_to: Option<CallReturn>,
     origin: Option<JsStackFrame>,
+    execution_budget: &mut ExecutionBudget,
 ) -> Result<NativeDispatch, NativeFailure> {
     let prototype_key = runtime.predefined_property_key(PredefinedAtom::Prototype);
     begin_intrinsic_get(
         runtime,
+        realm,
         HeapReference::Function(new_target),
         StoredValue::Function(new_target),
         &prototype_key,
         IntrinsicGetContinuation::NumberConstructor { new_target, value },
         return_to,
         origin,
+        execution_budget,
     )
 }
 
 pub(super) fn begin_string_constructor_wrapper(
     runtime: &mut Runtime,
+    realm: RealmId,
     new_target: FunctionId,
     value: JsString,
     return_to: Option<CallReturn>,
     origin: Option<JsStackFrame>,
+    execution_budget: &mut ExecutionBudget,
 ) -> Result<NativeDispatch, NativeFailure> {
     let prototype_key = runtime.predefined_property_key(PredefinedAtom::Prototype);
     begin_intrinsic_get(
         runtime,
+        realm,
         HeapReference::Function(new_target),
         StoredValue::Function(new_target),
         &prototype_key,
         IntrinsicGetContinuation::StringConstructor { new_target, value },
         return_to,
         origin,
+        execution_budget,
     )
 }
 
@@ -250,38 +262,23 @@ pub(super) fn begin_array_constructor_prototype_get(
     let receiver = StoredValue::Function(new_target);
     charge_heap_property_lookup(runtime, &receiver, execution_budget)?;
     let prototype_key = runtime.predefined_property_key(PredefinedAtom::Prototype);
-    match read_heap_property_for_receiver(
+    let continuation = IntrinsicGetContinuation::ArrayConstructor {
+        realm,
+        new_target,
+        arguments,
+        origin: origin.clone(),
+    };
+    let dispatch = begin_internal_get(
         runtime,
         HeapReference::Function(new_target),
         receiver,
-        &prototype_key,
-    )? {
-        PropertyReadOutcome::Value(value) => finish_array_constructor_after_prototype_get(
-            runtime,
-            realm,
-            new_target,
-            arguments,
-            origin,
-            &value,
-            execution_budget,
-        ),
-        PropertyReadOutcome::Getter { function, receiver } => intrinsic_getter_call(
-            function,
-            receiver,
-            IntrinsicGetContinuation::ArrayConstructor {
-                realm,
-                new_target,
-                arguments,
-                origin: origin.clone(),
-            },
-            return_to,
-            Some(origin),
-        ),
-        PropertyReadOutcome::Failed(_) => Err(EngineFault::RuntimeInvariant {
-            message: "function-valued Array newTarget prototype Get failed as a primitive",
-        }
-        .into()),
-    }
+        prototype_key,
+        realm,
+        return_to,
+        origin,
+        execution_budget,
+    )?;
+    continue_intrinsic_get_after(runtime, dispatch, continuation, return_to, execution_budget)
 }
 
 pub(super) fn finish_array_constructor_after_prototype_get(
@@ -351,43 +348,124 @@ pub(super) fn finish_array_constructor(
 )]
 pub(super) fn begin_intrinsic_get(
     runtime: &mut Runtime,
+    realm: RealmId,
     reference: HeapReference,
     receiver: StoredValue,
     key: &PropertyKey,
     continuation: IntrinsicGetContinuation,
     return_to: Option<CallReturn>,
     origin: Option<JsStackFrame>,
+    execution_budget: &mut ExecutionBudget,
 ) -> Result<NativeDispatch, NativeFailure> {
-    match read_heap_property_for_receiver(runtime, reference, receiver, key)? {
-        PropertyReadOutcome::Value(value) => {
-            finish_intrinsic_get(runtime, continuation, value, &[], &[])
+    let origin = origin.unwrap_or_else(native_function_host_origin);
+    let dispatch = begin_internal_get(
+        runtime,
+        reference,
+        receiver,
+        key.clone(),
+        realm,
+        return_to,
+        origin,
+        execution_budget,
+    )?;
+    continue_intrinsic_get_after(runtime, dispatch, continuation, return_to, execution_budget)
+}
+
+pub(super) fn continue_intrinsic_get_after(
+    runtime: &mut Runtime,
+    dispatch: NativeDispatch,
+    continuation: IntrinsicGetContinuation,
+    return_to: Option<CallReturn>,
+    execution_budget: &mut ExecutionBudget,
+) -> Result<NativeDispatch, NativeFailure> {
+    match dispatch {
+        NativeDispatch::Immediate(value) => match continuation {
+            IntrinsicGetContinuation::ArrayConstructor {
+                realm,
+                new_target,
+                arguments,
+                origin,
+            } => finish_array_constructor_after_prototype_get(
+                runtime,
+                realm,
+                new_target,
+                arguments,
+                origin,
+                &value,
+                execution_budget,
+            ),
+            IntrinsicGetContinuation::PromiseConstructor {
+                realm,
+                new_target,
+                executor,
+                origin,
+            } => finish_promise_constructor_after_prototype_get(
+                runtime, realm, new_target, executor, origin, return_to, &value,
+            ),
+            IntrinsicGetContinuation::MapConstructor {
+                kind,
+                realm,
+                new_target,
+                iterable,
+                origin,
+            } => finish_map_constructor_after_prototype_get(
+                runtime,
+                kind,
+                realm,
+                new_target,
+                iterable,
+                origin,
+                return_to,
+                &value,
+                execution_budget,
+            ),
+            IntrinsicGetContinuation::SetConstructor {
+                kind,
+                realm,
+                new_target,
+                iterable,
+                origin,
+            } => finish_set_constructor_after_prototype_get(
+                runtime,
+                kind,
+                realm,
+                new_target,
+                iterable,
+                origin,
+                return_to,
+                &value,
+                execution_budget,
+            ),
+            continuation @ (IntrinsicGetContinuation::WeakRefConstructor { .. }
+            | IntrinsicGetContinuation::FinalizationRegistryConstructor {
+                ..
+            }) => finish_weak_reference_constructor_get(runtime, continuation, &value),
+            continuation => finish_intrinsic_get(runtime, continuation, value, &[], &[]),
+        },
+        NativeDispatch::Call(mut call) => {
+            prepend_native_continuations(
+                &mut call,
+                vec![NativeContinuation::IntrinsicGet(continuation)],
+            )?;
+            Ok(NativeDispatch::Call(call))
         }
-        PropertyReadOutcome::Getter { function, receiver } => {
-            intrinsic_getter_call(function, receiver, continuation, return_to, origin)
+        NativeDispatch::Frame(mut frame) => {
+            attach_native_continuations(
+                &mut frame,
+                vec![NativeContinuation::IntrinsicGet(continuation)],
+            )?;
+            Ok(NativeDispatch::Frame(frame))
         }
-        PropertyReadOutcome::Failed(_) => Err(EngineFault::RuntimeInvariant {
-            message: "heap-only intrinsic Get produced a primitive property failure",
+        NativeDispatch::Pair(_, _)
+        | NativeDispatch::ForOfRecord { .. }
+        | NativeDispatch::ForOfStep { .. }
+        | NativeDispatch::ForOfClosed
+        | NativeDispatch::CopyDataPropertiesDone
+        | NativeDispatch::AsyncAwait { .. } => Err(EngineFault::RuntimeInvariant {
+            message: "intrinsic Get produced a structured result",
         }
         .into()),
     }
-}
-
-fn intrinsic_getter_call(
-    function: FunctionId,
-    receiver: StoredValue,
-    continuation: IntrinsicGetContinuation,
-    return_to: Option<CallReturn>,
-    origin: Option<JsStackFrame>,
-) -> Result<NativeDispatch, NativeFailure> {
-    let continuations = reserve_intrinsic_get_continuation()?;
-    Ok(intrinsic_getter_call_with_reserved_continuation(
-        function,
-        receiver,
-        continuation,
-        return_to,
-        origin,
-        continuations,
-    ))
 }
 
 pub(super) fn reserve_intrinsic_get_continuation() -> Result<Vec<NativeContinuation>, NativeFailure>
@@ -441,6 +519,39 @@ pub(super) fn finish_intrinsic_get(
             new_target,
             value: number_value,
         } => finish_number_constructor_wrapper(runtime, new_target, number_value, &value),
+        IntrinsicGetContinuation::DateConstructor {
+            new_target,
+            value: date_value,
+        } => finish_date_constructor_wrapper(runtime, new_target, date_value, &value),
+        IntrinsicGetContinuation::ArrayBufferConstructor {
+            new_target,
+            byte_length,
+            max_byte_length,
+        } => finish_array_buffer_constructor_wrapper(
+            runtime,
+            new_target,
+            byte_length,
+            max_byte_length,
+            &value,
+        ),
+        IntrinsicGetContinuation::TypedArrayConstructor {
+            new_target,
+            element,
+            length,
+        } => finish_typed_array_constructor_wrapper(runtime, new_target, element, length, &value),
+        IntrinsicGetContinuation::TemporalInstantConstructor {
+            new_target,
+            epoch_nanoseconds,
+        } => finish_temporal_instant_constructor_wrapper(
+            runtime,
+            new_target,
+            epoch_nanoseconds,
+            &value,
+        ),
+        IntrinsicGetContinuation::TemporalDurationConstructor {
+            new_target,
+            duration,
+        } => finish_temporal_duration_constructor_wrapper(runtime, new_target, duration, &value),
         IntrinsicGetContinuation::StringConstructor {
             new_target,
             value: string_value,
@@ -449,6 +560,25 @@ pub(super) fn finish_intrinsic_get(
             message: "Array prototype getter resumed without an execution budget",
         }
         .into()),
+        IntrinsicGetContinuation::MapConstructor { .. } => Err(EngineFault::RuntimeInvariant {
+            message: "Map prototype getter resumed without an execution budget",
+        }
+        .into()),
+        IntrinsicGetContinuation::SetConstructor { .. } => Err(EngineFault::RuntimeInvariant {
+            message: "Set prototype getter resumed without an execution budget",
+        }
+        .into()),
+        IntrinsicGetContinuation::PromiseConstructor { .. } => Err(EngineFault::RuntimeInvariant {
+            message: "Promise prototype getter resumed without its caller completion",
+        }
+        .into()),
+        IntrinsicGetContinuation::WeakRefConstructor { .. }
+        | IntrinsicGetContinuation::FinalizationRegistryConstructor { .. } => {
+            Err(EngineFault::RuntimeInvariant {
+                message: "weak-reference prototype getter resumed without its caller completion",
+            }
+            .into())
+        }
         IntrinsicGetContinuation::ObjectPrototypeToString {
             default_tag,
             temporary_receiver,
@@ -704,8 +834,26 @@ pub(super) fn advance_function_source_conversion(
 
     loop {
         if state.index == state.arguments.len() {
-            let source = completed_dynamic_function_source(state.arguments)?;
-            return finish_ordinary_function_constructor(
+            let family = match state.native.kind {
+                NativeFunctionKind::OrdinaryFunctionConstructor => DynamicFunctionFamily::Function,
+                NativeFunctionKind::GeneratorFunctionConstructor => {
+                    DynamicFunctionFamily::GeneratorFunction
+                }
+                NativeFunctionKind::AsyncFunctionConstructor => {
+                    DynamicFunctionFamily::AsyncFunction
+                }
+                NativeFunctionKind::AsyncGeneratorFunctionConstructor => {
+                    DynamicFunctionFamily::AsyncGeneratorFunction
+                }
+                _ => {
+                    return Err(EngineFault::RuntimeInvariant {
+                        message: "dynamic source conversion has a nondynamic constructor",
+                    }
+                    .into());
+                }
+            };
+            let source = completed_dynamic_function_source(state.arguments, family)?;
+            return finish_dynamic_function_constructor(
                 runtime,
                 state.native,
                 state.construction,
@@ -749,19 +897,16 @@ pub(super) fn advance_function_source_conversion(
             .ok_or(EngineFault::RuntimeInvariant {
                 message: "object-valued dynamic Function source has no heap reference",
             })?;
-        let (property, key, awaiting_property) = match state.stage {
+        let (key, awaiting_property) = match state.stage {
             PrimitiveConversionStage::Start => (
-                PrimitiveConversionProperty::Exotic,
                 runtime.predefined_symbol_property_key(PredefinedAtom::SymbolToPrimitive),
                 PrimitiveConversionStage::AwaitExoticProperty,
             ),
             PrimitiveConversionStage::ToString => (
-                PrimitiveConversionProperty::ToString,
                 runtime.predefined_property_key(PredefinedAtom::ToString),
                 PrimitiveConversionStage::AwaitToStringProperty,
             ),
             PrimitiveConversionStage::ValueOf => (
-                PrimitiveConversionProperty::ValueOf,
                 runtime.predefined_property_key(PredefinedAtom::ValueOf),
                 PrimitiveConversionStage::AwaitValueOfProperty,
             ),
@@ -777,48 +922,29 @@ pub(super) fn advance_function_source_conversion(
                 .into());
             }
         };
-        match lookup_primitive_conversion_property(runtime, reference, &key)? {
-            PrimitiveConversionPropertyLookup::Getter(function) => {
-                state.stage = awaiting_property;
-                return function_source_method_call(state, function, Vec::new(), return_to);
-            }
-            PrimitiveConversionPropertyLookup::Value(value) => {
-                match use_primitive_conversion_property(
-                    &mut state.stage,
-                    property,
-                    &value,
-                    state.native.realm,
-                    &state.origin,
-                )? {
-                    PrimitiveConversionPropertyAction::Continue => {}
-                    PrimitiveConversionPropertyAction::Call {
-                        function,
-                        arguments,
-                    } => {
-                        return function_source_method_call(state, function, arguments, return_to);
-                    }
-                }
-            }
-        }
+        let receiver = current.duplicate();
+        state.stage = awaiting_property;
+        let dispatch = begin_internal_get(
+            runtime,
+            reference,
+            receiver,
+            key,
+            state.native.realm,
+            return_to,
+            state.origin.clone(),
+            execution_budget,
+        )?;
+        return continue_function_source_property_after(
+            runtime,
+            dispatch,
+            state,
+            return_to,
+            active_frames,
+            active_frame_values,
+            compiler,
+            execution_budget,
+        );
     }
-}
-
-fn lookup_primitive_conversion_property(
-    runtime: &Runtime,
-    reference: HeapReference,
-    key: &PropertyKey,
-) -> Result<PrimitiveConversionPropertyLookup, NativeFailure> {
-    Ok(match lookup_heap_property(runtime, Some(reference), key)? {
-        None => PrimitiveConversionPropertyLookup::Value(StoredValue::Undefined),
-        Some(OwnProperty::Data { value, .. }) => PrimitiveConversionPropertyLookup::Value(value),
-        Some(OwnProperty::Accessor {
-            getter: Some(function),
-            ..
-        }) => PrimitiveConversionPropertyLookup::Getter(function),
-        Some(OwnProperty::Accessor { getter: None, .. }) => {
-            PrimitiveConversionPropertyLookup::Value(StoredValue::Undefined)
-        }
-    })
 }
 
 fn use_primitive_conversion_property(
@@ -939,6 +1065,57 @@ fn function_source_method_call(
     }))
 }
 
+#[allow(
+    clippy::too_many_arguments,
+    reason = "dynamic Function property Get keeps compilation and execution budgets explicit across Proxy re-entry"
+)]
+fn continue_function_source_property_after(
+    runtime: &mut Runtime,
+    dispatch: NativeDispatch,
+    state: FunctionSourceContinuation,
+    return_to: Option<CallReturn>,
+    active_frames: usize,
+    active_frame_values: u64,
+    compiler: &Arc<dyn OrdinaryDynamicFunctionCompiler>,
+    execution_budget: &mut ExecutionBudget,
+) -> Result<NativeDispatch, NativeFailure> {
+    match dispatch {
+        NativeDispatch::Immediate(value) => advance_function_source_conversion(
+            runtime,
+            state,
+            Some(value),
+            return_to,
+            active_frames,
+            active_frame_values,
+            compiler,
+            execution_budget,
+        ),
+        NativeDispatch::Call(mut call) => {
+            prepend_native_continuations(
+                &mut call,
+                vec![NativeContinuation::FunctionSource(state)],
+            )?;
+            Ok(NativeDispatch::Call(call))
+        }
+        NativeDispatch::Frame(mut frame) => {
+            attach_native_continuations(
+                &mut frame,
+                vec![NativeContinuation::FunctionSource(state)],
+            )?;
+            Ok(NativeDispatch::Frame(frame))
+        }
+        NativeDispatch::Pair(_, _)
+        | NativeDispatch::ForOfRecord { .. }
+        | NativeDispatch::ForOfStep { .. }
+        | NativeDispatch::ForOfClosed
+        | NativeDispatch::CopyDataPropertiesDone
+        | NativeDispatch::AsyncAwait { .. } => Err(EngineFault::RuntimeInvariant {
+            message: "dynamic Function property Get produced a structured result",
+        }
+        .into()),
+    }
+}
+
 pub(super) fn begin_property_key_conversion(
     runtime: &mut Runtime,
     value: StoredValue,
@@ -1057,64 +1234,83 @@ pub(super) fn advance_property_key_conversion(
         }
     }
 
-    loop {
-        let reference = state
-            .receiver
-            .heap_reference()
-            .ok_or(EngineFault::RuntimeInvariant {
-                message: "object-valued property key has no heap reference",
-            })?;
-        let (property, key, awaiting_property) = match state.stage {
-            PrimitiveConversionStage::Start => (
-                PrimitiveConversionProperty::Exotic,
-                runtime.predefined_symbol_property_key(PredefinedAtom::SymbolToPrimitive),
-                PrimitiveConversionStage::AwaitExoticProperty,
-            ),
-            PrimitiveConversionStage::ToString => (
-                PrimitiveConversionProperty::ToString,
-                runtime.predefined_property_key(PredefinedAtom::ToString),
-                PrimitiveConversionStage::AwaitToStringProperty,
-            ),
-            PrimitiveConversionStage::ValueOf => (
-                PrimitiveConversionProperty::ValueOf,
-                runtime.predefined_property_key(PredefinedAtom::ValueOf),
-                PrimitiveConversionStage::AwaitValueOfProperty,
-            ),
-            PrimitiveConversionStage::AwaitExoticProperty
-            | PrimitiveConversionStage::AwaitToStringProperty
-            | PrimitiveConversionStage::AwaitValueOfProperty
-            | PrimitiveConversionStage::AwaitExotic
-            | PrimitiveConversionStage::AwaitToString
-            | PrimitiveConversionStage::AwaitValueOf => {
-                return Err(EngineFault::RuntimeInvariant {
-                    message: "property-key conversion awaited without a completion",
-                }
-                .into());
+    let reference = state
+        .receiver
+        .heap_reference()
+        .ok_or(EngineFault::RuntimeInvariant {
+            message: "object-valued property key has no heap reference",
+        })?;
+    let (key, awaiting_property) = match state.stage {
+        PrimitiveConversionStage::Start => (
+            runtime.predefined_symbol_property_key(PredefinedAtom::SymbolToPrimitive),
+            PrimitiveConversionStage::AwaitExoticProperty,
+        ),
+        PrimitiveConversionStage::ToString => (
+            runtime.predefined_property_key(PredefinedAtom::ToString),
+            PrimitiveConversionStage::AwaitToStringProperty,
+        ),
+        PrimitiveConversionStage::ValueOf => (
+            runtime.predefined_property_key(PredefinedAtom::ValueOf),
+            PrimitiveConversionStage::AwaitValueOfProperty,
+        ),
+        PrimitiveConversionStage::AwaitExoticProperty
+        | PrimitiveConversionStage::AwaitToStringProperty
+        | PrimitiveConversionStage::AwaitValueOfProperty
+        | PrimitiveConversionStage::AwaitExotic
+        | PrimitiveConversionStage::AwaitToString
+        | PrimitiveConversionStage::AwaitValueOf => {
+            return Err(EngineFault::RuntimeInvariant {
+                message: "property-key conversion awaited without a completion",
             }
-        };
-        match lookup_primitive_conversion_property(runtime, reference, &key)? {
-            PrimitiveConversionPropertyLookup::Getter(function) => {
-                state.stage = awaiting_property;
-                return property_key_method_call(state, function, Vec::new(), return_to);
-            }
-            PrimitiveConversionPropertyLookup::Value(value) => {
-                match use_primitive_conversion_property(
-                    &mut state.stage,
-                    property,
-                    &value,
-                    state.realm,
-                    &state.origin,
-                )? {
-                    PrimitiveConversionPropertyAction::Continue => {}
-                    PrimitiveConversionPropertyAction::Call {
-                        function,
-                        arguments,
-                    } => {
-                        return property_key_method_call(state, function, arguments, return_to);
-                    }
-                }
-            }
+            .into());
         }
+    };
+    state.stage = awaiting_property;
+    let dispatch = begin_internal_get(
+        runtime,
+        reference,
+        state.receiver.duplicate(),
+        key,
+        state.realm,
+        return_to,
+        state.origin.clone(),
+        execution_budget,
+    )?;
+    continue_property_key_get_after(runtime, dispatch, state, return_to, execution_budget)
+}
+
+fn continue_property_key_get_after(
+    runtime: &mut Runtime,
+    dispatch: NativeDispatch,
+    state: PropertyKeyContinuation,
+    return_to: Option<CallReturn>,
+    execution_budget: &mut ExecutionBudget,
+) -> Result<NativeDispatch, NativeFailure> {
+    match dispatch {
+        NativeDispatch::Immediate(value) => advance_property_key_conversion(
+            runtime,
+            state,
+            Some(value),
+            return_to,
+            execution_budget,
+        ),
+        NativeDispatch::Call(mut call) => {
+            prepend_native_continuations(&mut call, vec![NativeContinuation::PropertyKey(state)])?;
+            Ok(NativeDispatch::Call(call))
+        }
+        NativeDispatch::Frame(mut frame) => {
+            attach_native_continuations(&mut frame, vec![NativeContinuation::PropertyKey(state)])?;
+            Ok(NativeDispatch::Frame(frame))
+        }
+        NativeDispatch::Pair(_, _)
+        | NativeDispatch::ForOfRecord { .. }
+        | NativeDispatch::ForOfStep { .. }
+        | NativeDispatch::ForOfClosed
+        | NativeDispatch::CopyDataPropertiesDone
+        | NativeDispatch::AsyncAwait { .. } => Err(EngineFault::RuntimeInvariant {
+            message: "property-key conversion Get produced a structured result",
+        }
+        .into()),
     }
 }
 
@@ -1184,6 +1380,46 @@ pub(super) fn begin_operator_primitive_conversion(
         realm,
         return_to,
         &origin,
+        execution_budget,
+    )
+}
+
+/// Starts `OrdinaryToPrimitive` without probing `@@toPrimitive`.
+///
+/// Date's own `@@toPrimitive` method selects this path after validating its
+/// string hint, so looking up the exotic method again would recurse.
+#[allow(
+    clippy::too_many_arguments,
+    reason = "ordinary conversion carries the same explicit VM continuation context as ToPrimitive"
+)]
+pub(super) fn begin_ordinary_primitive_conversion(
+    runtime: &mut Runtime,
+    value: StoredValue,
+    hint: OperatorPrimitiveHint,
+    target: OperatorPrimitiveTarget,
+    realm: RealmId,
+    return_to: Option<CallReturn>,
+    origin: JsStackFrame,
+    execution_budget: &mut ExecutionBudget,
+) -> Result<NativeDispatch, NativeFailure> {
+    if !matches!(value, StoredValue::Function(_) | StoredValue::Object(_)) {
+        return Err(EngineFault::RuntimeInvariant {
+            message: "OrdinaryToPrimitive received a primitive receiver",
+        }
+        .into());
+    }
+    advance_operator_primitive_conversion(
+        runtime,
+        OperatorPrimitiveContinuation {
+            receiver: value,
+            realm,
+            hint,
+            stage: hint.first_ordinary_stage(),
+            target,
+            origin,
+        },
+        None,
+        return_to,
         execution_budget,
     )
 }
@@ -1290,54 +1526,89 @@ pub(super) fn advance_operator_primitive_conversion(
         }
     }
 
-    loop {
-        let reference = state
-            .receiver
-            .heap_reference()
-            .ok_or(EngineFault::RuntimeInvariant {
-                message: "object-valued operator operand has no heap reference",
-            })?;
-        let (property, key, awaiting_property) = match state.stage {
-            OperatorPrimitiveStage::Start => (
-                PrimitiveConversionProperty::Exotic,
-                runtime.predefined_symbol_property_key(PredefinedAtom::SymbolToPrimitive),
-                OperatorPrimitiveStage::AwaitExoticProperty,
-            ),
-            OperatorPrimitiveStage::ValueOf => (
-                PrimitiveConversionProperty::ValueOf,
-                runtime.predefined_property_key(PredefinedAtom::ValueOf),
-                OperatorPrimitiveStage::AwaitValueOfProperty,
-            ),
-            OperatorPrimitiveStage::ToString => (
-                PrimitiveConversionProperty::ToString,
-                runtime.predefined_property_key(PredefinedAtom::ToString),
-                OperatorPrimitiveStage::AwaitToStringProperty,
-            ),
-            OperatorPrimitiveStage::AwaitExoticProperty
-            | OperatorPrimitiveStage::AwaitValueOfProperty
-            | OperatorPrimitiveStage::AwaitToStringProperty
-            | OperatorPrimitiveStage::AwaitExotic
-            | OperatorPrimitiveStage::AwaitValueOf
-            | OperatorPrimitiveStage::AwaitToString => {
-                return Err(EngineFault::RuntimeInvariant {
-                    message: "operator primitive conversion awaited without a completion",
-                }
-                .into());
+    let reference = state
+        .receiver
+        .heap_reference()
+        .ok_or(EngineFault::RuntimeInvariant {
+            message: "object-valued operator operand has no heap reference",
+        })?;
+    let (key, awaiting_property) = match state.stage {
+        OperatorPrimitiveStage::Start => (
+            runtime.predefined_symbol_property_key(PredefinedAtom::SymbolToPrimitive),
+            OperatorPrimitiveStage::AwaitExoticProperty,
+        ),
+        OperatorPrimitiveStage::ValueOf => (
+            runtime.predefined_property_key(PredefinedAtom::ValueOf),
+            OperatorPrimitiveStage::AwaitValueOfProperty,
+        ),
+        OperatorPrimitiveStage::ToString => (
+            runtime.predefined_property_key(PredefinedAtom::ToString),
+            OperatorPrimitiveStage::AwaitToStringProperty,
+        ),
+        OperatorPrimitiveStage::AwaitExoticProperty
+        | OperatorPrimitiveStage::AwaitValueOfProperty
+        | OperatorPrimitiveStage::AwaitToStringProperty
+        | OperatorPrimitiveStage::AwaitExotic
+        | OperatorPrimitiveStage::AwaitValueOf
+        | OperatorPrimitiveStage::AwaitToString => {
+            return Err(EngineFault::RuntimeInvariant {
+                message: "operator primitive conversion awaited without a completion",
             }
-        };
-        match lookup_primitive_conversion_property(runtime, reference, &key)? {
-            PrimitiveConversionPropertyLookup::Getter(function) => {
-                state.stage = awaiting_property;
-                return operator_primitive_method_call(state, function, Vec::new(), return_to);
-            }
-            PrimitiveConversionPropertyLookup::Value(value) => {
-                if let Some((function, arguments)) =
-                    use_operator_primitive_property(&mut state, property, &value)?
-                {
-                    return operator_primitive_method_call(state, function, arguments, return_to);
-                }
-            }
+            .into());
         }
+    };
+    state.stage = awaiting_property;
+    let dispatch = begin_internal_get(
+        runtime,
+        reference,
+        state.receiver.duplicate(),
+        key,
+        state.realm,
+        return_to,
+        state.origin.clone(),
+        execution_budget,
+    )?;
+    continue_operator_primitive_get_after(runtime, dispatch, state, return_to, execution_budget)
+}
+
+fn continue_operator_primitive_get_after(
+    runtime: &mut Runtime,
+    dispatch: NativeDispatch,
+    state: OperatorPrimitiveContinuation,
+    return_to: Option<CallReturn>,
+    execution_budget: &mut ExecutionBudget,
+) -> Result<NativeDispatch, NativeFailure> {
+    match dispatch {
+        NativeDispatch::Immediate(value) => advance_operator_primitive_conversion(
+            runtime,
+            state,
+            Some(value),
+            return_to,
+            execution_budget,
+        ),
+        NativeDispatch::Call(mut call) => {
+            prepend_native_continuations(
+                &mut call,
+                vec![NativeContinuation::OperatorPrimitive(state)],
+            )?;
+            Ok(NativeDispatch::Call(call))
+        }
+        NativeDispatch::Frame(mut frame) => {
+            attach_native_continuations(
+                &mut frame,
+                vec![NativeContinuation::OperatorPrimitive(state)],
+            )?;
+            Ok(NativeDispatch::Frame(frame))
+        }
+        NativeDispatch::Pair(_, _)
+        | NativeDispatch::ForOfRecord { .. }
+        | NativeDispatch::ForOfStep { .. }
+        | NativeDispatch::ForOfClosed
+        | NativeDispatch::CopyDataPropertiesDone
+        | NativeDispatch::AsyncAwait { .. } => Err(EngineFault::RuntimeInvariant {
+            message: "operator primitive conversion Get produced a structured result",
+        }
+        .into()),
     }
 }
 
@@ -1524,14 +1795,484 @@ fn finish_operator_primitive_target(
                 |new_target| {
                     begin_number_constructor_wrapper(
                         runtime,
+                        realm,
                         new_target,
                         value,
                         return_to,
                         Some(origin.clone()),
+                        execution_budget,
                     )
                 },
             )
         }
+        OperatorPrimitiveTarget::DateConstructor { new_target } => {
+            finish_date_constructor_primitive(
+                runtime,
+                value,
+                new_target,
+                realm,
+                return_to,
+                origin,
+                execution_budget,
+            )
+        }
+        OperatorPrimitiveTarget::ArrayBufferConstructorLength(state) => {
+            finish_array_buffer_constructor_length(
+                runtime,
+                *state,
+                value,
+                return_to,
+                execution_budget,
+            )
+        }
+        OperatorPrimitiveTarget::ArrayBufferConstructorMax {
+            new_target,
+            byte_length,
+        } => finish_array_buffer_constructor_max(
+            runtime,
+            new_target,
+            byte_length,
+            value,
+            realm,
+            return_to,
+            origin,
+            execution_budget,
+        ),
+        OperatorPrimitiveTarget::DataViewConstructorOffset(state) => {
+            finish_data_view_constructor_offset(runtime, *state, value, return_to, execution_budget)
+        }
+        OperatorPrimitiveTarget::DataViewConstructorByteLength(state) => {
+            finish_data_view_constructor_byte_length(
+                runtime,
+                *state,
+                value,
+                return_to,
+                execution_budget,
+            )
+        }
+        OperatorPrimitiveTarget::TypedArrayConstructorLength(state) => {
+            finish_typed_array_constructor_length(
+                runtime,
+                *state,
+                value,
+                return_to,
+                execution_budget,
+            )
+        }
+        OperatorPrimitiveTarget::TypedArrayConstructorBufferOffset(state) => {
+            finish_typed_array_constructor_buffer_offset(
+                runtime,
+                *state,
+                value,
+                return_to,
+                execution_budget,
+            )
+        }
+        OperatorPrimitiveTarget::TypedArrayConstructorBufferLength(state) => {
+            finish_typed_array_constructor_buffer_length(
+                runtime,
+                *state,
+                value,
+                return_to,
+                execution_budget,
+            )
+        }
+        OperatorPrimitiveTarget::TypedArrayConstructorArrayLikeLength(state) => {
+            finish_typed_array_constructor_array_like_length(
+                runtime,
+                *state,
+                value,
+                return_to,
+                execution_budget,
+            )
+        }
+        OperatorPrimitiveTarget::TypedArrayConstructorElement(state) => {
+            finish_typed_array_constructor_element(
+                runtime,
+                *state,
+                value,
+                return_to,
+                execution_budget,
+            )
+        }
+        OperatorPrimitiveTarget::TypedArrayPrototypeSetOffset(state) => {
+            finish_typed_array_prototype_set_offset(
+                runtime,
+                *state,
+                value,
+                return_to,
+                execution_budget,
+            )
+        }
+        OperatorPrimitiveTarget::TypedArrayPrototypeSetSourceLength(state) => {
+            finish_typed_array_prototype_set_source_length(
+                runtime,
+                *state,
+                value,
+                return_to,
+                execution_budget,
+            )
+        }
+        OperatorPrimitiveTarget::TypedArrayPrototypeSetElement(state) => {
+            finish_typed_array_prototype_set_element(
+                runtime,
+                *state,
+                value,
+                return_to,
+                execution_budget,
+            )
+        }
+        OperatorPrimitiveTarget::TypedArrayPrototypeSubarrayBegin(state) => {
+            finish_typed_array_prototype_subarray_begin(
+                runtime,
+                *state,
+                value,
+                return_to,
+                execution_budget,
+            )
+        }
+        OperatorPrimitiveTarget::TypedArrayPrototypeSubarrayEnd(state) => {
+            finish_typed_array_prototype_subarray_end(
+                runtime,
+                *state,
+                value,
+                return_to,
+                execution_budget,
+            )
+        }
+        OperatorPrimitiveTarget::TypedArrayPrototypeSliceStart(state) => {
+            finish_typed_array_prototype_slice_start(
+                runtime,
+                *state,
+                value,
+                return_to,
+                execution_budget,
+            )
+        }
+        OperatorPrimitiveTarget::TypedArrayPrototypeSliceEnd(state) => {
+            finish_typed_array_prototype_slice_end(
+                runtime,
+                *state,
+                value,
+                return_to,
+                execution_budget,
+            )
+        }
+        OperatorPrimitiveTarget::TypedArrayPrototypeWithIndex(state) => {
+            finish_typed_array_prototype_with_index(
+                runtime,
+                *state,
+                value,
+                return_to,
+                execution_budget,
+            )
+        }
+        OperatorPrimitiveTarget::TypedArrayPrototypeWithValue(state) => {
+            finish_typed_array_prototype_with_value(runtime, &state, value, execution_budget)
+        }
+        OperatorPrimitiveTarget::TypedArrayPrototypeAtIndex(state) => {
+            finish_typed_array_prototype_at_index(runtime, *state, value)
+        }
+        OperatorPrimitiveTarget::TypedArrayPrototypeIncludesFromIndex(state) => {
+            finish_typed_array_prototype_includes_from_index(
+                runtime,
+                *state,
+                value,
+                execution_budget,
+            )
+        }
+        OperatorPrimitiveTarget::TypedArrayPrototypeIndexOfFromIndex(state) => {
+            finish_typed_array_prototype_index_of_from_index(
+                runtime,
+                *state,
+                value,
+                execution_budget,
+            )
+        }
+        OperatorPrimitiveTarget::TypedArrayPrototypeLastIndexOfFromIndex(state) => {
+            finish_typed_array_prototype_last_index_of_from_index(
+                runtime,
+                *state,
+                value,
+                execution_budget,
+            )
+        }
+        OperatorPrimitiveTarget::TypedArrayPrototypeFill(state) => {
+            finish_typed_array_prototype_fill(runtime, *state, value, return_to, execution_budget)
+        }
+        OperatorPrimitiveTarget::TypedArrayPrototypeCopyWithin(state) => {
+            finish_typed_array_prototype_copy_within(
+                runtime,
+                *state,
+                value,
+                return_to,
+                execution_budget,
+            )
+        }
+        OperatorPrimitiveTarget::DataViewGetIndex(state) => {
+            finish_data_view_get_index(runtime, state.as_ref(), value)
+        }
+        OperatorPrimitiveTarget::DataViewSetOffset(state) => {
+            finish_data_view_set_offset(runtime, *state, value, return_to, execution_budget)
+        }
+        OperatorPrimitiveTarget::DataViewSetValue(state) => {
+            finish_data_view_set_value(runtime, state.as_ref(), value)
+        }
+        OperatorPrimitiveTarget::TypedArrayElementSet(state) => {
+            finish_typed_array_element_set(runtime, *state, value)
+        }
+        OperatorPrimitiveTarget::ArrayBufferResize { object } => {
+            finish_array_buffer_resize(runtime, object, value, realm, origin)
+        }
+        OperatorPrimitiveTarget::ArrayBufferTransfer {
+            object,
+            preserve_resizability,
+        } => finish_array_buffer_transfer(
+            runtime,
+            object,
+            preserve_resizability,
+            value,
+            realm,
+            origin,
+        ),
+        OperatorPrimitiveTarget::ArrayBufferSliceStart(state) => {
+            finish_array_buffer_slice_start(runtime, *state, value, return_to, execution_budget)
+        }
+        OperatorPrimitiveTarget::ArrayBufferSliceEnd(state) => {
+            finish_array_buffer_slice_end(runtime, *state, value, return_to, execution_budget)
+        }
+        OperatorPrimitiveTarget::DateParse => finish_date_parse(value, realm, origin),
+        OperatorPrimitiveTarget::DateUtc(state) => {
+            let number = operator_to_number(value, realm, origin)?;
+            advance_date_utc(
+                runtime,
+                *state,
+                Some(number),
+                realm,
+                return_to,
+                origin,
+                execution_budget,
+            )
+        }
+        OperatorPrimitiveTarget::DateConstructorComponents(state) => {
+            let number = operator_to_number(value, realm, origin)?;
+            advance_date_constructor_components(
+                runtime,
+                *state,
+                Some(number),
+                realm,
+                return_to,
+                origin,
+                execution_budget,
+            )
+        }
+        OperatorPrimitiveTarget::TemporalDurationConstructor(state) => {
+            let number = operator_to_number(value, realm, origin)?;
+            advance_temporal_duration_constructor(
+                runtime,
+                *state,
+                Some(number),
+                realm,
+                return_to,
+                origin,
+                execution_budget,
+            )
+        }
+        OperatorPrimitiveTarget::TemporalDurationBag(state) => {
+            advance_temporal_duration_property_bag(
+                runtime,
+                *state,
+                Some(value),
+                return_to,
+                execution_budget,
+            )
+        }
+        OperatorPrimitiveTarget::TemporalDurationRoundLargestUnit(state) => {
+            finish_temporal_duration_round_largest_unit(
+                runtime,
+                *state,
+                value,
+                return_to,
+                execution_budget,
+            )
+        }
+        OperatorPrimitiveTarget::TemporalDurationRoundRoundingIncrement(state) => {
+            finish_temporal_duration_round_rounding_increment(
+                runtime,
+                *state,
+                value,
+                return_to,
+                execution_budget,
+            )
+        }
+        OperatorPrimitiveTarget::TemporalDurationRoundRoundingMode(state) => {
+            finish_temporal_duration_round_rounding_mode(
+                runtime,
+                *state,
+                value,
+                return_to,
+                execution_budget,
+            )
+        }
+        OperatorPrimitiveTarget::TemporalDurationRoundSmallestUnit(state) => {
+            finish_temporal_duration_round_smallest_unit(
+                runtime,
+                *state,
+                value,
+                return_to,
+                execution_budget,
+            )
+        }
+        OperatorPrimitiveTarget::TemporalDurationTotalUnit(state) => {
+            finish_temporal_duration_total_unit(*state, value)
+        }
+        OperatorPrimitiveTarget::TemporalDurationToStringFractionalSecondDigits(state) => {
+            finish_temporal_duration_to_string_fractional_second_digits(
+                runtime,
+                *state,
+                value,
+                return_to,
+                execution_budget,
+            )
+        }
+        OperatorPrimitiveTarget::TemporalDurationToStringRoundingMode(state) => {
+            finish_temporal_duration_to_string_rounding_mode(
+                runtime,
+                *state,
+                value,
+                return_to,
+                execution_budget,
+            )
+        }
+        OperatorPrimitiveTarget::TemporalDurationToStringSmallestUnit(state) => {
+            finish_temporal_duration_to_string_smallest_unit(&state, value)
+        }
+        OperatorPrimitiveTarget::TemporalInstantRoundRoundingIncrement(state) => {
+            finish_temporal_instant_round_rounding_increment(
+                runtime,
+                *state,
+                value,
+                return_to,
+                execution_budget,
+            )
+        }
+        OperatorPrimitiveTarget::TemporalInstantRoundRoundingMode(state) => {
+            finish_temporal_instant_round_rounding_mode(
+                runtime,
+                *state,
+                value,
+                return_to,
+                execution_budget,
+            )
+        }
+        OperatorPrimitiveTarget::TemporalInstantRoundSmallestUnit(state) => {
+            finish_temporal_instant_round_smallest_unit(
+                runtime,
+                &state,
+                value,
+                return_to,
+                execution_budget,
+            )
+        }
+        OperatorPrimitiveTarget::TemporalInstantDifferenceLargestUnit(state) => {
+            finish_temporal_instant_difference_largest_unit(
+                runtime,
+                *state,
+                value,
+                return_to,
+                execution_budget,
+            )
+        }
+        OperatorPrimitiveTarget::TemporalInstantDifferenceRoundingIncrement(state) => {
+            finish_temporal_instant_difference_rounding_increment(
+                runtime,
+                *state,
+                value,
+                return_to,
+                execution_budget,
+            )
+        }
+        OperatorPrimitiveTarget::TemporalInstantDifferenceRoundingMode(state) => {
+            finish_temporal_instant_difference_rounding_mode(
+                runtime,
+                *state,
+                value,
+                return_to,
+                execution_budget,
+            )
+        }
+        OperatorPrimitiveTarget::TemporalInstantDifferenceSmallestUnit(state) => {
+            finish_temporal_instant_difference_smallest_unit(runtime, &state, value)
+        }
+        OperatorPrimitiveTarget::TemporalInstantToStringFractionalSecondDigits(state) => {
+            finish_temporal_instant_to_string_fractional_second_digits(
+                runtime,
+                *state,
+                value,
+                return_to,
+                execution_budget,
+            )
+        }
+        OperatorPrimitiveTarget::TemporalInstantToStringRoundingMode(state) => {
+            finish_temporal_instant_to_string_rounding_mode(
+                runtime,
+                *state,
+                value,
+                return_to,
+                execution_budget,
+            )
+        }
+        OperatorPrimitiveTarget::TemporalInstantToStringSmallestUnit(state) => {
+            finish_temporal_instant_to_string_smallest_unit(
+                runtime,
+                *state,
+                value,
+                return_to,
+                execution_budget,
+            )
+        }
+        OperatorPrimitiveTarget::DateSetTime { object } => {
+            finish_date_set_time(runtime, object, value, realm, origin)
+        }
+        OperatorPrimitiveTarget::DateSetter(state) => {
+            let number = operator_to_number(value, realm, origin)?;
+            advance_date_setter(
+                runtime,
+                *state,
+                Some(number),
+                realm,
+                return_to,
+                origin,
+                execution_budget,
+            )
+        }
+        OperatorPrimitiveTarget::DateToPrimitive => Ok(NativeDispatch::Immediate(value)),
+        OperatorPrimitiveTarget::DateToJson(state) => {
+            begin_date_to_json_invoke(runtime, *state, value, return_to, execution_budget)
+        }
+        OperatorPrimitiveTarget::TemporalInstantNanoseconds { new_target } => {
+            finish_temporal_instant_nanoseconds(
+                runtime,
+                &value,
+                new_target,
+                realm,
+                return_to,
+                origin,
+                execution_budget,
+            )
+        }
+        OperatorPrimitiveTarget::TemporalInstantMilliseconds => {
+            finish_temporal_instant_milliseconds(runtime, value, realm, origin)
+        }
+        OperatorPrimitiveTarget::TemporalInstantString(target) => finish_temporal_instant_string(
+            runtime,
+            value,
+            *target,
+            realm,
+            return_to,
+            origin,
+            execution_budget,
+        ),
         OperatorPrimitiveTarget::NumberToString { number } => {
             let radix = operator_to_number(value, realm, origin)?;
             finish_number_to_string_radix(number, radix, realm, origin)
@@ -1540,15 +2281,92 @@ fn finish_operator_primitive_target(
             let digits = operator_to_number(value, realm, origin)?;
             finish_number_format(number, format, digits, realm, origin)
         }
+        OperatorPrimitiveTarget::GlobalNumeric(function) => match function {
+            GlobalNumericFunction::IsFinite | GlobalNumericFunction::IsNaN => {
+                let number = operator_to_number(value, realm, origin)?.as_f64();
+                let answer = if function == GlobalNumericFunction::IsFinite {
+                    number.is_finite()
+                } else {
+                    number.is_nan()
+                };
+                Ok(NativeDispatch::Immediate(StoredValue::Boolean(answer)))
+            }
+            GlobalNumericFunction::ParseFloat => {
+                let text = operator_primitive_to_string(value, realm, origin)?;
+                execution_budget.charge_instructions(u64::from(text.len()).saturating_add(1))?;
+                Ok(NativeDispatch::Immediate(StoredValue::Number(
+                    string_to_parse_float(&text)?,
+                )))
+            }
+            GlobalNumericFunction::ParseInt => Err(EngineFault::RuntimeInvariant {
+                message: "parseInt reached the single-argument numeric continuation",
+            }
+            .into()),
+        },
+        OperatorPrimitiveTarget::MathUnary(method) => {
+            let number = operator_to_number(value, realm, origin)?;
+            finish_math_unary(method, number)
+        }
+        OperatorPrimitiveTarget::MathBinaryRight { method, right } => {
+            let left = operator_to_number(value, realm, origin)?;
+            begin_operator_primitive_conversion(
+                runtime,
+                right,
+                OperatorPrimitiveHint::Number,
+                OperatorPrimitiveTarget::MathBinaryFinish { method, left },
+                realm,
+                return_to,
+                origin.clone(),
+                execution_budget,
+            )
+        }
+        OperatorPrimitiveTarget::MathBinaryFinish { method, left } => {
+            let right = operator_to_number(value, realm, origin)?;
+            finish_math_binary(method, left, right)
+        }
+        OperatorPrimitiveTarget::MathExtrema(state) => {
+            let number = operator_to_number(value, realm, origin)?;
+            advance_math_extrema(runtime, *state, Some(number), return_to, execution_budget)
+        }
+        OperatorPrimitiveTarget::MathHypot(state) => {
+            let number = operator_to_number(value, realm, origin)?;
+            advance_math_hypot(runtime, *state, Some(number), return_to, execution_budget)
+        }
+        OperatorPrimitiveTarget::GlobalUri(function) => {
+            let text = operator_primitive_to_string(value, realm, origin)?;
+            finish_uri_function(function, &text, realm, origin, execution_budget)
+        }
+        OperatorPrimitiveTarget::GlobalParseIntString { radix } => {
+            let text = operator_primitive_to_string(value, realm, origin)?;
+            begin_operator_primitive_conversion(
+                runtime,
+                radix,
+                OperatorPrimitiveHint::Number,
+                OperatorPrimitiveTarget::GlobalParseIntRadix { text },
+                realm,
+                return_to,
+                origin.clone(),
+                execution_budget,
+            )
+        }
+        OperatorPrimitiveTarget::GlobalParseIntRadix { text } => {
+            let radix = number_to_int32(operator_to_number(value, realm, origin)?);
+            execution_budget.charge_instructions(u64::from(text.len()).saturating_add(1))?;
+            Ok(NativeDispatch::Immediate(StoredValue::Number(
+                string_to_parse_int(&text, radix)?,
+            )))
+        }
         OperatorPrimitiveTarget::StringIntrinsic { new_target } => {
             let value = operator_primitive_to_string(value, realm, origin)?;
             if let Some(new_target) = new_target {
                 begin_string_constructor_wrapper(
                     runtime,
+                    realm,
                     new_target,
                     value,
                     return_to,
                     Some(origin.clone()),
+                    execution_budget,
                 )
             } else {
                 Ok(NativeDispatch::Immediate(StoredValue::String(value)))
@@ -1569,6 +2387,66 @@ fn finish_operator_primitive_target(
                 runtime.allocate_string_iterator(realm, string)?,
             )))
         }
+        OperatorPrimitiveTarget::JsonParseText(state) => {
+            let text = operator_primitive_to_string(value, realm, origin)?;
+            finish_json_parse_text(
+                runtime,
+                state,
+                text,
+                realm,
+                return_to,
+                origin.clone(),
+                execution_budget,
+            )
+        }
+        OperatorPrimitiveTarget::JsonParseArrayLength(state) => {
+            let number = operator_to_number(value, realm, origin)?;
+            finish_json_parse_array_length(runtime, *state, number, return_to, execution_budget)
+        }
+        OperatorPrimitiveTarget::JsonRawJsonText => {
+            let text = operator_primitive_to_string(value, realm, origin)?;
+            finish_json_raw_json_text(runtime, text, realm, origin.clone(), execution_budget)
+        }
+        OperatorPrimitiveTarget::JsonStringifyReplacerItem(state) => {
+            let item = operator_primitive_to_string(value, realm, origin)?;
+            finish_json_stringify_replacer_item(runtime, *state, item, return_to, execution_budget)
+        }
+        OperatorPrimitiveTarget::JsonStringifyReplacerLength(state) => {
+            let number = operator_to_number(value, realm, origin)?;
+            finish_json_stringify_replacer_length(
+                runtime,
+                *state,
+                number,
+                return_to,
+                execution_budget,
+            )
+        }
+        OperatorPrimitiveTarget::JsonStringifySpaceNumber(state) => {
+            let number = operator_to_number(value, realm, origin)?;
+            finish_json_stringify_space_number(runtime, *state, number, return_to, execution_budget)
+        }
+        OperatorPrimitiveTarget::JsonStringifySpaceString(state) => {
+            let string = operator_primitive_to_string(value, realm, origin)?;
+            finish_json_stringify_space_string(runtime, *state, string, return_to, execution_budget)
+        }
+        OperatorPrimitiveTarget::JsonStringifyContainerLength(state) => {
+            let number = operator_to_number(value, realm, origin)?;
+            finish_json_stringify_container_length(
+                runtime,
+                *state,
+                number,
+                return_to,
+                execution_budget,
+            )
+        }
+        OperatorPrimitiveTarget::JsonStringifyBoxedNumber(state) => {
+            let number = operator_to_number(value, realm, origin)?;
+            finish_json_stringify_boxed_number(runtime, *state, number, return_to, execution_budget)
+        }
+        OperatorPrimitiveTarget::JsonStringifyBoxedString(state) => {
+            let string = operator_primitive_to_string(value, realm, origin)?;
+            finish_json_stringify_boxed_string(runtime, *state, string, return_to, execution_budget)
+        }
         OperatorPrimitiveTarget::ErrorConstructorMessage(state) => {
             let message = operator_primitive_to_string(value, realm, origin)?;
             finish_error_constructor_message(runtime, state, message, return_to, execution_budget)
@@ -1586,6 +2464,9 @@ fn finish_operator_primitive_target(
         }
         OperatorPrimitiveTarget::FunctionApplyLength(state) => {
             finish_function_apply_length(runtime, state, value, return_to, execution_budget)
+        }
+        OperatorPrimitiveTarget::ProxyOwnKeysLength(state) => {
+            finish_proxy_own_keys_length(runtime, *state, value, return_to, execution_budget)
         }
         OperatorPrimitiveTarget::BigIntToString { value: receiver } => {
             let radix = operator_to_number(value, realm, origin)?;
@@ -1640,6 +2521,43 @@ fn finish_operator_primitive_target(
         }
         OperatorPrimitiveTarget::ArraySpliceArgument(state) => {
             advance_array_splice(runtime, *state, Some(value), return_to, execution_budget)
+        }
+        OperatorPrimitiveTarget::ArraySortValue(state) => {
+            advance_array_sort(runtime, *state, Some(value), return_to, execution_budget)
+        }
+        OperatorPrimitiveTarget::ArrayFlattenValue(state) => {
+            advance_array_flatten(runtime, *state, Some(value), return_to, execution_budget)
+        }
+        OperatorPrimitiveTarget::ArrayStaticLength(state) => {
+            advance_array_static(runtime, *state, Some(value), return_to, execution_budget)
+        }
+        OperatorPrimitiveTarget::ArrayFromAsyncLength { operation } => {
+            resume_array_from_async_length_conversion(
+                runtime,
+                operation,
+                value,
+                return_to,
+                execution_budget,
+            )
+        }
+        OperatorPrimitiveTarget::SetRecordSize(state) => {
+            let size = operator_to_number(value, realm, origin)?;
+            finish_set_record_size(runtime, *state, size, return_to, execution_budget)
+        }
+        OperatorPrimitiveTarget::StringRawValue(state) => {
+            advance_string_raw(runtime, *state, Some(value), return_to, execution_budget)
+        }
+        OperatorPrimitiveTarget::StringReplaceValue(state) => {
+            advance_string_replace(runtime, *state, value, return_to, execution_budget)
+        }
+        OperatorPrimitiveTarget::StringSplitValue(state) => {
+            advance_string_split(runtime, *state, value, return_to, execution_budget)
+        }
+        OperatorPrimitiveTarget::RegExpValue(state) => {
+            advance_regexp_continuation(runtime, *state, value, return_to, execution_budget)
+        }
+        OperatorPrimitiveTarget::LocaleStringValue(state) => {
+            advance_locale_string(runtime, *state, Some(value), return_to, execution_budget)
         }
         OperatorPrimitiveTarget::StringMethodSubject(state)
         | OperatorPrimitiveTarget::StringMethodArgument(state) => {
@@ -1699,15 +2617,40 @@ pub(super) fn finish_array_length_write(
             length
         }
     };
-    let StoredValue::Object(object) = state.base else {
-        return Err(EngineFault::RuntimeInvariant {
-            message: "array length conversion lost its array base",
+    let object = match &state.base {
+        StoredValue::Object(object) => *object,
+        _ => {
+            return Err(EngineFault::RuntimeInvariant {
+                message: "array length conversion lost its array base",
+            }
+            .into());
         }
-        .into());
     };
+    if let Some(definition) = state.definition {
+        return finish_array_length_definition(
+            runtime,
+            object,
+            length,
+            definition,
+            state.base,
+            &state.name,
+            realm,
+            origin,
+            execution_budget,
+        );
+    }
     let work = runtime.preview_array_length_write_work(object, length)?;
     execution_budget.charge_instructions(work)?;
     match runtime.set_array_length(object, length)? {
+        ArrayLengthWriteOutcome::Complete if state.reflect => {
+            Ok(NativeDispatch::Immediate(StoredValue::Boolean(true)))
+        }
+        ArrayLengthWriteOutcome::ReadOnly
+        | ArrayLengthWriteOutcome::BlockedByNonConfigurable { .. }
+            if state.reflect =>
+        {
+            Ok(NativeDispatch::Immediate(StoredValue::Boolean(false)))
+        }
         ArrayLengthWriteOutcome::Complete
         | ArrayLengthWriteOutcome::ReadOnly
         | ArrayLengthWriteOutcome::BlockedByNonConfigurable { .. }
@@ -1730,6 +2673,133 @@ pub(super) fn finish_array_length_write(
                 PropertyFailure::NotConfigurable,
             )?))
         }
+    }
+}
+
+#[allow(
+    clippy::too_many_arguments,
+    reason = "ArraySetLength completion keeps the converted length, descriptor flags, target completion, diagnostic identity, and budget explicit"
+)]
+fn finish_array_length_definition(
+    runtime: &mut Runtime,
+    object: ObjectId,
+    length: u32,
+    requested: ArrayLengthDefinition,
+    target: StoredValue,
+    name: &JsString,
+    realm: RealmId,
+    origin: &JsStackFrame,
+    execution_budget: &mut ExecutionBudget,
+) -> Result<NativeDispatch, NativeFailure> {
+    let key = runtime.predefined_property_key(PredefinedAtom::Length);
+    let existing =
+        runtime
+            .array_own_property(object, &key)?
+            .ok_or(EngineFault::RuntimeInvariant {
+                message: "ArraySetLength target has no own length property",
+            })?;
+    let current_writable = existing.layout().writable() == Some(true);
+    let definition = PropertyDefinition::data(
+        Requested::Present(StoredValue::Number(JsNumber::from_u32(length))),
+        requested_bool(requested.writable),
+    )
+    .with_enumerable(requested_bool(requested.enumerable))
+    .with_configurable(requested_bool(requested.configurable));
+    let final_writable = match validate_and_apply_existing(&definition, &existing) {
+        DefinitionDecision::Rejected => {
+            return array_length_definition_result(
+                requested.result,
+                false,
+                target,
+                realm,
+                origin,
+                name,
+                PropertyFailure::NotConfigurable,
+            );
+        }
+        DefinitionDecision::Unchanged => existing.layout().writable() == Some(true),
+        DefinitionDecision::Replace(OwnProperty::Data { layout, .. }) => {
+            layout.writable() == Some(true)
+        }
+        DefinitionDecision::Create(_)
+        | DefinitionDecision::Replace(OwnProperty::Accessor { .. }) => {
+            return Err(EngineFault::RuntimeInvariant {
+                message: "ArraySetLength validation changed the length property's kind or presence",
+            }
+            .into());
+        }
+    };
+    let current_length = runtime
+        .array_length(object)?
+        .ok_or(EngineFault::RuntimeInvariant {
+            message: "ArraySetLength target lost its Array state",
+        })?;
+    let outcome = if current_length == length {
+        ArrayLengthWriteOutcome::Complete
+    } else {
+        let work = runtime.preview_array_length_write_work(object, length)?;
+        execution_budget.charge_instructions(work)?;
+        runtime.set_array_length(object, length)?
+    };
+    if current_writable && !final_writable {
+        // ArraySetLength applies a requested false writable flag even when a
+        // non-configurable index stops the shrink and makes the definition
+        // itself return false.
+        runtime.set_array_length_writable(object, false)?;
+    }
+    match outcome {
+        ArrayLengthWriteOutcome::Complete => array_length_definition_result(
+            requested.result,
+            true,
+            target,
+            realm,
+            origin,
+            name,
+            PropertyFailure::NotConfigurable,
+        ),
+        ArrayLengthWriteOutcome::BlockedByNonConfigurable { .. } => array_length_definition_result(
+            requested.result,
+            false,
+            target,
+            realm,
+            origin,
+            name,
+            PropertyFailure::NotConfigurable,
+        ),
+        ArrayLengthWriteOutcome::ReadOnly => Err(EngineFault::RuntimeInvariant {
+            message: "validated ArraySetLength definition reached a read-only mutation",
+        }
+        .into()),
+    }
+}
+
+const fn requested_bool(value: Option<bool>) -> Requested<bool> {
+    match value {
+        Some(value) => Requested::Present(value),
+        None => Requested::Absent,
+    }
+}
+
+fn array_length_definition_result(
+    result: DefinePropertyResult,
+    success: bool,
+    target: StoredValue,
+    realm: RealmId,
+    origin: &JsStackFrame,
+    name: &JsString,
+    failure: PropertyFailure,
+) -> Result<NativeDispatch, NativeFailure> {
+    match (result, success) {
+        (DefinePropertyResult::Target, true) => Ok(NativeDispatch::Immediate(target)),
+        (DefinePropertyResult::Boolean, _) => {
+            Ok(NativeDispatch::Immediate(StoredValue::Boolean(success)))
+        }
+        (DefinePropertyResult::Target, false) => Err(NativeFailure::Abrupt(property_exception_at(
+            realm,
+            origin.clone(),
+            Some(name),
+            failure,
+        )?)),
     }
 }
 
@@ -1948,10 +3018,7 @@ fn apply_numeric_arithmetic(
         FinalOpcode::Div => left / right,
         FinalOpcode::Mod => left % right,
         FinalOpcode::Sub => left - right,
-        FinalOpcode::Pow if !right.is_finite() && left.abs().to_bits() == 1.0_f64.to_bits() => {
-            f64::NAN
-        }
-        FinalOpcode::Pow => left.powf(right),
+        FinalOpcode::Pow => number_exponentiate(left, right),
         _ => {
             return Err(EngineFault::RuntimeInvariant {
                 message: "non-arithmetic opcode reached numeric arithmetic",
@@ -1962,6 +3029,16 @@ fn apply_numeric_arithmetic(
     Ok(NativeDispatch::Immediate(StoredValue::Number(
         JsNumber::from_f64(result),
     )))
+}
+
+/// Applies the ECMA-262 `Number::exponentiate` compatibility exception before
+/// delegating the implementation-approximated finite operation to binary64.
+pub(super) fn number_exponentiate(base: f64, exponent: f64) -> f64 {
+    if !exponent.is_finite() && base.abs().to_bits() == 1.0_f64.to_bits() {
+        f64::NAN
+    } else {
+        base.powf(exponent)
+    }
 }
 
 fn apply_numeric_bitwise(
@@ -2300,6 +3377,20 @@ fn finish_property_key_target(
         }
         .into()),
         PropertyKeyTarget::Read { base, realm } => {
+            if let Some(reference) = base.heap_reference()
+                && runtime.proxy_state(reference)?.is_some()
+            {
+                return begin_internal_get(
+                    runtime,
+                    reference,
+                    base.duplicate(),
+                    property.key,
+                    realm,
+                    return_to,
+                    origin.clone(),
+                    execution_budget,
+                );
+            }
             match read_static_property(runtime, realm, &base, &property.key)? {
                 PropertyReadOutcome::Value(value) => Ok(NativeDispatch::Immediate(value)),
                 PropertyReadOutcome::Getter { function, receiver } => {
@@ -2327,12 +3418,41 @@ fn finish_property_key_target(
             realm,
         } => {
             if is_array_length_target(runtime, &base, &property.key)? {
-                let target = array_length_write_target(base, property.name, strict, &value);
+                let target = array_length_write_target(base, property.name, strict, false, &value);
                 return begin_operator_primitive_conversion(
                     runtime,
                     value,
                     OperatorPrimitiveHint::Number,
                     target,
+                    realm,
+                    return_to,
+                    origin.clone(),
+                    execution_budget,
+                );
+            }
+            if let Some((object, key)) = typed_array_indexed_key(runtime, &base, &property.key)? {
+                return begin_typed_array_element_set(
+                    runtime,
+                    object,
+                    key,
+                    value,
+                    TypedArraySetCompletion::LanguageWrite,
+                    realm,
+                    return_to,
+                    origin.clone(),
+                    execution_budget,
+                );
+            }
+            if let Some(reference) = base.heap_reference() {
+                return begin_internal_set(
+                    runtime,
+                    reference,
+                    property.key,
+                    property.name,
+                    value,
+                    base,
+                    strict,
+                    false,
                     realm,
                     return_to,
                     origin.clone(),
@@ -2396,19 +3516,85 @@ fn finish_property_key_target(
             origin.clone(),
             execution_budget,
         ),
-        PropertyKeyTarget::OwnPropertyDescriptor { target, realm } => {
+        PropertyKeyTarget::ReflectDefineProperty {
+            target,
+            descriptor,
+            realm,
+        } => begin_define_property_with_result(
+            runtime,
+            realm,
+            target,
+            property.key,
+            property.name,
+            descriptor,
+            return_to,
+            origin.clone(),
+            execution_budget,
+            DefinePropertyResult::Boolean,
+        ),
+        PropertyKeyTarget::OwnPropertyDescriptor { target, realm }
+        | PropertyKeyTarget::ReflectOwnPropertyDescriptor { target, realm } => {
+            if let Some(reference) = target.heap_reference()
+                && runtime.proxy_state(reference)?.is_some()
+            {
+                return begin_internal_get_own_property(
+                    runtime,
+                    reference,
+                    property.key,
+                    realm,
+                    return_to,
+                    origin.clone(),
+                    execution_budget,
+                );
+            }
             own_property_descriptor(runtime, realm, &target, &property.key, origin)
         }
-        // `hasOwnProperty` and `propertyIsEnumerable` share one own-property
-        // resolution with `getOwnPropertyDescriptor`, so all three agree on
-        // every exotic case.
+        // `Object.hasOwn`, `hasOwnProperty`, and `propertyIsEnumerable` share
+        // one own-property resolution with `getOwnPropertyDescriptor`, so all
+        // four agree on every admitted exotic case.
         PropertyKeyTarget::HasOwnProperty { target, realm } => {
+            if let Some(reference) = target.heap_reference()
+                && runtime.proxy_state(reference)?.is_some()
+            {
+                let dispatch = begin_internal_get_own_property(
+                    runtime,
+                    reference,
+                    property.key,
+                    realm,
+                    return_to,
+                    origin.clone(),
+                    execution_budget,
+                )?;
+                return continue_own_descriptor_query_after(
+                    runtime,
+                    dispatch,
+                    OwnDescriptorQuery::Present,
+                );
+            }
             let own = resolve_own_property(runtime, realm, &target, &property.key, origin)?;
             Ok(NativeDispatch::Immediate(StoredValue::Boolean(
                 own.is_some(),
             )))
         }
         PropertyKeyTarget::PropertyIsEnumerable { target, realm } => {
+            if let Some(reference) = target.heap_reference()
+                && runtime.proxy_state(reference)?.is_some()
+            {
+                let dispatch = begin_internal_get_own_property(
+                    runtime,
+                    reference,
+                    property.key,
+                    realm,
+                    return_to,
+                    origin.clone(),
+                    execution_budget,
+                )?;
+                return continue_own_descriptor_query_after(
+                    runtime,
+                    dispatch,
+                    OwnDescriptorQuery::Enumerable,
+                );
+            }
             // An absent property is not enumerable, and neither is an inherited
             // one: the test is on the own property only.
             let own = resolve_own_property(runtime, realm, &target, &property.key, origin)?;
@@ -2422,29 +3608,111 @@ fn finish_property_key_target(
             });
             Ok(NativeDispatch::Immediate(StoredValue::Boolean(enumerable)))
         }
+        PropertyKeyTarget::ReflectHas { target, realm }
+        | PropertyKeyTarget::In { target, realm } => {
+            let reference = target
+                .heap_reference()
+                .ok_or(EngineFault::RuntimeInvariant {
+                    message: "Reflect.has lost its validated target",
+                })?;
+            begin_internal_has(
+                runtime,
+                reference,
+                property.key,
+                realm,
+                return_to,
+                origin.clone(),
+                execution_budget,
+            )
+        }
+        PropertyKeyTarget::ReflectGet {
+            target,
+            receiver,
+            realm,
+        } => {
+            charge_heap_property_lookup(runtime, &target, execution_budget)?;
+            let reference = target
+                .heap_reference()
+                .ok_or(EngineFault::RuntimeInvariant {
+                    message: "Reflect.get lost its validated target",
+                })?;
+            begin_internal_get(
+                runtime,
+                reference,
+                receiver,
+                property.key,
+                realm,
+                return_to,
+                origin.clone(),
+                execution_budget,
+            )
+        }
+        PropertyKeyTarget::ReflectSet {
+            target,
+            receiver,
+            value,
+            realm,
+        } => {
+            let reference = target
+                .heap_reference()
+                .ok_or(EngineFault::RuntimeInvariant {
+                    message: "Reflect.set target lost its object reference",
+                })?;
+            begin_internal_set(
+                runtime,
+                reference,
+                property.key,
+                property.name,
+                value,
+                receiver,
+                false,
+                true,
+                realm,
+                return_to,
+                origin.clone(),
+                execution_budget,
+            )
+        }
         PropertyKeyTarget::Delete {
             base,
             strict,
             realm,
-        } => match delete_static_property(runtime, &base, &property.key)? {
-            PropertyDeleteOutcome::Deleted => {
-                Ok(NativeDispatch::Immediate(StoredValue::Boolean(true)))
-            }
-            PropertyDeleteOutcome::Refused if strict => {
-                Err(NativeFailure::Abrupt(property_exception_at(
+        } => {
+            if let Some(reference) = base.heap_reference()
+                && runtime.proxy_state(reference)?.is_some()
+            {
+                return begin_internal_delete(
+                    runtime,
+                    reference,
+                    property.key,
+                    strict,
+                    false,
                     realm,
+                    return_to,
                     origin.clone(),
-                    Some(&property.name),
-                    PropertyFailure::NotDeletable,
-                )?))
+                    execution_budget,
+                );
             }
-            PropertyDeleteOutcome::Refused => {
-                Ok(NativeDispatch::Immediate(StoredValue::Boolean(false)))
+            match delete_static_property(runtime, &base, &property.key)? {
+                PropertyDeleteOutcome::Deleted => {
+                    Ok(NativeDispatch::Immediate(StoredValue::Boolean(true)))
+                }
+                PropertyDeleteOutcome::Refused if strict => {
+                    Err(NativeFailure::Abrupt(property_exception_at(
+                        realm,
+                        origin.clone(),
+                        Some(&property.name),
+                        PropertyFailure::NotDeletable,
+                    )?))
+                }
+                PropertyDeleteOutcome::Refused => {
+                    Ok(NativeDispatch::Immediate(StoredValue::Boolean(false)))
+                }
+                PropertyDeleteOutcome::Failed(failure) => Err(NativeFailure::Abrupt(
+                    property_exception_at(realm, origin.clone(), Some(&property.name), failure)?,
+                )),
             }
-            PropertyDeleteOutcome::Failed(failure) => Err(NativeFailure::Abrupt(
-                property_exception_at(realm, origin.clone(), Some(&property.name), failure)?,
-            )),
-        },
+        }
         PropertyKeyTarget::DefineMethod {
             base,
             function,
@@ -2462,7 +3730,7 @@ fn finish_property_key_target(
                     origin: origin.clone(),
                 }));
             };
-            let name = computed_method_name(&value)?;
+            let name = computed_function_name(&value)?;
             match define_static_method(
                 runtime,
                 &base,
@@ -2529,7 +3797,7 @@ pub(super) fn computed_property_operand(
     }
 }
 
-fn computed_method_name(value: &StoredValue) -> Result<JsString, NativeFailure> {
+pub(super) fn computed_function_name(value: &StoredValue) -> Result<JsString, ExecutionError> {
     match value {
         StoredValue::String(name) => Ok(name.clone()),
         StoredValue::Symbol(atom) => atom.description().map_or_else(

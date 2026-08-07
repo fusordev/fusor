@@ -1,0 +1,36 @@
+{
+  "schema": 1,
+  "quickjs_release": "2026-06-04",
+  "cases": [
+    {
+      "id": "surface-metadata-and-brands",
+      "covers": ["weak-ref-surface", "finalization-registry-surface"],
+      "body": "return [WeakRef.name,WeakRef.length,WeakRef.prototype.deref.length,Object.prototype.toString.call(new WeakRef({})),FinalizationRegistry.name,FinalizationRegistry.length,FinalizationRegistry.prototype.register.length,FinalizationRegistry.prototype.unregister.length,Object.prototype.toString.call(new FinalizationRegistry(function(){}))].join('|');",
+      "expect": {"kind": "string", "value": "WeakRef|1|0|[object WeakRef]|FinalizationRegistry|1|2|1|[object FinalizationRegistry]"}
+    },
+    {
+      "id": "target-domain-and-constructor-new",
+      "covers": ["weak-ref-object-target", "weak-ref-symbol-target", "weak-ref-registered-symbol-rejection", "weak-ref-constructor-new", "finalization-registry-constructor-new"],
+      "body": "var object={};var unique=Symbol('u');var wellKnown=Symbol.iterator;var refs=[new WeakRef(object),new WeakRef(unique),new WeakRef(wellKnown)];var errors=[];try{new WeakRef(Symbol.for('registered'))}catch(error){errors.push(error instanceof TypeError)}try{WeakRef(object)}catch(error){errors.push(error instanceof TypeError)}try{FinalizationRegistry(function(){})}catch(error){errors.push(error instanceof TypeError)}return [refs[0].deref()===object,refs[1].deref()===unique,refs[2].deref()===wellKnown,errors.join(',')].join('|');",
+      "expect": {"kind": "string", "value": "true|true|true|true,true,true"}
+    },
+    {
+      "id": "weak-ref-new-target",
+      "covers": ["weak-ref-new-target"],
+      "body": "var target={};function Derived(){}var prototype=Object.create(WeakRef.prototype);Derived.prototype=prototype;var reference=Reflect.construct(WeakRef,[target],Derived);return [Object.getPrototypeOf(reference)===prototype,reference instanceof Derived,reference.deref()===target].join('|');",
+      "expect": {"kind": "string", "value": "true|true|true"}
+    },
+    {
+      "id": "registry-register-unregister-validation",
+      "covers": ["finalization-registry-register", "finalization-registry-unregister", "finalization-registry-validation"],
+      "body": "var registry=new FinalizationRegistry(function(){});var first={};var second={};var token={};var result=registry.register(first,'first',token);registry.register(second,'second',token);var removed=registry.unregister(token);var removedAgain=registry.unregister(token);var errors=[];try{registry.register(1,1)}catch(error){errors.push(error instanceof TypeError)}try{registry.register(first,first)}catch(error){errors.push(error instanceof TypeError)}try{registry.register(first,1,1)}catch(error){errors.push(error instanceof TypeError)}try{registry.unregister(1)}catch(error){errors.push(error instanceof TypeError)}return [String(result),removed,removedAgain,errors.join(',')].join('|');",
+      "expect": {"kind": "string", "value": "undefined|true|false|true,true,true,true"}
+    },
+    {
+      "id": "prototype-methods-check-brands-first",
+      "covers": ["weak-ref-brand-first", "finalization-registry-brand-first"],
+      "body": "var errors=[];try{WeakRef.prototype.deref.call({})}catch(error){errors.push(error instanceof TypeError)}try{FinalizationRegistry.prototype.register.call({},1,1)}catch(error){errors.push(error instanceof TypeError)}try{FinalizationRegistry.prototype.unregister.call({},1)}catch(error){errors.push(error instanceof TypeError)}return errors.join(',');",
+      "expect": {"kind": "string", "value": "true,true,true"}
+    }
+  ]
+}

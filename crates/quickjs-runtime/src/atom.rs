@@ -97,6 +97,42 @@ struct AtomEntry {
     predefined: Option<PredefinedAtom>,
 }
 
+/// Non-owning identity used by weak collections.
+///
+/// Hashing and equality preserve Symbol identity without keeping the Atom
+/// entry alive. This is deliberately crate-private: JavaScript can only
+/// observe the identity again by presenting a live Symbol value.
+#[derive(Clone)]
+pub(crate) struct WeakAtom(Weak<AtomEntry>);
+
+impl WeakAtom {
+    pub(crate) fn from_atom(atom: &Atom) -> Self {
+        Self(Arc::downgrade(&atom.0))
+    }
+
+    pub(crate) fn strong_count(&self) -> usize {
+        self.0.strong_count()
+    }
+
+    pub(crate) fn upgrade(&self) -> Option<Atom> {
+        self.0.upgrade().map(Atom)
+    }
+}
+
+impl PartialEq for WeakAtom {
+    fn eq(&self, other: &Self) -> bool {
+        self.0.ptr_eq(&other.0)
+    }
+}
+
+impl Eq for WeakAtom {}
+
+impl Hash for WeakAtom {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        self.0.as_ptr().hash(state);
+    }
+}
+
 impl Atom {
     /// Returns the atom namespace.
     #[must_use]
@@ -207,6 +243,14 @@ impl PropertyKey {
             atom.kind(),
             AtomKind::GlobalSymbol | AtomKind::Symbol
         ));
+        Self::from_atom(atom)
+    }
+
+    /// Creates an internal private-name key. This is deliberately
+    /// crate-private: ECMAScript `ToPropertyKey` and public reflection must
+    /// continue to reject private names.
+    pub(crate) fn from_private_atom(atom: Atom) -> Self {
+        debug_assert_eq!(atom.kind(), AtomKind::Private);
         Self::from_atom(atom)
     }
 
@@ -462,13 +506,15 @@ impl AtomTable {
     /// interner slot when no other owner retained the identity.
     pub(crate) fn rollback_interned_string(&mut self, atom: Atom) {
         debug_assert_eq!(atom.kind(), AtomKind::String);
-        debug_assert_eq!(atom.predefined_atom(), None);
         debug_assert!(
             atom.0
                 .owner
                 .upgrade()
                 .is_some_and(|owner| { Arc::ptr_eq(&owner, &self.state) })
         );
+        if atom.predefined_atom().is_some() {
+            return;
+        }
         let description = atom
             .description()
             .expect("string atom has a description")
@@ -1346,6 +1392,20 @@ mod tests {
         );
         assert_eq!(table.collect_dead(), 1);
         assert_eq!(table.usage(), startup);
+    }
+
+    #[test]
+    fn rollback_preserves_a_reused_predefined_string_atom() {
+        let mut table = table();
+        let startup = table.usage();
+        let predefined = table.predefined(PredefinedAtom::SetProperty);
+        let transaction = table.intern_string(&string("set")).unwrap();
+
+        assert_eq!(transaction, predefined);
+        table.rollback_interned_string(transaction);
+
+        assert_eq!(table.usage(), startup);
+        assert_eq!(table.intern_string(&string("set")).unwrap(), predefined);
     }
 
     #[test]

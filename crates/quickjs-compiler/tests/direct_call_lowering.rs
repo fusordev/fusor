@@ -1,7 +1,5 @@
 use quickjs_bytecode::{BytecodePc, FinalOpcode, Operands, VerificationLimits};
-use quickjs_compiler::{
-    CompilationContext, CompiledLeafFunction, LeafCompilationError, UnsupportedLeafFeature,
-};
+use quickjs_compiler::{CompilationContext, CompiledLeafFunction};
 use quickjs_frontend::{CompilationGoal, FrontendOptions, GlobalScriptGoal, with_parsed_program};
 
 fn compile(source: &str, name: &str) -> CompiledLeafFunction {
@@ -17,24 +15,6 @@ fn compile(source: &str, name: &str) -> CompiledLeafFunction {
             context
                 .compile_leaf(&executable, VerificationLimits::default())
                 .expect("direct-call compilation must succeed")
-        },
-    )
-    .expect("front-end acceptance")
-}
-
-fn compile_error(source: &str, name: &str) -> LeafCompilationError {
-    with_parsed_program(
-        source,
-        FrontendOptions::for_goal(CompilationGoal::GlobalScript(GlobalScriptGoal::new())),
-        |unit| {
-            let context = CompilationContext::new(unit).expect("storage planning must succeed");
-            let executable = context
-                .executables()
-                .find(|executable| executable.metadata().name() == Some(name))
-                .expect("named function executable");
-            context
-                .compile_leaf(&executable, VerificationLimits::default())
-                .expect_err("unsupported call family must fail closed")
         },
     )
     .expect("front-end acceptance")
@@ -325,30 +305,6 @@ fn computed_member_calls_keep_the_receiver_and_evaluate_arguments_after_lookup()
         source_slice_at(&compiled, source, call.0),
         "(holder[key])(first(),second)"
     );
-}
-
-#[test]
-fn optional_and_spread_calls_and_constructors_remain_fail_closed() {
-    let cases = [
-        ("function invoke(fn){return fn?.();}", "fn?.()"),
-        (
-            "function invoke(holder){return new (holder?.Ctor)();}",
-            "holder?.Ctor",
-        ),
-    ];
-
-    for (source, expected_source) in cases {
-        let LeafCompilationError::Unsupported { feature, span } = compile_error(source, "invoke")
-        else {
-            panic!("expected unsupported call family for {source}");
-        };
-        assert_eq!(feature, UnsupportedLeafFeature::UnsupportedExpression);
-        assert_eq!(
-            &source[span.start as usize..span.end as usize],
-            expected_source,
-            "{source}"
-        );
-    }
 }
 
 #[test]

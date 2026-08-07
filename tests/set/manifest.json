@@ -1,0 +1,54 @@
+{
+  "schema": 1,
+  "quickjs_release": "2026-06-04",
+  "cases": [
+    {
+      "id": "surface-metadata-aliases-and-brand",
+      "covers": ["set-surface", "set-brand"],
+      "body": "var methods=['isDisjointFrom','isSubsetOf','isSupersetOf','intersection','difference','symmetricDifference','union'];return [Set.name,Set.length,Object.prototype.toString.call(new Set()),Set.prototype.keys===Set.prototype.values,Set.prototype[Symbol.iterator]===Set.prototype.values,methods.map(function(name){return Set.prototype[name].length}).join(',')].join('|');",
+      "expect": {"kind": "string", "value": "Set|0|[object Set]|true|true|1,1,1,1,1,1,1"}
+    },
+    {
+      "id": "same-value-zero-order-and-new-target",
+      "covers": ["set-same-value-zero", "set-insertion-order", "set-new-target"],
+      "body": "var set=new Set();set.add(-0).add(NaN).add(1).add(1);set.delete(NaN);set.add(2);set.delete(1);set.add(1);function Derived(){}var prototype=Object.create(Set.prototype);Derived.prototype=prototype;var derived=Reflect.construct(Set,[[3]],Derived);return [set.size,set.has(+0),Array.from(set).join(':'),Object.getPrototypeOf(derived)===prototype,derived.size].join('|');",
+      "expect": {"kind": "string", "value": "3|true|0:2:1|true|1"}
+    },
+    {
+      "id": "constructor-order-close-and-original-abrupt",
+      "covers": ["set-constructor-order", "set-constructor-close"],
+      "body": "var log=[];var original={};var secondary={};var saved=Set.prototype.add;Object.defineProperty(Set.prototype,'add',{configurable:true,get:function(){log.push('adder');return function(){throw original}}});var iterable={[Symbol.iterator]:function(){log.push('iterator');return {next:function(){log.push('next');return {done:false,value:1}},return:function(){log.push('return');throw secondary}}}};var caught=false;try{new Set(iterable)}catch(error){caught=error===original}Object.defineProperty(Set.prototype,'add',{configurable:true,writable:true,value:saved});return log.join(',')+'|'+caught;",
+      "expect": {"kind": "string", "value": "adder,iterator,next,return|true"}
+    },
+    {
+      "id": "constructor-step-abrupt-does-not-close",
+      "covers": ["set-constructor-no-close-on-step"],
+      "body": "var original={};var log=[];function iterable(next){return {[Symbol.iterator]:function(){return {next:next,return:function(){log.push('close');return {}}}}};}var caught=[];try{new Set(iterable(function(){throw original}))}catch(error){caught.push(error===original)}try{new Set(iterable(function(){return {get done(){throw original}}}))}catch(error){caught.push(error===original)}try{new Set(iterable(function(){return {done:false,get value(){throw original}}}))}catch(error){caught.push(error===original)}return log.join(',')+'|'+caught.join(',');",
+      "expect": {"kind": "string", "value": "|true,true,true"}
+    },
+    {
+      "id": "live-iterator-delete-clear-and-for-each",
+      "covers": ["set-live-iterator", "set-delete-clear", "set-for-each-reentry"],
+      "body": "var set=new Set([1,2]);var iterator=set.values();var first=iterator.next().value;set.delete(2);set.add(3);var second=iterator.next().value;set.clear();set.add(4);var third=iterator.next().value;var seen=[];set.forEach(function(value,key,receiver){seen.push(value+':'+key+':'+(receiver===set));if(value===4)set.add(5)});var fourth=iterator.next().value;return [first,second,third,fourth,iterator.next().done,seen.join(',')].join('|');",
+      "expect": {"kind": "string", "value": "1|3|4|5|true|4:4:true,5:5:true"}
+    },
+    {
+      "id": "get-set-record-order-and-size-validation",
+      "covers": ["set-get-record-order", "set-size-validation"],
+      "body": "var log=[];var other={get size(){log.push('size');return {valueOf:function(){log.push('valueOf');return 0}}},get has(){log.push('has');return function(){}},get keys(){log.push('keys');return function(){log.push('keys-call');return [][Symbol.iterator]()}}};new Set().union(other);var nan={get size(){log.push('nan-size');return NaN},get has(){log.push('nan-has');return function(){}},get keys(){log.push('nan-keys');return function(){}}};var negative={get size(){log.push('negative-size');return -1},get has(){log.push('negative-has');return function(){}},get keys(){log.push('negative-keys');return function(){}}};var caught=[];try{new Set().union(nan)}catch(error){caught.push(error instanceof TypeError)}try{new Set().union(negative)}catch(error){caught.push(error instanceof RangeError)}return log.join(',')+'|'+caught.join(',');",
+      "expect": {"kind": "string", "value": "size,valueOf,has,keys,keys-call,nan-size,negative-size|true,true"}
+    },
+    {
+      "id": "composition-order-duplicates-and-intrinsic-result",
+      "covers": ["set-difference", "set-intersection", "set-symmetric-difference", "set-union", "set-composition-intrinsic-result"],
+      "body": "var base=new Set([1,2,3]);function like(size,values){return {size:size,has:function(value){return values.indexOf(value)>=0},keys:function(){return values[Symbol.iterator]()}}}var difference=base.difference(like(1,[2]));var intersection=base.intersection(like(2,[3,1]));var symmetric=base.symmetricDifference(like(4,[2,2,4,4]));Object.defineProperty(base,'constructor',{get:function(){throw 1}});var union=base.union(like(3,[3,4,4]));return [Array.from(difference).join(':'),Array.from(intersection).join(':'),Array.from(symmetric).join(':'),Array.from(union).join(':'),Object.getPrototypeOf(union)===Set.prototype].join('|');",
+      "expect": {"kind": "string", "value": "1:3|3:1|1:3:4|1:2:3:4|true"}
+    },
+    {
+      "id": "mutation-predicates-and-early-iterator-close",
+      "covers": ["set-mutation-during-iteration", "set-predicates", "set-iterator-close"],
+      "body": "var set=new Set([1,2]);var seen=[];var other={size:99,has:function(value){seen.push(value);if(value===1)set.add(3);return true},keys:function(){throw 1}};var intersection=set.intersection(other);var log=[];function like(value){return {size:0,has:function(){return false},keys:function(){var done=false;return {next:function(){if(done)return {done:true};done=true;return {done:false,value:value}},return:function(){log.push(value);return {}}}}}}var disjoint=new Set([1,2]).isDisjointFrom(like(2));var superset=new Set([1,2]).isSupersetOf(like(3));var subset=new Set([1,2]).isSubsetOf(new Set([1,2,3]));return [seen.join(','),Array.from(intersection).join(','),disjoint,superset,subset,log.join(',')].join('|');",
+      "expect": {"kind": "string", "value": "1,2,3|1,2,3|false|false|true|2,3"}
+    }
+  ]
+}

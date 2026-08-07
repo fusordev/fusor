@@ -15,12 +15,53 @@ fn compile_dynamic_function(
     parameters: &[SourceFragment<'_>],
     body: SourceFragment<'_>,
 ) -> Result<CompiledFunctionTree, LeafCompilationError> {
-    let source = DynamicFunctionSource::new(DynamicFunctionKind::Function, parameters, body);
+    compile_dynamic_function_kind(DynamicFunctionKind::Function, parameters, body)
+}
+
+fn compile_dynamic_function_kind(
+    kind: DynamicFunctionKind,
+    parameters: &[SourceFragment<'_>],
+    body: SourceFragment<'_>,
+) -> Result<CompiledFunctionTree, LeafCompilationError> {
+    let source = DynamicFunctionSource::new(kind, parameters, body);
     with_dynamic_function_source(source, FrontendLimits::default(), |unit, _| {
         let context = CompilationContext::new(unit).expect("dynamic storage plan");
         context.compile_dynamic_function_script(VerificationLimits::default())
     })
     .expect("dynamic frontend")
+}
+
+#[test]
+fn compiles_the_complete_dynamic_generator_function_wrapper() {
+    let parameters = [SourceFragment::new("value")];
+    let tree = compile_dynamic_function_kind(
+        DynamicFunctionKind::GeneratorFunction,
+        &parameters,
+        SourceFragment::new("yield value; return 9;"),
+    )
+    .expect("complete dynamic GeneratorFunction Script");
+
+    assert_eq!(tree.root_executable().index(), 0);
+    assert_eq!(tree.functions().len(), 2);
+    assert_eq!(
+        tree.verified_bytecode().root().metadata().executable_kind(),
+        CompilerExecutableKind::DynamicFunctionScript
+    );
+    let generator = tree
+        .verified_bytecode()
+        .function(FunctionTemplateId::new(1))
+        .expect("verified generator wrapper");
+    assert_eq!(
+        generator.metadata().executable_kind(),
+        CompilerExecutableKind::GeneratorFunction
+    );
+    let generator_opcodes = opcodes(&tree.functions()[1]);
+    assert_eq!(generator_opcodes[0].0, FinalOpcode::InitialYield);
+    assert!(
+        generator_opcodes
+            .iter()
+            .any(|(opcode, _)| *opcode == FinalOpcode::Yield)
+    );
 }
 
 fn opcodes(function: &CompiledFunction) -> Vec<(FinalOpcode, Operands)> {

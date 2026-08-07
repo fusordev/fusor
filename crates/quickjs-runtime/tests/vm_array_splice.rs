@@ -226,6 +226,26 @@ fn splice_accepts_an_array_like_receiver() {
     )]);
 }
 
+/// Extraction, replacement, and the final length write all use Proxy internal
+/// methods in specification order.
+#[test]
+fn splice_uses_proxy_internal_methods() {
+    assert_all(&[(
+        "(function(){\
+            let log='';const target=[1,2,3];\
+            const proxy=new Proxy(target,{\
+                get:function(t,k){log+='g'+k+';';return t[k];},\
+                has:function(t,k){log+='h'+k+';';return k in t;},\
+                set:function(t,k,v){log+='s'+k+'='+v+';';t[k]=v;return true;},\
+                deleteProperty:function(t,k){log+='d'+k+';';return delete t[k];}\
+            });\
+            const removed=Array.prototype.splice.call(proxy,1,1,'x');\
+            return log+'|'+removed.join()+'|'+target.join();\
+        })()",
+        "glength;h1;g1;s1=x;slength=3;|2|1,x,3",
+    )]);
+}
+
 /// `splice` reports arity 2 with the pinned descriptors.
 #[test]
 fn splice_has_the_pinned_shape() {

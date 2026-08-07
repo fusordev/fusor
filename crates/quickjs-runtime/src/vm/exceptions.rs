@@ -38,6 +38,50 @@ pub(super) fn tdz_exception(
     pc: BytecodePc,
 ) -> Result<PendingException, ExecutionError> {
     let code = code(runtime, frame.code)?;
+    let name = binding_name(runtime, frame, binding)?;
+    let message = if let Some(name) = name {
+        name.concat(&JsString::from_utf8(" is not initialized")?)?
+    } else {
+        JsString::from_utf8("lexical variable is not initialized")?
+    };
+    Ok(PendingException {
+        realm: code.realm,
+        payload: PendingExceptionPayload::EngineError {
+            kind: ExceptionKind::ReferenceError,
+            message,
+        },
+        origin: instruction_location(runtime, frame, pc)?,
+    })
+}
+
+pub(super) fn immutable_binding_exception(
+    runtime: &Runtime,
+    frame: &Frame,
+    binding: BindingName,
+    pc: BytecodePc,
+) -> Result<PendingException, ExecutionError> {
+    let code = code(runtime, frame.code)?;
+    let message = if let Some(name) = binding_name(runtime, frame, binding)? {
+        name.concat(&JsString::from_utf8(" is read-only")?)?
+    } else {
+        JsString::from_utf8("lexical variable is read-only")?
+    };
+    Ok(PendingException {
+        realm: code.realm,
+        payload: PendingExceptionPayload::EngineError {
+            kind: ExceptionKind::TypeError,
+            message,
+        },
+        origin: instruction_location(runtime, frame, pc)?,
+    })
+}
+
+fn binding_name(
+    runtime: &Runtime,
+    frame: &Frame,
+    binding: BindingName,
+) -> Result<Option<JsString>, EngineFault> {
+    let code = code(runtime, frame.code)?;
     let function =
         code.authority
             .function(frame.template)
@@ -58,23 +102,14 @@ pub(super) fn tdz_exception(
             .get(index as usize)
             .and_then(quickjs_bytecode::ClosureVariableDefinition::name),
     };
-    let message = if let Some(atom) = atom
-        && let Some(name) = installed
+    Ok(if let Some(atom) = atom {
+        installed
             .atoms
             .get(atom.get() as usize)
             .and_then(AtomDescription::description)
-    {
-        name.concat(&JsString::from_utf8(" is not initialized")?)?
+            .cloned()
     } else {
-        JsString::from_utf8("lexical variable is not initialized")?
-    };
-    Ok(PendingException {
-        realm: code.realm,
-        payload: PendingExceptionPayload::EngineError {
-            kind: ExceptionKind::ReferenceError,
-            message,
-        },
-        origin: instruction_location(runtime, frame, pc)?,
+        None
     })
 }
 
@@ -127,6 +162,63 @@ pub(super) fn not_constructor_exception(
     })
 }
 
+pub(super) fn derived_this_uninitialized_exception(
+    runtime: &Runtime,
+    frame: &Frame,
+    pc: BytecodePc,
+) -> Result<PendingException, ExecutionError> {
+    let realm = code(runtime, frame.code)?.realm;
+    Ok(PendingException {
+        realm,
+        payload: PendingExceptionPayload::EngineError {
+            kind: ExceptionKind::ReferenceError,
+            message: JsString::from_utf8(
+                "Must call super constructor in derived class before accessing 'this' or returning from derived constructor",
+            )?,
+        },
+        origin: instruction_location(runtime, frame, pc)?,
+    })
+}
+
+pub(super) fn derived_constructor_primitive_return_exception(
+    runtime: &Runtime,
+    frame: &Frame,
+    pc: BytecodePc,
+) -> Result<PendingException, ExecutionError> {
+    let realm = code(runtime, frame.code)?.realm;
+    Ok(PendingException {
+        realm,
+        payload: PendingExceptionPayload::EngineError {
+            kind: ExceptionKind::TypeError,
+            message: JsString::from_utf8(
+                "Derived constructors may only return object or undefined",
+            )?,
+        },
+        origin: instruction_location(runtime, frame, pc)?,
+    })
+}
+
+/// Constructs the `TypeError` used by the private-element abstract
+/// operations. The private name itself deliberately stays out of the message:
+/// it is an internal identity and must not become observable through a public
+/// property conversion.
+pub(super) fn private_field_exception(
+    runtime: &Runtime,
+    frame: &Frame,
+    pc: BytecodePc,
+    message: &'static str,
+) -> Result<PendingException, ExecutionError> {
+    let realm = code(runtime, frame.code)?.realm;
+    Ok(PendingException {
+        realm,
+        payload: PendingExceptionPayload::EngineError {
+            kind: ExceptionKind::TypeError,
+            message: JsString::from_utf8(message)?,
+        },
+        origin: instruction_location(runtime, frame, pc)?,
+    })
+}
+
 pub(super) fn function_not_constructor_message(
     runtime: &Runtime,
     function: FunctionId,
@@ -146,6 +238,30 @@ pub(super) fn function_not_constructor_message(
         return Ok(JsString::from_utf8("not a constructor")?);
     }
     Ok(name.concat(&JsString::from_utf8(" is not a constructor")?)?)
+}
+
+pub(super) fn class_constructor_call_message(
+    runtime: &Runtime,
+    function: FunctionId,
+) -> Result<JsString, ExecutionError> {
+    let name_key = runtime.predefined_property_key(PredefinedAtom::Name);
+    let name = match runtime
+        .object_record(HeapReference::Function(function))?
+        .own_property(&name_key)
+    {
+        Some(OwnProperty::Data {
+            value: StoredValue::String(name),
+            ..
+        }) if !name.is_empty() => name,
+        Some(OwnProperty::Data { .. } | OwnProperty::Accessor { .. }) | None => {
+            return Ok(JsString::from_utf8(
+                "Class constructor cannot be invoked without 'new'",
+            )?);
+        }
+    };
+    Ok(JsString::from_utf8("Class constructor ")?
+        .concat(&name)?
+        .concat(&JsString::from_utf8(" cannot be invoked without 'new'")?)?)
 }
 
 pub(super) fn property_exception(
@@ -303,8 +419,11 @@ fn exception_caller_frames(
                 | FinalOpcode::Apply
                 | FinalOpcode::Append
                 | FinalOpcode::ForOfStart
+                | FinalOpcode::ForAwaitOfStart
                 | FinalOpcode::ForOfNext
                 | FinalOpcode::IteratorClose
+                | FinalOpcode::IteratorNext
+                | FinalOpcode::IteratorCall
                 | FinalOpcode::ToPropKey
                 | FinalOpcode::DefineMethodComputed
                 | FinalOpcode::Neg
@@ -359,21 +478,14 @@ pub(super) fn dispatch_pending_exception(
     compiler: Option<&Arc<dyn OrdinaryDynamicFunctionCompiler>>,
     execution_budget: &mut ExecutionBudget,
 ) -> Result<(), ExecutionError> {
-    let frozen_engine_stack = if matches!(
-        &pending.payload,
-        PendingExceptionPayload::EngineError { .. }
-    ) {
-        let snapshot = capture_error_stack(runtime, frames, &pending.origin)?;
-        Some(render_error_stack(runtime, &snapshot)?)
-    } else {
-        None
-    };
+    freeze_pending_engine_stack(runtime, frames, &mut pending)?;
     loop {
         #[derive(Clone, Copy)]
         enum Handler {
             Catch { frame: usize, marker: usize },
             ForOf { frame: usize, marker: usize },
             Native(usize),
+            AsyncGenerator(usize),
         }
         let mut handler = None;
         for (index, frame) in frames.iter().enumerate().rev() {
@@ -404,15 +516,19 @@ pub(super) fn dispatch_pending_exception(
                 });
                 break;
             }
-            if frame.native_returns.iter().any(|continuation| {
-                matches!(
-                    continuation,
-                    NativeContinuation::AggregateError(_)
-                        | NativeContinuation::IteratorAppend(_)
-                        | NativeContinuation::IteratorClose(_)
-                )
-            }) {
+            if frame
+                .native_returns
+                .iter()
+                .any(NativeContinuation::handles_abrupt)
+            {
                 handler = Some(Handler::Native(index));
+                break;
+            }
+            if frame
+                .generator_resume
+                .is_some_and(|generator| runtime.async_generator_states.contains_key(&generator))
+            {
+                handler = Some(Handler::AsyncGenerator(index));
                 break;
             }
         }
@@ -421,6 +537,111 @@ pub(super) fn dispatch_pending_exception(
             let exception = finish_exception(runtime, pending, caller_frames)?;
             return Err(ExecutionError::Exception(exception));
         };
+
+        if let Handler::AsyncGenerator(handler_frame) = handler {
+            while frames.len() > handler_frame.saturating_add(1) {
+                let mut frame = frames.pop().ok_or(EngineFault::RuntimeInvariant {
+                    message: "exception unwinder lost a frame above its async-generator boundary",
+                })?;
+                if let Some(generator) = frame.generator_resume {
+                    complete_generator_resume(runtime, generator)?;
+                }
+                *active_frame_values = active_frame_values.saturating_sub(frame.reserved_values);
+                if let Some(dynamic) = frame.dynamic_return.take() {
+                    runtime.retire_dynamic_root(dynamic.root)?;
+                }
+            }
+            let mut frame = frames.pop().ok_or(EngineFault::RuntimeInvariant {
+                message: "exception unwinder lost its async-generator boundary frame",
+            })?;
+            *active_frame_values = active_frame_values.saturating_sub(frame.reserved_values);
+            let generator = frame
+                .generator_resume
+                .ok_or(EngineFault::RuntimeInvariant {
+                    message: "async-generator boundary lost its resume identity",
+                })?;
+            if !frame.native_returns.is_empty() {
+                return Err(EngineFault::RuntimeInvariant {
+                    message: "async-generator abrupt completion retained native continuations",
+                }
+                .into());
+            }
+            if let Some(dynamic) = frame.dynamic_return.take() {
+                runtime.retire_dynamic_root(dynamic.root)?;
+            }
+            let return_to = frame.return_to;
+            let PendingException { realm, payload, .. } = pending;
+            let thrown = match payload {
+                PendingExceptionPayload::ThrownValue(value) => value,
+                PendingExceptionPayload::FrozenEngineError {
+                    kind,
+                    message,
+                    stack,
+                } => StoredValue::Object(runtime.materialize_error_object(
+                    realm,
+                    kind,
+                    message,
+                    Some(stack),
+                )?),
+                PendingExceptionPayload::EngineError { .. } => {
+                    return Err(EngineFault::RuntimeInvariant {
+                        message: "async-generator engine error has no frozen stack snapshot",
+                    }
+                    .into());
+                }
+            };
+            let dispatch =
+                complete_async_generator_throw(runtime, generator, thrown, execution_budget)
+                    .map_err(native_failure_to_execution)?;
+            let active_frames = active_execution_frames(frames);
+            let result = match resolve_native_dispatch(
+                runtime,
+                dispatch,
+                frames,
+                active_frames,
+                *active_frame_values,
+                compiler,
+                execution_budget,
+            )
+            .map_err(native_failure_to_execution)?
+            {
+                NativeDispatch::Immediate(value) => value,
+                NativeDispatch::Frame(next) => {
+                    *active_frame_values = active_frame_values.saturating_add(next.reserved_values);
+                    frames.push(next);
+                    return Ok(());
+                }
+                NativeDispatch::Pair(_, _)
+                | NativeDispatch::ForOfRecord { .. }
+                | NativeDispatch::ForOfStep { .. }
+                | NativeDispatch::ForOfClosed
+                | NativeDispatch::CopyDataPropertiesDone
+                | NativeDispatch::AsyncAwait { .. }
+                | NativeDispatch::Call(_) => {
+                    return Err(EngineFault::RuntimeInvariant {
+                        message: "async-generator abrupt completion produced an invalid dispatch",
+                    }
+                    .into());
+                }
+            };
+            if let Some(parent) = frames.last_mut() {
+                push_call_result(
+                    parent,
+                    result,
+                    return_to.ok_or(EngineFault::RuntimeInvariant {
+                        message: "nested async-generator throw has no caller continuation",
+                    })?,
+                )?;
+            } else if return_to.is_none() {
+                execution_budget.native_root_completion = Some(result);
+            } else {
+                return Err(EngineFault::RuntimeInvariant {
+                    message: "root async-generator throw retained a caller continuation",
+                }
+                .into());
+            }
+            return Ok(());
+        }
 
         if let Handler::ForOf {
             frame: handler_frame,
@@ -433,6 +654,9 @@ pub(super) fn dispatch_pending_exception(
                 let mut frame = frames.pop().ok_or(EngineFault::RuntimeInvariant {
                     message: "exception unwinder lost a frame above its for-of handler",
                 })?;
+                if let Some(generator) = frame.generator_resume {
+                    complete_generator_resume(runtime, generator)?;
+                }
                 *active_frame_values = active_frame_values.saturating_sub(frame.reserved_values);
                 if let Some(dynamic) = frame.dynamic_return.take() {
                     runtime.retire_dynamic_root(dynamic.root)?;
@@ -441,7 +665,8 @@ pub(super) fn dispatch_pending_exception(
             if cleanup_temporary_receivers && runtime.collection_pending {
                 let pending_root = match &pending.payload {
                     PendingExceptionPayload::ThrownValue(value) => Some(value),
-                    PendingExceptionPayload::EngineError { .. } => None,
+                    PendingExceptionPayload::EngineError { .. }
+                    | PendingExceptionPayload::FrozenEngineError { .. } => None,
                 };
                 let pending_roots = pending_root.map_or(&[][..], std::slice::from_ref);
                 collect_cycles_with_execution_roots(runtime, frames, &[], pending_roots)?;
@@ -504,7 +729,8 @@ pub(super) fn dispatch_pending_exception(
                     | NativeDispatch::ForOfRecord { .. }
                     | NativeDispatch::ForOfStep { .. }
                     | NativeDispatch::ForOfClosed
-                    | NativeDispatch::CopyDataPropertiesDone,
+                    | NativeDispatch::CopyDataPropertiesDone
+                    | NativeDispatch::AsyncAwait { .. },
                 ) => {
                     return Err(EngineFault::RuntimeInvariant {
                         message: "exceptional IteratorClose completed without rethrowing",
@@ -513,6 +739,7 @@ pub(super) fn dispatch_pending_exception(
                 }
                 Err(NativeFailure::Abrupt(next)) => {
                     pending = next;
+                    freeze_pending_engine_stack(runtime, frames, &mut pending)?;
                     continue;
                 }
                 Err(NativeFailure::AbruptAfterTransient(next)) => {
@@ -520,6 +747,7 @@ pub(super) fn dispatch_pending_exception(
                         parent.transient_cleanup_pending = true;
                     }
                     pending = next;
+                    freeze_pending_engine_stack(runtime, frames, &mut pending)?;
                     continue;
                 }
                 Err(NativeFailure::Execution(error)) => return Err(error),
@@ -540,6 +768,9 @@ pub(super) fn dispatch_pending_exception(
                 let mut frame = frames.pop().ok_or(EngineFault::RuntimeInvariant {
                     message: "exception unwinder lost a frame above its native handler",
                 })?;
+                if let Some(generator) = frame.generator_resume {
+                    complete_generator_resume(runtime, generator)?;
+                }
                 *active_frame_values = active_frame_values.saturating_sub(frame.reserved_values);
                 if let Some(dynamic) = frame.dynamic_return.take() {
                     runtime.retire_dynamic_root(dynamic.root)?;
@@ -548,6 +779,9 @@ pub(super) fn dispatch_pending_exception(
             let mut frame = frames.pop().ok_or(EngineFault::RuntimeInvariant {
                 message: "exception unwinder lost its native handler frame",
             })?;
+            if let Some(generator) = frame.generator_resume {
+                complete_generator_resume(runtime, generator)?;
+            }
             *active_frame_values = active_frame_values.saturating_sub(frame.reserved_values);
             if let Some(dynamic) = frame.dynamic_return.take() {
                 runtime.retire_dynamic_root(dynamic.root)?;
@@ -560,6 +794,10 @@ pub(super) fn dispatch_pending_exception(
                 native_returns,
                 pending,
                 return_to,
+                frames,
+                active_frames,
+                *active_frame_values,
+                compiler,
                 execution_budget,
             );
             let dispatch = match dispatch {
@@ -576,16 +814,22 @@ pub(super) fn dispatch_pending_exception(
             };
             match dispatch {
                 Ok(NativeDispatch::Immediate(value)) => {
-                    let parent = frames.last_mut().ok_or(EngineFault::RuntimeInvariant {
-                        message: "iterator native handler completed without a parent frame",
-                    })?;
-                    push_call_result(
-                        parent,
-                        value,
-                        return_to.ok_or(EngineFault::RuntimeInvariant {
-                            message: "iterator native handler has no caller continuation",
-                        })?,
-                    )?;
+                    if let Some(parent) = frames.last_mut() {
+                        push_call_result(
+                            parent,
+                            value,
+                            return_to.ok_or(EngineFault::RuntimeInvariant {
+                                message: "iterator native handler has no caller continuation",
+                            })?,
+                        )?;
+                    } else if return_to.is_none() {
+                        execution_budget.native_root_completion = Some(value);
+                    } else {
+                        return Err(EngineFault::RuntimeInvariant {
+                            message: "root native handler retained a caller continuation",
+                        }
+                        .into());
+                    }
                 }
                 Ok(NativeDispatch::Pair(original, updated)) => {
                     let parent = frames.last_mut().ok_or(EngineFault::RuntimeInvariant {
@@ -604,7 +848,8 @@ pub(super) fn dispatch_pending_exception(
                     NativeDispatch::ForOfRecord { .. }
                     | NativeDispatch::ForOfStep { .. }
                     | NativeDispatch::ForOfClosed
-                    | NativeDispatch::CopyDataPropertiesDone,
+                    | NativeDispatch::CopyDataPropertiesDone
+                    | NativeDispatch::AsyncAwait { .. },
                 ) => {
                     return Err(EngineFault::RuntimeInvariant {
                         message: "iterator abrupt resolver produced a for-of normal result",
@@ -624,6 +869,7 @@ pub(super) fn dispatch_pending_exception(
                 }
                 Err(NativeFailure::Abrupt(next)) => {
                     pending = next;
+                    freeze_pending_engine_stack(runtime, frames, &mut pending)?;
                     continue;
                 }
                 Err(NativeFailure::AbruptAfterTransient(next)) => {
@@ -631,6 +877,7 @@ pub(super) fn dispatch_pending_exception(
                         parent.transient_cleanup_pending = true;
                     }
                     pending = next;
+                    freeze_pending_engine_stack(runtime, frames, &mut pending)?;
                     continue;
                 }
                 Err(NativeFailure::Execution(error)) => return Err(error),
@@ -649,18 +896,21 @@ pub(super) fn dispatch_pending_exception(
         } = pending;
         let caught = match payload {
             PendingExceptionPayload::ThrownValue(value) => value,
-            PendingExceptionPayload::EngineError { kind, message } => {
-                let stack = frozen_engine_stack
-                    .clone()
-                    .ok_or(EngineFault::RuntimeInvariant {
-                        message: "caught engine error has no frozen stack snapshot",
-                    })?;
-                StoredValue::Object(runtime.materialize_error_object(
-                    realm,
-                    kind,
-                    message,
-                    Some(stack),
-                )?)
+            PendingExceptionPayload::FrozenEngineError {
+                kind,
+                message,
+                stack,
+            } => StoredValue::Object(runtime.materialize_error_object(
+                realm,
+                kind,
+                message,
+                Some(stack),
+            )?),
+            PendingExceptionPayload::EngineError { .. } => {
+                return Err(EngineFault::RuntimeInvariant {
+                    message: "caught engine error has no frozen stack snapshot",
+                }
+                .into());
             }
         };
 
@@ -668,6 +918,9 @@ pub(super) fn dispatch_pending_exception(
             let mut frame = frames.pop().ok_or(EngineFault::RuntimeInvariant {
                 message: "exception unwinder lost a frame above its catch handler",
             })?;
+            if let Some(generator) = frame.generator_resume {
+                complete_generator_resume(runtime, generator)?;
+            }
             *active_frame_values = active_frame_values.saturating_sub(frame.reserved_values);
             if let Some(dynamic) = frame.dynamic_return.take() {
                 runtime.retire_dynamic_root(dynamic.root)?;
@@ -708,6 +961,34 @@ pub(super) fn dispatch_pending_exception(
     }
 }
 
+fn freeze_pending_engine_stack(
+    runtime: &Runtime,
+    frames: &[Frame],
+    pending: &mut PendingException,
+) -> Result<(), ExecutionError> {
+    if !matches!(
+        &pending.payload,
+        PendingExceptionPayload::EngineError { .. }
+    ) {
+        return Ok(());
+    }
+    let snapshot = capture_error_stack(runtime, frames, &pending.origin)?;
+    let stack = render_error_stack(runtime, &snapshot)?;
+    let payload = std::mem::replace(
+        &mut pending.payload,
+        PendingExceptionPayload::ThrownValue(StoredValue::Undefined),
+    );
+    let PendingExceptionPayload::EngineError { kind, message } = payload else {
+        unreachable!("engine-error payload was checked before replacement")
+    };
+    pending.payload = PendingExceptionPayload::FrozenEngineError {
+        kind,
+        message,
+        stack,
+    };
+    Ok(())
+}
+
 pub(super) fn finish_exception(
     runtime: &mut Runtime,
     pending: PendingException,
@@ -719,9 +1000,12 @@ pub(super) fn finish_exception(
         origin,
     } = pending;
     Ok(match payload {
-        PendingExceptionPayload::EngineError { kind, message } => {
-            JsException::engine_error(kind, message, origin, caller_frames)
-        }
+        PendingExceptionPayload::EngineError { kind, message }
+        | PendingExceptionPayload::FrozenEngineError {
+            kind,
+            message,
+            stack: _,
+        } => JsException::engine_error(kind, message, origin, caller_frames),
         PendingExceptionPayload::ThrownValue(value) => {
             JsException::explicit_throw(runtime.public_value(value)?, origin, caller_frames)
         }

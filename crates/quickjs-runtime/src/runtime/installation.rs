@@ -25,16 +25,63 @@
 
 //! Failure-atomic verified bytecode staging, environments, and root publication.
 
+use std::sync::Arc;
+
 use super::{
-    CompilerCapturedBinding, CompilerClosureBinding, CompilerConstant, CompilerConstantValue,
-    EnvironmentBinding, FrameBindingAddress, FunctionId, HashSet, HeapReference, InstallError,
-    InstalledCodeId, InstalledConstant, InstalledRoot, InstalledTemplate, JsNumber, JsValue,
-    OwnProperty, PropertyKey, RealmGlobalBinding, RealmGlobalRequest, RealmId, RootEnvironment,
-    RootTarget, Runtime, RuntimeError, RuntimeResource, StoredValue, VerifiedBytecode,
-    check_execution_limit, check_install_limit, dynamic_function_declaration_property_layout,
-    global_function_replacement_layout, rejected_global_declaration, runtime_string,
-    stale_heap_reference, usize_to_u64,
+    BindingCell, CompilerCaptureLayout, CompilerCapturedBinding, CompilerClosureBinding,
+    CompilerConstant, CompilerConstantValue, EnvironmentBinding, FrameBindingAddress, FunctionId,
+    HashSet, HeapReference, InstallError, InstalledCodeId, InstalledConstant, InstalledRoot,
+    InstalledTemplate, InstalledTemplateElement, InstalledTemplateObject, JsBigInt, JsNumber,
+    JsValue, OwnProperty, PropertyKey, RealmGlobalBinding, RealmGlobalBindingState,
+    RealmGlobalRequest, RealmId, RootEnvironment, RootTarget, Runtime, RuntimeError,
+    RuntimeResource, SlotValue, StoredValue, VerifiedBytecode, check_execution_limit,
+    check_install_limit, global_declaration_property_layout, global_function_replacement_layout,
+    rejected_global_declaration, runtime_string, stale_heap_reference, usize_to_u64,
 };
+
+fn stage_constant(constant: &CompilerConstant) -> Result<InstalledConstant, InstallError> {
+    Ok(match constant {
+        CompilerConstant::Value(CompilerConstantValue::Number(value)) => {
+            InstalledConstant::Number(JsNumber::from_f64(value.to_f64()))
+        }
+        CompilerConstant::Value(CompilerConstantValue::String(value)) => {
+            InstalledConstant::String(runtime_string(value)?)
+        }
+        CompilerConstant::Value(CompilerConstantValue::BigInt(value)) => {
+            let bytes = value
+                .decimal()
+                .latin1_units()
+                .ok_or(InstallError::AuthorityInvariant {
+                    message: "verified BigInt decimal is not compact ASCII",
+                })?;
+            let decimal =
+                std::str::from_utf8(bytes).map_err(|_| InstallError::AuthorityInvariant {
+                    message: "verified BigInt decimal is not ASCII",
+                })?;
+            InstalledConstant::BigInt(Arc::new(JsBigInt::from_str_radix(decimal, 10)?))
+        }
+        CompilerConstant::Value(CompilerConstantValue::TemplateObject(value)) => {
+            let mut elements = Vec::new();
+            elements
+                .try_reserve_exact(value.elements().len())
+                .map_err(|_| InstallError::AllocationFailed {
+                    resource: RuntimeResource::InstalledConstants,
+                    additional: value.elements().len(),
+                })?;
+            for element in value.elements() {
+                elements.push(InstalledTemplateElement {
+                    cooked: element.cooked().map(runtime_string).transpose()?,
+                    raw: runtime_string(element.raw())?,
+                });
+            }
+            InstalledConstant::TemplateObject(InstalledTemplateObject {
+                elements: elements.into(),
+                object: None,
+            })
+        }
+        CompilerConstant::Function(function) => InstalledConstant::Function(*function),
+    })
+}
 
 impl Runtime {
     pub(crate) fn prepare_execution_safe_point(&mut self) -> Result<(), crate::ExecutionError> {
@@ -136,6 +183,22 @@ impl Runtime {
         *public_roots = next_roots;
         self.public_roots += 1;
         Ok(JsValue::rooted_heap(&self.mailbox, reference))
+    }
+
+    pub(crate) fn public_value_pair(
+        &mut self,
+        first: StoredValue,
+        second: StoredValue,
+    ) -> Result<(JsValue, JsValue), crate::ExecutionError> {
+        let first = self.public_value(first)?;
+        match self.public_value(second) {
+            Ok(second) => Ok((first, second)),
+            Err(error) => {
+                drop(first);
+                self.drain_releases();
+                Err(error)
+            }
+        }
     }
 
     pub(crate) fn retire_internal_root(
@@ -270,15 +333,7 @@ impl Runtime {
                     additional: function.function().constants().len(),
                 })?;
             for constant in function.function().constants() {
-                constants.push(match constant {
-                    CompilerConstant::Value(CompilerConstantValue::Number(value)) => {
-                        InstalledConstant::Number(JsNumber::from_f64(value.to_f64()))
-                    }
-                    CompilerConstant::Value(CompilerConstantValue::String(value)) => {
-                        InstalledConstant::String(runtime_string(value)?)
-                    }
-                    CompilerConstant::Function(function) => InstalledConstant::Function(*function),
-                });
+                constants.push(stage_constant(constant)?);
             }
 
             let capture_layout = function.function().control_flow().compiler_capture_layout();
@@ -319,11 +374,14 @@ impl Runtime {
                     message: "capture layout length differs from the verified header",
                 });
             }
+            let mapped_arguments =
+                capture_layout.and_then(CompilerCaptureLayout::mapped_arguments_arc);
 
             templates.push(InstalledTemplate {
                 atoms,
                 constants,
                 own_cell_bindings: bindings,
+                mapped_arguments,
             });
         }
         Ok(templates)
@@ -340,6 +398,8 @@ impl Runtime {
         templates: &[InstalledTemplate],
     ) -> Result<RootEnvironment, InstallError> {
         let root = authority.root();
+        let executable_kind = root.metadata().executable_kind();
+        let declaration_layout = global_declaration_property_layout(executable_kind);
         let sources = root.function().closure_sources();
         if sources.len() != root.metadata().closures().len() {
             return Err(InstallError::AuthorityInvariant {
@@ -439,9 +499,23 @@ impl Runtime {
             match request {
                 RealmGlobalRequest::Lookup => {}
                 RealmGlobalRequest::Var | RealmGlobalRequest::Function => {
+                    if let Some(global) = realm_state.global_bindings.get(name).copied()
+                        && matches!(
+                            self.global_bindings
+                                .get(global)
+                                .map(|binding| binding.state),
+                            Some(RealmGlobalBindingState::Lexical { .. })
+                        )
+                    {
+                        return Err(rejected_global_declaration(authority, *closure, name)?);
+                    }
                     if let Some(property) = global_record.record.own_property(&key) {
                         if matches!(request, RealmGlobalRequest::Function)
-                            && global_function_replacement_layout(property.layout()).is_none()
+                            && global_function_replacement_layout(
+                                property.layout(),
+                                declaration_layout,
+                            )
+                            .is_none()
                         {
                             return Err(rejected_global_declaration(authority, *closure, name)?);
                         }
@@ -452,8 +526,31 @@ impl Runtime {
                         new_object_properties = new_object_properties.saturating_add(1);
                     }
                 }
+                RealmGlobalRequest::Let | RealmGlobalRequest::Const => {
+                    if let Some(global) = realm_state.global_bindings.get(name).copied()
+                        && !matches!(
+                            self.global_bindings
+                                .get(global)
+                                .map(|binding| binding.state),
+                            Some(RealmGlobalBindingState::Unresolved)
+                        )
+                    {
+                        return Err(rejected_global_declaration(authority, *closure, name)?);
+                    }
+                    if global_record
+                        .record
+                        .own_property(&key)
+                        .is_some_and(|property| !property.layout().is_configurable())
+                    {
+                        return Err(rejected_global_declaration(authority, *closure, name)?);
+                    }
+                }
             }
         }
+        let lexical_cells = requests
+            .iter()
+            .filter(|(_, request, _)| request.lexical_mutability().is_some())
+            .count();
         check_install_limit(
             RuntimeResource::RealmGlobalBindings,
             self.limits.max_realm_global_bindings,
@@ -465,12 +562,23 @@ impl Runtime {
             self.object_properties
                 .saturating_add(usize_to_u64(new_object_properties)),
         )?;
+        check_install_limit(
+            RuntimeResource::BindingCells,
+            self.limits.max_binding_cells,
+            usize_to_u64(self.cells.len()).saturating_add(usize_to_u64(lexical_cells)),
+        )?;
 
         self.global_bindings
             .try_reserve(missing)
             .map_err(|_| InstallError::AllocationFailed {
                 resource: RuntimeResource::RealmGlobalBindings,
                 additional: missing,
+            })?;
+        self.cells
+            .try_reserve(lexical_cells)
+            .map_err(|_| InstallError::AllocationFailed {
+                resource: RuntimeResource::BindingCells,
+                additional: lexical_cells,
             })?;
         self.realms
             .get_mut(realm)
@@ -516,6 +624,13 @@ impl Runtime {
                 resource: RuntimeResource::RealmGlobalBindings,
                 additional: requests.len(),
             })?;
+        let mut inserted_cells = Vec::new();
+        inserted_cells
+            .try_reserve_exact(lexical_cells)
+            .map_err(|_| InstallError::AllocationFailed {
+                resource: RuntimeResource::BindingCells,
+                additional: lexical_cells,
+            })?;
         let mut inserted_global_properties = Vec::new();
         inserted_global_properties
             .try_reserve_exact(new_object_properties)
@@ -532,6 +647,29 @@ impl Runtime {
             })?;
 
         for (name, request, _) in requests {
+            let lexical_state = if let Some(mutable) = request.lexical_mutability() {
+                let Ok(cell) = self.cells.try_insert(BindingCell {
+                    value: SlotValue::Uninitialized,
+                }) else {
+                    let partial = RootEnvironment {
+                        bindings,
+                        inserted_globals,
+                        updated_globals,
+                        inserted_cells,
+                        inserted_global_properties,
+                        updated_global_properties,
+                    };
+                    self.rollback_root_environment(realm, &partial);
+                    return Err(InstallError::AllocationFailed {
+                        resource: RuntimeResource::BindingCells,
+                        additional: 1,
+                    });
+                };
+                inserted_cells.push(cell);
+                Some(RealmGlobalBindingState::Lexical { cell, mutable })
+            } else {
+                None
+            };
             let existing = self
                 .realms
                 .get(realm)
@@ -545,6 +683,7 @@ impl Runtime {
                         bindings,
                         inserted_globals,
                         updated_globals,
+                        inserted_cells,
                         inserted_global_properties,
                         updated_global_properties,
                     };
@@ -553,29 +692,66 @@ impl Runtime {
                         message: "constructor-realm global binding is stale",
                     });
                 }
-                {
-                    let binding = self.global_bindings.get_mut(global).ok_or(
-                        InstallError::AuthorityInvariant {
+                let current = self
+                    .global_bindings
+                    .get(global)
+                    .ok_or(InstallError::AuthorityInvariant {
+                        message: "constructor-realm global binding is stale",
+                    })?
+                    .state;
+                let Some(upgraded) =
+                    lexical_state.or_else(|| request.upgraded_object_state(current))
+                else {
+                    let partial = RootEnvironment {
+                        bindings,
+                        inserted_globals,
+                        updated_globals,
+                        inserted_cells,
+                        inserted_global_properties,
+                        updated_global_properties,
+                    };
+                    self.rollback_root_environment(realm, &partial);
+                    return Err(InstallError::AuthorityInvariant {
+                        message: "preflighted realm-global state upgrade became incompatible",
+                    });
+                };
+                if upgraded != current {
+                    updated_globals.push((global, current));
+                    self.global_bindings
+                        .get_mut(global)
+                        .ok_or(InstallError::AuthorityInvariant {
                             message: "constructor-realm global binding is stale",
-                        },
-                    )?;
-                    let upgraded = request.upgraded_state(binding.state);
-                    if upgraded != binding.state {
-                        updated_globals.push((global, binding.state));
-                        binding.state = upgraded;
-                    }
+                        })?
+                        .state = upgraded;
                 }
                 global
             } else {
+                let Some(initial_state) =
+                    lexical_state.or_else(|| request.initial_nonlexical_state())
+                else {
+                    let partial = RootEnvironment {
+                        bindings,
+                        inserted_globals,
+                        updated_globals,
+                        inserted_cells,
+                        inserted_global_properties,
+                        updated_global_properties,
+                    };
+                    self.rollback_root_environment(realm, &partial);
+                    return Err(InstallError::AuthorityInvariant {
+                        message: "realm-global request has no initial state",
+                    });
+                };
                 let Ok(global) = self.global_bindings.try_insert(RealmGlobalBinding {
                     realm,
                     name: name.clone(),
-                    state: request.initial_state(),
+                    state: initial_state,
                 }) else {
                     let partial = RootEnvironment {
                         bindings,
                         inserted_globals,
                         updated_globals,
+                        inserted_cells,
                         inserted_global_properties,
                         updated_global_properties,
                     };
@@ -600,6 +776,7 @@ impl Runtime {
                         bindings,
                         inserted_globals,
                         updated_globals,
+                        inserted_cells,
                         inserted_global_properties,
                         updated_global_properties,
                     };
@@ -620,10 +797,13 @@ impl Runtime {
                 if let Some(existing_property) = existing_property {
                     if matches!(request, RealmGlobalRequest::Function) {
                         let existing_layout = existing_property.layout();
-                        let replacement = global_function_replacement_layout(existing_layout)
-                            .ok_or(InstallError::AuthorityInvariant {
-                                message: "preflighted global function property became incompatible",
-                            })?;
+                        let replacement = global_function_replacement_layout(
+                            existing_layout,
+                            declaration_layout,
+                        )
+                        .ok_or(InstallError::AuthorityInvariant {
+                            message: "preflighted global function property became incompatible",
+                        })?;
                         if replacement != existing_layout
                             || matches!(&existing_property, OwnProperty::Accessor { .. })
                         {
@@ -643,6 +823,7 @@ impl Runtime {
                                     bindings,
                                     inserted_globals,
                                     updated_globals,
+                                    inserted_cells,
                                     inserted_global_properties,
                                     updated_global_properties,
                                 };
@@ -661,13 +842,14 @@ impl Runtime {
                     if let Err(error) = self.append_data_property(
                         HeapReference::Object(global_object),
                         key.clone(),
-                        dynamic_function_declaration_property_layout(),
+                        declaration_layout,
                         StoredValue::Undefined,
                     ) {
                         let partial = RootEnvironment {
                             bindings,
                             inserted_globals,
                             updated_globals,
+                            inserted_cells,
                             inserted_global_properties,
                             updated_global_properties,
                         };
@@ -714,6 +896,7 @@ impl Runtime {
             bindings,
             inserted_globals,
             updated_globals,
+            inserted_cells,
             inserted_global_properties,
             updated_global_properties,
         })
@@ -752,6 +935,10 @@ impl Runtime {
                 debug_assert_eq!(removed, Some(*global));
             }
             let removed = self.global_bindings.remove(*global);
+            debug_assert!(removed.is_some());
+        }
+        for cell in environment.inserted_cells.iter().rev() {
+            let removed = self.cells.remove(*cell);
             debug_assert!(removed.is_some());
         }
     }

@@ -1,13 +1,14 @@
 use std::error::Error as _;
 
 use quickjs_bytecode::{
-    BytecodePc, EncodeError, FinalOpcode, FunctionIndexDomains, MAX_OPERAND_STACK_DEPTH, Operands,
-    VerificationErrorKind, VerificationLimits,
+    BytecodePc, CompilerConstantValue, EncodeError, FinalOpcode, FunctionIndexDomains,
+    MAX_OPERAND_STACK_DEPTH, Operands, VerificationErrorKind, VerificationLimits,
 };
-use quickjs_compiler::{
-    CompilationContext, CompiledLeafFunction, LeafCompilationError, UnsupportedLeafFeature,
+use quickjs_compiler::{CompilationContext, CompiledLeafFunction, LeafCompilationError};
+use quickjs_frontend::{
+    CompilationGoal, DiagnosticStage, FrontendDiagnosticCode, FrontendOptions, GlobalScriptGoal,
+    with_parsed_program,
 };
-use quickjs_frontend::{CompilationGoal, FrontendOptions, GlobalScriptGoal, with_parsed_program};
 
 fn compile(source: &str, name: &str) -> CompiledLeafFunction {
     with_parsed_program(
@@ -22,24 +23,6 @@ fn compile(source: &str, name: &str) -> CompiledLeafFunction {
             context
                 .compile_leaf(&executable, VerificationLimits::default())
                 .expect("straight-line compilation must succeed")
-        },
-    )
-    .expect("front-end acceptance")
-}
-
-fn compile_error(source: &str, name: &str) -> LeafCompilationError {
-    with_parsed_program(
-        source,
-        FrontendOptions::for_goal(CompilationGoal::GlobalScript(GlobalScriptGoal::new())),
-        |unit| {
-            let context = CompilationContext::new(unit).expect("storage planning must succeed");
-            let executable = context
-                .executables()
-                .find(|executable| executable.metadata().name() == Some(name))
-                .expect("named function executable");
-            context
-                .compile_leaf(&executable, VerificationLimits::default())
-                .expect_err("unsupported expression must fail closed")
         },
     )
     .expect("front-end acceptance")
@@ -404,32 +387,131 @@ fn primitive_literal_forms_do_not_require_a_constant_pool() {
 }
 
 #[test]
-fn unsupported_expression_families_fail_closed_at_the_exact_span() {
-    let cases = [
-        (
-            "function f(){ return `value ${1}`; }",
-            UnsupportedLeafFeature::UnsupportedLiteral,
-            "`value ${1}`",
-        ),
-        (
-            "function f(){ return 2147483648n; }",
-            UnsupportedLeafFeature::UnsupportedLiteral,
-            "2147483648n",
-        ),
-    ];
+fn regexp_literals_validate_and_lower_to_the_quickjs_two_input_opcode() {
+    let compiled = compile("function f(){ return /(?<word>a+)[0-9]/dgi; }", "f");
 
-    for (source, expected_feature, expected_source) in cases {
-        let error = compile_error(source, "f");
-        let LeafCompilationError::Unsupported { feature, span } = error else {
-            panic!("expected unsupported expression for {source}");
-        };
-        assert_eq!(feature, expected_feature, "{source}");
+    assert_eq!(
+        opcodes(&compiled),
+        [
+            FinalOpcode::PushAtomValue,
+            FinalOpcode::PushAtomValue,
+            FinalOpcode::RegExp,
+            FinalOpcode::Return,
+        ]
+    );
+    let atoms = compiled
+        .atoms()
+        .iter()
+        .map(|atom| {
+            String::from_utf16(&atom.string().code_units().collect::<Vec<_>>())
+                .expect("regexp literal source and flags are Unicode scalar text")
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(&atoms[..2], ["(?<word>a+)[0-9]", "dgi"]);
+}
+
+#[test]
+fn regexp_literal_pattern_errors_are_rejected_before_lowering() {
+    let source = "function f(){ return /[z-a]/u; }";
+    let error = with_parsed_program(
+        source,
+        FrontendOptions::for_goal(CompilationGoal::GlobalScript(GlobalScriptGoal::new())),
+        |_| (),
+    )
+    .expect_err("invalid RegExp literals are early errors");
+    assert_eq!(error.stage(), DiagnosticStage::Semantic);
+    assert_eq!(
+        error.diagnostics()[0].code,
+        FrontendDiagnosticCode::InvalidRegExpLiteral
+    );
+    let span = error.diagnostics()[0].labels[0].span;
+    assert_eq!(&source[span.start as usize..span.end as usize], "/[z-a]/u");
+}
+
+#[test]
+fn untagged_template_substitutions_lower_to_immediate_string_hint_conversions() {
+    let compiled = compile(
+        "function f(first, second){ return `head:${first}:middle:${second}:tail`; }",
+        "f",
+    );
+
+    assert_eq!(
+        opcodes(&compiled),
+        [
+            FinalOpcode::PushAtomValue,
+            FinalOpcode::GetArg0,
+            FinalOpcode::ToPropKey,
+            FinalOpcode::Add,
+            FinalOpcode::PushAtomValue,
+            FinalOpcode::Add,
+            FinalOpcode::GetArg1,
+            FinalOpcode::ToPropKey,
+            FinalOpcode::Add,
+            FinalOpcode::PushAtomValue,
+            FinalOpcode::Add,
+            FinalOpcode::Return,
+        ]
+    );
+    assert_eq!(compiled.control_flow().computed_stack_size(), 2);
+}
+
+#[test]
+fn bigint_literals_outside_i32_use_exact_verified_value_constants() {
+    for source in [
+        "function f(){ return 18_446_744_073_709_551_616n; }",
+        "function f(){ return 0x1_0000_0000_0000_0000n; }",
+    ] {
+        let compiled = compile(source, "f");
+
         assert_eq!(
-            &source[span.start as usize..span.end as usize],
-            expected_source,
-            "{source}"
+            opcodes(&compiled),
+            [FinalOpcode::PushConst8, FinalOpcode::Return]
+        );
+        let [quickjs_compiler::CompiledConstant::Value(CompilerConstantValue::BigInt(value))] =
+            compiled.constants()
+        else {
+            panic!("large BigInt literal must own one value constant");
+        };
+        assert_eq!(
+            value.decimal().latin1_units(),
+            Some(b"18446744073709551616".as_slice())
         );
     }
+}
+
+#[test]
+fn tagged_templates_lower_to_one_exact_site_object_argument_before_substitutions() {
+    let compiled = compile("function f(tag, value){ return tag`a\\n${value}b`; }", "f");
+
+    assert_eq!(
+        opcodes(&compiled),
+        [
+            FinalOpcode::GetArg0,
+            FinalOpcode::PushConst8,
+            FinalOpcode::GetArg1,
+            FinalOpcode::Call2,
+            FinalOpcode::Return,
+        ]
+    );
+    let [
+        quickjs_compiler::CompiledConstant::Value(CompilerConstantValue::TemplateObject(template)),
+    ] = compiled.constants()
+    else {
+        panic!("tagged template must own one site-object constant");
+    };
+    let [head, tail] = template.elements() else {
+        panic!("one substitution must produce two template elements");
+    };
+    assert_eq!(
+        head.cooked().and_then(|value| value.latin1_units()),
+        Some(b"a\n".as_slice())
+    );
+    assert_eq!(head.raw().latin1_units(), Some(b"a\\n".as_slice()));
+    assert_eq!(
+        tail.cooked().and_then(|value| value.latin1_units()),
+        Some(b"b".as_slice())
+    );
+    assert_eq!(tail.raw().latin1_units(), Some(b"b".as_slice()));
 }
 
 #[test]

@@ -255,6 +255,22 @@ fn join_is_generic_over_array_like_receivers() {
     );
 }
 
+/// `join` uses the Proxy `[[Get]]` path for the snapshotted length and every
+/// element rather than bypassing the handler through ordinary storage reads.
+#[test]
+fn join_uses_proxy_get() {
+    assert_eq!(
+        text(
+            "var log='';\
+             var target={length:2,0:'a',1:'b'};\
+             var proxy=new Proxy(target,{get:function(t,k){log+='g'+k+';';return t[k];}});\
+             var result=Array.prototype.join.call(proxy,'-');\
+             return log+'|'+result;"
+        ),
+        "glength;g0;g1;|a-b"
+    );
+}
+
 /// `join` reads its `length` once, before any element, so mutating `length`
 /// from an element getter cannot change the iteration count.
 #[test]

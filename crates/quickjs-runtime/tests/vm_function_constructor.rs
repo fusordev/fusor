@@ -9,9 +9,9 @@ use quickjs_frontend::{
     with_dynamic_function_source,
 };
 use quickjs_runtime::{
-    Context, DynamicFunctionCompileFailure, ExceptionKind, ExecutionError, ExecutionLimits,
-    Function, JsNumber, JsString, OrdinaryDynamicFunctionCompiler, OrdinaryDynamicFunctionSource,
-    Runtime, RuntimeLimits, RuntimeResource, ValueKind,
+    Context, DynamicFunctionCompileFailure, DynamicFunctionFamily, ExceptionKind, ExecutionError,
+    ExecutionLimits, Function, JsNumber, JsString, OrdinaryDynamicFunctionCompiler,
+    OrdinaryDynamicFunctionSource, Runtime, RuntimeLimits, RuntimeResource, ValueKind,
 };
 
 #[derive(Debug)]
@@ -43,18 +43,32 @@ impl OrdinaryDynamicFunctionCompiler for TestCompiler {
             .iter()
             .map(|parameter| SourceFragment::new(parameter.as_str()))
             .collect::<Vec<_>>();
-        let dynamic_source = DynamicFunctionSource::new(
-            DynamicFunctionKind::Function,
-            &parameters,
-            SourceFragment::new(&body_text),
-        );
+        let (kind, source_name): (DynamicFunctionKind, Arc<str>) = match source.family() {
+            DynamicFunctionFamily::Function => (
+                DynamicFunctionKind::Function,
+                Arc::from("<runtime Function>"),
+            ),
+            DynamicFunctionFamily::GeneratorFunction => (
+                DynamicFunctionKind::GeneratorFunction,
+                Arc::from("<runtime GeneratorFunction>"),
+            ),
+            DynamicFunctionFamily::AsyncFunction => (
+                DynamicFunctionKind::AsyncFunction,
+                Arc::from("<runtime AsyncFunction>"),
+            ),
+            DynamicFunctionFamily::AsyncGeneratorFunction => (
+                DynamicFunctionKind::AsyncGeneratorFunction,
+                Arc::from("<runtime AsyncGeneratorFunction>"),
+            ),
+        };
+        let dynamic_source =
+            DynamicFunctionSource::new(kind, &parameters, SourceFragment::new(&body_text));
         with_dynamic_function_source(
             dynamic_source,
             FrontendLimits::default(),
             |unit, _prepared| {
-                let context =
-                    CompilationContext::new_with_source_name(unit, Arc::from("<runtime Function>"))
-                        .map_err(engine_failure)?;
+                let context = CompilationContext::new_with_source_name(unit, source_name)
+                    .map_err(engine_failure)?;
                 context
                     .compile_dynamic_function_script(VerificationLimits::default())
                     .map(|tree| Arc::new(tree.verified_bytecode().clone()))
@@ -143,6 +157,94 @@ fn assert_number(value: &quickjs_runtime::JsValue, expected: i32) {
     assert!(number.strict_equals(JsNumber::from_i32(expected)));
 }
 
+fn assert_string(value: &quickjs_runtime::JsValue, expected: &str) {
+    let string = value.as_string().expect("live value").expect("string");
+    assert_eq!(string.to_utf8_lossy().expect("UTF-8"), expected);
+}
+
+#[test]
+fn async_function_constructor_has_exact_intrinsics_and_executes_await() {
+    let mut runtime = Runtime::try_new(RuntimeLimits::default()).expect("runtime");
+    let realm = runtime.create_realm().expect("realm");
+    let mut context = runtime.context(&realm).expect("context");
+    let run = dynamic_function(
+        &mut context,
+        &[],
+        "let C=(async function(){}).constructor;\
+         let f=new C('value','return await value;');\
+         let p=Object.getPrototypeOf(f);\
+         let cd=Object.getOwnPropertyDescriptor(p,'constructor');\
+         let pd=Object.getOwnPropertyDescriptor(C,'prototype');\
+         let nonconstructable=false;\
+         try{new f();}catch(error){nonconstructable=error instanceof TypeError;}\
+         let state={result:C.name+'|'+C.length+'|'+\
+             (Object.getPrototypeOf(C)===Function)+'|'+\
+             (Object.getPrototypeOf(p)===Function.prototype)+'|'+\
+             (f.prototype===undefined)+'|'+\
+             nonconstructable+'|'+\
+             cd.writable+','+cd.enumerable+','+cd.configurable+'|'+\
+             pd.writable+','+pd.enumerable+','+pd.configurable+'|'};\
+         f(7).then(function(value){state.result=state.result+value;});\
+         return state;",
+    );
+    let read = dynamic_function(&mut context, &["state"], "return state.result;");
+
+    let state = context
+        .call_with_dynamic_function_compiler(&run, &[], ExecutionLimits::default(), &compiler())
+        .expect("AsyncFunction construction");
+    let result = context
+        .call(&read, &[state], ExecutionLimits::default())
+        .expect("async result");
+
+    assert_string(
+        &result,
+        "AsyncFunction|1|true|true|true|true|false,false,true|false,false,false|7",
+    );
+}
+
+#[test]
+fn async_generator_function_constructor_has_exact_intrinsics_and_executes_yield() {
+    let mut runtime = Runtime::try_new(RuntimeLimits::default()).expect("runtime");
+    let realm = runtime.create_realm().expect("realm");
+    let mut context = runtime.context(&realm).expect("context");
+    let run = dynamic_function(
+        &mut context,
+        &[],
+        "let C=(async function*(){}).constructor;\
+         let f=new C('value','yield await value;');\
+         let p=Object.getPrototypeOf(f);\
+         let gp=Object.getPrototypeOf(f.prototype);\
+         let cd=Object.getOwnPropertyDescriptor(p,'constructor');\
+         let pd=Object.getOwnPropertyDescriptor(C,'prototype');\
+         let nonconstructable=false;\
+         try{new f();}catch(error){nonconstructable=error instanceof TypeError;}\
+         let state={result:C.name+'|'+C.length+'|'+\
+             (Object.getPrototypeOf(C)===Function)+'|'+\
+             (Object.getPrototypeOf(p)===Function.prototype)+'|'+\
+             (Object.getPrototypeOf(gp)[Symbol.asyncIterator].call({})!==undefined)+'|'+\
+             nonconstructable+'|'+\
+             cd.writable+','+cd.enumerable+','+cd.configurable+'|'+\
+             pd.writable+','+pd.enumerable+','+pd.configurable+'|'};\
+         f(7).next().then(function(result){\
+             state.result=state.result+result.value+':'+result.done;\
+         });\
+         return state;",
+    );
+    let read = dynamic_function(&mut context, &["state"], "return state.result;");
+
+    let state = context
+        .call_with_dynamic_function_compiler(&run, &[], ExecutionLimits::default(), &compiler())
+        .expect("AsyncGeneratorFunction construction");
+    let result = context
+        .call(&read, &[state], ExecutionLimits::default())
+        .expect("async-generator result");
+
+    assert_string(
+        &result,
+        "AsyncGeneratorFunction|1|true|true|true|true|false,false,true|false,false,false|7:false",
+    );
+}
+
 #[test]
 fn global_function_call_compiles_executes_and_calls_the_result() {
     let mut runtime = Runtime::try_new(RuntimeLimits::default()).expect("runtime");
@@ -159,6 +261,203 @@ fn global_function_call_compiles_executes_and_calls_the_result() {
         .expect("Function call");
 
     assert_number(&result, 7);
+}
+
+#[test]
+fn generated_function_accepts_a_formal_rest_fragment() {
+    let mut runtime = Runtime::try_new(RuntimeLimits::default()).expect("runtime");
+    let realm = runtime.create_realm().expect("realm");
+    let mut context = runtime.context(&realm).expect("context");
+    let run = dynamic_function(
+        &mut context,
+        &[],
+        "let f=Function('fixed','...rest',\
+            'return arguments.length*100+rest.length*10+rest[1];');\
+            return f.length*1000+f(1,2,3);",
+    );
+
+    let result = context
+        .call_with_dynamic_function_compiler(&run, &[], ExecutionLimits::default(), &compiler())
+        .expect("Function rest parameter");
+
+    assert_number(&result, 1_323);
+}
+
+#[test]
+fn generated_function_accepts_parameter_default_expressions() {
+    let mut runtime = Runtime::try_new(RuntimeLimits::default()).expect("runtime");
+    let realm = runtime.create_realm().expect("realm");
+    let mut context = runtime.context(&realm).expect("context");
+    let run = dynamic_function(
+        &mut context,
+        &[],
+        "let f=Function('a=1','b=a+1','return a*10+b;');\
+            return f.length*10000+f()*100+f(5);",
+    );
+
+    let result = context
+        .call_with_dynamic_function_compiler(&run, &[], ExecutionLimits::default(), &compiler())
+        .expect("Function parameter defaults");
+
+    assert_number(&result, 1_256);
+}
+
+#[test]
+fn generated_function_infers_anonymous_parameter_default_names() {
+    let mut runtime = Runtime::try_new(RuntimeLimits::default()).expect("runtime");
+    let realm = runtime.create_realm().expect("realm");
+    let mut context = runtime.context(&realm).expect("context");
+    let run = dynamic_function(
+        &mut context,
+        &[],
+        "let f=Function('callback=(function(){})','{nested=function(){}}={}',\
+            'return callback.name===\"callback\"&&nested.name===\"nested\";');\
+            return f();",
+    );
+
+    let result = context
+        .call_with_dynamic_function_compiler(&run, &[], ExecutionLimits::default(), &compiler())
+        .expect("Function anonymous parameter names");
+
+    assert_eq!(result.as_boolean().expect("live Boolean"), Some(true));
+}
+
+#[test]
+fn generated_function_infers_anonymous_declaration_names() {
+    let mut runtime = Runtime::try_new(RuntimeLimits::default()).expect("runtime");
+    let realm = runtime.create_realm().expect("realm");
+    let mut context = runtime.context(&realm).expect("context");
+    let run = dynamic_function(
+        &mut context,
+        &[],
+        "let f=Function('let local=(function(){});let {nested=function(){}}={};\
+            return local.name===\"local\"&&nested.name===\"nested\";');\
+            return f();",
+    );
+
+    let result = context
+        .call_with_dynamic_function_compiler(&run, &[], ExecutionLimits::default(), &compiler())
+        .expect("Function anonymous declaration names");
+
+    assert_eq!(result.as_boolean().expect("live Boolean"), Some(true));
+}
+
+#[test]
+fn generated_function_infers_anonymous_assignment_names() {
+    let mut runtime = Runtime::try_new(RuntimeLimits::default()).expect("runtime");
+    let realm = runtime.create_realm().expect("realm");
+    let mut context = runtime.context(&realm).expect("context");
+    let run = dynamic_function(
+        &mut context,
+        &[],
+        "let f=Function('let local,logical=false;local=(function(){});\
+            logical||=function(){};generatedGlobal=function(){};\
+            return local.name===\"local\"&&logical.name===\"logical\"&&\
+                generatedGlobal.name===\"generatedGlobal\";');\
+            return f();",
+    );
+
+    let result = context
+        .call_with_dynamic_function_compiler(&run, &[], ExecutionLimits::default(), &compiler())
+        .expect("Function anonymous assignment names");
+
+    assert_eq!(result.as_boolean().expect("live Boolean"), Some(true));
+}
+
+#[test]
+fn generated_function_infers_destructuring_assignment_default_names() {
+    let mut runtime = Runtime::try_new(RuntimeLimits::default()).expect("runtime");
+    let realm = runtime.create_realm().expect("realm");
+    let mut context = runtime.context(&realm).expect("context");
+    let run = dynamic_function(
+        &mut context,
+        &[],
+        "let f=Function('let arrayElement,objectElement;\
+            [arrayElement=function(){}]=[];\
+            ({objectElement=function(){}}={});\
+            [generatedDefault=function(){}]=[];\
+            return arrayElement.name===\"arrayElement\"&&\
+                objectElement.name===\"objectElement\"&&\
+                generatedDefault.name===\"generatedDefault\";');\
+            return f();",
+    );
+
+    let result = context
+        .call_with_dynamic_function_compiler(&run, &[], ExecutionLimits::default(), &compiler())
+        .expect("Function destructuring assignment default names");
+
+    assert_eq!(result.as_boolean().expect("live Boolean"), Some(true));
+}
+
+#[test]
+fn generated_function_infers_static_data_property_names() {
+    let mut runtime = Runtime::try_new(RuntimeLimits::default()).expect("runtime");
+    let realm = runtime.create_realm().expect("realm");
+    let mut context = runtime.context(&realm).expect("context");
+    let run = dynamic_function(
+        &mut context,
+        &[],
+        "let f=Function('const object={handler:function(){},1:function(){},\
+            \"__proto__\":function(){}};\
+            return object.handler.name===\"handler\"&&object[1].name===\"1\"&&\
+                object.__proto__.name===\"__proto__\";');\
+            return f();",
+    );
+
+    let result = context
+        .call_with_dynamic_function_compiler(&run, &[], ExecutionLimits::default(), &compiler())
+        .expect("Function static data-property names");
+
+    assert_eq!(result.as_boolean().expect("live Boolean"), Some(true));
+}
+
+#[test]
+fn generated_function_infers_computed_data_property_names() {
+    let mut runtime = Runtime::try_new(RuntimeLimits::default()).expect("runtime");
+    let realm = runtime.create_realm().expect("realm");
+    let mut context = runtime.context(&realm).expect("context");
+    let run = dynamic_function(
+        &mut context,
+        &[],
+        "let f=Function('const key=\"computed\",symbol=Symbol(\"token\"),empty=Symbol();\
+            const object={[key]:function(){},[symbol]:function(){},[empty]:function(){}};\
+            const descriptor=Object.getOwnPropertyDescriptor(object[key],\"name\");\
+            return object[key].name===\"computed\"&&object[symbol].name===\"[token]\"&&\
+                object[empty].name===\"\"&&!descriptor.writable&&!descriptor.enumerable&&\
+                descriptor.configurable;');\
+            return f();",
+    );
+
+    let result = context
+        .call_with_dynamic_function_compiler(&run, &[], ExecutionLimits::default(), &compiler())
+        .expect("Function computed data-property names");
+
+    assert_eq!(result.as_boolean().expect("live Boolean"), Some(true));
+}
+
+#[test]
+fn generated_function_splits_parameter_and_body_environments() {
+    let mut runtime = Runtime::try_new(RuntimeLimits::default()).expect("runtime");
+    let realm = runtime.create_realm().expect("realm");
+    let mut context = runtime.context(&realm).expect("context");
+    let run = dynamic_function(
+        &mut context,
+        &[],
+        "let copied=Function('a=1','var a;return a;');\
+            let separated=Function('a=1','reader=function inner(){return a;}',\
+                'var a=2;return reader()*10+a;');\
+            let declared=Function('a=1','reader=function inner(){return a;}',\
+                'function a(){return 3;}return reader()*10+a();');\
+            let args=Function('value=arguments.length',\
+                'var arguments;return value*10+arguments.length;');\
+            return copied()*1000000+separated()*10000+declared()*100+args(undefined,6);",
+    );
+
+    let result = context
+        .call_with_dynamic_function_compiler(&run, &[], ExecutionLimits::default(), &compiler())
+        .expect("Function parameter/body environments");
+
+    assert_number(&result, 1_121_322);
 }
 
 #[test]
@@ -383,6 +682,36 @@ fn generated_source_units_are_bounded_before_compilation() {
 }
 
 #[test]
+fn generator_source_units_include_the_generator_wrapper_token() {
+    let mut runtime = Runtime::try_new(RuntimeLimits::default()).expect("runtime");
+    let realm = runtime.create_realm().expect("realm");
+    let mut context = runtime.context(&realm).expect("context");
+    let run = dynamic_function(
+        &mut context,
+        &[],
+        "let GeneratorFunction=(function*(){}).constructor; return GeneratorFunction();",
+    );
+
+    let error = context
+        .call_with_dynamic_function_compiler(
+            &run,
+            &[],
+            ExecutionLimits::default().with_dynamic_source_code_units(28),
+            &compiler(),
+        )
+        .expect_err("empty generator wrapper contains 29 UTF-16 code units");
+
+    assert!(matches!(
+        error,
+        ExecutionError::LimitExceeded {
+            resource: RuntimeResource::DynamicSourceCodeUnits,
+            limit: 28,
+            observed: 29,
+        }
+    ));
+}
+
+#[test]
 fn numeric_source_arguments_use_javascript_number_spelling() {
     let mut runtime = Runtime::try_new(RuntimeLimits::default()).expect("runtime");
     let realm = runtime.create_realm().expect("realm");
@@ -569,6 +898,41 @@ fn function_prototype_is_callable_but_not_constructable() {
             .expect("UTF-8"),
         "not a constructor"
     );
+}
+
+/// `AddRestrictedFunctionProperties` installs one realm-owned
+/// `%ThrowTypeError%` as both accessors for `caller` and `arguments`.
+#[test]
+fn function_prototype_has_restricted_caller_and_arguments_properties() {
+    let mut runtime = Runtime::try_new(RuntimeLimits::default()).expect("runtime");
+    let realm = runtime.create_realm().expect("realm");
+    let inspect = dynamic_function(
+        &mut runtime.context(&realm).expect("context"),
+        &[],
+        "var caller=Object.getOwnPropertyDescriptor(Function.prototype,'caller');\
+         var args=Object.getOwnPropertyDescriptor(Function.prototype,'arguments');\
+         var thrower=caller.get,name=Object.getOwnPropertyDescriptor(thrower,'name'),\
+             length=Object.getOwnPropertyDescriptor(thrower,'length');\
+         var getError=false,setError=false;\
+         try{Function.prototype.caller;}catch(error){\
+           getError=error instanceof TypeError&&error.message==='invalid property access';}\
+         try{Function.prototype.arguments=1;}catch(error){\
+           setError=error instanceof TypeError&&error.message==='invalid property access';}\
+         return Object.getOwnPropertyNames(Function.prototype).join(',')===\
+           'length,name,caller,arguments,call,apply,bind,toString,constructor'&&\
+           caller.get===caller.set&&caller.get===args.get&&args.get===args.set&&\
+           !caller.enumerable&&caller.configurable&&!args.enumerable&&args.configurable&&\
+           thrower.name===''&&thrower.length===0&&!Object.isExtensible(thrower)&&\
+           !name.writable&&!name.enumerable&&!name.configurable&&\
+           !length.writable&&!length.enumerable&&!length.configurable&&getError&&setError;",
+    );
+    let value = runtime
+        .context(&realm)
+        .expect("context")
+        .call(&inspect, &[], ExecutionLimits::default())
+        .expect("restricted Function properties");
+
+    assert_eq!(value.as_boolean().expect("live Boolean"), Some(true));
 }
 
 #[test]
@@ -942,6 +1306,37 @@ fn function_source_rejects_an_object_after_both_ordinary_methods() {
             .to_utf8_lossy()
             .expect("UTF-8"),
         "toPrimitive"
+    );
+}
+
+#[test]
+fn function_source_conversion_uses_proxy_get() {
+    let mut runtime = Runtime::try_new(RuntimeLimits::default()).expect("runtime");
+    let realm = runtime.create_realm().expect("realm");
+    let mut context = runtime.context(&realm).expect("context");
+    let run = dynamic_function(
+        &mut context,
+        &[],
+        "let log='';let source=new Proxy({}, {get(target,key,receiver){\
+             log=log+(typeof key==='symbol'?'@':key)+',';\
+             if(typeof key==='symbol'){return undefined;}\
+             if(key==='toString'){return function(){return 'return 9;';};}\
+             return Reflect.get(target,key,receiver);\
+         }});\
+         return Function(source)()+'|'+log;",
+    );
+
+    let value = context
+        .call_with_dynamic_function_compiler(&run, &[], ExecutionLimits::default(), &compiler())
+        .expect("Proxy-backed dynamic Function source");
+    assert_eq!(
+        value
+            .as_string()
+            .expect("live value")
+            .expect("String")
+            .to_utf8_lossy()
+            .expect("UTF-8"),
+        "9|@,toString,"
     );
 }
 

@@ -1,11 +1,18 @@
+mod support;
+
+use std::sync::Arc;
+
 use quickjs_bytecode::{
-    AtomPoolIndex, BytecodeBuilder, BytecodePc, ControlFlowEdge, DecodeError, FinalOpcode,
+    AtomPoolIndex, BytecodeBuilder, BytecodePc, CompilerCaptureLayout, CompilerCapturedBinding,
+    CompilerConstantKind, CompilerConstantLayout, ControlFlowEdge, DecodeError, FinalOpcode,
     FunctionCountDomain, FunctionIndexDomains, FunctionKind, FunctionKindRequirement,
     InvalidControlFlowTargetReason, OperandIndexDomain, Operands, SecondaryOperandField,
     UnsupportedVerifierFeature, UnverifiedCompilerFunctionBody, UnverifiedFunctionBody,
     UnverifiedFunctionHeader, VerificationError, VerificationErrorKind, VerificationLimits,
     VerificationResource, VerifiedSuccessorKind, verify_compiler_control_flow, verify_control_flow,
 };
+
+use support::snapshot_verified_control_flow;
 
 fn encode(instructions: &[(FinalOpcode, Operands)]) -> Vec<u8> {
     let mut builder = BytecodeBuilder::new();
@@ -52,6 +59,45 @@ fn reject(
         VerificationLimits::default(),
     )
     .expect_err("test bytecode must be rejected")
+}
+
+#[test]
+fn compiler_control_flow_certificate_has_a_complete_stable_snapshot() {
+    let bytecode = encode(&[
+        (FinalOpcode::PushTrue, Operands::None),
+        (FinalOpcode::IfFalse, Operands::Label(10)),
+        (FinalOpcode::Push1, Operands::NoneInt),
+        (FinalOpcode::Goto, Operands::Label(5)),
+        (FinalOpcode::Push2, Operands::NoneInt),
+        (FinalOpcode::Return, Operands::None),
+        (FinalOpcode::Nop, Operands::None),
+        (FinalOpcode::ReturnUndef, Operands::None),
+    ]);
+    let body = UnverifiedCompilerFunctionBody::new(
+        bytecode,
+        FunctionIndexDomains::new(1, 2, 2, 2, 2),
+        UnverifiedFunctionHeader::stripped_ordinary_source_function_with_variable_references(
+            true, 1, 2,
+        ),
+    )
+    .with_capture_layout(
+        CompilerCaptureLayout::new(Arc::from([
+            CompilerCapturedBinding::Argument(0),
+            CompilerCapturedBinding::ScopedLocal(1),
+        ]))
+        .with_mapped_arguments(Arc::from([0])),
+    )
+    .with_constant_layout(CompilerConstantLayout::new(Arc::from([
+        CompilerConstantKind::Value,
+        CompilerConstantKind::Function,
+    ])));
+
+    let verified = verify_compiler_control_flow(body, VerificationLimits::default())
+        .expect("the characterization body must verify");
+
+    let expected =
+        include_str!("support/snapshots/compiler-control-flow.txt").replace("\r\n", "\n");
+    assert_eq!(snapshot_verified_control_flow(&verified), expected);
 }
 
 #[test]
@@ -793,7 +839,7 @@ fn each_missing_semantic_capability_fails_closed_with_a_typed_reason() {
         (
             encode(&[
                 (
-                    FinalOpcode::DefineClass,
+                    FinalOpcode::DefineClassComputed,
                     Operands::AtomU8 {
                         atom: AtomPoolIndex::new(0),
                         value: 1,
@@ -884,10 +930,52 @@ fn synchronous_for_of_markers_are_compiler_only_structural_inputs() {
     );
     assert_eq!(error.opcode(), Some(FinalOpcode::ForOfStart));
 
+    let error = verify_compiler_control_flow(
+        UnverifiedCompilerFunctionBody::new(
+            encode(&[
+                (FinalOpcode::ForAwaitOfStart, Operands::None),
+                (FinalOpcode::ReturnUndef, Operands::None),
+            ]),
+            FunctionIndexDomains::default(),
+            UnverifiedFunctionHeader::default(),
+        ),
+        VerificationLimits::default(),
+    )
+    .expect_err("async iterator construction still requires its compiler-owned input");
+    assert_eq!(
+        error.kind(),
+        &VerificationErrorKind::StackUnderflow {
+            required: 1,
+            available: 0,
+        }
+    );
+
     for (opcode, operands) in [
-        (FinalOpcode::ForAwaitOfStart, Operands::None),
         (FinalOpcode::ForAwaitOfNext, Operands::None),
         (FinalOpcode::IteratorGetValueDone, Operands::None),
+    ] {
+        let error = verify_compiler_control_flow(
+            UnverifiedCompilerFunctionBody::new(
+                encode(&[
+                    (opcode, operands),
+                    (FinalOpcode::ReturnUndef, Operands::None),
+                ]),
+                FunctionIndexDomains::default(),
+                UnverifiedFunctionHeader::default(),
+            ),
+            VerificationLimits::default(),
+        )
+        .expect_err("async iterator marker families stay fail-closed");
+        assert_eq!(
+            error.kind(),
+            &VerificationErrorKind::UnsupportedOpcodeSemantics {
+                feature: UnsupportedVerifierFeature::IteratorMarkers,
+            },
+            "{opcode}"
+        );
+    }
+
+    for (opcode, operands) in [
         (FinalOpcode::IteratorNext, Operands::None),
         (FinalOpcode::IteratorCall, Operands::U8(0)),
     ] {
@@ -902,11 +990,12 @@ fn synchronous_for_of_markers_are_compiler_only_structural_inputs() {
             ),
             VerificationLimits::default(),
         )
-        .expect_err("async and public iterator marker families stay fail-closed");
+        .expect_err("delegated iterator calls require their compiler-owned stack record");
         assert_eq!(
             error.kind(),
-            &VerificationErrorKind::UnsupportedOpcodeSemantics {
-                feature: UnsupportedVerifierFeature::IteratorMarkers,
+            &VerificationErrorKind::StackUnderflow {
+                required: 4,
+                available: 0,
             },
             "{opcode}"
         );

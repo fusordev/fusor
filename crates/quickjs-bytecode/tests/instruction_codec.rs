@@ -419,6 +419,29 @@ fn operand_argument_counts_feed_the_existing_stack_effect_rules() {
 }
 
 #[test]
+fn derived_define_class_carries_the_certified_heritage_pair() {
+    let base = Instruction::new(
+        FinalOpcode::DefineClass,
+        Operands::AtomU8 {
+            atom: AtomPoolIndex::new(0),
+            value: 0,
+        },
+    )
+    .expect("base define_class operands");
+    let derived = Instruction::new(
+        FinalOpcode::DefineClass,
+        Operands::AtomU8 {
+            atom: AtomPoolIndex::new(0),
+            value: 1,
+        },
+    )
+    .expect("derived define_class operands");
+
+    assert_eq!(base.stack_effect(), Ok(StackEffect::new(2, 2)));
+    assert_eq!(derived.stack_effect(), Ok(StackEffect::new(3, 2)));
+}
+
+#[test]
 fn arbitrary_bytes_and_positions_are_total_and_error_iteration_is_fused() {
     const MAX_INSTRUCTION_BYTES: usize = MAX_ENCODED_OPERAND_BYTES + 1;
 

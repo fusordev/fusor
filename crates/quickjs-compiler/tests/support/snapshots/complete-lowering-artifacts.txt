@@ -1,0 +1,6991 @@
+tree representative
+root: ExecutableId(1)
+source: "function outer({seed = 1}, ...items) {let total = seed;const [head = 0, ...tail] = items;for (const value of tail) {try {if (value) { total += value; } else { continue; }} finally { total += 1; }}function inner(delta = head) { return total + delta; }return inner;}"
+function graph: root=FunctionTemplateId(0) depth=2 usage=FunctionGraphUsage { functions: 2, bytecode_bytes: 188, instructions: 100, constants: 1, atoms: 14, string_payload_bytes: 70, closure_variables: 2, closure_edge_evaluations: 2, transfer_evaluations: 100 }
+execution requirements: [
+    CoreValues,
+    Numbers,
+    Strings,
+    Closures,
+    Arrays,
+    Iterators,
+    OrdinaryObjects,
+    DynamicPropertyKeys,
+    AbruptCompletions,
+    LexicalBindings,
+    DynamicOperators,
+]
+function 0
+executable: ExecutableId(1)
+graph control flow matches: true
+graph atoms: [
+    CompilerAtom {
+        string: CompilerString {
+            storage: Latin1(
+                [
+                    115,
+                    101,
+                    101,
+                    100,
+                ],
+            ),
+        },
+        static_property_only: false,
+    },
+    CompilerAtom {
+        string: CompilerString {
+            storage: Latin1(
+                [
+                    111,
+                    117,
+                    116,
+                    101,
+                    114,
+                ],
+            ),
+        },
+        static_property_only: false,
+    },
+    CompilerAtom {
+        string: CompilerString {
+            storage: Latin1(
+                [
+                    95,
+                    97,
+                    114,
+                    103,
+                    95,
+                    48,
+                    95,
+                ],
+            ),
+        },
+        static_property_only: false,
+    },
+    CompilerAtom {
+        string: CompilerString {
+            storage: Latin1(
+                [
+                    105,
+                    116,
+                    101,
+                    109,
+                    115,
+                ],
+            ),
+        },
+        static_property_only: false,
+    },
+    CompilerAtom {
+        string: CompilerString {
+            storage: Latin1(
+                [
+                    116,
+                    111,
+                    116,
+                    97,
+                    108,
+                ],
+            ),
+        },
+        static_property_only: false,
+    },
+    CompilerAtom {
+        string: CompilerString {
+            storage: Latin1(
+                [
+                    104,
+                    101,
+                    97,
+                    100,
+                ],
+            ),
+        },
+        static_property_only: false,
+    },
+    CompilerAtom {
+        string: CompilerString {
+            storage: Latin1(
+                [
+                    116,
+                    97,
+                    105,
+                    108,
+                ],
+            ),
+        },
+        static_property_only: false,
+    },
+    CompilerAtom {
+        string: CompilerString {
+            storage: Latin1(
+                [
+                    118,
+                    97,
+                    108,
+                    117,
+                    101,
+                ],
+            ),
+        },
+        static_property_only: false,
+    },
+    CompilerAtom {
+        string: CompilerString {
+            storage: Latin1(
+                [
+                    105,
+                    110,
+                    110,
+                    101,
+                    114,
+                ],
+            ),
+        },
+        static_property_only: false,
+    },
+]
+graph constants: [
+    Function(
+        FunctionTemplateId(
+            1,
+        ),
+    ),
+]
+graph closure sources: []
+locals: [
+    LoweredLocal {
+        binding: BindingId(
+            1,
+        ),
+        slot: LocalSlot(
+            0,
+        ),
+    },
+    LoweredLocal {
+        binding: BindingId(
+            2,
+        ),
+        slot: LocalSlot(
+            1,
+        ),
+    },
+    LoweredLocal {
+        binding: BindingId(
+            3,
+        ),
+        slot: LocalSlot(
+            2,
+        ),
+    },
+    LoweredLocal {
+        binding: BindingId(
+            4,
+        ),
+        slot: LocalSlot(
+            3,
+        ),
+    },
+    LoweredLocal {
+        binding: BindingId(
+            5,
+        ),
+        slot: LocalSlot(
+            4,
+        ),
+    },
+    LoweredLocal {
+        binding: BindingId(
+            6,
+        ),
+        slot: LocalSlot(
+            5,
+        ),
+    },
+    LoweredLocal {
+        binding: BindingId(
+            7,
+        ),
+        slot: LocalSlot(
+            6,
+        ),
+    },
+]
+atoms: [
+    CompilerAtom {
+        string: CompilerString {
+            storage: Latin1(
+                [
+                    115,
+                    101,
+                    101,
+                    100,
+                ],
+            ),
+        },
+        static_property_only: false,
+    },
+    CompilerAtom {
+        string: CompilerString {
+            storage: Latin1(
+                [
+                    111,
+                    117,
+                    116,
+                    101,
+                    114,
+                ],
+            ),
+        },
+        static_property_only: false,
+    },
+    CompilerAtom {
+        string: CompilerString {
+            storage: Latin1(
+                [
+                    95,
+                    97,
+                    114,
+                    103,
+                    95,
+                    48,
+                    95,
+                ],
+            ),
+        },
+        static_property_only: false,
+    },
+    CompilerAtom {
+        string: CompilerString {
+            storage: Latin1(
+                [
+                    105,
+                    116,
+                    101,
+                    109,
+                    115,
+                ],
+            ),
+        },
+        static_property_only: false,
+    },
+    CompilerAtom {
+        string: CompilerString {
+            storage: Latin1(
+                [
+                    116,
+                    111,
+                    116,
+                    97,
+                    108,
+                ],
+            ),
+        },
+        static_property_only: false,
+    },
+    CompilerAtom {
+        string: CompilerString {
+            storage: Latin1(
+                [
+                    104,
+                    101,
+                    97,
+                    100,
+                ],
+            ),
+        },
+        static_property_only: false,
+    },
+    CompilerAtom {
+        string: CompilerString {
+            storage: Latin1(
+                [
+                    116,
+                    97,
+                    105,
+                    108,
+                ],
+            ),
+        },
+        static_property_only: false,
+    },
+    CompilerAtom {
+        string: CompilerString {
+            storage: Latin1(
+                [
+                    118,
+                    97,
+                    108,
+                    117,
+                    101,
+                ],
+            ),
+        },
+        static_property_only: false,
+    },
+    CompilerAtom {
+        string: CompilerString {
+            storage: Latin1(
+                [
+                    105,
+                    110,
+                    110,
+                    101,
+                    114,
+                ],
+            ),
+        },
+        static_property_only: false,
+    },
+]
+constants: [
+    Function(
+        CompiledFunctionConstant {
+            executable: ExecutableId(
+                2,
+            ),
+        },
+    ),
+]
+closure variables: []
+realm globals: []
+source instructions: [
+    SourceInstruction {
+        pc: BytecodePc(
+            0,
+        ),
+        span: Span {
+            start: 16,
+            end: 20,
+        },
+    },
+    SourceInstruction {
+        pc: BytecodePc(
+            3,
+        ),
+        span: Span {
+            start: 30,
+            end: 35,
+        },
+    },
+    SourceInstruction {
+        pc: BytecodePc(
+            6,
+        ),
+        span: Span {
+            start: 15,
+            end: 25,
+        },
+    },
+    SourceInstruction {
+        pc: BytecodePc(
+            7,
+        ),
+        span: Span {
+            start: 15,
+            end: 25,
+        },
+    },
+    SourceInstruction {
+        pc: BytecodePc(
+            8,
+        ),
+        span: Span {
+            start: 16,
+            end: 24,
+        },
+    },
+    SourceInstruction {
+        pc: BytecodePc(
+            13,
+        ),
+        span: Span {
+            start: 16,
+            end: 24,
+        },
+    },
+    SourceInstruction {
+        pc: BytecodePc(
+            14,
+        ),
+        span: Span {
+            start: 16,
+            end: 24,
+        },
+    },
+    SourceInstruction {
+        pc: BytecodePc(
+            15,
+        ),
+        span: Span {
+            start: 16,
+            end: 24,
+        },
+    },
+    SourceInstruction {
+        pc: BytecodePc(
+            16,
+        ),
+        span: Span {
+            start: 16,
+            end: 24,
+        },
+    },
+    SourceInstruction {
+        pc: BytecodePc(
+            18,
+        ),
+        span: Span {
+            start: 16,
+            end: 24,
+        },
+    },
+    SourceInstruction {
+        pc: BytecodePc(
+            19,
+        ),
+        span: Span {
+            start: 23,
+            end: 24,
+        },
+    },
+    SourceInstruction {
+        pc: BytecodePc(
+            20,
+        ),
+        span: Span {
+            start: 16,
+            end: 20,
+        },
+    },
+    SourceInstruction {
+        pc: BytecodePc(
+            21,
+        ),
+        span: Span {
+            start: 15,
+            end: 25,
+        },
+    },
+    SourceInstruction {
+        pc: BytecodePc(
+            22,
+        ),
+        span: Span {
+            start: 27,
+            end: 35,
+        },
+    },
+    SourceInstruction {
+        pc: BytecodePc(
+            25,
+        ),
+        span: Span {
+            start: 30,
+            end: 35,
+        },
+    },
+    SourceInstruction {
+        pc: BytecodePc(
+            26,
+        ),
+        span: Span {
+            start: 75,
+            end: 79,
+        },
+    },
+    SourceInstruction {
+        pc: BytecodePc(
+            29,
+        ),
+        span: Span {
+            start: 62,
+            end: 66,
+        },
+    },
+    SourceInstruction {
+        pc: BytecodePc(
+            32,
+        ),
+        span: Span {
+            start: 42,
+            end: 47,
+        },
+    },
+    SourceInstruction {
+        pc: BytecodePc(
+            35,
+        ),
+        span: Span {
+            start: 196,
+            end: 250,
+        },
+    },
+    SourceInstruction {
+        pc: BytecodePc(
+            38,
+        ),
+        span: Span {
+            start: 196,
+            end: 250,
+        },
+    },
+    SourceInstruction {
+        pc: BytecodePc(
+            40,
+        ),
+        span: Span {
+            start: 196,
+            end: 250,
+        },
+    },
+    SourceInstruction {
+        pc: BytecodePc(
+            42,
+        ),
+        span: Span {
+            start: 50,
+            end: 54,
+        },
+    },
+    SourceInstruction {
+        pc: BytecodePc(
+            45,
+        ),
+        span: Span {
+            start: 42,
+            end: 47,
+        },
+    },
+    SourceInstruction {
+        pc: BytecodePc(
+            46,
+        ),
+        span: Span {
+            start: 83,
+            end: 88,
+        },
+    },
+    SourceInstruction {
+        pc: BytecodePc(
+            49,
+        ),
+        span: Span {
+            start: 61,
+            end: 80,
+        },
+    },
+    SourceInstruction {
+        pc: BytecodePc(
+            50,
+        ),
+        span: Span {
+            start: 62,
+            end: 70,
+        },
+    },
+    SourceInstruction {
+        pc: BytecodePc(
+            52,
+        ),
+        span: Span {
+            start: 62,
+            end: 70,
+        },
+    },
+    SourceInstruction {
+        pc: BytecodePc(
+            53,
+        ),
+        span: Span {
+            start: 62,
+            end: 70,
+        },
+    },
+    SourceInstruction {
+        pc: BytecodePc(
+            54,
+        ),
+        span: Span {
+            start: 62,
+            end: 70,
+        },
+    },
+    SourceInstruction {
+        pc: BytecodePc(
+            55,
+        ),
+        span: Span {
+            start: 62,
+            end: 70,
+        },
+    },
+    SourceInstruction {
+        pc: BytecodePc(
+            56,
+        ),
+        span: Span {
+            start: 62,
+            end: 70,
+        },
+    },
+    SourceInstruction {
+        pc: BytecodePc(
+            58,
+        ),
+        span: Span {
+            start: 62,
+            end: 70,
+        },
+    },
+    SourceInstruction {
+        pc: BytecodePc(
+            59,
+        ),
+        span: Span {
+            start: 69,
+            end: 70,
+        },
+    },
+    SourceInstruction {
+        pc: BytecodePc(
+            60,
+        ),
+        span: Span {
+            start: 62,
+            end: 66,
+        },
+    },
+    SourceInstruction {
+        pc: BytecodePc(
+            61,
+        ),
+        span: Span {
+            start: 72,
+            end: 79,
+        },
+    },
+    SourceInstruction {
+        pc: BytecodePc(
+            64,
+        ),
+        span: Span {
+            start: 72,
+            end: 79,
+        },
+    },
+    SourceInstruction {
+        pc: BytecodePc(
+            65,
+        ),
+        span: Span {
+            start: 72,
+            end: 79,
+        },
+    },
+    SourceInstruction {
+        pc: BytecodePc(
+            67,
+        ),
+        span: Span {
+            start: 72,
+            end: 79,
+        },
+    },
+    SourceInstruction {
+        pc: BytecodePc(
+            69,
+        ),
+        span: Span {
+            start: 72,
+            end: 79,
+        },
+    },
+    SourceInstruction {
+        pc: BytecodePc(
+            71,
+        ),
+        span: Span {
+            start: 72,
+            end: 79,
+        },
+    },
+    SourceInstruction {
+        pc: BytecodePc(
+            72,
+        ),
+        span: Span {
+            start: 72,
+            end: 79,
+        },
+    },
+    SourceInstruction {
+        pc: BytecodePc(
+            73,
+        ),
+        span: Span {
+            start: 72,
+            end: 79,
+        },
+    },
+    SourceInstruction {
+        pc: BytecodePc(
+            75,
+        ),
+        span: Span {
+            start: 72,
+            end: 79,
+        },
+    },
+    SourceInstruction {
+        pc: BytecodePc(
+            76,
+        ),
+        span: Span {
+            start: 72,
+            end: 79,
+        },
+    },
+    SourceInstruction {
+        pc: BytecodePc(
+            77,
+        ),
+        span: Span {
+            start: 75,
+            end: 79,
+        },
+    },
+    SourceInstruction {
+        pc: BytecodePc(
+            79,
+        ),
+        span: Span {
+            start: 61,
+            end: 80,
+        },
+    },
+    SourceInstruction {
+        pc: BytecodePc(
+            80,
+        ),
+        span: Span {
+            start: 100,
+            end: 105,
+        },
+    },
+    SourceInstruction {
+        pc: BytecodePc(
+            83,
+        ),
+        span: Span {
+            start: 109,
+            end: 113,
+        },
+    },
+    SourceInstruction {
+        pc: BytecodePc(
+            86,
+        ),
+        span: Span {
+            start: 109,
+            end: 113,
+        },
+    },
+    SourceInstruction {
+        pc: BytecodePc(
+            87,
+        ),
+        span: Span {
+            start: 100,
+            end: 105,
+        },
+    },
+    SourceInstruction {
+        pc: BytecodePc(
+            90,
+        ),
+        span: Span {
+            start: 89,
+            end: 196,
+        },
+    },
+    SourceInstruction {
+        pc: BytecodePc(
+            92,
+        ),
+        span: Span {
+            start: 89,
+            end: 196,
+        },
+    },
+    SourceInstruction {
+        pc: BytecodePc(
+            94,
+        ),
+        span: Span {
+            start: 89,
+            end: 196,
+        },
+    },
+    SourceInstruction {
+        pc: BytecodePc(
+            95,
+        ),
+        span: Span {
+            start: 89,
+            end: 196,
+        },
+    },
+    SourceInstruction {
+        pc: BytecodePc(
+            97,
+        ),
+        span: Span {
+            start: 100,
+            end: 105,
+        },
+    },
+    SourceInstruction {
+        pc: BytecodePc(
+            99,
+        ),
+        span: Span {
+            start: 116,
+            end: 195,
+        },
+    },
+    SourceInstruction {
+        pc: BytecodePc(
+            104,
+        ),
+        span: Span {
+            start: 125,
+            end: 130,
+        },
+    },
+    SourceInstruction {
+        pc: BytecodePc(
+            107,
+        ),
+        span: Span {
+            start: 125,
+            end: 130,
+        },
+    },
+    SourceInstruction {
+        pc: BytecodePc(
+            109,
+        ),
+        span: Span {
+            start: 134,
+            end: 139,
+        },
+    },
+    SourceInstruction {
+        pc: BytecodePc(
+            112,
+        ),
+        span: Span {
+            start: 143,
+            end: 148,
+        },
+    },
+    SourceInstruction {
+        pc: BytecodePc(
+            115,
+        ),
+        span: Span {
+            start: 134,
+            end: 148,
+        },
+    },
+    SourceInstruction {
+        pc: BytecodePc(
+            116,
+        ),
+        span: Span {
+            start: 134,
+            end: 139,
+        },
+    },
+    SourceInstruction {
+        pc: BytecodePc(
+            119,
+        ),
+        span: Span {
+            start: 134,
+            end: 148,
+        },
+    },
+    SourceInstruction {
+        pc: BytecodePc(
+            120,
+        ),
+        span: Span {
+            start: 121,
+            end: 170,
+        },
+    },
+    SourceInstruction {
+        pc: BytecodePc(
+            122,
+        ),
+        span: Span {
+            start: 159,
+            end: 168,
+        },
+    },
+    SourceInstruction {
+        pc: BytecodePc(
+            123,
+        ),
+        span: Span {
+            start: 159,
+            end: 168,
+        },
+    },
+    SourceInstruction {
+        pc: BytecodePc(
+            124,
+        ),
+        span: Span {
+            start: 159,
+            end: 168,
+        },
+    },
+    SourceInstruction {
+        pc: BytecodePc(
+            129,
+        ),
+        span: Span {
+            start: 159,
+            end: 168,
+        },
+    },
+    SourceInstruction {
+        pc: BytecodePc(
+            130,
+        ),
+        span: Span {
+            start: 159,
+            end: 168,
+        },
+    },
+    SourceInstruction {
+        pc: BytecodePc(
+            132,
+        ),
+        span: Span {
+            start: 120,
+            end: 171,
+        },
+    },
+    SourceInstruction {
+        pc: BytecodePc(
+            133,
+        ),
+        span: Span {
+            start: 120,
+            end: 171,
+        },
+    },
+    SourceInstruction {
+        pc: BytecodePc(
+            134,
+        ),
+        span: Span {
+            start: 120,
+            end: 171,
+        },
+    },
+    SourceInstruction {
+        pc: BytecodePc(
+            139,
+        ),
+        span: Span {
+            start: 120,
+            end: 171,
+        },
+    },
+    SourceInstruction {
+        pc: BytecodePc(
+            140,
+        ),
+        span: Span {
+            start: 120,
+            end: 171,
+        },
+    },
+    SourceInstruction {
+        pc: BytecodePc(
+            142,
+        ),
+        span: Span {
+            start: 116,
+            end: 195,
+        },
+    },
+    SourceInstruction {
+        pc: BytecodePc(
+            147,
+        ),
+        span: Span {
+            start: 116,
+            end: 195,
+        },
+    },
+    SourceInstruction {
+        pc: BytecodePc(
+            148,
+        ),
+        span: Span {
+            start: 182,
+            end: 187,
+        },
+    },
+    SourceInstruction {
+        pc: BytecodePc(
+            151,
+        ),
+        span: Span {
+            start: 191,
+            end: 192,
+        },
+    },
+    SourceInstruction {
+        pc: BytecodePc(
+            152,
+        ),
+        span: Span {
+            start: 182,
+            end: 192,
+        },
+    },
+    SourceInstruction {
+        pc: BytecodePc(
+            153,
+        ),
+        span: Span {
+            start: 182,
+            end: 187,
+        },
+    },
+    SourceInstruction {
+        pc: BytecodePc(
+            156,
+        ),
+        span: Span {
+            start: 182,
+            end: 192,
+        },
+    },
+    SourceInstruction {
+        pc: BytecodePc(
+            157,
+        ),
+        span: Span {
+            start: 180,
+            end: 195,
+        },
+    },
+    SourceInstruction {
+        pc: BytecodePc(
+            158,
+        ),
+        span: Span {
+            start: 115,
+            end: 196,
+        },
+    },
+    SourceInstruction {
+        pc: BytecodePc(
+            160,
+        ),
+        span: Span {
+            start: 89,
+            end: 196,
+        },
+    },
+    SourceInstruction {
+        pc: BytecodePc(
+            162,
+        ),
+        span: Span {
+            start: 89,
+            end: 196,
+        },
+    },
+    SourceInstruction {
+        pc: BytecodePc(
+            163,
+        ),
+        span: Span {
+            start: 257,
+            end: 262,
+        },
+    },
+    SourceInstruction {
+        pc: BytecodePc(
+            165,
+        ),
+        span: Span {
+            start: 250,
+            end: 263,
+        },
+    },
+]
+bytecode: [94, 0, 0, 94, 1, 0, 207, 111, 62, 0, 0, 0, 0, 17, 6, 169, 232, 3, 14, 180, 199, 14, 13, 1, 0, 200, 94, 4, 0, 94, 3, 0, 94, 2, 0, 94, 6, 0, 190, 0, 193, 6, 95, 0, 0, 201, 95, 1, 0, 123, 126, 0, 14, 17, 6, 169, 232, 3, 14, 179, 202, 38, 0, 0, 179, 126, 2, 232, 3, 234, 5, 78, 141, 234, 247, 14, 14, 193, 4, 130, 94, 5, 0, 95, 4, 0, 123, 94, 5, 0, 126, 0, 232, 4, 14, 234, 66, 193, 5, 107, 42, 0, 0, 0, 95, 5, 0, 232, 14, 95, 2, 0, 95, 5, 0, 155, 97, 2, 0, 14, 234, 11, 14, 6, 108, 23, 0, 0, 0, 14, 234, 212, 14, 6, 108, 13, 0, 0, 0, 14, 234, 17, 108, 5, 0, 0, 0, 48, 95, 2, 0, 180, 155, 97, 2, 0, 14, 109, 234, 1, 234, 182, 130, 192, 6, 40]
+instructions: [
+    VerifiedInstruction {
+        decoded: DecodedInstruction {
+            pc: BytecodePc(
+                0,
+            ),
+            instruction: Instruction {
+                opcode: SetLocUninitialized,
+                operands: Loc(
+                    0,
+                ),
+            },
+            next_pc: BytecodePc(
+                3,
+            ),
+        },
+        entry_stack_depth: Some(
+            0,
+        ),
+        successors: VerifiedSuccessors(
+            Fallthrough(
+                InstructionIndex(
+                    1,
+                ),
+            ),
+        ),
+    },
+    VerifiedInstruction {
+        decoded: DecodedInstruction {
+            pc: BytecodePc(
+                3,
+            ),
+            instruction: Instruction {
+                opcode: SetLocUninitialized,
+                operands: Loc(
+                    1,
+                ),
+            },
+            next_pc: BytecodePc(
+                6,
+            ),
+        },
+        entry_stack_depth: Some(
+            0,
+        ),
+        successors: VerifiedSuccessors(
+            Fallthrough(
+                InstructionIndex(
+                    2,
+                ),
+            ),
+        ),
+    },
+    VerifiedInstruction {
+        decoded: DecodedInstruction {
+            pc: BytecodePc(
+                6,
+            ),
+            instruction: Instruction {
+                opcode: GetArg0,
+                operands: NoneArg,
+            },
+            next_pc: BytecodePc(
+                7,
+            ),
+        },
+        entry_stack_depth: Some(
+            0,
+        ),
+        successors: VerifiedSuccessors(
+            Fallthrough(
+                InstructionIndex(
+                    3,
+                ),
+            ),
+        ),
+    },
+    VerifiedInstruction {
+        decoded: DecodedInstruction {
+            pc: BytecodePc(
+                7,
+            ),
+            instruction: Instruction {
+                opcode: ToObject,
+                operands: None,
+            },
+            next_pc: BytecodePc(
+                8,
+            ),
+        },
+        entry_stack_depth: Some(
+            1,
+        ),
+        successors: VerifiedSuccessors(
+            Fallthrough(
+                InstructionIndex(
+                    4,
+                ),
+            ),
+        ),
+    },
+    VerifiedInstruction {
+        decoded: DecodedInstruction {
+            pc: BytecodePc(
+                8,
+            ),
+            instruction: Instruction {
+                opcode: GetField2,
+                operands: Atom(
+                    AtomPoolIndex(
+                        0,
+                    ),
+                ),
+            },
+            next_pc: BytecodePc(
+                13,
+            ),
+        },
+        entry_stack_depth: Some(
+            1,
+        ),
+        successors: VerifiedSuccessors(
+            Fallthrough(
+                InstructionIndex(
+                    5,
+                ),
+            ),
+        ),
+    },
+    VerifiedInstruction {
+        decoded: DecodedInstruction {
+            pc: BytecodePc(
+                13,
+            ),
+            instruction: Instruction {
+                opcode: Dup,
+                operands: None,
+            },
+            next_pc: BytecodePc(
+                14,
+            ),
+        },
+        entry_stack_depth: Some(
+            2,
+        ),
+        successors: VerifiedSuccessors(
+            Fallthrough(
+                InstructionIndex(
+                    6,
+                ),
+            ),
+        ),
+    },
+    VerifiedInstruction {
+        decoded: DecodedInstruction {
+            pc: BytecodePc(
+                14,
+            ),
+            instruction: Instruction {
+                opcode: Undefined,
+                operands: None,
+            },
+            next_pc: BytecodePc(
+                15,
+            ),
+        },
+        entry_stack_depth: Some(
+            3,
+        ),
+        successors: VerifiedSuccessors(
+            Fallthrough(
+                InstructionIndex(
+                    7,
+                ),
+            ),
+        ),
+    },
+    VerifiedInstruction {
+        decoded: DecodedInstruction {
+            pc: BytecodePc(
+                15,
+            ),
+            instruction: Instruction {
+                opcode: StrictEq,
+                operands: None,
+            },
+            next_pc: BytecodePc(
+                16,
+            ),
+        },
+        entry_stack_depth: Some(
+            4,
+        ),
+        successors: VerifiedSuccessors(
+            Fallthrough(
+                InstructionIndex(
+                    8,
+                ),
+            ),
+        ),
+    },
+    VerifiedInstruction {
+        decoded: DecodedInstruction {
+            pc: BytecodePc(
+                16,
+            ),
+            instruction: Instruction {
+                opcode: IfFalse8,
+                operands: Label8(
+                    3,
+                ),
+            },
+            next_pc: BytecodePc(
+                18,
+            ),
+        },
+        entry_stack_depth: Some(
+            3,
+        ),
+        successors: VerifiedSuccessors(
+            Branch {
+                taken: InstructionIndex(
+                    11,
+                ),
+                not_taken: InstructionIndex(
+                    9,
+                ),
+            },
+        ),
+    },
+    VerifiedInstruction {
+        decoded: DecodedInstruction {
+            pc: BytecodePc(
+                18,
+            ),
+            instruction: Instruction {
+                opcode: Drop,
+                operands: None,
+            },
+            next_pc: BytecodePc(
+                19,
+            ),
+        },
+        entry_stack_depth: Some(
+            2,
+        ),
+        successors: VerifiedSuccessors(
+            Fallthrough(
+                InstructionIndex(
+                    10,
+                ),
+            ),
+        ),
+    },
+    VerifiedInstruction {
+        decoded: DecodedInstruction {
+            pc: BytecodePc(
+                19,
+            ),
+            instruction: Instruction {
+                opcode: Push1,
+                operands: NoneInt,
+            },
+            next_pc: BytecodePc(
+                20,
+            ),
+        },
+        entry_stack_depth: Some(
+            1,
+        ),
+        successors: VerifiedSuccessors(
+            Fallthrough(
+                InstructionIndex(
+                    11,
+                ),
+            ),
+        ),
+    },
+    VerifiedInstruction {
+        decoded: DecodedInstruction {
+            pc: BytecodePc(
+                20,
+            ),
+            instruction: Instruction {
+                opcode: PutLoc0,
+                operands: NoneLoc,
+            },
+            next_pc: BytecodePc(
+                21,
+            ),
+        },
+        entry_stack_depth: Some(
+            2,
+        ),
+        successors: VerifiedSuccessors(
+            Fallthrough(
+                InstructionIndex(
+                    12,
+                ),
+            ),
+        ),
+    },
+    VerifiedInstruction {
+        decoded: DecodedInstruction {
+            pc: BytecodePc(
+                21,
+            ),
+            instruction: Instruction {
+                opcode: Drop,
+                operands: None,
+            },
+            next_pc: BytecodePc(
+                22,
+            ),
+        },
+        entry_stack_depth: Some(
+            1,
+        ),
+        successors: VerifiedSuccessors(
+            Fallthrough(
+                InstructionIndex(
+                    13,
+                ),
+            ),
+        ),
+    },
+    VerifiedInstruction {
+        decoded: DecodedInstruction {
+            pc: BytecodePc(
+                22,
+            ),
+            instruction: Instruction {
+                opcode: Rest,
+                operands: U16(
+                    1,
+                ),
+            },
+            next_pc: BytecodePc(
+                25,
+            ),
+        },
+        entry_stack_depth: Some(
+            0,
+        ),
+        successors: VerifiedSuccessors(
+            Fallthrough(
+                InstructionIndex(
+                    14,
+                ),
+            ),
+        ),
+    },
+    VerifiedInstruction {
+        decoded: DecodedInstruction {
+            pc: BytecodePc(
+                25,
+            ),
+            instruction: Instruction {
+                opcode: PutLoc1,
+                operands: NoneLoc,
+            },
+            next_pc: BytecodePc(
+                26,
+            ),
+        },
+        entry_stack_depth: Some(
+            1,
+        ),
+        successors: VerifiedSuccessors(
+            Fallthrough(
+                InstructionIndex(
+                    15,
+                ),
+            ),
+        ),
+    },
+    VerifiedInstruction {
+        decoded: DecodedInstruction {
+            pc: BytecodePc(
+                26,
+            ),
+            instruction: Instruction {
+                opcode: SetLocUninitialized,
+                operands: Loc(
+                    4,
+                ),
+            },
+            next_pc: BytecodePc(
+                29,
+            ),
+        },
+        entry_stack_depth: Some(
+            0,
+        ),
+        successors: VerifiedSuccessors(
+            Fallthrough(
+                InstructionIndex(
+                    16,
+                ),
+            ),
+        ),
+    },
+    VerifiedInstruction {
+        decoded: DecodedInstruction {
+            pc: BytecodePc(
+                29,
+            ),
+            instruction: Instruction {
+                opcode: SetLocUninitialized,
+                operands: Loc(
+                    3,
+                ),
+            },
+            next_pc: BytecodePc(
+                32,
+            ),
+        },
+        entry_stack_depth: Some(
+            0,
+        ),
+        successors: VerifiedSuccessors(
+            Fallthrough(
+                InstructionIndex(
+                    17,
+                ),
+            ),
+        ),
+    },
+    VerifiedInstruction {
+        decoded: DecodedInstruction {
+            pc: BytecodePc(
+                32,
+            ),
+            instruction: Instruction {
+                opcode: SetLocUninitialized,
+                operands: Loc(
+                    2,
+                ),
+            },
+            next_pc: BytecodePc(
+                35,
+            ),
+        },
+        entry_stack_depth: Some(
+            0,
+        ),
+        successors: VerifiedSuccessors(
+            Fallthrough(
+                InstructionIndex(
+                    18,
+                ),
+            ),
+        ),
+    },
+    VerifiedInstruction {
+        decoded: DecodedInstruction {
+            pc: BytecodePc(
+                35,
+            ),
+            instruction: Instruction {
+                opcode: SetLocUninitialized,
+                operands: Loc(
+                    6,
+                ),
+            },
+            next_pc: BytecodePc(
+                38,
+            ),
+        },
+        entry_stack_depth: Some(
+            0,
+        ),
+        successors: VerifiedSuccessors(
+            Fallthrough(
+                InstructionIndex(
+                    19,
+                ),
+            ),
+        ),
+    },
+    VerifiedInstruction {
+        decoded: DecodedInstruction {
+            pc: BytecodePc(
+                38,
+            ),
+            instruction: Instruction {
+                opcode: FClosure8,
+                operands: Const8(
+                    0,
+                ),
+            },
+            next_pc: BytecodePc(
+                40,
+            ),
+        },
+        entry_stack_depth: Some(
+            0,
+        ),
+        successors: VerifiedSuccessors(
+            Fallthrough(
+                InstructionIndex(
+                    20,
+                ),
+            ),
+        ),
+    },
+    VerifiedInstruction {
+        decoded: DecodedInstruction {
+            pc: BytecodePc(
+                40,
+            ),
+            instruction: Instruction {
+                opcode: PutLoc8,
+                operands: Loc8(
+                    6,
+                ),
+            },
+            next_pc: BytecodePc(
+                42,
+            ),
+        },
+        entry_stack_depth: Some(
+            1,
+        ),
+        successors: VerifiedSuccessors(
+            Fallthrough(
+                InstructionIndex(
+                    21,
+                ),
+            ),
+        ),
+    },
+    VerifiedInstruction {
+        decoded: DecodedInstruction {
+            pc: BytecodePc(
+                42,
+            ),
+            instruction: Instruction {
+                opcode: GetLocCheck,
+                operands: Loc(
+                    0,
+                ),
+            },
+            next_pc: BytecodePc(
+                45,
+            ),
+        },
+        entry_stack_depth: Some(
+            0,
+        ),
+        successors: VerifiedSuccessors(
+            Fallthrough(
+                InstructionIndex(
+                    22,
+                ),
+            ),
+        ),
+    },
+    VerifiedInstruction {
+        decoded: DecodedInstruction {
+            pc: BytecodePc(
+                45,
+            ),
+            instruction: Instruction {
+                opcode: PutLoc2,
+                operands: NoneLoc,
+            },
+            next_pc: BytecodePc(
+                46,
+            ),
+        },
+        entry_stack_depth: Some(
+            1,
+        ),
+        successors: VerifiedSuccessors(
+            Fallthrough(
+                InstructionIndex(
+                    23,
+                ),
+            ),
+        ),
+    },
+    VerifiedInstruction {
+        decoded: DecodedInstruction {
+            pc: BytecodePc(
+                46,
+            ),
+            instruction: Instruction {
+                opcode: GetLocCheck,
+                operands: Loc(
+                    1,
+                ),
+            },
+            next_pc: BytecodePc(
+                49,
+            ),
+        },
+        entry_stack_depth: Some(
+            0,
+        ),
+        successors: VerifiedSuccessors(
+            Fallthrough(
+                InstructionIndex(
+                    24,
+                ),
+            ),
+        ),
+    },
+    VerifiedInstruction {
+        decoded: DecodedInstruction {
+            pc: BytecodePc(
+                49,
+            ),
+            instruction: Instruction {
+                opcode: ForOfStart,
+                operands: None,
+            },
+            next_pc: BytecodePc(
+                50,
+            ),
+        },
+        entry_stack_depth: Some(
+            1,
+        ),
+        successors: VerifiedSuccessors(
+            Fallthrough(
+                InstructionIndex(
+                    25,
+                ),
+            ),
+        ),
+    },
+    VerifiedInstruction {
+        decoded: DecodedInstruction {
+            pc: BytecodePc(
+                50,
+            ),
+            instruction: Instruction {
+                opcode: ForOfNext,
+                operands: U8(
+                    0,
+                ),
+            },
+            next_pc: BytecodePc(
+                52,
+            ),
+        },
+        entry_stack_depth: Some(
+            3,
+        ),
+        successors: VerifiedSuccessors(
+            Fallthrough(
+                InstructionIndex(
+                    26,
+                ),
+            ),
+        ),
+    },
+    VerifiedInstruction {
+        decoded: DecodedInstruction {
+            pc: BytecodePc(
+                52,
+            ),
+            instruction: Instruction {
+                opcode: Drop,
+                operands: None,
+            },
+            next_pc: BytecodePc(
+                53,
+            ),
+        },
+        entry_stack_depth: Some(
+            5,
+        ),
+        successors: VerifiedSuccessors(
+            Fallthrough(
+                InstructionIndex(
+                    27,
+                ),
+            ),
+        ),
+    },
+    VerifiedInstruction {
+        decoded: DecodedInstruction {
+            pc: BytecodePc(
+                53,
+            ),
+            instruction: Instruction {
+                opcode: Dup,
+                operands: None,
+            },
+            next_pc: BytecodePc(
+                54,
+            ),
+        },
+        entry_stack_depth: Some(
+            4,
+        ),
+        successors: VerifiedSuccessors(
+            Fallthrough(
+                InstructionIndex(
+                    28,
+                ),
+            ),
+        ),
+    },
+    VerifiedInstruction {
+        decoded: DecodedInstruction {
+            pc: BytecodePc(
+                54,
+            ),
+            instruction: Instruction {
+                opcode: Undefined,
+                operands: None,
+            },
+            next_pc: BytecodePc(
+                55,
+            ),
+        },
+        entry_stack_depth: Some(
+            5,
+        ),
+        successors: VerifiedSuccessors(
+            Fallthrough(
+                InstructionIndex(
+                    29,
+                ),
+            ),
+        ),
+    },
+    VerifiedInstruction {
+        decoded: DecodedInstruction {
+            pc: BytecodePc(
+                55,
+            ),
+            instruction: Instruction {
+                opcode: StrictEq,
+                operands: None,
+            },
+            next_pc: BytecodePc(
+                56,
+            ),
+        },
+        entry_stack_depth: Some(
+            6,
+        ),
+        successors: VerifiedSuccessors(
+            Fallthrough(
+                InstructionIndex(
+                    30,
+                ),
+            ),
+        ),
+    },
+    VerifiedInstruction {
+        decoded: DecodedInstruction {
+            pc: BytecodePc(
+                56,
+            ),
+            instruction: Instruction {
+                opcode: IfFalse8,
+                operands: Label8(
+                    3,
+                ),
+            },
+            next_pc: BytecodePc(
+                58,
+            ),
+        },
+        entry_stack_depth: Some(
+            5,
+        ),
+        successors: VerifiedSuccessors(
+            Branch {
+                taken: InstructionIndex(
+                    33,
+                ),
+                not_taken: InstructionIndex(
+                    31,
+                ),
+            },
+        ),
+    },
+    VerifiedInstruction {
+        decoded: DecodedInstruction {
+            pc: BytecodePc(
+                58,
+            ),
+            instruction: Instruction {
+                opcode: Drop,
+                operands: None,
+            },
+            next_pc: BytecodePc(
+                59,
+            ),
+        },
+        entry_stack_depth: Some(
+            4,
+        ),
+        successors: VerifiedSuccessors(
+            Fallthrough(
+                InstructionIndex(
+                    32,
+                ),
+            ),
+        ),
+    },
+    VerifiedInstruction {
+        decoded: DecodedInstruction {
+            pc: BytecodePc(
+                59,
+            ),
+            instruction: Instruction {
+                opcode: Push0,
+                operands: NoneInt,
+            },
+            next_pc: BytecodePc(
+                60,
+            ),
+        },
+        entry_stack_depth: Some(
+            3,
+        ),
+        successors: VerifiedSuccessors(
+            Fallthrough(
+                InstructionIndex(
+                    33,
+                ),
+            ),
+        ),
+    },
+    VerifiedInstruction {
+        decoded: DecodedInstruction {
+            pc: BytecodePc(
+                60,
+            ),
+            instruction: Instruction {
+                opcode: PutLoc3,
+                operands: NoneLoc,
+            },
+            next_pc: BytecodePc(
+                61,
+            ),
+        },
+        entry_stack_depth: Some(
+            4,
+        ),
+        successors: VerifiedSuccessors(
+            Fallthrough(
+                InstructionIndex(
+                    34,
+                ),
+            ),
+        ),
+    },
+    VerifiedInstruction {
+        decoded: DecodedInstruction {
+            pc: BytecodePc(
+                61,
+            ),
+            instruction: Instruction {
+                opcode: ArrayFrom,
+                operands: NPop {
+                    argument_count: 0,
+                },
+            },
+            next_pc: BytecodePc(
+                64,
+            ),
+        },
+        entry_stack_depth: Some(
+            3,
+        ),
+        successors: VerifiedSuccessors(
+            Fallthrough(
+                InstructionIndex(
+                    35,
+                ),
+            ),
+        ),
+    },
+    VerifiedInstruction {
+        decoded: DecodedInstruction {
+            pc: BytecodePc(
+                64,
+            ),
+            instruction: Instruction {
+                opcode: Push0,
+                operands: NoneInt,
+            },
+            next_pc: BytecodePc(
+                65,
+            ),
+        },
+        entry_stack_depth: Some(
+            4,
+        ),
+        successors: VerifiedSuccessors(
+            Fallthrough(
+                InstructionIndex(
+                    36,
+                ),
+            ),
+        ),
+    },
+    VerifiedInstruction {
+        decoded: DecodedInstruction {
+            pc: BytecodePc(
+                65,
+            ),
+            instruction: Instruction {
+                opcode: ForOfNext,
+                operands: U8(
+                    2,
+                ),
+            },
+            next_pc: BytecodePc(
+                67,
+            ),
+        },
+        entry_stack_depth: Some(
+            5,
+        ),
+        successors: VerifiedSuccessors(
+            Fallthrough(
+                InstructionIndex(
+                    37,
+                ),
+            ),
+        ),
+    },
+    VerifiedInstruction {
+        decoded: DecodedInstruction {
+            pc: BytecodePc(
+                67,
+            ),
+            instruction: Instruction {
+                opcode: IfFalse8,
+                operands: Label8(
+                    3,
+                ),
+            },
+            next_pc: BytecodePc(
+                69,
+            ),
+        },
+        entry_stack_depth: Some(
+            7,
+        ),
+        successors: VerifiedSuccessors(
+            Branch {
+                taken: InstructionIndex(
+                    39,
+                ),
+                not_taken: InstructionIndex(
+                    38,
+                ),
+            },
+        ),
+    },
+    VerifiedInstruction {
+        decoded: DecodedInstruction {
+            pc: BytecodePc(
+                69,
+            ),
+            instruction: Instruction {
+                opcode: Goto8,
+                operands: Label8(
+                    5,
+                ),
+            },
+            next_pc: BytecodePc(
+                71,
+            ),
+        },
+        entry_stack_depth: Some(
+            6,
+        ),
+        successors: VerifiedSuccessors(
+            Jump(
+                InstructionIndex(
+                    42,
+                ),
+            ),
+        ),
+    },
+    VerifiedInstruction {
+        decoded: DecodedInstruction {
+            pc: BytecodePc(
+                71,
+            ),
+            instruction: Instruction {
+                opcode: DefineArrayEl,
+                operands: None,
+            },
+            next_pc: BytecodePc(
+                72,
+            ),
+        },
+        entry_stack_depth: Some(
+            6,
+        ),
+        successors: VerifiedSuccessors(
+            Fallthrough(
+                InstructionIndex(
+                    40,
+                ),
+            ),
+        ),
+    },
+    VerifiedInstruction {
+        decoded: DecodedInstruction {
+            pc: BytecodePc(
+                72,
+            ),
+            instruction: Instruction {
+                opcode: Inc,
+                operands: None,
+            },
+            next_pc: BytecodePc(
+                73,
+            ),
+        },
+        entry_stack_depth: Some(
+            5,
+        ),
+        successors: VerifiedSuccessors(
+            Fallthrough(
+                InstructionIndex(
+                    41,
+                ),
+            ),
+        ),
+    },
+    VerifiedInstruction {
+        decoded: DecodedInstruction {
+            pc: BytecodePc(
+                73,
+            ),
+            instruction: Instruction {
+                opcode: Goto8,
+                operands: Label8(
+                    -9,
+                ),
+            },
+            next_pc: BytecodePc(
+                75,
+            ),
+        },
+        entry_stack_depth: Some(
+            5,
+        ),
+        successors: VerifiedSuccessors(
+            Jump(
+                InstructionIndex(
+                    36,
+                ),
+            ),
+        ),
+    },
+    VerifiedInstruction {
+        decoded: DecodedInstruction {
+            pc: BytecodePc(
+                75,
+            ),
+            instruction: Instruction {
+                opcode: Drop,
+                operands: None,
+            },
+            next_pc: BytecodePc(
+                76,
+            ),
+        },
+        entry_stack_depth: Some(
+            6,
+        ),
+        successors: VerifiedSuccessors(
+            Fallthrough(
+                InstructionIndex(
+                    43,
+                ),
+            ),
+        ),
+    },
+    VerifiedInstruction {
+        decoded: DecodedInstruction {
+            pc: BytecodePc(
+                76,
+            ),
+            instruction: Instruction {
+                opcode: Drop,
+                operands: None,
+            },
+            next_pc: BytecodePc(
+                77,
+            ),
+        },
+        entry_stack_depth: Some(
+            5,
+        ),
+        successors: VerifiedSuccessors(
+            Fallthrough(
+                InstructionIndex(
+                    44,
+                ),
+            ),
+        ),
+    },
+    VerifiedInstruction {
+        decoded: DecodedInstruction {
+            pc: BytecodePc(
+                77,
+            ),
+            instruction: Instruction {
+                opcode: PutLoc8,
+                operands: Loc8(
+                    4,
+                ),
+            },
+            next_pc: BytecodePc(
+                79,
+            ),
+        },
+        entry_stack_depth: Some(
+            4,
+        ),
+        successors: VerifiedSuccessors(
+            Fallthrough(
+                InstructionIndex(
+                    45,
+                ),
+            ),
+        ),
+    },
+    VerifiedInstruction {
+        decoded: DecodedInstruction {
+            pc: BytecodePc(
+                79,
+            ),
+            instruction: Instruction {
+                opcode: IteratorClose,
+                operands: None,
+            },
+            next_pc: BytecodePc(
+                80,
+            ),
+        },
+        entry_stack_depth: Some(
+            3,
+        ),
+        successors: VerifiedSuccessors(
+            Fallthrough(
+                InstructionIndex(
+                    46,
+                ),
+            ),
+        ),
+    },
+    VerifiedInstruction {
+        decoded: DecodedInstruction {
+            pc: BytecodePc(
+                80,
+            ),
+            instruction: Instruction {
+                opcode: SetLocUninitialized,
+                operands: Loc(
+                    5,
+                ),
+            },
+            next_pc: BytecodePc(
+                83,
+            ),
+        },
+        entry_stack_depth: Some(
+            0,
+        ),
+        successors: VerifiedSuccessors(
+            Fallthrough(
+                InstructionIndex(
+                    47,
+                ),
+            ),
+        ),
+    },
+    VerifiedInstruction {
+        decoded: DecodedInstruction {
+            pc: BytecodePc(
+                83,
+            ),
+            instruction: Instruction {
+                opcode: GetLocCheck,
+                operands: Loc(
+                    4,
+                ),
+            },
+            next_pc: BytecodePc(
+                86,
+            ),
+        },
+        entry_stack_depth: Some(
+            0,
+        ),
+        successors: VerifiedSuccessors(
+            Fallthrough(
+                InstructionIndex(
+                    48,
+                ),
+            ),
+        ),
+    },
+    VerifiedInstruction {
+        decoded: DecodedInstruction {
+            pc: BytecodePc(
+                86,
+            ),
+            instruction: Instruction {
+                opcode: ForOfStart,
+                operands: None,
+            },
+            next_pc: BytecodePc(
+                87,
+            ),
+        },
+        entry_stack_depth: Some(
+            1,
+        ),
+        successors: VerifiedSuccessors(
+            Fallthrough(
+                InstructionIndex(
+                    49,
+                ),
+            ),
+        ),
+    },
+    VerifiedInstruction {
+        decoded: DecodedInstruction {
+            pc: BytecodePc(
+                87,
+            ),
+            instruction: Instruction {
+                opcode: SetLocUninitialized,
+                operands: Loc(
+                    5,
+                ),
+            },
+            next_pc: BytecodePc(
+                90,
+            ),
+        },
+        entry_stack_depth: Some(
+            3,
+        ),
+        successors: VerifiedSuccessors(
+            Fallthrough(
+                InstructionIndex(
+                    50,
+                ),
+            ),
+        ),
+    },
+    VerifiedInstruction {
+        decoded: DecodedInstruction {
+            pc: BytecodePc(
+                90,
+            ),
+            instruction: Instruction {
+                opcode: ForOfNext,
+                operands: U8(
+                    0,
+                ),
+            },
+            next_pc: BytecodePc(
+                92,
+            ),
+        },
+        entry_stack_depth: Some(
+            3,
+        ),
+        successors: VerifiedSuccessors(
+            Fallthrough(
+                InstructionIndex(
+                    51,
+                ),
+            ),
+        ),
+    },
+    VerifiedInstruction {
+        decoded: DecodedInstruction {
+            pc: BytecodePc(
+                92,
+            ),
+            instruction: Instruction {
+                opcode: IfFalse8,
+                operands: Label8(
+                    4,
+                ),
+            },
+            next_pc: BytecodePc(
+                94,
+            ),
+        },
+        entry_stack_depth: Some(
+            5,
+        ),
+        successors: VerifiedSuccessors(
+            Branch {
+                taken: InstructionIndex(
+                    54,
+                ),
+                not_taken: InstructionIndex(
+                    52,
+                ),
+            },
+        ),
+    },
+    VerifiedInstruction {
+        decoded: DecodedInstruction {
+            pc: BytecodePc(
+                94,
+            ),
+            instruction: Instruction {
+                opcode: Drop,
+                operands: None,
+            },
+            next_pc: BytecodePc(
+                95,
+            ),
+        },
+        entry_stack_depth: Some(
+            4,
+        ),
+        successors: VerifiedSuccessors(
+            Fallthrough(
+                InstructionIndex(
+                    53,
+                ),
+            ),
+        ),
+    },
+    VerifiedInstruction {
+        decoded: DecodedInstruction {
+            pc: BytecodePc(
+                95,
+            ),
+            instruction: Instruction {
+                opcode: Goto8,
+                operands: Label8(
+                    66,
+                ),
+            },
+            next_pc: BytecodePc(
+                97,
+            ),
+        },
+        entry_stack_depth: Some(
+            3,
+        ),
+        successors: VerifiedSuccessors(
+            Jump(
+                InstructionIndex(
+                    84,
+                ),
+            ),
+        ),
+    },
+    VerifiedInstruction {
+        decoded: DecodedInstruction {
+            pc: BytecodePc(
+                97,
+            ),
+            instruction: Instruction {
+                opcode: PutLoc8,
+                operands: Loc8(
+                    5,
+                ),
+            },
+            next_pc: BytecodePc(
+                99,
+            ),
+        },
+        entry_stack_depth: Some(
+            4,
+        ),
+        successors: VerifiedSuccessors(
+            Fallthrough(
+                InstructionIndex(
+                    55,
+                ),
+            ),
+        ),
+    },
+    VerifiedInstruction {
+        decoded: DecodedInstruction {
+            pc: BytecodePc(
+                99,
+            ),
+            instruction: Instruction {
+                opcode: Catch,
+                operands: Label(
+                    42,
+                ),
+            },
+            next_pc: BytecodePc(
+                104,
+            ),
+        },
+        entry_stack_depth: Some(
+            3,
+        ),
+        successors: VerifiedSuccessors(
+            Branch {
+                taken: InstructionIndex(
+                    74,
+                ),
+                not_taken: InstructionIndex(
+                    56,
+                ),
+            },
+        ),
+    },
+    VerifiedInstruction {
+        decoded: DecodedInstruction {
+            pc: BytecodePc(
+                104,
+            ),
+            instruction: Instruction {
+                opcode: GetLocCheck,
+                operands: Loc(
+                    5,
+                ),
+            },
+            next_pc: BytecodePc(
+                107,
+            ),
+        },
+        entry_stack_depth: Some(
+            4,
+        ),
+        successors: VerifiedSuccessors(
+            Fallthrough(
+                InstructionIndex(
+                    57,
+                ),
+            ),
+        ),
+    },
+    VerifiedInstruction {
+        decoded: DecodedInstruction {
+            pc: BytecodePc(
+                107,
+            ),
+            instruction: Instruction {
+                opcode: IfFalse8,
+                operands: Label8(
+                    14,
+                ),
+            },
+            next_pc: BytecodePc(
+                109,
+            ),
+        },
+        entry_stack_depth: Some(
+            5,
+        ),
+        successors: VerifiedSuccessors(
+            Branch {
+                taken: InstructionIndex(
+                    64,
+                ),
+                not_taken: InstructionIndex(
+                    58,
+                ),
+            },
+        ),
+    },
+    VerifiedInstruction {
+        decoded: DecodedInstruction {
+            pc: BytecodePc(
+                109,
+            ),
+            instruction: Instruction {
+                opcode: GetLocCheck,
+                operands: Loc(
+                    2,
+                ),
+            },
+            next_pc: BytecodePc(
+                112,
+            ),
+        },
+        entry_stack_depth: Some(
+            4,
+        ),
+        successors: VerifiedSuccessors(
+            Fallthrough(
+                InstructionIndex(
+                    59,
+                ),
+            ),
+        ),
+    },
+    VerifiedInstruction {
+        decoded: DecodedInstruction {
+            pc: BytecodePc(
+                112,
+            ),
+            instruction: Instruction {
+                opcode: GetLocCheck,
+                operands: Loc(
+                    5,
+                ),
+            },
+            next_pc: BytecodePc(
+                115,
+            ),
+        },
+        entry_stack_depth: Some(
+            5,
+        ),
+        successors: VerifiedSuccessors(
+            Fallthrough(
+                InstructionIndex(
+                    60,
+                ),
+            ),
+        ),
+    },
+    VerifiedInstruction {
+        decoded: DecodedInstruction {
+            pc: BytecodePc(
+                115,
+            ),
+            instruction: Instruction {
+                opcode: Add,
+                operands: None,
+            },
+            next_pc: BytecodePc(
+                116,
+            ),
+        },
+        entry_stack_depth: Some(
+            6,
+        ),
+        successors: VerifiedSuccessors(
+            Fallthrough(
+                InstructionIndex(
+                    61,
+                ),
+            ),
+        ),
+    },
+    VerifiedInstruction {
+        decoded: DecodedInstruction {
+            pc: BytecodePc(
+                116,
+            ),
+            instruction: Instruction {
+                opcode: SetLocCheck,
+                operands: Loc(
+                    2,
+                ),
+            },
+            next_pc: BytecodePc(
+                119,
+            ),
+        },
+        entry_stack_depth: Some(
+            5,
+        ),
+        successors: VerifiedSuccessors(
+            Fallthrough(
+                InstructionIndex(
+                    62,
+                ),
+            ),
+        ),
+    },
+    VerifiedInstruction {
+        decoded: DecodedInstruction {
+            pc: BytecodePc(
+                119,
+            ),
+            instruction: Instruction {
+                opcode: Drop,
+                operands: None,
+            },
+            next_pc: BytecodePc(
+                120,
+            ),
+        },
+        entry_stack_depth: Some(
+            5,
+        ),
+        successors: VerifiedSuccessors(
+            Fallthrough(
+                InstructionIndex(
+                    63,
+                ),
+            ),
+        ),
+    },
+    VerifiedInstruction {
+        decoded: DecodedInstruction {
+            pc: BytecodePc(
+                120,
+            ),
+            instruction: Instruction {
+                opcode: Goto8,
+                operands: Label8(
+                    11,
+                ),
+            },
+            next_pc: BytecodePc(
+                122,
+            ),
+        },
+        entry_stack_depth: Some(
+            4,
+        ),
+        successors: VerifiedSuccessors(
+            Jump(
+                InstructionIndex(
+                    69,
+                ),
+            ),
+        ),
+    },
+    VerifiedInstruction {
+        decoded: DecodedInstruction {
+            pc: BytecodePc(
+                122,
+            ),
+            instruction: Instruction {
+                opcode: Drop,
+                operands: None,
+            },
+            next_pc: BytecodePc(
+                123,
+            ),
+        },
+        entry_stack_depth: Some(
+            4,
+        ),
+        successors: VerifiedSuccessors(
+            Fallthrough(
+                InstructionIndex(
+                    65,
+                ),
+            ),
+        ),
+    },
+    VerifiedInstruction {
+        decoded: DecodedInstruction {
+            pc: BytecodePc(
+                123,
+            ),
+            instruction: Instruction {
+                opcode: Undefined,
+                operands: None,
+            },
+            next_pc: BytecodePc(
+                124,
+            ),
+        },
+        entry_stack_depth: Some(
+            3,
+        ),
+        successors: VerifiedSuccessors(
+            Fallthrough(
+                InstructionIndex(
+                    66,
+                ),
+            ),
+        ),
+    },
+    VerifiedInstruction {
+        decoded: DecodedInstruction {
+            pc: BytecodePc(
+                124,
+            ),
+            instruction: Instruction {
+                opcode: Gosub,
+                operands: Label(
+                    23,
+                ),
+            },
+            next_pc: BytecodePc(
+                129,
+            ),
+        },
+        entry_stack_depth: Some(
+            4,
+        ),
+        successors: VerifiedSuccessors(
+            Branch {
+                taken: InstructionIndex(
+                    76,
+                ),
+                not_taken: InstructionIndex(
+                    67,
+                ),
+            },
+        ),
+    },
+    VerifiedInstruction {
+        decoded: DecodedInstruction {
+            pc: BytecodePc(
+                129,
+            ),
+            instruction: Instruction {
+                opcode: Drop,
+                operands: None,
+            },
+            next_pc: BytecodePc(
+                130,
+            ),
+        },
+        entry_stack_depth: Some(
+            4,
+        ),
+        successors: VerifiedSuccessors(
+            Fallthrough(
+                InstructionIndex(
+                    68,
+                ),
+            ),
+        ),
+    },
+    VerifiedInstruction {
+        decoded: DecodedInstruction {
+            pc: BytecodePc(
+                130,
+            ),
+            instruction: Instruction {
+                opcode: Goto8,
+                operands: Label8(
+                    -44,
+                ),
+            },
+            next_pc: BytecodePc(
+                132,
+            ),
+        },
+        entry_stack_depth: Some(
+            3,
+        ),
+        successors: VerifiedSuccessors(
+            Jump(
+                InstructionIndex(
+                    49,
+                ),
+            ),
+        ),
+    },
+    VerifiedInstruction {
+        decoded: DecodedInstruction {
+            pc: BytecodePc(
+                132,
+            ),
+            instruction: Instruction {
+                opcode: Drop,
+                operands: None,
+            },
+            next_pc: BytecodePc(
+                133,
+            ),
+        },
+        entry_stack_depth: Some(
+            4,
+        ),
+        successors: VerifiedSuccessors(
+            Fallthrough(
+                InstructionIndex(
+                    70,
+                ),
+            ),
+        ),
+    },
+    VerifiedInstruction {
+        decoded: DecodedInstruction {
+            pc: BytecodePc(
+                133,
+            ),
+            instruction: Instruction {
+                opcode: Undefined,
+                operands: None,
+            },
+            next_pc: BytecodePc(
+                134,
+            ),
+        },
+        entry_stack_depth: Some(
+            3,
+        ),
+        successors: VerifiedSuccessors(
+            Fallthrough(
+                InstructionIndex(
+                    71,
+                ),
+            ),
+        ),
+    },
+    VerifiedInstruction {
+        decoded: DecodedInstruction {
+            pc: BytecodePc(
+                134,
+            ),
+            instruction: Instruction {
+                opcode: Gosub,
+                operands: Label(
+                    13,
+                ),
+            },
+            next_pc: BytecodePc(
+                139,
+            ),
+        },
+        entry_stack_depth: Some(
+            4,
+        ),
+        successors: VerifiedSuccessors(
+            Branch {
+                taken: InstructionIndex(
+                    76,
+                ),
+                not_taken: InstructionIndex(
+                    72,
+                ),
+            },
+        ),
+    },
+    VerifiedInstruction {
+        decoded: DecodedInstruction {
+            pc: BytecodePc(
+                139,
+            ),
+            instruction: Instruction {
+                opcode: Drop,
+                operands: None,
+            },
+            next_pc: BytecodePc(
+                140,
+            ),
+        },
+        entry_stack_depth: Some(
+            4,
+        ),
+        successors: VerifiedSuccessors(
+            Fallthrough(
+                InstructionIndex(
+                    73,
+                ),
+            ),
+        ),
+    },
+    VerifiedInstruction {
+        decoded: DecodedInstruction {
+            pc: BytecodePc(
+                140,
+            ),
+            instruction: Instruction {
+                opcode: Goto8,
+                operands: Label8(
+                    17,
+                ),
+            },
+            next_pc: BytecodePc(
+                142,
+            ),
+        },
+        entry_stack_depth: Some(
+            3,
+        ),
+        successors: VerifiedSuccessors(
+            Jump(
+                InstructionIndex(
+                    82,
+                ),
+            ),
+        ),
+    },
+    VerifiedInstruction {
+        decoded: DecodedInstruction {
+            pc: BytecodePc(
+                142,
+            ),
+            instruction: Instruction {
+                opcode: Gosub,
+                operands: Label(
+                    5,
+                ),
+            },
+            next_pc: BytecodePc(
+                147,
+            ),
+        },
+        entry_stack_depth: Some(
+            4,
+        ),
+        successors: VerifiedSuccessors(
+            Branch {
+                taken: InstructionIndex(
+                    76,
+                ),
+                not_taken: InstructionIndex(
+                    75,
+                ),
+            },
+        ),
+    },
+    VerifiedInstruction {
+        decoded: DecodedInstruction {
+            pc: BytecodePc(
+                147,
+            ),
+            instruction: Instruction {
+                opcode: Throw,
+                operands: None,
+            },
+            next_pc: BytecodePc(
+                148,
+            ),
+        },
+        entry_stack_depth: Some(
+            4,
+        ),
+        successors: VerifiedSuccessors(
+            Terminate,
+        ),
+    },
+    VerifiedInstruction {
+        decoded: DecodedInstruction {
+            pc: BytecodePc(
+                148,
+            ),
+            instruction: Instruction {
+                opcode: GetLocCheck,
+                operands: Loc(
+                    2,
+                ),
+            },
+            next_pc: BytecodePc(
+                151,
+            ),
+        },
+        entry_stack_depth: Some(
+            5,
+        ),
+        successors: VerifiedSuccessors(
+            Fallthrough(
+                InstructionIndex(
+                    77,
+                ),
+            ),
+        ),
+    },
+    VerifiedInstruction {
+        decoded: DecodedInstruction {
+            pc: BytecodePc(
+                151,
+            ),
+            instruction: Instruction {
+                opcode: Push1,
+                operands: NoneInt,
+            },
+            next_pc: BytecodePc(
+                152,
+            ),
+        },
+        entry_stack_depth: Some(
+            6,
+        ),
+        successors: VerifiedSuccessors(
+            Fallthrough(
+                InstructionIndex(
+                    78,
+                ),
+            ),
+        ),
+    },
+    VerifiedInstruction {
+        decoded: DecodedInstruction {
+            pc: BytecodePc(
+                152,
+            ),
+            instruction: Instruction {
+                opcode: Add,
+                operands: None,
+            },
+            next_pc: BytecodePc(
+                153,
+            ),
+        },
+        entry_stack_depth: Some(
+            7,
+        ),
+        successors: VerifiedSuccessors(
+            Fallthrough(
+                InstructionIndex(
+                    79,
+                ),
+            ),
+        ),
+    },
+    VerifiedInstruction {
+        decoded: DecodedInstruction {
+            pc: BytecodePc(
+                153,
+            ),
+            instruction: Instruction {
+                opcode: SetLocCheck,
+                operands: Loc(
+                    2,
+                ),
+            },
+            next_pc: BytecodePc(
+                156,
+            ),
+        },
+        entry_stack_depth: Some(
+            6,
+        ),
+        successors: VerifiedSuccessors(
+            Fallthrough(
+                InstructionIndex(
+                    80,
+                ),
+            ),
+        ),
+    },
+    VerifiedInstruction {
+        decoded: DecodedInstruction {
+            pc: BytecodePc(
+                156,
+            ),
+            instruction: Instruction {
+                opcode: Drop,
+                operands: None,
+            },
+            next_pc: BytecodePc(
+                157,
+            ),
+        },
+        entry_stack_depth: Some(
+            6,
+        ),
+        successors: VerifiedSuccessors(
+            Fallthrough(
+                InstructionIndex(
+                    81,
+                ),
+            ),
+        ),
+    },
+    VerifiedInstruction {
+        decoded: DecodedInstruction {
+            pc: BytecodePc(
+                157,
+            ),
+            instruction: Instruction {
+                opcode: Ret,
+                operands: None,
+            },
+            next_pc: BytecodePc(
+                158,
+            ),
+        },
+        entry_stack_depth: Some(
+            5,
+        ),
+        successors: VerifiedSuccessors(
+            Terminate,
+        ),
+    },
+    VerifiedInstruction {
+        decoded: DecodedInstruction {
+            pc: BytecodePc(
+                158,
+            ),
+            instruction: Instruction {
+                opcode: Goto8,
+                operands: Label8(
+                    1,
+                ),
+            },
+            next_pc: BytecodePc(
+                160,
+            ),
+        },
+        entry_stack_depth: Some(
+            3,
+        ),
+        successors: VerifiedSuccessors(
+            Jump(
+                InstructionIndex(
+                    83,
+                ),
+            ),
+        ),
+    },
+    VerifiedInstruction {
+        decoded: DecodedInstruction {
+            pc: BytecodePc(
+                160,
+            ),
+            instruction: Instruction {
+                opcode: Goto8,
+                operands: Label8(
+                    -74,
+                ),
+            },
+            next_pc: BytecodePc(
+                162,
+            ),
+        },
+        entry_stack_depth: Some(
+            3,
+        ),
+        successors: VerifiedSuccessors(
+            Jump(
+                InstructionIndex(
+                    49,
+                ),
+            ),
+        ),
+    },
+    VerifiedInstruction {
+        decoded: DecodedInstruction {
+            pc: BytecodePc(
+                162,
+            ),
+            instruction: Instruction {
+                opcode: IteratorClose,
+                operands: None,
+            },
+            next_pc: BytecodePc(
+                163,
+            ),
+        },
+        entry_stack_depth: Some(
+            3,
+        ),
+        successors: VerifiedSuccessors(
+            Fallthrough(
+                InstructionIndex(
+                    85,
+                ),
+            ),
+        ),
+    },
+    VerifiedInstruction {
+        decoded: DecodedInstruction {
+            pc: BytecodePc(
+                163,
+            ),
+            instruction: Instruction {
+                opcode: GetLoc8,
+                operands: Loc8(
+                    6,
+                ),
+            },
+            next_pc: BytecodePc(
+                165,
+            ),
+        },
+        entry_stack_depth: Some(
+            0,
+        ),
+        successors: VerifiedSuccessors(
+            Fallthrough(
+                InstructionIndex(
+                    86,
+                ),
+            ),
+        ),
+    },
+    VerifiedInstruction {
+        decoded: DecodedInstruction {
+            pc: BytecodePc(
+                165,
+            ),
+            instruction: Instruction {
+                opcode: Return,
+                operands: None,
+            },
+            next_pc: BytecodePc(
+                166,
+            ),
+        },
+        entry_stack_depth: Some(
+            1,
+        ),
+        successors: VerifiedSuccessors(
+            Terminate,
+        ),
+    },
+]
+control-flow summary: max_stack=7 transfers=87 domains=FunctionIndexDomains { atom_pool_len: 9, constant_pool_len: 1, argument_count: 1, local_count: 7, closure_var_count: 0 } header=VerifiedFunctionHeader { flags: FunctionHeaderFlags(1601), mode: FunctionMode(0), kind: Normal, defined_argument_count: 1, variable_reference_count: 2 }
+capture layout: Some(
+    CompilerCaptureLayout {
+        bindings: [
+            ScopedLocal(
+                2,
+            ),
+            ScopedLocal(
+                3,
+            ),
+        ],
+        mapped_arguments: None,
+    },
+)
+constant layout: Some(
+    CompilerConstantLayout {
+        kinds: [
+            Function,
+        ],
+    },
+)
+metadata kind: OrdinaryFunction
+metadata function name: Some(AtomPoolIndex(1))
+metadata variables: [
+    VariableDefinition {
+        name: Some(
+            AtomPoolIndex(
+                2,
+            ),
+        ),
+        scope_next: End,
+        policy: CompilerBindingPolicy {
+            kind: Parameter,
+            initialization: Argument,
+            writes: Mutable,
+            temporal_dead_zone: false,
+        },
+        has_scope: false,
+        variable_reference: None,
+        function_initializer: None,
+    },
+    VariableDefinition {
+        name: Some(
+            AtomPoolIndex(
+                0,
+            ),
+        ),
+        scope_next: End,
+        policy: CompilerBindingPolicy {
+            kind: Parameter,
+            initialization: Argument,
+            writes: Mutable,
+            temporal_dead_zone: true,
+        },
+        has_scope: false,
+        variable_reference: None,
+        function_initializer: None,
+    },
+    VariableDefinition {
+        name: Some(
+            AtomPoolIndex(
+                3,
+            ),
+        ),
+        scope_next: Local(
+            0,
+        ),
+        policy: CompilerBindingPolicy {
+            kind: Parameter,
+            initialization: Argument,
+            writes: Mutable,
+            temporal_dead_zone: true,
+        },
+        has_scope: false,
+        variable_reference: None,
+        function_initializer: None,
+    },
+    VariableDefinition {
+        name: Some(
+            AtomPoolIndex(
+                4,
+            ),
+        ),
+        scope_next: End,
+        policy: CompilerBindingPolicy {
+            kind: Let,
+            initialization: AtDeclaration,
+            writes: Mutable,
+            temporal_dead_zone: true,
+        },
+        has_scope: true,
+        variable_reference: Some(
+            0,
+        ),
+        function_initializer: None,
+    },
+    VariableDefinition {
+        name: Some(
+            AtomPoolIndex(
+                5,
+            ),
+        ),
+        scope_next: Local(
+            2,
+        ),
+        policy: CompilerBindingPolicy {
+            kind: Const,
+            initialization: AtDeclaration,
+            writes: Immutable,
+            temporal_dead_zone: true,
+        },
+        has_scope: true,
+        variable_reference: Some(
+            1,
+        ),
+        function_initializer: None,
+    },
+    VariableDefinition {
+        name: Some(
+            AtomPoolIndex(
+                6,
+            ),
+        ),
+        scope_next: Local(
+            3,
+        ),
+        policy: CompilerBindingPolicy {
+            kind: Const,
+            initialization: AtDeclaration,
+            writes: Immutable,
+            temporal_dead_zone: true,
+        },
+        has_scope: true,
+        variable_reference: None,
+        function_initializer: None,
+    },
+    VariableDefinition {
+        name: Some(
+            AtomPoolIndex(
+                7,
+            ),
+        ),
+        scope_next: Local(
+            6,
+        ),
+        policy: CompilerBindingPolicy {
+            kind: Const,
+            initialization: AtDeclaration,
+            writes: Immutable,
+            temporal_dead_zone: true,
+        },
+        has_scope: true,
+        variable_reference: None,
+        function_initializer: None,
+    },
+    VariableDefinition {
+        name: Some(
+            AtomPoolIndex(
+                8,
+            ),
+        ),
+        scope_next: Local(
+            4,
+        ),
+        policy: CompilerBindingPolicy {
+            kind: Function,
+            initialization: FunctionAtScopeEntry,
+            writes: Mutable,
+            temporal_dead_zone: false,
+        },
+        has_scope: true,
+        variable_reference: None,
+        function_initializer: Some(
+            0,
+        ),
+    },
+]
+metadata closures: []
+metadata source: display="characterization.js" function="function outer({seed = 1}, ...items) {let total = seed;const [head = 0, ...tail] = items;for (const value of tail) {try {if (value) { total += value; } else { continue; }} finally { total += 1; }}function inner(delta = head) { return total + delta; }return inner;}" function_span=SourceByteSpan { start: 0, end: 264 } name_span=Some(SourceByteSpan { start: 9, end: 14 }) mappings=[
+    PcSourceSpan {
+        pc: BytecodePc(
+            0,
+        ),
+        span: SourceByteSpan {
+            start: 16,
+            end: 20,
+        },
+    },
+    PcSourceSpan {
+        pc: BytecodePc(
+            3,
+        ),
+        span: SourceByteSpan {
+            start: 30,
+            end: 35,
+        },
+    },
+    PcSourceSpan {
+        pc: BytecodePc(
+            6,
+        ),
+        span: SourceByteSpan {
+            start: 15,
+            end: 25,
+        },
+    },
+    PcSourceSpan {
+        pc: BytecodePc(
+            7,
+        ),
+        span: SourceByteSpan {
+            start: 15,
+            end: 25,
+        },
+    },
+    PcSourceSpan {
+        pc: BytecodePc(
+            8,
+        ),
+        span: SourceByteSpan {
+            start: 16,
+            end: 24,
+        },
+    },
+    PcSourceSpan {
+        pc: BytecodePc(
+            13,
+        ),
+        span: SourceByteSpan {
+            start: 16,
+            end: 24,
+        },
+    },
+    PcSourceSpan {
+        pc: BytecodePc(
+            14,
+        ),
+        span: SourceByteSpan {
+            start: 16,
+            end: 24,
+        },
+    },
+    PcSourceSpan {
+        pc: BytecodePc(
+            15,
+        ),
+        span: SourceByteSpan {
+            start: 16,
+            end: 24,
+        },
+    },
+    PcSourceSpan {
+        pc: BytecodePc(
+            16,
+        ),
+        span: SourceByteSpan {
+            start: 16,
+            end: 24,
+        },
+    },
+    PcSourceSpan {
+        pc: BytecodePc(
+            18,
+        ),
+        span: SourceByteSpan {
+            start: 16,
+            end: 24,
+        },
+    },
+    PcSourceSpan {
+        pc: BytecodePc(
+            19,
+        ),
+        span: SourceByteSpan {
+            start: 23,
+            end: 24,
+        },
+    },
+    PcSourceSpan {
+        pc: BytecodePc(
+            20,
+        ),
+        span: SourceByteSpan {
+            start: 16,
+            end: 20,
+        },
+    },
+    PcSourceSpan {
+        pc: BytecodePc(
+            21,
+        ),
+        span: SourceByteSpan {
+            start: 15,
+            end: 25,
+        },
+    },
+    PcSourceSpan {
+        pc: BytecodePc(
+            22,
+        ),
+        span: SourceByteSpan {
+            start: 27,
+            end: 35,
+        },
+    },
+    PcSourceSpan {
+        pc: BytecodePc(
+            25,
+        ),
+        span: SourceByteSpan {
+            start: 30,
+            end: 35,
+        },
+    },
+    PcSourceSpan {
+        pc: BytecodePc(
+            26,
+        ),
+        span: SourceByteSpan {
+            start: 75,
+            end: 79,
+        },
+    },
+    PcSourceSpan {
+        pc: BytecodePc(
+            29,
+        ),
+        span: SourceByteSpan {
+            start: 62,
+            end: 66,
+        },
+    },
+    PcSourceSpan {
+        pc: BytecodePc(
+            32,
+        ),
+        span: SourceByteSpan {
+            start: 42,
+            end: 47,
+        },
+    },
+    PcSourceSpan {
+        pc: BytecodePc(
+            35,
+        ),
+        span: SourceByteSpan {
+            start: 196,
+            end: 250,
+        },
+    },
+    PcSourceSpan {
+        pc: BytecodePc(
+            38,
+        ),
+        span: SourceByteSpan {
+            start: 196,
+            end: 250,
+        },
+    },
+    PcSourceSpan {
+        pc: BytecodePc(
+            40,
+        ),
+        span: SourceByteSpan {
+            start: 196,
+            end: 250,
+        },
+    },
+    PcSourceSpan {
+        pc: BytecodePc(
+            42,
+        ),
+        span: SourceByteSpan {
+            start: 50,
+            end: 54,
+        },
+    },
+    PcSourceSpan {
+        pc: BytecodePc(
+            45,
+        ),
+        span: SourceByteSpan {
+            start: 42,
+            end: 47,
+        },
+    },
+    PcSourceSpan {
+        pc: BytecodePc(
+            46,
+        ),
+        span: SourceByteSpan {
+            start: 83,
+            end: 88,
+        },
+    },
+    PcSourceSpan {
+        pc: BytecodePc(
+            49,
+        ),
+        span: SourceByteSpan {
+            start: 61,
+            end: 80,
+        },
+    },
+    PcSourceSpan {
+        pc: BytecodePc(
+            50,
+        ),
+        span: SourceByteSpan {
+            start: 62,
+            end: 70,
+        },
+    },
+    PcSourceSpan {
+        pc: BytecodePc(
+            52,
+        ),
+        span: SourceByteSpan {
+            start: 62,
+            end: 70,
+        },
+    },
+    PcSourceSpan {
+        pc: BytecodePc(
+            53,
+        ),
+        span: SourceByteSpan {
+            start: 62,
+            end: 70,
+        },
+    },
+    PcSourceSpan {
+        pc: BytecodePc(
+            54,
+        ),
+        span: SourceByteSpan {
+            start: 62,
+            end: 70,
+        },
+    },
+    PcSourceSpan {
+        pc: BytecodePc(
+            55,
+        ),
+        span: SourceByteSpan {
+            start: 62,
+            end: 70,
+        },
+    },
+    PcSourceSpan {
+        pc: BytecodePc(
+            56,
+        ),
+        span: SourceByteSpan {
+            start: 62,
+            end: 70,
+        },
+    },
+    PcSourceSpan {
+        pc: BytecodePc(
+            58,
+        ),
+        span: SourceByteSpan {
+            start: 62,
+            end: 70,
+        },
+    },
+    PcSourceSpan {
+        pc: BytecodePc(
+            59,
+        ),
+        span: SourceByteSpan {
+            start: 69,
+            end: 70,
+        },
+    },
+    PcSourceSpan {
+        pc: BytecodePc(
+            60,
+        ),
+        span: SourceByteSpan {
+            start: 62,
+            end: 66,
+        },
+    },
+    PcSourceSpan {
+        pc: BytecodePc(
+            61,
+        ),
+        span: SourceByteSpan {
+            start: 72,
+            end: 79,
+        },
+    },
+    PcSourceSpan {
+        pc: BytecodePc(
+            64,
+        ),
+        span: SourceByteSpan {
+            start: 72,
+            end: 79,
+        },
+    },
+    PcSourceSpan {
+        pc: BytecodePc(
+            65,
+        ),
+        span: SourceByteSpan {
+            start: 72,
+            end: 79,
+        },
+    },
+    PcSourceSpan {
+        pc: BytecodePc(
+            67,
+        ),
+        span: SourceByteSpan {
+            start: 72,
+            end: 79,
+        },
+    },
+    PcSourceSpan {
+        pc: BytecodePc(
+            69,
+        ),
+        span: SourceByteSpan {
+            start: 72,
+            end: 79,
+        },
+    },
+    PcSourceSpan {
+        pc: BytecodePc(
+            71,
+        ),
+        span: SourceByteSpan {
+            start: 72,
+            end: 79,
+        },
+    },
+    PcSourceSpan {
+        pc: BytecodePc(
+            72,
+        ),
+        span: SourceByteSpan {
+            start: 72,
+            end: 79,
+        },
+    },
+    PcSourceSpan {
+        pc: BytecodePc(
+            73,
+        ),
+        span: SourceByteSpan {
+            start: 72,
+            end: 79,
+        },
+    },
+    PcSourceSpan {
+        pc: BytecodePc(
+            75,
+        ),
+        span: SourceByteSpan {
+            start: 72,
+            end: 79,
+        },
+    },
+    PcSourceSpan {
+        pc: BytecodePc(
+            76,
+        ),
+        span: SourceByteSpan {
+            start: 72,
+            end: 79,
+        },
+    },
+    PcSourceSpan {
+        pc: BytecodePc(
+            77,
+        ),
+        span: SourceByteSpan {
+            start: 75,
+            end: 79,
+        },
+    },
+    PcSourceSpan {
+        pc: BytecodePc(
+            79,
+        ),
+        span: SourceByteSpan {
+            start: 61,
+            end: 80,
+        },
+    },
+    PcSourceSpan {
+        pc: BytecodePc(
+            80,
+        ),
+        span: SourceByteSpan {
+            start: 100,
+            end: 105,
+        },
+    },
+    PcSourceSpan {
+        pc: BytecodePc(
+            83,
+        ),
+        span: SourceByteSpan {
+            start: 109,
+            end: 113,
+        },
+    },
+    PcSourceSpan {
+        pc: BytecodePc(
+            86,
+        ),
+        span: SourceByteSpan {
+            start: 109,
+            end: 113,
+        },
+    },
+    PcSourceSpan {
+        pc: BytecodePc(
+            87,
+        ),
+        span: SourceByteSpan {
+            start: 100,
+            end: 105,
+        },
+    },
+    PcSourceSpan {
+        pc: BytecodePc(
+            90,
+        ),
+        span: SourceByteSpan {
+            start: 89,
+            end: 196,
+        },
+    },
+    PcSourceSpan {
+        pc: BytecodePc(
+            92,
+        ),
+        span: SourceByteSpan {
+            start: 89,
+            end: 196,
+        },
+    },
+    PcSourceSpan {
+        pc: BytecodePc(
+            94,
+        ),
+        span: SourceByteSpan {
+            start: 89,
+            end: 196,
+        },
+    },
+    PcSourceSpan {
+        pc: BytecodePc(
+            95,
+        ),
+        span: SourceByteSpan {
+            start: 89,
+            end: 196,
+        },
+    },
+    PcSourceSpan {
+        pc: BytecodePc(
+            97,
+        ),
+        span: SourceByteSpan {
+            start: 100,
+            end: 105,
+        },
+    },
+    PcSourceSpan {
+        pc: BytecodePc(
+            99,
+        ),
+        span: SourceByteSpan {
+            start: 116,
+            end: 195,
+        },
+    },
+    PcSourceSpan {
+        pc: BytecodePc(
+            104,
+        ),
+        span: SourceByteSpan {
+            start: 125,
+            end: 130,
+        },
+    },
+    PcSourceSpan {
+        pc: BytecodePc(
+            107,
+        ),
+        span: SourceByteSpan {
+            start: 125,
+            end: 130,
+        },
+    },
+    PcSourceSpan {
+        pc: BytecodePc(
+            109,
+        ),
+        span: SourceByteSpan {
+            start: 134,
+            end: 139,
+        },
+    },
+    PcSourceSpan {
+        pc: BytecodePc(
+            112,
+        ),
+        span: SourceByteSpan {
+            start: 143,
+            end: 148,
+        },
+    },
+    PcSourceSpan {
+        pc: BytecodePc(
+            115,
+        ),
+        span: SourceByteSpan {
+            start: 134,
+            end: 148,
+        },
+    },
+    PcSourceSpan {
+        pc: BytecodePc(
+            116,
+        ),
+        span: SourceByteSpan {
+            start: 134,
+            end: 139,
+        },
+    },
+    PcSourceSpan {
+        pc: BytecodePc(
+            119,
+        ),
+        span: SourceByteSpan {
+            start: 134,
+            end: 148,
+        },
+    },
+    PcSourceSpan {
+        pc: BytecodePc(
+            120,
+        ),
+        span: SourceByteSpan {
+            start: 121,
+            end: 170,
+        },
+    },
+    PcSourceSpan {
+        pc: BytecodePc(
+            122,
+        ),
+        span: SourceByteSpan {
+            start: 159,
+            end: 168,
+        },
+    },
+    PcSourceSpan {
+        pc: BytecodePc(
+            123,
+        ),
+        span: SourceByteSpan {
+            start: 159,
+            end: 168,
+        },
+    },
+    PcSourceSpan {
+        pc: BytecodePc(
+            124,
+        ),
+        span: SourceByteSpan {
+            start: 159,
+            end: 168,
+        },
+    },
+    PcSourceSpan {
+        pc: BytecodePc(
+            129,
+        ),
+        span: SourceByteSpan {
+            start: 159,
+            end: 168,
+        },
+    },
+    PcSourceSpan {
+        pc: BytecodePc(
+            130,
+        ),
+        span: SourceByteSpan {
+            start: 159,
+            end: 168,
+        },
+    },
+    PcSourceSpan {
+        pc: BytecodePc(
+            132,
+        ),
+        span: SourceByteSpan {
+            start: 120,
+            end: 171,
+        },
+    },
+    PcSourceSpan {
+        pc: BytecodePc(
+            133,
+        ),
+        span: SourceByteSpan {
+            start: 120,
+            end: 171,
+        },
+    },
+    PcSourceSpan {
+        pc: BytecodePc(
+            134,
+        ),
+        span: SourceByteSpan {
+            start: 120,
+            end: 171,
+        },
+    },
+    PcSourceSpan {
+        pc: BytecodePc(
+            139,
+        ),
+        span: SourceByteSpan {
+            start: 120,
+            end: 171,
+        },
+    },
+    PcSourceSpan {
+        pc: BytecodePc(
+            140,
+        ),
+        span: SourceByteSpan {
+            start: 120,
+            end: 171,
+        },
+    },
+    PcSourceSpan {
+        pc: BytecodePc(
+            142,
+        ),
+        span: SourceByteSpan {
+            start: 116,
+            end: 195,
+        },
+    },
+    PcSourceSpan {
+        pc: BytecodePc(
+            147,
+        ),
+        span: SourceByteSpan {
+            start: 116,
+            end: 195,
+        },
+    },
+    PcSourceSpan {
+        pc: BytecodePc(
+            148,
+        ),
+        span: SourceByteSpan {
+            start: 182,
+            end: 187,
+        },
+    },
+    PcSourceSpan {
+        pc: BytecodePc(
+            151,
+        ),
+        span: SourceByteSpan {
+            start: 191,
+            end: 192,
+        },
+    },
+    PcSourceSpan {
+        pc: BytecodePc(
+            152,
+        ),
+        span: SourceByteSpan {
+            start: 182,
+            end: 192,
+        },
+    },
+    PcSourceSpan {
+        pc: BytecodePc(
+            153,
+        ),
+        span: SourceByteSpan {
+            start: 182,
+            end: 187,
+        },
+    },
+    PcSourceSpan {
+        pc: BytecodePc(
+            156,
+        ),
+        span: SourceByteSpan {
+            start: 182,
+            end: 192,
+        },
+    },
+    PcSourceSpan {
+        pc: BytecodePc(
+            157,
+        ),
+        span: SourceByteSpan {
+            start: 180,
+            end: 195,
+        },
+    },
+    PcSourceSpan {
+        pc: BytecodePc(
+            158,
+        ),
+        span: SourceByteSpan {
+            start: 115,
+            end: 196,
+        },
+    },
+    PcSourceSpan {
+        pc: BytecodePc(
+            160,
+        ),
+        span: SourceByteSpan {
+            start: 89,
+            end: 196,
+        },
+    },
+    PcSourceSpan {
+        pc: BytecodePc(
+            162,
+        ),
+        span: SourceByteSpan {
+            start: 89,
+            end: 196,
+        },
+    },
+    PcSourceSpan {
+        pc: BytecodePc(
+            163,
+        ),
+        span: SourceByteSpan {
+            start: 257,
+            end: 262,
+        },
+    },
+    PcSourceSpan {
+        pc: BytecodePc(
+            165,
+        ),
+        span: SourceByteSpan {
+            start: 250,
+            end: 263,
+        },
+    },
+]
+disassembly:
+pc=0x00000000 opcode=set_loc_uninitialized operands=loc(index=0) stack={pops=0,pushes=0}
+pc=0x00000003 opcode=set_loc_uninitialized operands=loc(index=1) stack={pops=0,pushes=0}
+pc=0x00000006 opcode=get_arg0 operands=none_arg stack={pops=0,pushes=1}
+pc=0x00000007 opcode=to_object operands=none stack={pops=1,pushes=1}
+pc=0x00000008 opcode=get_field2 operands=atom(pool_index=0x00000000) stack={pops=1,pushes=2}
+pc=0x0000000d opcode=dup operands=none stack={pops=1,pushes=2}
+pc=0x0000000e opcode=undefined operands=none stack={pops=0,pushes=1}
+pc=0x0000000f opcode=strict_eq operands=none stack={pops=2,pushes=1}
+pc=0x00000010 opcode=if_false8 operands=label8(displacement=+3) stack={pops=1,pushes=0}
+pc=0x00000012 opcode=drop operands=none stack={pops=1,pushes=0}
+pc=0x00000013 opcode=push_1 operands=none_int stack={pops=0,pushes=1}
+pc=0x00000014 opcode=put_loc0 operands=none_loc stack={pops=1,pushes=0}
+pc=0x00000015 opcode=drop operands=none stack={pops=1,pushes=0}
+pc=0x00000016 opcode=rest operands=u16(1) stack={pops=0,pushes=1}
+pc=0x00000019 opcode=put_loc1 operands=none_loc stack={pops=1,pushes=0}
+pc=0x0000001a opcode=set_loc_uninitialized operands=loc(index=4) stack={pops=0,pushes=0}
+pc=0x0000001d opcode=set_loc_uninitialized operands=loc(index=3) stack={pops=0,pushes=0}
+pc=0x00000020 opcode=set_loc_uninitialized operands=loc(index=2) stack={pops=0,pushes=0}
+pc=0x00000023 opcode=set_loc_uninitialized operands=loc(index=6) stack={pops=0,pushes=0}
+pc=0x00000026 opcode=fclosure8 operands=const8(index=0) stack={pops=0,pushes=1}
+pc=0x00000028 opcode=put_loc8 operands=loc8(index=6) stack={pops=1,pushes=0}
+pc=0x0000002a opcode=get_loc_check operands=loc(index=0) stack={pops=0,pushes=1}
+pc=0x0000002d opcode=put_loc2 operands=none_loc stack={pops=1,pushes=0}
+pc=0x0000002e opcode=get_loc_check operands=loc(index=1) stack={pops=0,pushes=1}
+pc=0x00000031 opcode=for_of_start operands=none stack={pops=1,pushes=3}
+pc=0x00000032 opcode=for_of_next operands=u8(0) stack={pops=3,pushes=5}
+pc=0x00000034 opcode=drop operands=none stack={pops=1,pushes=0}
+pc=0x00000035 opcode=dup operands=none stack={pops=1,pushes=2}
+pc=0x00000036 opcode=undefined operands=none stack={pops=0,pushes=1}
+pc=0x00000037 opcode=strict_eq operands=none stack={pops=2,pushes=1}
+pc=0x00000038 opcode=if_false8 operands=label8(displacement=+3) stack={pops=1,pushes=0}
+pc=0x0000003a opcode=drop operands=none stack={pops=1,pushes=0}
+pc=0x0000003b opcode=push_0 operands=none_int stack={pops=0,pushes=1}
+pc=0x0000003c opcode=put_loc3 operands=none_loc stack={pops=1,pushes=0}
+pc=0x0000003d opcode=array_from operands=npop(argument_count=0) stack={pops=0,pushes=1}
+pc=0x00000040 opcode=push_0 operands=none_int stack={pops=0,pushes=1}
+pc=0x00000041 opcode=for_of_next operands=u8(2) stack={pops=3,pushes=5}
+pc=0x00000043 opcode=if_false8 operands=label8(displacement=+3) stack={pops=1,pushes=0}
+pc=0x00000045 opcode=goto8 operands=label8(displacement=+5) stack={pops=0,pushes=0}
+pc=0x00000047 opcode=define_array_el operands=none stack={pops=3,pushes=2}
+pc=0x00000048 opcode=inc operands=none stack={pops=1,pushes=1}
+pc=0x00000049 opcode=goto8 operands=label8(displacement=-9) stack={pops=0,pushes=0}
+pc=0x0000004b opcode=drop operands=none stack={pops=1,pushes=0}
+pc=0x0000004c opcode=drop operands=none stack={pops=1,pushes=0}
+pc=0x0000004d opcode=put_loc8 operands=loc8(index=4) stack={pops=1,pushes=0}
+pc=0x0000004f opcode=iterator_close operands=none stack={pops=3,pushes=0}
+pc=0x00000050 opcode=set_loc_uninitialized operands=loc(index=5) stack={pops=0,pushes=0}
+pc=0x00000053 opcode=get_loc_check operands=loc(index=4) stack={pops=0,pushes=1}
+pc=0x00000056 opcode=for_of_start operands=none stack={pops=1,pushes=3}
+pc=0x00000057 opcode=set_loc_uninitialized operands=loc(index=5) stack={pops=0,pushes=0}
+pc=0x0000005a opcode=for_of_next operands=u8(0) stack={pops=3,pushes=5}
+pc=0x0000005c opcode=if_false8 operands=label8(displacement=+4) stack={pops=1,pushes=0}
+pc=0x0000005e opcode=drop operands=none stack={pops=1,pushes=0}
+pc=0x0000005f opcode=goto8 operands=label8(displacement=+66) stack={pops=0,pushes=0}
+pc=0x00000061 opcode=put_loc8 operands=loc8(index=5) stack={pops=1,pushes=0}
+pc=0x00000063 opcode=catch operands=label(displacement=+42) stack={pops=0,pushes=1}
+pc=0x00000068 opcode=get_loc_check operands=loc(index=5) stack={pops=0,pushes=1}
+pc=0x0000006b opcode=if_false8 operands=label8(displacement=+14) stack={pops=1,pushes=0}
+pc=0x0000006d opcode=get_loc_check operands=loc(index=2) stack={pops=0,pushes=1}
+pc=0x00000070 opcode=get_loc_check operands=loc(index=5) stack={pops=0,pushes=1}
+pc=0x00000073 opcode=add operands=none stack={pops=2,pushes=1}
+pc=0x00000074 opcode=set_loc_check operands=loc(index=2) stack={pops=1,pushes=1}
+pc=0x00000077 opcode=drop operands=none stack={pops=1,pushes=0}
+pc=0x00000078 opcode=goto8 operands=label8(displacement=+11) stack={pops=0,pushes=0}
+pc=0x0000007a opcode=drop operands=none stack={pops=1,pushes=0}
+pc=0x0000007b opcode=undefined operands=none stack={pops=0,pushes=1}
+pc=0x0000007c opcode=gosub operands=label(displacement=+23) stack={pops=0,pushes=0}
+pc=0x00000081 opcode=drop operands=none stack={pops=1,pushes=0}
+pc=0x00000082 opcode=goto8 operands=label8(displacement=-44) stack={pops=0,pushes=0}
+pc=0x00000084 opcode=drop operands=none stack={pops=1,pushes=0}
+pc=0x00000085 opcode=undefined operands=none stack={pops=0,pushes=1}
+pc=0x00000086 opcode=gosub operands=label(displacement=+13) stack={pops=0,pushes=0}
+pc=0x0000008b opcode=drop operands=none stack={pops=1,pushes=0}
+pc=0x0000008c opcode=goto8 operands=label8(displacement=+17) stack={pops=0,pushes=0}
+pc=0x0000008e opcode=gosub operands=label(displacement=+5) stack={pops=0,pushes=0}
+pc=0x00000093 opcode=throw operands=none stack={pops=1,pushes=0}
+pc=0x00000094 opcode=get_loc_check operands=loc(index=2) stack={pops=0,pushes=1}
+pc=0x00000097 opcode=push_1 operands=none_int stack={pops=0,pushes=1}
+pc=0x00000098 opcode=add operands=none stack={pops=2,pushes=1}
+pc=0x00000099 opcode=set_loc_check operands=loc(index=2) stack={pops=1,pushes=1}
+pc=0x0000009c opcode=drop operands=none stack={pops=1,pushes=0}
+pc=0x0000009d opcode=ret operands=none stack={pops=1,pushes=0}
+pc=0x0000009e opcode=goto8 operands=label8(displacement=+1) stack={pops=0,pushes=0}
+pc=0x000000a0 opcode=goto8 operands=label8(displacement=-74) stack={pops=0,pushes=0}
+pc=0x000000a2 opcode=iterator_close operands=none stack={pops=3,pushes=0}
+pc=0x000000a3 opcode=get_loc8 operands=loc8(index=6) stack={pops=0,pushes=1}
+pc=0x000000a5 opcode=return operands=none stack={pops=1,pushes=0}
+
+function 1
+executable: ExecutableId(2)
+graph control flow matches: true
+graph atoms: [
+    CompilerAtom {
+        string: CompilerString {
+            storage: Latin1(
+                [
+                    105,
+                    110,
+                    110,
+                    101,
+                    114,
+                ],
+            ),
+        },
+        static_property_only: false,
+    },
+    CompilerAtom {
+        string: CompilerString {
+            storage: Latin1(
+                [
+                    95,
+                    97,
+                    114,
+                    103,
+                    95,
+                    48,
+                    95,
+                ],
+            ),
+        },
+        static_property_only: false,
+    },
+    CompilerAtom {
+        string: CompilerString {
+            storage: Latin1(
+                [
+                    116,
+                    111,
+                    116,
+                    97,
+                    108,
+                ],
+            ),
+        },
+        static_property_only: false,
+    },
+    CompilerAtom {
+        string: CompilerString {
+            storage: Latin1(
+                [
+                    104,
+                    101,
+                    97,
+                    100,
+                ],
+            ),
+        },
+        static_property_only: false,
+    },
+    CompilerAtom {
+        string: CompilerString {
+            storage: Latin1(
+                [
+                    100,
+                    101,
+                    108,
+                    116,
+                    97,
+                ],
+            ),
+        },
+        static_property_only: false,
+    },
+]
+graph constants: []
+graph closure sources: [
+    ParentVariableReference(
+        0,
+    ),
+    ParentVariableReference(
+        1,
+    ),
+]
+locals: [
+    LoweredLocal {
+        binding: BindingId(
+            8,
+        ),
+        slot: LocalSlot(
+            0,
+        ),
+    },
+]
+atoms: [
+    CompilerAtom {
+        string: CompilerString {
+            storage: Latin1(
+                [
+                    105,
+                    110,
+                    110,
+                    101,
+                    114,
+                ],
+            ),
+        },
+        static_property_only: false,
+    },
+    CompilerAtom {
+        string: CompilerString {
+            storage: Latin1(
+                [
+                    95,
+                    97,
+                    114,
+                    103,
+                    95,
+                    48,
+                    95,
+                ],
+            ),
+        },
+        static_property_only: false,
+    },
+    CompilerAtom {
+        string: CompilerString {
+            storage: Latin1(
+                [
+                    116,
+                    111,
+                    116,
+                    97,
+                    108,
+                ],
+            ),
+        },
+        static_property_only: false,
+    },
+    CompilerAtom {
+        string: CompilerString {
+            storage: Latin1(
+                [
+                    104,
+                    101,
+                    97,
+                    100,
+                ],
+            ),
+        },
+        static_property_only: false,
+    },
+    CompilerAtom {
+        string: CompilerString {
+            storage: Latin1(
+                [
+                    100,
+                    101,
+                    108,
+                    116,
+                    97,
+                ],
+            ),
+        },
+        static_property_only: false,
+    },
+]
+constants: []
+closure variables: [
+    CompiledClosureVariable {
+        binding: BindingId(
+            3,
+        ),
+        slot: CaptureSlot(
+            0,
+        ),
+        source: ParentVariableReference(
+            0,
+        ),
+        policy: DeclarationPolicy {
+            kind: Let,
+            initialization: AtDeclaration,
+            writes: Mutable,
+            temporal_dead_zone: true,
+        },
+    },
+    CompiledClosureVariable {
+        binding: BindingId(
+            4,
+        ),
+        slot: CaptureSlot(
+            1,
+        ),
+        source: ParentVariableReference(
+            1,
+        ),
+        policy: DeclarationPolicy {
+            kind: Const,
+            initialization: AtDeclaration,
+            writes: Immutable,
+            temporal_dead_zone: true,
+        },
+    },
+]
+realm globals: []
+source instructions: [
+    SourceInstruction {
+        pc: BytecodePc(
+            0,
+        ),
+        span: Span {
+            start: 211,
+            end: 216,
+        },
+    },
+    SourceInstruction {
+        pc: BytecodePc(
+            3,
+        ),
+        span: Span {
+            start: 211,
+            end: 223,
+        },
+    },
+    SourceInstruction {
+        pc: BytecodePc(
+            4,
+        ),
+        span: Span {
+            start: 211,
+            end: 223,
+        },
+    },
+    SourceInstruction {
+        pc: BytecodePc(
+            5,
+        ),
+        span: Span {
+            start: 211,
+            end: 223,
+        },
+    },
+    SourceInstruction {
+        pc: BytecodePc(
+            6,
+        ),
+        span: Span {
+            start: 211,
+            end: 223,
+        },
+    },
+    SourceInstruction {
+        pc: BytecodePc(
+            7,
+        ),
+        span: Span {
+            start: 211,
+            end: 223,
+        },
+    },
+    SourceInstruction {
+        pc: BytecodePc(
+            9,
+        ),
+        span: Span {
+            start: 211,
+            end: 223,
+        },
+    },
+    SourceInstruction {
+        pc: BytecodePc(
+            10,
+        ),
+        span: Span {
+            start: 219,
+            end: 223,
+        },
+    },
+    SourceInstruction {
+        pc: BytecodePc(
+            13,
+        ),
+        span: Span {
+            start: 211,
+            end: 216,
+        },
+    },
+    SourceInstruction {
+        pc: BytecodePc(
+            14,
+        ),
+        span: Span {
+            start: 234,
+            end: 239,
+        },
+    },
+    SourceInstruction {
+        pc: BytecodePc(
+            17,
+        ),
+        span: Span {
+            start: 242,
+            end: 247,
+        },
+    },
+    SourceInstruction {
+        pc: BytecodePc(
+            20,
+        ),
+        span: Span {
+            start: 234,
+            end: 247,
+        },
+    },
+    SourceInstruction {
+        pc: BytecodePc(
+            21,
+        ),
+        span: Span {
+            start: 227,
+            end: 248,
+        },
+    },
+]
+bytecode: [94, 0, 0, 207, 17, 6, 169, 232, 5, 14, 100, 1, 0, 199, 100, 0, 0, 95, 0, 0, 155, 40]
+instructions: [
+    VerifiedInstruction {
+        decoded: DecodedInstruction {
+            pc: BytecodePc(
+                0,
+            ),
+            instruction: Instruction {
+                opcode: SetLocUninitialized,
+                operands: Loc(
+                    0,
+                ),
+            },
+            next_pc: BytecodePc(
+                3,
+            ),
+        },
+        entry_stack_depth: Some(
+            0,
+        ),
+        successors: VerifiedSuccessors(
+            Fallthrough(
+                InstructionIndex(
+                    1,
+                ),
+            ),
+        ),
+    },
+    VerifiedInstruction {
+        decoded: DecodedInstruction {
+            pc: BytecodePc(
+                3,
+            ),
+            instruction: Instruction {
+                opcode: GetArg0,
+                operands: NoneArg,
+            },
+            next_pc: BytecodePc(
+                4,
+            ),
+        },
+        entry_stack_depth: Some(
+            0,
+        ),
+        successors: VerifiedSuccessors(
+            Fallthrough(
+                InstructionIndex(
+                    2,
+                ),
+            ),
+        ),
+    },
+    VerifiedInstruction {
+        decoded: DecodedInstruction {
+            pc: BytecodePc(
+                4,
+            ),
+            instruction: Instruction {
+                opcode: Dup,
+                operands: None,
+            },
+            next_pc: BytecodePc(
+                5,
+            ),
+        },
+        entry_stack_depth: Some(
+            1,
+        ),
+        successors: VerifiedSuccessors(
+            Fallthrough(
+                InstructionIndex(
+                    3,
+                ),
+            ),
+        ),
+    },
+    VerifiedInstruction {
+        decoded: DecodedInstruction {
+            pc: BytecodePc(
+                5,
+            ),
+            instruction: Instruction {
+                opcode: Undefined,
+                operands: None,
+            },
+            next_pc: BytecodePc(
+                6,
+            ),
+        },
+        entry_stack_depth: Some(
+            2,
+        ),
+        successors: VerifiedSuccessors(
+            Fallthrough(
+                InstructionIndex(
+                    4,
+                ),
+            ),
+        ),
+    },
+    VerifiedInstruction {
+        decoded: DecodedInstruction {
+            pc: BytecodePc(
+                6,
+            ),
+            instruction: Instruction {
+                opcode: StrictEq,
+                operands: None,
+            },
+            next_pc: BytecodePc(
+                7,
+            ),
+        },
+        entry_stack_depth: Some(
+            3,
+        ),
+        successors: VerifiedSuccessors(
+            Fallthrough(
+                InstructionIndex(
+                    5,
+                ),
+            ),
+        ),
+    },
+    VerifiedInstruction {
+        decoded: DecodedInstruction {
+            pc: BytecodePc(
+                7,
+            ),
+            instruction: Instruction {
+                opcode: IfFalse8,
+                operands: Label8(
+                    5,
+                ),
+            },
+            next_pc: BytecodePc(
+                9,
+            ),
+        },
+        entry_stack_depth: Some(
+            2,
+        ),
+        successors: VerifiedSuccessors(
+            Branch {
+                taken: InstructionIndex(
+                    8,
+                ),
+                not_taken: InstructionIndex(
+                    6,
+                ),
+            },
+        ),
+    },
+    VerifiedInstruction {
+        decoded: DecodedInstruction {
+            pc: BytecodePc(
+                9,
+            ),
+            instruction: Instruction {
+                opcode: Drop,
+                operands: None,
+            },
+            next_pc: BytecodePc(
+                10,
+            ),
+        },
+        entry_stack_depth: Some(
+            1,
+        ),
+        successors: VerifiedSuccessors(
+            Fallthrough(
+                InstructionIndex(
+                    7,
+                ),
+            ),
+        ),
+    },
+    VerifiedInstruction {
+        decoded: DecodedInstruction {
+            pc: BytecodePc(
+                10,
+            ),
+            instruction: Instruction {
+                opcode: GetVarRefCheck,
+                operands: VarRef(
+                    1,
+                ),
+            },
+            next_pc: BytecodePc(
+                13,
+            ),
+        },
+        entry_stack_depth: Some(
+            0,
+        ),
+        successors: VerifiedSuccessors(
+            Fallthrough(
+                InstructionIndex(
+                    8,
+                ),
+            ),
+        ),
+    },
+    VerifiedInstruction {
+        decoded: DecodedInstruction {
+            pc: BytecodePc(
+                13,
+            ),
+            instruction: Instruction {
+                opcode: PutLoc0,
+                operands: NoneLoc,
+            },
+            next_pc: BytecodePc(
+                14,
+            ),
+        },
+        entry_stack_depth: Some(
+            1,
+        ),
+        successors: VerifiedSuccessors(
+            Fallthrough(
+                InstructionIndex(
+                    9,
+                ),
+            ),
+        ),
+    },
+    VerifiedInstruction {
+        decoded: DecodedInstruction {
+            pc: BytecodePc(
+                14,
+            ),
+            instruction: Instruction {
+                opcode: GetVarRefCheck,
+                operands: VarRef(
+                    0,
+                ),
+            },
+            next_pc: BytecodePc(
+                17,
+            ),
+        },
+        entry_stack_depth: Some(
+            0,
+        ),
+        successors: VerifiedSuccessors(
+            Fallthrough(
+                InstructionIndex(
+                    10,
+                ),
+            ),
+        ),
+    },
+    VerifiedInstruction {
+        decoded: DecodedInstruction {
+            pc: BytecodePc(
+                17,
+            ),
+            instruction: Instruction {
+                opcode: GetLocCheck,
+                operands: Loc(
+                    0,
+                ),
+            },
+            next_pc: BytecodePc(
+                20,
+            ),
+        },
+        entry_stack_depth: Some(
+            1,
+        ),
+        successors: VerifiedSuccessors(
+            Fallthrough(
+                InstructionIndex(
+                    11,
+                ),
+            ),
+        ),
+    },
+    VerifiedInstruction {
+        decoded: DecodedInstruction {
+            pc: BytecodePc(
+                20,
+            ),
+            instruction: Instruction {
+                opcode: Add,
+                operands: None,
+            },
+            next_pc: BytecodePc(
+                21,
+            ),
+        },
+        entry_stack_depth: Some(
+            2,
+        ),
+        successors: VerifiedSuccessors(
+            Fallthrough(
+                InstructionIndex(
+                    12,
+                ),
+            ),
+        ),
+    },
+    VerifiedInstruction {
+        decoded: DecodedInstruction {
+            pc: BytecodePc(
+                21,
+            ),
+            instruction: Instruction {
+                opcode: Return,
+                operands: None,
+            },
+            next_pc: BytecodePc(
+                22,
+            ),
+        },
+        entry_stack_depth: Some(
+            1,
+        ),
+        successors: VerifiedSuccessors(
+            Terminate,
+        ),
+    },
+]
+control-flow summary: max_stack=3 transfers=13 domains=FunctionIndexDomains { atom_pool_len: 5, constant_pool_len: 0, argument_count: 1, local_count: 1, closure_var_count: 2 } header=VerifiedFunctionHeader { flags: FunctionHeaderFlags(1601), mode: FunctionMode(0), kind: Normal, defined_argument_count: 0, variable_reference_count: 0 }
+capture layout: Some(
+    CompilerCaptureLayout {
+        bindings: [],
+        mapped_arguments: None,
+    },
+)
+constant layout: Some(
+    CompilerConstantLayout {
+        kinds: [],
+    },
+)
+metadata kind: OrdinaryFunction
+metadata function name: Some(AtomPoolIndex(0))
+metadata variables: [
+    VariableDefinition {
+        name: Some(
+            AtomPoolIndex(
+                1,
+            ),
+        ),
+        scope_next: End,
+        policy: CompilerBindingPolicy {
+            kind: Parameter,
+            initialization: Argument,
+            writes: Mutable,
+            temporal_dead_zone: false,
+        },
+        has_scope: false,
+        variable_reference: None,
+        function_initializer: None,
+    },
+    VariableDefinition {
+        name: Some(
+            AtomPoolIndex(
+                4,
+            ),
+        ),
+        scope_next: End,
+        policy: CompilerBindingPolicy {
+            kind: Parameter,
+            initialization: Argument,
+            writes: Mutable,
+            temporal_dead_zone: true,
+        },
+        has_scope: false,
+        variable_reference: None,
+        function_initializer: None,
+    },
+]
+metadata closures: [
+    ClosureVariableDefinition {
+        name: Some(
+            AtomPoolIndex(
+                2,
+            ),
+        ),
+        binding: Captured(
+            CompilerBindingPolicy {
+                kind: Let,
+                initialization: AtDeclaration,
+                writes: Mutable,
+                temporal_dead_zone: true,
+            },
+        ),
+        source: ParentVariableReference(
+            0,
+        ),
+        function_initializer: None,
+    },
+    ClosureVariableDefinition {
+        name: Some(
+            AtomPoolIndex(
+                3,
+            ),
+        ),
+        binding: Captured(
+            CompilerBindingPolicy {
+                kind: Const,
+                initialization: AtDeclaration,
+                writes: Immutable,
+                temporal_dead_zone: true,
+            },
+        ),
+        source: ParentVariableReference(
+            1,
+        ),
+        function_initializer: None,
+    },
+]
+metadata source: display="characterization.js" function="function inner(delta = head) { return total + delta; }" function_span=SourceByteSpan { start: 196, end: 250 } name_span=Some(SourceByteSpan { start: 205, end: 210 }) mappings=[
+    PcSourceSpan {
+        pc: BytecodePc(
+            0,
+        ),
+        span: SourceByteSpan {
+            start: 211,
+            end: 216,
+        },
+    },
+    PcSourceSpan {
+        pc: BytecodePc(
+            3,
+        ),
+        span: SourceByteSpan {
+            start: 211,
+            end: 223,
+        },
+    },
+    PcSourceSpan {
+        pc: BytecodePc(
+            4,
+        ),
+        span: SourceByteSpan {
+            start: 211,
+            end: 223,
+        },
+    },
+    PcSourceSpan {
+        pc: BytecodePc(
+            5,
+        ),
+        span: SourceByteSpan {
+            start: 211,
+            end: 223,
+        },
+    },
+    PcSourceSpan {
+        pc: BytecodePc(
+            6,
+        ),
+        span: SourceByteSpan {
+            start: 211,
+            end: 223,
+        },
+    },
+    PcSourceSpan {
+        pc: BytecodePc(
+            7,
+        ),
+        span: SourceByteSpan {
+            start: 211,
+            end: 223,
+        },
+    },
+    PcSourceSpan {
+        pc: BytecodePc(
+            9,
+        ),
+        span: SourceByteSpan {
+            start: 211,
+            end: 223,
+        },
+    },
+    PcSourceSpan {
+        pc: BytecodePc(
+            10,
+        ),
+        span: SourceByteSpan {
+            start: 219,
+            end: 223,
+        },
+    },
+    PcSourceSpan {
+        pc: BytecodePc(
+            13,
+        ),
+        span: SourceByteSpan {
+            start: 211,
+            end: 216,
+        },
+    },
+    PcSourceSpan {
+        pc: BytecodePc(
+            14,
+        ),
+        span: SourceByteSpan {
+            start: 234,
+            end: 239,
+        },
+    },
+    PcSourceSpan {
+        pc: BytecodePc(
+            17,
+        ),
+        span: SourceByteSpan {
+            start: 242,
+            end: 247,
+        },
+    },
+    PcSourceSpan {
+        pc: BytecodePc(
+            20,
+        ),
+        span: SourceByteSpan {
+            start: 234,
+            end: 247,
+        },
+    },
+    PcSourceSpan {
+        pc: BytecodePc(
+            21,
+        ),
+        span: SourceByteSpan {
+            start: 227,
+            end: 248,
+        },
+    },
+]
+disassembly:
+pc=0x00000000 opcode=set_loc_uninitialized operands=loc(index=0) stack={pops=0,pushes=0}
+pc=0x00000003 opcode=get_arg0 operands=none_arg stack={pops=0,pushes=1}
+pc=0x00000004 opcode=dup operands=none stack={pops=1,pushes=2}
+pc=0x00000005 opcode=undefined operands=none stack={pops=0,pushes=1}
+pc=0x00000006 opcode=strict_eq operands=none stack={pops=2,pushes=1}
+pc=0x00000007 opcode=if_false8 operands=label8(displacement=+5) stack={pops=1,pushes=0}
+pc=0x00000009 opcode=drop operands=none stack={pops=1,pushes=0}
+pc=0x0000000a opcode=get_var_ref_check operands=var_ref(index=1) stack={pops=0,pushes=1}
+pc=0x0000000d opcode=put_loc0 operands=none_loc stack={pops=1,pushes=0}
+pc=0x0000000e opcode=get_var_ref_check operands=var_ref(index=0) stack={pops=0,pushes=1}
+pc=0x00000011 opcode=get_loc_check operands=loc(index=0) stack={pops=0,pushes=1}
+pc=0x00000014 opcode=add operands=none stack={pops=2,pushes=1}
+pc=0x00000015 opcode=return operands=none stack={pops=1,pushes=0}
+
+tree dynamic function
+root: ExecutableId(0)
+source: "(function anonymous(left,right = 2\n) {\nconst sum = left + right; return function inner(){ return sum; };\n})"
+function graph: root=FunctionTemplateId(0) depth=3 usage=FunctionGraphUsage { functions: 3, bytecode_bytes: 40, instructions: 25, constants: 2, atoms: 9, string_payload_bytes: 48, closure_variables: 1, closure_edge_evaluations: 1, transfer_evaluations: 25 }
+execution requirements: [
+    CoreValues,
+    Numbers,
+    Strings,
+    Closures,
+    LexicalBindings,
+    DynamicOperators,
+]
+function 0
+executable: ExecutableId(0)
+graph control flow matches: true
+graph atoms: [
+    CompilerAtom {
+        string: CompilerString {
+            storage: Latin1(
+                [
+                    95,
+                    114,
+                    101,
+                    116,
+                    95,
+                ],
+            ),
+        },
+        static_property_only: false,
+    },
+]
+graph constants: [
+    Function(
+        FunctionTemplateId(
+            1,
+        ),
+    ),
+]
+graph closure sources: []
+locals: []
+atoms: [
+    CompilerAtom {
+        string: CompilerString {
+            storage: Latin1(
+                [
+                    95,
+                    114,
+                    101,
+                    116,
+                    95,
+                ],
+            ),
+        },
+        static_property_only: false,
+    },
+]
+constants: [
+    Function(
+        CompiledFunctionConstant {
+            executable: ExecutableId(
+                1,
+            ),
+        },
+    ),
+]
+closure variables: []
+realm globals: []
+source instructions: [
+    SourceInstruction {
+        pc: BytecodePc(
+            0,
+        ),
+        span: Span {
+            start: 1,
+            end: 106,
+        },
+    },
+    SourceInstruction {
+        pc: BytecodePc(
+            2,
+        ),
+        span: Span {
+            start: 0,
+            end: 107,
+        },
+    },
+    SourceInstruction {
+        pc: BytecodePc(
+            3,
+        ),
+        span: Span {
+            start: 0,
+            end: 107,
+        },
+    },
+    SourceInstruction {
+        pc: BytecodePc(
+            4,
+        ),
+        span: Span {
+            start: 0,
+            end: 107,
+        },
+    },
+]
+bytecode: [190, 0, 199, 195, 40]
+instructions: [
+    VerifiedInstruction {
+        decoded: DecodedInstruction {
+            pc: BytecodePc(
+                0,
+            ),
+            instruction: Instruction {
+                opcode: FClosure8,
+                operands: Const8(
+                    0,
+                ),
+            },
+            next_pc: BytecodePc(
+                2,
+            ),
+        },
+        entry_stack_depth: Some(
+            0,
+        ),
+        successors: VerifiedSuccessors(
+            Fallthrough(
+                InstructionIndex(
+                    1,
+                ),
+            ),
+        ),
+    },
+    VerifiedInstruction {
+        decoded: DecodedInstruction {
+            pc: BytecodePc(
+                2,
+            ),
+            instruction: Instruction {
+                opcode: PutLoc0,
+                operands: NoneLoc,
+            },
+            next_pc: BytecodePc(
+                3,
+            ),
+        },
+        entry_stack_depth: Some(
+            1,
+        ),
+        successors: VerifiedSuccessors(
+            Fallthrough(
+                InstructionIndex(
+                    2,
+                ),
+            ),
+        ),
+    },
+    VerifiedInstruction {
+        decoded: DecodedInstruction {
+            pc: BytecodePc(
+                3,
+            ),
+            instruction: Instruction {
+                opcode: GetLoc0,
+                operands: NoneLoc,
+            },
+            next_pc: BytecodePc(
+                4,
+            ),
+        },
+        entry_stack_depth: Some(
+            0,
+        ),
+        successors: VerifiedSuccessors(
+            Fallthrough(
+                InstructionIndex(
+                    3,
+                ),
+            ),
+        ),
+    },
+    VerifiedInstruction {
+        decoded: DecodedInstruction {
+            pc: BytecodePc(
+                4,
+            ),
+            instruction: Instruction {
+                opcode: Return,
+                operands: None,
+            },
+            next_pc: BytecodePc(
+                5,
+            ),
+        },
+        entry_stack_depth: Some(
+            1,
+        ),
+        successors: VerifiedSuccessors(
+            Terminate,
+        ),
+    },
+]
+control-flow summary: max_stack=1 transfers=4 domains=FunctionIndexDomains { atom_pool_len: 1, constant_pool_len: 1, argument_count: 0, local_count: 1, closure_var_count: 0 } header=VerifiedFunctionHeader { flags: FunctionHeaderFlags(1024), mode: FunctionMode(0), kind: Normal, defined_argument_count: 0, variable_reference_count: 0 }
+capture layout: Some(
+    CompilerCaptureLayout {
+        bindings: [],
+        mapped_arguments: None,
+    },
+)
+constant layout: Some(
+    CompilerConstantLayout {
+        kinds: [
+            Function,
+        ],
+    },
+)
+metadata kind: DynamicFunctionScript
+metadata function name: None
+metadata variables: [
+    VariableDefinition {
+        name: Some(
+            AtomPoolIndex(
+                0,
+            ),
+        ),
+        scope_next: End,
+        policy: CompilerBindingPolicy {
+            kind: Var,
+            initialization: UndefinedAtInstantiation,
+            writes: Mutable,
+            temporal_dead_zone: false,
+        },
+        has_scope: false,
+        variable_reference: None,
+        function_initializer: None,
+    },
+]
+metadata closures: []
+metadata source: display="dynamic-characterization.js" function="(function anonymous(left,right = 2\n) {\nconst sum = left + right; return function inner(){ return sum; };\n})" function_span=SourceByteSpan { start: 0, end: 107 } name_span=None mappings=[
+    PcSourceSpan {
+        pc: BytecodePc(
+            0,
+        ),
+        span: SourceByteSpan {
+            start: 1,
+            end: 106,
+        },
+    },
+    PcSourceSpan {
+        pc: BytecodePc(
+            2,
+        ),
+        span: SourceByteSpan {
+            start: 0,
+            end: 107,
+        },
+    },
+    PcSourceSpan {
+        pc: BytecodePc(
+            3,
+        ),
+        span: SourceByteSpan {
+            start: 0,
+            end: 107,
+        },
+    },
+    PcSourceSpan {
+        pc: BytecodePc(
+            4,
+        ),
+        span: SourceByteSpan {
+            start: 0,
+            end: 107,
+        },
+    },
+]
+disassembly:
+pc=0x00000000 opcode=fclosure8 operands=const8(index=0) stack={pops=0,pushes=1}
+pc=0x00000002 opcode=put_loc0 operands=none_loc stack={pops=1,pushes=0}
+pc=0x00000003 opcode=get_loc0 operands=none_loc stack={pops=0,pushes=1}
+pc=0x00000004 opcode=return operands=none stack={pops=1,pushes=0}
+
+function 1
+executable: ExecutableId(1)
+graph control flow matches: true
+graph atoms: [
+    CompilerAtom {
+        string: CompilerString {
+            storage: Latin1(
+                [
+                    97,
+                    110,
+                    111,
+                    110,
+                    121,
+                    109,
+                    111,
+                    117,
+                    115,
+                ],
+            ),
+        },
+        static_property_only: false,
+    },
+    CompilerAtom {
+        string: CompilerString {
+            storage: Latin1(
+                [
+                    95,
+                    97,
+                    114,
+                    103,
+                    95,
+                    48,
+                    95,
+                ],
+            ),
+        },
+        static_property_only: false,
+    },
+    CompilerAtom {
+        string: CompilerString {
+            storage: Latin1(
+                [
+                    95,
+                    97,
+                    114,
+                    103,
+                    95,
+                    49,
+                    95,
+                ],
+            ),
+        },
+        static_property_only: false,
+    },
+    CompilerAtom {
+        string: CompilerString {
+            storage: Latin1(
+                [
+                    108,
+                    101,
+                    102,
+                    116,
+                ],
+            ),
+        },
+        static_property_only: false,
+    },
+    CompilerAtom {
+        string: CompilerString {
+            storage: Latin1(
+                [
+                    114,
+                    105,
+                    103,
+                    104,
+                    116,
+                ],
+            ),
+        },
+        static_property_only: false,
+    },
+    CompilerAtom {
+        string: CompilerString {
+            storage: Latin1(
+                [
+                    115,
+                    117,
+                    109,
+                ],
+            ),
+        },
+        static_property_only: false,
+    },
+]
+graph constants: [
+    Function(
+        FunctionTemplateId(
+            2,
+        ),
+    ),
+]
+graph closure sources: []
+locals: [
+    LoweredLocal {
+        binding: BindingId(
+            0,
+        ),
+        slot: LocalSlot(
+            0,
+        ),
+    },
+    LoweredLocal {
+        binding: BindingId(
+            1,
+        ),
+        slot: LocalSlot(
+            1,
+        ),
+    },
+    LoweredLocal {
+        binding: BindingId(
+            2,
+        ),
+        slot: LocalSlot(
+            2,
+        ),
+    },
+    LoweredLocal {
+        binding: BindingId(
+            3,
+        ),
+        slot: LocalSlot(
+            3,
+        ),
+    },
+]
+atoms: [
+    CompilerAtom {
+        string: CompilerString {
+            storage: Latin1(
+                [
+                    97,
+                    110,
+                    111,
+                    110,
+                    121,
+                    109,
+                    111,
+                    117,
+                    115,
+                ],
+            ),
+        },
+        static_property_only: false,
+    },
+    CompilerAtom {
+        string: CompilerString {
+            storage: Latin1(
+                [
+                    95,
+                    97,
+                    114,
+                    103,
+                    95,
+                    48,
+                    95,
+                ],
+            ),
+        },
+        static_property_only: false,
+    },
+    CompilerAtom {
+        string: CompilerString {
+            storage: Latin1(
+                [
+                    95,
+                    97,
+                    114,
+                    103,
+                    95,
+                    49,
+                    95,
+                ],
+            ),
+        },
+        static_property_only: false,
+    },
+    CompilerAtom {
+        string: CompilerString {
+            storage: Latin1(
+                [
+                    108,
+                    101,
+                    102,
+                    116,
+                ],
+            ),
+        },
+        static_property_only: false,
+    },
+    CompilerAtom {
+        string: CompilerString {
+            storage: Latin1(
+                [
+                    114,
+                    105,
+                    103,
+                    104,
+                    116,
+                ],
+            ),
+        },
+        static_property_only: false,
+    },
+    CompilerAtom {
+        string: CompilerString {
+            storage: Latin1(
+                [
+                    115,
+                    117,
+                    109,
+                ],
+            ),
+        },
+        static_property_only: false,
+    },
+]
+constants: [
+    Function(
+        CompiledFunctionConstant {
+            executable: ExecutableId(
+                2,
+            ),
+        },
+    ),
+]
+closure variables: []
+realm globals: []
+source instructions: [
+    SourceInstruction {
+        pc: BytecodePc(
+            0,
+        ),
+        span: Span {
+            start: 20,
+            end: 24,
+        },
+    },
+    SourceInstruction {
+        pc: BytecodePc(
+            3,
+        ),
+        span: Span {
+            start: 25,
+            end: 30,
+        },
+    },
+    SourceInstruction {
+        pc: BytecodePc(
+            6,
+        ),
+        span: Span {
+            start: 20,
+            end: 24,
+        },
+    },
+    SourceInstruction {
+        pc: BytecodePc(
+            7,
+        ),
+        span: Span {
+            start: 20,
+            end: 24,
+        },
+    },
+    SourceInstruction {
+        pc: BytecodePc(
+            8,
+        ),
+        span: Span {
+            start: 25,
+            end: 34,
+        },
+    },
+    SourceInstruction {
+        pc: BytecodePc(
+            9,
+        ),
+        span: Span {
+            start: 25,
+            end: 34,
+        },
+    },
+    SourceInstruction {
+        pc: BytecodePc(
+            10,
+        ),
+        span: Span {
+            start: 25,
+            end: 34,
+        },
+    },
+    SourceInstruction {
+        pc: BytecodePc(
+            11,
+        ),
+        span: Span {
+            start: 25,
+            end: 34,
+        },
+    },
+    SourceInstruction {
+        pc: BytecodePc(
+            12,
+        ),
+        span: Span {
+            start: 25,
+            end: 34,
+        },
+    },
+    SourceInstruction {
+        pc: BytecodePc(
+            14,
+        ),
+        span: Span {
+            start: 25,
+            end: 34,
+        },
+    },
+    SourceInstruction {
+        pc: BytecodePc(
+            15,
+        ),
+        span: Span {
+            start: 33,
+            end: 34,
+        },
+    },
+    SourceInstruction {
+        pc: BytecodePc(
+            16,
+        ),
+        span: Span {
+            start: 25,
+            end: 30,
+        },
+    },
+    SourceInstruction {
+        pc: BytecodePc(
+            17,
+        ),
+        span: Span {
+            start: 45,
+            end: 48,
+        },
+    },
+    SourceInstruction {
+        pc: BytecodePc(
+            20,
+        ),
+        span: Span {
+            start: 51,
+            end: 55,
+        },
+    },
+    SourceInstruction {
+        pc: BytecodePc(
+            23,
+        ),
+        span: Span {
+            start: 58,
+            end: 63,
+        },
+    },
+    SourceInstruction {
+        pc: BytecodePc(
+            26,
+        ),
+        span: Span {
+            start: 51,
+            end: 63,
+        },
+    },
+    SourceInstruction {
+        pc: BytecodePc(
+            27,
+        ),
+        span: Span {
+            start: 45,
+            end: 48,
+        },
+    },
+    SourceInstruction {
+        pc: BytecodePc(
+            28,
+        ),
+        span: Span {
+            start: 72,
+            end: 103,
+        },
+    },
+    SourceInstruction {
+        pc: BytecodePc(
+            30,
+        ),
+        span: Span {
+            start: 65,
+            end: 104,
+        },
+    },
+]
+bytecode: [94, 1, 0, 94, 2, 0, 207, 200, 208, 17, 6, 169, 232, 3, 14, 181, 201, 94, 3, 0, 95, 1, 0, 95, 2, 0, 155, 202, 190, 0, 40]
+instructions: [
+    VerifiedInstruction {
+        decoded: DecodedInstruction {
+            pc: BytecodePc(
+                0,
+            ),
+            instruction: Instruction {
+                opcode: SetLocUninitialized,
+                operands: Loc(
+                    1,
+                ),
+            },
+            next_pc: BytecodePc(
+                3,
+            ),
+        },
+        entry_stack_depth: Some(
+            0,
+        ),
+        successors: VerifiedSuccessors(
+            Fallthrough(
+                InstructionIndex(
+                    1,
+                ),
+            ),
+        ),
+    },
+    VerifiedInstruction {
+        decoded: DecodedInstruction {
+            pc: BytecodePc(
+                3,
+            ),
+            instruction: Instruction {
+                opcode: SetLocUninitialized,
+                operands: Loc(
+                    2,
+                ),
+            },
+            next_pc: BytecodePc(
+                6,
+            ),
+        },
+        entry_stack_depth: Some(
+            0,
+        ),
+        successors: VerifiedSuccessors(
+            Fallthrough(
+                InstructionIndex(
+                    2,
+                ),
+            ),
+        ),
+    },
+    VerifiedInstruction {
+        decoded: DecodedInstruction {
+            pc: BytecodePc(
+                6,
+            ),
+            instruction: Instruction {
+                opcode: GetArg0,
+                operands: NoneArg,
+            },
+            next_pc: BytecodePc(
+                7,
+            ),
+        },
+        entry_stack_depth: Some(
+            0,
+        ),
+        successors: VerifiedSuccessors(
+            Fallthrough(
+                InstructionIndex(
+                    3,
+                ),
+            ),
+        ),
+    },
+    VerifiedInstruction {
+        decoded: DecodedInstruction {
+            pc: BytecodePc(
+                7,
+            ),
+            instruction: Instruction {
+                opcode: PutLoc1,
+                operands: NoneLoc,
+            },
+            next_pc: BytecodePc(
+                8,
+            ),
+        },
+        entry_stack_depth: Some(
+            1,
+        ),
+        successors: VerifiedSuccessors(
+            Fallthrough(
+                InstructionIndex(
+                    4,
+                ),
+            ),
+        ),
+    },
+    VerifiedInstruction {
+        decoded: DecodedInstruction {
+            pc: BytecodePc(
+                8,
+            ),
+            instruction: Instruction {
+                opcode: GetArg1,
+                operands: NoneArg,
+            },
+            next_pc: BytecodePc(
+                9,
+            ),
+        },
+        entry_stack_depth: Some(
+            0,
+        ),
+        successors: VerifiedSuccessors(
+            Fallthrough(
+                InstructionIndex(
+                    5,
+                ),
+            ),
+        ),
+    },
+    VerifiedInstruction {
+        decoded: DecodedInstruction {
+            pc: BytecodePc(
+                9,
+            ),
+            instruction: Instruction {
+                opcode: Dup,
+                operands: None,
+            },
+            next_pc: BytecodePc(
+                10,
+            ),
+        },
+        entry_stack_depth: Some(
+            1,
+        ),
+        successors: VerifiedSuccessors(
+            Fallthrough(
+                InstructionIndex(
+                    6,
+                ),
+            ),
+        ),
+    },
+    VerifiedInstruction {
+        decoded: DecodedInstruction {
+            pc: BytecodePc(
+                10,
+            ),
+            instruction: Instruction {
+                opcode: Undefined,
+                operands: None,
+            },
+            next_pc: BytecodePc(
+                11,
+            ),
+        },
+        entry_stack_depth: Some(
+            2,
+        ),
+        successors: VerifiedSuccessors(
+            Fallthrough(
+                InstructionIndex(
+                    7,
+                ),
+            ),
+        ),
+    },
+    VerifiedInstruction {
+        decoded: DecodedInstruction {
+            pc: BytecodePc(
+                11,
+            ),
+            instruction: Instruction {
+                opcode: StrictEq,
+                operands: None,
+            },
+            next_pc: BytecodePc(
+                12,
+            ),
+        },
+        entry_stack_depth: Some(
+            3,
+        ),
+        successors: VerifiedSuccessors(
+            Fallthrough(
+                InstructionIndex(
+                    8,
+                ),
+            ),
+        ),
+    },
+    VerifiedInstruction {
+        decoded: DecodedInstruction {
+            pc: BytecodePc(
+                12,
+            ),
+            instruction: Instruction {
+                opcode: IfFalse8,
+                operands: Label8(
+                    3,
+                ),
+            },
+            next_pc: BytecodePc(
+                14,
+            ),
+        },
+        entry_stack_depth: Some(
+            2,
+        ),
+        successors: VerifiedSuccessors(
+            Branch {
+                taken: InstructionIndex(
+                    11,
+                ),
+                not_taken: InstructionIndex(
+                    9,
+                ),
+            },
+        ),
+    },
+    VerifiedInstruction {
+        decoded: DecodedInstruction {
+            pc: BytecodePc(
+                14,
+            ),
+            instruction: Instruction {
+                opcode: Drop,
+                operands: None,
+            },
+            next_pc: BytecodePc(
+                15,
+            ),
+        },
+        entry_stack_depth: Some(
+            1,
+        ),
+        successors: VerifiedSuccessors(
+            Fallthrough(
+                InstructionIndex(
+                    10,
+                ),
+            ),
+        ),
+    },
+    VerifiedInstruction {
+        decoded: DecodedInstruction {
+            pc: BytecodePc(
+                15,
+            ),
+            instruction: Instruction {
+                opcode: Push2,
+                operands: NoneInt,
+            },
+            next_pc: BytecodePc(
+                16,
+            ),
+        },
+        entry_stack_depth: Some(
+            0,
+        ),
+        successors: VerifiedSuccessors(
+            Fallthrough(
+                InstructionIndex(
+                    11,
+                ),
+            ),
+        ),
+    },
+    VerifiedInstruction {
+        decoded: DecodedInstruction {
+            pc: BytecodePc(
+                16,
+            ),
+            instruction: Instruction {
+                opcode: PutLoc2,
+                operands: NoneLoc,
+            },
+            next_pc: BytecodePc(
+                17,
+            ),
+        },
+        entry_stack_depth: Some(
+            1,
+        ),
+        successors: VerifiedSuccessors(
+            Fallthrough(
+                InstructionIndex(
+                    12,
+                ),
+            ),
+        ),
+    },
+    VerifiedInstruction {
+        decoded: DecodedInstruction {
+            pc: BytecodePc(
+                17,
+            ),
+            instruction: Instruction {
+                opcode: SetLocUninitialized,
+                operands: Loc(
+                    3,
+                ),
+            },
+            next_pc: BytecodePc(
+                20,
+            ),
+        },
+        entry_stack_depth: Some(
+            0,
+        ),
+        successors: VerifiedSuccessors(
+            Fallthrough(
+                InstructionIndex(
+                    13,
+                ),
+            ),
+        ),
+    },
+    VerifiedInstruction {
+        decoded: DecodedInstruction {
+            pc: BytecodePc(
+                20,
+            ),
+            instruction: Instruction {
+                opcode: GetLocCheck,
+                operands: Loc(
+                    1,
+                ),
+            },
+            next_pc: BytecodePc(
+                23,
+            ),
+        },
+        entry_stack_depth: Some(
+            0,
+        ),
+        successors: VerifiedSuccessors(
+            Fallthrough(
+                InstructionIndex(
+                    14,
+                ),
+            ),
+        ),
+    },
+    VerifiedInstruction {
+        decoded: DecodedInstruction {
+            pc: BytecodePc(
+                23,
+            ),
+            instruction: Instruction {
+                opcode: GetLocCheck,
+                operands: Loc(
+                    2,
+                ),
+            },
+            next_pc: BytecodePc(
+                26,
+            ),
+        },
+        entry_stack_depth: Some(
+            1,
+        ),
+        successors: VerifiedSuccessors(
+            Fallthrough(
+                InstructionIndex(
+                    15,
+                ),
+            ),
+        ),
+    },
+    VerifiedInstruction {
+        decoded: DecodedInstruction {
+            pc: BytecodePc(
+                26,
+            ),
+            instruction: Instruction {
+                opcode: Add,
+                operands: None,
+            },
+            next_pc: BytecodePc(
+                27,
+            ),
+        },
+        entry_stack_depth: Some(
+            2,
+        ),
+        successors: VerifiedSuccessors(
+            Fallthrough(
+                InstructionIndex(
+                    16,
+                ),
+            ),
+        ),
+    },
+    VerifiedInstruction {
+        decoded: DecodedInstruction {
+            pc: BytecodePc(
+                27,
+            ),
+            instruction: Instruction {
+                opcode: PutLoc3,
+                operands: NoneLoc,
+            },
+            next_pc: BytecodePc(
+                28,
+            ),
+        },
+        entry_stack_depth: Some(
+            1,
+        ),
+        successors: VerifiedSuccessors(
+            Fallthrough(
+                InstructionIndex(
+                    17,
+                ),
+            ),
+        ),
+    },
+    VerifiedInstruction {
+        decoded: DecodedInstruction {
+            pc: BytecodePc(
+                28,
+            ),
+            instruction: Instruction {
+                opcode: FClosure8,
+                operands: Const8(
+                    0,
+                ),
+            },
+            next_pc: BytecodePc(
+                30,
+            ),
+        },
+        entry_stack_depth: Some(
+            0,
+        ),
+        successors: VerifiedSuccessors(
+            Fallthrough(
+                InstructionIndex(
+                    18,
+                ),
+            ),
+        ),
+    },
+    VerifiedInstruction {
+        decoded: DecodedInstruction {
+            pc: BytecodePc(
+                30,
+            ),
+            instruction: Instruction {
+                opcode: Return,
+                operands: None,
+            },
+            next_pc: BytecodePc(
+                31,
+            ),
+        },
+        entry_stack_depth: Some(
+            1,
+        ),
+        successors: VerifiedSuccessors(
+            Terminate,
+        ),
+    },
+]
+control-flow summary: max_stack=3 transfers=19 domains=FunctionIndexDomains { atom_pool_len: 6, constant_pool_len: 1, argument_count: 2, local_count: 4, closure_var_count: 0 } header=VerifiedFunctionHeader { flags: FunctionHeaderFlags(1601), mode: FunctionMode(0), kind: Normal, defined_argument_count: 1, variable_reference_count: 1 }
+capture layout: Some(
+    CompilerCaptureLayout {
+        bindings: [
+            ScopedLocal(
+                3,
+            ),
+        ],
+        mapped_arguments: None,
+    },
+)
+constant layout: Some(
+    CompilerConstantLayout {
+        kinds: [
+            Function,
+        ],
+    },
+)
+metadata kind: OrdinaryFunction
+metadata function name: Some(AtomPoolIndex(0))
+metadata variables: [
+    VariableDefinition {
+        name: Some(
+            AtomPoolIndex(
+                1,
+            ),
+        ),
+        scope_next: End,
+        policy: CompilerBindingPolicy {
+            kind: Parameter,
+            initialization: Argument,
+            writes: Mutable,
+            temporal_dead_zone: false,
+        },
+        has_scope: false,
+        variable_reference: None,
+        function_initializer: None,
+    },
+    VariableDefinition {
+        name: Some(
+            AtomPoolIndex(
+                2,
+            ),
+        ),
+        scope_next: End,
+        policy: CompilerBindingPolicy {
+            kind: Parameter,
+            initialization: Argument,
+            writes: Mutable,
+            temporal_dead_zone: false,
+        },
+        has_scope: false,
+        variable_reference: None,
+        function_initializer: None,
+    },
+    VariableDefinition {
+        name: Some(
+            AtomPoolIndex(
+                0,
+            ),
+        ),
+        scope_next: End,
+        policy: CompilerBindingPolicy {
+            kind: FunctionName,
+            initialization: FunctionName,
+            writes: ImmutableInStrictCode,
+            temporal_dead_zone: false,
+        },
+        has_scope: false,
+        variable_reference: None,
+        function_initializer: None,
+    },
+    VariableDefinition {
+        name: Some(
+            AtomPoolIndex(
+                3,
+            ),
+        ),
+        scope_next: Local(
+            0,
+        ),
+        policy: CompilerBindingPolicy {
+            kind: Parameter,
+            initialization: Argument,
+            writes: Mutable,
+            temporal_dead_zone: true,
+        },
+        has_scope: false,
+        variable_reference: None,
+        function_initializer: None,
+    },
+    VariableDefinition {
+        name: Some(
+            AtomPoolIndex(
+                4,
+            ),
+        ),
+        scope_next: Local(
+            1,
+        ),
+        policy: CompilerBindingPolicy {
+            kind: Parameter,
+            initialization: Argument,
+            writes: Mutable,
+            temporal_dead_zone: true,
+        },
+        has_scope: false,
+        variable_reference: None,
+        function_initializer: None,
+    },
+    VariableDefinition {
+        name: Some(
+            AtomPoolIndex(
+                5,
+            ),
+        ),
+        scope_next: End,
+        policy: CompilerBindingPolicy {
+            kind: Const,
+            initialization: AtDeclaration,
+            writes: Immutable,
+            temporal_dead_zone: true,
+        },
+        has_scope: true,
+        variable_reference: Some(
+            0,
+        ),
+        function_initializer: None,
+    },
+]
+metadata closures: []
+metadata source: display="dynamic-characterization.js" function="function anonymous(left,right = 2\n) {\nconst sum = left + right; return function inner(){ return sum; };\n}" function_span=SourceByteSpan { start: 1, end: 106 } name_span=Some(SourceByteSpan { start: 10, end: 19 }) mappings=[
+    PcSourceSpan {
+        pc: BytecodePc(
+            0,
+        ),
+        span: SourceByteSpan {
+            start: 20,
+            end: 24,
+        },
+    },
+    PcSourceSpan {
+        pc: BytecodePc(
+            3,
+        ),
+        span: SourceByteSpan {
+            start: 25,
+            end: 30,
+        },
+    },
+    PcSourceSpan {
+        pc: BytecodePc(
+            6,
+        ),
+        span: SourceByteSpan {
+            start: 20,
+            end: 24,
+        },
+    },
+    PcSourceSpan {
+        pc: BytecodePc(
+            7,
+        ),
+        span: SourceByteSpan {
+            start: 20,
+            end: 24,
+        },
+    },
+    PcSourceSpan {
+        pc: BytecodePc(
+            8,
+        ),
+        span: SourceByteSpan {
+            start: 25,
+            end: 34,
+        },
+    },
+    PcSourceSpan {
+        pc: BytecodePc(
+            9,
+        ),
+        span: SourceByteSpan {
+            start: 25,
+            end: 34,
+        },
+    },
+    PcSourceSpan {
+        pc: BytecodePc(
+            10,
+        ),
+        span: SourceByteSpan {
+            start: 25,
+            end: 34,
+        },
+    },
+    PcSourceSpan {
+        pc: BytecodePc(
+            11,
+        ),
+        span: SourceByteSpan {
+            start: 25,
+            end: 34,
+        },
+    },
+    PcSourceSpan {
+        pc: BytecodePc(
+            12,
+        ),
+        span: SourceByteSpan {
+            start: 25,
+            end: 34,
+        },
+    },
+    PcSourceSpan {
+        pc: BytecodePc(
+            14,
+        ),
+        span: SourceByteSpan {
+            start: 25,
+            end: 34,
+        },
+    },
+    PcSourceSpan {
+        pc: BytecodePc(
+            15,
+        ),
+        span: SourceByteSpan {
+            start: 33,
+            end: 34,
+        },
+    },
+    PcSourceSpan {
+        pc: BytecodePc(
+            16,
+        ),
+        span: SourceByteSpan {
+            start: 25,
+            end: 30,
+        },
+    },
+    PcSourceSpan {
+        pc: BytecodePc(
+            17,
+        ),
+        span: SourceByteSpan {
+            start: 45,
+            end: 48,
+        },
+    },
+    PcSourceSpan {
+        pc: BytecodePc(
+            20,
+        ),
+        span: SourceByteSpan {
+            start: 51,
+            end: 55,
+        },
+    },
+    PcSourceSpan {
+        pc: BytecodePc(
+            23,
+        ),
+        span: SourceByteSpan {
+            start: 58,
+            end: 63,
+        },
+    },
+    PcSourceSpan {
+        pc: BytecodePc(
+            26,
+        ),
+        span: SourceByteSpan {
+            start: 51,
+            end: 63,
+        },
+    },
+    PcSourceSpan {
+        pc: BytecodePc(
+            27,
+        ),
+        span: SourceByteSpan {
+            start: 45,
+            end: 48,
+        },
+    },
+    PcSourceSpan {
+        pc: BytecodePc(
+            28,
+        ),
+        span: SourceByteSpan {
+            start: 72,
+            end: 103,
+        },
+    },
+    PcSourceSpan {
+        pc: BytecodePc(
+            30,
+        ),
+        span: SourceByteSpan {
+            start: 65,
+            end: 104,
+        },
+    },
+]
+disassembly:
+pc=0x00000000 opcode=set_loc_uninitialized operands=loc(index=1) stack={pops=0,pushes=0}
+pc=0x00000003 opcode=set_loc_uninitialized operands=loc(index=2) stack={pops=0,pushes=0}
+pc=0x00000006 opcode=get_arg0 operands=none_arg stack={pops=0,pushes=1}
+pc=0x00000007 opcode=put_loc1 operands=none_loc stack={pops=1,pushes=0}
+pc=0x00000008 opcode=get_arg1 operands=none_arg stack={pops=0,pushes=1}
+pc=0x00000009 opcode=dup operands=none stack={pops=1,pushes=2}
+pc=0x0000000a opcode=undefined operands=none stack={pops=0,pushes=1}
+pc=0x0000000b opcode=strict_eq operands=none stack={pops=2,pushes=1}
+pc=0x0000000c opcode=if_false8 operands=label8(displacement=+3) stack={pops=1,pushes=0}
+pc=0x0000000e opcode=drop operands=none stack={pops=1,pushes=0}
+pc=0x0000000f opcode=push_2 operands=none_int stack={pops=0,pushes=1}
+pc=0x00000010 opcode=put_loc2 operands=none_loc stack={pops=1,pushes=0}
+pc=0x00000011 opcode=set_loc_uninitialized operands=loc(index=3) stack={pops=0,pushes=0}
+pc=0x00000014 opcode=get_loc_check operands=loc(index=1) stack={pops=0,pushes=1}
+pc=0x00000017 opcode=get_loc_check operands=loc(index=2) stack={pops=0,pushes=1}
+pc=0x0000001a opcode=add operands=none stack={pops=2,pushes=1}
+pc=0x0000001b opcode=put_loc3 operands=none_loc stack={pops=1,pushes=0}
+pc=0x0000001c opcode=fclosure8 operands=const8(index=0) stack={pops=0,pushes=1}
+pc=0x0000001e opcode=return operands=none stack={pops=1,pushes=0}
+
+function 2
+executable: ExecutableId(2)
+graph control flow matches: true
+graph atoms: [
+    CompilerAtom {
+        string: CompilerString {
+            storage: Latin1(
+                [
+                    105,
+                    110,
+                    110,
+                    101,
+                    114,
+                ],
+            ),
+        },
+        static_property_only: false,
+    },
+    CompilerAtom {
+        string: CompilerString {
+            storage: Latin1(
+                [
+                    115,
+                    117,
+                    109,
+                ],
+            ),
+        },
+        static_property_only: false,
+    },
+]
+graph constants: []
+graph closure sources: [
+    ParentVariableReference(
+        0,
+    ),
+]
+locals: [
+    LoweredLocal {
+        binding: BindingId(
+            4,
+        ),
+        slot: LocalSlot(
+            0,
+        ),
+    },
+]
+atoms: [
+    CompilerAtom {
+        string: CompilerString {
+            storage: Latin1(
+                [
+                    105,
+                    110,
+                    110,
+                    101,
+                    114,
+                ],
+            ),
+        },
+        static_property_only: false,
+    },
+    CompilerAtom {
+        string: CompilerString {
+            storage: Latin1(
+                [
+                    115,
+                    117,
+                    109,
+                ],
+            ),
+        },
+        static_property_only: false,
+    },
+]
+constants: []
+closure variables: [
+    CompiledClosureVariable {
+        binding: BindingId(
+            3,
+        ),
+        slot: CaptureSlot(
+            0,
+        ),
+        source: ParentVariableReference(
+            0,
+        ),
+        policy: DeclarationPolicy {
+            kind: Const,
+            initialization: AtDeclaration,
+            writes: Immutable,
+            temporal_dead_zone: true,
+        },
+    },
+]
+realm globals: []
+source instructions: [
+    SourceInstruction {
+        pc: BytecodePc(
+            0,
+        ),
+        span: Span {
+            start: 97,
+            end: 100,
+        },
+    },
+    SourceInstruction {
+        pc: BytecodePc(
+            3,
+        ),
+        span: Span {
+            start: 90,
+            end: 101,
+        },
+    },
+]
+bytecode: [100, 0, 0, 40]
+instructions: [
+    VerifiedInstruction {
+        decoded: DecodedInstruction {
+            pc: BytecodePc(
+                0,
+            ),
+            instruction: Instruction {
+                opcode: GetVarRefCheck,
+                operands: VarRef(
+                    0,
+                ),
+            },
+            next_pc: BytecodePc(
+                3,
+            ),
+        },
+        entry_stack_depth: Some(
+            0,
+        ),
+        successors: VerifiedSuccessors(
+            Fallthrough(
+                InstructionIndex(
+                    1,
+                ),
+            ),
+        ),
+    },
+    VerifiedInstruction {
+        decoded: DecodedInstruction {
+            pc: BytecodePc(
+                3,
+            ),
+            instruction: Instruction {
+                opcode: Return,
+                operands: None,
+            },
+            next_pc: BytecodePc(
+                4,
+            ),
+        },
+        entry_stack_depth: Some(
+            1,
+        ),
+        successors: VerifiedSuccessors(
+            Terminate,
+        ),
+    },
+]
+control-flow summary: max_stack=1 transfers=2 domains=FunctionIndexDomains { atom_pool_len: 2, constant_pool_len: 0, argument_count: 0, local_count: 1, closure_var_count: 1 } header=VerifiedFunctionHeader { flags: FunctionHeaderFlags(1603), mode: FunctionMode(0), kind: Normal, defined_argument_count: 0, variable_reference_count: 0 }
+capture layout: Some(
+    CompilerCaptureLayout {
+        bindings: [],
+        mapped_arguments: None,
+    },
+)
+constant layout: Some(
+    CompilerConstantLayout {
+        kinds: [],
+    },
+)
+metadata kind: OrdinaryFunction
+metadata function name: Some(AtomPoolIndex(0))
+metadata variables: [
+    VariableDefinition {
+        name: Some(
+            AtomPoolIndex(
+                0,
+            ),
+        ),
+        scope_next: End,
+        policy: CompilerBindingPolicy {
+            kind: FunctionName,
+            initialization: FunctionName,
+            writes: ImmutableInStrictCode,
+            temporal_dead_zone: false,
+        },
+        has_scope: false,
+        variable_reference: None,
+        function_initializer: None,
+    },
+]
+metadata closures: [
+    ClosureVariableDefinition {
+        name: Some(
+            AtomPoolIndex(
+                1,
+            ),
+        ),
+        binding: Captured(
+            CompilerBindingPolicy {
+                kind: Const,
+                initialization: AtDeclaration,
+                writes: Immutable,
+                temporal_dead_zone: true,
+            },
+        ),
+        source: ParentVariableReference(
+            0,
+        ),
+        function_initializer: None,
+    },
+]
+metadata source: display="dynamic-characterization.js" function="function inner(){ return sum; }" function_span=SourceByteSpan { start: 72, end: 103 } name_span=Some(SourceByteSpan { start: 81, end: 86 }) mappings=[
+    PcSourceSpan {
+        pc: BytecodePc(
+            0,
+        ),
+        span: SourceByteSpan {
+            start: 97,
+            end: 100,
+        },
+    },
+    PcSourceSpan {
+        pc: BytecodePc(
+            3,
+        ),
+        span: SourceByteSpan {
+            start: 90,
+            end: 101,
+        },
+    },
+]
+disassembly:
+pc=0x00000000 opcode=get_var_ref_check operands=var_ref(index=0) stack={pops=0,pushes=1}
+pc=0x00000003 opcode=return operands=none stack={pops=1,pushes=0}

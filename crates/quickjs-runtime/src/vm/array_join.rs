@@ -64,6 +64,9 @@ pub(super) struct ArrayJoinContinuation {
     accumulated: JsString,
     /// The element count from the single `ToLength` length read.
     length: u64,
+    /// Whether `length` comes from a prior `%TypedArray%` validation rather
+    /// than this generic join's observable `length` property read.
+    length_is_ready: bool,
     /// The next element index to read.
     next: u64,
     realm: RealmId,
@@ -122,6 +125,7 @@ pub(super) fn begin_array_join(
         separator: None,
         accumulated: JsString::empty(),
         length: 0,
+        length_is_ready: false,
         next: 0,
         realm,
         stage: ArrayJoinStage::AwaitSeparator,
@@ -150,12 +154,68 @@ pub(super) fn begin_array_join(
     }
 }
 
+/// Starts `%TypedArray%.prototype.join` after `ValidateTypedArray` has
+/// captured its required length witness.
+///
+/// Unlike generic `Array.prototype.join`, the typed-array method obtains its
+/// length before converting `separator`. A separator's `toString` may resize
+/// the backing buffer, but the subsequent indexed Gets still run against that
+/// original iteration count.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the native entry point preserves the validated typed-array witness and standard call context"
+)]
+pub(super) fn begin_typed_array_join(
+    runtime: &mut Runtime,
+    realm: RealmId,
+    receiver: StoredValue,
+    length: usize,
+    separator: Option<StoredValue>,
+    return_to: Option<CallReturn>,
+    origin: JsStackFrame,
+    execution_budget: &mut ExecutionBudget,
+) -> Result<NativeDispatch, NativeFailure> {
+    let length = u64::try_from(length).map_err(|_| EngineFault::RuntimeInvariant {
+        message: "TypedArray join length did not fit u64",
+    })?;
+    let state = ArrayJoinContinuation {
+        target: receiver,
+        separator: None,
+        accumulated: JsString::empty(),
+        length,
+        length_is_ready: true,
+        next: 0,
+        realm,
+        stage: ArrayJoinStage::AwaitSeparator,
+        origin,
+    };
+    match separator {
+        None | Some(StoredValue::Undefined) => {
+            let mut state = state;
+            state.separator = Some(JsString::from_utf8(",")?);
+            state.stage = ArrayJoinStage::NextElement;
+            advance_array_join(runtime, state, None, return_to, execution_budget)
+        }
+        Some(value) => begin_operator_primitive_conversion(
+            runtime,
+            value,
+            OperatorPrimitiveHint::String,
+            OperatorPrimitiveTarget::ArrayJoinSeparator(Box::new(state)),
+            realm,
+            return_to,
+            native_function_host_origin(),
+            execution_budget,
+        ),
+    }
+}
+
 /// Resumes the join loop.
 ///
 /// `completion` carries the value produced by whatever operation the previous
 /// stage awaited.
 #[allow(
     clippy::too_many_lines,
+    clippy::needless_continue,
     reason = "the separator, length, element-read, and element-string stages form one traced continuation mirroring js_array_join"
 )]
 pub(super) fn advance_array_join(
@@ -166,6 +226,21 @@ pub(super) fn advance_array_join(
     execution_budget: &mut ExecutionBudget,
 ) -> Result<NativeDispatch, NativeFailure> {
     let mut completion = completion;
+    macro_rules! await_get {
+        ($operation:expr) => {
+            match $operation? {
+                GetContinuationDispatch::Ready {
+                    state: resumed,
+                    value,
+                } => {
+                    state = resumed;
+                    completion = Some(value);
+                    continue;
+                }
+                GetContinuationDispatch::Suspended(dispatch) => return Ok(dispatch),
+            }
+        };
+    }
     loop {
         match state.stage {
             ArrayJoinStage::AwaitSeparator => {
@@ -175,39 +250,32 @@ pub(super) fn advance_array_join(
                     state.realm,
                     &state.origin,
                 )?);
-                state.stage = ArrayJoinStage::AwaitLength;
+                state.stage = if state.length_is_ready {
+                    ArrayJoinStage::NextElement
+                } else {
+                    ArrayJoinStage::AwaitLength
+                };
             }
             ArrayJoinStage::AwaitLength => {
                 let length_key = runtime.predefined_property_key(PredefinedAtom::Length);
                 charge_heap_property_lookup(runtime, &state.target, execution_budget)?;
-                match read_static_property(runtime, state.realm, &state.target, &length_key)? {
-                    PropertyReadOutcome::Value(value) => {
-                        completion = Some(value);
-                        state.stage = ArrayJoinStage::AwaitLengthConversion;
-                    }
-                    PropertyReadOutcome::Getter { function, receiver } => {
-                        state.stage = ArrayJoinStage::AwaitLengthConversion;
-                        return Ok(NativeDispatch::Call(NativeCall {
-                            function,
-                            receiver,
-                            arguments: CallArguments::empty(),
-                            return_to,
-                            origin: state.origin.clone(),
-                            continuations: join_continuation(state)?,
-                            pre_call: None,
-                            new_target: None,
-                            native_caller: None,
-                        }));
-                    }
-                    PropertyReadOutcome::Failed(failure) => {
-                        return Err(NativeFailure::Abrupt(property_exception_at(
-                            state.realm,
-                            state.origin.clone(),
-                            None,
-                            failure,
-                        )?));
-                    }
-                }
+                state.stage = ArrayJoinStage::AwaitLengthConversion;
+                let dispatch = begin_value_get(
+                    runtime,
+                    &state.target,
+                    length_key,
+                    None,
+                    state.realm,
+                    return_to,
+                    state.origin.clone(),
+                    execution_budget,
+                )?;
+                await_get!(continue_get_state_after(
+                    dispatch,
+                    state,
+                    array_join_continuation,
+                    "Array join length Get produced a structured result",
+                ));
             }
             ArrayJoinStage::AwaitLengthConversion => {
                 let value = take_completion(&mut completion)?;
@@ -236,34 +304,23 @@ pub(super) fn advance_array_join(
                 }
                 let key = element_key(state.next)?;
                 charge_heap_property_lookup(runtime, &state.target, execution_budget)?;
-                match read_static_property(runtime, state.realm, &state.target, &key)? {
-                    PropertyReadOutcome::Value(value) => {
-                        completion = Some(value);
-                        state.stage = ArrayJoinStage::AwaitElement;
-                    }
-                    PropertyReadOutcome::Getter { function, receiver } => {
-                        state.stage = ArrayJoinStage::AwaitElement;
-                        return Ok(NativeDispatch::Call(NativeCall {
-                            function,
-                            receiver,
-                            arguments: CallArguments::empty(),
-                            return_to,
-                            origin: state.origin.clone(),
-                            continuations: join_continuation(state)?,
-                            pre_call: None,
-                            new_target: None,
-                            native_caller: None,
-                        }));
-                    }
-                    PropertyReadOutcome::Failed(failure) => {
-                        return Err(NativeFailure::Abrupt(property_exception_at(
-                            state.realm,
-                            state.origin.clone(),
-                            None,
-                            failure,
-                        )?));
-                    }
-                }
+                state.stage = ArrayJoinStage::AwaitElement;
+                let dispatch = begin_value_get(
+                    runtime,
+                    &state.target,
+                    key,
+                    None,
+                    state.realm,
+                    return_to,
+                    state.origin.clone(),
+                    execution_budget,
+                )?;
+                await_get!(continue_get_state_after(
+                    dispatch,
+                    state,
+                    array_join_continuation,
+                    "Array join element Get produced a structured result",
+                ));
             }
             ArrayJoinStage::AwaitElement => {
                 let value = take_completion(&mut completion)?;
@@ -304,19 +361,8 @@ pub(super) fn advance_array_join(
     }
 }
 
-/// Builds the one-element continuation list a nested getter call resumes into.
-fn join_continuation(
-    state: ArrayJoinContinuation,
-) -> Result<Vec<NativeContinuation>, NativeFailure> {
-    let mut continuations = Vec::new();
-    continuations
-        .try_reserve_exact(1)
-        .map_err(|_| ExecutionError::AllocationFailed {
-            resource: RuntimeResource::Frames,
-            additional: 1,
-        })?;
-    continuations.push(NativeContinuation::ArrayJoin(Box::new(state)));
-    Ok(continuations)
+fn array_join_continuation(state: ArrayJoinContinuation) -> NativeContinuation {
+    NativeContinuation::ArrayJoin(Box::new(state))
 }
 
 /// Returns the property key for one element index.

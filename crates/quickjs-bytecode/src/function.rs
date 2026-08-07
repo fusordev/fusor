@@ -164,7 +164,29 @@ pub struct UnverifiedFunctionHeader {
 impl UnverifiedFunctionHeader {
     const STRIPPED_ORDINARY_SOURCE_FLAGS: u16 = (1 << 0) | (1 << 1) | (1 << 6) | (1 << 9);
     const ORDINARY_SOURCE_FLAGS: u16 = Self::STRIPPED_ORDINARY_SOURCE_FLAGS | (1 << 10);
+    const ORDINARY_ARROW_FLAGS: u16 = (1 << 1) | (1 << 6) | (1 << 10);
     const ORDINARY_METHOD_FLAGS: u16 = (1 << 1) | (1 << 6) | (1 << 8) | (1 << 9) | (1 << 10);
+    // Class constructors receive their observable `prototype` property from
+    // `define_class`, not from closure materialization. They are still
+    // ordinary strict functions with `this`, `new.target`, `arguments`, and a
+    // home object available to the class machinery.
+    const CLASS_CONSTRUCTOR_FLAGS: u16 =
+        (1 << 1) | (1 << 3) | (1 << 6) | (1 << 8) | (1 << 9) | (1 << 10);
+    // A derived class constructor keeps the class home-object and argument
+    // capabilities, but additionally records both the deferred receiver and
+    // `super()` permissions. Its receiver is initialized only after the
+    // superclass construction succeeds.
+    const DERIVED_CLASS_CONSTRUCTOR_FLAGS: u16 =
+        Self::CLASS_CONSTRUCTOR_FLAGS | (1 << 2) | (1 << 7);
+    const GENERATOR_SOURCE_FLAGS: u16 = (1 << 1) | (1 << 4) | (1 << 6) | (1 << 9) | (1 << 10);
+    const GENERATOR_METHOD_FLAGS: u16 =
+        (1 << 1) | (1 << 4) | (1 << 6) | (1 << 8) | (1 << 9) | (1 << 10);
+    const ASYNC_SOURCE_FLAGS: u16 = (1 << 1) | (2 << 4) | (1 << 6) | (1 << 9) | (1 << 10);
+    const ASYNC_METHOD_FLAGS: u16 =
+        (1 << 1) | (2 << 4) | (1 << 6) | (1 << 8) | (1 << 9) | (1 << 10);
+    const ASYNC_GENERATOR_SOURCE_FLAGS: u16 = (1 << 1) | (3 << 4) | (1 << 6) | (1 << 9) | (1 << 10);
+    const ASYNC_GENERATOR_METHOD_FLAGS: u16 =
+        (1 << 1) | (3 << 4) | (1 << 6) | (1 << 8) | (1 << 9) | (1 << 10);
     const DYNAMIC_FUNCTION_SCRIPT_FLAGS: u16 = 1 << 10;
 
     /// Creates an unverified function header.
@@ -244,6 +266,27 @@ impl UnverifiedFunctionHeader {
         )
     }
 
+    /// Creates a synchronous arrow-function header with retained debug source
+    /// and a typed capture layout.
+    ///
+    /// Arrow functions are normal callables without an own `prototype`,
+    /// `arguments`, or construct path. The `new.target` selector remains
+    /// admitted because its value is captured lexically from the enclosing
+    /// execution context rather than created by the arrow frame.
+    #[must_use]
+    pub const fn ordinary_arrow_with_variable_references(
+        strict: bool,
+        defined_argument_count: u32,
+        variable_reference_count: u32,
+    ) -> Self {
+        Self::new(
+            Self::ORDINARY_ARROW_FLAGS,
+            if strict { 1 } else { 0 },
+            defined_argument_count,
+            variable_reference_count,
+        )
+    }
+
     /// Creates an ordinary object method or accessor header with retained
     /// debug source and a typed capture layout.
     ///
@@ -266,6 +309,150 @@ impl UnverifiedFunctionHeader {
         )
     }
 
+    /// Creates a base-class constructor header with retained debug source and
+    /// a typed capture layout.
+    ///
+    /// A class constructor is constructable even though it intentionally has
+    /// no closure-created `prototype` property: `define_class` creates that
+    /// property and the paired prototype object atomically.
+    #[must_use]
+    pub const fn class_constructor_with_variable_references(
+        strict: bool,
+        defined_argument_count: u32,
+        variable_reference_count: u32,
+    ) -> Self {
+        Self::new(
+            Self::CLASS_CONSTRUCTOR_FLAGS,
+            if strict { 1 } else { 0 },
+            defined_argument_count,
+            variable_reference_count,
+        )
+    }
+
+    /// Creates a derived-class constructor header with retained debug source
+    /// and a typed capture layout.
+    ///
+    /// Its `this` receiver is intentionally absent until superclass
+    /// construction completes, which is represented by the derived-class
+    /// flag rather than a closure-created prototype property.
+    #[must_use]
+    pub const fn derived_class_constructor_with_variable_references(
+        strict: bool,
+        defined_argument_count: u32,
+        variable_reference_count: u32,
+    ) -> Self {
+        Self::new(
+            Self::DERIVED_CLASS_CONSTRUCTOR_FLAGS,
+            if strict { 1 } else { 0 },
+            defined_argument_count,
+            variable_reference_count,
+        )
+    }
+
+    /// Creates a synchronous generator source-function header with retained
+    /// debug source and a typed capture layout.
+    ///
+    /// `QuickJS` records generator kind separately from the ordinary
+    /// `has_prototype` bit. Generator functions are nonconstructable, while
+    /// their observable own `prototype` object is materialized from the kind.
+    #[must_use]
+    pub const fn generator_source_function_with_variable_references(
+        strict: bool,
+        defined_argument_count: u32,
+        variable_reference_count: u32,
+    ) -> Self {
+        Self::new(
+            Self::GENERATOR_SOURCE_FLAGS,
+            if strict { 1 } else { 0 },
+            defined_argument_count,
+            variable_reference_count,
+        )
+    }
+
+    /// Creates a synchronous generator object-method header with retained
+    /// debug source and a typed capture layout.
+    #[must_use]
+    pub const fn generator_method_with_variable_references(
+        strict: bool,
+        defined_argument_count: u32,
+        variable_reference_count: u32,
+    ) -> Self {
+        Self::new(
+            Self::GENERATOR_METHOD_FLAGS,
+            if strict { 1 } else { 0 },
+            defined_argument_count,
+            variable_reference_count,
+        )
+    }
+
+    /// Creates an async source-function header with retained debug source and
+    /// a typed capture layout.
+    ///
+    /// Async functions are callable but nonconstructable and do not expose an
+    /// own `prototype` property. `QuickJS` records that distinction in the
+    /// function kind rather than the ordinary `has_prototype` bit.
+    #[must_use]
+    pub const fn async_source_function_with_variable_references(
+        strict: bool,
+        defined_argument_count: u32,
+        variable_reference_count: u32,
+    ) -> Self {
+        Self::new(
+            Self::ASYNC_SOURCE_FLAGS,
+            if strict { 1 } else { 0 },
+            defined_argument_count,
+            variable_reference_count,
+        )
+    }
+
+    /// Creates an async object-method header with retained debug source and a
+    /// typed capture layout.
+    #[must_use]
+    pub const fn async_method_with_variable_references(
+        strict: bool,
+        defined_argument_count: u32,
+        variable_reference_count: u32,
+    ) -> Self {
+        Self::new(
+            Self::ASYNC_METHOD_FLAGS,
+            if strict { 1 } else { 0 },
+            defined_argument_count,
+            variable_reference_count,
+        )
+    }
+
+    /// Creates an async-generator source-function header with retained debug
+    /// source and a typed capture layout.
+    #[must_use]
+    pub const fn async_generator_source_function_with_variable_references(
+        strict: bool,
+        defined_argument_count: u32,
+        variable_reference_count: u32,
+    ) -> Self {
+        Self::new(
+            Self::ASYNC_GENERATOR_SOURCE_FLAGS,
+            if strict { 1 } else { 0 },
+            defined_argument_count,
+            variable_reference_count,
+        )
+    }
+
+    /// Creates an async-generator object-method header with retained debug
+    /// source and a typed capture layout.
+    #[must_use]
+    pub const fn async_generator_method_with_variable_references(
+        strict: bool,
+        defined_argument_count: u32,
+        variable_reference_count: u32,
+    ) -> Self {
+        Self::new(
+            Self::ASYNC_GENERATOR_METHOD_FLAGS,
+            if strict { 1 } else { 0 },
+            defined_argument_count,
+            variable_reference_count,
+        )
+    }
+
     /// Creates the non-eval Script header used by a dynamic `Function` body.
     ///
     /// The record retains debug source, has no call arguments, executes in
@@ -277,6 +464,21 @@ impl UnverifiedFunctionHeader {
         Self::new(
             Self::DYNAMIC_FUNCTION_SCRIPT_FLAGS,
             0,
+            0,
+            variable_reference_count,
+        )
+    }
+
+    /// Creates a host-loaded Global Script header.
+    ///
+    /// A Global Script has no call arguments, retains ordinary Script strict
+    /// mode, and uses the same non-eval Script flag family as the exact
+    /// dynamic-Function wrapper.
+    #[must_use]
+    pub const fn global_script(strict: bool, variable_reference_count: u32) -> Self {
+        Self::new(
+            Self::DYNAMIC_FUNCTION_SCRIPT_FLAGS,
+            if strict { 1 } else { 0 },
             0,
             variable_reference_count,
         )
@@ -304,6 +506,20 @@ impl UnverifiedFunctionHeader {
     #[must_use]
     pub const fn variable_reference_count(self) -> u32 {
         self.variable_reference_count
+    }
+
+    /// Selects whether the serialized parameter-list flag denotes the simple
+    /// identifier-only grammar. Ordinary-function compiler constructors
+    /// default to `true`.
+    #[must_use]
+    pub const fn with_simple_parameter_list(mut self, simple: bool) -> Self {
+        const SIMPLE_PARAMETER_LIST: u16 = 1 << 1;
+        if simple {
+            self.serialized_flags |= SIMPLE_PARAMETER_LIST;
+        } else {
+            self.serialized_flags &= !SIMPLE_PARAMETER_LIST;
+        }
+        self
     }
 }
 

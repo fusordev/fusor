@@ -1020,7 +1020,15 @@ fn thrown_object_remains_rooted_until_the_last_exception_value_clone_drops() {
 #[test]
 fn aggregate_object_limit_failure_is_atomic_and_runtime_is_reusable() {
     let authority = compile("function make(){return {};}", "make");
-    let mut runtime = runtime(RuntimeLimits::default().with_max_heap_objects(21));
+    let limit = {
+        let mut probe = runtime(RuntimeLimits::default());
+        let probe_realm = probe.create_realm().expect("probe realm");
+        with_context(&mut probe, &probe_realm, |context| {
+            context.instantiate(authority.clone()).expect("probe make");
+            context.runtime_usage().heap_objects() + 1
+        })
+    };
+    let mut runtime = runtime(RuntimeLimits::default().with_max_heap_objects(limit));
     let realm = runtime.create_realm().expect("realm");
     let (_make, baseline) = with_context(&mut runtime, &realm, |context| {
         let make = context.instantiate(authority).expect("make");
@@ -1036,9 +1044,10 @@ fn aggregate_object_limit_failure_is_atomic_and_runtime_is_reusable() {
             context.call(&make, &[], ExecutionLimits::default()),
             Err(ExecutionError::LimitExceeded {
                 resource: RuntimeResource::HeapObjects,
-                limit: 21,
-                observed: 22,
+                limit: actual_limit,
+                observed: observed_limit,
             })
+            if actual_limit == limit && observed_limit == limit + 1
         ));
         assert_eq!(
             context.runtime_usage(),
@@ -1067,7 +1076,15 @@ fn aggregate_object_limit_failure_is_atomic_and_runtime_is_reusable() {
 #[test]
 fn aggregate_property_limit_failure_is_atomic_and_runtime_is_reusable() {
     let authority = compile("function make(){return {value:1};}", "make");
-    let mut runtime = runtime(RuntimeLimits::default().with_max_object_properties(414));
+    let limit = {
+        let mut probe = runtime(RuntimeLimits::default());
+        let probe_realm = probe.create_realm().expect("probe realm");
+        with_context(&mut probe, &probe_realm, |context| {
+            context.instantiate(authority.clone()).expect("probe make");
+            context.runtime_usage().object_properties() + 1
+        })
+    };
+    let mut runtime = runtime(RuntimeLimits::default().with_max_object_properties(limit));
     let realm = runtime.create_realm().expect("realm");
     let (make, first, baseline, before_failure) = with_context(&mut runtime, &realm, |context| {
         let make = context.instantiate(authority).expect("make");
@@ -1083,9 +1100,10 @@ fn aggregate_property_limit_failure_is_atomic_and_runtime_is_reusable() {
             context.call(&make, &[], ExecutionLimits::default()),
             Err(ExecutionError::LimitExceeded {
                 resource: RuntimeResource::ObjectProperties,
-                limit: 414,
-                observed: 415,
+                limit: actual_limit,
+                observed: observed_limit,
             })
+            if actual_limit == limit && observed_limit == limit + 1
         ));
         assert_eq!(
             context.runtime_usage().object_properties(),

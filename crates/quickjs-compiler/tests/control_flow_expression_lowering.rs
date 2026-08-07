@@ -7,7 +7,10 @@ use quickjs_bytecode::{
 use quickjs_compiler::{
     CompilationContext, CompiledLeafFunction, LeafCompilationError, UnsupportedLeafFeature,
 };
-use quickjs_frontend::{CompilationGoal, FrontendOptions, GlobalScriptGoal, with_parsed_program};
+use quickjs_frontend::{
+    CompilationGoal, DiagnosticStage, FrontendDiagnosticCode, FrontendOptions, GlobalScriptGoal,
+    with_parsed_program,
+};
 
 fn compile(source: &str, name: &str) -> CompiledLeafFunction {
     with_parsed_program(
@@ -183,6 +186,112 @@ fn and_and_nullish_assignment_use_their_distinct_short_circuit_tests() {
             FinalOpcode::Return,
         ]
     );
+}
+
+#[test]
+fn optional_member_chains_short_circuit_the_complete_syntactic_chain() {
+    let compiled = compile("function f(value,key){return value?.a?.[key].b;}", "f");
+
+    assert_eq!(
+        opcodes(&compiled),
+        [
+            FinalOpcode::GetArg0,
+            FinalOpcode::Dup,
+            FinalOpcode::IsUndefinedOrNull,
+            FinalOpcode::IfFalse8,
+            FinalOpcode::Drop,
+            FinalOpcode::Undefined,
+            FinalOpcode::Goto8,
+            FinalOpcode::GetField,
+            FinalOpcode::Dup,
+            FinalOpcode::IsUndefinedOrNull,
+            FinalOpcode::IfFalse8,
+            FinalOpcode::Drop,
+            FinalOpcode::Undefined,
+            FinalOpcode::Goto8,
+            FinalOpcode::GetArg1,
+            FinalOpcode::GetArrayEl,
+            FinalOpcode::GetField,
+            FinalOpcode::Return,
+        ]
+    );
+    assert_eq!(compiled.control_flow().computed_stack_size(), 2);
+
+    let exits = compiled
+        .control_flow()
+        .instructions()
+        .iter()
+        .filter(|instruction| instruction.decoded().instruction().opcode() == FinalOpcode::Goto8)
+        .map(|instruction| instruction.successors().jump_target().expect("chain exit"))
+        .collect::<Vec<_>>();
+    assert_eq!(exits.len(), 2);
+    assert_eq!(exits[0], exits[1]);
+    assert_eq!(
+        compiled
+            .control_flow()
+            .instruction(exits[0])
+            .expect("chain exit target")
+            .decoded()
+            .instruction()
+            .opcode(),
+        FinalOpcode::Return
+    );
+}
+
+#[test]
+fn optional_method_calls_test_the_function_and_retain_the_receiver() {
+    let compiled = compile(
+        "function f(holder,arg){return holder?.method?.(arg).value;}",
+        "f",
+    );
+
+    assert_eq!(
+        opcodes(&compiled),
+        [
+            FinalOpcode::GetArg0,
+            FinalOpcode::Dup,
+            FinalOpcode::IsUndefinedOrNull,
+            FinalOpcode::IfFalse8,
+            FinalOpcode::Drop,
+            FinalOpcode::Undefined,
+            FinalOpcode::Goto8,
+            FinalOpcode::GetField2,
+            FinalOpcode::Dup,
+            FinalOpcode::IsUndefinedOrNull,
+            FinalOpcode::IfFalse8,
+            FinalOpcode::Drop,
+            FinalOpcode::Drop,
+            FinalOpcode::Undefined,
+            FinalOpcode::Goto8,
+            FinalOpcode::GetArg1,
+            FinalOpcode::CallMethod,
+            FinalOpcode::GetField,
+            FinalOpcode::Return,
+        ]
+    );
+    assert_eq!(compiled.control_flow().computed_stack_size(), 3);
+}
+
+#[test]
+fn optional_spread_calls_pack_arguments_only_after_the_nullish_guard() {
+    let compiled = compile("function f(fn,values){return fn?.(1,...values,2);}", "f");
+    let opcodes = opcodes(&compiled);
+    let guard = opcodes
+        .iter()
+        .position(|opcode| *opcode == FinalOpcode::IsUndefinedOrNull)
+        .expect("optional call guard");
+    let array = opcodes
+        .iter()
+        .position(|opcode| *opcode == FinalOpcode::ArrayFrom)
+        .expect("spread argument array");
+    let apply = opcodes
+        .iter()
+        .position(|opcode| *opcode == FinalOpcode::Apply)
+        .expect("dynamic call");
+
+    assert!(guard < array && array < apply);
+    assert!(opcodes.contains(&FinalOpcode::Append));
+    assert!(opcodes.contains(&FinalOpcode::DefineArrayEl));
 }
 
 #[test]
@@ -417,17 +526,21 @@ fn nested_control_flow_has_verified_equal_depth_joins_and_relocated_sources() {
 }
 
 #[test]
-fn unsupported_short_circuit_paths_are_still_prevalidated_with_exact_spans() {
-    let source = "function f(){ return false && /constant/; }";
-    let error = compile_error(source, "f");
-    let LeafCompilationError::Unsupported { feature, span } = error else {
-        panic!("expected unsupported literal");
-    };
-    assert_eq!(feature, UnsupportedLeafFeature::UnsupportedLiteral);
+fn unreachable_regexp_paths_are_still_prevalidated_with_exact_spans() {
+    let source = "function f(){ return false && /[z-a]/u; }";
+    let error = with_parsed_program(
+        source,
+        FrontendOptions::for_goal(CompilationGoal::GlobalScript(GlobalScriptGoal::new())),
+        |_| (),
+    )
+    .expect_err("unreachable invalid RegExp literals are still early errors");
+    assert_eq!(error.stage(), DiagnosticStage::Semantic);
     assert_eq!(
-        &source[span.start as usize..span.end as usize],
-        "/constant/"
+        error.diagnostics()[0].code,
+        FrontendDiagnosticCode::InvalidRegExpLiteral
     );
+    let span = error.diagnostics()[0].labels[0].span;
+    assert_eq!(&source[span.start as usize..span.end as usize], "/[z-a]/u");
 }
 
 #[test]

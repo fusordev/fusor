@@ -34,13 +34,18 @@ const DEFAULT_MAX_INSTALLED_ATOMS: u64 = 1_048_576;
 const DEFAULT_MAX_INSTALLED_CONSTANTS: u64 = 1_048_576;
 const DEFAULT_MAX_HEAP_FUNCTIONS: u64 = 1_048_576;
 const DEFAULT_MAX_HEAP_OBJECTS: u64 = 1_048_576;
+const DEFAULT_MAX_ARRAY_BUFFER_BYTES: u64 = 1_073_741_824;
 const DEFAULT_MAX_OBJECT_PROPERTIES: u64 = 16_777_216;
 const DEFAULT_MAX_FOR_IN_ENTRIES: u64 = 16_777_216;
+const DEFAULT_MAX_COLLECTION_ENTRIES: u64 = 16_777_216;
 const DEFAULT_MAX_BINDING_CELLS: u64 = 1_048_576;
 const DEFAULT_MAX_REALM_GLOBAL_BINDINGS: u64 = 1_048_576;
 const DEFAULT_MAX_PUBLIC_ROOTS: u64 = 1_048_576;
 const DEFAULT_MAX_ACTIVE_FRAMES: u32 = 1_024;
 const DEFAULT_MAX_ACTIVE_FRAME_VALUES: u64 = 16_777_216;
+const DEFAULT_MAX_PENDING_PROMISE_JOBS: u64 = 1_048_576;
+const DEFAULT_MAX_PENDING_FINALIZATION_JOBS: u64 = 1_048_576;
+const DEFAULT_MAX_KEPT_ALIVE: u64 = 1_048_576;
 
 /// Inclusive logical ceilings for one JavaScript runtime.
 ///
@@ -57,13 +62,18 @@ pub struct RuntimeLimits {
     pub(super) max_installed_constants: u64,
     pub(crate) max_heap_functions: u64,
     pub(crate) max_heap_objects: u64,
+    pub(crate) max_array_buffer_bytes: u64,
     pub(crate) max_object_properties: u64,
     pub(crate) max_for_in_entries: u64,
+    pub(crate) max_collection_entries: u64,
     pub(crate) max_binding_cells: u64,
     pub(crate) max_realm_global_bindings: u64,
     pub(super) max_public_roots: u64,
     pub(crate) max_active_frames: u32,
     pub(crate) max_active_frame_values: u64,
+    pub(crate) max_pending_promise_jobs: u64,
+    pub(crate) max_pending_finalization_jobs: u64,
+    pub(crate) max_kept_alive: u64,
 }
 
 impl RuntimeLimits {
@@ -123,6 +133,13 @@ impl RuntimeLimits {
         self
     }
 
+    /// Replaces the maximum bytes retained by `ArrayBuffer` backing data blocks.
+    #[must_use]
+    pub const fn with_max_array_buffer_bytes(mut self, maximum: u64) -> Self {
+        self.max_array_buffer_bytes = maximum;
+        self
+    }
+
     /// Replaces the maximum aggregate own-property slot count.
     #[must_use]
     pub const fn with_max_object_properties(mut self, maximum: u64) -> Self {
@@ -134,6 +151,13 @@ impl RuntimeLimits {
     #[must_use]
     pub const fn with_max_for_in_entries(mut self, maximum: u64) -> Self {
         self.max_for_in_entries = maximum;
+        self
+    }
+
+    /// Replaces the maximum aggregate entries retained by keyed collections.
+    #[must_use]
+    pub const fn with_max_collection_entries(mut self, maximum: u64) -> Self {
+        self.max_collection_entries = maximum;
         self
     }
 
@@ -171,6 +195,29 @@ impl RuntimeLimits {
         self.max_active_frame_values = maximum;
         self
     }
+
+    /// Replaces the maximum number of Promise jobs waiting in the runtime FIFO.
+    #[must_use]
+    pub const fn with_max_pending_promise_jobs(mut self, maximum: u64) -> Self {
+        self.max_pending_promise_jobs = maximum;
+        self
+    }
+
+    /// Replaces the maximum number of finalization cleanup jobs waiting in the
+    /// runtime FIFO.
+    #[must_use]
+    pub const fn with_max_pending_finalization_jobs(mut self, maximum: u64) -> Self {
+        self.max_pending_finalization_jobs = maximum;
+        self
+    }
+
+    /// Replaces the maximum number of weak targets retained by
+    /// `AddToKeptObjects` during one ECMAScript job.
+    #[must_use]
+    pub const fn with_max_kept_alive(mut self, maximum: u64) -> Self {
+        self.max_kept_alive = maximum;
+        self
+    }
 }
 
 impl Default for RuntimeLimits {
@@ -184,13 +231,18 @@ impl Default for RuntimeLimits {
             max_installed_constants: DEFAULT_MAX_INSTALLED_CONSTANTS,
             max_heap_functions: DEFAULT_MAX_HEAP_FUNCTIONS,
             max_heap_objects: DEFAULT_MAX_HEAP_OBJECTS,
+            max_array_buffer_bytes: DEFAULT_MAX_ARRAY_BUFFER_BYTES,
             max_object_properties: DEFAULT_MAX_OBJECT_PROPERTIES,
             max_for_in_entries: DEFAULT_MAX_FOR_IN_ENTRIES,
+            max_collection_entries: DEFAULT_MAX_COLLECTION_ENTRIES,
             max_binding_cells: DEFAULT_MAX_BINDING_CELLS,
             max_realm_global_bindings: DEFAULT_MAX_REALM_GLOBAL_BINDINGS,
             max_public_roots: DEFAULT_MAX_PUBLIC_ROOTS,
             max_active_frames: DEFAULT_MAX_ACTIVE_FRAMES,
             max_active_frame_values: DEFAULT_MAX_ACTIVE_FRAME_VALUES,
+            max_pending_promise_jobs: DEFAULT_MAX_PENDING_PROMISE_JOBS,
+            max_pending_finalization_jobs: DEFAULT_MAX_PENDING_FINALIZATION_JOBS,
+            max_kept_alive: DEFAULT_MAX_KEPT_ALIVE,
         }
     }
 }
@@ -208,12 +260,17 @@ pub struct RuntimeUsage {
     pub(super) installed_constants: u64,
     pub(super) heap_functions: u64,
     pub(super) heap_objects: u64,
+    pub(super) array_buffer_bytes: u64,
     pub(super) object_properties: u64,
     pub(super) for_in_entries: u64,
+    pub(super) collection_entries: u64,
     pub(super) binding_cells: u64,
     pub(super) realm_global_bindings: u64,
     pub(super) public_roots: u64,
     pub(super) pending_releases: u64,
+    pub(super) pending_promise_jobs: u64,
+    pub(super) pending_finalization_jobs: u64,
+    pub(super) kept_alive: u64,
 }
 
 impl RuntimeUsage {
@@ -259,6 +316,12 @@ impl RuntimeUsage {
         self.heap_objects
     }
 
+    /// Returns bytes retained by live `ArrayBuffer` backing data blocks.
+    #[must_use]
+    pub const fn array_buffer_bytes(self) -> u64 {
+        self.array_buffer_bytes
+    }
+
     /// Returns the aggregate own-property slot count.
     #[must_use]
     pub const fn object_properties(self) -> u64 {
@@ -269,6 +332,12 @@ impl RuntimeUsage {
     #[must_use]
     pub const fn for_in_entries(self) -> u64 {
         self.for_in_entries
+    }
+
+    /// Returns entries retained by live keyed collections, including tombstones.
+    #[must_use]
+    pub const fn collection_entries(self) -> u64 {
+        self.collection_entries
     }
 
     /// Returns the number of live captured-binding cells.
@@ -294,5 +363,25 @@ impl RuntimeUsage {
     #[must_use]
     pub const fn pending_releases(self) -> u64 {
         self.pending_releases
+    }
+
+    /// Returns the number of Promise jobs retained by the runtime FIFO.
+    #[must_use]
+    pub const fn pending_promise_jobs(self) -> u64 {
+        self.pending_promise_jobs
+    }
+
+    /// Returns the number of finalization cleanup jobs retained by the runtime
+    /// FIFO.
+    #[must_use]
+    pub const fn pending_finalization_jobs(self) -> u64 {
+        self.pending_finalization_jobs
+    }
+
+    /// Returns the number of weak targets retained for the current ECMAScript
+    /// job.
+    #[must_use]
+    pub const fn kept_alive(self) -> u64 {
+        self.kept_alive
     }
 }

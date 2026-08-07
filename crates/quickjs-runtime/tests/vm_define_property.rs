@@ -319,6 +319,21 @@ fn define_property_reads_the_descriptor_fields_in_specification_order() {
     );
 }
 
+/// An invalid accessor is rejected at its field, before later descriptor
+/// fields are consulted.
+#[test]
+fn define_property_validates_accessors_during_descriptor_conversion() {
+    assert_eq!(
+        text(
+            "var log='';var desc={\
+             get get(){log+='g';return 1;},\
+             get set(){log+='s';return undefined;}};\
+             try{Object.defineProperty({},'x',desc);}catch(error){}return log;"
+        ),
+        "g"
+    );
+}
+
 /// Oracle: `key then value order => [kv]`. The key is converted before any
 /// descriptor field is read.
 #[test]
@@ -389,7 +404,7 @@ fn get_own_property_descriptor_reports_only_own_properties() {
     );
     assert_eq!(
         text(
-            "var base={x:1};var o={__proto__:base};\
+            "var base={x:1};var o={};Object.setPrototypeOf(o,base);\
              return typeof Object.getOwnPropertyDescriptor(o,'x');"
         ),
         "undefined"

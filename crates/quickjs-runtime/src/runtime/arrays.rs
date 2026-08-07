@@ -26,11 +26,36 @@
 //! Array exotic allocation, indexed property definition, and length mutation.
 
 use super::{
-    ArrayDefineOutcome, ArrayLengthWriteOutcome, ArrayState, Atom, HeapObject, HeapReference,
-    JsNumber, ObjectId, ObjectRecord, OwnProperty, PredefinedAtom, PropertyKey, PropertyLayout,
-    PropertyLayoutKind, RealmId, Runtime, RuntimeResource, StoredValue, check_execution_limit,
-    stale_heap_reference, usize_to_u64,
+    ArrayDefineOutcome, ArrayLengthWriteOutcome, ArrayState, Atom, BindingCellId, HeapObject,
+    HeapReference, JsNumber, ObjectId, ObjectRecord, OwnProperty, PredefinedAtom, PropertyKey,
+    PropertyLayout, PropertyLayoutKind, RealmId, Runtime, RuntimeResource, SlotValue, StoredValue,
+    check_execution_limit, stale_heap_reference, usize_to_u64,
 };
+
+struct ArrayDefinitionFacts {
+    length: u32,
+    existing: ArrayPropertyLocation,
+    extensible: bool,
+    length_writable: bool,
+}
+
+#[derive(Clone, Copy, Eq, PartialEq)]
+enum ArrayPropertyLocation {
+    Absent,
+    Dense,
+    Sparse,
+}
+
+fn default_dense_data_value(property: &OwnProperty) -> Option<StoredValue> {
+    match property {
+        OwnProperty::Data { layout, value }
+            if *layout == PropertyLayout::data(true, true, true) =>
+        {
+            Some(value.duplicate())
+        }
+        OwnProperty::Data { .. } | OwnProperty::Accessor { .. } => None,
+    }
+}
 
 impl Runtime {
     pub(crate) fn allocate_array(
@@ -84,12 +109,12 @@ impl Runtime {
             })?;
 
         let mut record = ObjectRecord::empty(Some(prototype));
-        record.try_reserve_data(property_count).map_err(|_| {
-            crate::ExecutionError::AllocationFailed {
+        record
+            .try_reserve_data(1)
+            .map_err(|_| crate::ExecutionError::AllocationFailed {
                 resource: RuntimeResource::ObjectProperties,
                 additional: property_count,
-            }
-        })?;
+            })?;
         record
             .append_data(
                 self.predefined_property_key(PredefinedAtom::Length),
@@ -100,15 +125,11 @@ impl Runtime {
                 resource: RuntimeResource::ObjectProperties,
                 additional: property_count,
             })?;
-        record.append_dense_array_data(elements).map_err(|_| {
-            crate::ExecutionError::AllocationFailed {
-                resource: RuntimeResource::ObjectProperties,
-                additional: property_count,
-            }
-        })?;
         let object = self
-            .objects
-            .try_insert(HeapObject::array(record, ArrayState::new(length)))
+            .insert_heap_object(HeapObject::array(
+                record,
+                ArrayState::dense(length, elements),
+            ))
             .map_err(|_| crate::ExecutionError::AllocationFailed {
                 resource: RuntimeResource::HeapObjects,
                 additional: 1,
@@ -163,8 +184,7 @@ impl Runtime {
                 additional: 1,
             })?;
         let object = self
-            .objects
-            .try_insert(HeapObject::array(record, ArrayState::new(length)))
+            .insert_heap_object(HeapObject::array(record, ArrayState::new(length)))
             .map_err(|_| crate::ExecutionError::AllocationFailed {
                 resource: RuntimeResource::HeapObjects,
                 additional: 1,
@@ -185,10 +205,131 @@ impl Runtime {
             })
     }
 
+    pub(crate) fn is_arguments_object(&self, object: ObjectId) -> Result<bool, crate::EngineFault> {
+        self.objects
+            .get(object)
+            .map(HeapObject::is_arguments)
+            .ok_or(crate::EngineFault::StaleHeapEdge {
+                edge: "object",
+                index: object.index(),
+                generation: object.generation(),
+            })
+    }
+
+    pub(crate) fn mapped_arguments_cell(
+        &self,
+        object: ObjectId,
+        key: &PropertyKey,
+    ) -> Result<Option<BindingCellId>, crate::EngineFault> {
+        let Some(index) = key.as_index() else {
+            return Ok(None);
+        };
+        self.objects
+            .get(object)
+            .map(|object| object.arguments_cell(index.get()))
+            .ok_or(crate::EngineFault::StaleHeapEdge {
+                edge: "object",
+                index: object.index(),
+                generation: object.generation(),
+            })
+    }
+
+    pub(crate) fn mapped_arguments_value(
+        &self,
+        object: ObjectId,
+        key: &PropertyKey,
+    ) -> Result<Option<StoredValue>, crate::EngineFault> {
+        let Some(cell) = self.mapped_arguments_cell(object, key)? else {
+            return Ok(None);
+        };
+        match &self
+            .cells
+            .get(cell)
+            .ok_or(crate::EngineFault::StaleHeapEdge {
+                edge: "mapped arguments binding cell",
+                index: cell.index(),
+                generation: cell.generation(),
+            })?
+            .value
+        {
+            SlotValue::Value(value) => Ok(Some(value.duplicate())),
+            SlotValue::Uninitialized => Err(crate::EngineFault::RuntimeInvariant {
+                message: "mapped arguments binding is initialized",
+            }),
+        }
+    }
+
+    pub(crate) fn replace_mapped_arguments_cell_value(
+        &mut self,
+        cell: BindingCellId,
+        value: StoredValue,
+    ) -> Result<(), crate::EngineFault> {
+        self.cells
+            .get_mut(cell)
+            .ok_or(crate::EngineFault::StaleHeapEdge {
+                edge: "mapped arguments binding cell",
+                index: cell.index(),
+                generation: cell.generation(),
+            })?
+            .value = SlotValue::Value(value);
+        self.collection_pending = true;
+        Ok(())
+    }
+
+    pub(crate) fn detach_mapped_arguments_property(
+        &mut self,
+        object: ObjectId,
+        key: &PropertyKey,
+    ) -> Result<Option<BindingCellId>, crate::EngineFault> {
+        let Some(index) = key.as_index() else {
+            return Ok(None);
+        };
+        let detached = self
+            .objects
+            .get_mut(object)
+            .map(|object| object.detach_arguments_cell(index.get()))
+            .ok_or(crate::EngineFault::StaleHeapEdge {
+                edge: "object",
+                index: object.index(),
+                generation: object.generation(),
+            })?;
+        if detached.is_some() {
+            self.collection_pending = true;
+        }
+        Ok(detached)
+    }
+
+    pub(crate) fn synchronize_mapped_arguments_property(
+        &mut self,
+        object: ObjectId,
+        key: &PropertyKey,
+    ) -> Result<(), crate::EngineFault> {
+        let Some(value) = self.mapped_arguments_value(object, key)? else {
+            return Ok(());
+        };
+        if !self
+            .objects
+            .get_mut(object)
+            .ok_or(crate::EngineFault::StaleHeapEdge {
+                edge: "object",
+                index: object.index(),
+                generation: object.generation(),
+            })?
+            .record
+            .replace_existing_data(key, value)
+        {
+            return Err(crate::EngineFault::RuntimeInvariant {
+                message: "mapped arguments property remains present data",
+            });
+        }
+        self.collection_pending = true;
+        Ok(())
+    }
+
     pub(crate) fn array_length(&self, object: ObjectId) -> Result<Option<u32>, crate::EngineFault> {
         self.objects
             .get(object)
-            .map(|object| object.array_state().copied().map(ArrayState::length))
+            .map(|object| object.array_state().map(ArrayState::length))
             .ok_or(crate::EngineFault::StaleHeapEdge {
                 edge: "object",
                 index: object.index(),
@@ -214,7 +355,7 @@ impl Runtime {
                 message: "array own-property lookup received a non-array object",
             });
         }
-        Ok(object.record.own_property(key))
+        Ok(object.array_own_property(key))
     }
 
     pub(crate) fn preview_array_define_data_property_work(
@@ -235,7 +376,7 @@ impl Runtime {
             }
             .into());
         }
-        Ok(usize_to_u64(object.record.property_count())
+        Ok(usize_to_u64(object.property_count())
             .saturating_mul(4)
             .saturating_add(4))
     }
@@ -262,9 +403,140 @@ impl Runtime {
         // The mutation performs at most four linear shape passes: length
         // descriptor lookup, blocker discovery, stable compaction, and length
         // slot update. Return a conservative bound before any mutation.
-        Ok(usize_to_u64(object.record.property_count())
+        Ok(usize_to_u64(object.property_count())
             .saturating_mul(4)
             .saturating_add(4))
+    }
+
+    fn array_definition_facts(
+        &self,
+        object: ObjectId,
+        key: &PropertyKey,
+    ) -> Result<ArrayDefinitionFacts, crate::EngineFault> {
+        let array = self
+            .objects
+            .get(object)
+            .ok_or(crate::EngineFault::StaleHeapEdge {
+                edge: "array object",
+                index: object.index(),
+                generation: object.generation(),
+            })?;
+        let length = array
+            .array_state()
+            .ok_or(crate::EngineFault::RuntimeInvariant {
+                message: "array property definition received a non-array object",
+            })?
+            .length();
+        let length_property = array
+            .record
+            .own_property(&self.predefined_property_key(PredefinedAtom::Length))
+            .ok_or(crate::EngineFault::RuntimeInvariant {
+                message: "array object has no own length property",
+            })?;
+        let dense_exists = key.as_index().is_some_and(|index| {
+            array
+                .array_state()
+                .is_some_and(|state| state.dense_value(index).is_some())
+        });
+        let exists = array.array_own_property(key).is_some();
+        Ok(ArrayDefinitionFacts {
+            length,
+            existing: if dense_exists {
+                ArrayPropertyLocation::Dense
+            } else if exists {
+                ArrayPropertyLocation::Sparse
+            } else {
+                ArrayPropertyLocation::Absent
+            },
+            extensible: array.record.is_extensible(),
+            length_writable: length_property.layout().writable() == Some(true),
+        })
+    }
+
+    fn replace_existing_array_property(
+        &mut self,
+        object: ObjectId,
+        key: &PropertyKey,
+        property: OwnProperty,
+        dense_exists: bool,
+    ) -> Result<(), crate::ExecutionError> {
+        if dense_exists {
+            if let Some(value) = default_dense_data_value(&property) {
+                let index = key
+                    .as_index()
+                    .expect("only an indexed property can be dense");
+                let created = self
+                    .objects
+                    .get_mut(object)
+                    .expect("live array remains present")
+                    .array_state_mut()
+                    .expect("array state remains present")
+                    .try_store_dense(index, value)
+                    .map_err(|_| crate::ExecutionError::AllocationFailed {
+                        resource: RuntimeResource::ObjectProperties,
+                        additional: 1,
+                    })?;
+                debug_assert!(!created, "a located dense property is replaced");
+                self.collection_pending = true;
+                return Ok(());
+            }
+            self.objects
+                .get_mut(object)
+                .expect("live array remains present")
+                .transition_array_to_sparse()
+                .map_err(|_| crate::ExecutionError::AllocationFailed {
+                    resource: RuntimeResource::ObjectProperties,
+                    additional: 1,
+                })?;
+        }
+        if self
+            .objects
+            .get_mut(object)
+            .expect("live array remains present")
+            .record
+            .restore_existing_property(key, property)
+            .is_none()
+        {
+            return Err(crate::EngineFault::RuntimeInvariant {
+                message: "located array property disappeared before its definition",
+            }
+            .into());
+        }
+        self.collection_pending = true;
+        Ok(())
+    }
+
+    fn try_store_new_dense_array_property(
+        &mut self,
+        object: ObjectId,
+        key: &PropertyKey,
+        property: &OwnProperty,
+    ) -> Result<bool, crate::ExecutionError> {
+        let (Some(index), Some(value)) = (key.as_index(), default_dense_data_value(property))
+        else {
+            return Ok(false);
+        };
+        if !self
+            .objects
+            .get(object)
+            .and_then(HeapObject::array_state)
+            .is_some_and(|state| state.can_store_dense(index))
+        {
+            return Ok(false);
+        }
+        let created = self
+            .objects
+            .get_mut(object)
+            .expect("live array remains present")
+            .array_state_mut()
+            .expect("array state remains present")
+            .try_store_dense(index, value)
+            .map_err(|_| crate::ExecutionError::AllocationFailed {
+                resource: RuntimeResource::ObjectProperties,
+                additional: 1,
+            })?;
+        debug_assert!(created, "an absent dense property is created");
+        Ok(true)
     }
 
     pub(crate) fn define_array_data_property(
@@ -280,66 +552,41 @@ impl Runtime {
             }
             .into());
         }
+        self.define_array_own_property(object, key, OwnProperty::Data { layout, value })
+    }
+
+    pub(crate) fn define_array_own_property(
+        &mut self,
+        object: ObjectId,
+        key: PropertyKey,
+        property: OwnProperty,
+    ) -> Result<ArrayDefineOutcome, crate::ExecutionError> {
         if key.as_atom().and_then(Atom::predefined_atom) == Some(PredefinedAtom::Length) {
             return Err(crate::EngineFault::RuntimeInvariant {
                 message: "array length definition bypassed numeric length validation",
             }
             .into());
         }
-        let (length, exists, extensible, length_writable) = {
-            let array = self
-                .objects
-                .get(object)
-                .ok_or(crate::EngineFault::StaleHeapEdge {
-                    edge: "array object",
-                    index: object.index(),
-                    generation: object.generation(),
-                })?;
-            let length = array
-                .array_state()
-                .ok_or(crate::EngineFault::RuntimeInvariant {
-                    message: "array data-property definition received a non-array object",
-                })?
-                .length();
-            let length_property = array
-                .record
-                .own_property(&self.predefined_property_key(PredefinedAtom::Length))
-                .ok_or(crate::EngineFault::RuntimeInvariant {
-                    message: "array object has no own length property",
-                })?;
-            (
-                length,
-                array.record.own_property(&key).is_some(),
-                array.record.is_extensible(),
-                length_property.layout().writable() == Some(true),
-            )
-        };
-        let extended_length = key
-            .as_index()
-            .and_then(|index| (index.get() >= length).then_some(index.get().saturating_add(1)));
-        if extended_length.is_some() && !length_writable {
+        let facts = self.array_definition_facts(object, &key)?;
+        let extended_length = key.as_index().and_then(|index| {
+            (index.get() >= facts.length).then_some(index.get().saturating_add(1))
+        });
+        if extended_length.is_some() && !facts.length_writable {
             return Ok(ArrayDefineOutcome::ReadOnlyLength);
         }
-        if exists {
-            let replaced = self
-                .objects
-                .get_mut(object)
-                .expect("live array remains present")
-                .record
-                .replace_existing_with_data(&key, layout, value);
-            if replaced.is_none() {
-                return Err(crate::EngineFault::RuntimeInvariant {
-                    message: "located array property disappeared before its data definition",
-                }
-                .into());
-            }
+        if facts.existing != ArrayPropertyLocation::Absent {
+            self.replace_existing_array_property(
+                object,
+                &key,
+                property,
+                facts.existing == ArrayPropertyLocation::Dense,
+            )?;
             if let Some(length) = extended_length {
                 self.update_array_length(object, length)?;
             }
-            self.collection_pending = true;
             return Ok(ArrayDefineOutcome::Complete);
         }
-        if !extensible {
+        if !facts.extensible {
             return Ok(ArrayDefineOutcome::NonExtensible);
         }
         check_execution_limit(
@@ -347,28 +594,28 @@ impl Runtime {
             self.limits.max_object_properties,
             self.object_properties.saturating_add(1),
         )?;
-        self.objects
-            .get_mut(object)
-            .expect("live array remains present")
-            .record
-            .try_reserve_data(1)
-            .map_err(|_| crate::ExecutionError::AllocationFailed {
-                resource: RuntimeResource::ObjectProperties,
-                additional: 1,
-            })?;
-        self.objects
-            .get_mut(object)
-            .expect("live array remains present")
-            .record
-            .append_data(key, layout, value)
-            .map_err(|_| crate::ExecutionError::AllocationFailed {
-                resource: RuntimeResource::ObjectProperties,
-                additional: 1,
-            })?;
+        if self.try_store_new_dense_array_property(object, &key, &property)? {
+            if let Some(length) = extended_length {
+                self.update_array_length(object, length)?;
+            }
+            self.object_properties = self.object_properties.saturating_add(1);
+            self.collection_pending = true;
+            return Ok(ArrayDefineOutcome::Complete);
+        }
+        if key.as_index().is_some() {
+            self.objects
+                .get_mut(object)
+                .expect("live array remains present")
+                .transition_array_to_sparse()
+                .map_err(|_| crate::ExecutionError::AllocationFailed {
+                    resource: RuntimeResource::ObjectProperties,
+                    additional: 1,
+                })?;
+        }
+        self.append_own_property(HeapReference::Object(object), key, property)?;
         if let Some(length) = extended_length {
             self.update_array_length(object, length)?;
         }
-        self.object_properties = self.object_properties.saturating_add(1);
         self.collection_pending = true;
         Ok(ArrayDefineOutcome::Complete)
     }
@@ -410,6 +657,25 @@ impl Runtime {
             return Ok(ArrayLengthWriteOutcome::Complete);
         }
 
+        if self
+            .objects
+            .get(object)
+            .and_then(HeapObject::array_state)
+            .is_some_and(ArrayState::is_dense)
+        {
+            let removed = self
+                .objects
+                .get_mut(object)
+                .expect("live array remains present")
+                .array_state_mut()
+                .expect("array state remains present")
+                .truncate_dense(requested_length);
+            self.object_properties = self.object_properties.saturating_sub(usize_to_u64(removed));
+            self.update_array_length(object, requested_length)?;
+            self.collection_pending = true;
+            return Ok(ArrayLengthWriteOutcome::Complete);
+        }
+
         let truncation = self
             .objects
             .get_mut(object)
@@ -428,6 +694,40 @@ impl Runtime {
             },
             None => ArrayLengthWriteOutcome::Complete,
         })
+    }
+
+    /// Applies the final `writable` attribute selected by `ArraySetLength` after
+    /// all indexed deletions have completed (or stopped at a blocker).
+    pub(crate) fn set_array_length_writable(
+        &mut self,
+        object: ObjectId,
+        writable: bool,
+    ) -> Result<(), crate::EngineFault> {
+        let length_key = self.predefined_property_key(PredefinedAtom::Length);
+        let array = self
+            .objects
+            .get_mut(object)
+            .ok_or(crate::EngineFault::StaleHeapEdge {
+                edge: "array object",
+                index: object.index(),
+                generation: object.generation(),
+            })?;
+        if array.array_state().is_none() {
+            return Err(crate::EngineFault::RuntimeInvariant {
+                message: "array length layout update received a non-array object",
+            });
+        }
+        let previous = array.record.replace_existing_data_layout(
+            &length_key,
+            PropertyLayout::data(writable, false, false),
+        );
+        if previous.is_none() {
+            return Err(crate::EngineFault::RuntimeInvariant {
+                message: "array object lost its own data length layout",
+            });
+        }
+        self.collection_pending = true;
+        Ok(())
     }
 
     fn update_array_length(

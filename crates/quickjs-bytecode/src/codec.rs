@@ -576,6 +576,18 @@ impl Instruction {
     ///
     /// Propagates a schema inconsistency from [`FinalOpcode::stack_effect`].
     pub fn stack_effect(self) -> Result<StackEffect, StackEffectError> {
+        // `define_class` keeps QuickJS's compact `atom_u8` encoding.  The
+        // verified derived-class form carries both the superclass constructor
+        // and its already-observed `.prototype` parent, so it consumes one
+        // additional value.  This belongs here rather than in the opcode
+        // table: the table describes the upstream opcode family, while the
+        // compiler-owned heritage bit describes the certified lowering shape.
+        if matches!(
+            (self.opcode, self.operands),
+            (FinalOpcode::DefineClass, Operands::AtomU8 { value: 1, .. })
+        ) {
+            return Ok(StackEffect::new(3, 2));
+        }
         self.opcode
             .stack_effect(self.operands.dynamic_argument_count())
     }

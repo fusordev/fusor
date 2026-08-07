@@ -72,6 +72,10 @@ impl Runtime {
         self.atoms.new_unique_symbol(description)
     }
 
+    pub(crate) fn new_private_name(&mut self, description: &JsString) -> Result<Atom, AtomError> {
+        self.atoms.new_private_name(description)
+    }
+
     pub(crate) fn intern_global_symbol(
         &mut self,
         description: &JsString,
@@ -97,8 +101,7 @@ impl Runtime {
                 additional: 1,
             })?;
         let object = self
-            .objects
-            .try_insert(HeapObject::with_boxed_primitive(
+            .insert_heap_object(HeapObject::with_boxed_primitive(
                 ObjectRecord::empty(Some(HeapReference::Object(prototype))),
                 BoxedPrimitive::Symbol(value),
             ))

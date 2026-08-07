@@ -27,13 +27,27 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
 pub(crate) const DEFAULT_CONTROL_FLOW_CORPUS: &str = "tests/control-flow/manifest.json";
+pub(crate) const DEFAULT_ASYNC_FUNCTION_CORPUS: &str = "tests/async-function/manifest.json";
+pub(crate) const DEFAULT_ASYNC_GENERATOR_CORPUS: &str = "tests/async-generator/manifest.json";
 pub(crate) const DEFAULT_ERROR_CORPUS: &str = "tests/error/manifest.json";
 pub(crate) const DEFAULT_FUNCTION_APPLY_CORPUS: &str = "tests/function-apply/manifest.json";
 pub(crate) const DEFAULT_FUNCTION_BIND_CORPUS: &str = "tests/function-bind/manifest.json";
+pub(crate) const DEFAULT_GENERATOR_CORPUS: &str = "tests/generator/manifest.json";
 pub(crate) const DEFAULT_ITERATOR_CORPUS: &str = "tests/iterator/manifest.json";
 pub(crate) const DEFAULT_CALL_SPREAD_CORPUS: &str = "tests/call-spread/manifest.json";
+pub(crate) const DEFAULT_OBJECT_LEGACY_CORPUS: &str = "tests/object-legacy/manifest.json";
+pub(crate) const DEFAULT_PROMISE_CORE_CORPUS: &str = "tests/promise-core/manifest.json";
+pub(crate) const DEFAULT_STRING_HTML_CORPUS: &str = "tests/string-html/manifest.json";
+pub(crate) const DEFAULT_STRING_REPLACE_ALL_CORPUS: &str = "tests/string-replace-all/manifest.json";
+pub(crate) const DEFAULT_STRING_SPLIT_CORPUS: &str = "tests/string-split/manifest.json";
+pub(crate) const DEFAULT_MAP_CORPUS: &str = "tests/map/manifest.json";
+pub(crate) const DEFAULT_SET_CORPUS: &str = "tests/set/manifest.json";
+pub(crate) const DEFAULT_WEAK_COLLECTIONS_CORPUS: &str = "tests/weak-collections/manifest.json";
+pub(crate) const DEFAULT_WEAK_REFERENCES_CORPUS: &str = "tests/weak-references/manifest.json";
 pub(crate) const MAX_CONTROL_FLOW_TIMEOUT_MS: u64 = 60_000;
 pub(crate) const CANDIDATE_WORKER_COMMAND: &str = "__control-flow-candidate-worker";
+pub(crate) const ASYNC_FUNCTION_CANDIDATE_WORKER_COMMAND: &str =
+    "__async-function-candidate-worker";
 
 const EXPECTED_ORACLE_BANNER: &str = "QuickJS version 2026-06-04";
 const EXPECTED_MANIFEST_RELEASE: &str = "2026-06-04";
@@ -341,42 +355,406 @@ const ITERATOR_REQUIRED_COVERAGE: &[&str] = &[
     "iterator-result-nonobject",
 ];
 
+const OBJECT_LEGACY_REQUIRED_COVERAGE: &[&str] = &[
+    "define-getter",
+    "define-setter",
+    "define-validation-order",
+    "lookup-key-order",
+    "lookup-prototype",
+    "lookup-shadow",
+    "proto-cycle",
+    "proto-getter",
+    "proto-invalid-prototype",
+    "proto-nonextensible",
+    "proto-nullish-order",
+    "proto-primitive-receiver",
+    "proto-setter",
+    "surface-order",
+    "symbol-key",
+];
+
+const STRING_HTML_REQUIRED_COVERAGE: &[&str] = &[
+    "anchor",
+    "big",
+    "blink",
+    "bold",
+    "coercion-order",
+    "fixed",
+    "fontcolor",
+    "fontsize",
+    "italics",
+    "link",
+    "nullish-order",
+    "quote-escape",
+    "small",
+    "strike",
+    "sub",
+    "sup",
+    "surface-order",
+    "trim-aliases",
+];
+
+const STRING_REPLACE_ALL_REQUIRED_COVERAGE: &[&str] = &[
+    "replace-all-callback",
+    "replace-all-empty-search",
+    "replace-all-errors",
+    "replace-all-fallback-order",
+    "replace-all-global-flags",
+    "replace-all-match-order",
+    "replace-all-non-overlap",
+    "replace-all-nullish-order",
+    "replace-all-own-key-order",
+    "replace-all-result-coercion",
+    "replace-all-substitution",
+    "replace-all-surface",
+    "replace-all-symbol-replace",
+    "replace-all-utf16",
+];
+
+const STRING_SPLIT_REQUIRED_COVERAGE: &[&str] = &[
+    "split-descriptor",
+    "split-empty-separator",
+    "split-empty-subject",
+    "split-fallback-order",
+    "split-get-method-errors",
+    "split-leading-adjacent-trailing",
+    "split-limit-uint32",
+    "split-limit-zero",
+    "split-limit-zero-separator-order",
+    "split-no-match",
+    "split-non-overlap",
+    "split-nullish-order",
+    "split-protocol-arguments",
+    "split-surface",
+    "split-symbol-protocol",
+    "split-undefined-separator",
+    "split-utf16",
+];
+
+const MAP_REQUIRED_COVERAGE: &[&str] = &[
+    "map-brand",
+    "map-constructor-close",
+    "map-constructor-no-close-on-step",
+    "map-constructor-order",
+    "map-delete-clear",
+    "map-for-each-reentry",
+    "map-group-by",
+    "map-group-order",
+    "map-insertion-order",
+    "map-live-iterator",
+    "map-new-target",
+    "map-same-value-zero",
+    "map-surface",
+];
+
+const SET_REQUIRED_COVERAGE: &[&str] = &[
+    "set-brand",
+    "set-composition-intrinsic-result",
+    "set-constructor-close",
+    "set-constructor-no-close-on-step",
+    "set-constructor-order",
+    "set-delete-clear",
+    "set-difference",
+    "set-for-each-reentry",
+    "set-get-record-order",
+    "set-insertion-order",
+    "set-intersection",
+    "set-iterator-close",
+    "set-live-iterator",
+    "set-mutation-during-iteration",
+    "set-new-target",
+    "set-predicates",
+    "set-same-value-zero",
+    "set-size-validation",
+    "set-surface",
+    "set-symmetric-difference",
+    "set-union",
+];
+
+const WEAK_COLLECTIONS_REQUIRED_COVERAGE: &[&str] = &[
+    "weak-brand-first",
+    "weak-chaining",
+    "weak-collection-brands",
+    "weak-constructor-data",
+    "weak-map-constructor-close",
+    "weak-map-constructor-no-close-on-step",
+    "weak-map-constructor-order",
+    "weak-map-new-target",
+    "weak-map-surface",
+    "weak-object-key",
+    "weak-primitive-query",
+    "weak-registered-symbol-rejection",
+    "weak-set-new-target",
+    "weak-set-surface",
+    "weak-symbol-key",
+];
+
+const WEAK_REFERENCES_REQUIRED_COVERAGE: &[&str] = &[
+    "finalization-registry-brand-first",
+    "finalization-registry-constructor-new",
+    "finalization-registry-register",
+    "finalization-registry-surface",
+    "finalization-registry-unregister",
+    "finalization-registry-validation",
+    "weak-ref-brand-first",
+    "weak-ref-constructor-new",
+    "weak-ref-new-target",
+    "weak-ref-object-target",
+    "weak-ref-registered-symbol-rejection",
+    "weak-ref-surface",
+    "weak-ref-symbol-target",
+];
+
+const PROMISE_CORE_REQUIRED_COVERAGE: &[&str] = &[
+    "all-input-order",
+    "all-settled-records",
+    "any-error-order",
+    "capability-callable",
+    "capability-executor-once",
+    "catch-invoke",
+    "combinator-empty",
+    "combinator-iterator-close",
+    "combinator-original-abrupt",
+    "combinator-resolve-order",
+    "constructor-new",
+    "constructor-sync",
+    "executor-callable",
+    "finally-generic",
+    "finally-handler-metadata",
+    "finally-noncallable",
+    "finally-order",
+    "finally-surface",
+    "finally-validation",
+    "generic-reject",
+    "generic-resolve",
+    "new-target-prototype",
+    "promise-brand",
+    "promise-static-metadata",
+    "promise-static-surface",
+    "promise-try",
+    "promise-try-abrupt",
+    "prototype-abrupt",
+    "prototype-fallback",
+    "prototype-order",
+    "reaction-deferred",
+    "race-invoke",
+    "resolve-identity",
+    "resolve-constructor-abrupt",
+    "resolve-constructor-get",
+    "resolving-functions",
+    "resolving-metadata",
+    "species-constructor-order",
+    "species-fallback",
+    "species-getter",
+    "species-validation",
+    "then-capability",
+    "then-brand",
+    "thenable-get",
+    "with-resolvers",
+    "with-resolvers-generic",
+];
+
+const GENERATOR_REQUIRED_COVERAGE: &[&str] = &[
+    "abrupt-resume-forwarding",
+    "call-apply",
+    "completed-next",
+    "completed-return",
+    "completed-throw",
+    "delegate-next",
+    "delegate-return",
+    "delegate-throw",
+    "done-before-value",
+    "dynamic-generator-call",
+    "dynamic-generator-fallback-prototype",
+    "dynamic-generator-function",
+    "dynamic-generator-metadata",
+    "dynamic-generator-new-target",
+    "dynamic-generator-source-order",
+    "for-of-consumption",
+    "function-prototype-chain",
+    "generator-method",
+    "instance-prototype-chain",
+    "iterator-close",
+    "iterator-result-identity",
+    "iterator-result-validation",
+    "lazy-yield-value",
+    "missing-return",
+    "missing-throw",
+    "missing-throw-type-error",
+    "next-first-argument",
+    "next-resume-value",
+    "nonconstructable",
+    "parameter-initialization",
+    "prestart-return",
+    "prestart-throw",
+    "reentrancy",
+    "return-completion-propagation",
+    "return-finally",
+    "return-nested-close",
+    "throw-catch",
+    "throw-done-completion",
+    "uncaught-completes",
+    "yield",
+    "yield-star",
+    "yield-star-finally",
+    "zero-argument-close",
+];
+
+const ASYNC_FUNCTION_REQUIRED_COVERAGE: &[&str] = &[
+    "await-fulfill",
+    "await-reject",
+    "await-always-defers",
+    "await-finally",
+    "await-thenable",
+    "dynamic-async-function",
+    "dynamic-new-target",
+    "dynamic-prototype-fallback",
+    "dynamic-source-order",
+    "fifo-job-order",
+    "function-prototype-chain",
+    "method",
+    "nonconstructable",
+    "parameter-abrupt-rejection",
+    "parameter-initialization",
+    "return-assimilation",
+    "sync-prefix",
+    "throw-rejects",
+];
+
+const ASYNC_GENERATOR_REQUIRED_COVERAGE: &[&str] = &[
+    "async-from-sync",
+    "async-iterator-close",
+    "async-iterator-identity",
+    "async-iterator-precedence",
+    "await-fulfill",
+    "await-reject",
+    "call-deferred",
+    "completed-next",
+    "completed-return-await",
+    "completed-throw",
+    "dynamic-async-generator-function",
+    "dynamic-new-target",
+    "dynamic-prototype-fallback",
+    "dynamic-source-order",
+    "delegate-next",
+    "done-before-value",
+    "fifo-request-queue",
+    "function-prototype-chain",
+    "instance-prototype-chain",
+    "invalid-receiver-rejects",
+    "iterator-close",
+    "method",
+    "missing-throw",
+    "next-promise",
+    "next-resume-value",
+    "nonconstructable",
+    "parameter-abrupt-throw",
+    "parameter-initialization",
+    "return-await",
+    "return-finally",
+    "return-promise-resolve-abrupt",
+    "return-reject",
+    "raw-delegate-value",
+    "rejection-precedence",
+    "throw-catch",
+    "throw-forwarding",
+    "uncaught-throw",
+    "value-assimilation",
+    "value-promise-resolve-abrupt",
+    "yield-await-assimilation",
+    "yield-star",
+];
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum RuntimeDifferentialSuite {
+    AsyncFunction,
+    AsyncGenerator,
     ControlFlow,
     Error,
     FunctionApply,
     FunctionBind,
+    Generator,
     Iterator,
     CallSpread,
+    ObjectLegacy,
+    PromiseCore,
+    StringHtml,
+    StringReplaceAll,
+    StringSplit,
+    Map,
+    Set,
+    WeakCollections,
+    WeakReferences,
 }
 
 impl RuntimeDifferentialSuite {
     const fn label(self) -> &'static str {
         match self {
+            Self::AsyncFunction => "async-function",
+            Self::AsyncGenerator => "async-generator",
             Self::ControlFlow => "control-flow",
             Self::Error => "error",
             Self::FunctionApply => "function-apply",
             Self::FunctionBind => "function-bind",
+            Self::Generator => "generator",
             Self::Iterator => "iterator",
             Self::CallSpread => "call-spread",
+            Self::ObjectLegacy => "object-legacy",
+            Self::PromiseCore => "promise-core",
+            Self::StringHtml => "string-html",
+            Self::StringReplaceAll => "string-replace-all",
+            Self::StringSplit => "string-split",
+            Self::Map => "map",
+            Self::Set => "set",
+            Self::WeakCollections => "weak-collections",
+            Self::WeakReferences => "weak-references",
         }
     }
 
     const fn required_coverage(self) -> &'static [&'static str] {
         match self {
+            Self::AsyncFunction => ASYNC_FUNCTION_REQUIRED_COVERAGE,
+            Self::AsyncGenerator => ASYNC_GENERATOR_REQUIRED_COVERAGE,
             Self::ControlFlow => REQUIRED_COVERAGE,
             Self::Error => ERROR_REQUIRED_COVERAGE,
             Self::FunctionApply => FUNCTION_APPLY_REQUIRED_COVERAGE,
             Self::FunctionBind => FUNCTION_BIND_REQUIRED_COVERAGE,
+            Self::Generator => GENERATOR_REQUIRED_COVERAGE,
             Self::Iterator => ITERATOR_REQUIRED_COVERAGE,
             Self::CallSpread => CALL_SPREAD_REQUIRED_COVERAGE,
+            Self::ObjectLegacy => OBJECT_LEGACY_REQUIRED_COVERAGE,
+            Self::PromiseCore => PROMISE_CORE_REQUIRED_COVERAGE,
+            Self::StringHtml => STRING_HTML_REQUIRED_COVERAGE,
+            Self::StringReplaceAll => STRING_REPLACE_ALL_REQUIRED_COVERAGE,
+            Self::StringSplit => STRING_SPLIT_REQUIRED_COVERAGE,
+            Self::Map => MAP_REQUIRED_COVERAGE,
+            Self::Set => SET_REQUIRED_COVERAGE,
+            Self::WeakCollections => WEAK_COLLECTIONS_REQUIRED_COVERAGE,
+            Self::WeakReferences => WEAK_REFERENCES_REQUIRED_COVERAGE,
         }
+    }
+
+    const fn reads_async_result(self) -> bool {
+        matches!(self, Self::AsyncFunction | Self::AsyncGenerator)
     }
 }
 
 #[derive(Debug, Eq, PartialEq)]
 pub(crate) struct ControlFlowDifferentialOptions {
+    pub(crate) oracle: PathBuf,
+    pub(crate) corpus: PathBuf,
+    pub(crate) timeout: Duration,
+}
+
+#[derive(Debug, Eq, PartialEq)]
+pub(crate) struct AsyncFunctionDifferentialOptions {
+    pub(crate) oracle: PathBuf,
+    pub(crate) corpus: PathBuf,
+    pub(crate) timeout: Duration,
+}
+
+#[derive(Debug, Eq, PartialEq)]
+pub(crate) struct AsyncGeneratorDifferentialOptions {
     pub(crate) oracle: PathBuf,
     pub(crate) corpus: PathBuf,
     pub(crate) timeout: Duration,
@@ -404,6 +782,13 @@ pub(crate) struct FunctionBindDifferentialOptions {
 }
 
 #[derive(Debug, Eq, PartialEq)]
+pub(crate) struct GeneratorDifferentialOptions {
+    pub(crate) oracle: PathBuf,
+    pub(crate) corpus: PathBuf,
+    pub(crate) timeout: Duration,
+}
+
+#[derive(Debug, Eq, PartialEq)]
 pub(crate) struct IteratorDifferentialOptions {
     pub(crate) oracle: PathBuf,
     pub(crate) corpus: PathBuf,
@@ -412,6 +797,69 @@ pub(crate) struct IteratorDifferentialOptions {
 
 #[derive(Debug, Eq, PartialEq)]
 pub(crate) struct CallSpreadDifferentialOptions {
+    pub(crate) oracle: PathBuf,
+    pub(crate) corpus: PathBuf,
+    pub(crate) timeout: Duration,
+}
+
+#[derive(Debug, Eq, PartialEq)]
+pub(crate) struct ObjectLegacyDifferentialOptions {
+    pub(crate) oracle: PathBuf,
+    pub(crate) corpus: PathBuf,
+    pub(crate) timeout: Duration,
+}
+
+#[derive(Debug, Eq, PartialEq)]
+pub(crate) struct PromiseCoreDifferentialOptions {
+    pub(crate) oracle: PathBuf,
+    pub(crate) corpus: PathBuf,
+    pub(crate) timeout: Duration,
+}
+
+#[derive(Debug, Eq, PartialEq)]
+pub(crate) struct StringHtmlDifferentialOptions {
+    pub(crate) oracle: PathBuf,
+    pub(crate) corpus: PathBuf,
+    pub(crate) timeout: Duration,
+}
+
+#[derive(Debug, Eq, PartialEq)]
+pub(crate) struct StringReplaceAllDifferentialOptions {
+    pub(crate) oracle: PathBuf,
+    pub(crate) corpus: PathBuf,
+    pub(crate) timeout: Duration,
+}
+
+#[derive(Debug, Eq, PartialEq)]
+pub(crate) struct StringSplitDifferentialOptions {
+    pub(crate) oracle: PathBuf,
+    pub(crate) corpus: PathBuf,
+    pub(crate) timeout: Duration,
+}
+
+#[derive(Debug, Eq, PartialEq)]
+pub(crate) struct MapDifferentialOptions {
+    pub(crate) oracle: PathBuf,
+    pub(crate) corpus: PathBuf,
+    pub(crate) timeout: Duration,
+}
+
+#[derive(Debug, Eq, PartialEq)]
+pub(crate) struct SetDifferentialOptions {
+    pub(crate) oracle: PathBuf,
+    pub(crate) corpus: PathBuf,
+    pub(crate) timeout: Duration,
+}
+
+#[derive(Debug, Eq, PartialEq)]
+pub(crate) struct WeakCollectionsDifferentialOptions {
+    pub(crate) oracle: PathBuf,
+    pub(crate) corpus: PathBuf,
+    pub(crate) timeout: Duration,
+}
+
+#[derive(Debug, Eq, PartialEq)]
+pub(crate) struct WeakReferencesDifferentialOptions {
     pub(crate) oracle: PathBuf,
     pub(crate) corpus: PathBuf,
     pub(crate) timeout: Duration,
@@ -457,6 +905,28 @@ pub(crate) fn run_control_flow_differential(
     )
 }
 
+pub(crate) fn run_async_function_differential(
+    options: &AsyncFunctionDifferentialOptions,
+) -> Result<bool, String> {
+    run_runtime_differential(
+        &options.oracle,
+        &options.corpus,
+        options.timeout,
+        RuntimeDifferentialSuite::AsyncFunction,
+    )
+}
+
+pub(crate) fn run_async_generator_differential(
+    options: &AsyncGeneratorDifferentialOptions,
+) -> Result<bool, String> {
+    run_runtime_differential(
+        &options.oracle,
+        &options.corpus,
+        options.timeout,
+        RuntimeDifferentialSuite::AsyncGenerator,
+    )
+}
+
 pub(crate) fn run_error_differential(options: &ErrorDifferentialOptions) -> Result<bool, String> {
     run_runtime_differential(
         &options.oracle,
@@ -488,6 +958,17 @@ pub(crate) fn run_function_bind_differential(
     )
 }
 
+pub(crate) fn run_generator_differential(
+    options: &GeneratorDifferentialOptions,
+) -> Result<bool, String> {
+    run_runtime_differential(
+        &options.oracle,
+        &options.corpus,
+        options.timeout,
+        RuntimeDifferentialSuite::Generator,
+    )
+}
+
 pub(crate) fn run_iterator_differential(
     options: &IteratorDifferentialOptions,
 ) -> Result<bool, String> {
@@ -510,6 +991,101 @@ pub(crate) fn run_call_spread_differential(
     )
 }
 
+pub(crate) fn run_object_legacy_differential(
+    options: &ObjectLegacyDifferentialOptions,
+) -> Result<bool, String> {
+    run_runtime_differential(
+        &options.oracle,
+        &options.corpus,
+        options.timeout,
+        RuntimeDifferentialSuite::ObjectLegacy,
+    )
+}
+
+pub(crate) fn run_promise_core_differential(
+    options: &PromiseCoreDifferentialOptions,
+) -> Result<bool, String> {
+    run_runtime_differential(
+        &options.oracle,
+        &options.corpus,
+        options.timeout,
+        RuntimeDifferentialSuite::PromiseCore,
+    )
+}
+
+pub(crate) fn run_string_html_differential(
+    options: &StringHtmlDifferentialOptions,
+) -> Result<bool, String> {
+    run_runtime_differential(
+        &options.oracle,
+        &options.corpus,
+        options.timeout,
+        RuntimeDifferentialSuite::StringHtml,
+    )
+}
+
+pub(crate) fn run_string_replace_all_differential(
+    options: &StringReplaceAllDifferentialOptions,
+) -> Result<bool, String> {
+    run_runtime_differential(
+        &options.oracle,
+        &options.corpus,
+        options.timeout,
+        RuntimeDifferentialSuite::StringReplaceAll,
+    )
+}
+
+pub(crate) fn run_string_split_differential(
+    options: &StringSplitDifferentialOptions,
+) -> Result<bool, String> {
+    run_runtime_differential(
+        &options.oracle,
+        &options.corpus,
+        options.timeout,
+        RuntimeDifferentialSuite::StringSplit,
+    )
+}
+
+pub(crate) fn run_map_differential(options: &MapDifferentialOptions) -> Result<bool, String> {
+    run_runtime_differential(
+        &options.oracle,
+        &options.corpus,
+        options.timeout,
+        RuntimeDifferentialSuite::Map,
+    )
+}
+
+pub(crate) fn run_set_differential(options: &SetDifferentialOptions) -> Result<bool, String> {
+    run_runtime_differential(
+        &options.oracle,
+        &options.corpus,
+        options.timeout,
+        RuntimeDifferentialSuite::Set,
+    )
+}
+
+pub(crate) fn run_weak_collections_differential(
+    options: &WeakCollectionsDifferentialOptions,
+) -> Result<bool, String> {
+    run_runtime_differential(
+        &options.oracle,
+        &options.corpus,
+        options.timeout,
+        RuntimeDifferentialSuite::WeakCollections,
+    )
+}
+
+pub(crate) fn run_weak_references_differential(
+    options: &WeakReferencesDifferentialOptions,
+) -> Result<bool, String> {
+    run_runtime_differential(
+        &options.oracle,
+        &options.corpus,
+        options.timeout,
+        RuntimeDifferentialSuite::WeakReferences,
+    )
+}
+
 fn run_runtime_differential(
     oracle_path: &Path,
     corpus_path: &Path,
@@ -520,7 +1096,7 @@ fn run_runtime_differential(
     validate_executable(oracle_path, &format!("{} oracle", suite.label()))?;
     validate_oracle_release(oracle_path, timeout)?;
     let corpus = load_corpus(corpus_path, suite)?;
-    let oracle = observe_oracle(oracle_path, &corpus.cases, timeout)?;
+    let oracle = observe_oracle(oracle_path, &corpus.cases, timeout, suite)?;
 
     for ((case, observed), index) in corpus.cases.iter().zip(&oracle).zip(0_usize..) {
         if observed != &case.expected {
@@ -534,7 +1110,7 @@ fn run_runtime_differential(
         }
     }
 
-    let candidate = observe_candidate(&corpus.cases, timeout)?;
+    let candidate = observe_candidate(&corpus.cases, timeout, suite)?;
     let mut mismatch_count = 0_usize;
     let mut reported = Vec::new();
     for (((case, expected), actual), index) in corpus
@@ -983,6 +1559,7 @@ fn observe_oracle(
     executable: &Path,
     cases: &[ControlFlowCase],
     timeout: Duration,
+    suite: RuntimeDifferentialSuite,
 ) -> Result<Vec<Observation>, String> {
     if cases.is_empty() || cases.len() > MAX_CASES {
         return Err(format!(
@@ -998,12 +1575,13 @@ fn observe_oracle(
         )
     })?;
     for (index, case) in cases.iter().enumerate() {
-        let observation = observe_oracle_case(executable, case, timeout).map_err(|error| {
-            format!(
-                "runtime differential oracle case {index} `{}` failed: {error}",
-                case.id
-            )
-        })?;
+        let observation =
+            observe_oracle_case(executable, case, timeout, suite).map_err(|error| {
+                format!(
+                    "runtime differential oracle case {index} `{}` failed: {error}",
+                    case.id
+                )
+            })?;
         observations.push(observation);
     }
     Ok(observations)
@@ -1013,8 +1591,9 @@ fn observe_oracle_case(
     executable: &Path,
     case: &ControlFlowCase,
     timeout: Duration,
+    suite: RuntimeDifferentialSuite,
 ) -> Result<Observation, String> {
-    let source = build_oracle_source(case)?;
+    let source = build_oracle_source(case, suite)?;
     let temporary = TempOracleScript::create()?;
     let result = (|| {
         temporary.write_source(&source)?;
@@ -1050,7 +1629,10 @@ fn oracle_case_arguments(input: &Path) -> [&OsStr; 5] {
     ]
 }
 
-fn build_oracle_source(case: &ControlFlowCase) -> Result<String, String> {
+fn build_oracle_source(
+    case: &ControlFlowCase,
+    suite: RuntimeDifferentialSuite,
+) -> Result<String, String> {
     let mut source = String::from(
         "(function(){\
          const __Function=Function,__print=print,__json=JSON.stringify,__String=String;\
@@ -1068,11 +1650,17 @@ fn build_oracle_source(case: &ControlFlowCase) -> Result<String, String> {
            throw new TypeError(\"unsupported result type: \"+type);\
          }\
          function __run(index,body){let value,result;try{value=__Function(body)();}catch(error){result={kind:\"throw\",name:__String(error&&error.name),message:__String(error&&error.message)};__print(index+\"\\t\"+__json(result));return;}result=__normal(value);__print(index+\"\\t\"+__json(result));}\
+         function __runAsync(index,body){let value,result;try{value=__Function(body)();}catch(error){result={kind:\"throw\",name:__String(error&&error.name),message:__String(error&&error.message)};__print(index+\"\\t\"+__json(result));return;}Promise.resolve(value.done).then(function(){try{result=__normal(value.result);}catch(error){result={kind:\"throw\",name:__String(error&&error.name),message:__String(error&&error.message)};}__print(index+\"\\t\"+__json(result));},function(error){result={kind:\"throw\",name:__String(error&&error.name),message:__String(error&&error.message)};__print(index+\"\\t\"+__json(result));});}\
          const __scopeProbe=__Function(\"return typeof __Function+\\\":\\\"+typeof __run;\")();\
          if(__scopeProbe!==\"undefined:undefined\")throw new Error(\"oracle harness lexical scope leaked\");\n",
     );
     let body = js_string_literal(&case.body)?;
-    writeln!(source, "__run(0,{body});}})();")
+    let runner = if suite.reads_async_result() {
+        "__runAsync"
+    } else {
+        "__run"
+    };
+    writeln!(source, "{runner}(0,{body});}})();")
         .map_err(|_| "cannot write generated runtime differential oracle source".to_owned())?;
     if source.len() > MAX_GENERATED_ORACLE_SOURCE_BYTES {
         return Err(format!(
@@ -1275,6 +1863,7 @@ fn parse_oracle_stdout(stdout: &[u8], expected_count: usize) -> Result<Vec<Obser
 fn observe_candidate(
     cases: &[ControlFlowCase],
     timeout: Duration,
+    suite: RuntimeDifferentialSuite,
 ) -> Result<Vec<CandidateObservation>, String> {
     if cases.is_empty() || cases.len() > MAX_CASES {
         return Err(format!(
@@ -1290,7 +1879,12 @@ fn observe_candidate(
         .try_reserve_exact(cases.len())
         .map_err(|_| format!("cannot reserve {} candidate results", cases.len()))?;
     for case in cases {
-        let arguments = [OsStr::new(CANDIDATE_WORKER_COMMAND)];
+        let worker_command = if suite.reads_async_result() {
+            ASYNC_FUNCTION_CANDIDATE_WORKER_COMMAND
+        } else {
+            CANDIDATE_WORKER_COMMAND
+        };
+        let arguments = [OsStr::new(worker_command)];
         let observation = match run_program_with_arguments_bounded_input(
             &worker,
             &arguments,
@@ -1352,9 +1946,11 @@ fn parse_candidate_worker_stdout(stdout: &[u8]) -> Result<Observation, String> {
     parse_observation(&value, "candidate worker stdout")
 }
 
-pub(crate) fn run_control_flow_candidate_worker() -> Result<(), String> {
+pub(crate) fn run_control_flow_candidate_worker(read_async_result: bool) -> Result<(), String> {
     let body = read_candidate_worker_body(std::io::stdin().lock())?;
-    let attempt = catch_unwind(AssertUnwindSafe(|| observe_candidate_body(&body)));
+    let attempt = catch_unwind(AssertUnwindSafe(|| {
+        observe_candidate_body(&body, read_async_result)
+    }));
     let observation = match attempt {
         Ok(Ok(observation)) => observation,
         Ok(Err(error)) => return Err(truncate(&error)),
@@ -1443,7 +2039,7 @@ fn encode_observation(observation: &Observation) -> Result<String, String> {
         .map_err(|error| format!("cannot encode candidate worker result: {error}"))
 }
 
-fn observe_candidate_body(body: &str) -> Result<Observation, String> {
+fn observe_candidate_body(body: &str, read_async_result: bool) -> Result<Observation, String> {
     validate_candidate_body(body, "candidate body")?;
     let runtime_limits = RuntimeLimits::default()
         .with_max_realms(1)
@@ -1476,7 +2072,7 @@ fn observe_candidate_body(body: &str) -> Result<Observation, String> {
     let limits = DynamicFunctionLimits::default()
         .with_frontend(
             FrontendLimits::new(CANDIDATE_SOURCE_BYTES)
-                .with_max_dynamic_function_fragments(1)
+                .with_max_dynamic_function_fragments(16)
                 .with_max_dynamic_function_origin_bytes(128),
         )
         .with_execution(execution);
@@ -1495,33 +2091,142 @@ fn observe_candidate_body(body: &str) -> Result<Observation, String> {
         .into_value()
         .into_function()
         .map_err(|error| format!("dynamic Function facade returned a non-function: {error}"))?;
-    match call_with_dynamic_function_support(&mut context, &function, &[], limits) {
+    let completion = call_with_dynamic_function_support(&mut context, &function, &[], limits);
+    let completion = match completion {
+        Ok(state) if read_async_result => read_async_candidate_result(&mut context, state, limits)?,
+        other => other,
+    };
+    match completion {
         Ok(value) => normalize_candidate_value(&value),
         Err(ExecutionError::Exception(exception)) => {
-            let Some(kind) = exception.kind() else {
-                return Err("candidate threw an arbitrary JavaScript value".to_owned());
-            };
-            let name = exception_name(kind);
-            validate_runtime_ascii(
-                name,
-                "candidate exception name",
-                MAX_EXPECTED_ERROR_NAME_BYTES,
-            )?;
-            let message = exception
-                .message()
-                .ok_or_else(|| "candidate engine exception has no message".to_owned())?;
-            let message = decode_bounded_candidate_ascii(
-                message,
-                "candidate exception message",
-                MAX_EXPECTED_ERROR_MESSAGE_BYTES,
-            )?;
-            Ok(Observation::Throw {
-                name: name.to_owned(),
-                message,
-            })
+            if let Some(kind) = exception.kind() {
+                let name = exception_name(kind);
+                validate_runtime_ascii(
+                    name,
+                    "candidate exception name",
+                    MAX_EXPECTED_ERROR_NAME_BYTES,
+                )?;
+                let message = exception
+                    .message()
+                    .ok_or_else(|| "candidate engine exception has no message".to_owned())?;
+                let message = decode_bounded_candidate_ascii(
+                    message,
+                    "candidate exception message",
+                    MAX_EXPECTED_ERROR_MESSAGE_BYTES,
+                )?;
+                return Ok(Observation::Throw {
+                    name: name.to_owned(),
+                    message,
+                });
+            }
+            let thrown = exception
+                .thrown_value()
+                .ok_or_else(|| "candidate explicit throw has no JavaScript value".to_owned())?
+                .clone();
+            normalize_candidate_thrown_value(&mut context, &thrown, limits)
         }
         Err(error) => Err(format!("candidate execution failed: {error}")),
     }
+}
+
+fn read_async_candidate_result(
+    context: &mut quickjs_runtime::Context<'_>,
+    state: JsValue,
+    limits: DynamicFunctionLimits,
+) -> Result<Result<JsValue, ExecutionError>, String> {
+    let parameters = [SourceFragment::new("state")];
+    let reader = construct_dynamic_function(
+        context,
+        DynamicFunctionSource::new(
+            DynamicFunctionKind::Function,
+            &parameters,
+            SourceFragment::new("return state.result;"),
+        ),
+        limits,
+    )
+    .map_err(|error| format!("async result reader construction failed: {error}"))?
+    .into_value()
+    .into_function()
+    .map_err(|error| format!("async result reader is not a function: {error}"))?;
+    Ok(call_with_dynamic_function_support(
+        context,
+        &reader,
+        &[state],
+        limits,
+    ))
+}
+
+/// Observes an explicit JavaScript throw through ordinary property access, as
+/// the oracle harness does. Keeping this in JavaScript is important: the host
+/// must not infer an Error family from prototype identity or bypass an
+/// observable `name`/`message` getter.
+fn normalize_candidate_thrown_value(
+    context: &mut quickjs_runtime::Context<'_>,
+    thrown: &JsValue,
+    limits: DynamicFunctionLimits,
+) -> Result<Observation, String> {
+    let parameters = [SourceFragment::new("value"), SourceFragment::new("key")];
+    let observer_limits = limits.with_frontend(
+        FrontendLimits::new(CANDIDATE_SOURCE_BYTES)
+            .with_max_dynamic_function_fragments(3)
+            .with_max_dynamic_function_origin_bytes(128),
+    );
+    let completion = construct_dynamic_function(
+        context,
+        DynamicFunctionSource::new(
+            DynamicFunctionKind::Function,
+            &parameters,
+            SourceFragment::new("return value && value[key];"),
+        ),
+        observer_limits,
+    )
+    .map_err(|error| format!("cannot construct candidate throw observer: {error}"))?;
+    let observer = completion
+        .into_value()
+        .into_function()
+        .map_err(|error| format!("candidate throw observer is not a function: {error}"))?;
+    let name_key = context.string(
+        JsString::from_utf8("name")
+            .map_err(|error| format!("cannot construct candidate exception name key: {error}"))?,
+    );
+    let message_key =
+        context.string(JsString::from_utf8("message").map_err(|error| {
+            format!("cannot construct candidate exception message key: {error}")
+        })?);
+    let name = call_with_dynamic_function_support(
+        context,
+        &observer,
+        &[thrown.clone(), name_key],
+        observer_limits,
+    )
+    .map_err(|error| format!("candidate exception name observation failed: {error}"))?;
+    let message = call_with_dynamic_function_support(
+        context,
+        &observer,
+        &[thrown.clone(), message_key],
+        observer_limits,
+    )
+    .map_err(|error| format!("candidate exception message observation failed: {error}"))?;
+    let name = name
+        .as_string()
+        .map_err(|error| format!("cannot inspect candidate exception name: {error}"))?
+        .ok_or_else(|| "candidate exception name is not a String".to_owned())?;
+    let message = message
+        .as_string()
+        .map_err(|error| format!("cannot inspect candidate exception message: {error}"))?
+        .ok_or_else(|| "candidate exception message is not a String".to_owned())?;
+    Ok(Observation::Throw {
+        name: decode_bounded_candidate_ascii(
+            name,
+            "candidate exception name",
+            MAX_EXPECTED_ERROR_NAME_BYTES,
+        )?,
+        message: decode_bounded_candidate_ascii(
+            message,
+            "candidate exception message",
+            MAX_EXPECTED_ERROR_MESSAGE_BYTES,
+        )?,
+    })
 }
 
 fn normalize_candidate_value(value: &JsValue) -> Result<Observation, String> {
@@ -1591,6 +2296,7 @@ const fn exception_name(kind: ExceptionKind) -> &'static str {
         ExceptionKind::ReferenceError => "ReferenceError",
         ExceptionKind::SyntaxError => "SyntaxError",
         ExceptionKind::TypeError => "TypeError",
+        ExceptionKind::UriError => "URIError",
     }
 }
 
@@ -1890,6 +2596,183 @@ mod tests {
     }
 
     #[test]
+    fn checked_in_generator_manifest_satisfies_the_strict_contract() {
+        let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("../tests/generator/manifest.json");
+        let bytes = fs::read(&path).expect("read checked-in generator manifest");
+        let corpus = parse_corpus_for_suite(
+            &bytes,
+            &path.display().to_string(),
+            RuntimeDifferentialSuite::Generator,
+        )
+        .expect("checked-in generator manifest");
+        assert_eq!(corpus.cases.len(), 18);
+        assert_eq!(super::GENERATOR_REQUIRED_COVERAGE.len(), 43);
+    }
+
+    #[test]
+    fn checked_in_async_function_manifest_satisfies_the_strict_contract() {
+        let path =
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("../tests/async-function/manifest.json");
+        let bytes = fs::read(&path).expect("read checked-in async-function manifest");
+        let corpus = parse_corpus_for_suite(
+            &bytes,
+            &path.display().to_string(),
+            RuntimeDifferentialSuite::AsyncFunction,
+        )
+        .expect("checked-in async-function manifest");
+        assert_eq!(corpus.cases.len(), 9);
+        assert_eq!(super::ASYNC_FUNCTION_REQUIRED_COVERAGE.len(), 18);
+    }
+
+    #[test]
+    fn checked_in_async_generator_manifest_satisfies_the_strict_contract() {
+        let path =
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("../tests/async-generator/manifest.json");
+        let bytes = fs::read(&path).expect("read checked-in async-generator manifest");
+        let corpus = parse_corpus_for_suite(
+            &bytes,
+            &path.display().to_string(),
+            RuntimeDifferentialSuite::AsyncGenerator,
+        )
+        .expect("checked-in async-generator manifest");
+        assert_eq!(corpus.cases.len(), 18);
+        assert_eq!(super::ASYNC_GENERATOR_REQUIRED_COVERAGE.len(), 41);
+    }
+
+    #[test]
+    fn checked_in_object_legacy_manifest_satisfies_the_strict_contract() {
+        let path =
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("../tests/object-legacy/manifest.json");
+        let bytes = fs::read(&path).expect("read checked-in object-legacy manifest");
+        let corpus = parse_corpus_for_suite(
+            &bytes,
+            &path.display().to_string(),
+            RuntimeDifferentialSuite::ObjectLegacy,
+        )
+        .expect("checked-in object-legacy manifest");
+        assert_eq!(corpus.cases.len(), 15);
+        assert_eq!(
+            super::OBJECT_LEGACY_REQUIRED_COVERAGE.len(),
+            corpus.cases.len()
+        );
+    }
+
+    #[test]
+    fn checked_in_promise_core_manifest_satisfies_the_strict_contract() {
+        let path =
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("../tests/promise-core/manifest.json");
+        let bytes = fs::read(&path).expect("read checked-in Promise core manifest");
+        let corpus = parse_corpus_for_suite(
+            &bytes,
+            &path.display().to_string(),
+            RuntimeDifferentialSuite::PromiseCore,
+        )
+        .expect("checked-in Promise core manifest");
+        assert_eq!(corpus.cases.len(), 29);
+    }
+
+    #[test]
+    fn checked_in_string_html_manifest_satisfies_the_strict_contract() {
+        let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("../tests/string-html/manifest.json");
+        let bytes = fs::read(&path).expect("read checked-in string-html manifest");
+        let corpus = parse_corpus_for_suite(
+            &bytes,
+            &path.display().to_string(),
+            RuntimeDifferentialSuite::StringHtml,
+        )
+        .expect("checked-in string-html manifest");
+        assert_eq!(corpus.cases.len(), 6);
+    }
+
+    #[test]
+    fn checked_in_string_replace_all_manifest_satisfies_the_strict_contract() {
+        let path =
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("../tests/string-replace-all/manifest.json");
+        let bytes = fs::read(&path).expect("read checked-in String replaceAll manifest");
+        let corpus = parse_corpus_for_suite(
+            &bytes,
+            &path.display().to_string(),
+            RuntimeDifferentialSuite::StringReplaceAll,
+        )
+        .expect("checked-in String replaceAll manifest");
+        assert_eq!(corpus.cases.len(), 6);
+        assert_eq!(super::STRING_REPLACE_ALL_REQUIRED_COVERAGE.len(), 14);
+    }
+
+    #[test]
+    fn checked_in_string_split_manifest_satisfies_the_strict_contract() {
+        let path =
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("../tests/string-split/manifest.json");
+        let bytes = fs::read(&path).expect("read checked-in String split manifest");
+        let corpus = parse_corpus_for_suite(
+            &bytes,
+            &path.display().to_string(),
+            RuntimeDifferentialSuite::StringSplit,
+        )
+        .expect("checked-in String split manifest");
+        assert_eq!(corpus.cases.len(), 6);
+        assert_eq!(super::STRING_SPLIT_REQUIRED_COVERAGE.len(), 17);
+    }
+
+    #[test]
+    fn checked_in_map_manifest_satisfies_the_strict_contract() {
+        let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("../tests/map/manifest.json");
+        let bytes = fs::read(&path).expect("read checked-in Map manifest");
+        let corpus = parse_corpus_for_suite(
+            &bytes,
+            &path.display().to_string(),
+            RuntimeDifferentialSuite::Map,
+        )
+        .expect("checked-in Map manifest");
+        assert_eq!(corpus.cases.len(), 6);
+        assert_eq!(super::MAP_REQUIRED_COVERAGE.len(), 13);
+    }
+
+    #[test]
+    fn checked_in_set_manifest_satisfies_the_strict_contract() {
+        let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("../tests/set/manifest.json");
+        let bytes = fs::read(&path).expect("read checked-in Set manifest");
+        let corpus = parse_corpus_for_suite(
+            &bytes,
+            &path.display().to_string(),
+            RuntimeDifferentialSuite::Set,
+        )
+        .expect("checked-in Set manifest");
+        assert_eq!(corpus.cases.len(), 8);
+        assert_eq!(super::SET_REQUIRED_COVERAGE.len(), 21);
+    }
+
+    #[test]
+    fn checked_in_weak_collections_manifest_satisfies_the_strict_contract() {
+        let path =
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("../tests/weak-collections/manifest.json");
+        let bytes = fs::read(&path).expect("read checked-in weak-collections manifest");
+        let corpus = parse_corpus_for_suite(
+            &bytes,
+            &path.display().to_string(),
+            RuntimeDifferentialSuite::WeakCollections,
+        )
+        .expect("checked-in weak-collections manifest");
+        assert_eq!(corpus.cases.len(), 6);
+        assert_eq!(super::WEAK_COLLECTIONS_REQUIRED_COVERAGE.len(), 15);
+    }
+
+    #[test]
+    fn checked_in_weak_references_manifest_satisfies_the_strict_contract() {
+        let path =
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("../tests/weak-references/manifest.json");
+        let bytes = fs::read(&path).expect("read checked-in weak-references manifest");
+        let corpus = parse_corpus_for_suite(
+            &bytes,
+            &path.display().to_string(),
+            RuntimeDifferentialSuite::WeakReferences,
+        )
+        .expect("checked-in weak-references manifest");
+        assert_eq!(corpus.cases.len(), 5);
+        assert_eq!(super::WEAK_REFERENCES_REQUIRED_COVERAGE.len(), 13);
+    }
+
+    #[test]
     fn accepts_a_complete_call_spread_manifest_with_its_own_coverage_contract() {
         let manifest = complete_call_spread_manifest();
         let corpus = parse_corpus_for_suite(
@@ -2139,7 +3022,8 @@ mod tests {
     #[test]
     fn oracle_source_iife_isolates_harness_bindings_and_embeds_the_body() {
         let corpus = parse(&complete_manifest()).expect("valid manifest");
-        let source = build_oracle_source(&corpus.cases[0]).expect("oracle source");
+        let source = build_oracle_source(&corpus.cases[0], RuntimeDifferentialSuite::ControlFlow)
+            .expect("oracle source");
         assert!(source.starts_with("(function(){const __Function=Function"));
         assert!(source.contains("__Function(body)()"));
         assert!(source.contains(

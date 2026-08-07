@@ -1,0 +1,42 @@
+{
+  "schema": 1,
+  "quickjs_release": "2026-06-04",
+  "cases": [
+    {
+      "id": "surface-metadata-and-brands",
+      "covers": ["weak-map-surface", "weak-set-surface", "weak-collection-brands"],
+      "body": "return [WeakMap.name,WeakMap.length,Object.prototype.toString.call(new WeakMap()),WeakMap.prototype.set.length,WeakMap.prototype.get.length,WeakMap.prototype.has.length,WeakMap.prototype.delete.length,WeakSet.name,WeakSet.length,Object.prototype.toString.call(new WeakSet()),WeakSet.prototype.add.length,WeakSet.prototype.has.length,WeakSet.prototype.delete.length].join('|');",
+      "expect": {"kind": "string", "value": "WeakMap|0|[object WeakMap]|2|1|1|1|WeakSet|0|[object WeakSet]|1|1|1"}
+    },
+    {
+      "id": "weak-key-domain-and-chaining",
+      "covers": ["weak-object-key", "weak-symbol-key", "weak-registered-symbol-rejection", "weak-chaining"],
+      "body": "var object={};var unique=Symbol('u');var wellKnown=Symbol.iterator;var registered=Symbol.for('r');var map=new WeakMap();var set=new WeakSet();var mapChain=map.set(object,1).set(unique,2).set(wellKnown,3)===map;var setChain=set.add(object).add(unique).add(wellKnown)===set;var errors=[];try{map.set(registered,4)}catch(error){errors.push(error instanceof TypeError)}try{set.add(registered)}catch(error){errors.push(error instanceof TypeError)}return [mapChain,setChain,map.get(object),map.get(unique),map.get(wellKnown),set.has(object),set.has(unique),set.has(wellKnown),errors.join(',')].join('|');",
+      "expect": {"kind": "string", "value": "true|true|1|2|3|true|true|true|true,true"}
+    },
+    {
+      "id": "constructor-order-close-and-original-abrupt",
+      "covers": ["weak-map-constructor-order", "weak-map-constructor-close"],
+      "body": "var log=[];var original={};var secondary={};var saved=WeakMap.prototype.set;Object.defineProperty(WeakMap.prototype,'set',{configurable:true,get:function(){log.push('adder');return function(){throw original}}});var key={};var iterable={[Symbol.iterator]:function(){log.push('iterator');return {next:function(){log.push('next');return {done:false,value:[key,1]}},return:function(){log.push('return');throw secondary}}}};var caught=false;try{new WeakMap(iterable)}catch(error){caught=error===original}Object.defineProperty(WeakMap.prototype,'set',{configurable:true,writable:true,value:saved});return log.join(',')+'|'+caught;",
+      "expect": {"kind": "string", "value": "adder,iterator,next,return|true"}
+    },
+    {
+      "id": "constructor-step-abrupt-does-not-close",
+      "covers": ["weak-map-constructor-no-close-on-step"],
+      "body": "var original={};var log=[];function iterable(next){return {[Symbol.iterator]:function(){return {next:next,return:function(){log.push('close');return {}}}}};}var caught=[];try{new WeakMap(iterable(function(){throw original}))}catch(error){caught.push(error===original)}try{new WeakMap(iterable(function(){return {get done(){throw original}}}))}catch(error){caught.push(error===original)}try{new WeakMap(iterable(function(){return {done:false,get value(){throw original}}}))}catch(error){caught.push(error===original)}return log.join(',')+'|'+caught.join(',');",
+      "expect": {"kind": "string", "value": "|true,true,true"}
+    },
+    {
+      "id": "new-target-prototypes-and-constructor-data",
+      "covers": ["weak-map-new-target", "weak-set-new-target", "weak-constructor-data"],
+      "body": "var key={};function MapDerived(){}var mapPrototype=Object.create(WeakMap.prototype);MapDerived.prototype=mapPrototype;var map=Reflect.construct(WeakMap,[[[key,7]]],MapDerived);function SetDerived(){}var setPrototype=Object.create(WeakSet.prototype);SetDerived.prototype=setPrototype;var set=Reflect.construct(WeakSet,[[key]],SetDerived);return [Object.getPrototypeOf(map)===mapPrototype,map instanceof MapDerived,map.get(key),Object.getPrototypeOf(set)===setPrototype,set instanceof SetDerived,set.has(key)].join('|');",
+      "expect": {"kind": "string", "value": "true|true|7|true|true|true"}
+    },
+    {
+      "id": "primitive-queries-and-brand-first",
+      "covers": ["weak-primitive-query", "weak-brand-first"],
+      "body": "var map=new WeakMap();var set=new WeakSet();var brand=[];try{WeakMap.prototype.set.call({},1,2)}catch(error){brand.push(error instanceof TypeError)}try{WeakSet.prototype.add.call({},1)}catch(error){brand.push(error instanceof TypeError)}return [map.has(1),String(map.get(1)),map.delete(1),set.has(1),set.delete(1),brand.join(',')].join('|');",
+      "expect": {"kind": "string", "value": "false|undefined|false|false|false|true,true"}
+    }
+  ]
+}

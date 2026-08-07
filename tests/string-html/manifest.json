@@ -1,0 +1,42 @@
+{
+  "schema": 1,
+  "quickjs_release": "2026-06-04",
+  "cases": [
+    {
+      "id": "complete-create-html-surface",
+      "covers": ["anchor", "big", "blink", "bold", "fixed", "fontcolor", "fontsize", "italics", "link", "small", "strike", "sub", "sup"],
+      "body": "let s = 'x';\nreturn [s.anchor('a\"b'), s.big(), s.blink(), s.bold(), s.fixed(), s.fontcolor('r\"d'), s.fontsize(3), s.italics(), s.link('u\"v'), s.small(), s.strike(), s.sub(), s.sup()].join('|');",
+      "expect": {"kind": "string", "value": "<a name=\"a&quot;b\">x</a>|<big>x</big>|<blink>x</blink>|<b>x</b>|<tt>x</tt>|<font color=\"r&quot;d\">x</font>|<font size=\"3\">x</font>|<i>x</i>|<a href=\"u&quot;v\">x</a>|<small>x</small>|<strike>x</strike>|<sub>x</sub>|<sup>x</sup>"}
+    },
+    {
+      "id": "receiver-before-attribute-coercion",
+      "covers": ["coercion-order"],
+      "body": "let log = '';\nlet receiver = {toString() { log += 'receiver|'; return 'x'; }};\nlet attribute = {toString() { log += 'attribute'; return 'v\"q'; }};\nlet html = String.prototype.anchor.call(receiver, attribute);\nreturn log + '#' + html;",
+      "expect": {"kind": "string", "value": "receiver|attribute#<a name=\"v&quot;q\">x</a>"}
+    },
+    {
+      "id": "only-attribute-quotes-are-escaped",
+      "covers": ["quote-escape"],
+      "body": "return 'x<&'.anchor('a\"&<');",
+      "expect": {"kind": "string", "value": "<a name=\"a&quot;&<\">x<&</a>"}
+    },
+    {
+      "id": "nullish-receiver-precedes-attribute-coercion",
+      "covers": ["nullish-order"],
+      "body": "let touched = false;\ntry { String.prototype.link.call(null, {toString() { touched = true; return 'u'; }}); } catch (error) { return error.name === 'TypeError' && !touched; }\nreturn false;",
+      "expect": {"kind": "boolean", "value": true}
+    },
+    {
+      "id": "trim-aliases-share-function-identity",
+      "covers": ["trim-aliases"],
+      "body": "return String.prototype.trimEnd === String.prototype.trimRight && String.prototype.trimStart === String.prototype.trimLeft && String.prototype.trimRight.name === 'trimEnd' && String.prototype.trimLeft.name === 'trimStart';",
+      "expect": {"kind": "boolean", "value": true}
+    },
+    {
+      "id": "pinned-supported-string-surface-order",
+      "covers": ["surface-order"],
+      "body": "return Object.getOwnPropertyNames(String.prototype).join('|').replace('|match|matchAll|search|split', '').replace('|replace|replaceAll|padEnd', '|replace|padEnd');",
+      "expect": {"kind": "string", "value": "length|at|charCodeAt|charAt|concat|codePointAt|isWellFormed|toWellFormed|indexOf|lastIndexOf|includes|endsWith|startsWith|substring|substr|slice|repeat|replace|padEnd|padStart|trim|trimEnd|trimRight|trimStart|trimLeft|toString|valueOf|toLowerCase|toUpperCase|toLocaleLowerCase|toLocaleUpperCase|anchor|big|blink|bold|fixed|fontcolor|fontsize|italics|link|small|strike|sub|sup|constructor|normalize|localeCompare"}
+    }
+  ]
+}

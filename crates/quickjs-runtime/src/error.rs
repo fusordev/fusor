@@ -2,7 +2,7 @@ use std::{error::Error, fmt, sync::Arc};
 
 use quickjs_bytecode::{BytecodePc, FinalOpcode, FunctionTemplateId, SourceByteSpan};
 
-use crate::{AtomError, JsString, JsStringError, JsValue};
+use crate::{AtomError, BigIntError, JsString, JsStringError, JsValue};
 
 /// Public runtime handle category.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
@@ -139,10 +139,14 @@ pub enum RuntimeResource {
     HeapFunctions,
     /// Runtime ordinary objects.
     HeapObjects,
+    /// Bytes retained by live `ArrayBuffer` backing data blocks.
+    ArrayBufferBytes,
     /// Own property slots across ordinary objects and functions.
     ObjectProperties,
     /// Property-key snapshots and visited-key entries retained by `for-in` iterators.
     ForInEntries,
+    /// Ordered entries and tombstones retained by keyed collections.
+    CollectionEntries,
     /// Captured binding cells.
     BindingCells,
     /// Constructor-realm global binding records.
@@ -163,6 +167,14 @@ pub enum RuntimeResource {
     Collection,
     /// The deferred public-root release mailbox.
     ReleaseMailbox,
+    /// Jobs retained by the runtime-owned ECMAScript Promise FIFO.
+    PromiseJobs,
+    /// Cleanup jobs retained for live `FinalizationRegistry` objects.
+    FinalizationJobs,
+    /// Weak targets retained until the current ECMAScript job completes.
+    KeptAlive,
+    /// Backtracking states retained by one bounded `RegExp` execution.
+    RegExpBacktrackStates,
 }
 
 impl fmt::Display for RuntimeResource {
@@ -175,8 +187,10 @@ impl fmt::Display for RuntimeResource {
             Self::InstalledConstants => "installed constants",
             Self::HeapFunctions => "heap functions",
             Self::HeapObjects => "heap objects",
+            Self::ArrayBufferBytes => "ArrayBuffer bytes",
             Self::ObjectProperties => "object properties",
             Self::ForInEntries => "for-in iterator entries",
+            Self::CollectionEntries => "keyed collection entries",
             Self::BindingCells => "binding cells",
             Self::RealmGlobalBindings => "realm global bindings",
             Self::PublicRoots => "public roots",
@@ -187,6 +201,10 @@ impl fmt::Display for RuntimeResource {
             Self::ExceptionFrames => "exception stack frames",
             Self::Collection => "runtime collection",
             Self::ReleaseMailbox => "release mailbox",
+            Self::PromiseJobs => "Promise jobs",
+            Self::FinalizationJobs => "finalization jobs",
+            Self::KeptAlive => "kept-alive weak targets",
+            Self::RegExpBacktrackStates => "RegExp backtracking states",
         })
     }
 }
@@ -284,6 +302,8 @@ pub enum InstallError {
     },
     /// A compiler string could not become a runtime string.
     String(JsStringError),
+    /// A verified compiler `BigInt` could not become a runtime value.
+    BigInt(BigIntError),
     /// Runtime-local atom interning failed.
     Atom(AtomError),
     /// Global declaration instantiation rejected an existing object property.
@@ -333,6 +353,7 @@ impl fmt::Display for InstallError {
                 "failed to reserve {additional} additional entries for {resource}"
             ),
             Self::String(source) => source.fmt(formatter),
+            Self::BigInt(source) => source.fmt(formatter),
             Self::Atom(source) => source.fmt(formatter),
             Self::GlobalDeclarationRejected { name, .. } => write!(
                 formatter,
@@ -351,6 +372,7 @@ impl Error for InstallError {
     fn source(&self) -> Option<&(dyn Error + 'static)> {
         match self {
             Self::String(source) => Some(source),
+            Self::BigInt(source) => Some(source),
             Self::Atom(source) => Some(source),
             Self::UnsupportedOpcode { .. }
             | Self::LimitExceeded { .. }
@@ -364,6 +386,12 @@ impl Error for InstallError {
 impl From<JsStringError> for InstallError {
     fn from(source: JsStringError) -> Self {
         Self::String(source)
+    }
+}
+
+impl From<BigIntError> for InstallError {
+    fn from(source: BigIntError) -> Self {
+        Self::BigInt(source)
     }
 }
 
@@ -389,6 +417,55 @@ pub enum ExceptionKind {
     SyntaxError,
     /// A value was used in an operation requiring another JavaScript type.
     TypeError,
+    /// A URI codec received an unpaired surrogate or malformed percent-encoded
+    /// UTF-8 sequence.
+    UriError,
+}
+
+/// Intrinsic Error family carried by a JavaScript Error object.
+///
+/// This is distinct from [`ExceptionKind`]: explicit JavaScript `throw`
+/// completions carry arbitrary values, so a host must inspect an Error
+/// object's intrinsic prototype lineage to classify it.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub enum ErrorObjectKind {
+    /// `%Error%`.
+    Error,
+    /// `%EvalError%`.
+    EvalError,
+    /// `%RangeError%`.
+    RangeError,
+    /// `%ReferenceError%`.
+    ReferenceError,
+    /// `%SyntaxError%`.
+    SyntaxError,
+    /// `%TypeError%`.
+    TypeError,
+    /// `%URIError%`.
+    UriError,
+    /// QuickJS-compatible `%InternalError%`.
+    InternalError,
+    /// `%AggregateError%`.
+    AggregateError,
+}
+
+impl ErrorObjectKind {
+    /// Returns the ECMAScript constructor name used by Test262 negative
+    /// metadata and diagnostics.
+    #[must_use]
+    pub const fn constructor_name(self) -> &'static str {
+        match self {
+            Self::Error => "Error",
+            Self::EvalError => "EvalError",
+            Self::RangeError => "RangeError",
+            Self::ReferenceError => "ReferenceError",
+            Self::SyntaxError => "SyntaxError",
+            Self::TypeError => "TypeError",
+            Self::UriError => "URIError",
+            Self::InternalError => "InternalError",
+            Self::AggregateError => "AggregateError",
+        }
+    }
 }
 
 /// One verified caller location retained on an escaping JavaScript exception.
@@ -586,6 +663,7 @@ impl fmt::Display for JsException {
                     ExceptionKind::ReferenceError => "ReferenceError",
                     ExceptionKind::SyntaxError => "SyntaxError",
                     ExceptionKind::TypeError => "TypeError",
+                    ExceptionKind::UriError => "URIError",
                 };
                 write!(
                     formatter,
@@ -672,11 +750,6 @@ pub enum EngineFault {
         /// Internal operation that has not yet been made resumable.
         operation: &'static str,
     },
-    /// A write reached an accessor outside the iterative setter path.
-    UnsupportedAccessorWrite {
-        /// Internal operation that has not yet been made resumable.
-        operation: &'static str,
-    },
     /// A runtime-only operation produced an impossible error family.
     RuntimeInvariant {
         /// Concise invariant description.
@@ -741,10 +814,6 @@ impl fmt::Display for EngineFault {
                 formatter,
                 "{operation} reached an accessor outside the iterative getter path"
             ),
-            Self::UnsupportedAccessorWrite { operation } => write!(
-                formatter,
-                "{operation} reached an accessor outside the iterative setter path"
-            ),
             Self::RuntimeInvariant { message } => {
                 write!(formatter, "runtime invariant failed: {message}")
             }
@@ -754,7 +823,7 @@ impl fmt::Display for EngineFault {
 
 impl Error for EngineFault {}
 
-/// Failure of the host-provided ordinary dynamic-Function compiler.
+/// Failure of the host-provided dynamic-function compiler.
 #[derive(Clone, Debug)]
 pub enum DynamicFunctionCompileFailure {
     /// Exact JavaScript syntax rejection suitable for a `SyntaxError`.
@@ -1000,6 +1069,46 @@ impl From<ExecutionError> for DynamicFunctionScriptError {
     }
 }
 
+/// Failure while installing or executing one verified host-loaded Global
+/// Script.
+#[derive(Debug)]
+pub enum GlobalScriptError {
+    /// Complete authority installation failed before Script execution began.
+    Install(InstallError),
+    /// The installed Script failed during execution or completion publication.
+    Execution(ExecutionError),
+}
+
+impl fmt::Display for GlobalScriptError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Install(source) => source.fmt(formatter),
+            Self::Execution(source) => source.fmt(formatter),
+        }
+    }
+}
+
+impl Error for GlobalScriptError {
+    fn source(&self) -> Option<&(dyn Error + 'static)> {
+        match self {
+            Self::Install(source) => Some(source),
+            Self::Execution(source) => Some(source),
+        }
+    }
+}
+
+impl From<InstallError> for GlobalScriptError {
+    fn from(source: InstallError) -> Self {
+        Self::Install(source)
+    }
+}
+
+impl From<ExecutionError> for GlobalScriptError {
+    fn from(source: ExecutionError) -> Self {
+        Self::Execution(source)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::{error::Error, fmt, sync::Arc};
@@ -1123,5 +1232,23 @@ mod tests {
             exception.to_string(),
             "RangeError: radix must be between 2 and 36"
         );
+    }
+
+    #[test]
+    fn uri_exceptions_render_the_javascript_error_name() {
+        let exception = JsException::engine_error(
+            ExceptionKind::UriError,
+            string("malformed UTF-8"),
+            JsStackFrame::new(
+                FunctionTemplateId::new(0),
+                BytecodePc::ZERO,
+                Arc::from("<caller>"),
+                Arc::from("decodeURI('%C0%80')"),
+                SourceByteSpan::new(0, 21),
+            ),
+            Vec::new(),
+        );
+
+        assert_eq!(exception.to_string(), "URIError: malformed UTF-8");
     }
 }

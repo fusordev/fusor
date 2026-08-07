@@ -1,9 +1,10 @@
 use std::sync::Arc;
 
 use quickjs_bytecode::{
-    AtomPoolIndex, BytecodeBuilder, BytecodePc, CompilerAtom, CompilerCaptureLayout,
-    CompilerClosureSource, CompilerConstant, CompilerConstantLayout, CompilerConstantValue,
-    CompilerString, FinalOpcode, FunctionGraphResource, FunctionGraphVerificationErrorKind,
+    AtomPoolIndex, BytecodeBuilder, BytecodePc, CompilerAtom, CompilerBigInt,
+    CompilerCaptureLayout, CompilerClosureSource, CompilerConstant, CompilerConstantLayout,
+    CompilerConstantValue, CompilerString, CompilerTemplateElement, CompilerTemplateObject,
+    FinalOpcode, FunctionGraphResource, FunctionGraphVerificationErrorKind,
     FunctionGraphVerificationLimits, FunctionIndexDomains, FunctionTemplateId, Operands,
     UnverifiedCompilerFunction, UnverifiedCompilerFunctionBody, UnverifiedCompilerFunctionGraph,
     UnverifiedFunctionHeader, VerificationLimits, verify_compiler_control_flow,
@@ -340,6 +341,70 @@ fn graph_rejects_hostile_static_property_only_atom_uses() {
 }
 
 #[test]
+fn graph_allows_a_static_property_only_atom_for_inferred_function_names() {
+    let parent = graph_function(
+        1,
+        &[
+            (FinalOpcode::FClosure8, Operands::Const8(0)),
+            (FinalOpcode::SetName, Operands::Atom(AtomPoolIndex::new(0))),
+            (FinalOpcode::Return, Operands::None),
+        ],
+        Arc::from([CompilerAtom::new_static_property_only(string(
+            &['0' as u16],
+        ))]),
+        Arc::from([CompilerConstant::Function(FunctionTemplateId::new(1))]),
+    );
+    let child = graph_function(
+        0,
+        &[(FinalOpcode::ReturnUndef, Operands::None)],
+        Arc::from([]),
+        Arc::from([]),
+    );
+
+    let verified = function_graph(
+        vec![parent, child],
+        FunctionGraphVerificationLimits::default(),
+    )
+    .expect("set_name consumes a static property spelling without exposing it");
+    assert!(verified.root().atoms()[0].is_static_property_only());
+}
+
+#[test]
+fn graph_allows_a_static_property_only_atom_for_an_empty_class_name() {
+    let parent = graph_function(
+        1,
+        &[
+            (FinalOpcode::Undefined, Operands::None),
+            (FinalOpcode::FClosure8, Operands::Const8(0)),
+            (
+                FinalOpcode::DefineClass,
+                Operands::AtomU8 {
+                    atom: AtomPoolIndex::new(0),
+                    value: 0,
+                },
+            ),
+            (FinalOpcode::Drop, Operands::None),
+            (FinalOpcode::Drop, Operands::None),
+            (FinalOpcode::ReturnUndef, Operands::None),
+        ],
+        Arc::from([CompilerAtom::new_static_property_only(string(&[]))]),
+        Arc::from([CompilerConstant::Function(FunctionTemplateId::new(1))]),
+    );
+    let child = graph_function(
+        0,
+        &[(FinalOpcode::ReturnUndef, Operands::None)],
+        Arc::from([]),
+        Arc::from([]),
+    );
+
+    function_graph(
+        vec![parent, child],
+        FunctionGraphVerificationLimits::default(),
+    )
+    .expect("define_class consumes an empty static-property spelling without exposing it");
+}
+
+#[test]
 fn graph_rejects_static_property_only_atoms_as_realm_globals() {
     let mut builder = BytecodeBuilder::new();
     builder
@@ -459,6 +524,49 @@ fn graph_aggregates_payloads_but_atom_uniqueness_is_function_local() {
     .expect("equal contents in distinct function-local atom domains are valid");
     assert_eq!(verified.usage().atoms(), 2);
     assert_eq!(verified.usage().string_payload_bytes(), 3);
+}
+
+#[test]
+fn graph_budgets_bigint_decimal_payload_bytes() {
+    let decimal = string(&"18446744073709551616".encode_utf16().collect::<Vec<_>>());
+    let value = CompilerBigInt::try_from_decimal(decimal).expect("canonical decimal");
+    let verified = graph(
+        graph_function(
+            0,
+            &[(FinalOpcode::ReturnUndef, Operands::None)],
+            Arc::from([]),
+            Arc::from([CompilerConstant::Value(CompilerConstantValue::BigInt(
+                value,
+            ))]),
+        ),
+        FunctionGraphVerificationLimits::default().with_max_string_payload_bytes(20),
+    )
+    .expect("BigInt text payload limit is inclusive");
+
+    assert_eq!(verified.usage().string_payload_bytes(), 20);
+}
+
+#[test]
+fn graph_budgets_all_tagged_template_text_payload_bytes() {
+    let value = CompilerTemplateObject::try_from_elements(Arc::from([
+        CompilerTemplateElement::new(Some(string(&[b'a'.into()])), string(&[b'a'.into()])),
+        CompilerTemplateElement::new(None, string(&[b'\\'.into(), b'u'.into()])),
+    ]))
+    .expect("template object");
+    let verified = graph(
+        graph_function(
+            0,
+            &[(FinalOpcode::ReturnUndef, Operands::None)],
+            Arc::from([]),
+            Arc::from([CompilerConstant::Value(
+                CompilerConstantValue::TemplateObject(value),
+            )]),
+        ),
+        FunctionGraphVerificationLimits::default().with_max_string_payload_bytes(4),
+    )
+    .expect("cooked and raw template payload limit is inclusive");
+
+    assert_eq!(verified.usage().string_payload_bytes(), 4);
 }
 
 #[test]

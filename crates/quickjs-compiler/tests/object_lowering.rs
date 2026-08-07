@@ -1,7 +1,7 @@
 use quickjs_bytecode::{AtomPoolIndex, BytecodePc, FinalOpcode, Operands, VerificationLimits};
 use quickjs_compiler::{
     CompilationContext, CompiledFunction, CompiledFunctionTree, CompiledLeafFunction,
-    CompilerError, LeafCompilationError, UnsupportedFeature, UnsupportedLeafFeature,
+    LeafCompilationError, UnsupportedLeafFeature,
 };
 use quickjs_frontend::{CompilationGoal, FrontendOptions, GlobalScriptGoal, with_parsed_program};
 
@@ -79,6 +79,33 @@ fn tree_instructions(compiled: &CompiledFunction) -> Vec<(FinalOpcode, Operands)
         .map(|instruction| {
             let instruction = instruction.decoded().instruction();
             (instruction.opcode(), instruction.operands())
+        })
+        .collect()
+}
+
+fn inferred_names(function: &CompiledFunction) -> Vec<String> {
+    let instructions = tree_instructions(function);
+    instructions
+        .iter()
+        .enumerate()
+        .filter_map(|(index, (opcode, operands))| {
+            (*opcode == FinalOpcode::SetName).then_some((index, *operands))
+        })
+        .map(|(index, operands)| {
+            assert!(matches!(
+                instructions[index - 1],
+                (FinalOpcode::FClosure | FinalOpcode::FClosure8, _)
+            ));
+            let Operands::Atom(atom) = operands else {
+                panic!("set_name must carry one atom operand");
+            };
+            String::from_utf16(
+                &function.atoms()[atom.get() as usize]
+                    .string()
+                    .code_units()
+                    .collect::<Vec<_>>(),
+            )
+            .expect("static property atom is valid UTF-16")
         })
         .collect()
 }
@@ -478,8 +505,7 @@ fn bigint_methods_and_accessors_keep_exact_values_names_and_raw_sources() {
     );
 }
 
-/// A `__proto__` method or accessor is an ordinary own property; only the
-/// `__proto__: value` data form is a prototype mutation.
+/// A `__proto__` method or accessor is an ordinary own property.
 #[test]
 fn quoted_proto_methods_and_accessors_stay_ordinary_own_properties() {
     let tree = compile_tree(
@@ -545,23 +571,35 @@ fn object_methods_capture_outer_cells_and_lower_their_frontend_bodies() {
 }
 
 #[test]
-fn object_method_super_remains_fail_closed_before_home_object_lowering() {
-    let source = "function make(){return {method(){return super.value;}};}";
-    let error = with_parsed_program(
-        source,
-        FrontendOptions::for_goal(CompilationGoal::GlobalScript(GlobalScriptGoal::new())),
-        |unit| match CompilationContext::new(unit) {
-            Ok(_) => panic!("super must not acquire compiler storage"),
-            Err(error) => error,
-        },
-    )
-    .expect("front-end acceptance");
-
-    let CompilerError::Unsupported { feature, span } = error else {
-        panic!("expected a structured unsupported super binding");
-    };
-    assert_eq!(feature, UnsupportedFeature::FunctionSyntheticBinding);
-    assert_eq!(&source[span.start as usize..span.end as usize], "super");
+fn object_methods_and_accessors_lower_super_through_the_home_object() {
+    let tree = compile_tree(
+        "function make(){return {read(){return super.value;},call(){return super.method();},write(next){return super.value=next;},add(next){return super['value']+=next;},assign(next){return super.value||=next;},pre(){return ++super.value;},post(){return super['value']++;},get current(){return super.value;},set current(next){super.value=next;}};}",
+        "make",
+    );
+    let opcodes = tree
+        .functions()
+        .iter()
+        .flat_map(|function| function.control_flow().instructions())
+        .map(|instruction| instruction.decoded().instruction().opcode())
+        .collect::<Vec<_>>();
+    assert!(opcodes.contains(&FinalOpcode::GetSuper));
+    assert!(opcodes.contains(&FinalOpcode::GetSuperValue));
+    assert!(opcodes.contains(&FinalOpcode::PutSuperValue));
+    assert!(opcodes.contains(&FinalOpcode::Dup3));
+    assert!(opcodes.contains(&FinalOpcode::Insert4));
+    assert!(opcodes.contains(&FinalOpcode::Perm5));
+    assert!(tree.functions().iter().any(|function| {
+        function
+            .control_flow()
+            .instructions()
+            .iter()
+            .any(|instruction| {
+                matches!(
+                    instruction.decoded().instruction().operands(),
+                    Operands::U8(5)
+                )
+            })
+    }));
 }
 
 #[test]
@@ -875,110 +913,96 @@ fn computed_methods_getters_and_setters_use_typed_computed_definitions() {
 }
 
 #[test]
-fn unsupported_object_forms_fail_closed_at_the_relevant_source() {
-    let cases = [
-        (
-            "function make(object,key){return object?.[key];}",
-            UnsupportedLeafFeature::UnsupportedExpression,
-            "key",
-        ),
-        (
-            "function make(object,key,value){return object[key]+=value;}",
-            UnsupportedLeafFeature::UnsupportedExpression,
-            "key",
-        ),
-        (
-            "function make(object,key,value){return object[key]&&=value;}",
-            UnsupportedLeafFeature::UnsupportedExpression,
-            "key",
-        ),
-        (
-            "function make(value){return {...value};}",
-            UnsupportedLeafFeature::UnsupportedExpression,
-            "...value",
-        ),
-        (
-            "function make(object,key){return object[key]++;}",
-            UnsupportedLeafFeature::UnsupportedExpression,
-            "key",
-        ),
-        (
-            "function make(key){return {[key]:function(){}};}",
-            UnsupportedLeafFeature::InferredFunctionName,
-            "function(){}",
-        ),
-        (
-            "function make(){return {async \"method\"(){return 1;}};}",
-            UnsupportedLeafFeature::NonOrdinaryFunction,
-            "return 1",
-        ),
-        (
-            "function make(){return {*1(){yield 1;}};}",
-            UnsupportedLeafFeature::NonOrdinaryFunction,
-            "yield 1",
-        ),
-        (
-            r#"function make(){return {"__proto__":function(){}};}"#,
-            UnsupportedLeafFeature::InferredFunctionName,
-            "function(){}",
-        ),
-        (
-            "function make(){return {handler:function(){}};}",
-            UnsupportedLeafFeature::InferredFunctionName,
-            "function(){}",
-        ),
-        (
-            r#"function make(){return {"handler":function(){}};}"#,
-            UnsupportedLeafFeature::InferredFunctionName,
-            "function(){}",
-        ),
-        (
-            "function make(){return {1:function(){}};}",
-            UnsupportedLeafFeature::InferredFunctionName,
-            "function(){}",
-        ),
-        (
-            "function make(){return {1n:function(){}};}",
-            UnsupportedLeafFeature::InferredFunctionName,
-            "function(){}",
-        ),
-        (
-            "function make(){return this;}",
-            UnsupportedLeafFeature::UnsupportedExpression,
-            "this",
-        ),
-    ];
+fn static_anonymous_function_data_properties_emit_canonical_inferred_names() {
+    let tree = compile_tree(
+        r#"function make(){return {
+            identifier:function(){},
+            "quoted":(function(){}),
+            1:function(){},
+            1n:function(){},
+            "__proto__":function(){}
+        };}"#,
+        "make",
+    );
+    let root = tree.root();
 
-    for (source, expected_feature, expected_fragment) in cases {
-        let LeafCompilationError::Unsupported { feature, span } = compile_error(source, "make")
-        else {
-            panic!("expected unsupported object form for {source}");
-        };
-        assert_eq!(feature, expected_feature, "{source}");
-        let highlighted = &source[span.start as usize..span.end as usize];
-        assert!(
-            highlighted.contains(expected_fragment),
-            "expected diagnostic span containing {expected_fragment:?}, found {highlighted:?}: {source}"
-        );
-    }
+    assert_eq!(
+        inferred_names(root),
+        ["identifier", "quoted", "1", "1", "__proto__"]
+    );
+    assert_eq!(
+        root.constants()
+            .iter()
+            .filter(|constant| constant.function().is_some())
+            .count(),
+        5,
+        "each static data property evaluates its anonymous function with NamedEvaluation"
+    );
+    assert_eq!(
+        tree_instructions(root)
+            .iter()
+            .filter(|(opcode, _)| *opcode == FinalOpcode::SetProto)
+            .count(),
+        0
+    );
 }
 
 #[test]
-fn anonymous_class_computed_data_properties_remain_fail_closed_before_lowering() {
-    let source = "function make(key){return {[key]:class {}};}";
-    with_parsed_program(
-        source,
-        FrontendOptions::for_goal(CompilationGoal::GlobalScript(GlobalScriptGoal::new())),
-        |unit| {
-            let Err(CompilerError::Unsupported { feature, span }) = CompilationContext::new(unit)
-            else {
-                panic!("anonymous computed class data must remain fail closed");
-            };
-            assert_eq!(feature, UnsupportedFeature::ClassSyntheticSlots);
-            assert_eq!(&source[span.start as usize..span.end as usize], "class {}");
-        },
-    )
-    .expect("front-end acceptance");
+fn computed_anonymous_function_data_properties_use_the_exact_name_definition_sequence() {
+    let tree = compile_tree(
+        "function make(first,second){return {\
+            [first]:function(){},\
+            [second]:(function(){})\
+        };}",
+        "make",
+    );
+    let root = tree.root();
+
+    assert_eq!(
+        tree_instructions(root),
+        [
+            (FinalOpcode::Object, Operands::None),
+            (FinalOpcode::GetArg0, Operands::NoneArg),
+            (FinalOpcode::ToPropKey, Operands::None),
+            (FinalOpcode::FClosure8, Operands::Const8(0)),
+            (FinalOpcode::SetNameComputed, Operands::None),
+            (FinalOpcode::DefineArrayEl, Operands::None),
+            (FinalOpcode::Drop, Operands::None),
+            (FinalOpcode::GetArg1, Operands::NoneArg),
+            (FinalOpcode::ToPropKey, Operands::None),
+            (FinalOpcode::FClosure8, Operands::Const8(1)),
+            (FinalOpcode::SetNameComputed, Operands::None),
+            (FinalOpcode::DefineArrayEl, Operands::None),
+            (FinalOpcode::Drop, Operands::None),
+            (FinalOpcode::Return, Operands::None),
+        ]
+    );
+    assert_eq!(root.control_flow().computed_stack_size(), 3);
+}
+
+#[test]
+fn object_spread_remains_fail_closed_at_the_relevant_source() {
+    let source = "function make(value){return {...value};}";
+    let LeafCompilationError::Unsupported { feature, span } = compile_error(source, "make") else {
+        panic!("object spread must remain fail closed");
+    };
+    assert_eq!(feature, UnsupportedLeafFeature::UnsupportedExpression);
+    assert_eq!(&source[span.start as usize..span.end as usize], "...value");
+}
+
+#[test]
+fn anonymous_class_computed_data_properties_use_the_typed_computed_name_path() {
+    let tree = compile_tree("function make(key){return {[key]:class {}};}", "make");
+    let instructions = tree
+        .root()
+        .control_flow()
+        .instructions()
+        .iter()
+        .map(|instruction| instruction.decoded().instruction().opcode())
+        .collect::<Vec<_>>();
+    assert!(instructions.contains(&FinalOpcode::SetNameComputed));
+    assert!(instructions.contains(&FinalOpcode::DefineArrayEl));
+    assert_eq!(tree.functions().len(), 2);
 }
 
 /// `delete` lowers to the pinned `OP_delete` shape: the base, then the key,
@@ -1029,13 +1053,24 @@ fn deleting_a_non_reference_drops_the_operand_and_pushes_true() {
     assert_eq!(tail[2], (FinalOpcode::Return, Operands::None));
 }
 
-/// `__proto__: value` lowers to `OP_set_proto`, which mutates the prototype
-/// and leaves the literal on the stack instead of defining an own property
-/// (`quickjs.c:19330-19341`). Quoted and escaped spellings are the same
-/// prototype mutation because the comparison is on cooked code units; the
-/// pinned oracle agrees for all three.
+/// A statically resolved declarative binding cannot be removed. The pinned
+/// compiler folds this case to `push_false` rather than reading the binding.
 #[test]
-fn proto_data_keys_lower_to_set_proto_in_every_spelling() {
+fn deleting_a_resolved_identifier_pushes_false_without_reading_it() {
+    let compiled = compile("function make(value){return delete value;}", "make");
+    assert_eq!(
+        instructions(&compiled),
+        vec![
+            (FinalOpcode::PushFalse, Operands::None),
+            (FinalOpcode::Return, Operands::None),
+        ]
+    );
+}
+
+/// Annex B object-literal `__proto__` mutation is absent. Every static spelling
+/// defines an ordinary own data property with the cooked property key.
+#[test]
+fn proto_data_keys_define_ordinary_own_properties_in_every_spelling() {
     for source in [
         "function make(value){return {__proto__:value};}",
         "function make(value){return {\"__proto__\":value};}",
@@ -1047,7 +1082,10 @@ fn proto_data_keys_lower_to_set_proto_in_every_spelling() {
             vec![
                 (FinalOpcode::Object, Operands::None),
                 (FinalOpcode::GetArg0, Operands::NoneArg),
-                (FinalOpcode::SetProto, Operands::None),
+                (
+                    FinalOpcode::DefineField,
+                    Operands::Atom(AtomPoolIndex::new(0))
+                ),
                 (FinalOpcode::Return, Operands::None),
             ],
             "{source}"
@@ -1055,9 +1093,8 @@ fn proto_data_keys_lower_to_set_proto_in_every_spelling() {
     }
 }
 
-/// A computed `__proto__` key stays an ordinary own property, so it keeps the
-/// computed definition opcode rather than becoming a prototype mutation. The
-/// oracle reports `computed proto is own => __proto__`.
+/// A computed `__proto__` key is likewise an ordinary own property and uses
+/// the computed definition opcode.
 #[test]
 fn a_computed_proto_key_still_defines_an_own_property() {
     let compiled = compile("function make(key,value){return {[key]:value};}", "make");
@@ -1066,7 +1103,7 @@ fn a_computed_proto_key_still_defines_an_own_property() {
         lowered
             .iter()
             .all(|(opcode, _)| *opcode != FinalOpcode::SetProto),
-        "a computed key must not mutate the prototype: {lowered:?}"
+        "a computed key must not use an Annex B prototype mutation: {lowered:?}"
     );
     assert!(
         lowered

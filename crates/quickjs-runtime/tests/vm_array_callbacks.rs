@@ -296,6 +296,25 @@ fn the_callback_methods_accept_an_array_like_receiver() {
     ]);
 }
 
+/// Generic callback methods observe a Proxy's `get` and `has` traps in the
+/// order required by `LengthOfArrayLike` and the indexed iteration.
+#[test]
+fn callback_methods_use_proxy_internal_methods() {
+    assert_all(&[(
+        "(function(){\
+            let log='';\
+            const target={length:2,0:3};\
+            const proxy=new Proxy(target,{\
+                get:function(t,k){log+='g'+k+';';return t[k];},\
+                has:function(t,k){log+='h'+k+';';return k in t;}\
+            });\
+            const result=Array.prototype.map.call(proxy,function(v){return v*2;});\
+            return log+'|'+result.join()+'|'+Object.prototype.hasOwnProperty.call(result,1);\
+        })()",
+        "glength;h0;g0;h1;|6,|false",
+    )]);
+}
+
 /// Every installed method reports arity 1 with the pinned descriptors.
 #[test]
 fn the_callback_methods_have_the_pinned_shape() {

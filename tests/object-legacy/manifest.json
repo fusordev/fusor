@@ -1,0 +1,96 @@
+{
+  "schema": 1,
+  "quickjs_release": "2026-06-04",
+  "cases": [
+    {
+      "id": "pinned-object-prototype-surface-order",
+      "covers": ["surface-order"],
+      "body": "let prototype = Object.prototype;\nlet descriptor = Object.getOwnPropertyDescriptor(prototype, \"__proto__\");\nreturn Object.getOwnPropertyNames(prototype).join(\"|\") + \"#\" + descriptor.get.name + \":\" + descriptor.get.length + \":\" + descriptor.set.name + \":\" + descriptor.set.length;",
+      "expect": {"kind": "string", "value": "toString|toLocaleString|valueOf|hasOwnProperty|isPrototypeOf|propertyIsEnumerable|__proto__|__defineGetter__|__defineSetter__|__lookupGetter__|__lookupSetter__|constructor#get __proto__:0:set __proto__:1"}
+    },
+    {
+      "id": "proto-getter-boxes-and-reads-prototypes",
+      "covers": ["proto-getter"],
+      "body": "let get = Object.getOwnPropertyDescriptor(Object.prototype, \"__proto__\").get;\nreturn get.call({}) === Object.prototype && get.call(Object.create(null)) === null && get.call(1) === Number.prototype;",
+      "expect": {"kind": "boolean", "value": true}
+    },
+    {
+      "id": "proto-setter-mutates-and-returns-undefined",
+      "covers": ["proto-setter"],
+      "body": "let set = Object.getOwnPropertyDescriptor(Object.prototype, \"__proto__\").set;\nlet prototype = {tag: true};\nlet target = {};\nlet result = set.call(target, prototype);\nlet direct = {};\ndirect.__proto__ = prototype;\nreturn result === undefined && Object.getPrototypeOf(target) === prototype && Object.getPrototypeOf(direct) === prototype;",
+      "expect": {"kind": "boolean", "value": true}
+    },
+    {
+      "id": "proto-setter-ignores-invalid-prototypes",
+      "covers": ["proto-invalid-prototype"],
+      "body": "let set = Object.getOwnPropertyDescriptor(Object.prototype, \"__proto__\").set;\nlet target = {};\nlet before = Object.getPrototypeOf(target);\nreturn set.call(target, 1) === undefined && Object.getPrototypeOf(target) === before;",
+      "expect": {"kind": "boolean", "value": true}
+    },
+    {
+      "id": "proto-setter-ignores-primitive-receivers",
+      "covers": ["proto-primitive-receiver"],
+      "body": "let set = Object.getOwnPropertyDescriptor(Object.prototype, \"__proto__\").set;\nreturn set.call(1, {}) === undefined;",
+      "expect": {"kind": "boolean", "value": true}
+    },
+    {
+      "id": "proto-setter-honors-nonextensible-order",
+      "covers": ["proto-nonextensible"],
+      "body": "let access = Object.getOwnPropertyDescriptor(Object.prototype, \"__proto__\");\nlet same = Object.preventExtensions({});\nlet sameResult = access.set.call(same, Object.prototype);\nlet different = Object.preventExtensions({});\nlet threw = false;\ntry { access.set.call(different, null); } catch (error) { threw = error.name === \"TypeError\"; }\nreturn sameResult === undefined && access.get.call(same) === Object.prototype && threw;",
+      "expect": {"kind": "boolean", "value": true}
+    },
+    {
+      "id": "proto-setter-rejects-cycles",
+      "covers": ["proto-cycle"],
+      "body": "let set = Object.getOwnPropertyDescriptor(Object.prototype, \"__proto__\").set;\nlet target = {};\ntry { set.call(target, target); } catch (error) { return error.name === \"TypeError\"; }\nreturn false;",
+      "expect": {"kind": "boolean", "value": true}
+    },
+    {
+      "id": "proto-nullish-validation-precedes-prototype-validation",
+      "covers": ["proto-nullish-order"],
+      "body": "let access = Object.getOwnPropertyDescriptor(Object.prototype, \"__proto__\");\nlet getThrows = false, setThrows = false;\ntry { access.get.call(null); } catch (error) { getThrows = error.name === \"TypeError\"; }\ntry { access.set.call(null, 1); } catch (error) { setThrows = error.name === \"TypeError\"; }\nreturn getThrows && setThrows;",
+      "expect": {"kind": "boolean", "value": true}
+    },
+    {
+      "id": "define-getter-creates-enumerable-configurable-accessor",
+      "covers": ["define-getter"],
+      "body": "let getter = function getter() { return 7; };\nlet target = {};\nlet result = target.__defineGetter__(\"value\", getter);\nlet descriptor = Object.getOwnPropertyDescriptor(target, \"value\");\nreturn result === undefined && target.value === 7 && descriptor.get === getter && descriptor.set === undefined && descriptor.enumerable && descriptor.configurable;",
+      "expect": {"kind": "boolean", "value": true}
+    },
+    {
+      "id": "define-setter-merges-with-existing-getter",
+      "covers": ["define-setter"],
+      "body": "let getter = function getter() { return 1; };\nlet setter = function setter(value) { this.seen = value; };\nlet target = {};\ntarget.__defineGetter__(\"value\", getter);\nlet result = target.__defineSetter__(\"value\", setter);\nlet descriptor = Object.getOwnPropertyDescriptor(target, \"value\");\ntarget.value = 9;\nreturn result === undefined && descriptor.get === getter && descriptor.set === setter && target.seen === 9;",
+      "expect": {"kind": "boolean", "value": true}
+    },
+    {
+      "id": "define-validates-target-and-callability-before-key",
+      "covers": ["define-validation-order"],
+      "body": "let log = \"\";\nlet key = {toString() { log += \"key\"; return \"value\"; }};\nlet callability = false, target = false;\ntry { Object.prototype.__defineGetter__.call({}, key, 0); } catch (error) { callability = error.name === \"TypeError\" && log === \"\"; }\ntry { Object.prototype.__defineGetter__.call(null, key, 0); } catch (error) { target = error.name === \"TypeError\" && log === \"\"; }\nreturn callability && target;",
+      "expect": {"kind": "boolean", "value": true}
+    },
+    {
+      "id": "lookup-walks-the-prototype-chain",
+      "covers": ["lookup-prototype"],
+      "body": "let getter = function getter() {};\nlet setter = function setter() {};\nlet prototype = {};\nprototype.__defineGetter__(\"value\", getter);\nprototype.__defineSetter__(\"value\", setter);\nlet child = Object.create(prototype);\nreturn child.__lookupGetter__(\"value\") === getter && child.__lookupSetter__(\"value\") === setter;",
+      "expect": {"kind": "boolean", "value": true}
+    },
+    {
+      "id": "lookup-stops-at-a-data-property",
+      "covers": ["lookup-shadow"],
+      "body": "let prototype = {};\nprototype.__defineGetter__(\"value\", function getter() {});\nlet child = Object.create(prototype);\nObject.defineProperty(child, \"value\", {value: 1});\nreturn child.__lookupGetter__(\"value\") === undefined && child.__lookupSetter__(\"value\") === undefined;",
+      "expect": {"kind": "boolean", "value": true}
+    },
+    {
+      "id": "lookup-coerces-key-after-target",
+      "covers": ["lookup-key-order"],
+      "body": "let log = \"\";\nlet getter = function getter() {};\nlet target = {};\ntarget.__defineGetter__(\"value\", getter);\nlet key = {toString() { log += \"key\"; return \"value\"; }};\nlet found = target.__lookupGetter__(key);\nlet untouched = {toString() { log += \"bad\"; return \"value\"; }};\nlet targetFirst = false;\ntry { Object.prototype.__lookupGetter__.call(null, untouched); } catch (error) { targetFirst = error.name === \"TypeError\" && log === \"key\"; }\nreturn found === getter && targetFirst;",
+      "expect": {"kind": "boolean", "value": true}
+    },
+    {
+      "id": "legacy-accessors-accept-symbol-keys",
+      "covers": ["symbol-key"],
+      "body": "let key = Symbol(\"legacy\");\nlet getter = function getter() {};\nlet target = {};\ntarget.__defineGetter__(key, getter);\nreturn target.__lookupGetter__(key) === getter && Object.getOwnPropertyDescriptor(target, key).get === getter;",
+      "expect": {"kind": "boolean", "value": true}
+    }
+  ]
+}

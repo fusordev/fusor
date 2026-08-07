@@ -1,390 +1,95 @@
-# Porting plan
+# Porting roadmap
 
 ## Target and boundaries
 
-Port [QuickJS 2026-06-04](UPSTREAM.md) to safe, pure Rust, targeting its
-ES2025 script/module semantics (including Annex B), embeddable runtime model,
-deterministic destruction with cycle removal, bytecode execution, standard
-built-ins, modules, jobs, and the documented `std`/`os` host surface.
+Port the observable JavaScript and host behavior of [QuickJS 2026-06-04](UPSTREAM.md) to safe, pure Rust: ES2025 Script/Module and explicitly admitted later ECMA-262 features, deliberately excluding Annex B compatibility. ECMA-262 is normative; pinned QuickJS is the compatibility/diagnostic target; Oxc is parsing and semantic analysis only. QuickJS and Node are differential oracles, never runtime dependencies.
 
-The project does **not** reproduce QuickJS binary layout or C API. Rust callers
-get an idiomatic lifetime-safe API; an optional, isolated N-API adapter may
-provide a C ABI. Behavior that cannot yet be reproduced safely must be
-documented, tested, and fail closed.
+This is a source-level port, not a C API or byte-layout clone. The core links neither C nor C++. Unsupported source semantics reject before execution, and only whole-graph [`VerifiedBytecode`](BYTECODE_VERIFIER.md) executes. Focused tests prove only their named behavior.
 
-QuickJS is the sole runtime-semantics reference. Oxc is the selected parser;
-no alternate JavaScript engine, VM, GC, or RegExp implementation may supply
-runtime semantics. The upstream C engine is a differential-testing oracle only
-and is never linked or shipped.
+| Crate | Owns |
+| --- | --- |
+| `quickjs-diagnostics` | sources, diagnostics, spans, source maps |
+| `quickjs-frontend` | published Oxc records and parsing goals |
+| `quickjs-bytecode` | instructions, codec, verifier, debug data |
+| `quickjs-compiler` | iterative Oxc-to-verified-bytecode lowering |
+| `quickjs-regexp` | bounded ES RegExp grammar and UTF-16 execution |
+| `quickjs-runtime` | values, heap, realms, VM, built-ins, limits |
+| `quickjs` | embedding and tool facade |
 
-## Architecture
+Tooling, inspector, Wasm, N-API, TypeScript erasure, Serde conversion, and Tokio driving are optional layers, not runtime dependencies. See [ARCHITECTURE.md](ARCHITECTURE.md) for the ownership boundaries.
 
-Production crates remain independently reusable and documented:
+## Ordered status
 
-- `quickjs-diagnostics`: sources, stable diagnostics, spans, source maps, and
-  optional Miette rendering.
-- `quickjs-frontend`: Oxc parsing, semantic analysis, parse goals, and owned
-  frontend records.
-- `quickjs-bytecode`: owned instructions, verifier, serializer, disassembler,
-  constants, atoms, and debug tables.
-- `quickjs-compiler`: Oxc lowering to verified bytecode.
-- `quickjs-runtime`: values, heap, realms, VM, built-ins, modules, jobs,
-  limits, interrupts, and embedding APIs.
-- `quickjs`: ergonomic facade; thin `qjs`, `qjsc`, and bytecode-viewer CLIs
-  consume the library crates.
-- Optional/lower-priority crates: Tokio host driver, inspector, Wasm, N-API,
-  TypeScript stripping, and Serde conversion.
+Finish frontend/diagnostics and language/compiler/execution before broad Test262 alignment. Checked items have focused regressions.
 
-`xtask`, fuzzers, and benchmarks are repository tooling, not production
-dependencies. See [ARCHITECTURE.md](ARCHITECTURE.md) for trust boundaries and
-[BYTECODE_VERIFIER.md](BYTECODE_VERIFIER.md) for the bytecode contract.
+### Frontend and diagnostics
 
-## Status
-
-### Foundation and frontend
-
-- [x] Reproducible Rust workspace; CI formatting, linting, tests, docs, audit,
-  and optional oracle runners. Workspace-owned core crates forbid `unsafe`.
-- [x] Directly pin published Oxc parser/semantic crates; no vendoring or
-  patches.
-- [x] Parse Script, Module, all dynamic Function-constructor forms, strict
-  scripts, and asynchronous global scripts through explicit, lossless goals.
-  Unsupported adapters reject before parsing.
-- [x] Preserve byte-accurate diagnostics, owned semantic/module records,
-  source-order static requests, import attributes, and binding roles.
-- [x] Differential parser and Function-constructor manifests, including
-  closed goal/feature/claim validation and a pinned compiler oracle.
-- [x] The parser ledger is exhaustive and closed in four dimensions: parse
-  goals, frontend claims, QuickJS grammar productions, and QuickJS parser
-  diagnostics. Productions are enumerated from the pinned parser's own dispatch
-  structure and each must be exercised by a fixture the oracle accepts. Every
-  `SyntaxError` the pinned front end can raise while compiling a source text is
-  either provoked by a fixture or recorded as unreachable with a reason; the
-  observed oracle message is matched against the pinned format string on every
-  run. Each intentional Oxc difference keeps an ID, rationale, and regression
-  fixture.
-
-Known intentional parser differences:
-
-- `QJS-OXC-001`: Oxc determines RegExp literal boundaries/flags; the deferred
-  QuickJS-derived layer owns pattern grammar.
-- `QJS-OXC-002`: chained labels may accept a `continue` target that QuickJS
-  rejects; a post-semantic check supplies the pinned QuickJS rejection.
-- `QJS-OXC-003`: pinned QuickJS caps parser recursion near 695 nested
-  parentheses and reports `stack overflow` (`quickjs.c:22720`); the frontend
-  parses the same source on its isolated stack, since the bound is a QuickJS
-  resource limit rather than ECMAScript grammar.
-- `QJS-OXC-004`: pinned QuickJS rejects an instance field named `prototype`
-  (`quickjs.c:25396`), which its own source marks as inconsistent with the
-  specification; the frontend follows ECMAScript, which reserves `prototype`
-  only for static fields.
-
-Known intentional runtime differences:
-
-- `QJS-BIGINT-001`: `js_bigint_asUintN` returns its argument unchanged whenever
-  the requested width already spans the value (`quickjs.c:56075` and
-  `quickjs.c:56092`), so the pinned `qjs` reports `BigInt.asUintN(64, -1n)` as
-  `-1n` and `BigInt.asUintN(100, -1n)` as `-1n`. ECMAScript's `BigInt::asUintN`
-  is defined modulo 2**bits and is therefore always non-negative; V8 reports
-  `18446744073709551615n` and `1267650600228229401496703205375n`. Because the
-  specification is the authority where the two disagree, this port follows
-  ECMAScript. Widths below 64 agree with both engines.
-
-Known intentional profile narrowings. These are not behavior differences: the
-narrowed surface fails closed with a structured error rather than answering
-incorrectly, so no script can observe a wrong result.
-
-- `QJS-CREATE-001`: `Object.create` admits only its prototype argument. Honoring
-  `propertyDescriptors` means running `ToPropertyDescriptor` for each key, which
-  is resumable work this entry point cannot perform, so a present second
-  argument reports `TypeError: property descriptors are not supported` instead of
-  being silently ignored. The reported `length` stays `2` to match the pinned
-  oracle, because arity is part of the observable shape.
+- [x] Published Oxc `0.142.0` is directly pinned; Script, Module, strict/async-global, and dynamic-Function goals retain owned source, binding, and module records. RegExp literal errors use `quickjs-regexp`.
+- [x] The compatibility ledger covers admitted grammar and reachable diagnostics.
+- [ ] Complete chained source maps and the public diagnostic/API audit.
 
 ### Compiler, bytecode, and execution
 
-- [x] Complete opcode metadata, checked codec/disassembly, typed operands,
-  deterministic encoding, bounded construction, and total decoding.
-- [x] Verifier foundations: predecode, targets/indices, stack-depth joins,
-  maximum stack checking, function headers/kinds, and source-PC diagnostics.
-- [x] Whole-graph verified bytecode is the only executable authority. Raw or
-  serialized bytecode and direct `eval` remain fail closed.
-- [x] Iterative Oxc lowering for ordinary functions, lexical bindings/captures,
-  nested closures, expressions, statements, labels, `switch`, classic `for`,
-  `for-in`, `for-of`, calls/spread, destructuring, and selected Error/native
-  frame behavior. Compiler traversal and verification use explicit worklists.
-  Array-assignment member and rest targets evaluate their base and computed key
-  after the iterator is acquired and before the matching iterator step, which is
-  the order ECMAScript's IteratorDestructuringAssignmentEvaluation and the
-  pinned QuickJS reference (`quickjs.c:26596-26612`) both require; ordering
-  regressions observe `next`, base, and computed-key effects.
-- [x] Runtime installation, calls, exceptions, resumable native/bytecode
-  dispatch, iterator close/error precedence, bounded resources, and
-  verified-frame stack traces for the admitted profile. Host calls
-  (`Context::call`) unwrap bound functions with the same observable result as
-  interpreter dispatch: the innermost bound receiver reaches native and bytecode
-  targets, and every bound layer's arguments accumulate before the caller's
-  arguments are appended once.
-- [x] Host interrupts: an embedder-installed handler is polled on a decrementing
-  counter rather than on every instruction, reproducing `js_poll_interrupts` and
-  its `JS_INTERRUPT_COUNTER_INIT` of 10,000 (`quickjs.c:512`, `quickjs.c:7877`).
-  Fuel and interrupts stay separate because they answer different questions: fuel
-  is a pre-committed deterministic budget, while an interrupt is a decision the
-  host makes during execution, which is what makes wall-clock deadlines and user
-  cancellation expressible. Upstream marks an interrupt uncatchable
-  (`quickjs.c:7861`); this port preserves that structurally by reporting
-  `ExecutionError::Interrupted` instead of a `JsException`, so it bypasses the
-  JavaScript unwinder by construction.
-- [ ] Complete verifier coverage, source/debug tables, dynamic `eval`, and
-  remaining compiler/runtime opcode families.
+- [x] Typed opcode metadata, bounded codec/disassembly, resource certificates, total decoding, and whole-child-graph verification. Raw or serialized bytecode cannot execute.
+- [x] Iterative lowering/execution for the admitted ordinary profile: closures, control flow, calls/spread, destructuring, exceptions, sync/async functions and generators, `yield*`, templates, optional chains, construction, and `new.target`.
+- [x] Global Script evaluation preserves realm `var`, lexical bindings, TDZ, declaration conflicts, and source identity across evaluations.
+- [~] Classes: named base/derived declarations and expressions; inheritance (including `extends null`); explicit/synthesized constructors; `super(...)` including spread; public static/instance fields and methods/accessors; computed field keys; static initialization blocks; and direct/computed `super` reads, calls, simple/compound/logical writes, and updates. Field/static-block lexical `this`, `super`, `new.target`, arrows, source order, and derived receiver timing have focused coverage.
+- [~] Private **instance data fields** and ordinary private methods have fresh opaque names and VM-only own slots. A private method closure is created once per class evaluation, receives `#name` and the class prototype as its home object, and is installed on each instance; direct calls, `super`, bad-receiver `TypeError`, and `#name in object` are covered. Slots are non-enumerable/non-configurable, invisible to string reflection, do not walk prototypes, and do not invoke Proxy traps.
+- [ ] Close classes: private accessors and static private elements; compound/logical/update private writes; decorators; and the remaining private-function naming/diagnostic audit. Arrow-contained `super()` is supported. Parsing is not execution support.
+- [ ] Implement direct/indirect `eval`, `with`, remaining opcode families, and complete debug/source tables. `eval` and unverified bytecode remain fail closed; Annex B block-function forms remain rejected.
 
-### Values and objects
+### Values, objects, and built-ins
 
-- [x] UTF-16 strings (including lone surrogates), Numbers with signed zero and
-  int32 fast paths, property-key/index recognition, atoms/symbols, descriptors,
-  bounded arenas, and iterative tracing/cycle reclamation foundations. Realm
-  intrinsic descriptors follow the pinned upstream flags, including the
-  non-writable, non-configurable `Function.prototype[Symbol.hasInstance]`
-  (`quickjs.c:39511-39523`), so inherited `instanceof` behavior cannot be
-  replaced by assignment.
-- [x] First ordinary-object slice: object literals; data/accessor properties;
-  ordinary reads/writes; receiver-aware calls; computed keys; and resumable
-  getter/setter dispatch.
-- [x] Operator/coercion profile: ordinary arithmetic, bitwise, comparison, and
-  equality operators; resumable `ToPrimitive`; `StringToNumber`; radix
-  conversion; and exact Number formatting tests for bases 2–36.
-- [x] Boolean, Number, and String constructor/prototype verticals, including
-  wrapper behavior, realm ownership, strict/sloppy receiver rules, and
-  `Object.prototype` tagging/boxing as admitted by the current profile.
-- [x] Descriptor authority and mutable object structure:
-  `ValidateAndApplyPropertyDescriptor`/`OrdinaryDefineOwnProperty` decide every
-  own-property definition, so a non-configurable property rejects a
-  reconfiguration and a non-writable one accepts only a `SameValue` rewrite;
-  `[[Delete]]`, `[[OwnPropertyKeys]]` with the full index/string/symbol phase
-  order, `[[SetPrototypeOf]]` with its same-value-before-extensibility rule
-  (`quickjs.c:7940`), `[[PreventExtensions]]`, and `SetIntegrityLevel`. The
-  `delete` operator and object-literal `__proto__` reach these through the
-  pinned `OP_delete` and `OP_set_proto` shapes. A realm-owned `Object`
-  constructor publishes `getPrototypeOf`, `setPrototypeOf`, `preventExtensions`,
-  `isExtensible`, `seal`, `freeze`, `isSealed`, `isFrozen`, `keys`, and
-  `getOwnPropertyNames`. Shared `ToIntegerOrInfinity`, `ToLength`, and `ToIndex`
-  replace the previously inlined length truncations.
-- [x] `Array.prototype.join` and `Array.prototype.toString` as one resumable
-  element loop mirroring `js_array_join` (`quickjs.c:42505`): the length is read
-  once with `ToLength`, `null`/`undefined` elements and holes contribute
-  nothing, each element's `ToString` and each accessor getter can re-enter the
-  interpreter, and the separator defaults to `","` when absent or `undefined`.
-  This closes the coercion divergence in which `String([1,2])` produced
-  `"[object Array]"`.
-- [x] BigInt domain: a project-owned two's-complement limb representation
-  mirroring `JSBigInt` (`quickjs.c:490-495`), the full operator set with the two
-  numeric domains kept separate (`cannot convert bigint to number` for a mixed
-  pair, no unary `+`, no `>>>`), relational comparison and loose equality mixing
-  by exact mathematical value rather than by rounding, `typeof`, truthiness,
-  strict equality, `ToString`/`ToPropertyKey`, executable literals, an
-  `Object(bigint)` wrapper with `[object BigInt]` tagging, and a realm-owned
-  non-constructable `BigInt` with `toString`, `valueOf`,
-  `[Symbol.toStringTag]`, `asIntN`, and `asUintN`.
-- [x] Complete numeric conversions: the modular narrow conversions (`ToInt8`,
-  `ToUint8`, `ToInt16`, `ToUint16`) share `ToUint32` and a truncation, while
-  `ToUint8Clamp` saturates and rounds half to even because upstream uses `lrint`
-  (`quickjs.c:13381`). `ToNumeric` admits a `BigInt` where `ToNumber` rejects one
-  (`quickjs.c:13025`), and the `Number` constructor is its only caller
-  (`quickjs.c:44595`), so `Number(1n)` is `1` while `1n | 0` still throws. The
-  supporting `JsBigInt::to_f64` takes the top 54 significant bits and folds the
-  remainder into a sticky flag, so `Number(9007199254740993n)` is
-  `9007199254740992` and an out-of-range magnitude becomes a signed infinity.
-  `CanonicalNumericIndexString` accepts only the exact `ToString` spelling, with
-  `"-0"` answered directly (`quickjs.c:3675`).
-- [x] `String.prototype` methods that need no `RegExp` or Unicode tables: `at`,
-  `charAt`, `charCodeAt`, `codePointAt`, `concat`, `endsWith`, `includes`,
-  `indexOf`, `lastIndexOf`, `padEnd`, `padStart`, `repeat`, `slice`,
-  `startsWith`, `substr`, `substring`, `trim`, `trimEnd`, `trimStart`,
-  `isWellFormed`, and `toWellFormed`. They share one resumable state machine
-  because they share one shape: `RequireObjectCoercible`, then `ToString` of the
-  receiver, then each declared argument left to right, and every one of those
-  steps can re-enter the interpreter. The pinned oracle fixes that order, logging
-  `recv,arg,pos` for `indexOf` with side-effecting conversions. Indices remain
-  UTF-16 code-unit indices, so a lone surrogate stays observable.
-- [x] `Number` statics and `Array.isArray`: the value properties
-  (`MAX_VALUE`, `MIN_VALUE`, `EPSILON`, `MAX_SAFE_INTEGER`, `MIN_SAFE_INTEGER`,
-  `POSITIVE_INFINITY`, `NEGATIVE_INFINITY`, `NaN`) are stored as exact binary64
-  bit patterns rather than decimal literals and carry the pinned frozen
-  descriptor, while `isInteger`, `isSafeInteger`, `isFinite`, and `isNaN` answer
-  `false` for a non-Number without converting it, which is what separates them
-  from the global `isNaN`. `Number.isInteger(2**53)` is `true` while
-  `Number.isSafeInteger(2**53)` is `false`.
-- [x] `Object.prototype.hasOwnProperty`, `isPrototypeOf`, and
-  `propertyIsEnumerable`, plus `Object.create`. The first and third share one
-  own-property resolution with `Object.getOwnPropertyDescriptor`, so all three
-  agree on every exotic case: a primitive String reports its indices and
-  `length`, and a hole is absent rather than `undefined`, which is the same
-  distinction `Array.prototype.indexOf` relies on. `isPrototypeOf` starts its
-  walk at the candidate's prototype, so nothing precedes itself, and charges the
-  shared budget per link. `Object.create` represents a null prototype rather than
-  substituting one; see `QJS-CREATE-001` for its narrowed descriptors argument.
-- [x] `Array.prototype.push`, `pop`, `shift`, `unshift`, `reverse`, and `fill` as
-  one resumable driver. Each reads `length` once with `ToLength`, performs a
-  planned sequence of element steps, and writes `length` back; every read, write,
-  and delete can enter an accessor, so each is a suspension point. Expressing the
-  differences as an explicit step plan (`Move`, `Take`, `Drop`, `Store`, `Swap`)
-  rather than as five implementations is what keeps hole handling uniform: an
-  absent source is deleted at its destination, so `[1,,3].reverse()` stays sparse
-  while `[,2].shift()` leaves index `0` present. The pinned oracle fixes the
-  order, reporting `getlen|set1:x|setlen:2` for `push` and `getlen|get1|setlen:1`
-  for `pop`. Growing past `2^53 - 1` reports upstream's misspelled
-  `Array loo long` (`quickjs.c:41933`), which is observable and therefore
-  reproduced. A real Array's exotic `length` reaches the array write path
-  directly, because the ordinary path deliberately refuses a `length` write that
-  has not run a resumable numeric conversion.
-- [x] `Array.prototype.slice`, `concat`, and `at`, which read without mutating.
-  `slice` and `concat` build a fresh Array while `at` answers one element, and all
-  three share the same resumable element read. `concat` spreads only a real
-  Array, and it applies that same test to its receiver, so
-  `Array.prototype.concat.call({length:2,0:"a"},9)` has length `2` with the
-  array-like itself at index `0`; nesting is never flattened. Holes survive into
-  the result because an absent source index is skipped rather than written, and
-  the destination length is set once at the end so a trailing hole still counts.
-- [x] `Number.prototype.toFixed`, `toExponential`, and `toPrecision`, rendered
-  from the *exact* value the binary64 holds rather than from its shortest decimal
-  spelling. That distinction is observable and is why these use `JsBigInt`
-  integer arithmetic instead of a floating-point formatter: `(1.005).toFixed(2)`
-  is `"1.00"` because the stored value is just below 1.005, while
-  `(1.55).toFixed(1)` is `"1.6"` because that one is just above, and a formatter
-  working from the shortest spelling would round both up. Every binary64 is
-  exactly `significand * 2^exponent`, so the digits follow from scaling by a power
-  of ten, dividing by a power of two, and rounding the integer quotient half away
-  from zero. Only `toFixed` validates its digit count before short-circuiting a
-  non-finite value, which the oracle draws sharply: `(NaN).toFixed(101)` is a
-  `RangeError` while `(NaN).toExponential(101)` is `"NaN"`.
-- [x] `String.fromCharCode` and `String.fromCodePoint`, sharing the same
-  resumable machine as the prototype methods because their arguments are also
-  arbitrary objects. The two differ in coercion and range: `fromCharCode` applies
-  `ToUint16` and wraps silently, so `String.fromCharCode(65601)` is `"A"`, while
-  `fromCodePoint` requires an exact code point in `0..=0x10FFFF` and otherwise
-  reports `RangeError: invalid code point`. A supplementary code point is encoded
-  as a surrogate pair, so `String.fromCodePoint(0x1F600).length` is `2`.
-- [x] `Array.prototype.indexOf`, `lastIndexOf`, and `includes` as one resumable
-  element loop, since every element read can run a getter. They differ in exactly
-  two observable ways, which are carried as data rather than as separate
-  implementations. The comparison: the index searches use strict equality, so
-  `[NaN].indexOf(NaN)` is `-1`, while `includes` uses `SameValueZero`, so
-  `[NaN].includes(NaN)` is `true`; both treat the signed zeros as equal. Holes:
-  the index searches test `HasProperty` first and skip a missing index, so
-  `[1,,3].indexOf(undefined)` is `-1`, while `includes` reads every index and
-  answers `true`. The length is read once with `ToLength`, and the loop stops at
-  the first match, so a second matching getter never runs.
-- [x] The callback-taking `Array.prototype` methods -- `forEach`, `map`,
-  `filter`, `every`, `some`, `find`, `findIndex`, `findLast`, and
-  `findLastIndex` -- as one resumable loop. Suspension is intrinsic here rather
-  than incidental: the callback is a user call on every iteration, so the loop
-  cannot be written any other way. Three behaviors separate the nine and all
-  three are carried as data. Holes: the first five test `HasProperty` and skip a
-  missing index, so `[1,,3].forEach` runs twice, while the `find` family visits
-  every index and sees `undefined`, so `[1,,3].find` runs three times; `map`
-  still counts a skipped hole so its result keeps the source's shape. Early exit:
-  `every` stops on a falsy result and `some` and the `find` family stop on a
-  truthy one. Result: `undefined`, a fresh Array, a Boolean, the element, or the
-  index. The length is snapshotted with `ToLength` before the first callback, so a
-  callback that grows the array is not revisited, while one that shrinks it still
-  stops early because each index is re-tested.
-- [x] `Array.prototype.reduce` and `reduceRight`, which share the same element
-  read but thread an accumulator through the callback's result and pass four
-  arguments rather than three. An absent initial value is distinct from an
-  explicit `undefined` one: the former seeds from the first *present* element, so
-  an empty or all-holes array reports `TypeError: empty array`, while the latter
-  simply becomes the accumulator and `[1,2].reduce((a,v)=>a+v, undefined)` is
-  `NaN`.
-- [x] `Array.prototype.splice`, which is both a copier and a mutator. Every
-  removed element is collected into a fresh Array before anything shifts, so a
-  getter cannot observe a half-shifted array. The tail then moves by
-  `insertions - removed`, walked from whichever end keeps a source from being
-  overwritten before it is read: from the end when growing, from the front when
-  shrinking. An absent `deleteCount` removes everything from `start` while an
-  absent `start` removes nothing.
-- [ ] Remaining String/Number/Array method surface (`sort`, `flat`, `flatMap`,
-  `copyWithin`, `with`, `toSorted`, `toReversed`, `toSpliced`, and the
-  locale-dependent renderings), shape sharing/transition
-  interning, remaining exotics (arguments, Proxy), dense indexed storage,
-  deterministic finalization, and diagnostics.
+- [x] UTF-16 strings; binary64/BigInt/Symbol; canonical keys/conversions; ordinary descriptors/prototypes/integrity; functions/bound construction; arrays/holes; iterator close; global lexical environments; Proxy invariants; reflection; shape/transition interning; and dense indexed storage.
+- [ ] Audit remaining exotic and reflection/diagnostic paths as compiler operands become reachable.
+- [x] Globals; Object/Reflect; Error families; Boolean/Number/BigInt/Symbol; Array; JSON/Math; String; RegExp; Map/Set/weak collections; Promise; sync and async generators; and a runtime-owned FIFO job queue with resumable continuations.
+- [x] Annex B is intentionally absent: no legacy Object.prototype accessors, String HTML/`substr`/trim aliases, object-literal `__proto__` mutation, HTML comments, or legacy octal literals/escapes. A static `__proto__` key is an ordinary own property; use `Object.setPrototypeOf` for prototype mutation.
+- [x] Date: TimeClip, normative ISO/local parsing, UTC/local getters and setters, primitive/JSON behavior, and non-Intl locale fallback over the shared `temporal_rs = 0.2.5` kernel.
+- [~] Temporal: `%Temporal.Instant%`, `%Temporal.Duration%`, `Date.prototype.toTemporalInstant`, Instant arithmetic/difference/rounding/string formatting, and Duration rounding/string formatting share `temporal_rs = 0.2.5`. Instant difference converts `other` before object-only options and preserves `largestUnit` → `roundingIncrement` → `roundingMode` → `smallestUnit`; Instant and Duration stringification preserve `fractionalSecondDigits` → `roundingMode` → `smallestUnit`, and Instant then reads `timeZone` for compiled IANA/fixed-offset formatting. Next: Zoned operations and remaining Temporal types.
+- [~] Binary data: fixed/resizable `ArrayBuffer`, transfer/slice/resize, and full `DataView` construction, resizable-view witnesses, Float16, Number, and BigInt element access are complete. Typed-array backing storage, GC edges, canonical numeric-index exotics, descriptor/delete/own-key rules, coercion-resume writes, concrete constructors/accessors and `@@species`, all constructor source forms, and `set` (typed/array-like sources, overlap-safe copying, and fresh resizable-buffer witnesses), `copyWithin` (overlap-safe raw-byte copies with a conditional final witness), `subarray`/`slice` (species, fresh witnesses, and overlap-safe copies), live `entries`/`keys`/`values`, `join`, `toReversed`, `with`, `at`, `includes`, `indexOf`/`lastIndexOf`, `fill`, `reverse`, and callback `every`/`some`/`forEach`/`find*` (initial-length capture and fresh post-resize indexed `Get`s) are in place. Next: typed `filter`/`map`/`reduce*`/`sort`/`toSorted`, then `SharedArrayBuffer` and Atomics.
+- [ ] ECMA-402 / `quickjs-intl` is deliberately low priority. If resumed, isolate it behind direct ICU4X rather than mixing locale behavior into the runtime core.
 
-### Built-ins and asynchronous semantics
+### Modules, conformance, and host layers
 
-- [x] Initial Error family: Error, native Error subclasses, AggregateError,
-  constructor/prototype graphs, causes, `Error.isError`, `toString`, iterator
-  ordering/close behavior, and snapshotted engine-error stacks.
-- [ ] Close Error compatibility gaps, then implement Object/Function/Reflect,
-  Proxy, remaining built-ins, RegExp/Date/JSON, collections, binary data,
-  Atomics, Unicode tables, promises, async functions/generators, weak
-  references, and finalization registries.
-- [ ] Add deterministic QuickJS-compatible job ordering. Tokio may provide
-  host I/O, timers, cancellation, and wakeups, but never Promise-job ordering.
+- [ ] Module linking/evaluation, cycles, resolver semantics, dynamic `import`, and top-level `await`. Parsing a Module is not execution.
+- [ ] Embedding API, ESM REPL, `qjs`, Rust-native `qjsc`, bytecode viewer, CDP adapter, and portable `std`/`os` modules.
+- [x] `cargo xtask test262` and the manual-dispatch GitHub Actions workflow pin Test262 `5c8206929d81b2d3d727ca6aac56c18358c8d790`, apply the exact QuickJS baseline patch, run the full configured non-Annex-B suite (including Temporal), print its pass rate, and upload the deterministic JSON report.
+- [ ] After the preceding language/compiler/module gates close, run Test262 by feature cohort; investigate every admitted failure against ECMA-262 and QuickJS/Node; remove temporary skips; then run the full configured suite.
+- [ ] Establish startup/memory/interpreter/compile benchmarks and finish release, resource, cancellation, dependency, and public-API audits.
 
-### Modules, embedding, and tools
+## Compatibility differences
 
-- [x] Initial runtime/realm/context foundation with bounded realm creation,
-  same-runtime handle checks, verified-function installation, primitive values,
-  and host invocation.
-- [ ] Full Rust embedding API; module linking/cycles/dynamic import/top-level
-  await; QuickJS-compatible resolver semantics; ESM REPL; `qjs`; Rust-native
-  `qjsc`; bytecode viewer; CDP adapter; and portable `std`/`os` modules.
+| ID | Intentional behavior |
+| --- | --- |
+| `QJS-OXC-001` | Oxc determines RegExp literal boundaries/flags; the owned RegExp layer owns grammar, early errors, and execution. |
+| `QJS-OXC-002` | A post-semantic check rejects one chained-label `continue` target accepted by Oxc but rejected by QuickJS. |
+| `QJS-OXC-003` | This frontend uses an independent bounded nesting stack; QuickJS's near-695-parenthesis overflow is non-normative. |
+| `QJS-OXC-004` | Instance field `prototype` follows ECMA-262; QuickJS rejects it although only static fields reserve it. |
+| `QJS-BIGINT-001` | `BigInt.asUintN` reduces modulo `2**bits`, including negative inputs. |
+| `QJS-PROMISE-001` | Hostile synchronous `then` calls share the required `[[AlreadyCalled]]` record in `Promise.allSettled`. |
+| `QJS-ASYNC-GENERATOR-001` | Handled async `yield*` `.return()` preserves a thenable value property rather than assimilating it. |
+| `QJS-MAP-001` | `getOrInsertComputed` rescans and updates a callback-created key in place rather than deleting/re-appending it. |
+| `QJS-STRING-001` | Primitive pattern/search/separator values use inherited `@@match`/`@@search`/`@@replace`/`@@split` through `GetMethod`. |
+| `QJS-TEMPLATE-001` | Untagged templates use intrinsic concatenation with immediate `ToString`, not observable `String.prototype.concat`. |
+| `QJS-REGEXP-001` | Unicode-set string disjunction in lookbehind follows ECMA-262/Node rather than QuickJS rejection. |
+| `QJS-REGEXP-002` | `RegExp.escape` retains non-whitespace Unicode scalars rather than hex-escaping them. |
 
-### Conformance, performance, and optional layers
+## Completion gates and engineering rules
 
-- [ ] Run/maintain upstream suites, pinned test262
-  `5c8206929d81b2d3d727ca6aac56c18358c8d790`, differential corpora, and
-  fuzzing for parser, bytecode, serializer, and runtime boundaries.
-- [ ] Establish startup, memory, interpreter, and compile benchmarks; require
-  no unexplained supported-platform crashes or undefined behavior.
-- [ ] Complete public API, source-map, platform/resource-limit, cancellation,
-  dependency, and reproducible-release audits.
-- [ ] Optional: Wasmtime WebAssembly, safe N-API semantics plus an audited ABI
-  boundary, erasable TypeScript preprocessing with required source maps, and a
-  bounded policy-driven Serde bridge.
-
-## Completion gates
-
-A milestone is complete only when its checked items pass in CI. Each semantic
-change starts with a regression or conformance test. Relevant standard gates:
+During development, run only changed-package and focused integration tests; do not repeatedly run the workspace suite. Before release, a full-conformance claim, or goal completion, run:
 
 ```console
-cargo fmt --all --check
+cargo fmt --all -- --check
 cargo clippy --workspace --all-targets --all-features -- -D warnings
-cargo test --workspace
-cargo doc --workspace --no-deps
+cargo test --workspace --all-features
+RUSTDOCFLAGS="-D warnings" cargo doc --workspace --all-features --no-deps
+cargo audit
 ```
 
-Run the applicable `cargo xtask *-differential` corpus against the pinned
-QuickJS oracle for parser, dynamic Function, Number radix, control flow,
-function apply/bind, iterators, call spread, and Errors. The parser manifest is
-a closed compatibility gate: it fails when a pinned grammar production has no
-accepted fixture, when a reachable pinned diagnostic has no fixture, when a
-fixture declares an unreachable one, or when an observed oracle message does not
-match the pinned format string.
-
-Current corpus status: parser 196/196, Number radix 991/991, control flow 63/63,
-iterators 40/40, function apply 15/15, function bind 21/21, call spread 15/15.
-The Error corpus stands at 31/35. Three remaining mismatches need `Reflect`,
-which belongs to the built-ins milestone; the fourth needs the harness to
-normalize a script-thrown Error object, which it currently reports as an
-arbitrary value. Each fails closed as a missing property rather than producing a
-wrong answer.
-
-## Engineering rules
-
-1. Preserve observable ECMAScript behavior, not QuickJS private representation.
-2. Use validated newtypes for bytecode operands and heap handles; reject
-   unsupported semantics rather than silently approximating them.
-3. Keep parser, compiler, VM, and host concerns separate. Carry source
-   identity/spans through bytecode and stack frames; retain structured errors
-   independently of CLI rendering.
-4. Keep the Rust core safe. Any N-API pointer handling is confined to its
-   audited boundary crate.
-5. Performance changes require a profile, benchmark, and preserved observable
-   behavior; `unsafe` is never an optimization escape hatch.
-6. Tokio is a host substrate only; the runtime owns ECMAScript jobs and Promise
-   ordering.
-7. Match documented upstream omissions: proper tail calls and `Atomics.waitAsync`
-   remain out of scope; `Intl` is a separate optional layer.
-8. Preserve upstream copyright notices. Keep changes small, bisectable, tested,
-   and recorded in Git; production APIs must be documented and stable.
+1. Follow ECMA-262 first; document intentional differences.
+2. Reject unsupported semantics rather than approximating them; execute only whole-graph verified bytecode.
+3. Keep parser, compiler, verifier, VM, built-in, and host ownership separate.
+4. Use explicit worklists and typed continuations; Rust recursion, locks, and Tokio must not define JavaScript behavior.
+5. Runtime/context/heap/JS handles are thread-affine and `!Send + !Sync`.
+6. Keep the core safe; foreign pointers belong only to an audited boundary.
+7. Performance changes require profiles and differential evidence; `unsafe` is never an optimization escape. Proper tail calls and `Atomics.waitAsync` remain out of scope.

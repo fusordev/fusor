@@ -39,6 +39,33 @@ fn opcodes(function: &CompiledFunction) -> Vec<(FinalOpcode, Operands)> {
         .collect()
 }
 
+fn inferred_names(function: &CompiledFunction) -> Vec<String> {
+    let instructions = opcodes(function);
+    instructions
+        .iter()
+        .enumerate()
+        .filter_map(|(index, (opcode, operands))| {
+            (*opcode == FinalOpcode::SetName).then_some((index, *operands))
+        })
+        .map(|(index, operands)| {
+            assert!(matches!(
+                instructions[index - 1],
+                (FinalOpcode::FClosure | FinalOpcode::FClosure8, _)
+            ));
+            let Operands::Atom(atom) = operands else {
+                panic!("set_name must carry one atom operand");
+            };
+            String::from_utf16(
+                &function.atoms()[atom.get() as usize]
+                    .string()
+                    .code_units()
+                    .collect::<Vec<_>>(),
+            )
+            .expect("identifier atom is valid UTF-16")
+        })
+        .collect()
+}
+
 fn function_executable(constant: &CompiledConstant) -> ExecutableId {
     constant
         .function()
@@ -241,37 +268,137 @@ fn compile_leaf_remains_an_explicit_nested_function_free_boundary() {
 }
 
 #[test]
-fn anonymous_functions_in_inferred_name_contexts_fail_closed() {
-    for source in [
-        "function outer(){ let inferred = function(){}; }",
-        "function outer(){ let inferred; inferred = (function(){}); }",
-    ] {
-        let error = with_parsed_program(
-            source,
-            FrontendOptions::for_goal(CompilationGoal::GlobalScript(GlobalScriptGoal::new())),
-            |unit| {
-                let context = CompilationContext::new(unit).expect("storage planning must succeed");
-                let outer = context
-                    .executables()
-                    .find(|executable| executable.metadata().name() == Some("outer"))
-                    .expect("outer function");
-                context
-                    .compile_tree(&outer, VerificationLimits::default())
-                    .expect_err("inferred names need exact name-setting bytecode")
-            },
-        )
-        .expect("front-end acceptance");
-        assert!(
-            matches!(
-                error,
-                LeafCompilationError::Unsupported {
-                    feature: UnsupportedLeafFeature::InferredFunctionName,
-                    ..
-                }
-            ),
-            "{source}"
-        );
-    }
+fn anonymous_identifier_assignments_emit_adjacent_inferred_name_pairs() {
+    let tree = compile_tree(
+        "function outer(){\
+             let direct, logicalAnd=true, logicalOr=false, logicalNullish=null, captured;\
+             direct=(function(){});\
+             logicalAnd&&=function(){};\
+             logicalOr||=(function(){});\
+             logicalNullish??=function(){};\
+             captured=function(){};\
+             const holder={};\
+             holder.member=function(){};\
+             holder['computed']=function(){};\
+             ({}=function(){});\
+             let compound=0;compound+=function(){};\
+             return function(){return captured;};\
+         }",
+        "outer",
+    );
+    let outer = tree.root();
+    assert_eq!(
+        inferred_names(outer),
+        [
+            "direct",
+            "logicalAnd",
+            "logicalOr",
+            "logicalNullish",
+            "captured"
+        ]
+    );
+    assert_eq!(
+        outer
+            .constants()
+            .iter()
+            .filter(|constant| constant.function().is_some())
+            .count(),
+        10,
+        "member targets, a whole assignment pattern, compound assignment, and return remain unnamed"
+    );
+}
+
+#[test]
+fn anonymous_destructuring_assignment_defaults_emit_only_identifier_names() {
+    let tree = compile_tree(
+        "function outer(){\
+             let arrayElement, objectShorthand, objectRenamed, nestedArray, captured;\
+             [arrayElement=function(){}]=[];\
+             ({objectShorthand=function(){}}={});\
+             ({key:objectRenamed=(function(){})}={});\
+             [[nestedArray=function(){}]=[]]=[];\
+             [captured=function(){}]=[];\
+             const holder={};\
+             [holder.array=function(){}]=[];\
+             ({key:holder.object=function(){}}={});\
+             ([{}=function(){}]=[]);\
+             return function(){return captured;};\
+         }",
+        "outer",
+    );
+    let outer = tree.root();
+    assert_eq!(
+        inferred_names(outer),
+        [
+            "arrayElement",
+            "objectShorthand",
+            "objectRenamed",
+            "nestedArray",
+            "captured"
+        ]
+    );
+    assert_eq!(
+        outer
+            .constants()
+            .iter()
+            .filter(|constant| constant.function().is_some())
+            .count(),
+        9,
+        "member and nested-pattern defaults plus return remain unnamed"
+    );
+}
+
+#[test]
+fn anonymous_parameter_defaults_emit_adjacent_inferred_name_pairs() {
+    let tree = compile_tree(
+        "function outer(\
+             top=(function(){}),\
+             {nested=function(){}}={},\
+             [element=function(){}]=[],\
+             {}=function(){}\
+         ){}",
+        "outer",
+    );
+    let outer = tree.root();
+    assert_eq!(inferred_names(outer), ["top", "nested", "element"]);
+    assert_eq!(
+        outer
+            .constants()
+            .iter()
+            .filter(|constant| constant.function().is_some())
+            .count(),
+        4,
+        "a pattern-level anonymous default is evaluated without inferred naming"
+    );
+}
+
+#[test]
+fn anonymous_declaration_initializers_emit_adjacent_inferred_name_pairs() {
+    let tree = compile_tree(
+        "function outer(){\
+             let lexical=function(){};\
+             const constant=(function(){});\
+             var variable=function(){};\
+             let {nested=function(){}}={};\
+             let [element=function(){}]=[];\
+             let {}=function(){};\
+         }",
+        "outer",
+    );
+    let outer = tree.root();
+    assert_eq!(
+        inferred_names(outer),
+        ["lexical", "constant", "variable", "nested", "element"]
+    );
+    assert_eq!(
+        outer
+            .constants()
+            .iter()
+            .filter(|constant| constant.function().is_some())
+            .count(),
+        6,
+        "a declaration pattern initializer is evaluated without inferred naming"
+    );
 }
 
 #[test]

@@ -1,4 +1,5 @@
-//! The `Number` statics and `Array.isArray`, pinned to the specification.
+//! Global numeric functions, `Number` statics, and `Array.isArray`, pinned to
+//! the specification.
 //!
 //! Every expectation below was produced by the pinned oracle:
 //!
@@ -138,6 +139,22 @@ fn assert_all(cases: &[(&str, &str)]) {
     }
 }
 
+#[test]
+fn global_this_is_the_mutable_realm_global_binding() {
+    assert_all(&[
+        ("globalThis.globalThis===globalThis", "true"),
+        (
+            "(function(){const d=Object.getOwnPropertyDescriptor(globalThis,'globalThis');return d.writable+'|'+d.enumerable+'|'+d.configurable})()",
+            "true|false|true",
+        ),
+        (
+            "(function(){const replacement={};globalThis.globalThis=replacement;return globalThis===replacement})()",
+            "true",
+        ),
+        ("Reflect.deleteProperty(globalThis,'globalThis')", "true"),
+    ]);
+}
+
 /// The `Number` value statics carry the exact pinned binary64 values.
 #[test]
 fn the_number_value_statics_are_exact() {
@@ -271,6 +288,150 @@ fn the_predicates_never_convert_their_argument() {
             rendered(&format!("Number.{predicate}()")),
             "false",
             "Number.{predicate}()"
+        );
+    }
+}
+
+/// The global predicates perform `ToNumber`, unlike their `Number` statics.
+#[test]
+fn the_global_predicates_coerce_and_propagate_abrupt_completions() {
+    assert_all(&[
+        ("isFinite(1)", "true"),
+        ("isFinite('1')", "true"),
+        ("isFinite('x')", "false"),
+        ("isFinite(null)", "true"),
+        ("isFinite(undefined)", "false"),
+        ("isFinite(Infinity)", "false"),
+        ("isNaN(NaN)", "true"),
+        ("isNaN('x')", "true"),
+        ("isNaN('1')", "false"),
+        ("isNaN(null)", "false"),
+        ("isNaN(undefined)", "true"),
+        (
+            "(function(){let log='';const value={valueOf(){log+='v';return '2';},toString(){log+='s';return '3';}};return isFinite(value)+'|'+log;})()",
+            "true|v",
+        ),
+        (
+            "(function(){try{isNaN({valueOf(){throw 41;}});}catch(error){return error===41;}})()",
+            "true",
+        ),
+        (
+            "(function(){try{isFinite(BigInt(1));}catch(error){return error instanceof TypeError;}})()",
+            "true",
+        ),
+        (
+            "(function(){try{isNaN(Symbol('x'));}catch(error){return error instanceof TypeError;}})()",
+            "true",
+        ),
+    ]);
+}
+
+/// `parseFloat` consumes the longest `StrDecimalLiteral` prefix after
+/// `ToString` and leading-whitespace removal.
+#[test]
+fn global_parse_float_uses_the_specification_prefix_grammar() {
+    assert_all(&[
+        ("parseFloat('  -1.25e2tail')", "-125"),
+        ("parseFloat('1e')", "1"),
+        ("parseFloat('1e+')", "1"),
+        ("parseFloat('.5x')", "0.5"),
+        ("parseFloat('+Infinitytail')", "Infinity"),
+        ("parseFloat('-Infinityx')", "-Infinity"),
+        ("String(parseFloat('.'))", "NaN"),
+        ("Object.is(parseFloat('-0x'),-0)", "true"),
+        ("parseFloat('0x10')", "0"),
+        ("parseFloat('1\\ud8002')", "1"),
+        ("parseFloat(BigInt(10))", "10"),
+        (
+            "(function(){let log='';const value={toString(){log+='s';return '2.5x';},valueOf(){log+='v';return 3;}};return parseFloat(value)+'|'+log;})()",
+            "2.5|s",
+        ),
+        (
+            "(function(){try{parseFloat(Symbol('x'));}catch(error){return error instanceof TypeError;}})()",
+            "true",
+        ),
+    ]);
+}
+
+/// `parseInt` converts its input before its radix, applies `ToInt32` to the
+/// radix, and rounds accepted integer prefixes to binary64.
+#[test]
+fn global_parse_int_preserves_conversion_order_and_radix_semantics() {
+    assert_all(&[
+        ("parseInt('  -0xFzz')", "-15"),
+        ("parseInt('0x10')", "16"),
+        ("parseInt('0x10',16)", "16"),
+        ("parseInt('0x10',10)", "0"),
+        ("parseInt('08')", "8"),
+        ("parseInt('11',2)", "3"),
+        ("parseInt('z',36)", "35"),
+        ("String(parseInt('1',1))", "NaN"),
+        ("String(parseInt('1',37))", "NaN"),
+        ("Object.is(parseInt('-0',10),-0)", "true"),
+        ("parseInt('10',4294967298)", "2"),
+        ("parseInt('900719925474099267',10)", "900719925474099300"),
+        ("parseInt('ffffffffffffffff',16)", "18446744073709552000"),
+        ("parseInt(BigInt(10),10)", "10"),
+        (
+            "(function(){let log='';const input={toString(){log+='s';return '10';}};const radix={valueOf(){log+='r';return 2;}};return parseInt(input,radix)+'|'+log;})()",
+            "2|sr",
+        ),
+        (
+            "(function(){let touched=false;try{parseInt({toString(){throw 41;}},{valueOf(){touched=true;return 2;}});}catch(error){return error===41&&!touched;}})()",
+            "true",
+        ),
+        (
+            "(function(){try{parseInt('10',Symbol('x'));}catch(error){return error instanceof TypeError;}})()",
+            "true",
+        ),
+    ]);
+}
+
+/// The parser statics are aliases of the corresponding realm-global function
+/// identities, and every installed property carries the ordinary built-in
+/// descriptor.
+#[test]
+fn global_numeric_function_identities_and_descriptors_are_exact() {
+    assert_all(&[
+        ("isFinite.name+','+isFinite.length", "isFinite,1"),
+        ("isNaN.name+','+isNaN.length", "isNaN,1"),
+        ("parseFloat.name+','+parseFloat.length", "parseFloat,1"),
+        ("parseInt.name+','+parseInt.length", "parseInt,2"),
+        ("Number.parseFloat===parseFloat", "true"),
+        ("Number.parseInt===parseInt", "true"),
+        (
+            "(function(){const d=Object.getOwnPropertyDescriptor(this,'parseInt');return d.value===parseInt&&d.writable&&!d.enumerable&&d.configurable;})()",
+            "true",
+        ),
+        (
+            "(function(){const d=Object.getOwnPropertyDescriptor(Number,'parseFloat');return d.value===parseFloat&&d.writable&&!d.enumerable&&d.configurable;})()",
+            "true",
+        ),
+    ]);
+}
+
+/// Prefix scans debit the shared execution budget in proportion to their
+/// UTF-16 input instead of hiding unbounded native work behind one call.
+#[test]
+fn numeric_prefix_scans_consume_instruction_fuel() {
+    for parser in ["parseFloat", "parseInt"] {
+        let mut runtime = Runtime::try_new(RuntimeLimits::default()).expect("runtime");
+        let realm = runtime.create_realm().expect("realm");
+        let mut context = runtime.context(&realm).expect("context");
+        let input = "1".repeat(1_000);
+        let body = format!("return {parser}('{input}');");
+        let run = dynamic_function(&mut context, &body);
+        let result = context.call(
+            &run,
+            &[],
+            ExecutionLimits::default().with_instruction_fuel(100),
+        );
+        assert!(
+            matches!(
+                result,
+                Err(ExecutionError::InstructionLimitExceeded { limit: 100, .. })
+            ),
+            "{parser} must charge its input scan"
         );
     }
 }

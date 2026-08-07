@@ -696,37 +696,416 @@ fn top_level_arrow_arguments_remains_an_unresolved_global() {
 }
 
 #[test]
-fn arrow_nested_in_function_rejects_the_inherited_arguments_binding() {
-    let source = "function outer() { return () => arguments; }";
-    let (feature, span) = unsupported(source, ParseMode::Script);
+fn sloppy_arguments_is_synthesized_and_captured_by_an_arrow() {
+    let plan = script("function outer() { arguments; return () => arguments; }");
+    let outer = plan.executables()[1].id();
+    let arrow = plan.executables()[2].id();
+    let binding = plan
+        .bindings_for(outer)
+        .unwrap()
+        .iter()
+        .find(|binding| binding.is_arguments_object())
+        .expect("arguments binding");
 
-    assert_eq!(feature, UnsupportedFeature::ArgumentsBinding);
-    assert_eq!(&source[span.start as usize..span.end as usize], "arguments");
+    assert!(binding.is_frame_captured());
+    assert!(plan.unresolved_globals_for(outer).unwrap().is_empty());
+    assert!(plan.unresolved_globals_for(arrow).unwrap().is_empty());
+    assert_eq!(plan.resolved_references_for(outer).unwrap().len(), 1);
+    assert_eq!(plan.resolved_references_for(arrow).unwrap().len(), 1);
+    let captures = plan.frame_captures_for(arrow).unwrap();
+    assert_eq!(captures.len(), 1);
+    assert_eq!(captures[0].binding(), binding.id());
+    assert_eq!(
+        captures[0].source(),
+        CaptureSource::ParentBinding(binding.id())
+    );
 }
 
 #[test]
-fn oxc_resolved_arguments_collisions_fail_closed() {
-    let cases = [
-        "function f() { var arguments; return arguments; }",
-        "const f = function arguments() { return arguments; };",
-    ];
+fn strict_arguments_is_synthesized_once_and_captured_by_an_arrow() {
+    let plan = script("function outer() {'use strict'; arguments; return () => arguments;}");
+    let outer = plan.executables()[1].id();
+    let arrow = plan.executables()[2].id();
+    let binding = plan
+        .bindings_for(outer)
+        .unwrap()
+        .iter()
+        .find(|binding| binding.is_arguments_object())
+        .expect("arguments binding");
 
-    for source in cases {
-        let (feature, span) = unsupported(source, ParseMode::Script);
-        assert_eq!(feature, UnsupportedFeature::ArgumentsBinding, "{source}");
-        assert_eq!(
-            &source[span.start as usize..span.end as usize],
-            "arguments",
+    assert_eq!(binding.name(), "arguments");
+    assert!(binding.is_frame_captured());
+    assert!(plan.unresolved_globals_for(outer).unwrap().is_empty());
+    assert!(plan.unresolved_globals_for(arrow).unwrap().is_empty());
+    assert_eq!(plan.resolved_references_for(outer).unwrap().len(), 1);
+    assert_eq!(plan.resolved_references_for(arrow).unwrap().len(), 1);
+    let captures = plan.frame_captures_for(arrow).unwrap();
+    assert_eq!(captures.len(), 1);
+    assert_eq!(captures[0].binding(), binding.id());
+    assert_eq!(
+        captures[0].source(),
+        CaptureSource::ParentBinding(binding.id())
+    );
+}
+
+#[test]
+fn oxc_resolved_arguments_collisions_route_to_the_specification_binding() {
+    let var_plan = script("function f() { var arguments; return arguments; }");
+    let function = var_plan.executables()[1].id();
+    let arguments = var_plan
+        .bindings_for(function)
+        .unwrap()
+        .iter()
+        .find(|binding| binding.is_arguments_object())
+        .expect("the var binding is reused as the arguments object");
+    assert_eq!(arguments.policy().kind(), DeclarationKind::Var);
+    assert_eq!(
+        var_plan.resolved_references_for(function).unwrap()[0].binding(),
+        arguments.id()
+    );
+
+    let named_plan = script("const f = function arguments() { return arguments; };");
+    let function = named_plan.executables()[1].id();
+    let named_bindings = named_plan
+        .bindings_for(function)
+        .unwrap()
+        .iter()
+        .filter(|binding| binding.name() == "arguments")
+        .collect::<Vec<_>>();
+    assert_eq!(named_bindings.len(), 2);
+    let arguments = named_bindings
+        .iter()
+        .copied()
+        .find(|binding| binding.is_arguments_object())
+        .expect("named expression gains an inner arguments object");
+    assert!(named_bindings.iter().any(|binding| {
+        binding.policy().kind() == DeclarationKind::FunctionName && !binding.is_arguments_object()
+    }));
+    assert_eq!(
+        named_plan.resolved_references_for(function).unwrap()[0].binding(),
+        arguments.id()
+    );
+}
+
+#[test]
+fn implicit_arguments_shadow_outer_bindings_but_preserve_inner_explicit_ones() {
+    let outer_plan = script("let arguments=0; function f(){ return arguments; }");
+    let function = outer_plan.executables()[1].id();
+    let arguments = outer_plan
+        .bindings_for(function)
+        .unwrap()
+        .iter()
+        .find(|binding| binding.is_arguments_object())
+        .expect("ordinary function arguments shadow the outer lexical");
+    assert_eq!(
+        outer_plan.resolved_references_for(function).unwrap()[0].binding(),
+        arguments.id()
+    );
+
+    let arrow_plan = script("function f(){ return (arguments) => arguments; }");
+    let function = arrow_plan.executables()[1].id();
+    let arrow = arrow_plan.executables()[2].id();
+    assert!(
+        arrow_plan
+            .bindings_for(function)
+            .unwrap()
+            .iter()
+            .all(|binding| !binding.is_arguments_object())
+    );
+    let parameter = arrow_plan
+        .bindings_for(arrow)
+        .unwrap()
+        .iter()
+        .find(|binding| binding.name() == "arguments")
+        .expect("arrow parameter binding");
+    assert_eq!(
+        arrow_plan.resolved_references_for(arrow).unwrap()[0].binding(),
+        parameter.id()
+    );
+
+    let arrow_var_plan =
+        script("function f(){ return () => { var arguments=2; return arguments; }; }");
+    let function = arrow_var_plan.executables()[1].id();
+    let arrow = arrow_var_plan.executables()[2].id();
+    assert!(
+        arrow_var_plan
+            .bindings_for(function)
+            .unwrap()
+            .iter()
+            .all(|binding| !binding.is_arguments_object())
+    );
+    let binding = arrow_var_plan
+        .bindings_for(arrow)
+        .unwrap()
+        .iter()
+        .find(|binding| binding.name() == "arguments")
+        .expect("arrow var binding");
+    assert_eq!(
+        arrow_var_plan.resolved_references_for(arrow).unwrap()[0].binding(),
+        binding.id()
+    );
+
+    let block_plan = script(
+        "function f(){ let result; { let arguments=3; result=arguments; } return arguments; }",
+    );
+    let function = block_plan.executables()[1].id();
+    let bindings = block_plan.bindings_for(function).unwrap();
+    let implicit = bindings
+        .iter()
+        .find(|binding| binding.is_arguments_object())
+        .expect("outer function arguments binding");
+    let lexical = bindings
+        .iter()
+        .find(|binding| {
+            binding.name() == "arguments" && binding.policy().kind() == DeclarationKind::Let
+        })
+        .expect("inner block lexical binding");
+    let targets = block_plan
+        .resolved_references_for(function)
+        .unwrap()
+        .iter()
+        .map(quickjs_compiler::ResolvedReference::binding)
+        .collect::<Vec<_>>();
+    assert!(targets.contains(&implicit.id()));
+    assert!(targets.contains(&lexical.id()));
+}
+
+#[test]
+fn explicit_arguments_bindings_with_ordinary_semantics_remain_supported() {
+    for source in [
+        "function parameter(arguments) { var arguments; return arguments; }",
+        "function lexical() { let arguments = 1; return arguments; }",
+        "function outer() { function arguments() {} return arguments; }",
+    ] {
+        let plan = script(source);
+        assert!(
+            plan.bindings_for(plan.executables()[1].id())
+                .unwrap()
+                .iter()
+                .all(|binding| !binding.is_arguments_object()),
             "{source}"
         );
     }
 }
 
 #[test]
-fn explicit_arguments_bindings_with_ordinary_semantics_remain_supported() {
-    script("function parameter(arguments) { var arguments; return arguments; }");
-    script("function lexical() { let arguments = 1; return arguments; }");
-    script("function outer() { function arguments() {} return arguments; }");
+fn expression_free_destructured_parameters_use_raw_positions_and_local_bindings() {
+    let plan = script(
+        "function f(keep,{value,...objectRest},[head,,...tail]){\
+            return keep+value+objectRest+head+tail+arguments.length;}",
+    );
+    let function = plan.executables()[1].id();
+    let executable = &plan.executables()[1];
+    assert_eq!(executable.parameter_count(), 3);
+    assert!(!executable.has_simple_parameter_list());
+    assert!(executable.parameter_binding_indices().is_empty());
+    assert!(executable.mapped_parameter_indices().is_empty());
+
+    let bindings = plan.bindings_for(function).unwrap();
+    let keep = bindings
+        .iter()
+        .find(|binding| binding.name() == "keep")
+        .expect("identifier formal binding");
+    assert_eq!(
+        keep.placement(),
+        StoragePlacement::Argument { parameter_index: 0 }
+    );
+    for name in ["value", "objectRest", "head", "tail"] {
+        let binding = bindings
+            .iter()
+            .find(|binding| binding.name() == name)
+            .unwrap_or_else(|| panic!("missing destructured parameter {name}"));
+        assert_eq!(binding.placement(), StoragePlacement::Local, "{name}");
+        assert_eq!(
+            binding.policy().kind(),
+            DeclarationKind::Parameter,
+            "{name}"
+        );
+    }
+    assert!(
+        bindings
+            .iter()
+            .any(quickjs_compiler::BindingStorage::is_arguments_object)
+    );
+}
+
+#[test]
+fn formal_rest_parameters_start_after_fixed_arguments_and_bind_locally() {
+    let plan = script(
+        "function f(keep,...[head,{value},...tail]){\
+            return keep+head+value+tail.length+arguments.length;}",
+    );
+    let function = plan.executables()[1].id();
+    let executable = &plan.executables()[1];
+    assert_eq!(executable.parameter_count(), 1);
+    assert!(!executable.has_simple_parameter_list());
+    assert!(executable.parameter_binding_indices().is_empty());
+    assert!(executable.mapped_parameter_indices().is_empty());
+
+    let bindings = plan.bindings_for(function).unwrap();
+    let keep = bindings
+        .iter()
+        .find(|binding| binding.name() == "keep")
+        .expect("fixed parameter binding");
+    assert_eq!(
+        keep.placement(),
+        StoragePlacement::Argument { parameter_index: 0 }
+    );
+    for name in ["head", "value", "tail"] {
+        let binding = bindings
+            .iter()
+            .find(|binding| binding.name() == name)
+            .unwrap_or_else(|| panic!("missing rest parameter binding {name}"));
+        assert_eq!(binding.placement(), StoragePlacement::Local, "{name}");
+        assert_eq!(
+            binding.policy().kind(),
+            DeclarationKind::Parameter,
+            "{name}"
+        );
+        assert_eq!(
+            binding.policy().initialization(),
+            InitializationPolicy::Argument,
+            "{name}"
+        );
+    }
+    assert!(
+        bindings
+            .iter()
+            .any(quickjs_compiler::BindingStorage::is_arguments_object)
+    );
+}
+
+#[test]
+fn parameter_expressions_use_tdz_locals_and_stop_observable_length() {
+    let plan = script(
+        "function f(first,{[first]: value = 2} = {},last = value,...[tail = last]){\
+            return first+value+last+tail+arguments.length;}",
+    );
+    let executable = &plan.executables()[1];
+    assert_eq!(executable.parameter_count(), 3);
+    assert_eq!(executable.defined_parameter_count(), 1);
+    assert!(!executable.has_simple_parameter_list());
+    assert!(executable.has_parameter_expressions());
+
+    let bindings = plan.bindings_for(executable.id()).unwrap();
+    for name in ["first", "value", "last", "tail"] {
+        let binding = bindings
+            .iter()
+            .find(|binding| binding.name() == name)
+            .unwrap_or_else(|| panic!("missing parameter-expression binding {name}"));
+        assert_eq!(binding.placement(), StoragePlacement::Local, "{name}");
+        assert_eq!(
+            binding.policy().kind(),
+            DeclarationKind::Parameter,
+            "{name}"
+        );
+        assert_eq!(
+            binding.policy().initialization(),
+            InitializationPolicy::Argument,
+            "{name}"
+        );
+        assert!(binding.policy().has_temporal_dead_zone(), "{name}");
+    }
+    assert!(
+        bindings
+            .iter()
+            .any(quickjs_compiler::BindingStorage::is_arguments_object)
+    );
+}
+
+#[test]
+fn parameter_expression_collisions_split_parameter_and_body_bindings() {
+    let plan = script(
+        "function f(a=1,reader=function inner(){return a}){var a;function reader(){}\
+            var arguments;return a+reader+arguments.length;}",
+    );
+    let executable = plan.executables()[1].id();
+    let bindings = plan.bindings_for(executable).unwrap();
+
+    let a = bindings
+        .iter()
+        .filter(|binding| binding.name() == "a")
+        .collect::<Vec<_>>();
+    assert_eq!(a.len(), 2);
+    assert_eq!(a[0].policy().kind(), DeclarationKind::Parameter);
+    assert!(a[0].policy().has_temporal_dead_zone());
+    assert_eq!(a[1].policy().kind(), DeclarationKind::Var);
+    assert!(!a[1].policy().has_temporal_dead_zone());
+
+    let reader = bindings
+        .iter()
+        .filter(|binding| binding.name() == "reader")
+        .collect::<Vec<_>>();
+    assert_eq!(reader.len(), 2);
+    assert_eq!(reader[0].policy().kind(), DeclarationKind::Parameter);
+    assert_eq!(reader[1].policy().kind(), DeclarationKind::Function);
+    assert_eq!(
+        reader[1].policy().initialization(),
+        InitializationPolicy::FunctionAtScopeEntry
+    );
+
+    let arguments = bindings
+        .iter()
+        .filter(|binding| binding.name() == "arguments")
+        .collect::<Vec<_>>();
+    assert_eq!(arguments.len(), 2);
+    assert!(
+        arguments
+            .iter()
+            .any(|binding| binding.is_arguments_object())
+    );
+    assert!(arguments.iter().any(|binding| {
+        !binding.is_arguments_object() && binding.policy().kind() == DeclarationKind::Var
+    }));
+}
+
+#[test]
+fn non_simple_body_functions_activate_after_parameter_initialization() {
+    let plan = script(
+        "function f({value}){function value(){return 1;}function other(){return 2;}\
+            return value()+other();}",
+    );
+    let bindings = plan.bindings_for(plan.executables()[1].id()).unwrap();
+    for name in ["value", "other"] {
+        let binding = bindings
+            .iter()
+            .find(|binding| binding.name() == name)
+            .unwrap_or_else(|| panic!("missing body function {name}"));
+        assert_eq!(binding.placement(), StoragePlacement::Local, "{name}");
+        assert_eq!(binding.policy().kind(), DeclarationKind::Function, "{name}");
+        assert_eq!(
+            binding.policy().initialization(),
+            InitializationPolicy::FunctionAtScopeEntry,
+            "{name}"
+        );
+    }
+}
+
+#[test]
+fn duplicate_parameters_share_the_last_formal_argument_slot() {
+    let plan = script("function f(a, a) { return a + arguments[0] + arguments[1]; }");
+    let function = plan.executables()[1].id();
+    let parameters = plan
+        .bindings_for(function)
+        .unwrap()
+        .iter()
+        .filter(|binding| binding.name() == "a")
+        .collect::<Vec<_>>();
+
+    assert_eq!(plan.executables()[1].parameter_count(), 2);
+    assert_eq!(plan.executables()[1].parameter_binding_indices(), [1, 1]);
+    assert_eq!(plan.executables()[1].mapped_parameter_indices(), [1]);
+    assert_eq!(parameters.len(), 1);
+    assert_eq!(
+        parameters[0].placement(),
+        StoragePlacement::Argument { parameter_index: 1 }
+    );
+    assert!(
+        plan.bindings_for(function)
+            .unwrap()
+            .iter()
+            .any(quickjs_compiler::BindingStorage::is_arguments_object)
+    );
 }
 
 #[test]
@@ -760,28 +1139,7 @@ fn unsupported(source: &str, mode: ParseMode) -> (UnsupportedFeature, quickjs_fr
 fn unsupported_dynamic_binding_cases_fail_closed_at_exact_spans() {
     let cases = [
         ("eval('code')", UnsupportedFeature::DirectEval),
-        (
-            "function f(a = 1) {}",
-            UnsupportedFeature::ParameterExpressions,
-        ),
-        (
-            "function f({ value }) {}",
-            UnsupportedFeature::NonSimpleParameters,
-        ),
-        (
-            "function f(...rest) {}",
-            UnsupportedFeature::NonSimpleParameters,
-        ),
-        (
-            "function f(a, a) {}",
-            UnsupportedFeature::DuplicateParameters,
-        ),
         ("with (object) value;", UnsupportedFeature::WithStatement),
-        (
-            "function f() { return arguments; }",
-            UnsupportedFeature::ArgumentsBinding,
-        ),
-        ("class Box {}", UnsupportedFeature::ClassSyntheticSlots),
     ];
 
     for (source, expected) in cases {

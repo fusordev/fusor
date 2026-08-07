@@ -581,6 +581,40 @@ fn function_prototype_symbol_has_instance_runs_the_ordinary_path() {
 }
 
 #[test]
+fn instanceof_routes_proxy_get_and_prototype_internal_methods() {
+    assert_eq!(
+        call(
+            "function C() {}\n\
+             let log='';\n\
+             let P=new Proxy(C,{get(t,k,r){\n\
+               if(k===Symbol.hasInstance)log+='h';\n\
+               if(k==='prototype')log+='p';\n\
+               return Reflect.get(t,k,r);\n\
+             }});\n\
+             let value=Object.create(C.prototype);\n\
+             return (value instanceof P)+'|'+log;",
+            string,
+        ),
+        "true|hp"
+    );
+    assert_eq!(
+        call(
+            "function C() {}\n\
+             let log='';\n\
+             let value=new Proxy({},{getPrototypeOf(){log+='g';return C.prototype;}});\n\
+             return (value instanceof C)+'|'+log;",
+            string,
+        ),
+        "true|g"
+    );
+    assert!(!call(
+        "function C() {}\n\
+         return C.prototype instanceof C;",
+        boolean,
+    ));
+}
+
+#[test]
 fn instanceof_unwraps_bound_functions() {
     assert!(call(
         "function C() {}\n\

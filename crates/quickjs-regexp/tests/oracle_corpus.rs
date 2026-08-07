@@ -1,0 +1,478 @@
+//! Shared core corpus characterized against `QuickJS` 2026-06-04 and Node 24.19.
+
+use quickjs_regexp::{CompileLimits, CompiledRegExp, ExecLimits};
+
+type ExpectedRanges = &'static [Option<(usize, usize)>];
+
+struct Case {
+    pattern: &'static str,
+    flags: &'static str,
+    input: &'static str,
+    start: usize,
+    expected: Option<ExpectedRanges>,
+}
+
+const CASES: &[Case] = &[
+    Case {
+        pattern: "(a|ab)+?(b)",
+        flags: "",
+        input: "zzababq",
+        start: 0,
+        expected: Some(&[Some((2, 4)), Some((2, 3)), Some((3, 4))]),
+    },
+    Case {
+        pattern: "(ab|a)+b",
+        flags: "",
+        input: "aaab",
+        start: 0,
+        expected: Some(&[Some((0, 4)), Some((2, 3))]),
+    },
+    Case {
+        pattern: "(a|(b))+",
+        flags: "",
+        input: "aba",
+        start: 0,
+        expected: Some(&[Some((0, 3)), Some((2, 3)), None]),
+    },
+    Case {
+        pattern: r"^(a|(b))\2c$",
+        flags: "",
+        input: "ac",
+        start: 0,
+        expected: Some(&[Some((0, 2)), Some((0, 1)), None]),
+    },
+    Case {
+        pattern: "a+",
+        flags: "",
+        input: "zzaaaq",
+        start: 0,
+        expected: Some(&[Some((2, 5))]),
+    },
+    Case {
+        pattern: "a",
+        flags: "y",
+        input: "ba",
+        start: 0,
+        expected: None,
+    },
+    Case {
+        pattern: "^(.)$",
+        flags: "u",
+        input: "😀",
+        start: 0,
+        expected: Some(&[Some((0, 2)), Some((0, 2))]),
+    },
+    Case {
+        pattern: "^(..)$",
+        flags: "",
+        input: "😀",
+        start: 0,
+        expected: Some(&[Some((0, 2)), Some((0, 2))]),
+    },
+    Case {
+        pattern: "a$",
+        flags: "",
+        input: "a\n",
+        start: 0,
+        expected: None,
+    },
+    Case {
+        pattern: "a$",
+        flags: "",
+        input: "a\r\n",
+        start: 0,
+        expected: None,
+    },
+    Case {
+        pattern: "^b$",
+        flags: "m",
+        input: "a\nb\nc",
+        start: 0,
+        expected: Some(&[Some((2, 3))]),
+    },
+    Case {
+        pattern: "^[a-z]+$",
+        flags: "iu",
+        input: "\u{212a}",
+        start: 0,
+        expected: Some(&[Some((0, 1))]),
+    },
+    Case {
+        pattern: "^[a-z]+$",
+        flags: "i",
+        input: "\u{212a}",
+        start: 0,
+        expected: None,
+    },
+    Case {
+        pattern: r"^\w$",
+        flags: "iu",
+        input: "\u{212a}",
+        start: 0,
+        expected: Some(&[Some((0, 1))]),
+    },
+    Case {
+        pattern: "^(a*?)(a*)$",
+        flags: "",
+        input: "aaa",
+        start: 0,
+        expected: Some(&[Some((0, 3)), Some((0, 0)), Some((0, 3))]),
+    },
+    Case {
+        pattern: "^(a{2,4})(a?)$",
+        flags: "",
+        input: "aaaa",
+        start: 0,
+        expected: Some(&[Some((0, 4)), Some((0, 4)), Some((4, 4))]),
+    },
+    Case {
+        pattern: "^(a{0})(a)$",
+        flags: "",
+        input: "a",
+        start: 0,
+        expected: Some(&[Some((0, 1)), Some((0, 0)), Some((0, 1))]),
+    },
+    Case {
+        pattern: "^(()*)$",
+        flags: "",
+        input: "",
+        start: 0,
+        expected: Some(&[Some((0, 0)), Some((0, 0)), None]),
+    },
+    Case {
+        pattern: r"^(a+)\1$",
+        flags: "i",
+        input: "aAaA",
+        start: 0,
+        expected: Some(&[Some((0, 4)), Some((0, 2))]),
+    },
+    Case {
+        pattern: "^[^a-c]+$",
+        flags: "i",
+        input: "XYZ",
+        start: 0,
+        expected: Some(&[Some((0, 3))]),
+    },
+    Case {
+        pattern: r"^\s+$",
+        flags: "",
+        input: "\u{feff}\u{2028}",
+        start: 0,
+        expected: Some(&[Some((0, 2))]),
+    },
+    Case {
+        pattern: r"^\p{ASCII}+$",
+        flags: "u",
+        input: "Az0",
+        start: 0,
+        expected: Some(&[Some((0, 3))]),
+    },
+    Case {
+        pattern: r"^\P{ASCII}+$",
+        flags: "u",
+        input: "λ😀",
+        start: 0,
+        expected: Some(&[Some((0, 3))]),
+    },
+    Case {
+        pattern: r"^\p{Letter}+$",
+        flags: "u",
+        input: "Rustλ字",
+        start: 0,
+        expected: Some(&[Some((0, 6))]),
+    },
+    Case {
+        pattern: r"^\p{gc=Sc}+$",
+        flags: "u",
+        input: "$€¥",
+        start: 0,
+        expected: Some(&[Some((0, 3))]),
+    },
+    Case {
+        pattern: r"^\p{Script=Greek}+$",
+        flags: "u",
+        input: "Ωλ",
+        start: 0,
+        expected: Some(&[Some((0, 2))]),
+    },
+    Case {
+        pattern: r"^\p{scx=Hira}+$",
+        flags: "u",
+        input: "あー",
+        start: 0,
+        expected: Some(&[Some((0, 2))]),
+    },
+    Case {
+        pattern: r"^\p{Emoji_Presentation}+$",
+        flags: "u",
+        input: "😀🦃",
+        start: 0,
+        expected: Some(&[Some((0, 4))]),
+    },
+    Case {
+        pattern: r"^[\p{Letter}0-9]+$",
+        flags: "u",
+        input: "λ9",
+        start: 0,
+        expected: Some(&[Some((0, 2))]),
+    },
+    Case {
+        pattern: r"^\p{Lowercase_Letter}$",
+        flags: "iu",
+        input: "A",
+        start: 0,
+        expected: Some(&[Some((0, 1))]),
+    },
+    Case {
+        pattern: r"^\P{Lowercase_Letter}$",
+        flags: "iu",
+        input: "A",
+        start: 0,
+        expected: Some(&[Some((0, 1))]),
+    },
+    Case {
+        pattern: r"^\P{Lowercase_Letter}$",
+        flags: "iv",
+        input: "A",
+        start: 0,
+        expected: None,
+    },
+    Case {
+        pattern: "foo(?=bar)",
+        flags: "",
+        input: "xxfoobar",
+        start: 0,
+        expected: Some(&[Some((2, 5))]),
+    },
+    Case {
+        pattern: "foo(?!bar)",
+        flags: "",
+        input: "xxfoobaz",
+        start: 0,
+        expected: Some(&[Some((2, 5))]),
+    },
+    Case {
+        pattern: "foo(?!bar)",
+        flags: "",
+        input: "xxfoobar",
+        start: 0,
+        expected: None,
+    },
+    Case {
+        pattern: "(?<=foo)bar",
+        flags: "",
+        input: "xxfoobar",
+        start: 0,
+        expected: Some(&[Some((5, 8))]),
+    },
+    Case {
+        pattern: "(?<!foo)bar",
+        flags: "",
+        input: "xxbar",
+        start: 0,
+        expected: Some(&[Some((2, 5))]),
+    },
+    Case {
+        pattern: "(?<!foo)bar",
+        flags: "",
+        input: "xxfoobar",
+        start: 0,
+        expected: None,
+    },
+    Case {
+        pattern: r"(?=(a+))\1",
+        flags: "",
+        input: "aaa",
+        start: 0,
+        expected: Some(&[Some((0, 3)), Some((0, 3))]),
+    },
+    Case {
+        pattern: "(?<=([ab]+)([bc]+))$",
+        flags: "",
+        input: "abc",
+        start: 0,
+        expected: Some(&[Some((3, 3)), Some((0, 1)), Some((1, 3))]),
+    },
+    Case {
+        pattern: "(?<=a(?=b))b",
+        flags: "",
+        input: "ab",
+        start: 0,
+        expected: Some(&[Some((1, 2))]),
+    },
+    Case {
+        pattern: r"(?<=(a)\1)b",
+        flags: "",
+        input: "aab",
+        start: 0,
+        expected: Some(&[Some((2, 3)), Some((1, 2))]),
+    },
+    Case {
+        pattern: "^[[a-z]&&[^aeiou]]+$",
+        flags: "v",
+        input: "rhythm",
+        start: 0,
+        expected: Some(&[Some((0, 6))]),
+    },
+    Case {
+        pattern: "^[[a-z]&&[^aeiou]]+$",
+        flags: "v",
+        input: "rust",
+        start: 0,
+        expected: None,
+    },
+    Case {
+        pattern: "^[[a-z]--[aeiou]]+$",
+        flags: "v",
+        input: "rhythm",
+        start: 0,
+        expected: Some(&[Some((0, 6))]),
+    },
+    Case {
+        pattern: "^[\\p{Script=Greek}&&\\p{Letter}]+$",
+        flags: "v",
+        input: "Ωλ",
+        start: 0,
+        expected: Some(&[Some((0, 2))]),
+    },
+    Case {
+        pattern: "^[\\p{ASCII}--[A-Z]]+$",
+        flags: "v",
+        input: "rust9",
+        start: 0,
+        expected: Some(&[Some((0, 5))]),
+    },
+    Case {
+        pattern: "^[[^a-c]&&[a-z]]+$",
+        flags: "v",
+        input: "xyz",
+        start: 0,
+        expected: Some(&[Some((0, 3))]),
+    },
+    Case {
+        pattern: r"^[\q{ab|a|}]",
+        flags: "v",
+        input: "ab",
+        start: 0,
+        expected: Some(&[Some((0, 2))]),
+    },
+    Case {
+        pattern: r"^[\q{ab|a}]b$",
+        flags: "v",
+        input: "ab",
+        start: 0,
+        expected: Some(&[Some((0, 2))]),
+    },
+    Case {
+        pattern: r"^[[\q{ab|a}]&&[\q{ab|x}]]$",
+        flags: "v",
+        input: "ab",
+        start: 0,
+        expected: Some(&[Some((0, 2))]),
+    },
+    Case {
+        pattern: r"^[[\q{ab|a}]&&[\q{ab|x}]]$",
+        flags: "v",
+        input: "a",
+        start: 0,
+        expected: None,
+    },
+    Case {
+        pattern: r"^[[\q{ab|a}]--[\q{a}]]$",
+        flags: "v",
+        input: "ab",
+        start: 0,
+        expected: Some(&[Some((0, 2))]),
+    },
+    Case {
+        pattern: r"^[[\q{ab|a}]--[\q{a}]]$",
+        flags: "v",
+        input: "a",
+        start: 0,
+        expected: None,
+    },
+    Case {
+        pattern: r"^[\q{}]$",
+        flags: "v",
+        input: "",
+        start: 0,
+        expected: Some(&[Some((0, 0))]),
+    },
+    Case {
+        pattern: r"^\p{Basic_Emoji}$",
+        flags: "v",
+        input: "🦃",
+        start: 0,
+        expected: Some(&[Some((0, 2))]),
+    },
+    Case {
+        pattern: r"^\p{Basic_Emoji}$",
+        flags: "v",
+        input: "🛤️",
+        start: 0,
+        expected: Some(&[Some((0, 3))]),
+    },
+    Case {
+        pattern: r"^\p{Emoji_Keycap_Sequence}$",
+        flags: "v",
+        input: "3️⃣",
+        start: 0,
+        expected: Some(&[Some((0, 3))]),
+    },
+    Case {
+        pattern: r"^\p{RGI_Emoji_Modifier_Sequence}$",
+        flags: "v",
+        input: "✊🏽",
+        start: 0,
+        expected: Some(&[Some((0, 3))]),
+    },
+    Case {
+        pattern: r"^\p{RGI_Emoji_Flag_Sequence}$",
+        flags: "v",
+        input: "🇨🇳",
+        start: 0,
+        expected: Some(&[Some((0, 4))]),
+    },
+    Case {
+        pattern: r"^\p{RGI_Emoji_Flag_Sequence}$",
+        flags: "v",
+        input: "🇦🇦",
+        start: 0,
+        expected: None,
+    },
+    Case {
+        pattern: r"^\p{RGI_Emoji_Tag_Sequence}$",
+        flags: "v",
+        input: "🏴󠁧󠁢󠁳󠁣󠁴󠁿",
+        start: 0,
+        expected: Some(&[Some((0, 14))]),
+    },
+    Case {
+        pattern: r"^[\p{Basic_Emoji}&&\q{🦃}]$",
+        flags: "v",
+        input: "🦃",
+        start: 0,
+        expected: Some(&[Some((0, 2))]),
+    },
+];
+
+#[test]
+fn matches_the_shared_quickjs_and_node_core_corpus() {
+    for (index, case) in CASES.iter().enumerate() {
+        let expression =
+            CompiledRegExp::compile(case.pattern, case.flags, CompileLimits::default())
+                .unwrap_or_else(|error| panic!("case {index} failed to compile: {error}"));
+        let input = case.input.encode_utf16().collect::<Vec<_>>();
+        let actual = expression
+            .execute(&input, case.start, ExecLimits::default())
+            .unwrap_or_else(|error| panic!("case {index} failed to execute: {error}"))
+            .map(|result| {
+                result
+                    .captures
+                    .into_iter()
+                    .map(|range| range.map(|range| (range.start, range.end)))
+                    .collect::<Vec<_>>()
+            });
+        assert_eq!(actual.as_deref(), case.expected, "case {index}");
+    }
+}

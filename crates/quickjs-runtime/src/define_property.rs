@@ -97,6 +97,29 @@ enum DefinitionFields {
     reason = "the generic and accessor constructors are required by Object.defineProperty, whose resumable descriptor read is a separate milestone"
 )]
 impl PropertyDefinition {
+    /// Duplicates a descriptor while retaining any runtime-owned value.
+    pub(crate) fn duplicate(&self) -> Self {
+        let fields = match &self.fields {
+            DefinitionFields::Generic => DefinitionFields::Generic,
+            DefinitionFields::Data { value, writable } => DefinitionFields::Data {
+                value: match value {
+                    Requested::Absent => Requested::Absent,
+                    Requested::Present(value) => Requested::Present(value.duplicate()),
+                },
+                writable: *writable,
+            },
+            DefinitionFields::Accessor { getter, setter } => DefinitionFields::Accessor {
+                getter: *getter,
+                setter: *setter,
+            },
+        };
+        Self {
+            fields,
+            enumerable: self.enumerable,
+            configurable: self.configurable,
+        }
+    }
+
     /// Creates a descriptor carrying neither data nor accessor fields.
     pub(crate) const fn generic() -> Self {
         Self {
@@ -156,6 +179,108 @@ impl PropertyDefinition {
                 getter.is_present() || setter.is_present()
             }
         }
+    }
+
+    /// Returns whether this data descriptor carries a value that an exotic
+    /// object must validate before ordinary descriptor application.
+    pub(crate) const fn has_present_data_value(&self) -> bool {
+        matches!(
+            self.fields,
+            DefinitionFields::Data {
+                value: Requested::Present(_),
+                ..
+            }
+        )
+    }
+
+    /// Returns the requested data value, when that field is present.
+    pub(crate) const fn present_data_value(&self) -> Option<&StoredValue> {
+        match &self.fields {
+            DefinitionFields::Data {
+                value: Requested::Present(value),
+                ..
+            } => Some(value),
+            DefinitionFields::Generic
+            | DefinitionFields::Data {
+                value: Requested::Absent,
+                ..
+            }
+            | DefinitionFields::Accessor { .. } => None,
+        }
+    }
+
+    /// Returns the requested writable attribute for a data descriptor.
+    pub(crate) const fn requested_writable(&self) -> Option<bool> {
+        match &self.fields {
+            DefinitionFields::Data {
+                writable: Requested::Present(writable),
+                ..
+            } => Some(*writable),
+            DefinitionFields::Generic
+            | DefinitionFields::Data {
+                writable: Requested::Absent,
+                ..
+            }
+            | DefinitionFields::Accessor { .. } => None,
+        }
+    }
+
+    /// Returns the requested enumerable attribute, preserving absence.
+    pub(crate) const fn requested_enumerable(&self) -> Option<bool> {
+        match self.enumerable {
+            Requested::Absent => None,
+            Requested::Present(value) => Some(value),
+        }
+    }
+
+    /// Returns the requested configurable attribute, preserving absence.
+    pub(crate) const fn requested_configurable(&self) -> Option<bool> {
+        match self.configurable {
+            Requested::Absent => None,
+            Requested::Present(value) => Some(value),
+        }
+    }
+
+    /// Returns the requested data value, preserving field absence.
+    pub(crate) const fn requested_value(&self) -> Option<&StoredValue> {
+        self.present_data_value()
+    }
+
+    /// Returns the requested getter, preserving the distinction between an
+    /// absent field and a present `undefined` getter.
+    #[allow(
+        clippy::option_option,
+        reason = "the outer option is field presence and the inner option is an undefined accessor"
+    )]
+    pub(crate) const fn requested_getter(&self) -> Option<Option<FunctionId>> {
+        match self.fields {
+            DefinitionFields::Accessor { getter, .. } => match getter {
+                Requested::Absent => None,
+                Requested::Present(value) => Some(value),
+            },
+            DefinitionFields::Generic | DefinitionFields::Data { .. } => None,
+        }
+    }
+
+    /// Returns the requested setter, preserving the distinction between an
+    /// absent field and a present `undefined` setter.
+    #[allow(
+        clippy::option_option,
+        reason = "the outer option is field presence and the inner option is an undefined accessor"
+    )]
+    pub(crate) const fn requested_setter(&self) -> Option<Option<FunctionId>> {
+        match self.fields {
+            DefinitionFields::Accessor { setter, .. } => match setter {
+                Requested::Absent => None,
+                Requested::Present(value) => Some(value),
+            },
+            DefinitionFields::Generic | DefinitionFields::Data { .. } => None,
+        }
+    }
+
+    /// Returns whether this is an accessor descriptor.
+    pub(crate) const fn is_accessor_descriptor(&self) -> bool {
+        self.is_accessor()
     }
 }
 

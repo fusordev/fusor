@@ -1,11 +1,13 @@
 use std::sync::Arc;
 
-use quickjs_bytecode::{FinalOpcode, FunctionTemplateId};
+use quickjs_bytecode::{FinalOpcode, FunctionTemplateId, VerificationLimits};
 use quickjs_compiler::CompilationContext;
-use quickjs_frontend::{CompilationGoal, FrontendOptions, GlobalScriptGoal, with_parsed_program};
+use quickjs_frontend::{
+    CompilationGoal, DynamicFunctionKind, DynamicFunctionSource, FrontendLimits, FrontendOptions,
+    GlobalScriptGoal, SourceFragment, with_dynamic_function_source, with_parsed_program,
+};
 use quickjs_runtime::{
-    AtomLimits, ExecutionLimits, InstallError, PREDEFINED_ATOM_COUNT,
-    PREDEFINED_DESCRIPTION_CODE_UNITS, PREDEFINED_INTERNER_SLOTS, Runtime, RuntimeLimits,
+    AtomLimits, ExecutionLimits, InstallError, Runtime, RuntimeLimits, RuntimeResource,
 };
 
 fn compile(source: &str, root_name: &str) -> Arc<quickjs_bytecode::VerifiedBytecode> {
@@ -21,12 +23,32 @@ fn compile(source: &str, root_name: &str) -> Arc<quickjs_bytecode::VerifiedBytec
                 .find(|executable| executable.metadata().name() == Some(root_name))
                 .expect("root function");
             let tree = context
-                .compile_tree(&root, quickjs_bytecode::VerificationLimits::default())
+                .compile_tree(&root, VerificationLimits::default())
                 .expect("verified function tree");
             Arc::new(tree.verified_bytecode().clone())
         },
     )
     .expect("frontend")
+}
+
+fn compile_dynamic(parameters: &[&str], body: &str) -> Arc<quickjs_bytecode::VerifiedBytecode> {
+    let parameters = parameters
+        .iter()
+        .map(|parameter| SourceFragment::new(parameter))
+        .collect::<Vec<_>>();
+    let source = DynamicFunctionSource::new(
+        DynamicFunctionKind::Function,
+        &parameters,
+        SourceFragment::new(body),
+    );
+    with_dynamic_function_source(source, FrontendLimits::default(), |unit, _| {
+        let context = CompilationContext::new(unit).expect("dynamic storage plan");
+        context
+            .compile_dynamic_function_script(VerificationLimits::default())
+            .map(|tree| Arc::new(tree.verified_bytecode().clone()))
+    })
+    .expect("dynamic frontend")
+    .expect("dynamic compiler")
 }
 
 #[test]
@@ -38,10 +60,15 @@ fn atom_failure_rolls_back_the_complete_installation() {
         }",
         "fail",
     );
+    let installed_realm_atoms = {
+        let mut probe = Runtime::try_new(RuntimeLimits::default()).expect("probe runtime");
+        probe.create_realm().expect("probe realm");
+        probe.atom_usage()
+    };
     let atom_limits = AtomLimits::new(
-        PREDEFINED_ATOM_COUNT + 84,
-        PREDEFINED_DESCRIPTION_CODE_UNITS + 724,
-        PREDEFINED_INTERNER_SLOTS + 84,
+        installed_realm_atoms.live_atoms,
+        installed_realm_atoms.live_description_code_units,
+        installed_realm_atoms.interner_slots,
     );
     let mut runtime =
         Runtime::try_new(RuntimeLimits::default().with_atom_limits(atom_limits)).expect("runtime");
@@ -130,6 +157,107 @@ fn complete_non_bigint_dynamic_operator_family_is_admitted_across_the_complete_g
         .expect("the complete non-BigInt dynamic operator family is supported");
 }
 
+#[test]
+fn public_root_materializes_ordinary_function_metadata_and_constructor_prototype() {
+    let subject = compile(
+        "function subject(first,second){return first+second;}",
+        "subject",
+    );
+    let inspect = compile_dynamic(
+        &["candidate"],
+        "let length=Object.getOwnPropertyDescriptor(candidate,'length');\
+         let name=Object.getOwnPropertyDescriptor(candidate,'name');\
+         let prototype=Object.getOwnPropertyDescriptor(candidate,'prototype');\
+         let object=new candidate(2,3);\
+         return Object.getOwnPropertyNames(candidate).join(',')+'|'+\
+             candidate.length+'|'+candidate.name+'|'+\
+             length.writable+','+length.enumerable+','+length.configurable+'|'+\
+             name.writable+','+name.enumerable+','+name.configurable+'|'+\
+             prototype.writable+','+prototype.enumerable+','+prototype.configurable+'|'+\
+             (candidate.prototype.constructor===candidate)+'|'+\
+             Object.getOwnPropertyNames(candidate.prototype).join(',')+'|'+\
+             (Object.getPrototypeOf(candidate)===Function.prototype)+'|'+\
+             (Object.getPrototypeOf(candidate.prototype)===Object.prototype)+'|'+\
+             (object instanceof candidate)+'|'+candidate(2,3);",
+    );
+    let mut runtime = Runtime::try_new(RuntimeLimits::default()).expect("runtime");
+    let realm = runtime.create_realm().expect("realm");
+    let mut context = runtime.context(&realm).expect("context");
+    let subject = context.instantiate(subject).expect("subject");
+    let inspect = context
+        .execute_dynamic_function_script(inspect, ExecutionLimits::default())
+        .expect("inspect Script")
+        .into_function()
+        .expect("inspect function");
+
+    let result = context
+        .call(&inspect, &[subject.as_value()], ExecutionLimits::default())
+        .expect("inspect public root");
+
+    assert_eq!(
+        result
+            .as_string()
+            .expect("live value")
+            .expect("String")
+            .to_utf8_lossy()
+            .expect("UTF-8"),
+        "length,name,prototype|2|subject|false,false,true|false,false,true|\
+         true,false,false|true|constructor|true|true|true|5"
+    );
+}
+
+#[test]
+fn public_root_metadata_preflight_is_failure_atomic() {
+    let authority = compile("function subject(first,second){}", "subject");
+    let installed_realm = {
+        let mut probe = Runtime::try_new(RuntimeLimits::default()).expect("probe runtime");
+        probe.create_realm().expect("probe realm");
+        probe.usage()
+    };
+    for (limits, resource, limit, observed) in [
+        (
+            RuntimeLimits::default().with_max_heap_objects(installed_realm.heap_objects()),
+            RuntimeResource::HeapObjects,
+            installed_realm.heap_objects(),
+            installed_realm.heap_objects() + 1,
+        ),
+        (
+            RuntimeLimits::default()
+                .with_max_object_properties(installed_realm.object_properties()),
+            RuntimeResource::ObjectProperties,
+            installed_realm.object_properties(),
+            installed_realm.object_properties() + 4,
+        ),
+    ] {
+        let mut runtime = Runtime::try_new(limits).expect("runtime");
+        let realm = runtime.create_realm().expect("realm");
+        let usage = runtime.usage();
+        let atoms = runtime.atom_usage();
+
+        let error = runtime
+            .context(&realm)
+            .expect("context")
+            .instantiate(Arc::clone(&authority))
+            .expect_err("root metadata must exceed the exact limit");
+
+        assert!(
+            matches!(
+                error,
+                InstallError::LimitExceeded {
+                    resource: actual_resource,
+                    limit: actual_limit,
+                    observed: actual_observed,
+                } if actual_resource == resource
+                    && actual_limit == limit
+                    && actual_observed == observed
+            ),
+            "unexpected installation failure: {error:?}"
+        );
+        assert_eq!(runtime.usage(), usage);
+        assert_eq!(runtime.atom_usage(), atoms);
+    }
+}
+
 /// A nested `BigInt` literal installs rather than failing closed.
 ///
 /// This previously asserted the opposite: `push_bigint_i32` was admitted by the
@@ -154,29 +282,18 @@ fn nested_bigint_literals_install_and_execute() {
 }
 
 #[test]
-fn in_operator_remains_rejected_before_runtime_mutation() {
+fn in_operator_is_admitted_across_the_complete_graph() {
     let authority = compile(
         "function outer(){function child(left,right){return left in right;}return 0;}",
         "outer",
     );
     let mut runtime = Runtime::try_new(RuntimeLimits::default()).expect("runtime");
     let realm = runtime.create_realm().expect("realm");
-    let before = runtime.usage();
-    let error = {
-        let mut context = runtime.context(&realm).expect("context");
-        context
-            .instantiate(authority)
-            .expect_err("in operator remains deferred")
-    };
-    assert!(matches!(
-        error,
-        InstallError::UnsupportedOpcode {
-            function,
-            opcode: FinalOpcode::In,
-            ..
-        } if function == FunctionTemplateId::new(1)
-    ));
-    assert_eq!(runtime.usage(), before);
+    runtime
+        .context(&realm)
+        .expect("context")
+        .instantiate(authority)
+        .expect("in operator is admitted");
 }
 
 #[test]
@@ -235,10 +352,15 @@ fn one_arc_authority_installs_independently_into_two_runtimes() {
 fn long_lived_context_drains_dropped_roots_before_installation_limits() {
     let first = compile("function first(){return 1;}", "first");
     let second = compile("function second(){return 2;}", "second");
+    let installed_functions = {
+        let mut probe = Runtime::try_new(RuntimeLimits::default()).expect("probe runtime");
+        probe.create_realm().expect("probe realm");
+        probe.usage().heap_functions()
+    };
     let mut runtime = Runtime::try_new(
         RuntimeLimits::default()
             .with_max_public_roots(1)
-            .with_max_heap_functions(124),
+            .with_max_heap_functions(installed_functions + 1),
     )
     .expect("runtime");
     let realm = runtime.create_realm().expect("realm");

@@ -53,26 +53,66 @@ pub(super) fn installed_template(
 }
 
 pub(super) fn materialize_constant(
-    runtime: &Runtime,
+    runtime: &mut Runtime,
     code_id: InstalledCodeId,
     template: FunctionTemplateId,
     index: u32,
 ) -> Result<StoredValue, ExecutionError> {
-    match installed_template(runtime, code_id, template)?
+    let elements = match installed_template(runtime, code_id, template)?
         .constants
         .get(index as usize)
         .ok_or(EngineFault::MissingPoolEntry {
             pool: "constant",
             index,
         })? {
-        InstalledConstant::Number(value) => Ok(StoredValue::Number(*value)),
-        InstalledConstant::String(value) => Ok(StoredValue::String(value.clone())),
-        InstalledConstant::Function(_) => Err(EngineFault::MissingPoolEntry {
-            pool: "ordinary value constant",
+        InstalledConstant::Number(value) => return Ok(StoredValue::Number(*value)),
+        InstalledConstant::String(value) => return Ok(StoredValue::String(value.clone())),
+        InstalledConstant::BigInt(value) => {
+            return Ok(StoredValue::BigInt(Arc::clone(value)));
+        }
+        InstalledConstant::TemplateObject(value) => {
+            if let Some(object) = value.object {
+                return Ok(StoredValue::Object(object));
+            }
+            Arc::clone(&value.elements)
+        }
+        InstalledConstant::Function(_) => {
+            return Err(EngineFault::MissingPoolEntry {
+                pool: "ordinary value constant",
+                index,
+            }
+            .into());
+        }
+    };
+    let realm = code(runtime, code_id)?.realm;
+    let object = runtime.allocate_template_object(realm, &elements)?;
+    let installed = runtime
+        .code
+        .get_mut(code_id)
+        .and_then(|code| {
+            usize::try_from(template.get())
+                .ok()
+                .and_then(|index| code.templates.get_mut(index))
+        })
+        .and_then(|template| template.constants.get_mut(index as usize))
+        .ok_or(EngineFault::MissingPoolEntry {
+            pool: "template object constant",
+            index,
+        })?;
+    let InstalledConstant::TemplateObject(template_object) = installed else {
+        return Err(EngineFault::MissingPoolEntry {
+            pool: "template object constant",
             index,
         }
-        .into()),
+        .into());
+    };
+    if template_object.object.replace(object).is_some() {
+        return Err(EngineFault::RuntimeInvariant {
+            message: "template object cache was populated during non-observable allocation",
+        }
+        .into());
     }
+    Ok(StoredValue::Object(object))
 }
 
 pub(super) fn function_constant(
@@ -89,14 +129,107 @@ pub(super) fn function_constant(
             index,
         })? {
         InstalledConstant::Function(function) => Ok(*function),
-        InstalledConstant::Number(_) | InstalledConstant::String(_) => {
-            Err(EngineFault::MissingPoolEntry {
-                pool: "function constant",
-                index,
-            }
-            .into())
+        InstalledConstant::Number(_)
+        | InstalledConstant::String(_)
+        | InstalledConstant::BigInt(_)
+        | InstalledConstant::TemplateObject(_) => Err(EngineFault::MissingPoolEntry {
+            pool: "function constant",
+            index,
         }
+        .into()),
     }
+}
+
+/// Finishes the runtime half of a verified class definition. The paired
+/// closure already owns its code and intrinsic function slots; this installs
+/// the public prototype object, the selected constructor/prototype inheritance
+/// links, and the exact class-only constructor metadata.
+pub(super) fn define_class(
+    runtime: &mut Runtime,
+    constructor: FunctionId,
+    name: JsString,
+    constructor_parent: HeapReference,
+    prototype_parent: Option<HeapReference>,
+) -> Result<ObjectId, ExecutionError> {
+    if !bytecode_function_is_class_constructor(runtime, constructor)? {
+        return Err(EngineFault::RuntimeInvariant {
+            message: "define_class did not receive a class-constructor closure",
+        }
+        .into());
+    }
+    let prototype = runtime.allocate_ordinary_object_with_optional_prototype(prototype_parent)?;
+    let constructor_key = runtime.predefined_property_key(PredefinedAtom::Constructor);
+    let prototype_key = runtime.predefined_property_key(PredefinedAtom::Prototype);
+    let name_key = runtime.predefined_property_key(PredefinedAtom::Name);
+
+    runtime.append_data_property(
+        HeapReference::Object(prototype),
+        constructor_key,
+        PropertyLayout::data(true, false, true),
+        StoredValue::Function(constructor),
+    )?;
+    if !runtime.replace_prototype_checked(
+        HeapReference::Function(constructor),
+        Some(constructor_parent),
+    )? {
+        return Err(EngineFault::RuntimeInvariant {
+            message: "verified class definition created a circular constructor prototype chain",
+        }
+        .into());
+    }
+    runtime.append_data_property(
+        HeapReference::Function(constructor),
+        prototype_key,
+        PropertyLayout::data(false, false, false),
+        StoredValue::Object(prototype),
+    )?;
+    let renamed = runtime
+        .object_record_mut(HeapReference::Function(constructor))?
+        .replace_existing_with_data(
+            &name_key,
+            PropertyLayout::data(false, false, true),
+            StoredValue::String(name),
+        );
+    if renamed.is_none() {
+        return Err(EngineFault::RuntimeInvariant {
+            message: "class-constructor closure lost its name property",
+        }
+        .into());
+    }
+    set_function_home_object(runtime, constructor, HeapReference::Object(prototype))?;
+    Ok(prototype)
+}
+
+/// Installs the non-observable `[[HomeObject]]` edge for one compiler-created
+/// method-like closure.  A closure receives this exactly once, at its paired
+/// class or method definition site.
+pub(super) fn set_function_home_object(
+    runtime: &mut Runtime,
+    function: FunctionId,
+    home_object: HeapReference,
+) -> Result<(), ExecutionError> {
+    let function = runtime
+        .functions
+        .get_mut(function)
+        .ok_or(EngineFault::StaleHeapEdge {
+            edge: "function home object",
+            index: function.index(),
+            generation: function.generation(),
+        })?;
+    let FunctionImplementation::Bytecode(bytecode) = &mut function.implementation else {
+        return Err(EngineFault::RuntimeInvariant {
+            message: "method definition received a non-bytecode closure",
+        }
+        .into());
+    };
+    if bytecode.home_object.replace(home_object).is_some() {
+        return Err(EngineFault::RuntimeInvariant {
+            message: "method closure received its home object twice",
+        }
+        .into());
+    }
+    runtime.collection_pending = true;
+    Ok(())
 }
 
 #[allow(
@@ -126,7 +259,16 @@ pub(super) fn create_closure(
         }
         .into());
     }
-    let (sources, expected, realm, function_name, defined_argument_count, has_prototype) = {
+    let (
+        sources,
+        expected,
+        realm,
+        function_name,
+        defined_argument_count,
+        has_prototype,
+        function_kind,
+        executable_kind,
+    ) = {
         let code = code(runtime, frame.code)?;
         let function = code
             .authority
@@ -169,12 +311,33 @@ pub(super) fn create_closure(
             function_name,
             header.defined_argument_count(),
             header.flags().has_prototype(),
+            header.kind(),
+            function.metadata().executable_kind(),
         )
     };
-    let function_prototype = runtime.realm_function_prototype(realm)?;
-    let object_prototype = has_prototype
-        .then(|| runtime.realm_object_prototype(realm))
-        .transpose()?;
+    let lexical = executable_kind == CompilerExecutableKind::OrdinaryArrow;
+    let generator = function_kind == FunctionKind::Generator;
+    let asynchronous = function_kind == FunctionKind::Async;
+    let async_generator = function_kind == FunctionKind::AsyncGenerator;
+    let creates_prototype = has_prototype || generator || async_generator;
+    let function_prototype = if async_generator {
+        HeapReference::Object(runtime.realm_async_generator_function_prototype(realm)?)
+    } else if generator {
+        HeapReference::Object(runtime.realm_generator_function_prototype(realm)?)
+    } else if asynchronous {
+        HeapReference::Object(runtime.realm_async_function_prototype(realm)?)
+    } else {
+        HeapReference::Function(runtime.realm_function_prototype(realm)?)
+    };
+    let object_prototype = if async_generator {
+        Some(runtime.realm_async_generator_prototype(realm)?)
+    } else if generator {
+        Some(runtime.realm_generator_prototype(realm)?)
+    } else {
+        has_prototype
+            .then(|| runtime.realm_object_prototype(realm))
+            .transpose()?
+    };
     if sources.len() != expected {
         return Err(EngineFault::InvalidClosureEnvironment { function: child }.into());
     }
@@ -303,13 +466,13 @@ pub(super) fn create_closure(
         runtime.limits.max_heap_functions,
         usize_to_u64(runtime.functions.len()).saturating_add(1),
     )?;
-    let function_property_count = 2_usize + usize::from(has_prototype);
+    let function_property_count = 2_usize + usize::from(creates_prototype);
     let prototype_property_count = usize::from(has_prototype);
     let new_property_count = function_property_count.saturating_add(prototype_property_count);
     check_execution_limit(
         RuntimeResource::HeapObjects,
         runtime.limits.max_heap_objects,
-        usize_to_u64(runtime.objects.len()).saturating_add(usize::from(has_prototype) as u64),
+        usize_to_u64(runtime.objects.len()).saturating_add(usize::from(creates_prototype) as u64),
     )?;
     check_execution_limit(
         RuntimeResource::ObjectProperties,
@@ -332,10 +495,10 @@ pub(super) fn create_closure(
         })?;
     runtime
         .objects
-        .try_reserve(usize::from(has_prototype))
+        .try_reserve(usize::from(creates_prototype))
         .map_err(|_| ExecutionError::AllocationFailed {
             resource: RuntimeResource::HeapObjects,
-            additional: usize::from(has_prototype),
+            additional: usize::from(creates_prototype),
         })?;
     runtime
         .cells
@@ -364,8 +527,7 @@ pub(super) fn create_closure(
     let name_key = runtime.predefined_property_key(PredefinedAtom::Name);
     let prototype_key = runtime.predefined_property_key(PredefinedAtom::Prototype);
     let constructor_key = runtime.predefined_property_key(PredefinedAtom::Constructor);
-    let mut function_record =
-        crate::object::ObjectRecord::empty(Some(HeapReference::Function(function_prototype)));
+    let mut function_record = crate::object::ObjectRecord::empty(Some(function_prototype));
     function_record
         .try_reserve_data(function_property_count)
         .map_err(|_| ExecutionError::AllocationFailed {
@@ -395,7 +557,7 @@ pub(super) fn create_closure(
     let mut prototype_record = object_prototype.map(|object_prototype| {
         crate::object::ObjectRecord::empty(Some(HeapReference::Object(object_prototype)))
     });
-    if let Some(record) = prototype_record.as_mut() {
+    if has_prototype && let Some(record) = prototype_record.as_mut() {
         record
             .try_reserve_data(1)
             .map_err(|_| ExecutionError::AllocationFailed {
@@ -462,9 +624,7 @@ pub(super) fn create_closure(
     }
 
     let prototype_object = if let Some(record) = prototype_record {
-        let Ok(object) = runtime
-            .objects
-            .try_insert(crate::object::HeapObject::ordinary(record))
+        let Ok(object) = runtime.insert_heap_object(crate::object::HeapObject::ordinary(record))
         else {
             rollback_new_cells(runtime, frame, &pending_cells, &new_cells);
             return Err(ExecutionError::AllocationFailed {
@@ -493,11 +653,14 @@ pub(super) fn create_closure(
         None
     };
 
-    let Ok(function) = runtime.functions.try_insert(HeapFunction {
+    let Ok(function) = runtime.insert_heap_function(HeapFunction {
         implementation: FunctionImplementation::Bytecode(BytecodeFunction {
             code: frame.code,
             template: child,
             environment,
+            lexical_receiver: lexical.then(|| frame.receiver.duplicate()),
+            lexical_new_target: if lexical { frame.new_target } else { None },
+            home_object: None,
         }),
         object: function_record,
         public_roots: 0,
@@ -512,7 +675,7 @@ pub(super) fn create_closure(
             additional: 1,
         });
     };
-    if let Some(object) = prototype_object {
+    if has_prototype && let Some(object) = prototype_object {
         let updated = runtime.objects.get_mut(object).is_some_and(|prototype| {
             prototype
                 .record

@@ -26,13 +26,21 @@
 //! Realm-owned objects, prototypes, boxed primitives, and ordinary properties.
 
 use super::{
-    Arc, Atom, AtomError, BoxedPrimitive, ErrorIntrinsicKind, ExceptionKind, FunctionId,
-    FunctionImplementation, HandleError, HandleKind, HeapObject, HeapReference, IntegrityLevel,
-    JsBigInt, JsNumber, JsString, NativeFunctionKind, ObjectId, ObjectRecord, OwnProperty,
-    PredefinedAtom, PropertyDeletion, PropertyKey, PropertyLayout, PropertyLayoutKind, RealmId,
-    RealmIntrinsics, ReleaseMailbox, Runtime, RuntimeResource, SetPrototypeOutcome, StoredValue,
-    array_length_from_number, check_execution_limit, stale_heap_reference, usize_to_u64,
+    Arc, Atom, AtomError, BindingCell, BoxedPrimitive, ErrorIntrinsicKind, ErrorObjectKind,
+    ExceptionKind, FunctionId, FunctionImplementation, HandleError, HandleKind, HeapFunction,
+    HeapObject, HeapReference, JsBigInt, JsNumber, JsString, NativeFunction, NativeFunctionKind,
+    ObjectId, ObjectRecord, OwnProperty, PredefinedAtom, PropertyDeletion, PropertyKey,
+    PropertyLayout, PropertyLayoutKind, Rc, RealmId, RealmIntrinsics, ReleaseMailbox, Runtime,
+    RuntimeResource, SetPrototypeOutcome, SlotValue, StoredValue, array_length_from_number,
+    check_execution_limit, stale_heap_reference, usize_to_u64,
 };
+
+#[derive(Clone, Copy)]
+struct ArgumentsIntrinsics {
+    object_prototype: ObjectId,
+    array_values: FunctionId,
+    throw_type_error: FunctionId,
+}
 
 impl Runtime {
     pub(crate) fn validate_owner(
@@ -142,6 +150,66 @@ impl Runtime {
                     });
                 }
                 Ok(function_prototype)
+            }
+        }
+    }
+
+    pub(crate) fn realm_async_from_sync_iterator_prototype(
+        &self,
+        realm: RealmId,
+    ) -> Result<ObjectId, crate::EngineFault> {
+        let state = self
+            .realms
+            .get(realm)
+            .ok_or(crate::EngineFault::StaleHeapEdge {
+                edge: "realm",
+                index: realm.index(),
+                generation: realm.generation(),
+            })?;
+        match state.intrinsics {
+            RealmIntrinsics::Initializing => Err(crate::EngineFault::RuntimeInvariant {
+                message: "realm iterator intrinsics are not initialized",
+            }),
+            RealmIntrinsics::Ready { iterators, .. } => {
+                let prototype = iterators.async_from_sync_iterator_prototype;
+                if self.objects.get(prototype).is_none() {
+                    return Err(crate::EngineFault::StaleHeapEdge {
+                        edge: "AsyncFromSyncIteratorPrototype intrinsic",
+                        index: prototype.index(),
+                        generation: prototype.generation(),
+                    });
+                }
+                Ok(prototype)
+            }
+        }
+    }
+
+    pub(crate) fn realm_async_from_sync_iterator_next(
+        &self,
+        realm: RealmId,
+    ) -> Result<FunctionId, crate::EngineFault> {
+        let state = self
+            .realms
+            .get(realm)
+            .ok_or(crate::EngineFault::StaleHeapEdge {
+                edge: "realm",
+                index: realm.index(),
+                generation: realm.generation(),
+            })?;
+        match state.intrinsics {
+            RealmIntrinsics::Initializing => Err(crate::EngineFault::RuntimeInvariant {
+                message: "realm iterator intrinsics are not initialized",
+            }),
+            RealmIntrinsics::Ready { iterators, .. } => {
+                let function = iterators.async_from_sync_iterator_next;
+                if self.functions.get(function).is_none() {
+                    return Err(crate::EngineFault::StaleHeapEdge {
+                        edge: "AsyncFromSyncIterator next intrinsic",
+                        index: function.index(),
+                        generation: function.generation(),
+                    });
+                }
+                Ok(function)
             }
         }
     }
@@ -342,6 +410,86 @@ impl Runtime {
         Ok(array.prototype)
     }
 
+    /// Returns the realm's intrinsic `%Array%` constructor.
+    pub(crate) fn realm_array_constructor(
+        &self,
+        realm: RealmId,
+    ) -> Result<FunctionId, crate::EngineFault> {
+        let state = self
+            .realms
+            .get(realm)
+            .ok_or(crate::EngineFault::StaleHeapEdge {
+                edge: "realm",
+                index: realm.index(),
+                generation: realm.generation(),
+            })?;
+        let RealmIntrinsics::Ready { array, .. } = state.intrinsics else {
+            return Err(crate::EngineFault::RuntimeInvariant {
+                message: "realm Array intrinsics are not initialized",
+            });
+        };
+        let function =
+            self.functions
+                .get(array.constructor)
+                .ok_or(crate::EngineFault::StaleHeapEdge {
+                    edge: "Array constructor intrinsic",
+                    index: array.constructor.index(),
+                    generation: array.constructor.generation(),
+                })?;
+        if !matches!(
+            function.native(),
+            Some(NativeFunction {
+                realm: function_realm,
+                kind: NativeFunctionKind::ArrayConstructor,
+            }) if *function_realm == realm
+        ) {
+            return Err(crate::EngineFault::RuntimeInvariant {
+                message: "realm Array constructor intrinsic has the wrong implementation",
+            });
+        }
+        Ok(array.constructor)
+    }
+
+    /// Returns the realm's intrinsic `%RegExp%` constructor.
+    pub(crate) fn realm_regexp_constructor(
+        &self,
+        realm: RealmId,
+    ) -> Result<FunctionId, crate::EngineFault> {
+        let state = self
+            .realms
+            .get(realm)
+            .ok_or(crate::EngineFault::StaleHeapEdge {
+                edge: "realm",
+                index: realm.index(),
+                generation: realm.generation(),
+            })?;
+        let RealmIntrinsics::Ready { regexp, .. } = state.intrinsics else {
+            return Err(crate::EngineFault::RuntimeInvariant {
+                message: "realm RegExp intrinsics are not initialized",
+            });
+        };
+        let function =
+            self.functions
+                .get(regexp.constructor)
+                .ok_or(crate::EngineFault::StaleHeapEdge {
+                    edge: "RegExp constructor intrinsic",
+                    index: regexp.constructor.index(),
+                    generation: regexp.constructor.generation(),
+                })?;
+        if !matches!(
+            function.native(),
+            Some(NativeFunction {
+                realm: function_realm,
+                kind: NativeFunctionKind::RegExpConstructor,
+            }) if *function_realm == realm
+        ) {
+            return Err(crate::EngineFault::RuntimeInvariant {
+                message: "realm RegExp constructor intrinsic has the wrong implementation",
+            });
+        }
+        Ok(regexp.constructor)
+    }
+
     pub(crate) fn realm_error_intrinsic_prototype(
         &self,
         realm: RealmId,
@@ -424,8 +572,7 @@ impl Runtime {
                 additional: 1,
             })?;
         let object = self
-            .objects
-            .try_insert(HeapObject::error(ObjectRecord::empty(Some(prototype))))
+            .insert_heap_object(HeapObject::error(ObjectRecord::empty(Some(prototype))))
             .map_err(|_| crate::ExecutionError::AllocationFailed {
                 resource: RuntimeResource::HeapObjects,
                 additional: 1,
@@ -487,6 +634,54 @@ impl Runtime {
         )
     }
 
+    pub(crate) fn error_object_kind(
+        &self,
+        object: ObjectId,
+    ) -> Result<Option<ErrorObjectKind>, crate::EngineFault> {
+        let object_record = self
+            .objects
+            .get(object)
+            .ok_or(crate::EngineFault::StaleHeapEdge {
+                edge: "Error object",
+                index: object.index(),
+                generation: object.generation(),
+            })?;
+        if !object_record.is_error() {
+            return Ok(None);
+        }
+        let mut prototype = object_record.record.prototype();
+        let mut remaining = self.objects.len().saturating_add(1);
+        while remaining != 0 {
+            remaining -= 1;
+            let Some(HeapReference::Object(current)) = prototype else {
+                return Ok(None);
+            };
+            for (_, state) in self.realms.iter() {
+                let RealmIntrinsics::Ready { errors, .. } = state.intrinsics else {
+                    continue;
+                };
+                for kind in ErrorIntrinsicKind::ALL {
+                    if errors.intrinsic(kind).prototype == current {
+                        return Ok(Some(kind.public_kind()));
+                    }
+                }
+            }
+            prototype = self
+                .objects
+                .get(current)
+                .ok_or(crate::EngineFault::StaleHeapEdge {
+                    edge: "Error prototype chain",
+                    index: current.index(),
+                    generation: current.generation(),
+                })?
+                .record
+                .prototype();
+        }
+        Err(crate::EngineFault::RuntimeInvariant {
+            message: "Error prototype chain is cyclic",
+        })
+    }
+
     pub(crate) fn materialize_error_object(
         &mut self,
         realm: RealmId,
@@ -543,8 +738,7 @@ impl Runtime {
                 })?;
         }
         let object = self
-            .objects
-            .try_insert(HeapObject::error(record))
+            .insert_heap_object(HeapObject::error(record))
             .map_err(|_| crate::ExecutionError::AllocationFailed {
                 resource: RuntimeResource::HeapObjects,
                 additional: 1,
@@ -581,6 +775,20 @@ impl Runtime {
                     );
                 }
                 FunctionImplementation::Native(native) => return Ok(native.realm),
+                FunctionImplementation::PromiseResolving(resolving) => {
+                    return Ok(resolving.realm);
+                }
+                FunctionImplementation::PromiseCapabilityExecutor(executor) => {
+                    return Ok(executor.realm);
+                }
+                FunctionImplementation::PromiseFinally(function) => {
+                    return Ok(function.realm());
+                }
+                FunctionImplementation::PromiseCombinatorElement(function) => {
+                    return Ok(function.realm);
+                }
+                FunctionImplementation::Proxy(proxy) => return Ok(proxy.realm),
+                FunctionImplementation::ProxyRevoker(revoker) => return Ok(revoker.realm),
                 FunctionImplementation::Bound(bound) => {
                     if remaining == 0 {
                         return Err(crate::EngineFault::RuntimeInvariant {
@@ -639,6 +847,10 @@ impl Runtime {
         if record.prototype() == prototype {
             return Ok(SetPrototypeOutcome::Complete);
         }
+        if matches!(target, HeapReference::Object(object) if self.realms.iter().any(|(_, realm)| realm.object_prototype == object))
+        {
+            return Ok(SetPrototypeOutcome::NonExtensible);
+        }
         if !record.is_extensible() {
             return Ok(SetPrototypeOutcome::NonExtensible);
         }
@@ -664,45 +876,6 @@ impl Runtime {
         Ok(self.object_record(target)?.is_extensible())
     }
 
-    /// Applies ECMAScript `SetIntegrityLevel`.
-    ///
-    /// Both levels first prevent extensions, then clamp every own property's
-    /// attributes. Freezing additionally clears `writable` on data properties;
-    /// an accessor has no `writable` attribute, so only its `configurable`
-    /// attribute changes (`quickjs.c:40549`).
-    pub(crate) fn set_integrity_level(
-        &mut self,
-        target: HeapReference,
-        level: IntegrityLevel,
-    ) -> Result<(), crate::EngineFault> {
-        let record = self.object_record_mut(target)?;
-        record.prevent_extensions();
-        match level {
-            IntegrityLevel::Sealed => record.seal_own_properties(),
-            IntegrityLevel::Frozen => record.freeze_own_properties(),
-        }
-        Ok(())
-    }
-
-    /// Applies ECMAScript `TestIntegrityLevel`.
-    ///
-    /// An extensible object is neither sealed nor frozen regardless of its
-    /// properties, so an empty but extensible object reports `false`.
-    pub(crate) fn tests_integrity_level(
-        &self,
-        target: HeapReference,
-        level: IntegrityLevel,
-    ) -> Result<bool, crate::EngineFault> {
-        let record = self.object_record(target)?;
-        if record.is_extensible() {
-            return Ok(false);
-        }
-        Ok(match level {
-            IntegrityLevel::Sealed => record.own_properties_are_sealed(),
-            IntegrityLevel::Frozen => record.own_properties_are_frozen(),
-        })
-    }
-
     /// Applies ECMAScript `[[Delete]]` for an ordinary object, keeping the
     /// runtime's own-property accounting in step with the removal.
     ///
@@ -716,8 +889,28 @@ impl Runtime {
         target: HeapReference,
         key: &PropertyKey,
     ) -> Result<PropertyDeletion, crate::EngineFault> {
-        let deletion = self.object_record_mut(target)?.delete_own_property(key);
+        let dense_deleted = match (target, key.as_index()) {
+            (HeapReference::Object(object), Some(index)) => self
+                .objects
+                .get_mut(object)
+                .ok_or(crate::EngineFault::StaleHeapEdge {
+                    edge: "object",
+                    index: object.index(),
+                    generation: object.generation(),
+                })?
+                .array_state_mut()
+                .is_some_and(|state| state.delete_dense(index)),
+            (HeapReference::Function(_), _) | (HeapReference::Object(_), None) => false,
+        };
+        let deletion = if dense_deleted {
+            PropertyDeletion::Deleted
+        } else {
+            self.object_record_mut(target)?.delete_own_property(key)
+        };
         if deletion == PropertyDeletion::Deleted {
+            if let HeapReference::Object(object) = target {
+                self.detach_mapped_arguments_property(object, key)?;
+            }
             self.object_properties = self.object_properties.saturating_sub(1);
             self.collection_pending = true;
         }
@@ -746,7 +939,8 @@ impl Runtime {
         &mut self,
         reference: HeapReference,
     ) -> Result<&mut ObjectRecord, crate::EngineFault> {
-        match reference {
+        let interner = Rc::clone(&self.shape_interner);
+        let record = match reference {
             HeapReference::Function(function) => self
                 .functions
                 .get_mut(function)
@@ -757,6 +951,38 @@ impl Runtime {
                 .get_mut(object)
                 .map(|object| &mut object.record)
                 .ok_or_else(|| stale_heap_reference(reference)),
+        }?;
+        record.adopt_shape_interner(interner);
+        Ok(record)
+    }
+
+    pub(crate) fn insert_heap_object(
+        &mut self,
+        mut object: HeapObject,
+    ) -> Result<ObjectId, std::collections::TryReserveError> {
+        object
+            .record
+            .adopt_shape_interner(Rc::clone(&self.shape_interner));
+        self.objects.try_insert(object)
+    }
+
+    pub(crate) fn insert_heap_function(
+        &mut self,
+        mut function: HeapFunction,
+    ) -> Result<FunctionId, std::collections::TryReserveError> {
+        function
+            .object
+            .adopt_shape_interner(Rc::clone(&self.shape_interner));
+        self.functions.try_insert(function)
+    }
+
+    pub(crate) fn canonicalize_all_shapes(&mut self) {
+        let interner = Rc::clone(&self.shape_interner);
+        for (_, function) in self.functions.iter_mut() {
+            function.object.adopt_shape_interner(Rc::clone(&interner));
+        }
+        for (_, object) in self.objects.iter_mut() {
+            object.record.adopt_shape_interner(Rc::clone(&interner));
         }
     }
 
@@ -786,8 +1012,7 @@ impl Runtime {
                 additional: 1,
             })?;
         let object = self
-            .objects
-            .try_insert(HeapObject::ordinary(ObjectRecord::empty(Some(prototype))))
+            .insert_heap_object(HeapObject::ordinary(ObjectRecord::empty(Some(prototype))))
             .map_err(|_| crate::ExecutionError::AllocationFailed {
                 resource: RuntimeResource::HeapObjects,
                 additional: 1,
@@ -798,8 +1023,8 @@ impl Runtime {
 
     /// Allocates an ordinary object whose prototype may be absent.
     ///
-    /// `Object.create(null)` is the only caller that needs a null prototype, and
-    /// a prototype-less object is genuinely useful as a bare dictionary, so the
+    /// `Object.create(null)` and `Object.groupBy` need a null prototype. A
+    /// prototype-less object is genuinely useful as a bare dictionary, so the
     /// absence is represented rather than substituted.
     pub(crate) fn allocate_ordinary_object_with_optional_prototype(
         &mut self,
@@ -820,14 +1045,103 @@ impl Runtime {
                 additional: 1,
             })?;
         let object = self
-            .objects
-            .try_insert(HeapObject::ordinary(ObjectRecord::empty(None)))
+            .insert_heap_object(HeapObject::ordinary(ObjectRecord::empty(None)))
             .map_err(|_| crate::ExecutionError::AllocationFailed {
                 resource: RuntimeResource::HeapObjects,
                 additional: 1,
             })?;
         self.collection_pending = true;
         Ok(object)
+    }
+
+    /// Allocates the frozen null-prototype object created by `JSON.rawJSON`.
+    ///
+    /// The object and its single data property are prepared before publication,
+    /// so either resource limit can reject the complete allocation without
+    /// leaving a partially initialized heap object behind.
+    pub(crate) fn allocate_raw_json_object(
+        &mut self,
+        text: JsString,
+    ) -> Result<ObjectId, crate::ExecutionError> {
+        check_execution_limit(
+            RuntimeResource::HeapObjects,
+            self.limits.max_heap_objects,
+            usize_to_u64(self.objects.len()).saturating_add(1),
+        )?;
+        check_execution_limit(
+            RuntimeResource::ObjectProperties,
+            self.limits.max_object_properties,
+            self.object_properties.saturating_add(1),
+        )?;
+
+        let mut record = ObjectRecord::empty(None);
+        record
+            .append_data(
+                self.predefined_property_key(PredefinedAtom::RawJson),
+                PropertyLayout::data(false, true, false),
+                StoredValue::String(text),
+            )
+            .map_err(|_| crate::ExecutionError::AllocationFailed {
+                resource: RuntimeResource::ObjectProperties,
+                additional: 1,
+            })?;
+        record.prevent_extensions();
+        self.objects
+            .try_reserve(1)
+            .map_err(|_| crate::ExecutionError::AllocationFailed {
+                resource: RuntimeResource::HeapObjects,
+                additional: 1,
+            })?;
+        let object = self
+            .insert_heap_object(HeapObject::raw_json(record))
+            .map_err(|_| crate::ExecutionError::AllocationFailed {
+                resource: RuntimeResource::HeapObjects,
+                additional: 1,
+            })?;
+        self.object_properties = self.object_properties.saturating_add(1);
+        self.collection_pending = true;
+        Ok(object)
+    }
+
+    /// Tests the unforgeable `[[IsRawJSON]]` object brand.
+    pub(crate) fn is_raw_json_object(&self, object: ObjectId) -> Result<bool, crate::EngineFault> {
+        self.objects.get(object).map(HeapObject::is_raw_json).ok_or(
+            crate::EngineFault::StaleHeapEdge {
+                edge: "object",
+                index: object.index(),
+                generation: object.generation(),
+            },
+        )
+    }
+
+    /// Returns the immutable source text carried by a branded raw-JSON object.
+    pub(crate) fn raw_json_text(
+        &self,
+        object: ObjectId,
+    ) -> Result<Option<JsString>, crate::EngineFault> {
+        let object = self
+            .objects
+            .get(object)
+            .ok_or(crate::EngineFault::StaleHeapEdge {
+                edge: "object",
+                index: object.index(),
+                generation: object.generation(),
+            })?;
+        if !object.is_raw_json() {
+            return Ok(None);
+        }
+        let key = self.predefined_property_key(PredefinedAtom::RawJson);
+        match object.record.own_property(&key) {
+            Some(OwnProperty::Data {
+                value: StoredValue::String(text),
+                ..
+            }) => Ok(Some(text)),
+            Some(OwnProperty::Data { .. } | OwnProperty::Accessor { .. }) | None => {
+                Err(crate::EngineFault::RuntimeInvariant {
+                    message: "branded raw JSON object lost its immutable source text",
+                })
+            }
+        }
     }
 
     pub(crate) fn allocate_boxed_boolean_with_prototype(
@@ -850,8 +1164,7 @@ impl Runtime {
                 additional: 1,
             })?;
         let object = self
-            .objects
-            .try_insert(HeapObject::with_boxed_primitive(
+            .insert_heap_object(HeapObject::with_boxed_primitive(
                 ObjectRecord::empty(Some(prototype)),
                 BoxedPrimitive::Boolean(value),
             ))
@@ -910,8 +1223,7 @@ impl Runtime {
                 additional: 1,
             })?;
         let object = self
-            .objects
-            .try_insert(HeapObject::with_boxed_primitive(
+            .insert_heap_object(HeapObject::with_boxed_primitive(
                 ObjectRecord::empty(Some(prototype)),
                 BoxedPrimitive::Number(value),
             ))
@@ -967,8 +1279,7 @@ impl Runtime {
                 additional: 1,
             })?;
         let object = self
-            .objects
-            .try_insert(HeapObject::with_boxed_primitive(
+            .insert_heap_object(HeapObject::with_boxed_primitive(
                 ObjectRecord::empty(Some(prototype)),
                 BoxedPrimitive::BigInt(value),
             ))
@@ -1055,8 +1366,7 @@ impl Runtime {
                 additional: 1,
             })?;
         let object = self
-            .objects
-            .try_insert(HeapObject::with_boxed_primitive(
+            .insert_heap_object(HeapObject::with_boxed_primitive(
                 record,
                 BoxedPrimitive::String(value),
             ))
@@ -1134,6 +1444,424 @@ impl Runtime {
         Ok(())
     }
 
+    /// Reads an internal private-name data slot without walking prototypes or
+    /// invoking Proxy traps. Private fields are deliberately not ordinary
+    /// property accesses, even though their storage shares the ordinary shape
+    /// backing for GC and transition interning.
+    pub(crate) fn private_own_data_property(
+        &self,
+        reference: HeapReference,
+        key: &PropertyKey,
+    ) -> Result<Option<StoredValue>, crate::ExecutionError> {
+        Ok(match self.object_record(reference)?.own_property(key) {
+            Some(OwnProperty::Data { value, .. }) => Some(value),
+            Some(OwnProperty::Accessor { .. }) => {
+                return Err(crate::EngineFault::RuntimeInvariant {
+                    message: "private field storage became an accessor",
+                }
+                .into());
+            }
+            None => None,
+        })
+    }
+
+    /// Replaces an existing internal private-name data slot. The operation
+    /// never falls back to a prototype, setter, or Proxy trap.
+    pub(crate) fn replace_private_own_data_property(
+        &mut self,
+        reference: HeapReference,
+        key: &PropertyKey,
+        value: StoredValue,
+    ) -> Result<bool, crate::ExecutionError> {
+        let replaced = self
+            .object_record_mut(reference)?
+            .replace_existing_data(key, value);
+        if replaced {
+            self.collection_pending = true;
+        }
+        Ok(replaced)
+    }
+
+    /// Creates the ordinary arguments object used by strict functions.
+    ///
+    /// The object carries the `[[ParameterMap]]` brand for
+    /// `Object.prototype.toString`, but uses ordinary property internal
+    /// methods because its parameter map is `undefined`.
+    pub(crate) fn allocate_unmapped_arguments_object(
+        &mut self,
+        realm: RealmId,
+        values: Vec<StoredValue>,
+    ) -> Result<ObjectId, crate::ExecutionError> {
+        let property_count =
+            values
+                .len()
+                .checked_add(3)
+                .ok_or(crate::ExecutionError::LimitExceeded {
+                    resource: RuntimeResource::ObjectProperties,
+                    limit: self.limits.max_object_properties,
+                    observed: u64::MAX,
+                })?;
+        check_execution_limit(
+            RuntimeResource::HeapObjects,
+            self.limits.max_heap_objects,
+            usize_to_u64(self.objects.len()).saturating_add(1),
+        )?;
+        check_execution_limit(
+            RuntimeResource::ObjectProperties,
+            self.limits.max_object_properties,
+            self.object_properties
+                .saturating_add(usize_to_u64(property_count)),
+        )?;
+        let length =
+            u32::try_from(values.len()).map_err(|_| crate::ExecutionError::LimitExceeded {
+                resource: RuntimeResource::ObjectProperties,
+                limit: u64::from(u32::MAX - 1),
+                observed: usize_to_u64(values.len()),
+            })?;
+        let intrinsics = self.arguments_intrinsics(realm)?;
+        self.objects
+            .try_reserve(1)
+            .map_err(|_| crate::ExecutionError::AllocationFailed {
+                resource: RuntimeResource::HeapObjects,
+                additional: 1,
+            })?;
+        let record =
+            self.build_unmapped_arguments_record(intrinsics, values, length, property_count)?;
+
+        let object = self
+            .insert_heap_object(HeapObject::arguments(record))
+            .map_err(|_| crate::ExecutionError::AllocationFailed {
+                resource: RuntimeResource::HeapObjects,
+                additional: 1,
+            })?;
+        self.object_properties = self
+            .object_properties
+            .saturating_add(usize_to_u64(property_count));
+        self.collection_pending = true;
+        Ok(object)
+    }
+
+    /// Creates the arguments exotic object used by a sloppy function with a
+    /// simple parameter list.
+    pub(crate) fn allocate_mapped_arguments_object(
+        &mut self,
+        realm: RealmId,
+        callee: FunctionId,
+        values: Vec<StoredValue>,
+        mapped_indices: &[u32],
+    ) -> Result<ObjectId, crate::ExecutionError> {
+        let active_mapping_count = mapped_indices
+            .iter()
+            .take_while(|index| usize::try_from(**index).is_ok_and(|index| index < values.len()))
+            .count();
+        let mapping_len = mapped_indices[..active_mapping_count]
+            .last()
+            .copied()
+            .map_or(Ok(0_usize), |index| {
+                usize::try_from(index)
+                    .ok()
+                    .and_then(|index| index.checked_add(1))
+                    .ok_or(crate::EngineFault::RuntimeInvariant {
+                        message: "mapped arguments domain fits usize",
+                    })
+            })?;
+        let property_count =
+            values
+                .len()
+                .checked_add(3)
+                .ok_or(crate::ExecutionError::LimitExceeded {
+                    resource: RuntimeResource::ObjectProperties,
+                    limit: self.limits.max_object_properties,
+                    observed: u64::MAX,
+                })?;
+        check_execution_limit(
+            RuntimeResource::HeapObjects,
+            self.limits.max_heap_objects,
+            usize_to_u64(self.objects.len()).saturating_add(1),
+        )?;
+        check_execution_limit(
+            RuntimeResource::ObjectProperties,
+            self.limits.max_object_properties,
+            self.object_properties
+                .saturating_add(usize_to_u64(property_count)),
+        )?;
+        check_execution_limit(
+            RuntimeResource::BindingCells,
+            self.limits.max_binding_cells,
+            usize_to_u64(self.cells.len()).saturating_add(usize_to_u64(active_mapping_count)),
+        )?;
+        let length =
+            u32::try_from(values.len()).map_err(|_| crate::ExecutionError::LimitExceeded {
+                resource: RuntimeResource::ObjectProperties,
+                limit: u64::from(u32::MAX - 1),
+                observed: usize_to_u64(values.len()),
+            })?;
+        let intrinsics = self.arguments_intrinsics(realm)?;
+        if !self.functions.contains(callee) {
+            return Err(stale_heap_reference(HeapReference::Function(callee)).into());
+        }
+
+        let mut mapped_values = Vec::new();
+        mapped_values
+            .try_reserve_exact(active_mapping_count)
+            .map_err(|_| crate::ExecutionError::AllocationFailed {
+                resource: RuntimeResource::BindingCells,
+                additional: active_mapping_count,
+            })?;
+        for &index in mapped_indices.iter().take(active_mapping_count) {
+            let value = values
+                .get(index as usize)
+                .ok_or(crate::EngineFault::RuntimeInvariant {
+                    message: "active mapped argument was supplied",
+                })?;
+            mapped_values.push((index, value.duplicate()));
+        }
+        let record =
+            self.build_mapped_arguments_record(intrinsics, callee, values, length, property_count)?;
+
+        self.commit_mapped_arguments_object(record, mapped_values, mapping_len, property_count)
+    }
+
+    fn commit_mapped_arguments_object(
+        &mut self,
+        record: ObjectRecord,
+        mapped_values: Vec<(u32, StoredValue)>,
+        mapping_len: usize,
+        property_count: usize,
+    ) -> Result<ObjectId, crate::ExecutionError> {
+        let mapped_count = mapped_values.len();
+        self.objects
+            .try_reserve(1)
+            .map_err(|_| crate::ExecutionError::AllocationFailed {
+                resource: RuntimeResource::HeapObjects,
+                additional: 1,
+            })?;
+        self.cells.try_reserve(mapped_count).map_err(|_| {
+            crate::ExecutionError::AllocationFailed {
+                resource: RuntimeResource::BindingCells,
+                additional: mapped_count,
+            }
+        })?;
+        let mut parameter_map = Vec::new();
+        parameter_map.try_reserve_exact(mapping_len).map_err(|_| {
+            crate::ExecutionError::AllocationFailed {
+                resource: RuntimeResource::BindingCells,
+                additional: mapping_len,
+            }
+        })?;
+        parameter_map.resize(mapping_len, None);
+        let mut rollback_cells = Vec::new();
+        rollback_cells
+            .try_reserve_exact(mapped_count)
+            .map_err(|_| crate::ExecutionError::AllocationFailed {
+                resource: RuntimeResource::BindingCells,
+                additional: mapped_count,
+            })?;
+
+        for (index, value) in mapped_values {
+            let Ok(cell) = self.cells.try_insert(BindingCell {
+                value: SlotValue::Value(value),
+            }) else {
+                for cell in rollback_cells {
+                    let removed = self.cells.remove(cell);
+                    debug_assert!(removed.is_some());
+                }
+                return Err(crate::ExecutionError::AllocationFailed {
+                    resource: RuntimeResource::BindingCells,
+                    additional: 1,
+                });
+            };
+            rollback_cells.push(cell);
+            let Some(target) = parameter_map.get_mut(index as usize) else {
+                for cell in rollback_cells {
+                    let removed = self.cells.remove(cell);
+                    debug_assert!(removed.is_some());
+                }
+                return Err(crate::EngineFault::RuntimeInvariant {
+                    message: "mapped argument index belongs to its parameter map",
+                }
+                .into());
+            };
+            if target.replace(cell).is_some() {
+                for cell in rollback_cells {
+                    let removed = self.cells.remove(cell);
+                    debug_assert!(removed.is_some());
+                }
+                return Err(crate::EngineFault::RuntimeInvariant {
+                    message: "mapped argument indices are unique",
+                }
+                .into());
+            }
+        }
+
+        let Ok(object) =
+            self.insert_heap_object(HeapObject::mapped_arguments(record, parameter_map))
+        else {
+            for cell in rollback_cells {
+                let removed = self.cells.remove(cell);
+                debug_assert!(removed.is_some());
+            }
+            return Err(crate::ExecutionError::AllocationFailed {
+                resource: RuntimeResource::HeapObjects,
+                additional: 1,
+            });
+        };
+        self.object_properties = self
+            .object_properties
+            .saturating_add(usize_to_u64(property_count));
+        self.collection_pending = true;
+        Ok(object)
+    }
+
+    fn arguments_intrinsics(
+        &self,
+        realm: RealmId,
+    ) -> Result<ArgumentsIntrinsics, crate::ExecutionError> {
+        let state = self
+            .realms
+            .get(realm)
+            .ok_or(crate::EngineFault::StaleHeapEdge {
+                edge: "realm",
+                index: realm.index(),
+                generation: realm.generation(),
+            })?;
+        let RealmIntrinsics::Ready {
+            throw_type_error,
+            iterators,
+            ..
+        } = state.intrinsics
+        else {
+            return Err(crate::EngineFault::RuntimeInvariant {
+                message: "realm arguments intrinsics are not initialized",
+            }
+            .into());
+        };
+        for function in [throw_type_error, iterators.array_values] {
+            if !self.functions.contains(function) {
+                return Err(stale_heap_reference(HeapReference::Function(function)).into());
+            }
+        }
+        if !self.objects.contains(state.object_prototype) {
+            return Err(stale_heap_reference(HeapReference::Object(state.object_prototype)).into());
+        }
+        Ok(ArgumentsIntrinsics {
+            object_prototype: state.object_prototype,
+            array_values: iterators.array_values,
+            throw_type_error,
+        })
+    }
+
+    fn build_unmapped_arguments_record(
+        &self,
+        intrinsics: ArgumentsIntrinsics,
+        values: Vec<StoredValue>,
+        length: u32,
+        property_count: usize,
+    ) -> Result<ObjectRecord, crate::ExecutionError> {
+        let mut record =
+            ObjectRecord::empty(Some(HeapReference::Object(intrinsics.object_prototype)));
+        record
+            .try_reserve_data(property_count)
+            .map_err(|_| arguments_property_allocation_failed(property_count))?;
+        let length_key = self.predefined_property_key(PredefinedAtom::Length);
+        let iterator_key = self.predefined_symbol_property_key(PredefinedAtom::SymbolIterator);
+        let callee_key = self.predefined_property_key(PredefinedAtom::Callee);
+        let ordinary = PropertyLayout::data(true, false, true);
+        record
+            .append_data(
+                length_key,
+                ordinary,
+                StoredValue::Number(JsNumber::from_u32(length)),
+            )
+            .map_err(|_| arguments_property_allocation_failed(property_count))?;
+        for (index, value) in values.into_iter().enumerate() {
+            let index = u32::try_from(index).map_err(|_| crate::EngineFault::RuntimeInvariant {
+                message: "preflighted arguments index fits u32",
+            })?;
+            let index =
+                crate::ArrayIndex::new(index).ok_or(crate::EngineFault::RuntimeInvariant {
+                    message: "arguments index does not use the array-length sentinel",
+                })?;
+            record
+                .append_data(
+                    PropertyKey::from_index(index),
+                    PropertyLayout::data(true, true, true),
+                    value,
+                )
+                .map_err(|_| arguments_property_allocation_failed(property_count))?;
+        }
+        record
+            .append_data(
+                iterator_key,
+                ordinary,
+                StoredValue::Function(intrinsics.array_values),
+            )
+            .map_err(|_| arguments_property_allocation_failed(property_count))?;
+        record
+            .append_accessor(
+                callee_key,
+                PropertyLayout::accessor(false, false),
+                Some(intrinsics.throw_type_error),
+                Some(intrinsics.throw_type_error),
+            )
+            .map_err(|_| arguments_property_allocation_failed(property_count))?;
+        Ok(record)
+    }
+
+    fn build_mapped_arguments_record(
+        &self,
+        intrinsics: ArgumentsIntrinsics,
+        callee: FunctionId,
+        values: Vec<StoredValue>,
+        length: u32,
+        property_count: usize,
+    ) -> Result<ObjectRecord, crate::ExecutionError> {
+        let mut record =
+            ObjectRecord::empty(Some(HeapReference::Object(intrinsics.object_prototype)));
+        record
+            .try_reserve_data(property_count)
+            .map_err(|_| arguments_property_allocation_failed(property_count))?;
+        for (index, value) in values.into_iter().enumerate() {
+            let index = u32::try_from(index).map_err(|_| crate::EngineFault::RuntimeInvariant {
+                message: "preflighted arguments index fits u32",
+            })?;
+            let index =
+                crate::ArrayIndex::new(index).ok_or(crate::EngineFault::RuntimeInvariant {
+                    message: "arguments index does not use the array-length sentinel",
+                })?;
+            record
+                .append_data(
+                    PropertyKey::from_index(index),
+                    PropertyLayout::data(true, true, true),
+                    value,
+                )
+                .map_err(|_| arguments_property_allocation_failed(property_count))?;
+        }
+        let ordinary = PropertyLayout::data(true, false, true);
+        record
+            .append_data(
+                self.predefined_property_key(PredefinedAtom::Length),
+                ordinary,
+                StoredValue::Number(JsNumber::from_u32(length)),
+            )
+            .map_err(|_| arguments_property_allocation_failed(property_count))?;
+        record
+            .append_data(
+                self.predefined_symbol_property_key(PredefinedAtom::SymbolIterator),
+                ordinary,
+                StoredValue::Function(intrinsics.array_values),
+            )
+            .map_err(|_| arguments_property_allocation_failed(property_count))?;
+        record
+            .append_data(
+                self.predefined_property_key(PredefinedAtom::Callee),
+                ordinary,
+                StoredValue::Function(callee),
+            )
+            .map_err(|_| arguments_property_allocation_failed(property_count))?;
+        Ok(record)
+    }
+
     /// Appends one own property described by a completed descriptor decision.
     ///
     /// This is the insertion half of `OrdinaryDefineOwnProperty`: the caller
@@ -1195,5 +1923,12 @@ impl Runtime {
         self.object_properties += 1;
         self.collection_pending = true;
         Ok(())
+    }
+}
+
+fn arguments_property_allocation_failed(additional: usize) -> crate::ExecutionError {
+    crate::ExecutionError::AllocationFailed {
+        resource: RuntimeResource::ObjectProperties,
+        additional,
     }
 }

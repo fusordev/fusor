@@ -26,9 +26,9 @@
 //! The `BigInt` constructor, its prototype methods, and `asIntN`/`asUintN`.
 //!
 //! `BigInt` is callable but not constructable (`quickjs.c:56005-56012`), so
-//! `new BigInt(1)` is a `TypeError`. The prototype carries exactly `toString`,
-//! `valueOf`, and `[Symbol.toStringTag]`; there is deliberately no
-//! `toLocaleString`.
+//! `new BigInt(1)` is a `TypeError`. In this no-`Intl` profile,
+//! `BigInt.prototype.toLocaleString` deterministically uses the ordinary
+//! decimal representation permitted by ECMA-262.
 
 use std::cmp::Ordering;
 

@@ -34,6 +34,23 @@ fn compile(source: &str, root_name: &str) -> Arc<quickjs_bytecode::VerifiedBytec
     .expect("frontend")
 }
 
+fn compile_global_script(source: &str) -> Arc<quickjs_bytecode::VerifiedBytecode> {
+    with_parsed_program(
+        source,
+        FrontendOptions::for_goal(CompilationGoal::GlobalScript(GlobalScriptGoal::new())),
+        |unit| {
+            let context =
+                CompilationContext::new_with_source_name(unit, Arc::from("runtime-delete.js"))
+                    .expect("storage plan");
+            let tree = context
+                .compile_global_script(quickjs_bytecode::VerificationLimits::default())
+                .expect("verified Global Script");
+            Arc::new(tree.verified_bytecode().clone())
+        },
+    )
+    .expect("frontend")
+}
+
 /// Runs `function run(){...}` and projects its result while the owning
 /// runtime is still alive, since a `JsValue` is only readable through the
 /// runtime that produced it.
@@ -271,5 +288,111 @@ fn a_deleted_slot_is_not_reused_by_a_later_write() {
                 return o.b+o.c;\
             }",
         5,
+    );
+}
+
+/// ES 13.5.1 and Global Environment Record `DeleteBinding`: a newly created
+/// Script `var` property is fixed, a sloppy assignment creates a configurable
+/// global property, a missing name succeeds, and a non-configurable intrinsic
+/// does not disappear.
+#[test]
+fn sloppy_identifier_delete_uses_global_environment_semantics() {
+    let authority = compile_global_script(
+        "var declared=1;\
+         assigned=2;\
+         [delete declared,delete assigned,typeof assigned,delete absent,delete NaN].join('|');",
+    );
+    let mut runtime = Runtime::try_new(RuntimeLimits::default()).expect("runtime");
+    let realm = runtime.create_realm().expect("realm");
+    let mut context = runtime.context(&realm).expect("context");
+    let result = context
+        .execute_global_script(authority, ExecutionLimits::default())
+        .expect("Global Script completion");
+    assert_eq!(
+        result
+            .as_string()
+            .expect("live result")
+            .expect("string")
+            .to_utf8_lossy()
+            .expect("UTF-8"),
+        "false|true|undefined|true|false"
+    );
+}
+
+/// A configurable built-in is still an ordinary global object binding.
+#[test]
+fn deleting_a_configurable_builtin_removes_its_global_binding() {
+    let authority = compile_global_script("[delete JSON,typeof JSON].join('|');");
+    let mut runtime = Runtime::try_new(RuntimeLimits::default()).expect("runtime");
+    let realm = runtime.create_realm().expect("realm");
+    let mut context = runtime.context(&realm).expect("context");
+    let result = context
+        .execute_global_script(authority, ExecutionLimits::default())
+        .expect("Global Script completion");
+    assert_eq!(
+        result
+            .as_string()
+            .expect("live result")
+            .expect("string")
+            .to_utf8_lossy()
+            .expect("UTF-8"),
+        "true|undefined"
+    );
+}
+
+/// A later Script compiles the name as unresolved, but the realm's persistent
+/// declarative record must still make `DeleteBinding` return `false`.
+#[test]
+fn identifier_delete_observes_lexical_bindings_from_earlier_scripts() {
+    let initialize = compile_global_script("let lexical=7;");
+    let delete = compile_global_script("delete lexical;");
+    let read = compile_global_script("lexical;");
+    let mut runtime = Runtime::try_new(RuntimeLimits::default()).expect("runtime");
+    let realm = runtime.create_realm().expect("realm");
+    let mut context = runtime.context(&realm).expect("context");
+    context
+        .execute_global_script(initialize, ExecutionLimits::default())
+        .expect("lexical declaration");
+    let deleted = context
+        .execute_global_script(delete, ExecutionLimits::default())
+        .expect("delete completion");
+    assert_eq!(deleted.as_boolean().expect("live result"), Some(false));
+    let value = context
+        .execute_global_script(read, ExecutionLimits::default())
+        .expect("lexical read");
+    assert!(
+        value
+            .as_number()
+            .expect("live result")
+            .expect("number")
+            .strict_equals(JsNumber::from_i32(7))
+    );
+}
+
+/// `CreateGlobalVarBinding` reuses an existing own property. If an earlier
+/// Script created that property as configurable, the later declaration does
+/// not make it non-configurable and `DeleteBinding` succeeds.
+#[test]
+fn global_var_delete_preserves_a_preexisting_configurable_property() {
+    let create = compile_global_script("preexisting=1;");
+    let declare_and_delete =
+        compile_global_script("var preexisting;[delete preexisting,typeof preexisting].join('|');");
+    let mut runtime = Runtime::try_new(RuntimeLimits::default()).expect("runtime");
+    let realm = runtime.create_realm().expect("realm");
+    let mut context = runtime.context(&realm).expect("context");
+    context
+        .execute_global_script(create, ExecutionLimits::default())
+        .expect("configurable global creation");
+    let result = context
+        .execute_global_script(declare_and_delete, ExecutionLimits::default())
+        .expect("global var deletion");
+    assert_eq!(
+        result
+            .as_string()
+            .expect("live result")
+            .expect("string")
+            .to_utf8_lossy()
+            .expect("UTF-8"),
+        "true|undefined"
     );
 }

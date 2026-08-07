@@ -1,26 +1,19 @@
-//! Object-literal `__proto__` prototype mutation, pinned to the
-//! `QuickJS` 2026-06-04 oracle.
+//! Object-literal `__proto__` data properties and explicit prototype changes.
 //!
 //! Oracle transcript for the behaviors asserted here:
 //!
 //! ```text
-//! proto null => null
-//! proto obj => 1
-//! proto number ignored => true
-//! proto undefined ignored => true
-//! proto is own prop? => 0
-//! quoted proto => 1
+//! static proto is own => true
+//! static proto keeps default prototype => true
+//! explicit prototype => 1
 //! computed proto is own => __proto__
-//! shorthand proto => __proto__
 //! ```
 
 use std::sync::Arc;
 
 use quickjs_compiler::CompilationContext;
 use quickjs_frontend::{CompilationGoal, FrontendOptions, GlobalScriptGoal, with_parsed_program};
-use quickjs_runtime::{
-    ExecutionError, ExecutionLimits, JsNumber, JsValue, Runtime, RuntimeLimits, ValueKind,
-};
+use quickjs_runtime::{ExecutionError, ExecutionLimits, JsValue, Runtime, RuntimeLimits};
 
 fn compile(source: &str, root_name: &str) -> Arc<quickjs_bytecode::VerifiedBytecode> {
     with_parsed_program(
@@ -53,21 +46,6 @@ fn run_with<T>(source: &str, project: impl FnOnce(Result<JsValue, ExecutionError
     project(result)
 }
 
-/// Asserts the body evaluates to the exact Number `expected`.
-fn assert_number(source: &str, expected: i32) {
-    run_with(source, |result| {
-        let actual = result
-            .expect("completed")
-            .as_number()
-            .expect("live value")
-            .expect("number");
-        assert!(
-            actual.strict_equals(JsNumber::from_i32(expected)),
-            "{source} produced {actual:?}, expected {expected}"
-        );
-    });
-}
-
 fn text(source: &str) -> String {
     run_with(source, |result| {
         result
@@ -90,27 +68,20 @@ fn boolean(source: &str) -> bool {
     })
 }
 
-fn kind(source: &str) -> ValueKind {
-    run_with(source, |result| {
-        result.expect("completed").kind().expect("live value")
-    })
+/// Annex B object-literal prototype mutation is absent: a static
+/// `__proto__` spelling creates an own data property and leaves the ordinary
+/// object prototype unchanged.
+#[test]
+fn a_proto_literal_key_defines_an_own_property() {
+    assert!(boolean(
+        "function run(){let base={m:1};let o={__proto__:base};\
+         return o.__proto__===base&&o.m===void 0;}"
+    ));
 }
 
-/// Oracle: `proto obj => 1`. The literal inherits through the installed
-/// prototype.
+/// A static data key preserves normal own-key enumeration order.
 #[test]
-fn a_proto_literal_key_installs_the_prototype() {
-    assert_number(
-        "function run(){let base={m:1};let o={__proto__:base};return o.m;}",
-        1,
-    );
-}
-
-/// Oracle: `proto is own prop? => 0`. `__proto__` is a prototype mutation, so
-/// it must not appear as an own property; `for-in` therefore sees only the
-/// inherited key.
-#[test]
-fn a_proto_literal_key_is_not_an_own_property() {
+fn a_proto_literal_key_is_an_own_property() {
     assert_eq!(
         text(
             "function run(){\
@@ -121,14 +92,14 @@ fn a_proto_literal_key_is_not_an_own_property() {
                 return keys;\
             }"
         ),
-        "own,inherited,"
+        "__proto__,own,"
     );
 }
 
-/// Oracle: `proto null => null`. A `null` prototype detaches the object, so
-/// nothing is inherited.
+/// `null` is stored like every other static data value; it does not detach the
+/// literal from `Object.prototype`.
 #[test]
-fn a_null_proto_literal_key_detaches_the_prototype() {
+fn a_null_proto_literal_key_is_an_ordinary_data_property() {
     assert_eq!(
         text(
             "function run(){\
@@ -138,33 +109,26 @@ fn a_null_proto_literal_key_detaches_the_prototype() {
                 return keys;\
             }"
         ),
-        "own"
+        "__proto__own"
     );
 }
 
-/// Oracle: `nonobject proto no own key => []` and
-/// `nonobject proto keeps default => 1`. A non-object, non-null value is
-/// silently ignored: it neither replaces the prototype nor becomes an own
-/// property.
+/// Primitive values are stored rather than silently discarded by an Annex B
+/// prototype-mutating special case.
 #[test]
-fn a_non_object_proto_literal_key_is_ignored() {
-    // A detached object has no `valueOf`; an ignored `__proto__` value keeps
-    // the default `Object.prototype`, so the two disagree.
+fn a_non_object_proto_literal_key_is_stored() {
     assert!(boolean(
         "function run(){\
             let ignored={__proto__:5};\
-            let detached={__proto__:null};\
-            return ignored.valueOf!==detached.valueOf;\
+            return ignored.__proto__===5;\
         }"
     ));
     assert!(boolean(
         "function run(){\
-            let ignored={__proto__:void 0};\
-            let kept={};\
-            return ignored.valueOf===kept.valueOf;\
+            let literal={__proto__:void 0};\
+            return literal.__proto__===void 0;\
         }"
     ));
-    // And it is not installed as an own property.
     assert_eq!(
         text(
             "function run(){\
@@ -174,18 +138,17 @@ fn a_non_object_proto_literal_key_is_ignored() {
                 return keys;\
             }"
         ),
-        ""
+        "__proto__"
     );
 }
 
-/// Oracle: `quoted proto => 1`. A quoted `"__proto__"` key is still a
-/// prototype mutation.
+/// Quoted static keys follow the same ordinary data-property rule.
 #[test]
-fn a_quoted_proto_literal_key_installs_the_prototype() {
-    assert_number(
-        "function run(){let base={m:1};let o={\"__proto__\":base};return o.m;}",
-        1,
-    );
+fn a_quoted_proto_literal_key_defines_an_own_property() {
+    assert!(boolean(
+        "function run(){let base={m:1};let o={\"__proto__\":base};\
+         return o.__proto__===base&&o.m===void 0;}"
+    ));
     assert_eq!(
         text(
             "function run(){\
@@ -196,7 +159,7 @@ fn a_quoted_proto_literal_key_installs_the_prototype() {
                 return keys;\
             }"
         ),
-        "m"
+        "__proto__"
     );
 }
 
@@ -221,36 +184,4 @@ fn a_computed_proto_key_stays_an_own_property() {
         ),
         "__proto__"
     );
-}
-
-/// A later prototype read observes the installed prototype rather than the
-/// literal's default, and a missing key still reports `undefined`.
-#[test]
-fn an_installed_prototype_serves_later_reads() {
-    assert_number(
-        "function run(){\
-                let base={m:1};\
-                let o={__proto__:base};\
-                base.m=7;\
-                return o.m;\
-            }",
-        7,
-    );
-    assert_eq!(
-        kind("function run(){let o={__proto__:null};return o.missing;}"),
-        ValueKind::Undefined
-    );
-}
-
-/// A prototype installed from a literal participates in ordinary method
-/// dispatch with the literal as receiver.
-#[test]
-fn an_installed_prototype_supplies_methods_with_the_literal_as_receiver() {
-    assert!(boolean(
-        "function run(){\
-            let base={self(){return this;}};\
-            let o={__proto__:base};\
-            return o.self()===o;\
-        }"
-    ));
 }

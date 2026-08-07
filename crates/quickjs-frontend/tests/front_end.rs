@@ -806,16 +806,20 @@ fn accepts_promise_try_from_the_quickjs_es2025_profile() {
 }
 
 #[test]
-fn leaves_regexp_pattern_validation_to_the_quickjs_runtime_layer() {
+fn regexp_literal_grammar_failures_are_semantic_early_errors() {
     let allocator = Allocator::new();
-    let unit = parse(
+    let error = parse(
         &allocator,
         "const pattern = /(/;",
         FrontendOptions::new(ParseMode::Script),
     )
-    .expect("the front end only identifies the RegExp literal boundary");
-
-    assert_eq!(unit.program().body.len(), 1);
+    .expect_err("RegExp pattern grammar is an ECMAScript early error");
+    assert_eq!(error.stage(), DiagnosticStage::Semantic);
+    assert_eq!(
+        error.diagnostics()[0].code,
+        FrontendDiagnosticCode::InvalidRegExpLiteral
+    );
+    assert_eq!(error.diagnostics()[0].labels[0].span, Span::new(16, 19));
 
     for source in ["const pattern = /[/;", "const pattern = /unterminated;"] {
         let error = parse(&allocator, source, FrontendOptions::new(ParseMode::Script))

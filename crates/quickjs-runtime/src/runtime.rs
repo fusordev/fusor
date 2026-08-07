@@ -24,43 +24,69 @@
  */
 
 use std::{
-    collections::{HashMap, HashSet},
+    cell::{Cell, RefCell},
+    collections::{HashMap, HashSet, VecDeque},
+    rc::Rc,
     sync::{Arc, Weak},
 };
 
 use quickjs_bytecode::{
-    CompilerBindingKind, CompilerBindingPolicy, CompilerCapturedBinding, CompilerClosureBinding,
-    CompilerConstant, CompilerConstantValue, CompilerExecutableKind, FinalOpcode,
-    FunctionTemplateId, Operands, VerifiedBytecode,
+    CompilerBindingKind, CompilerBindingPolicy, CompilerCaptureLayout, CompilerCapturedBinding,
+    CompilerClosureBinding, CompilerConstant, CompilerConstantValue, CompilerExecutableKind,
+    FinalOpcode, FunctionTemplateId, Instruction, Operands, VerifiedBytecode,
 };
 
+use crate::promise_rejection::PromiseRejectionState;
 use crate::{
     ArrayIndex, Atom, AtomError, AtomLimits, AtomTable, AtomUsage, DynamicFunctionScriptError,
-    ExceptionKind, ExecutionLimits, Function, HandleError, HandleKind, InstallError, JsBigInt,
-    JsNumber, JsString, JsValue, OrdinaryDynamicFunctionCompiler, PredefinedAtom, PropertyKey,
-    PropertyLayout, PropertyLayoutKind, RuntimeError, RuntimeResource,
+    ErrorObjectKind, ExceptionKind, ExecutionLimits, Function, GlobalScriptError, HandleError,
+    HandleKind, InstallError, JsBigInt, JsNumber, JsString, JsValue,
+    OrdinaryDynamicFunctionCompiler, PredefinedAtom, PropertyKey, PropertyLayout,
+    PropertyLayoutKind, RuntimeError, RuntimeResource,
     arena::{Arena, RuntimeIdentity},
     ids::{BindingCellId, FunctionId, InstalledCodeId, ObjectId, RealmGlobalBindingId, RealmId},
     interrupt::InterruptState,
     object::{
-        ArrayIterator, ArrayIteratorKind, ArrayState, BoxedPrimitive, ForInIterator, ForInSnapshot,
-        HeapObject, IntegrityLevel, KeyPhases, ObjectRecord, OwnProperty, PropertyDeletion,
-        StringIterator,
+        ArrayBufferState, ArrayIterator, ArrayIteratorKind, ArrayState, BoxedPrimitive,
+        DataViewState, DateState, ForInIterator, ForInSnapshot, HeapObject, KeyPhases,
+        ObjectRecord, OwnProperty, PromiseCapability, PromiseReaction, PropertyDeletion,
+        ProxyState, RegExpState, RegExpStringIterator, ShapeInterner, StringIterator,
+        TypedArrayElementType, TypedArrayState,
     },
     value::{HeapReference, PrimitiveValue, ReleaseMailbox, RootTarget, SlotValue, StoredValue},
 };
 
+mod array_buffers;
+mod async_functions;
+mod data_views;
+mod dates;
 mod iterators;
 mod limits;
+mod maps;
+mod promises;
+mod proxies;
+mod regexps;
+mod sets;
 mod symbols;
+mod temporals;
+mod typed_arrays;
+mod weak_collections;
+mod weak_references;
 pub(crate) use iterators::PreparedIteratorResultPlan;
 pub use limits::{RuntimeLimits, RuntimeUsage};
+pub(crate) use typed_arrays::{
+    TypedArrayElementValue, TypedArrayOwnProperty, TypedArrayPropertyKey, TypedArrayStoreOutcome,
+    TypedArrayView,
+};
 
 struct RealmState {
     object_prototype: ObjectId,
     global_object: ObjectId,
     intrinsics: RealmIntrinsics,
     global_bindings: HashMap<Atom, RealmGlobalBindingId>,
+    /// Realm-local state for the implementation-defined `%Math.random%`
+    /// pseudorandom sequence. Xorshift64* requires a non-zero state.
+    math_random_state: u64,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -72,6 +98,7 @@ enum RealmIntrinsics {
     Initializing,
     Ready {
         function_prototype: FunctionId,
+        throw_type_error: FunctionId,
         function_constructor: FunctionId,
         errors: ErrorIntrinsics,
         boolean: BooleanIntrinsics,
@@ -79,8 +106,24 @@ enum RealmIntrinsics {
         bigint: BigIntIntrinsics,
         string: StringIntrinsics,
         array: ArrayIntrinsics,
+        array_buffer: ArrayBufferIntrinsics,
+        data_view: DataViewIntrinsics,
+        typed_array: TypedArrayIntrinsics,
+        date: DateIntrinsics,
+        temporal: TemporalIntrinsics,
+        map: MapIntrinsics,
+        set: SetIntrinsics,
+        weak_map: WeakMapIntrinsics,
+        weak_set: WeakSetIntrinsics,
+        weak_ref: WeakRefIntrinsics,
+        finalization_registry: FinalizationRegistryIntrinsics,
+        promise: PromiseIntrinsics,
+        regexp: RegExpIntrinsics,
         symbol: SymbolIntrinsics,
         iterators: IteratorIntrinsics,
+        generators: GeneratorIntrinsics,
+        async_functions: AsyncFunctionIntrinsics,
+        async_generators: AsyncGeneratorIntrinsics,
     },
 }
 
@@ -110,19 +153,23 @@ impl ErrorIntrinsicKind {
         Self::AggregateError,
     ];
 
+    const fn public_kind(self) -> ErrorObjectKind {
+        match self {
+            Self::Error => ErrorObjectKind::Error,
+            Self::EvalError => ErrorObjectKind::EvalError,
+            Self::RangeError => ErrorObjectKind::RangeError,
+            Self::ReferenceError => ErrorObjectKind::ReferenceError,
+            Self::SyntaxError => ErrorObjectKind::SyntaxError,
+            Self::TypeError => ErrorObjectKind::TypeError,
+            Self::UriError => ErrorObjectKind::UriError,
+            Self::InternalError => ErrorObjectKind::InternalError,
+            Self::AggregateError => ErrorObjectKind::AggregateError,
+        }
+    }
+
     #[cfg(test)]
     const fn name(self) -> &'static str {
-        match self {
-            Self::Error => "Error",
-            Self::EvalError => "EvalError",
-            Self::RangeError => "RangeError",
-            Self::ReferenceError => "ReferenceError",
-            Self::SyntaxError => "SyntaxError",
-            Self::TypeError => "TypeError",
-            Self::UriError => "URIError",
-            Self::InternalError => "InternalError",
-            Self::AggregateError => "AggregateError",
-        }
+        self.public_kind().constructor_name()
     }
 
     const fn index(self) -> usize {
@@ -160,6 +207,7 @@ impl ErrorIntrinsicKind {
             ExceptionKind::ReferenceError => Self::ReferenceError,
             ExceptionKind::SyntaxError => Self::SyntaxError,
             ExceptionKind::TypeError => Self::TypeError,
+            ExceptionKind::UriError => Self::UriError,
         }
     }
 }
@@ -215,6 +263,90 @@ struct ArrayIntrinsics {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct ArrayBufferIntrinsics {
+    prototype: ObjectId,
+    constructor: FunctionId,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct DataViewIntrinsics {
+    prototype: ObjectId,
+    constructor: FunctionId,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct TypedArrayIntrinsics {
+    prototype: ObjectId,
+    instance_prototypes: [ObjectId; 12],
+    constructors: [FunctionId; 12],
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct DateIntrinsics {
+    prototype: ObjectId,
+    constructor: FunctionId,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct TemporalIntrinsics {
+    namespace: ObjectId,
+    duration_prototype: ObjectId,
+    duration_constructor: FunctionId,
+    instant_prototype: ObjectId,
+    instant_constructor: FunctionId,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct MapIntrinsics {
+    prototype: ObjectId,
+    constructor: FunctionId,
+    iterator_prototype: ObjectId,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct SetIntrinsics {
+    prototype: ObjectId,
+    constructor: FunctionId,
+    iterator_prototype: ObjectId,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct WeakMapIntrinsics {
+    prototype: ObjectId,
+    constructor: FunctionId,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct WeakSetIntrinsics {
+    prototype: ObjectId,
+    constructor: FunctionId,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct WeakRefIntrinsics {
+    prototype: ObjectId,
+    constructor: FunctionId,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct FinalizationRegistryIntrinsics {
+    prototype: ObjectId,
+    constructor: FunctionId,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct PromiseIntrinsics {
+    prototype: ObjectId,
+    constructor: FunctionId,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct RegExpIntrinsics {
+    prototype: ObjectId,
+    constructor: FunctionId,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 struct SymbolIntrinsics {
     prototype: ObjectId,
     constructor: FunctionId,
@@ -227,8 +359,33 @@ struct SymbolIntrinsics {
 )]
 struct IteratorIntrinsics {
     iterator_prototype: ObjectId,
+    async_iterator_prototype: ObjectId,
+    async_from_sync_iterator_prototype: ObjectId,
+    async_from_sync_iterator_next: FunctionId,
     array_iterator_prototype: ObjectId,
     string_iterator_prototype: ObjectId,
+    regexp_string_iterator_prototype: ObjectId,
+    array_values: FunctionId,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct GeneratorIntrinsics {
+    function_constructor: FunctionId,
+    function_prototype: ObjectId,
+    generator_prototype: ObjectId,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct AsyncFunctionIntrinsics {
+    function_constructor: FunctionId,
+    function_prototype: ObjectId,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct AsyncGeneratorIntrinsics {
+    function_constructor: FunctionId,
+    function_prototype: ObjectId,
+    generator_prototype: ObjectId,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -274,12 +431,14 @@ pub(crate) fn array_length_from_number(value: JsNumber) -> Option<u32> {
     (f64::from(length) == value).then_some(length)
 }
 
+#[cfg(test)]
 pub(crate) enum ForInAdvance {
     Continue { work: u64 },
     Yield { key: PropertyKey, work: u64 },
     Done { work: u64 },
 }
 
+#[cfg(test)]
 impl ForInAdvance {
     pub(crate) const fn work(&self) -> u64 {
         match self {
@@ -327,13 +486,27 @@ pub(crate) enum FrameBindingAddress {
 pub(crate) enum InstalledConstant {
     Number(JsNumber),
     String(JsString),
+    BigInt(Arc<JsBigInt>),
+    TemplateObject(InstalledTemplateObject),
     Function(FunctionTemplateId),
+}
+
+#[derive(Clone)]
+pub(crate) struct InstalledTemplateElement {
+    pub(crate) cooked: Option<JsString>,
+    pub(crate) raw: JsString,
+}
+
+pub(crate) struct InstalledTemplateObject {
+    pub(crate) elements: Arc<[InstalledTemplateElement]>,
+    pub(crate) object: Option<ObjectId>,
 }
 
 pub(crate) struct InstalledTemplate {
     pub(crate) atoms: Vec<Atom>,
     pub(crate) constants: Vec<InstalledConstant>,
     pub(crate) own_cell_bindings: Vec<FrameBindingAddress>,
+    pub(crate) mapped_arguments: Option<Arc<[u32]>>,
 }
 
 pub(crate) struct InstalledCode {
@@ -347,6 +520,12 @@ pub(crate) struct BytecodeFunction {
     pub(crate) code: InstalledCodeId,
     pub(crate) template: FunctionTemplateId,
     pub(crate) environment: Vec<EnvironmentBinding>,
+    pub(crate) lexical_receiver: Option<StoredValue>,
+    pub(crate) lexical_new_target: Option<FunctionId>,
+    /// The ECMAScript `[[HomeObject]]` installed when this closure becomes a
+    /// class method, class constructor, or object-literal method.  It is an
+    /// internal GC edge, not a JavaScript-visible property.
+    pub(crate) home_object: Option<HeapReference>,
 }
 
 /// Which decimal rendering a `Number.prototype` method performs.
@@ -445,15 +624,19 @@ pub(crate) enum ArrayCopier {
     Slice,
     Concat,
     At,
+    ToReversed,
+    ToSpliced,
+    With,
 }
 
 impl ArrayCopier {
     /// Returns the reported `length` of the installed function.
     pub(crate) const fn arity(self) -> i32 {
         match self {
-            Self::Slice => 2,
+            Self::Slice | Self::ToSpliced | Self::With => 2,
             // `concat` is variadic and `at` takes one index; both report 1.
             Self::Concat | Self::At => 1,
+            Self::ToReversed => 0,
         }
     }
 
@@ -463,6 +646,9 @@ impl ArrayCopier {
             Self::Slice => "slice",
             Self::Concat => "concat",
             Self::At => "at",
+            Self::ToReversed => "toReversed",
+            Self::ToSpliced => "toSpliced",
+            Self::With => "with",
         }
     }
 }
@@ -476,6 +662,7 @@ pub(crate) enum ArrayMutator {
     Unshift,
     Reverse,
     Fill,
+    CopyWithin,
 }
 
 impl ArrayMutator {
@@ -485,6 +672,7 @@ impl ArrayMutator {
             // `push` and `unshift` are variadic but report 1; `fill` reports 1
             // even though it accepts three arguments.
             Self::Push | Self::Unshift | Self::Fill => 1,
+            Self::CopyWithin => 2,
             Self::Pop | Self::Shift | Self::Reverse => 0,
         }
     }
@@ -498,7 +686,69 @@ impl ArrayMutator {
             Self::Unshift => "unshift",
             Self::Reverse => "reverse",
             Self::Fill => "fill",
+            Self::CopyWithin => "copyWithin",
         }
+    }
+}
+
+/// Which `SortIndexedProperties`-based Array method a continuation performs.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum ArraySort {
+    Sort,
+    ToSorted,
+}
+
+impl ArraySort {
+    /// Returns the property name this method is installed under.
+    pub(crate) const fn name(self) -> &'static str {
+        match self {
+            Self::Sort => "sort",
+            Self::ToSorted => "toSorted",
+        }
+    }
+
+    /// Returns whether the method produces a fresh dense Array.
+    pub(crate) const fn copies(self) -> bool {
+        matches!(self, Self::ToSorted)
+    }
+}
+
+/// Which `FlattenIntoArray`-based Array method a continuation performs.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum ArrayFlatten {
+    Flat,
+    FlatMap,
+}
+
+/// Which no-`Intl` locale-string built-in is being invoked.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum LocaleStringMethod {
+    Object,
+    Number,
+    BigInt,
+    Array,
+}
+
+impl ArrayFlatten {
+    /// Returns the property name this method is installed under.
+    pub(crate) const fn name(self) -> &'static str {
+        match self {
+            Self::Flat => "flat",
+            Self::FlatMap => "flatMap",
+        }
+    }
+
+    /// Returns the reported `length` of the installed function.
+    pub(crate) const fn arity(self) -> i32 {
+        match self {
+            Self::Flat => 0,
+            Self::FlatMap => 1,
+        }
+    }
+
+    /// Returns whether the root flattening call applies a mapper.
+    pub(crate) const fn maps(self) -> bool {
+        matches!(self, Self::FlatMap)
     }
 }
 
@@ -540,6 +790,41 @@ pub(crate) enum NumberPredicate {
     IsNaN,
 }
 
+/// One of the coercing numeric functions installed on the global object.
+///
+/// These are deliberately distinct from [`NumberPredicate`]: the global
+/// predicates apply `ToNumber`, and the parsers apply the string-prefix
+/// algorithms after their observable argument conversions.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum GlobalNumericFunction {
+    IsFinite,
+    IsNaN,
+    ParseFloat,
+    ParseInt,
+}
+
+/// One URI handling function installed on the global object.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum UriFunction {
+    DecodeUri,
+    DecodeUriComponent,
+    EncodeUri,
+    EncodeUriComponent,
+}
+
+impl UriFunction {
+    /// Returns whether this function operates on a URI component rather than
+    /// a complete URI.
+    pub(crate) const fn is_component(self) -> bool {
+        matches!(self, Self::DecodeUriComponent | Self::EncodeUriComponent)
+    }
+
+    /// Returns whether this function percent-encodes rather than decodes.
+    pub(crate) const fn is_encode(self) -> bool {
+        matches!(self, Self::EncodeUri | Self::EncodeUriComponent)
+    }
+}
+
 /// How one argument is coerced before the method body runs.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum StringArgument {
@@ -573,15 +858,38 @@ pub(crate) enum StringMethod {
     PadEnd,
     PadStart,
     Repeat,
+    /// `String.prototype.match`, whose `@@match` lookup precedes receiver
+    /// coercion and whose fallback constructs a fresh intrinsic `RegExp`.
+    Match,
+    /// `String.prototype.matchAll`, including the global `RegExp` guard and
+    /// intrinsic-RegExp fallback.
+    MatchAll,
+    /// `String.prototype.replace`, whose `@@replace` protocol dispatch must run
+    /// before the receiver and fallback arguments are string-coerced.
+    Replace,
+    /// `String.prototype.replaceAll`, which additionally performs the
+    /// observable `IsRegExp` and global-flags checks before `@@replace`.
+    ReplaceAll,
+    /// `String.prototype.search`, with the same protocol-first shape as
+    /// `match` and an intrinsic-RegExp fallback.
+    Search,
+    /// `String.prototype.split`, whose `@@split` protocol dispatch precedes
+    /// the receiver, limit, and fallback separator conversions.
+    Split,
     Slice,
     StartsWith,
-    Substr,
     Substring,
     Trim,
     TrimEnd,
     TrimStart,
     IsWellFormed,
     ToWellFormed,
+    LocaleCompare,
+    Normalize,
+    ToLocaleLowerCase,
+    ToLocaleUpperCase,
+    ToLowerCase,
+    ToUpperCase,
     /// `String.fromCharCode`, which is a static rather than a prototype method.
     FromCharCode,
     /// `String.fromCodePoint`, likewise a static.
@@ -602,7 +910,17 @@ impl StringMethod {
             | Self::TrimStart
             | Self::IsWellFormed
             | Self::ToWellFormed
+            | Self::ToLocaleLowerCase
+            | Self::ToLocaleUpperCase
+            | Self::ToLowerCase
+            | Self::ToUpperCase
             | Self::Concat
+            | Self::Match
+            | Self::MatchAll
+            | Self::Replace
+            | Self::ReplaceAll
+            | Self::Search
+            | Self::Split
             | Self::FromCharCode
             | Self::FromCodePoint => &[],
             Self::At | Self::CharAt | Self::CharCodeAt | Self::CodePointAt => {
@@ -619,11 +937,11 @@ impl StringMethod {
                 &[StringArgument::Integer, StringArgument::OptionalString]
             }
             Self::Repeat => &[StringArgument::Integer],
-            // `substr`'s second argument is a length rather than an end index,
-            // but it is coerced identically; the difference is in the body.
-            Self::Slice | Self::Substring | Self::Substr => {
+            Self::Slice | Self::Substring => {
                 &[StringArgument::Integer, StringArgument::OptionalInteger]
             }
+            Self::LocaleCompare => &[StringArgument::String],
+            Self::Normalize => &[StringArgument::OptionalString],
         }
     }
 
@@ -654,6 +972,180 @@ impl StringMethod {
     }
 }
 
+/// The first specification-order slice of methods installed on `%Math%`.
+///
+/// Keeping one ordered enum makes the ordinary object's observable own-key
+/// order explicit while later tranches append the remaining methods.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum MathMethod {
+    Min,
+    Max,
+    Abs,
+    Floor,
+    Ceil,
+    Round,
+    Sqrt,
+    Acos,
+    Asin,
+    Atan,
+    Atan2,
+    Cos,
+    Exp,
+    Log,
+    Pow,
+    Sin,
+    Tan,
+    Trunc,
+    Sign,
+    Cosh,
+    Sinh,
+    Tanh,
+    Acosh,
+    Asinh,
+    Atanh,
+    Expm1,
+    Log1p,
+    Log2,
+    Log10,
+    Cbrt,
+    Hypot,
+    Random,
+    F16Round,
+    FRound,
+    Imul,
+    Clz32,
+    SumPrecise,
+}
+
+impl MathMethod {
+    pub(crate) const ALL: [Self; 37] = [
+        Self::Min,
+        Self::Max,
+        Self::Abs,
+        Self::Floor,
+        Self::Ceil,
+        Self::Round,
+        Self::Sqrt,
+        Self::Acos,
+        Self::Asin,
+        Self::Atan,
+        Self::Atan2,
+        Self::Cos,
+        Self::Exp,
+        Self::Log,
+        Self::Pow,
+        Self::Sin,
+        Self::Tan,
+        Self::Trunc,
+        Self::Sign,
+        Self::Cosh,
+        Self::Sinh,
+        Self::Tanh,
+        Self::Acosh,
+        Self::Asinh,
+        Self::Atanh,
+        Self::Expm1,
+        Self::Log1p,
+        Self::Log2,
+        Self::Log10,
+        Self::Cbrt,
+        Self::Hypot,
+        Self::Random,
+        Self::F16Round,
+        Self::FRound,
+        Self::Imul,
+        Self::Clz32,
+        Self::SumPrecise,
+    ];
+
+    pub(crate) const fn name(self) -> &'static str {
+        match self {
+            Self::Min => "min",
+            Self::Max => "max",
+            Self::Abs => "abs",
+            Self::Floor => "floor",
+            Self::Ceil => "ceil",
+            Self::Round => "round",
+            Self::Sqrt => "sqrt",
+            Self::Acos => "acos",
+            Self::Asin => "asin",
+            Self::Atan => "atan",
+            Self::Atan2 => "atan2",
+            Self::Cos => "cos",
+            Self::Exp => "exp",
+            Self::Log => "log",
+            Self::Pow => "pow",
+            Self::Sin => "sin",
+            Self::Tan => "tan",
+            Self::Trunc => "trunc",
+            Self::Sign => "sign",
+            Self::Cosh => "cosh",
+            Self::Sinh => "sinh",
+            Self::Tanh => "tanh",
+            Self::Acosh => "acosh",
+            Self::Asinh => "asinh",
+            Self::Atanh => "atanh",
+            Self::Expm1 => "expm1",
+            Self::Log1p => "log1p",
+            Self::Log2 => "log2",
+            Self::Log10 => "log10",
+            Self::Cbrt => "cbrt",
+            Self::Hypot => "hypot",
+            Self::Random => "random",
+            Self::F16Round => "f16round",
+            Self::FRound => "fround",
+            Self::Imul => "imul",
+            Self::Clz32 => "clz32",
+            Self::SumPrecise => "sumPrecise",
+        }
+    }
+
+    pub(crate) const fn length(self) -> i32 {
+        match self {
+            Self::Min | Self::Max | Self::Atan2 | Self::Pow | Self::Hypot | Self::Imul => 2,
+            Self::Random => 0,
+            Self::Abs
+            | Self::Floor
+            | Self::Ceil
+            | Self::Round
+            | Self::Sqrt
+            | Self::Acos
+            | Self::Asin
+            | Self::Atan
+            | Self::Cos
+            | Self::Exp
+            | Self::Log
+            | Self::Sin
+            | Self::Tan
+            | Self::Trunc
+            | Self::Sign
+            | Self::Cosh
+            | Self::Sinh
+            | Self::Tanh
+            | Self::Acosh
+            | Self::Asinh
+            | Self::Atanh
+            | Self::Expm1
+            | Self::Log1p
+            | Self::Log2
+            | Self::Log10
+            | Self::Cbrt
+            | Self::F16Round
+            | Self::FRound
+            | Self::Clz32
+            | Self::SumPrecise => 1,
+        }
+    }
+
+    pub(crate) const fn is_extrema(self) -> bool {
+        matches!(self, Self::Min | Self::Max)
+    }
+
+    pub(crate) const fn is_binary(self) -> bool {
+        matches!(self, Self::Atan2 | Self::Pow | Self::Imul)
+    }
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum NativeFunctionKind {
     FunctionPrototype,
@@ -661,6 +1153,7 @@ pub(crate) enum NativeFunctionKind {
     FunctionPrototypeCall,
     FunctionPrototypeBind,
     FunctionPrototypeHasInstance,
+    ThrowTypeError,
     OrdinaryFunctionConstructor,
     ObjectConstructor,
     ObjectGetPrototypeOf,
@@ -673,14 +1166,58 @@ pub(crate) enum NativeFunctionKind {
     ObjectIsFrozen,
     ObjectKeys,
     ObjectGetOwnPropertyNames,
+    ObjectGetOwnPropertySymbols,
     ObjectDefineProperty,
+    ObjectDefineProperties,
     ObjectGetOwnPropertyDescriptor,
+    ObjectGetOwnPropertyDescriptors,
+    ObjectIs,
+    ObjectHasOwn,
+    ObjectValues,
+    ObjectEntries,
+    ObjectAssign,
+    ObjectFromEntries,
+    ObjectGroupBy,
     ObjectCreate,
     ObjectPrototypeToString,
     ObjectPrototypeValueOf,
     ObjectPrototypeHasOwnProperty,
     ObjectPrototypeIsPrototypeOf,
     ObjectPrototypePropertyIsEnumerable,
+    /// One method on the ordinary `%Reflect%` object.
+    Reflect(ReflectMethod),
+    /// The `%Proxy%` constructor.
+    ProxyConstructor,
+    /// `Proxy.revocable`.
+    ProxyRevocable,
+    /// `JSON.parse`.
+    JsonParse,
+    /// `JSON.isRawJSON`.
+    JsonIsRawJson,
+    /// `JSON.rawJSON`.
+    JsonRawJson,
+    /// `JSON.stringify`.
+    JsonStringify,
+    /// One method on the ordinary `%Math%` object.
+    Math(MathMethod),
+    ArrayBufferConstructor,
+    ArrayBufferIsView,
+    ArrayBufferSpeciesGetter,
+    ArrayBufferPrototype(ArrayBufferPrototypeMethod),
+    DataViewConstructor,
+    DataViewPrototype(DataViewPrototypeMethod),
+    TypedArrayConstructor(TypedArrayElementType),
+    TypedArraySpeciesGetter,
+    TypedArrayPrototype(TypedArrayPrototypeMethod),
+    DateConstructor,
+    DateStatic(DateStaticMethod),
+    DatePrototype(DatePrototypeMethod),
+    TemporalDurationConstructor,
+    TemporalDurationStatic(TemporalDurationStaticMethod),
+    TemporalDurationPrototype(TemporalDurationPrototypeMethod),
+    TemporalInstantConstructor,
+    TemporalInstantStatic(TemporalInstantStaticMethod),
+    TemporalInstantPrototype(TemporalInstantPrototypeMethod),
     FunctionPrototypeToString,
     ErrorConstructor(ErrorIntrinsicKind),
     ErrorPrototypeToString,
@@ -703,16 +1240,28 @@ pub(crate) enum NativeFunctionKind {
     StringPrototypeValueOf,
     /// One `String.prototype` method sharing the resumable coercion machine.
     StringPrototypeMethod(StringMethod),
+    /// `String.raw`.
+    StringRaw,
     /// One `Number` predicate static.
     NumberPredicateStatic(NumberPredicate),
+    /// One coercing numeric function on the realm's global object.
+    GlobalNumeric(GlobalNumericFunction),
+    /// One global URI encoder or decoder.
+    GlobalUri(UriFunction),
     /// `Array.isArray`.
     ArrayIsArray,
+    /// One generic factory method on the `Array` constructor.
+    ArrayStatic(ArrayStatic),
     /// One `Array.prototype` search sharing the resumable element loop.
     ArrayPrototypeSearch(ArraySearch),
     /// One `Array.prototype` mutator sharing the resumable element driver.
     ArrayPrototypeMutator(ArrayMutator),
     /// One `Array.prototype` copying method sharing the resumable element read.
     ArrayPrototypeCopier(ArrayCopier),
+    /// One stable `SortIndexedProperties`-based Array method.
+    ArrayPrototypeSort(ArraySort),
+    /// One `FlattenIntoArray`-based Array method.
+    ArrayPrototypeFlatten(ArrayFlatten),
     /// One `Array.prototype` callback method sharing the resumable loop.
     ArrayPrototypeCallback(ArrayCallback),
     /// One `Array.prototype` reduction sharing the resumable fold.
@@ -720,6 +1269,19 @@ pub(crate) enum NativeFunctionKind {
     /// `Array.prototype.splice`.
     ArrayPrototypeSplice,
     ArrayConstructor,
+    /// The `%Array%[Symbol.species]` getter.
+    ArraySpeciesGetter,
+    RegExpConstructor,
+    RegExpEscape,
+    RegExpSpeciesGetter,
+    RegExpPrototypeFlags,
+    RegExpPrototypeSource,
+    RegExpPrototypeFlag(RegExpFlag),
+    RegExpPrototypeExec,
+    RegExpPrototypeCompile,
+    RegExpPrototypeTest,
+    RegExpPrototypeToString,
+    RegExpPrototypeSymbol(RegExpSymbolMethod),
     SymbolConstructor,
     SymbolPrototypeToString,
     SymbolPrototypeValueOf,
@@ -728,14 +1290,1431 @@ pub(crate) enum NativeFunctionKind {
     SymbolFor,
     SymbolKeyFor,
     IteratorPrototypeIterator,
+    AsyncIteratorPrototypeAsyncIterator,
+    AsyncFromSyncIteratorNext,
+    AsyncFromSyncIteratorReturn,
+    AsyncFromSyncIteratorThrow,
+    AsyncFromSyncIteratorUnwrap,
+    AsyncFromSyncIteratorClose,
     ArrayPrototypeJoin,
     ArrayPrototypeToString,
+    /// One no-`Intl` `toLocaleString` implementation.
+    LocaleString(LocaleStringMethod),
     ArrayPrototypeValues,
     ArrayPrototypeKeys,
     ArrayPrototypeEntries,
     ArrayIteratorNext,
+    MapConstructor,
+    MapGroupBy,
+    MapSpeciesGetter,
+    MapPrototype(MapMethod),
+    MapIteratorNext,
+    SetConstructor,
+    SetGroupBy,
+    SetSpeciesGetter,
+    SetPrototype(SetMethod),
+    SetIteratorNext,
+    WeakMapConstructor,
+    WeakMapPrototype(WeakMapMethod),
+    WeakSetConstructor,
+    WeakSetPrototype(WeakSetMethod),
+    WeakRefConstructor,
+    WeakRefPrototypeDeref,
+    FinalizationRegistryConstructor,
+    FinalizationRegistryPrototype(FinalizationRegistryMethod),
     StringPrototypeIterator,
     StringIteratorNext,
+    RegExpStringIteratorNext,
+    GeneratorFunctionConstructor,
+    AsyncFunctionConstructor,
+    GeneratorPrototypeNext,
+    GeneratorPrototypeReturn,
+    GeneratorPrototypeThrow,
+    AsyncGeneratorFunctionConstructor,
+    AsyncGeneratorPrototypeNext,
+    AsyncGeneratorPrototypeReturn,
+    AsyncGeneratorPrototypeThrow,
+    PromiseConstructor,
+    PromiseResolve,
+    PromiseReject,
+    PromiseStatic(PromiseStatic),
+    PromiseSpeciesGetter,
+    PromisePrototypeThen,
+    PromisePrototypeCatch,
+    PromisePrototypeFinally,
+}
+
+/// Static methods on `%Date%` in pinned `QuickJS` publication order.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum DateStaticMethod {
+    Now,
+    Parse,
+    Utc,
+}
+
+impl DateStaticMethod {
+    pub(crate) const ALL: [Self; 3] = [Self::Now, Self::Parse, Self::Utc];
+
+    pub(crate) const fn name(self) -> &'static str {
+        match self {
+            Self::Now => "now",
+            Self::Parse => "parse",
+            Self::Utc => "UTC",
+        }
+    }
+
+    pub(crate) const fn length(self) -> i32 {
+        match self {
+            Self::Now => 0,
+            Self::Parse => 1,
+            Self::Utc => 7,
+        }
+    }
+}
+
+/// Implemented methods on `%Date.prototype%` in pinned `QuickJS` publication order.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum DatePrototypeMethod {
+    ValueOf,
+    ToString,
+    ToUtcString,
+    ToIsoString,
+    ToDateString,
+    ToTimeString,
+    ToLocaleString,
+    ToLocaleDateString,
+    ToLocaleTimeString,
+    GetTimezoneOffset,
+    GetTime,
+    GetFullYear,
+    GetUtcFullYear,
+    GetMonth,
+    GetUtcMonth,
+    GetDate,
+    GetUtcDate,
+    GetHours,
+    GetUtcHours,
+    GetMinutes,
+    GetUtcMinutes,
+    GetSeconds,
+    GetUtcSeconds,
+    GetMilliseconds,
+    GetUtcMilliseconds,
+    GetDay,
+    GetUtcDay,
+    SetTime,
+    SetMilliseconds,
+    SetUtcMilliseconds,
+    SetSeconds,
+    SetUtcSeconds,
+    SetMinutes,
+    SetUtcMinutes,
+    SetHours,
+    SetUtcHours,
+    SetDate,
+    SetUtcDate,
+    SetMonth,
+    SetUtcMonth,
+    SetFullYear,
+    SetUtcFullYear,
+    ToTemporalInstant,
+    ToJson,
+    SymbolToPrimitive,
+}
+
+impl DatePrototypeMethod {
+    pub(crate) const ALL: [Self; 45] = [
+        Self::ValueOf,
+        Self::ToString,
+        Self::ToUtcString,
+        Self::ToIsoString,
+        Self::ToDateString,
+        Self::ToTimeString,
+        Self::ToLocaleString,
+        Self::ToLocaleDateString,
+        Self::ToLocaleTimeString,
+        Self::GetTimezoneOffset,
+        Self::GetTime,
+        Self::GetFullYear,
+        Self::GetUtcFullYear,
+        Self::GetMonth,
+        Self::GetUtcMonth,
+        Self::GetDate,
+        Self::GetUtcDate,
+        Self::GetHours,
+        Self::GetUtcHours,
+        Self::GetMinutes,
+        Self::GetUtcMinutes,
+        Self::GetSeconds,
+        Self::GetUtcSeconds,
+        Self::GetMilliseconds,
+        Self::GetUtcMilliseconds,
+        Self::GetDay,
+        Self::GetUtcDay,
+        Self::SetTime,
+        Self::SetMilliseconds,
+        Self::SetUtcMilliseconds,
+        Self::SetSeconds,
+        Self::SetUtcSeconds,
+        Self::SetMinutes,
+        Self::SetUtcMinutes,
+        Self::SetHours,
+        Self::SetUtcHours,
+        Self::SetDate,
+        Self::SetUtcDate,
+        Self::SetMonth,
+        Self::SetUtcMonth,
+        Self::SetFullYear,
+        Self::SetUtcFullYear,
+        Self::ToTemporalInstant,
+        Self::ToJson,
+        Self::SymbolToPrimitive,
+    ];
+
+    pub(crate) const fn name(self) -> &'static str {
+        match self {
+            Self::ValueOf => "valueOf",
+            Self::ToString => "toString",
+            Self::ToUtcString => "toUTCString",
+            Self::ToIsoString => "toISOString",
+            Self::ToDateString => "toDateString",
+            Self::ToTimeString => "toTimeString",
+            Self::ToLocaleString => "toLocaleString",
+            Self::ToLocaleDateString => "toLocaleDateString",
+            Self::ToLocaleTimeString => "toLocaleTimeString",
+            Self::GetTimezoneOffset => "getTimezoneOffset",
+            Self::GetTime => "getTime",
+            Self::GetFullYear => "getFullYear",
+            Self::GetUtcFullYear => "getUTCFullYear",
+            Self::GetMonth => "getMonth",
+            Self::GetUtcMonth => "getUTCMonth",
+            Self::GetDate => "getDate",
+            Self::GetUtcDate => "getUTCDate",
+            Self::GetHours => "getHours",
+            Self::GetUtcHours => "getUTCHours",
+            Self::GetMinutes => "getMinutes",
+            Self::GetUtcMinutes => "getUTCMinutes",
+            Self::GetSeconds => "getSeconds",
+            Self::GetUtcSeconds => "getUTCSeconds",
+            Self::GetMilliseconds => "getMilliseconds",
+            Self::GetUtcMilliseconds => "getUTCMilliseconds",
+            Self::GetDay => "getDay",
+            Self::GetUtcDay => "getUTCDay",
+            Self::SetTime => "setTime",
+            Self::SetMilliseconds => "setMilliseconds",
+            Self::SetUtcMilliseconds => "setUTCMilliseconds",
+            Self::SetSeconds => "setSeconds",
+            Self::SetUtcSeconds => "setUTCSeconds",
+            Self::SetMinutes => "setMinutes",
+            Self::SetUtcMinutes => "setUTCMinutes",
+            Self::SetHours => "setHours",
+            Self::SetUtcHours => "setUTCHours",
+            Self::SetDate => "setDate",
+            Self::SetUtcDate => "setUTCDate",
+            Self::SetMonth => "setMonth",
+            Self::SetUtcMonth => "setUTCMonth",
+            Self::SetFullYear => "setFullYear",
+            Self::SetUtcFullYear => "setUTCFullYear",
+            Self::ToTemporalInstant => "toTemporalInstant",
+            Self::ToJson => "toJSON",
+            Self::SymbolToPrimitive => "[Symbol.toPrimitive]",
+        }
+    }
+
+    pub(crate) const fn length(self) -> i32 {
+        match self {
+            Self::SetHours | Self::SetUtcHours => 4,
+            Self::SetMinutes | Self::SetUtcMinutes | Self::SetFullYear | Self::SetUtcFullYear => 3,
+            Self::SetSeconds | Self::SetUtcSeconds | Self::SetMonth | Self::SetUtcMonth => 2,
+            Self::SetTime
+            | Self::SetMilliseconds
+            | Self::SetUtcMilliseconds
+            | Self::SetDate
+            | Self::SetUtcDate
+            | Self::ToJson
+            | Self::SymbolToPrimitive => 1,
+            Self::ValueOf
+            | Self::ToString
+            | Self::ToUtcString
+            | Self::ToIsoString
+            | Self::ToDateString
+            | Self::ToTimeString
+            | Self::ToLocaleString
+            | Self::ToLocaleDateString
+            | Self::ToLocaleTimeString
+            | Self::GetTimezoneOffset
+            | Self::GetTime
+            | Self::GetFullYear
+            | Self::GetUtcFullYear
+            | Self::GetMonth
+            | Self::GetUtcMonth
+            | Self::GetDate
+            | Self::GetUtcDate
+            | Self::GetHours
+            | Self::GetUtcHours
+            | Self::GetMinutes
+            | Self::GetUtcMinutes
+            | Self::GetSeconds
+            | Self::GetUtcSeconds
+            | Self::GetMilliseconds
+            | Self::GetUtcMilliseconds
+            | Self::GetDay
+            | Self::GetUtcDay
+            | Self::ToTemporalInstant => 0,
+        }
+    }
+}
+
+/// Methods and accessors published on `%ArrayBuffer.prototype%`.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum ArrayBufferPrototypeMethod {
+    ByteLength,
+    Detached,
+    MaxByteLength,
+    Resizable,
+    Resize,
+    Slice,
+    Transfer,
+    TransferToFixedLength,
+}
+
+/// Element representations shared by `DataView` methods and the later
+/// typed-array indexed exotic implementation.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum DataViewElementType {
+    BigInt64,
+    BigUint64,
+    Float16,
+    Float32,
+    Float64,
+    Int8,
+    Int16,
+    Int32,
+    Uint8,
+    Uint16,
+    Uint32,
+}
+
+impl DataViewElementType {
+    #[must_use]
+    pub(crate) const fn byte_width(self) -> usize {
+        match self {
+            Self::BigInt64 | Self::BigUint64 | Self::Float64 => 8,
+            Self::Float32 | Self::Int32 | Self::Uint32 => 4,
+            Self::Float16 | Self::Int16 | Self::Uint16 => 2,
+            Self::Int8 | Self::Uint8 => 1,
+        }
+    }
+
+    #[must_use]
+    pub(crate) const fn is_bigint(self) -> bool {
+        matches!(self, Self::BigInt64 | Self::BigUint64)
+    }
+}
+
+/// Methods and accessors published on `%DataView.prototype%`.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum DataViewPrototypeMethod {
+    Buffer,
+    ByteLength,
+    ByteOffset,
+    GetBigInt64,
+    GetBigUint64,
+    GetFloat16,
+    GetFloat32,
+    GetFloat64,
+    GetInt8,
+    GetInt16,
+    GetInt32,
+    GetUint8,
+    GetUint16,
+    GetUint32,
+    SetBigInt64,
+    SetBigUint64,
+    SetFloat16,
+    SetFloat32,
+    SetFloat64,
+    SetInt8,
+    SetInt16,
+    SetInt32,
+    SetUint8,
+    SetUint16,
+    SetUint32,
+}
+
+impl DataViewPrototypeMethod {
+    pub(crate) const ALL: [Self; 25] = [
+        Self::Buffer,
+        Self::ByteLength,
+        Self::ByteOffset,
+        Self::GetBigInt64,
+        Self::GetBigUint64,
+        Self::GetFloat16,
+        Self::GetFloat32,
+        Self::GetFloat64,
+        Self::GetInt8,
+        Self::GetInt16,
+        Self::GetInt32,
+        Self::GetUint8,
+        Self::GetUint16,
+        Self::GetUint32,
+        Self::SetBigInt64,
+        Self::SetBigUint64,
+        Self::SetFloat16,
+        Self::SetFloat32,
+        Self::SetFloat64,
+        Self::SetInt8,
+        Self::SetInt16,
+        Self::SetInt32,
+        Self::SetUint8,
+        Self::SetUint16,
+        Self::SetUint32,
+    ];
+
+    #[must_use]
+    pub(crate) const fn name(self) -> &'static str {
+        match self {
+            Self::Buffer => "buffer",
+            Self::ByteLength => "byteLength",
+            Self::ByteOffset => "byteOffset",
+            Self::GetBigInt64 => "getBigInt64",
+            Self::GetBigUint64 => "getBigUint64",
+            Self::GetFloat16 => "getFloat16",
+            Self::GetFloat32 => "getFloat32",
+            Self::GetFloat64 => "getFloat64",
+            Self::GetInt8 => "getInt8",
+            Self::GetInt16 => "getInt16",
+            Self::GetInt32 => "getInt32",
+            Self::GetUint8 => "getUint8",
+            Self::GetUint16 => "getUint16",
+            Self::GetUint32 => "getUint32",
+            Self::SetBigInt64 => "setBigInt64",
+            Self::SetBigUint64 => "setBigUint64",
+            Self::SetFloat16 => "setFloat16",
+            Self::SetFloat32 => "setFloat32",
+            Self::SetFloat64 => "setFloat64",
+            Self::SetInt8 => "setInt8",
+            Self::SetInt16 => "setInt16",
+            Self::SetInt32 => "setInt32",
+            Self::SetUint8 => "setUint8",
+            Self::SetUint16 => "setUint16",
+            Self::SetUint32 => "setUint32",
+        }
+    }
+
+    #[must_use]
+    pub(crate) const fn length(self) -> i32 {
+        match self {
+            Self::Buffer | Self::ByteLength | Self::ByteOffset => 0,
+            Self::GetBigInt64
+            | Self::GetBigUint64
+            | Self::GetFloat16
+            | Self::GetFloat32
+            | Self::GetFloat64
+            | Self::GetInt8
+            | Self::GetInt16
+            | Self::GetInt32
+            | Self::GetUint8
+            | Self::GetUint16
+            | Self::GetUint32 => 1,
+            Self::SetBigInt64
+            | Self::SetBigUint64
+            | Self::SetFloat16
+            | Self::SetFloat32
+            | Self::SetFloat64
+            | Self::SetInt8
+            | Self::SetInt16
+            | Self::SetInt32
+            | Self::SetUint8
+            | Self::SetUint16
+            | Self::SetUint32 => 2,
+        }
+    }
+
+    #[must_use]
+    pub(crate) const fn is_accessor(self) -> bool {
+        matches!(self, Self::Buffer | Self::ByteLength | Self::ByteOffset)
+    }
+
+    #[must_use]
+    pub(crate) const fn is_setter(self) -> bool {
+        matches!(
+            self,
+            Self::SetBigInt64
+                | Self::SetBigUint64
+                | Self::SetFloat16
+                | Self::SetFloat32
+                | Self::SetFloat64
+                | Self::SetInt8
+                | Self::SetInt16
+                | Self::SetInt32
+                | Self::SetUint8
+                | Self::SetUint16
+                | Self::SetUint32
+        )
+    }
+
+    #[must_use]
+    pub(crate) const fn element_type(self) -> Option<DataViewElementType> {
+        match self {
+            Self::Buffer | Self::ByteLength | Self::ByteOffset => None,
+            Self::GetBigInt64 | Self::SetBigInt64 => Some(DataViewElementType::BigInt64),
+            Self::GetBigUint64 | Self::SetBigUint64 => Some(DataViewElementType::BigUint64),
+            Self::GetFloat16 | Self::SetFloat16 => Some(DataViewElementType::Float16),
+            Self::GetFloat32 | Self::SetFloat32 => Some(DataViewElementType::Float32),
+            Self::GetFloat64 | Self::SetFloat64 => Some(DataViewElementType::Float64),
+            Self::GetInt8 | Self::SetInt8 => Some(DataViewElementType::Int8),
+            Self::GetInt16 | Self::SetInt16 => Some(DataViewElementType::Int16),
+            Self::GetInt32 | Self::SetInt32 => Some(DataViewElementType::Int32),
+            Self::GetUint8 | Self::SetUint8 => Some(DataViewElementType::Uint8),
+            Self::GetUint16 | Self::SetUint16 => Some(DataViewElementType::Uint16),
+            Self::GetUint32 | Self::SetUint32 => Some(DataViewElementType::Uint32),
+        }
+    }
+}
+
+/// Accessors shared by every concrete typed-array prototype through
+/// `%TypedArray%.prototype`.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum TypedArrayPrototypeMethod {
+    Buffer,
+    ByteLength,
+    ByteOffset,
+    Length,
+    ToStringTag,
+    Set,
+    Subarray,
+    At,
+    Includes,
+    IndexOf,
+    LastIndexOf,
+    Fill,
+    CopyWithin,
+    Reverse,
+    Slice,
+    Entries,
+    Keys,
+    Values,
+    Join,
+    ToReversed,
+    With,
+    Every,
+    Find,
+    FindIndex,
+    FindLast,
+    FindLastIndex,
+    ForEach,
+    Some,
+}
+
+impl TypedArrayPrototypeMethod {
+    pub(crate) const ALL: [Self; 28] = [
+        Self::Buffer,
+        Self::ByteLength,
+        Self::ByteOffset,
+        Self::Length,
+        Self::ToStringTag,
+        Self::Set,
+        Self::Subarray,
+        Self::At,
+        Self::Includes,
+        Self::IndexOf,
+        Self::LastIndexOf,
+        Self::Fill,
+        Self::CopyWithin,
+        Self::Reverse,
+        Self::Slice,
+        Self::Entries,
+        Self::Keys,
+        Self::Values,
+        Self::Join,
+        Self::ToReversed,
+        Self::With,
+        Self::Every,
+        Self::Find,
+        Self::FindIndex,
+        Self::FindLast,
+        Self::FindLastIndex,
+        Self::ForEach,
+        Self::Some,
+    ];
+
+    #[must_use]
+    pub(crate) const fn name(self) -> &'static str {
+        match self {
+            Self::Buffer => "buffer",
+            Self::ByteLength => "byteLength",
+            Self::ByteOffset => "byteOffset",
+            Self::Length => "length",
+            Self::ToStringTag => "[Symbol.toStringTag]",
+            Self::Set => "set",
+            Self::Subarray => "subarray",
+            Self::At => "at",
+            Self::Includes => "includes",
+            Self::IndexOf => "indexOf",
+            Self::LastIndexOf => "lastIndexOf",
+            Self::Fill => "fill",
+            Self::CopyWithin => "copyWithin",
+            Self::Reverse => "reverse",
+            Self::Slice => "slice",
+            Self::Entries => "entries",
+            Self::Keys => "keys",
+            Self::Values => "values",
+            Self::Join => "join",
+            Self::ToReversed => "toReversed",
+            Self::With => "with",
+            Self::Every => "every",
+            Self::Find => "find",
+            Self::FindIndex => "findIndex",
+            Self::FindLast => "findLast",
+            Self::FindLastIndex => "findLastIndex",
+            Self::ForEach => "forEach",
+            Self::Some => "some",
+        }
+    }
+
+    #[must_use]
+    pub(crate) const fn accessor_name(self) -> &'static str {
+        match self {
+            Self::Buffer => "get buffer",
+            Self::ByteLength => "get byteLength",
+            Self::ByteOffset => "get byteOffset",
+            Self::Length => "get length",
+            Self::ToStringTag => "get [Symbol.toStringTag]",
+            Self::Set => "set",
+            Self::Subarray => "subarray",
+            Self::At => "at",
+            Self::Includes => "includes",
+            Self::IndexOf => "indexOf",
+            Self::LastIndexOf => "lastIndexOf",
+            Self::Fill => "fill",
+            Self::CopyWithin => "copyWithin",
+            Self::Reverse => "reverse",
+            Self::Slice => "slice",
+            Self::Entries => "entries",
+            Self::Keys => "keys",
+            Self::Values => "values",
+            Self::Join => "join",
+            Self::ToReversed => "toReversed",
+            Self::With => "with",
+            Self::Every => "every",
+            Self::Find => "find",
+            Self::FindIndex => "findIndex",
+            Self::FindLast => "findLast",
+            Self::FindLastIndex => "findLastIndex",
+            Self::ForEach => "forEach",
+            Self::Some => "some",
+        }
+    }
+
+    #[must_use]
+    pub(crate) const fn is_accessor(self) -> bool {
+        !matches!(
+            self,
+            Self::Set
+                | Self::Subarray
+                | Self::At
+                | Self::Includes
+                | Self::IndexOf
+                | Self::LastIndexOf
+                | Self::Fill
+                | Self::CopyWithin
+                | Self::Reverse
+                | Self::Slice
+                | Self::Entries
+                | Self::Keys
+                | Self::Values
+                | Self::Join
+                | Self::ToReversed
+                | Self::With
+                | Self::Every
+                | Self::Find
+                | Self::FindIndex
+                | Self::FindLast
+                | Self::FindLastIndex
+                | Self::ForEach
+                | Self::Some
+        )
+    }
+
+    #[must_use]
+    pub(crate) const fn arity(self) -> i32 {
+        match self {
+            Self::Set
+            | Self::At
+            | Self::Includes
+            | Self::IndexOf
+            | Self::LastIndexOf
+            | Self::Fill
+            | Self::Join
+            | Self::Every
+            | Self::Find
+            | Self::FindIndex
+            | Self::FindLast
+            | Self::FindLastIndex
+            | Self::ForEach
+            | Self::Some => 1,
+            Self::CopyWithin | Self::Subarray | Self::Slice | Self::With => 2,
+            Self::Reverse
+            | Self::Entries
+            | Self::Keys
+            | Self::Values
+            | Self::ToReversed
+            | Self::Buffer
+            | Self::ByteLength
+            | Self::ByteOffset
+            | Self::Length
+            | Self::ToStringTag => 0,
+        }
+    }
+}
+
+impl ArrayBufferPrototypeMethod {
+    pub(crate) const ALL: [Self; 8] = [
+        Self::ByteLength,
+        Self::Detached,
+        Self::MaxByteLength,
+        Self::Resizable,
+        Self::Resize,
+        Self::Slice,
+        Self::Transfer,
+        Self::TransferToFixedLength,
+    ];
+
+    pub(crate) const fn name(self) -> &'static str {
+        match self {
+            Self::ByteLength => "byteLength",
+            Self::Detached => "detached",
+            Self::MaxByteLength => "maxByteLength",
+            Self::Resizable => "resizable",
+            Self::Resize => "resize",
+            Self::Slice => "slice",
+            Self::Transfer => "transfer",
+            Self::TransferToFixedLength => "transferToFixedLength",
+        }
+    }
+
+    pub(crate) const fn length(self) -> i32 {
+        match self {
+            Self::Resize | Self::Transfer | Self::TransferToFixedLength => 1,
+            Self::Slice => 2,
+            Self::ByteLength | Self::Detached | Self::MaxByteLength | Self::Resizable => 0,
+        }
+    }
+
+    pub(crate) const fn is_accessor(self) -> bool {
+        matches!(
+            self,
+            Self::ByteLength | Self::Detached | Self::MaxByteLength | Self::Resizable
+        )
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum TemporalInstantStaticMethod {
+    From,
+    Compare,
+    FromEpochMilliseconds,
+    FromEpochNanoseconds,
+}
+
+impl TemporalInstantStaticMethod {
+    pub(crate) const ALL: [Self; 4] = [
+        Self::From,
+        Self::Compare,
+        Self::FromEpochMilliseconds,
+        Self::FromEpochNanoseconds,
+    ];
+
+    pub(crate) const fn name(self) -> &'static str {
+        match self {
+            Self::From => "from",
+            Self::Compare => "compare",
+            Self::FromEpochMilliseconds => "fromEpochMilliseconds",
+            Self::FromEpochNanoseconds => "fromEpochNanoseconds",
+        }
+    }
+
+    pub(crate) const fn length(self) -> i32 {
+        match self {
+            Self::Compare => 2,
+            Self::From | Self::FromEpochMilliseconds | Self::FromEpochNanoseconds => 1,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum TemporalInstantPrototypeMethod {
+    EpochMilliseconds,
+    EpochNanoseconds,
+    Add,
+    Subtract,
+    Until,
+    Since,
+    Round,
+    Equals,
+    ToString,
+    ToJson,
+    ValueOf,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum TemporalDurationPrototypeMethod {
+    Years,
+    Months,
+    Weeks,
+    Days,
+    Hours,
+    Minutes,
+    Seconds,
+    Milliseconds,
+    Microseconds,
+    Nanoseconds,
+    Sign,
+    Blank,
+    Abs,
+    Negated,
+    With,
+    Add,
+    Subtract,
+    Round,
+    Total,
+    ToString,
+    ToJson,
+    ToLocaleString,
+    ValueOf,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum TemporalDurationStaticMethod {
+    From,
+    Compare,
+}
+
+impl TemporalDurationStaticMethod {
+    pub(crate) const ALL: [Self; 2] = [Self::From, Self::Compare];
+
+    pub(crate) const fn name(self) -> &'static str {
+        match self {
+            Self::From => "from",
+            Self::Compare => "compare",
+        }
+    }
+
+    pub(crate) const fn length(self) -> i32 {
+        match self {
+            Self::From => 1,
+            Self::Compare => 2,
+        }
+    }
+}
+
+impl TemporalDurationPrototypeMethod {
+    pub(crate) const ALL: [Self; 23] = [
+        Self::Years,
+        Self::Months,
+        Self::Weeks,
+        Self::Days,
+        Self::Hours,
+        Self::Minutes,
+        Self::Seconds,
+        Self::Milliseconds,
+        Self::Microseconds,
+        Self::Nanoseconds,
+        Self::Sign,
+        Self::Blank,
+        Self::Abs,
+        Self::Negated,
+        Self::With,
+        Self::Add,
+        Self::Subtract,
+        Self::Round,
+        Self::Total,
+        Self::ToString,
+        Self::ToJson,
+        Self::ToLocaleString,
+        Self::ValueOf,
+    ];
+
+    pub(crate) const fn name(self) -> &'static str {
+        match self {
+            Self::Years => "years",
+            Self::Months => "months",
+            Self::Weeks => "weeks",
+            Self::Days => "days",
+            Self::Hours => "hours",
+            Self::Minutes => "minutes",
+            Self::Seconds => "seconds",
+            Self::Milliseconds => "milliseconds",
+            Self::Microseconds => "microseconds",
+            Self::Nanoseconds => "nanoseconds",
+            Self::Sign => "sign",
+            Self::Blank => "blank",
+            Self::Abs => "abs",
+            Self::Negated => "negated",
+            Self::With => "with",
+            Self::Add => "add",
+            Self::Subtract => "subtract",
+            Self::Round => "round",
+            Self::Total => "total",
+            Self::ToString => "toString",
+            Self::ToJson => "toJSON",
+            Self::ToLocaleString => "toLocaleString",
+            Self::ValueOf => "valueOf",
+        }
+    }
+
+    pub(crate) const fn function_name(self) -> &'static str {
+        match self {
+            Self::Years => "get years",
+            Self::Months => "get months",
+            Self::Weeks => "get weeks",
+            Self::Days => "get days",
+            Self::Hours => "get hours",
+            Self::Minutes => "get minutes",
+            Self::Seconds => "get seconds",
+            Self::Milliseconds => "get milliseconds",
+            Self::Microseconds => "get microseconds",
+            Self::Nanoseconds => "get nanoseconds",
+            Self::Sign => "get sign",
+            Self::Blank => "get blank",
+            Self::Abs => "abs",
+            Self::Negated => "negated",
+            Self::With => "with",
+            Self::Add => "add",
+            Self::Subtract => "subtract",
+            Self::Round => "round",
+            Self::Total => "total",
+            Self::ToString => "toString",
+            Self::ToJson => "toJSON",
+            Self::ToLocaleString => "toLocaleString",
+            Self::ValueOf => "valueOf",
+        }
+    }
+
+    pub(crate) const fn is_accessor(self) -> bool {
+        matches!(
+            self,
+            Self::Years
+                | Self::Months
+                | Self::Weeks
+                | Self::Days
+                | Self::Hours
+                | Self::Minutes
+                | Self::Seconds
+                | Self::Milliseconds
+                | Self::Microseconds
+                | Self::Nanoseconds
+                | Self::Sign
+                | Self::Blank
+        )
+    }
+
+    pub(crate) const fn length(self) -> i32 {
+        match self {
+            Self::With | Self::Add | Self::Subtract | Self::Round | Self::Total => 1,
+            _ => 0,
+        }
+    }
+}
+
+impl TemporalInstantPrototypeMethod {
+    pub(crate) const ALL: [Self; 11] = [
+        Self::EpochMilliseconds,
+        Self::EpochNanoseconds,
+        Self::Add,
+        Self::Subtract,
+        Self::Until,
+        Self::Since,
+        Self::Round,
+        Self::Equals,
+        Self::ToString,
+        Self::ToJson,
+        Self::ValueOf,
+    ];
+
+    pub(crate) const fn name(self) -> &'static str {
+        match self {
+            Self::EpochMilliseconds => "epochMilliseconds",
+            Self::EpochNanoseconds => "epochNanoseconds",
+            Self::Add => "add",
+            Self::Subtract => "subtract",
+            Self::Until => "until",
+            Self::Since => "since",
+            Self::Round => "round",
+            Self::Equals => "equals",
+            Self::ToString => "toString",
+            Self::ToJson => "toJSON",
+            Self::ValueOf => "valueOf",
+        }
+    }
+
+    pub(crate) const fn function_name(self) -> &'static str {
+        match self {
+            Self::EpochMilliseconds => "get epochMilliseconds",
+            Self::EpochNanoseconds => "get epochNanoseconds",
+            Self::Add => "add",
+            Self::Subtract => "subtract",
+            Self::Until => "until",
+            Self::Since => "since",
+            Self::Round => "round",
+            Self::Equals => "equals",
+            Self::ToString => "toString",
+            Self::ToJson => "toJSON",
+            Self::ValueOf => "valueOf",
+        }
+    }
+
+    pub(crate) const fn length(self) -> i32 {
+        match self {
+            Self::Add | Self::Subtract | Self::Until | Self::Since | Self::Round | Self::Equals => {
+                1
+            }
+            Self::EpochMilliseconds
+            | Self::EpochNanoseconds
+            | Self::ToString
+            | Self::ToJson
+            | Self::ValueOf => 0,
+        }
+    }
+}
+
+/// Boolean accessors backed by one `RegExp` instance's `[[OriginalFlags]]`.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum RegExpFlag {
+    Global,
+    IgnoreCase,
+    Multiline,
+    DotAll,
+    Unicode,
+    UnicodeSets,
+    Sticky,
+    HasIndices,
+}
+
+impl RegExpFlag {
+    pub(crate) const ALL: [Self; 8] = [
+        Self::Global,
+        Self::IgnoreCase,
+        Self::Multiline,
+        Self::DotAll,
+        Self::Unicode,
+        Self::UnicodeSets,
+        Self::Sticky,
+        Self::HasIndices,
+    ];
+
+    pub(crate) fn code_unit(self) -> u16 {
+        match self {
+            Self::Global => u16::from(b'g'),
+            Self::IgnoreCase => u16::from(b'i'),
+            Self::Multiline => u16::from(b'm'),
+            Self::DotAll => u16::from(b's'),
+            Self::Unicode => u16::from(b'u'),
+            Self::UnicodeSets => u16::from(b'v'),
+            Self::Sticky => u16::from(b'y'),
+            Self::HasIndices => u16::from(b'd'),
+        }
+    }
+
+    pub(crate) const fn atom(self) -> PredefinedAtom {
+        match self {
+            Self::Global => PredefinedAtom::Global,
+            Self::IgnoreCase => PredefinedAtom::IgnoreCase,
+            Self::Multiline => PredefinedAtom::Multiline,
+            Self::DotAll => PredefinedAtom::DotAll,
+            Self::Unicode => PredefinedAtom::Unicode,
+            Self::UnicodeSets => PredefinedAtom::UnicodeSets,
+            Self::Sticky => PredefinedAtom::Sticky,
+            Self::HasIndices => PredefinedAtom::HasIndices,
+        }
+    }
+}
+
+/// Well-known-symbol methods on `%RegExp.prototype%`.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum RegExpSymbolMethod {
+    Replace,
+    Match,
+    MatchAll,
+    Search,
+    Split,
+}
+
+impl RegExpSymbolMethod {
+    pub(crate) const ALL: [Self; 5] = [
+        Self::Replace,
+        Self::Match,
+        Self::MatchAll,
+        Self::Search,
+        Self::Split,
+    ];
+
+    pub(crate) const fn atom(self) -> PredefinedAtom {
+        match self {
+            Self::Replace => PredefinedAtom::SymbolReplace,
+            Self::Match => PredefinedAtom::SymbolMatch,
+            Self::MatchAll => PredefinedAtom::SymbolMatchAll,
+            Self::Search => PredefinedAtom::SymbolSearch,
+            Self::Split => PredefinedAtom::SymbolSplit,
+        }
+    }
+
+    pub(crate) const fn name(self) -> &'static str {
+        match self {
+            Self::Replace => "[Symbol.replace]",
+            Self::Match => "[Symbol.match]",
+            Self::MatchAll => "[Symbol.matchAll]",
+            Self::Search => "[Symbol.search]",
+            Self::Split => "[Symbol.split]",
+        }
+    }
+
+    pub(crate) const fn length(self) -> i32 {
+        match self {
+            Self::Replace | Self::Split => 2,
+            Self::Match | Self::MatchAll | Self::Search => 1,
+        }
+    }
+}
+
+/// Methods installed on `%Map.prototype%` in pinned `QuickJS` property order.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum MapMethod {
+    Set,
+    Get,
+    GetOrInsert,
+    GetOrInsertComputed,
+    Has,
+    Delete,
+    Clear,
+    Size,
+    ForEach,
+    Values,
+    Keys,
+    Entries,
+}
+
+impl MapMethod {
+    pub(crate) const ALL: [Self; 12] = [
+        Self::Set,
+        Self::Get,
+        Self::GetOrInsert,
+        Self::GetOrInsertComputed,
+        Self::Has,
+        Self::Delete,
+        Self::Clear,
+        Self::Size,
+        Self::ForEach,
+        Self::Values,
+        Self::Keys,
+        Self::Entries,
+    ];
+
+    pub(crate) const fn name(self) -> &'static str {
+        match self {
+            Self::Set => "set",
+            Self::Get => "get",
+            Self::GetOrInsert => "getOrInsert",
+            Self::GetOrInsertComputed => "getOrInsertComputed",
+            Self::Has => "has",
+            Self::Delete => "delete",
+            Self::Clear => "clear",
+            Self::Size => "size",
+            Self::ForEach => "forEach",
+            Self::Values => "values",
+            Self::Keys => "keys",
+            Self::Entries => "entries",
+        }
+    }
+
+    pub(crate) const fn length(self) -> i32 {
+        match self {
+            Self::Set | Self::GetOrInsert | Self::GetOrInsertComputed => 2,
+            Self::Get | Self::Has | Self::Delete | Self::ForEach => 1,
+            Self::Clear | Self::Size | Self::Values | Self::Keys | Self::Entries => 0,
+        }
+    }
+}
+
+/// Function identities installed on `%Set.prototype%` in pinned `QuickJS` order.
+/// `keys` and `@@iterator` alias the single `values` identity and therefore do
+/// not receive their own enum variants.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum SetMethod {
+    Add,
+    Has,
+    Delete,
+    Clear,
+    Size,
+    ForEach,
+    IsDisjointFrom,
+    IsSubsetOf,
+    IsSupersetOf,
+    Intersection,
+    Difference,
+    SymmetricDifference,
+    Union,
+    Values,
+    Entries,
+}
+
+impl SetMethod {
+    pub(crate) const ALL: [Self; 15] = [
+        Self::Add,
+        Self::Has,
+        Self::Delete,
+        Self::Clear,
+        Self::Size,
+        Self::ForEach,
+        Self::IsDisjointFrom,
+        Self::IsSubsetOf,
+        Self::IsSupersetOf,
+        Self::Intersection,
+        Self::Difference,
+        Self::SymmetricDifference,
+        Self::Union,
+        Self::Values,
+        Self::Entries,
+    ];
+
+    pub(crate) const fn name(self) -> &'static str {
+        match self {
+            Self::Add => "add",
+            Self::Has => "has",
+            Self::Delete => "delete",
+            Self::Clear => "clear",
+            Self::Size => "size",
+            Self::ForEach => "forEach",
+            Self::IsDisjointFrom => "isDisjointFrom",
+            Self::IsSubsetOf => "isSubsetOf",
+            Self::IsSupersetOf => "isSupersetOf",
+            Self::Intersection => "intersection",
+            Self::Difference => "difference",
+            Self::SymmetricDifference => "symmetricDifference",
+            Self::Union => "union",
+            Self::Values => "values",
+            Self::Entries => "entries",
+        }
+    }
+
+    pub(crate) const fn length(self) -> i32 {
+        match self {
+            Self::Clear | Self::Size | Self::Values | Self::Entries => 0,
+            Self::Add
+            | Self::Has
+            | Self::Delete
+            | Self::ForEach
+            | Self::IsDisjointFrom
+            | Self::IsSubsetOf
+            | Self::IsSupersetOf
+            | Self::Intersection
+            | Self::Difference
+            | Self::SymmetricDifference
+            | Self::Union => 1,
+        }
+    }
+}
+
+/// Methods installed on `%WeakMap.prototype%` in pinned `QuickJS` order.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum WeakMapMethod {
+    Set,
+    Get,
+    GetOrInsert,
+    GetOrInsertComputed,
+    Has,
+    Delete,
+}
+
+impl WeakMapMethod {
+    pub(crate) const ALL: [Self; 6] = [
+        Self::Set,
+        Self::Get,
+        Self::GetOrInsert,
+        Self::GetOrInsertComputed,
+        Self::Has,
+        Self::Delete,
+    ];
+
+    pub(crate) const fn length(self) -> i32 {
+        match self {
+            Self::Set | Self::GetOrInsert | Self::GetOrInsertComputed => 2,
+            Self::Get | Self::Has | Self::Delete => 1,
+        }
+    }
+}
+
+/// Methods installed on `%WeakSet.prototype%` in pinned `QuickJS` order.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum WeakSetMethod {
+    Add,
+    Has,
+    Delete,
+}
+
+/// Methods installed on `%FinalizationRegistry.prototype%` in pinned
+/// `QuickJS` order.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum FinalizationRegistryMethod {
+    Register,
+    Unregister,
+}
+
+impl FinalizationRegistryMethod {
+    pub(crate) const ALL: [Self; 2] = [Self::Register, Self::Unregister];
+
+    pub(crate) const fn length(self) -> i32 {
+        match self {
+            Self::Register => 2,
+            Self::Unregister => 1,
+        }
+    }
+}
+
+impl WeakSetMethod {
+    pub(crate) const ALL: [Self; 3] = [Self::Add, Self::Has, Self::Delete];
+
+    pub(crate) const fn length() -> i32 {
+        1
+    }
+}
+
+/// The remaining methods installed on the `Promise` constructor.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum PromiseStatic {
+    All,
+    AllSettled,
+    Any,
+    Try,
+    Race,
+    WithResolvers,
+}
+
+impl PromiseStatic {
+    /// Pinned `QuickJS` 2026-06-04 own-property publication order.
+    pub(crate) const ALL: [Self; 6] = [
+        Self::All,
+        Self::AllSettled,
+        Self::Any,
+        Self::Try,
+        Self::Race,
+        Self::WithResolvers,
+    ];
+
+    pub(crate) const fn name(self) -> &'static str {
+        match self {
+            Self::All => "all",
+            Self::AllSettled => "allSettled",
+            Self::Any => "any",
+            Self::Try => "try",
+            Self::Race => "race",
+            Self::WithResolvers => "withResolvers",
+        }
+    }
+
+    pub(crate) const fn length(self) -> i32 {
+        match self {
+            Self::WithResolvers => 0,
+            Self::All | Self::AllSettled | Self::Any | Self::Try | Self::Race => 1,
+        }
+    }
+}
+
+/// The generic factories installed on the `Array` constructor.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum ArrayStatic {
+    From,
+    FromAsync,
+    Of,
+}
+
+impl ArrayStatic {
+    pub(crate) const ALL: [Self; 3] = [Self::From, Self::FromAsync, Self::Of];
+
+    pub(crate) const fn length(self) -> i32 {
+        match self {
+            Self::From | Self::FromAsync => 1,
+            Self::Of => 0,
+        }
+    }
+
+    pub(crate) const fn predefined_atom(self) -> Option<PredefinedAtom> {
+        match self {
+            Self::From => Some(PredefinedAtom::From),
+            Self::FromAsync => None,
+            Self::Of => Some(PredefinedAtom::Of),
+        }
+    }
+}
+
+/// The ECMAScript 2025 `%Reflect%` method set, in specification property order.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum ReflectMethod {
+    Apply,
+    Construct,
+    DefineProperty,
+    DeleteProperty,
+    Get,
+    GetOwnPropertyDescriptor,
+    GetPrototypeOf,
+    Has,
+    IsExtensible,
+    OwnKeys,
+    PreventExtensions,
+    Set,
+    SetPrototypeOf,
+}
+
+impl ReflectMethod {
+    pub(crate) const ALL: [Self; 13] = [
+        Self::Apply,
+        Self::Construct,
+        Self::DefineProperty,
+        Self::DeleteProperty,
+        Self::Get,
+        Self::GetOwnPropertyDescriptor,
+        Self::GetPrototypeOf,
+        Self::Has,
+        Self::IsExtensible,
+        Self::OwnKeys,
+        Self::PreventExtensions,
+        Self::Set,
+        Self::SetPrototypeOf,
+    ];
+
+    pub(crate) const fn predefined_atom(self) -> PredefinedAtom {
+        match self {
+            Self::Apply => PredefinedAtom::Apply,
+            Self::Construct => PredefinedAtom::Construct,
+            Self::DefineProperty => PredefinedAtom::DefineProperty,
+            Self::DeleteProperty => PredefinedAtom::DeleteProperty,
+            Self::Get => PredefinedAtom::Get,
+            Self::GetOwnPropertyDescriptor => PredefinedAtom::GetOwnPropertyDescriptor,
+            Self::GetPrototypeOf => PredefinedAtom::GetPrototypeOf,
+            Self::Has => PredefinedAtom::Has,
+            Self::IsExtensible => PredefinedAtom::IsExtensible,
+            Self::OwnKeys => PredefinedAtom::OwnKeys,
+            Self::PreventExtensions => PredefinedAtom::PreventExtensions,
+            Self::Set => PredefinedAtom::SetProperty,
+            Self::SetPrototypeOf => PredefinedAtom::SetPrototypeOf,
+        }
+    }
+
+    pub(crate) const fn length(self) -> i32 {
+        match self {
+            Self::Apply | Self::DefineProperty | Self::Set => 3,
+            Self::Construct
+            | Self::DeleteProperty
+            | Self::Get
+            | Self::GetOwnPropertyDescriptor
+            | Self::Has
+            | Self::SetPrototypeOf => 2,
+            Self::GetPrototypeOf | Self::IsExtensible | Self::OwnKeys | Self::PreventExtensions => {
+                1
+            }
+        }
+    }
 }
 
 impl NativeFunctionKind {
@@ -749,6 +2728,24 @@ impl NativeFunctionKind {
                 | Self::NumberConstructor
                 | Self::StringConstructor
                 | Self::ArrayConstructor
+                | Self::ArrayBufferConstructor
+                | Self::DataViewConstructor
+                | Self::TypedArrayConstructor(_)
+                | Self::DateConstructor
+                | Self::TemporalDurationConstructor
+                | Self::TemporalInstantConstructor
+                | Self::RegExpConstructor
+                | Self::GeneratorFunctionConstructor
+                | Self::AsyncFunctionConstructor
+                | Self::AsyncGeneratorFunctionConstructor
+                | Self::PromiseConstructor
+                | Self::MapConstructor
+                | Self::SetConstructor
+                | Self::WeakMapConstructor
+                | Self::WeakSetConstructor
+                | Self::WeakRefConstructor
+                | Self::FinalizationRegistryConstructor
+                | Self::ProxyConstructor
         )
     }
 }
@@ -763,6 +2760,182 @@ pub(crate) enum FunctionImplementation {
     Bytecode(BytecodeFunction),
     Native(NativeFunction),
     Bound(BoundFunction),
+    PromiseResolving(PromiseResolvingFunction),
+    PromiseCapabilityExecutor(PromiseCapabilityExecutor),
+    PromiseFinally(PromiseFinallyFunction),
+    PromiseCombinatorElement(PromiseCombinatorElementFunction),
+    /// A callable Proxy exotic object. Non-callable proxies live in the object
+    /// arena with the same state representation.
+    Proxy(ProxyState),
+    /// The idempotent closure created by `Proxy.revocable`.
+    ProxyRevoker(ProxyRevokerFunction),
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct ProxyRevokerFunction {
+    pub(crate) proxy: HeapReference,
+    pub(crate) realm: RealmId,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum PromiseResolvingKind {
+    Resolve,
+    Reject,
+}
+
+pub(crate) struct PromiseResolvingFunction {
+    pub(crate) promise: ObjectId,
+    pub(crate) realm: RealmId,
+    pub(crate) kind: PromiseResolvingKind,
+    pub(crate) already_resolved: Rc<Cell<bool>>,
+}
+
+impl Clone for PromiseResolvingFunction {
+    fn clone(&self) -> Self {
+        Self {
+            promise: self.promise,
+            realm: self.realm,
+            kind: self.kind,
+            already_resolved: Rc::clone(&self.already_resolved),
+        }
+    }
+}
+
+#[derive(Default)]
+pub(crate) struct PromiseCapabilityCapture {
+    pub(crate) resolve: Option<StoredValue>,
+    pub(crate) reject: Option<StoredValue>,
+}
+
+pub(crate) struct PromiseCapabilityExecutor {
+    pub(crate) realm: RealmId,
+    pub(crate) capture: Rc<RefCell<PromiseCapabilityCapture>>,
+}
+
+impl Clone for PromiseCapabilityExecutor {
+    fn clone(&self) -> Self {
+        Self {
+            realm: self.realm,
+            capture: Rc::clone(&self.capture),
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum PromiseFinallyHandlerKind {
+    Then,
+    Catch,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum PromiseFinallyThunkKind {
+    Return,
+    Throw,
+}
+
+pub(crate) enum PromiseFinallyFunction {
+    Handler {
+        realm: RealmId,
+        on_finally: FunctionId,
+        constructor: FunctionId,
+        kind: PromiseFinallyHandlerKind,
+    },
+    Thunk {
+        realm: RealmId,
+        completion: StoredValue,
+        kind: PromiseFinallyThunkKind,
+    },
+}
+
+impl PromiseFinallyFunction {
+    pub(crate) const fn realm(&self) -> RealmId {
+        match self {
+            Self::Handler { realm, .. } | Self::Thunk { realm, .. } => *realm,
+        }
+    }
+}
+
+impl Clone for PromiseFinallyFunction {
+    fn clone(&self) -> Self {
+        match self {
+            Self::Handler {
+                realm,
+                on_finally,
+                constructor,
+                kind,
+            } => Self::Handler {
+                realm: *realm,
+                on_finally: *on_finally,
+                constructor: *constructor,
+                kind: *kind,
+            },
+            Self::Thunk {
+                realm,
+                completion,
+                kind,
+            } => Self::Thunk {
+                realm: *realm,
+                completion: completion.duplicate(),
+                kind: *kind,
+            },
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum PromiseCombinatorKind {
+    All,
+    AllSettled,
+    Any,
+    Race,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum PromiseCombinatorElementKind {
+    AllResolve,
+    AllSettledResolve,
+    AllSettledReject,
+    AnyReject,
+}
+
+pub(crate) struct PromiseCombinatorShared {
+    pub(crate) kind: PromiseCombinatorKind,
+    pub(crate) capability: PromiseCapability,
+    pub(crate) values: Vec<Option<StoredValue>>,
+    pub(crate) remaining: u64,
+}
+
+pub(crate) struct PromiseCombinatorElementFunction {
+    pub(crate) realm: RealmId,
+    pub(crate) kind: PromiseCombinatorElementKind,
+    pub(crate) index: usize,
+    pub(crate) shared: Rc<RefCell<PromiseCombinatorShared>>,
+    pub(crate) already_called: Rc<Cell<bool>>,
+}
+
+impl Clone for PromiseCombinatorElementFunction {
+    fn clone(&self) -> Self {
+        Self {
+            realm: self.realm,
+            kind: self.kind,
+            index: self.index,
+            shared: Rc::clone(&self.shared),
+            already_called: Rc::clone(&self.already_called),
+        }
+    }
+}
+
+pub(crate) enum PromiseJob {
+    Reaction {
+        reaction: PromiseReaction,
+        argument: StoredValue,
+    },
+    Thenable {
+        promise: ObjectId,
+        realm: RealmId,
+        thenable: StoredValue,
+        then: FunctionId,
+    },
 }
 
 /// One `Function.prototype.bind` result: a callable/constructable function
@@ -789,20 +2962,137 @@ impl HeapFunction {
             FunctionImplementation::Bound(_) => Err(crate::EngineFault::RuntimeInvariant {
                 message: "bound function reached the bytecode execution path",
             }),
+            FunctionImplementation::PromiseResolving(_) => {
+                Err(crate::EngineFault::RuntimeInvariant {
+                    message: "Promise resolving function reached the bytecode execution path",
+                })
+            }
+            FunctionImplementation::PromiseCapabilityExecutor(_) => {
+                Err(crate::EngineFault::RuntimeInvariant {
+                    message: "Promise capability executor reached the bytecode execution path",
+                })
+            }
+            FunctionImplementation::PromiseFinally(_) => {
+                Err(crate::EngineFault::RuntimeInvariant {
+                    message: "Promise finally function reached the bytecode execution path",
+                })
+            }
+            FunctionImplementation::PromiseCombinatorElement(_) => {
+                Err(crate::EngineFault::RuntimeInvariant {
+                    message: "Promise combinator element function reached the bytecode execution path",
+                })
+            }
+            FunctionImplementation::Proxy(_) => Err(crate::EngineFault::RuntimeInvariant {
+                message: "Proxy function reached the bytecode execution path",
+            }),
+            FunctionImplementation::ProxyRevoker(_) => Err(crate::EngineFault::RuntimeInvariant {
+                message: "Proxy revoker reached the bytecode execution path",
+            }),
         }
     }
 
     pub(crate) const fn native(&self) -> Option<&NativeFunction> {
         match &self.implementation {
-            FunctionImplementation::Bytecode(_) | FunctionImplementation::Bound(_) => None,
+            FunctionImplementation::Bytecode(_)
+            | FunctionImplementation::Bound(_)
+            | FunctionImplementation::PromiseResolving(_)
+            | FunctionImplementation::PromiseCapabilityExecutor(_)
+            | FunctionImplementation::PromiseFinally(_)
+            | FunctionImplementation::PromiseCombinatorElement(_)
+            | FunctionImplementation::Proxy(_)
+            | FunctionImplementation::ProxyRevoker(_) => None,
             FunctionImplementation::Native(function) => Some(function),
         }
     }
 
     pub(crate) fn bound(&self) -> Option<&BoundFunction> {
         match &self.implementation {
-            FunctionImplementation::Bytecode(_) | FunctionImplementation::Native(_) => None,
+            FunctionImplementation::Bytecode(_)
+            | FunctionImplementation::Native(_)
+            | FunctionImplementation::PromiseResolving(_)
+            | FunctionImplementation::PromiseCapabilityExecutor(_)
+            | FunctionImplementation::PromiseFinally(_)
+            | FunctionImplementation::PromiseCombinatorElement(_)
+            | FunctionImplementation::Proxy(_)
+            | FunctionImplementation::ProxyRevoker(_) => None,
             FunctionImplementation::Bound(bound) => Some(bound),
+        }
+    }
+
+    pub(crate) fn promise_resolving(&self) -> Option<&PromiseResolvingFunction> {
+        match &self.implementation {
+            FunctionImplementation::PromiseResolving(resolving) => Some(resolving),
+            FunctionImplementation::Bytecode(_)
+            | FunctionImplementation::Native(_)
+            | FunctionImplementation::Bound(_)
+            | FunctionImplementation::PromiseCapabilityExecutor(_)
+            | FunctionImplementation::PromiseFinally(_)
+            | FunctionImplementation::PromiseCombinatorElement(_)
+            | FunctionImplementation::Proxy(_)
+            | FunctionImplementation::ProxyRevoker(_) => None,
+        }
+    }
+
+    pub(crate) fn promise_capability_executor(&self) -> Option<&PromiseCapabilityExecutor> {
+        match &self.implementation {
+            FunctionImplementation::PromiseCapabilityExecutor(executor) => Some(executor),
+            FunctionImplementation::Bytecode(_)
+            | FunctionImplementation::Native(_)
+            | FunctionImplementation::Bound(_)
+            | FunctionImplementation::PromiseResolving(_)
+            | FunctionImplementation::PromiseFinally(_)
+            | FunctionImplementation::PromiseCombinatorElement(_)
+            | FunctionImplementation::Proxy(_)
+            | FunctionImplementation::ProxyRevoker(_) => None,
+        }
+    }
+
+    pub(crate) fn promise_finally(&self) -> Option<&PromiseFinallyFunction> {
+        match &self.implementation {
+            FunctionImplementation::PromiseFinally(function) => Some(function),
+            FunctionImplementation::Bytecode(_)
+            | FunctionImplementation::Native(_)
+            | FunctionImplementation::Bound(_)
+            | FunctionImplementation::PromiseResolving(_)
+            | FunctionImplementation::PromiseCapabilityExecutor(_)
+            | FunctionImplementation::PromiseCombinatorElement(_)
+            | FunctionImplementation::Proxy(_)
+            | FunctionImplementation::ProxyRevoker(_) => None,
+        }
+    }
+
+    pub(crate) fn promise_combinator_element(&self) -> Option<&PromiseCombinatorElementFunction> {
+        match &self.implementation {
+            FunctionImplementation::PromiseCombinatorElement(function) => Some(function),
+            FunctionImplementation::Bytecode(_)
+            | FunctionImplementation::Native(_)
+            | FunctionImplementation::Bound(_)
+            | FunctionImplementation::PromiseResolving(_)
+            | FunctionImplementation::PromiseCapabilityExecutor(_)
+            | FunctionImplementation::PromiseFinally(_)
+            | FunctionImplementation::Proxy(_)
+            | FunctionImplementation::ProxyRevoker(_) => None,
+        }
+    }
+
+    pub(crate) const fn proxy(&self) -> Option<&ProxyState> {
+        match &self.implementation {
+            FunctionImplementation::Proxy(state) => Some(state),
+            _ => None,
+        }
+    }
+
+    pub(crate) const fn proxy_mut(&mut self) -> Option<&mut ProxyState> {
+        match &mut self.implementation {
+            FunctionImplementation::Proxy(state) => Some(state),
+            _ => None,
+        }
+    }
+
+    pub(crate) const fn proxy_revoker(&self) -> Option<ProxyRevokerFunction> {
+        match self.implementation {
+            FunctionImplementation::ProxyRevoker(revoker) => Some(revoker),
+            _ => None,
         }
     }
 }
@@ -827,6 +3117,7 @@ pub(crate) struct RealmGlobalBinding {
 pub(crate) enum RealmGlobalBindingState {
     Unresolved,
     Object,
+    Lexical { cell: BindingCellId, mutable: bool },
 }
 
 #[derive(Clone, Copy)]
@@ -834,6 +3125,8 @@ enum RealmGlobalRequest {
     Lookup,
     Var,
     Function,
+    Let,
+    Const,
 }
 
 impl RealmGlobalRequest {
@@ -862,41 +3155,81 @@ impl RealmGlobalRequest {
                 quickjs_bytecode::CompilerWritePolicy::Mutable,
                 false,
             ) => Ok(Self::Function),
+            (
+                CompilerBindingKind::Let,
+                quickjs_bytecode::CompilerInitializationPolicy::AtDeclaration,
+                quickjs_bytecode::CompilerWritePolicy::Mutable,
+                true,
+            ) => Ok(Self::Let),
+            (
+                CompilerBindingKind::Const,
+                quickjs_bytecode::CompilerInitializationPolicy::AtDeclaration,
+                quickjs_bytecode::CompilerWritePolicy::Immutable,
+                true,
+            ) => Ok(Self::Const),
             _ => Err(InstallError::AuthorityInvariant {
                 message: "unsupported constructor-realm global declaration policy",
             }),
         }
     }
 
-    const fn initial_state(self) -> RealmGlobalBindingState {
+    const fn initial_nonlexical_state(self) -> Option<RealmGlobalBindingState> {
         match self {
-            Self::Lookup => RealmGlobalBindingState::Unresolved,
-            Self::Var | Self::Function => RealmGlobalBindingState::Object,
+            Self::Lookup => Some(RealmGlobalBindingState::Unresolved),
+            Self::Var | Self::Function => Some(RealmGlobalBindingState::Object),
+            Self::Let | Self::Const => None,
         }
     }
 
-    const fn upgraded_state(self, current: RealmGlobalBindingState) -> RealmGlobalBindingState {
+    const fn upgraded_object_state(
+        self,
+        current: RealmGlobalBindingState,
+    ) -> Option<RealmGlobalBindingState> {
         match (self, current) {
             (Self::Lookup, current)
-            | (Self::Var | Self::Function, current @ RealmGlobalBindingState::Object) => current,
-            (Self::Var | Self::Function, RealmGlobalBindingState::Unresolved) => {
-                RealmGlobalBindingState::Object
+            | (Self::Var | Self::Function, current @ RealmGlobalBindingState::Object) => {
+                Some(current)
             }
+            (Self::Var | Self::Function, RealmGlobalBindingState::Unresolved) => {
+                Some(RealmGlobalBindingState::Object)
+            }
+            (Self::Var | Self::Function, RealmGlobalBindingState::Lexical { .. })
+            | (Self::Let | Self::Const, _) => None,
         }
     }
 
     const fn declares_object_property(self) -> bool {
-        !matches!(self, Self::Lookup)
+        matches!(self, Self::Var | Self::Function)
+    }
+
+    const fn lexical_mutability(self) -> Option<bool> {
+        match self {
+            Self::Let => Some(true),
+            Self::Const => Some(false),
+            Self::Lookup | Self::Var | Self::Function => None,
+        }
     }
 }
 
-const fn dynamic_function_declaration_property_layout() -> PropertyLayout {
-    PropertyLayout::data(true, true, true)
+const fn global_declaration_property_layout(
+    executable_kind: CompilerExecutableKind,
+) -> PropertyLayout {
+    PropertyLayout::data(
+        true,
+        true,
+        matches!(
+            executable_kind,
+            CompilerExecutableKind::DynamicFunctionScript
+        ),
+    )
 }
 
-fn global_function_replacement_layout(existing: PropertyLayout) -> Option<PropertyLayout> {
+fn global_function_replacement_layout(
+    existing: PropertyLayout,
+    declaration: PropertyLayout,
+) -> Option<PropertyLayout> {
     if existing.is_configurable() {
-        Some(dynamic_function_declaration_property_layout())
+        Some(declaration)
     } else if existing.writable() == Some(true) && existing.is_enumerable() {
         Some(existing)
     } else {
@@ -1017,6 +3350,7 @@ pub struct Runtime {
     pub(crate) code: Arena<crate::ids::InstalledCodeMarker, InstalledCode>,
     pub(crate) functions: Arena<crate::ids::FunctionMarker, HeapFunction>,
     pub(crate) objects: Arena<crate::ids::ObjectMarker, HeapObject>,
+    pub(crate) shape_interner: Rc<RefCell<ShapeInterner>>,
     pub(crate) cells: Arena<crate::ids::BindingCellMarker, BindingCell>,
     pub(crate) global_bindings: Arena<crate::ids::RealmGlobalBindingMarker, RealmGlobalBinding>,
     pub(crate) limits: RuntimeLimits,
@@ -1024,10 +3358,22 @@ pub struct Runtime {
     installed_atoms: u64,
     installed_constants: u64,
     pub(crate) object_properties: u64,
+    pub(crate) array_buffer_bytes: u64,
     pub(crate) for_in_entries: u64,
+    pub(crate) collection_entries: u64,
     public_roots: u64,
     pub(crate) collection_pending: bool,
     pub(crate) interrupts: InterruptState,
+    pub(crate) promise_rejections: PromiseRejectionState,
+    pub(crate) promise_jobs: VecDeque<PromiseJob>,
+    pub(crate) finalization_jobs: VecDeque<ObjectId>,
+    pub(crate) kept_alive: Vec<StoredValue>,
+    pub(crate) generator_states: HashMap<ObjectId, crate::vm::GeneratorRecord>,
+    pub(crate) async_function_states: HashMap<ObjectId, crate::vm::AsyncFunctionRecord>,
+    pub(crate) async_generator_states: HashMap<ObjectId, crate::vm::AsyncGeneratorRecord>,
+    pub(crate) array_from_async_states: HashMap<ObjectId, crate::vm::ArrayFromAsyncRecord>,
+    /// Next non-zero seed assigned after a realm transaction commits.
+    next_math_random_seed: u64,
 }
 
 impl Runtime {
@@ -1054,17 +3400,51 @@ impl Runtime {
     pub fn has_interrupt_handler(&self) -> bool {
         self.interrupts.is_installed()
     }
+
+    /// Returns the predefined atom with the given descriptor.
+    pub(crate) fn predefined_atom(&self, predefined: PredefinedAtom) -> Atom {
+        self.atoms.predefined(predefined)
+    }
+
+    /// Returns a mutable reference to the bytecode function backing a function id.
+    pub(crate) fn bytecode_function_mut(
+        &mut self,
+        id: FunctionId,
+    ) -> Option<&mut BytecodeFunction> {
+        match self.functions.get_mut(id) {
+            Some(HeapFunction {
+                implementation: FunctionImplementation::Bytecode(bytecode),
+                ..
+            }) => Some(bytecode),
+            _ => None,
+        }
+    }
+
+    /// Returns an immutable reference to the bytecode function backing a function id.
+    pub(crate) fn bytecode_function(&self, id: FunctionId) -> Option<&BytecodeFunction> {
+        match self.functions.get(id) {
+            Some(HeapFunction {
+                implementation: FunctionImplementation::Bytecode(bytecode),
+                ..
+            }) => Some(bytecode),
+            _ => None,
+        }
+    }
 }
 
 mod arrays;
 mod context;
 mod for_in;
 mod gc;
+mod generators;
 pub use gc::CollectionReport;
 pub(crate) use gc::CollectionRoot;
 mod heap;
 mod installation;
 mod realm;
+#[cfg(test)]
+mod realm_snapshot;
+mod template_objects;
 
 /// An exclusive runtime mutator bound to one active realm.
 ///
@@ -1119,6 +3499,7 @@ struct RootEnvironment {
     bindings: Vec<EnvironmentBinding>,
     inserted_globals: Vec<(Atom, RealmGlobalBindingId)>,
     updated_globals: Vec<(RealmGlobalBindingId, RealmGlobalBindingState)>,
+    inserted_cells: Vec<BindingCellId>,
     inserted_global_properties: Vec<PropertyKey>,
     updated_global_properties: Vec<(PropertyKey, OwnProperty)>,
 }
@@ -1146,34 +3527,37 @@ fn require_root_kind(
     expected: CompilerExecutableKind,
 ) -> Result<(), InstallError> {
     let actual = authority.root().metadata().executable_kind();
-    if actual == expected {
+    if actual == expected
+        || (expected == CompilerExecutableKind::OrdinaryFunction
+            && matches!(
+                actual,
+                CompilerExecutableKind::GeneratorFunction
+                    | CompilerExecutableKind::AsyncFunction
+                    | CompilerExecutableKind::AsyncGeneratorFunction
+            ))
+    {
         return Ok(());
     }
-    let message = match (expected, actual) {
-        (
-            CompilerExecutableKind::OrdinaryFunction,
-            CompilerExecutableKind::DynamicFunctionScript,
-        ) => "dynamic-function Script cannot be instantiated as an ordinary function",
-        (CompilerExecutableKind::OrdinaryFunction, CompilerExecutableKind::OrdinaryMethod) => {
-            "ordinary method cannot be instantiated as an ordinary function"
+    let message = match expected {
+        CompilerExecutableKind::GlobalScript => {
+            "non-Script executable cannot execute as a host-loaded Global Script"
         }
-        (CompilerExecutableKind::OrdinaryMethod, CompilerExecutableKind::OrdinaryFunction) => {
-            "ordinary function cannot be instantiated as an ordinary method"
+        CompilerExecutableKind::OrdinaryFunction => {
+            "non-instantiable executable cannot be instantiated as a source function"
         }
-        (CompilerExecutableKind::OrdinaryMethod, CompilerExecutableKind::DynamicFunctionScript) => {
-            "dynamic-function Script cannot be instantiated as an ordinary method"
+        CompilerExecutableKind::DynamicFunctionScript => {
+            "source function cannot execute as a dynamic-function Script"
         }
-        (
-            CompilerExecutableKind::DynamicFunctionScript,
-            CompilerExecutableKind::OrdinaryFunction,
-        ) => "ordinary function cannot execute as a dynamic-function Script",
-        (CompilerExecutableKind::DynamicFunctionScript, CompilerExecutableKind::OrdinaryMethod) => {
-            "ordinary method cannot execute as a dynamic-function Script"
-        }
-        _ => {
-            return Err(InstallError::AuthorityInvariant {
-                message: "matching executable kinds reached rejection",
-            });
+        CompilerExecutableKind::OrdinaryMethod
+        | CompilerExecutableKind::ClassConstructor
+        | CompilerExecutableKind::OrdinaryArrow
+        | CompilerExecutableKind::GeneratorFunction
+        | CompilerExecutableKind::GeneratorMethod
+        | CompilerExecutableKind::AsyncFunction
+        | CompilerExecutableKind::AsyncMethod
+        | CompilerExecutableKind::AsyncGeneratorFunction
+        | CompilerExecutableKind::AsyncGeneratorMethod => {
+            "unsupported executable-kind admission request"
         }
     };
     Err(InstallError::AuthorityInvariant { message })
@@ -1195,8 +3579,9 @@ fn preflight_opcodes(authority: &VerifiedBytecode) -> Result<(), InstallError> {
         }
         for (instruction, mapping) in instructions.iter().zip(mappings) {
             let decoded = instruction.decoded();
-            let opcode = decoded.instruction().opcode();
-            if !is_supported_opcode(opcode) {
+            let instruction = decoded.instruction();
+            let opcode = instruction.opcode();
+            if !is_supported_instruction(instruction) {
                 return Err(InstallError::UnsupportedOpcode {
                     function: function_id,
                     pc: decoded.pc(),
@@ -1209,6 +3594,12 @@ fn preflight_opcodes(authority: &VerifiedBytecode) -> Result<(), InstallError> {
     Ok(())
 }
 
+const fn is_supported_instruction(instruction: Instruction) -> bool {
+    is_supported_opcode(instruction.opcode())
+        && (!matches!(instruction.opcode(), FinalOpcode::ThrowError)
+            || matches!(instruction.operands(), Operands::AtomU8 { value: 4, .. }))
+}
+
 #[allow(
     clippy::too_many_lines,
     reason = "whole-graph capability admission remains one exhaustive opcode audit"
@@ -1219,7 +3610,11 @@ const fn is_supported_opcode(opcode: FinalOpcode) -> bool {
         FinalOpcode::PushI32
             | FinalOpcode::PushConst
             | FinalOpcode::FClosure
+            | FinalOpcode::SetName
+            | FinalOpcode::SetNameComputed
+            | FinalOpcode::SetHomeObject
             | FinalOpcode::PushAtomValue
+            | FinalOpcode::PrivateSymbol
             | FinalOpcode::PushBigIntI32
             | FinalOpcode::Undefined
             | FinalOpcode::Null
@@ -1227,6 +3622,9 @@ const fn is_supported_opcode(opcode: FinalOpcode) -> bool {
             | FinalOpcode::PushFalse
             | FinalOpcode::PushTrue
             | FinalOpcode::Object
+            | FinalOpcode::RegExp
+            | FinalOpcode::SpecialObject
+            | FinalOpcode::Rest
             | FinalOpcode::ArrayFrom
             | FinalOpcode::Append
             | FinalOpcode::Catch
@@ -1237,8 +3635,11 @@ const fn is_supported_opcode(opcode: FinalOpcode) -> bool {
             | FinalOpcode::NipCatch
             | FinalOpcode::Dup
             | FinalOpcode::Dup1
+            | FinalOpcode::Dup2
+            | FinalOpcode::Dup3
             | FinalOpcode::Insert2
             | FinalOpcode::Insert3
+            | FinalOpcode::Insert4
             | FinalOpcode::Swap
             | FinalOpcode::Rot3l
             | FinalOpcode::Rot3r
@@ -1246,10 +3647,24 @@ const fn is_supported_opcode(opcode: FinalOpcode) -> bool {
             | FinalOpcode::CallMethod
             | FinalOpcode::CallConstructor
             | FinalOpcode::Apply
+            | FinalOpcode::CheckCtorReturn
+            | FinalOpcode::CheckCtor
+            | FinalOpcode::InitCtor
+            | FinalOpcode::GetSuper
+            | FinalOpcode::GetSuperValue
+            | FinalOpcode::PutSuperValue
             | FinalOpcode::Perm3
+            | FinalOpcode::Perm5
             | FinalOpcode::Throw
             | FinalOpcode::Return
             | FinalOpcode::ReturnUndef
+            | FinalOpcode::ReturnAsync
+            | FinalOpcode::Await
+            | FinalOpcode::InitialYield
+            | FinalOpcode::Yield
+            | FinalOpcode::YieldStar
+            | FinalOpcode::AsyncYieldStar
+            | FinalOpcode::ThrowError
             | FinalOpcode::GetLoc
             | FinalOpcode::PutLoc
             | FinalOpcode::SetLoc
@@ -1259,6 +3674,7 @@ const fn is_supported_opcode(opcode: FinalOpcode) -> bool {
             | FinalOpcode::GetVarUndef
             | FinalOpcode::GetVar
             | FinalOpcode::PutVar
+            | FinalOpcode::PutVarInit
             | FinalOpcode::GetVarRef
             | FinalOpcode::PutVarRef
             | FinalOpcode::SetVarRef
@@ -1272,21 +3688,31 @@ const fn is_supported_opcode(opcode: FinalOpcode) -> bool {
             | FinalOpcode::ForInStart
             | FinalOpcode::ForInNext
             | FinalOpcode::ForOfStart
+            | FinalOpcode::ForAwaitOfStart
             | FinalOpcode::ForOfNext
             | FinalOpcode::IteratorClose
+            | FinalOpcode::IteratorNext
+            | FinalOpcode::IteratorCall
+            | FinalOpcode::IteratorCheckObject
             | FinalOpcode::GetField
             | FinalOpcode::GetField2
+            | FinalOpcode::GetPrivateField
+            | FinalOpcode::PrivateIn
             | FinalOpcode::GetArrayEl
             | FinalOpcode::GetArrayEl2
             | FinalOpcode::PutField
+            | FinalOpcode::PutPrivateField
             | FinalOpcode::PutArrayEl
             | FinalOpcode::Delete
+            | FinalOpcode::DeleteVar
             | FinalOpcode::SetProto
             | FinalOpcode::ToObject
             | FinalOpcode::ToPropKey
             | FinalOpcode::CopyDataProperties
             | FinalOpcode::DefineField
+            | FinalOpcode::DefinePrivateField
             | FinalOpcode::DefineArrayEl
+            | FinalOpcode::DefineClass
             | FinalOpcode::DefineMethod
             | FinalOpcode::DefineMethodComputed
             | FinalOpcode::IfFalse
@@ -1319,9 +3745,11 @@ const fn is_supported_opcode(opcode: FinalOpcode) -> bool {
             | FinalOpcode::StrictEq
             | FinalOpcode::StrictNeq
             | FinalOpcode::InstanceOf
+            | FinalOpcode::In
             | FinalOpcode::And
             | FinalOpcode::Xor
             | FinalOpcode::Or
+            | FinalOpcode::IsNull
             | FinalOpcode::IsUndefinedOrNull
             | FinalOpcode::Nop
             | FinalOpcode::PushMinus1

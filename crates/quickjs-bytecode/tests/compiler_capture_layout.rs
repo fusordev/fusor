@@ -91,6 +91,71 @@ fn compiler_capture_layout_is_dense_ordered_and_retained() {
 }
 
 #[test]
+fn compiler_mapped_argument_positions_are_retained() {
+    let verified = verify_compiler_control_flow(
+        UnverifiedCompilerFunctionBody::new(
+            encode(&[(FinalOpcode::ReturnUndef, Operands::None)]),
+            FunctionIndexDomains::new(0, 0, 4, 0, 0),
+            UnverifiedFunctionHeader::stripped_ordinary_source_function_with_variable_references(
+                false, 4, 0,
+            ),
+        )
+        .with_capture_layout(
+            CompilerCaptureLayout::default().with_mapped_arguments(Arc::from([1, 3])),
+        ),
+        VerificationLimits::default(),
+    )
+    .expect("ascending in-bounds mapped positions are compiler authority");
+
+    assert_eq!(
+        verified
+            .compiler_capture_layout()
+            .expect("layout retained")
+            .mapped_arguments(),
+        Some([1, 3].as_slice())
+    );
+}
+
+#[test]
+fn compiler_mapped_argument_positions_must_be_in_bounds_and_strictly_ascending() {
+    let body = |mapped_arguments: Arc<[u32]>| {
+        UnverifiedCompilerFunctionBody::new(
+            encode(&[(FinalOpcode::ReturnUndef, Operands::None)]),
+            FunctionIndexDomains::new(0, 0, 2, 0, 0),
+            UnverifiedFunctionHeader::stripped_ordinary_source_function_with_variable_references(
+                false, 2, 0,
+            ),
+        )
+        .with_capture_layout(
+            CompilerCaptureLayout::default().with_mapped_arguments(mapped_arguments),
+        )
+    };
+
+    let out_of_bounds =
+        verify_compiler_control_flow(body(Arc::from([2])), VerificationLimits::default())
+            .expect_err("the argument domain bounds mapped positions");
+    assert_eq!(
+        out_of_bounds.kind(),
+        &VerificationErrorKind::CompilerMappedArgumentIndexOutOfBounds { index: 2, len: 2 }
+    );
+
+    let non_ascending: [Arc<[u32]>; 2] = [Arc::from([1, 1]), Arc::from([1, 0])];
+    for mapped_arguments in non_ascending {
+        let rejected_index = mapped_arguments[1];
+        let error =
+            verify_compiler_control_flow(body(mapped_arguments), VerificationLimits::default())
+                .expect_err("mapped positions must be unique and ascending");
+        assert_eq!(
+            error.kind(),
+            &VerificationErrorKind::CompilerMappedArgumentsNotAscending {
+                previous: 1,
+                index: rejected_index,
+            }
+        );
+    }
+}
+
+#[test]
 fn absent_and_explicitly_empty_compiler_capture_layouts_remain_distinct() {
     let bytecode = encode(&[(FinalOpcode::ReturnUndef, Operands::None)]);
     let absent = verify_compiler_control_flow(
