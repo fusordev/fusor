@@ -746,3 +746,39 @@ fn typed_array_reductions_capture_the_initial_view_and_refresh_each_element_read
         ExceptionKind::TypeError
     );
 }
+
+#[test]
+fn typed_array_filter_collects_before_species_and_keeps_fresh_resizable_reads() {
+    assert_eq!(
+        rendered(
+            "var source=new Uint8Array([1,2,3,4]),calls=[],context={tag:'x'};\
+             source.constructor={[Symbol.species]:Uint16Array};\
+             var out=source.filter(function(value,index,array){calls.push(this.tag+value+index+(array===source));return value%2===0},context);\
+             return [Uint8Array.prototype.filter.length,Uint8Array.prototype.filter.name,\
+               out.constructor===Uint16Array,out.length,out[0],out[1],calls.join(',')].join('|');"
+        ),
+        "1|filter|true|2|2|4|x10true,x21true,x32true,x43true"
+    );
+    assert_eq!(
+        rendered(
+            "var buffer=new ArrayBuffer(4,{maxByteLength:4}),source=new Uint8Array(buffer),order=[];\
+             source[0]=7;source[1]=8;\
+             source.constructor={[Symbol.species]:function C(length){order.push('species'+length);return new Uint8Array(length)}};\
+             var out=source.filter(function(value,index){order.push(value===undefined?'u'+index:String(value));if(index===0)buffer.resize(1);return true});\
+             return [out.length,out[0],out[1],out[2],out[3],order.join(',')].join('|');"
+        ),
+        "4|7|0|0|0|7,u1,u2,u3,species4"
+    );
+    assert_eq!(
+        thrown(
+            "var source=new Uint8Array(2);source.constructor={[Symbol.species]:BigInt64Array};source.filter(function(){return true});"
+        ),
+        ExceptionKind::TypeError
+    );
+    assert_eq!(
+        thrown(
+            "var buffer=new ArrayBuffer(4,{maxByteLength:4}),values=new Uint8Array(buffer,2,2);buffer.resize(1);values.filter(function(){return true});"
+        ),
+        ExceptionKind::TypeError
+    );
+}

@@ -1799,6 +1799,7 @@ pub(crate) enum TypedArrayPrototypeMethod {
     ToReversed,
     With,
     Every,
+    Filter,
     Find,
     FindIndex,
     FindLast,
@@ -1811,7 +1812,7 @@ pub(crate) enum TypedArrayPrototypeMethod {
 }
 
 impl TypedArrayPrototypeMethod {
-    pub(crate) const ALL: [Self; 31] = [
+    pub(crate) const ALL: [Self; 32] = [
         Self::Buffer,
         Self::ByteLength,
         Self::ByteOffset,
@@ -1834,6 +1835,7 @@ impl TypedArrayPrototypeMethod {
         Self::ToReversed,
         Self::With,
         Self::Every,
+        Self::Filter,
         Self::Find,
         Self::FindIndex,
         Self::FindLast,
@@ -1870,6 +1872,7 @@ impl TypedArrayPrototypeMethod {
             Self::ToReversed => "toReversed",
             Self::With => "with",
             Self::Every => "every",
+            Self::Filter => "filter",
             Self::Find => "find",
             Self::FindIndex => "findIndex",
             Self::FindLast => "findLast",
@@ -1907,6 +1910,7 @@ impl TypedArrayPrototypeMethod {
             Self::ToReversed => "toReversed",
             Self::With => "with",
             Self::Every => "every",
+            Self::Filter => "filter",
             Self::Find => "find",
             Self::FindIndex => "findIndex",
             Self::FindLast => "findLast",
@@ -1940,6 +1944,7 @@ impl TypedArrayPrototypeMethod {
                 | Self::ToReversed
                 | Self::With
                 | Self::Every
+                | Self::Filter
                 | Self::Find
                 | Self::FindIndex
                 | Self::FindLast
@@ -1963,6 +1968,7 @@ impl TypedArrayPrototypeMethod {
             | Self::Fill
             | Self::Join
             | Self::Every
+            | Self::Filter
             | Self::Find
             | Self::FindIndex
             | Self::FindLast

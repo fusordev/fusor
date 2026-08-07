@@ -26,6 +26,9 @@ pub(super) enum TypedArraySetCompletion {
     /// Resume `%TypedArray%.prototype.map` after its mapped value's indexed
     /// write has completed its own observable numeric conversion.
     Map(Box<TypedArrayPrototypeMapState>),
+    /// Resume `%TypedArray%.prototype.filter` after a collected value's
+    /// indexed write has completed its own observable numeric conversion.
+    Filter(Box<TypedArrayPrototypeFilterState>),
 }
 
 /// The non-observable prefix of typed-array `[[DefineOwnProperty]]`.
@@ -241,6 +244,42 @@ pub(super) struct TypedArrayPrototypeMapState {
     index: usize,
     realm: RealmId,
     stage: TypedArrayPrototypeMapStage,
+    origin: JsStackFrame,
+}
+
+#[allow(
+    clippy::enum_variant_names,
+    reason = "each name identifies the observable read, callback, species, or write boundary being awaited"
+)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum TypedArrayPrototypeFilterStage {
+    NextElement,
+    AwaitElement,
+    AwaitCallback,
+    AwaitConstructor,
+    AwaitSpecies,
+    AwaitConstruct,
+    NextKeptValue,
+}
+
+/// Resumable `%TypedArray%.prototype.filter`.
+///
+/// `filter` reads and selects every source value before it observes the
+/// species constructor. The retained values therefore remain rooted across
+/// callback calls, species construction, and destination element conversion.
+pub(super) struct TypedArrayPrototypeFilterState {
+    source: ObjectId,
+    source_length: usize,
+    source_element: TypedArrayElementType,
+    callback: FunctionId,
+    this_argument: StoredValue,
+    index: usize,
+    element: Option<StoredValue>,
+    kept: Vec<StoredValue>,
+    target: Option<ObjectId>,
+    write_index: usize,
+    realm: RealmId,
+    stage: TypedArrayPrototypeFilterStage,
     origin: JsStackFrame,
 }
 
@@ -492,6 +531,30 @@ impl TypedArrayPrototypeMapState {
     }
 }
 
+impl TypedArrayPrototypeFilterState {
+    pub(super) fn retained_values(&self) -> u64 {
+        3_u64
+            .saturating_add(u64::from(self.element.is_some()))
+            .saturating_add(usize_to_u64(self.kept.len()))
+            .saturating_add(u64::from(self.target.is_some()))
+    }
+
+    pub(super) fn trace_roots(&self, mark: &mut dyn FnMut(CollectionRoot)) {
+        mark(CollectionRoot::Heap(HeapReference::Object(self.source)));
+        mark(CollectionRoot::Heap(HeapReference::Function(self.callback)));
+        trace_stored_value_root(&self.this_argument, mark);
+        if let Some(element) = &self.element {
+            trace_stored_value_root(element, mark);
+        }
+        for value in &self.kept {
+            trace_stored_value_root(value, mark);
+        }
+        if let Some(target) = self.target {
+            mark(CollectionRoot::Heap(HeapReference::Object(target)));
+        }
+    }
+}
+
 impl TypedArrayPrototypeWithState {
     pub(super) const fn retained_values() -> u64 {
         2
@@ -576,6 +639,7 @@ impl TypedArrayElementSetState {
     pub(super) fn retained_values(&self) -> u64 {
         1_u64.saturating_add(match &self.completion {
             TypedArraySetCompletion::Map(_) => TypedArrayPrototypeMapState::retained_values(),
+            TypedArraySetCompletion::Filter(state) => state.retained_values(),
             TypedArraySetCompletion::LanguageWrite
             | TypedArraySetCompletion::ReflectSet
             | TypedArraySetCompletion::Define(_) => 0,
@@ -584,8 +648,12 @@ impl TypedArrayElementSetState {
 
     pub(super) fn trace_roots(&self, mark: &mut dyn FnMut(CollectionRoot)) {
         mark(CollectionRoot::Heap(HeapReference::Object(self.object)));
-        if let TypedArraySetCompletion::Map(state) = &self.completion {
-            state.trace_roots(mark);
+        match &self.completion {
+            TypedArraySetCompletion::Map(state) => state.trace_roots(mark),
+            TypedArraySetCompletion::Filter(state) => state.trace_roots(mark),
+            TypedArraySetCompletion::LanguageWrite
+            | TypedArraySetCompletion::ReflectSet
+            | TypedArraySetCompletion::Define(_) => {}
         }
     }
 }
@@ -1698,6 +1766,7 @@ pub(super) fn dispatch_typed_array_prototype(
             | TypedArrayPrototypeMethod::ToReversed
             | TypedArrayPrototypeMethod::With
             | TypedArrayPrototypeMethod::Every
+            | TypedArrayPrototypeMethod::Filter
             | TypedArrayPrototypeMethod::Find
             | TypedArrayPrototypeMethod::FindIndex
             | TypedArrayPrototypeMethod::FindLast
@@ -1960,6 +2029,19 @@ pub(super) fn dispatch_typed_array_prototype(
         }
         TypedArrayPrototypeMethod::Map => {
             return begin_typed_array_prototype_map(
+                runtime,
+                *object,
+                length,
+                state.element(),
+                arguments,
+                realm,
+                return_to,
+                origin,
+                execution_budget,
+            );
+        }
+        TypedArrayPrototypeMethod::Filter => {
+            return begin_typed_array_prototype_filter(
                 runtime,
                 *object,
                 length,
@@ -3882,6 +3964,399 @@ fn suspend_typed_array_map(
     }))
 }
 
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the native entry preserves the fixed source witness, callback arguments, and standard call context"
+)]
+fn begin_typed_array_prototype_filter(
+    runtime: &mut Runtime,
+    source: ObjectId,
+    source_length: usize,
+    source_element: TypedArrayElementType,
+    mut arguments: CallArguments,
+    realm: RealmId,
+    return_to: Option<CallReturn>,
+    origin: JsStackFrame,
+    execution_budget: &mut ExecutionBudget,
+) -> Result<NativeDispatch, NativeFailure> {
+    let StoredValue::Function(callback) = arguments.take_first_or_undefined() else {
+        return typed_array_type_error(realm, &origin, "not a function");
+    };
+    advance_typed_array_prototype_filter(
+        runtime,
+        TypedArrayPrototypeFilterState {
+            source,
+            source_length,
+            source_element,
+            callback,
+            this_argument: arguments.take_first_or_undefined(),
+            index: 0,
+            element: None,
+            kept: Vec::new(),
+            target: None,
+            write_index: 0,
+            realm,
+            stage: TypedArrayPrototypeFilterStage::NextElement,
+            origin,
+        },
+        StoredValue::Undefined,
+        return_to,
+        execution_budget,
+    )
+}
+
+#[expect(
+    clippy::too_many_lines,
+    reason = "the callback collection, species protocol, and conversion-resuming indexed writes are one ordered filter state machine"
+)]
+pub(super) fn advance_typed_array_prototype_filter(
+    runtime: &mut Runtime,
+    mut state: TypedArrayPrototypeFilterState,
+    value: StoredValue,
+    return_to: Option<CallReturn>,
+    execution_budget: &mut ExecutionBudget,
+) -> Result<NativeDispatch, NativeFailure> {
+    match state.stage {
+        TypedArrayPrototypeFilterStage::NextElement => {
+            if state.index >= state.source_length {
+                return begin_typed_array_filter_constructor_get(
+                    runtime,
+                    state,
+                    return_to,
+                    execution_budget,
+                );
+            }
+            execution_budget.charge_instructions(1)?;
+            let key = array_static_index_key(runtime, usize_to_u64(state.index))?;
+            let source = StoredValue::Object(state.source);
+            charge_heap_property_lookup(runtime, &source, execution_budget)?;
+            state.stage = TypedArrayPrototypeFilterStage::AwaitElement;
+            let dispatch = begin_value_get(
+                runtime,
+                &source,
+                key,
+                None,
+                state.realm,
+                return_to,
+                state.origin.clone(),
+                execution_budget,
+            )?;
+            continue_get_after(
+                dispatch,
+                state,
+                typed_array_prototype_filter_continuation,
+                |state, value| {
+                    advance_typed_array_prototype_filter(
+                        runtime,
+                        state,
+                        value,
+                        return_to,
+                        execution_budget,
+                    )
+                },
+                "TypedArray.prototype.filter source Get produced a structured result",
+            )
+        }
+        TypedArrayPrototypeFilterStage::AwaitElement => {
+            state.element = Some(value.duplicate());
+            let mut callback_arguments = Vec::new();
+            callback_arguments.try_reserve_exact(3).map_err(|_| {
+                ExecutionError::AllocationFailed {
+                    resource: RuntimeResource::Frames,
+                    additional: 3,
+                }
+            })?;
+            callback_arguments.push(value);
+            callback_arguments.push(typed_array_usize_number(state.index));
+            callback_arguments.push(StoredValue::Object(state.source));
+            state.stage = TypedArrayPrototypeFilterStage::AwaitCallback;
+            let callback = state.callback;
+            let receiver = state.this_argument.duplicate();
+            suspend_typed_array_filter(state, callback, receiver, callback_arguments, return_to)
+        }
+        TypedArrayPrototypeFilterStage::AwaitCallback => {
+            if value.is_truthy() {
+                let element = state.element.take().ok_or(EngineFault::RuntimeInvariant {
+                    message: "TypedArray.prototype.filter lost a source element before its callback completed",
+                })?;
+                state
+                    .kept
+                    .try_reserve(1)
+                    .map_err(|_| ExecutionError::AllocationFailed {
+                        resource: RuntimeResource::Frames,
+                        additional: 1,
+                    })?;
+                state.kept.push(element);
+            } else {
+                state.element = None;
+            }
+            state.index = state
+                .index
+                .checked_add(1)
+                .ok_or(EngineFault::RuntimeInvariant {
+                    message: "TypedArray.prototype.filter index overflowed within its captured length",
+                })?;
+            state.stage = TypedArrayPrototypeFilterStage::NextElement;
+            advance_typed_array_prototype_filter(
+                runtime,
+                state,
+                StoredValue::Undefined,
+                return_to,
+                execution_budget,
+            )
+        }
+        TypedArrayPrototypeFilterStage::AwaitConstructor => {
+            if let StoredValue::Function(function) = value
+                && function_is_constructor(runtime, function)?
+            {
+                let function_realm = runtime.function_realm(function)?;
+                if function_realm != state.realm
+                    && function
+                        == runtime
+                            .realm_typed_array_constructor(function_realm, state.source_element)?
+                {
+                    let constructor =
+                        runtime.realm_typed_array_constructor(state.realm, state.source_element)?;
+                    return begin_typed_array_filter_construct(state, constructor, return_to);
+                }
+            }
+            if matches!(value, StoredValue::Undefined) {
+                let constructor =
+                    runtime.realm_typed_array_constructor(state.realm, state.source_element)?;
+                return begin_typed_array_filter_construct(state, constructor, return_to);
+            }
+            if !matches!(value, StoredValue::Object(_) | StoredValue::Function(_)) {
+                return typed_array_type_error(state.realm, &state.origin, "not a constructor");
+            }
+            state.stage = TypedArrayPrototypeFilterStage::AwaitSpecies;
+            begin_typed_array_filter_species_get(
+                runtime,
+                state,
+                &value,
+                return_to,
+                execution_budget,
+            )
+        }
+        TypedArrayPrototypeFilterStage::AwaitSpecies => {
+            let constructor = if matches!(value, StoredValue::Undefined | StoredValue::Null) {
+                runtime.realm_typed_array_constructor(state.realm, state.source_element)?
+            } else if let StoredValue::Function(function) = value {
+                if !function_is_constructor(runtime, function)? {
+                    return typed_array_type_error(state.realm, &state.origin, "not a constructor");
+                }
+                function
+            } else {
+                return typed_array_type_error(state.realm, &state.origin, "not a constructor");
+            };
+            begin_typed_array_filter_construct(state, constructor, return_to)
+        }
+        TypedArrayPrototypeFilterStage::AwaitConstruct => {
+            let StoredValue::Object(target) = value else {
+                return typed_array_type_error(
+                    state.realm,
+                    &state.origin,
+                    "TypedArray species constructor returned a non-TypedArray",
+                );
+            };
+            let (target_state, target_length) =
+                typed_array_require_in_bounds(runtime, target, state.realm, &state.origin)?;
+            if target_length < state.kept.len() {
+                return typed_array_type_error(
+                    state.realm,
+                    &state.origin,
+                    "TypedArray species constructor returned a too-short TypedArray",
+                );
+            }
+            if target_state.element().is_bigint() != state.source_element.is_bigint() {
+                return typed_array_type_error(
+                    state.realm,
+                    &state.origin,
+                    "TypedArray species constructor returned a different content type",
+                );
+            }
+            state.target = Some(target);
+            state.stage = TypedArrayPrototypeFilterStage::NextKeptValue;
+            advance_typed_array_prototype_filter(
+                runtime,
+                state,
+                StoredValue::Undefined,
+                return_to,
+                execution_budget,
+            )
+        }
+        TypedArrayPrototypeFilterStage::NextKeptValue => {
+            if state.write_index >= state.kept.len() {
+                let target = state.target.ok_or(EngineFault::RuntimeInvariant {
+                    message: "TypedArray.prototype.filter lost its constructed target",
+                })?;
+                return Ok(NativeDispatch::Immediate(StoredValue::Object(target)));
+            }
+            let target = state.target.ok_or(EngineFault::RuntimeInvariant {
+                message: "TypedArray.prototype.filter lost its constructed target",
+            })?;
+            let value = state.kept[state.write_index].duplicate();
+            let realm = state.realm;
+            let origin = state.origin.clone();
+            begin_typed_array_element_set(
+                runtime,
+                target,
+                TypedArrayPropertyKey::Index(state.write_index),
+                value,
+                TypedArraySetCompletion::Filter(Box::new(state)),
+                realm,
+                return_to,
+                origin,
+                execution_budget,
+            )
+        }
+    }
+}
+
+pub(super) fn resume_typed_array_prototype_filter_after_store(
+    runtime: &mut Runtime,
+    mut state: TypedArrayPrototypeFilterState,
+    return_to: Option<CallReturn>,
+    execution_budget: &mut ExecutionBudget,
+) -> Result<NativeDispatch, NativeFailure> {
+    state.write_index = state
+        .write_index
+        .checked_add(1)
+        .ok_or(EngineFault::RuntimeInvariant {
+            message: "TypedArray.prototype.filter write index overflowed within its collected values",
+        })?;
+    state.stage = TypedArrayPrototypeFilterStage::NextKeptValue;
+    advance_typed_array_prototype_filter(
+        runtime,
+        state,
+        StoredValue::Undefined,
+        return_to,
+        execution_budget,
+    )
+}
+
+fn begin_typed_array_filter_constructor_get(
+    runtime: &mut Runtime,
+    mut state: TypedArrayPrototypeFilterState,
+    return_to: Option<CallReturn>,
+    execution_budget: &mut ExecutionBudget,
+) -> Result<NativeDispatch, NativeFailure> {
+    state.stage = TypedArrayPrototypeFilterStage::AwaitConstructor;
+    let source = StoredValue::Object(state.source);
+    charge_heap_property_lookup(runtime, &source, execution_budget)?;
+    let dispatch = begin_value_get(
+        runtime,
+        &source,
+        runtime.predefined_property_key(PredefinedAtom::Constructor),
+        None,
+        state.realm,
+        return_to,
+        state.origin.clone(),
+        execution_budget,
+    )?;
+    continue_get_after(
+        dispatch,
+        state,
+        typed_array_prototype_filter_continuation,
+        |state, value| {
+            advance_typed_array_prototype_filter(runtime, state, value, return_to, execution_budget)
+        },
+        "TypedArray.prototype.filter constructor Get produced a structured result",
+    )
+}
+
+fn begin_typed_array_filter_species_get(
+    runtime: &mut Runtime,
+    state: TypedArrayPrototypeFilterState,
+    constructor: &StoredValue,
+    return_to: Option<CallReturn>,
+    execution_budget: &mut ExecutionBudget,
+) -> Result<NativeDispatch, NativeFailure> {
+    charge_heap_property_lookup(runtime, constructor, execution_budget)?;
+    let dispatch = begin_value_get(
+        runtime,
+        constructor,
+        runtime.predefined_symbol_property_key(PredefinedAtom::SymbolSpecies),
+        None,
+        state.realm,
+        return_to,
+        state.origin.clone(),
+        execution_budget,
+    )?;
+    continue_get_after(
+        dispatch,
+        state,
+        typed_array_prototype_filter_continuation,
+        |state, value| {
+            advance_typed_array_prototype_filter(runtime, state, value, return_to, execution_budget)
+        },
+        "TypedArray.prototype.filter species Get produced a structured result",
+    )
+}
+
+fn begin_typed_array_filter_construct(
+    mut state: TypedArrayPrototypeFilterState,
+    constructor: FunctionId,
+    return_to: Option<CallReturn>,
+) -> Result<NativeDispatch, NativeFailure> {
+    state.stage = TypedArrayPrototypeFilterStage::AwaitConstruct;
+    let origin = state.origin.clone();
+    let count = state.kept.len();
+    let mut continuations = Vec::new();
+    continuations
+        .try_reserve_exact(1)
+        .map_err(|_| ExecutionError::AllocationFailed {
+            resource: RuntimeResource::Frames,
+            additional: 1,
+        })?;
+    continuations.push(typed_array_prototype_filter_continuation(state));
+    Ok(NativeDispatch::Call(NativeCall {
+        function: constructor,
+        receiver: StoredValue::Undefined,
+        arguments: CallArguments::from_values(vec![typed_array_usize_number(count)]),
+        return_to,
+        origin,
+        continuations,
+        pre_call: None,
+        new_target: Some(constructor),
+        native_caller: None,
+    }))
+}
+
+fn typed_array_prototype_filter_continuation(
+    state: TypedArrayPrototypeFilterState,
+) -> NativeContinuation {
+    NativeContinuation::TypedArrayPrototypeFilter(Box::new(state))
+}
+
+fn suspend_typed_array_filter(
+    state: TypedArrayPrototypeFilterState,
+    function: FunctionId,
+    receiver: StoredValue,
+    arguments: Vec<StoredValue>,
+    return_to: Option<CallReturn>,
+) -> Result<NativeDispatch, NativeFailure> {
+    let origin = state.origin.clone();
+    let mut continuations = Vec::new();
+    continuations
+        .try_reserve_exact(1)
+        .map_err(|_| ExecutionError::AllocationFailed {
+            resource: RuntimeResource::Frames,
+            additional: 1,
+        })?;
+    continuations.push(typed_array_prototype_filter_continuation(state));
+    Ok(NativeDispatch::Call(NativeCall {
+        function,
+        receiver,
+        arguments: CallArguments::from_values(arguments),
+        return_to,
+        origin,
+        continuations,
+        pre_call: None,
+        new_target: None,
+        native_caller: None,
+    }))
+}
+
 fn typed_array_relative_bound(value: f64, length: usize) -> usize {
     if value < 0.0 {
         if value == f64::NEG_INFINITY {
@@ -4561,6 +5036,14 @@ pub(super) fn finish_typed_array_element_set(
         }
         TypedArraySetCompletion::Map(state) => {
             return resume_typed_array_prototype_map_after_store(
+                runtime,
+                *state,
+                return_to,
+                execution_budget,
+            );
+        }
+        TypedArraySetCompletion::Filter(state) => {
+            return resume_typed_array_prototype_filter_after_store(
                 runtime,
                 *state,
                 return_to,
