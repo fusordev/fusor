@@ -208,6 +208,16 @@ pub(super) struct TypedArrayPrototypeIndexOfState {
     origin: JsStackFrame,
 }
 
+/// `%TypedArray%.prototype.lastIndexOf` after its validated internal length
+/// and before an explicitly supplied `fromIndex` has been converted.
+pub(super) struct TypedArrayPrototypeLastIndexOfState {
+    object: ObjectId,
+    length: usize,
+    needle: StoredValue,
+    realm: RealmId,
+    origin: JsStackFrame,
+}
+
 impl TypedArrayConstructorLengthState {
     pub(super) const fn retained_values() -> u64 {
         1
@@ -335,6 +345,17 @@ impl TypedArrayPrototypeIncludesState {
 }
 
 impl TypedArrayPrototypeIndexOfState {
+    pub(super) const fn retained_values() -> u64 {
+        2
+    }
+
+    pub(super) fn trace_roots(&self, mark: &mut dyn FnMut(CollectionRoot)) {
+        mark(CollectionRoot::Heap(HeapReference::Object(self.object)));
+        trace_stored_value_root(&self.needle, mark);
+    }
+}
+
+impl TypedArrayPrototypeLastIndexOfState {
     pub(super) const fn retained_values() -> u64 {
         2
     }
@@ -1451,6 +1472,7 @@ pub(super) fn dispatch_typed_array_prototype(
             | TypedArrayPrototypeMethod::At
             | TypedArrayPrototypeMethod::Includes
             | TypedArrayPrototypeMethod::IndexOf
+            | TypedArrayPrototypeMethod::LastIndexOf
             | TypedArrayPrototypeMethod::Reverse
     ) && !matches!(view, TypedArrayView::InBounds { .. })
     {
@@ -1537,6 +1559,18 @@ pub(super) fn dispatch_typed_array_prototype(
                 *object,
                 arguments.take_first_or_undefined(),
                 arguments.take_first_or_undefined(),
+                realm,
+                return_to,
+                origin,
+                execution_budget,
+            );
+        }
+        TypedArrayPrototypeMethod::LastIndexOf => {
+            return begin_typed_array_prototype_last_index_of(
+                runtime,
+                *object,
+                arguments.take_first_or_undefined(),
+                arguments.take_first(),
                 realm,
                 return_to,
                 origin,
@@ -1744,6 +1778,111 @@ pub(super) fn finish_typed_array_prototype_index_of_from_index(
     Ok(NativeDispatch::Immediate(StoredValue::Number(
         JsNumber::from_i32(-1),
     )))
+}
+
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the native entry point preserves an absent fromIndex and the uncoerced search value"
+)]
+fn begin_typed_array_prototype_last_index_of(
+    runtime: &mut Runtime,
+    object: ObjectId,
+    needle: StoredValue,
+    from_index: Option<StoredValue>,
+    realm: RealmId,
+    return_to: Option<CallReturn>,
+    origin: JsStackFrame,
+    execution_budget: &mut ExecutionBudget,
+) -> Result<NativeDispatch, NativeFailure> {
+    let (_, length) = typed_array_require_in_bounds(runtime, object, realm, &origin)?;
+    if length == 0 {
+        return Ok(typed_array_last_index_of_not_found());
+    }
+    let state = TypedArrayPrototypeLastIndexOfState {
+        object,
+        length,
+        needle,
+        realm,
+        origin: origin.clone(),
+    };
+    let Some(from_index) = from_index else {
+        return typed_array_last_index_of_search(runtime, &state, length - 1, execution_budget);
+    };
+    begin_operator_primitive_conversion(
+        runtime,
+        from_index,
+        OperatorPrimitiveHint::Number,
+        OperatorPrimitiveTarget::TypedArrayPrototypeLastIndexOfFromIndex(Box::new(state)),
+        realm,
+        return_to,
+        origin,
+        execution_budget,
+    )
+}
+
+#[allow(
+    clippy::needless_pass_by_value,
+    reason = "the primitive-conversion target transfers its owned continuation state"
+)]
+pub(super) fn finish_typed_array_prototype_last_index_of_from_index(
+    runtime: &mut Runtime,
+    state: TypedArrayPrototypeLastIndexOfState,
+    value: StoredValue,
+    execution_budget: &mut ExecutionBudget,
+) -> Result<NativeDispatch, NativeFailure> {
+    let relative =
+        number_to_integer_or_infinity(operator_to_number(value, state.realm, &state.origin)?);
+    let Some(start) = typed_array_last_index_of_start(relative, state.length) else {
+        return Ok(typed_array_last_index_of_not_found());
+    };
+    typed_array_last_index_of_search(runtime, &state, start, execution_budget)
+}
+
+fn typed_array_last_index_of_search(
+    runtime: &mut Runtime,
+    state: &TypedArrayPrototypeLastIndexOfState,
+    start: usize,
+    execution_budget: &mut ExecutionBudget,
+) -> Result<NativeDispatch, NativeFailure> {
+    for index in (0..=start).rev() {
+        execution_budget.charge_instructions(1)?;
+        if runtime
+            .typed_array_read_index(state.object, index)?
+            .is_some_and(|element| state.needle.strict_equals(&element))
+        {
+            return Ok(NativeDispatch::Immediate(typed_array_usize_number(index)));
+        }
+    }
+    Ok(typed_array_last_index_of_not_found())
+}
+
+fn typed_array_last_index_of_not_found() -> NativeDispatch {
+    NativeDispatch::Immediate(StoredValue::Number(JsNumber::from_i32(-1)))
+}
+
+fn typed_array_last_index_of_start(relative: f64, length: usize) -> Option<usize> {
+    if relative >= 0.0 {
+        #[expect(
+            clippy::cast_possible_truncation,
+            clippy::cast_sign_loss,
+            reason = "ToIntegerOrInfinity yields a non-negative integer and large values clamp below"
+        )]
+        let index = relative as usize;
+        return Some(index.min(length - 1));
+    }
+    if relative.is_infinite() {
+        return None;
+    }
+    #[expect(
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss,
+        reason = "ToIntegerOrInfinity yields a finite negative integer"
+    )]
+    let magnitude = (-relative) as usize;
+    if magnitude > length {
+        return None;
+    }
+    Some(length - magnitude)
 }
 
 fn begin_typed_array_prototype_at(

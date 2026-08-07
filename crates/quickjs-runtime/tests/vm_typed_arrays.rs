@@ -326,6 +326,32 @@ fn typed_array_index_of_uses_strict_equality_with_fresh_element_witnesses() {
 }
 
 #[test]
+fn typed_array_last_index_of_preserves_an_absent_from_index_and_uses_strict_equality() {
+    assert_eq!(
+        rendered(
+            "var values=new Float32Array([1,2,1,NaN]),bigints=new BigInt64Array([1n,2n,1n]);\
+             return [Uint8Array.prototype.lastIndexOf.length,Uint8Array.prototype.lastIndexOf.name,\
+               values.lastIndexOf(1),values.lastIndexOf(1,undefined),values.lastIndexOf(1,Infinity),\
+               values.lastIndexOf(1,-1),values.lastIndexOf(1,-3),values.lastIndexOf(1,-4),\
+               values.lastIndexOf(1,-5),values.lastIndexOf(NaN),bigints.lastIndexOf(1n),bigints.lastIndexOf(1),\
+               new Uint8Array(0).lastIndexOf(0,{valueOf(){throw new Error('unexpected')}})].join('|');"
+        ),
+        "1|lastIndexOf|2|0|2|2|0|0|-1|-1|2|-1|-1"
+    );
+    assert_eq!(
+        rendered(
+            "var buffer=new ArrayBuffer(4,{maxByteLength:4}),values=new Uint8Array(buffer);\
+             values[3]=7;return String(values.lastIndexOf(7,{valueOf(){buffer.resize(1);return Infinity}}));"
+        ),
+        "-1"
+    );
+    assert_eq!(
+        thrown("return new Uint8Array(1).lastIndexOf(0,1n);"),
+        ExceptionKind::TypeError
+    );
+}
+
+#[test]
 fn typed_array_reverse_mutates_in_place_for_number_and_bigint_content() {
     assert_eq!(
         rendered(
