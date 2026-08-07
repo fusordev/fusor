@@ -2136,6 +2136,24 @@ fn finish_operator_primitive_target(
         OperatorPrimitiveTarget::TemporalPlainDateEquals(receiver) => {
             finish_temporal_plain_date_equals(receiver.as_ref(), value, realm, origin)
         }
+        OperatorPrimitiveTarget::TemporalPlainDateBag(state) => {
+            advance_temporal_plain_date_property_bag(
+                runtime,
+                *state,
+                Some(value),
+                return_to,
+                execution_budget,
+            )
+        }
+        OperatorPrimitiveTarget::TemporalPlainDateOptions(state) => {
+            advance_temporal_plain_date_from_options(
+                runtime,
+                *state,
+                Some(value),
+                return_to,
+                execution_budget,
+            )
+        }
         OperatorPrimitiveTarget::TemporalDurationBag(state) => {
             advance_temporal_duration_property_bag(
                 runtime,

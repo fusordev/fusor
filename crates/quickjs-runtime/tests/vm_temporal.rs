@@ -172,6 +172,45 @@ fn plain_date_from_equals_and_new_target_prototype_preserve_branding() {
 }
 
 #[test]
+fn plain_date_from_property_bags_observe_field_and_overflow_conversion_order() {
+    assert_eq!(
+        rendered(
+            "var log=[];
+             var fields={
+               get calendar(){log.push('calendar');return {toString:function(){log.push('calendar string');return 'iso8601'}}},
+               get day(){log.push('day');return {valueOf:function(){log.push('day number');return 32.8}}},
+               get month(){log.push('month');return {valueOf:function(){log.push('month number');return 1.9}}},
+               get monthCode(){log.push('monthCode');return {toString:function(){log.push('monthCode string');return 'M01'}}},
+               get year(){log.push('year');return {valueOf:function(){log.push('year number');return 2021.7}}}
+             };
+             var options={get overflow(){log.push('overflow');return {toString:function(){log.push('overflow string');return 'constrain'}}}};
+             var date=Temporal.PlainDate.from(fields,options);
+             return [date.toString(),log.join(',')].join('|');"
+        ),
+        "2021-01-31|calendar,calendar string,day,day number,month,month number,monthCode,monthCode string,year,year number,overflow,overflow string"
+    );
+    assert_eq!(
+        rendered(
+            "return [Temporal.PlainDate.from({year:1976,month:11,day:18}).toString(),
+              Temporal.PlainDate.from({year:1976,monthCode:'M11',day:18},{overflow:'reject'}).toString()].join('|');"
+        ),
+        "1976-11-18|1976-11-18"
+    );
+    assert_eq!(
+        thrown("return Temporal.PlainDate.from({year:2019,month:1,day:32},{overflow:'reject'});"),
+        ExceptionKind::RangeError
+    );
+    assert_eq!(
+        thrown("return Temporal.PlainDate.from({year:2019,day:15});"),
+        ExceptionKind::TypeError
+    );
+    assert_eq!(
+        thrown("return Temporal.PlainDate.from({year:2021,month:12,monthCode:'M11',day:17});"),
+        ExceptionKind::RangeError
+    );
+}
+
+#[test]
 fn plain_date_rejects_unbranded_receivers_invalid_components_and_call_without_new() {
     assert_eq!(
         thrown("return Temporal.PlainDate(2020,1,1);"),

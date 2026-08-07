@@ -547,6 +547,24 @@ pub(super) fn resume_native_continuations(
             NativeContinuation::DateToJson(state) => {
                 finish_date_to_json_call(state, value, return_to)?
             }
+            NativeContinuation::TemporalPlainDateBag(state) => {
+                advance_temporal_plain_date_property_bag(
+                    runtime,
+                    *state,
+                    Some(value),
+                    return_to,
+                    execution_budget,
+                )?
+            }
+            NativeContinuation::TemporalPlainDateOptions(state) => {
+                advance_temporal_plain_date_from_options(
+                    runtime,
+                    *state,
+                    Some(value),
+                    return_to,
+                    execution_budget,
+                )?
+            }
             NativeContinuation::TemporalDurationBag(state) => {
                 advance_temporal_duration_property_bag(
                     runtime,

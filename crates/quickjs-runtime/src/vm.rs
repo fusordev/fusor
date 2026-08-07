@@ -769,6 +769,8 @@ enum NativeContinuation {
     TypedArrayPrototypeMap(Box<TypedArrayPrototypeMapState>),
     TypedArrayPrototypeFilter(Box<TypedArrayPrototypeFilterState>),
     DateToJson(DateToJsonContinuation),
+    TemporalPlainDateBag(Box<TemporalPlainDateBagContinuation>),
+    TemporalPlainDateOptions(Box<TemporalPlainDateOptionsContinuation>),
     TemporalDurationBag(Box<TemporalDurationBagContinuation>),
     TemporalDurationCompareOptions(TemporalDurationCompareOptionsContinuation),
     TemporalDurationRoundOptions(Box<TemporalDurationRoundContinuation>),
@@ -888,6 +890,10 @@ impl NativeContinuation {
             Self::TypedArrayPrototypeMap(_) => TypedArrayPrototypeMapState::retained_values(),
             Self::TypedArrayPrototypeFilter(state) => state.retained_values(),
             Self::DateToJson(_) => DateToJsonContinuation::retained_values(),
+            Self::TemporalPlainDateBag(_) => TemporalPlainDateBagContinuation::retained_values(),
+            Self::TemporalPlainDateOptions(_) => {
+                TemporalPlainDateOptionsContinuation::retained_values()
+            }
             Self::TemporalDurationBag(state) => state.retained_values(),
             Self::TemporalDurationCompareOptions(_) => {
                 TemporalDurationCompareOptionsContinuation::retained_values()
@@ -2108,6 +2114,8 @@ enum OperatorPrimitiveTarget {
     TemporalPlainDateConstructor(Box<TemporalPlainDateConstructorContinuation>),
     TemporalPlainDateCalendar(Box<TemporalPlainDateConstructorContinuation>),
     TemporalPlainDateEquals(Box<temporal_rs::PlainDate>),
+    TemporalPlainDateBag(Box<TemporalPlainDateBagContinuation>),
+    TemporalPlainDateOptions(Box<TemporalPlainDateOptionsContinuation>),
     TemporalDurationBag(Box<TemporalDurationBagContinuation>),
     TemporalDurationRoundLargestUnit(Box<TemporalDurationRoundContinuation>),
     TemporalDurationRoundRoundingIncrement(Box<TemporalDurationRoundContinuation>),
@@ -2371,6 +2379,10 @@ impl OperatorPrimitiveTarget {
             Self::TemporalDurationConstructor(state) => state.retained_values(),
             Self::TemporalPlainDateConstructor(state) | Self::TemporalPlainDateCalendar(state) => {
                 state.retained_values()
+            }
+            Self::TemporalPlainDateBag(_) => TemporalPlainDateBagContinuation::retained_values(),
+            Self::TemporalPlainDateOptions(_) => {
+                TemporalPlainDateOptionsContinuation::retained_values()
             }
             Self::TemporalDurationBag(state) => state.retained_values(),
             Self::TemporalDurationRoundLargestUnit(_state)
@@ -2647,6 +2659,8 @@ fn trace_operator_primitive_target_roots(
         OperatorPrimitiveTarget::TemporalDurationConstructor(state) => state.trace_roots(mark),
         OperatorPrimitiveTarget::TemporalPlainDateConstructor(state)
         | OperatorPrimitiveTarget::TemporalPlainDateCalendar(state) => state.trace_roots(mark),
+        OperatorPrimitiveTarget::TemporalPlainDateBag(state) => state.trace_roots(mark),
+        OperatorPrimitiveTarget::TemporalPlainDateOptions(state) => state.trace_roots(mark),
         OperatorPrimitiveTarget::TemporalDurationBag(state) => state.trace_roots(mark),
         OperatorPrimitiveTarget::TemporalDurationRoundLargestUnit(state)
         | OperatorPrimitiveTarget::TemporalDurationRoundRoundingIncrement(state)
@@ -2901,6 +2915,8 @@ fn trace_native_continuation_roots(
         NativeContinuation::TypedArrayPrototypeMap(state) => state.trace_roots(mark),
         NativeContinuation::TypedArrayPrototypeFilter(state) => state.trace_roots(mark),
         NativeContinuation::DateToJson(state) => state.trace_roots(mark),
+        NativeContinuation::TemporalPlainDateBag(state) => state.trace_roots(mark),
+        NativeContinuation::TemporalPlainDateOptions(state) => state.trace_roots(mark),
         NativeContinuation::TemporalDurationBag(state) => state.trace_roots(mark),
         NativeContinuation::TemporalDurationCompareOptions(state) => state.trace_roots(mark),
         NativeContinuation::TemporalDurationRoundOptions(state) => state.trace_roots(mark),
