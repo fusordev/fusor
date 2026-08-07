@@ -193,6 +193,18 @@ fn typed_array_constructors_initialize_iterable_and_array_like_inputs_in_their_d
 }
 
 #[test]
+fn typed_array_constructors_expose_the_shared_species_getter() {
+    assert_eq!(
+        rendered(
+            "return [Int8Array[Symbol.species]===Int8Array,\
+             BigInt64Array[Symbol.species]===BigInt64Array,\
+             Object.getOwnPropertyDescriptor(Int8Array,Symbol.species).get.name].join('|');"
+        ),
+        "true|true|get [Symbol.species]"
+    );
+}
+
+#[test]
 fn typed_array_set_copies_typed_and_array_like_sources_with_fresh_target_indices() {
     assert_eq!(
         rendered(

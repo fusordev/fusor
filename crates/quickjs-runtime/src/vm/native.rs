@@ -3140,6 +3140,7 @@ pub(super) fn dispatch_native_call_with_frames(
         }
         NativeFunctionKind::ArraySpeciesGetter
         | NativeFunctionKind::ArrayBufferSpeciesGetter
+        | NativeFunctionKind::TypedArraySpeciesGetter
         | NativeFunctionKind::PromiseSpeciesGetter
         | NativeFunctionKind::MapSpeciesGetter
         | NativeFunctionKind::SetSpeciesGetter

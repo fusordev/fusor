@@ -48,6 +48,11 @@ pub(super) fn visit_functions(visit: FunctionSink<'_>) {
             method.arity(),
         ));
     }
+    visit(ordinary(
+        NativeFunctionKind::TypedArraySpeciesGetter,
+        IntrinsicNameSpec::Literal("get [Symbol.species]"),
+        0,
+    ));
 }
 
 pub(super) fn visit_properties(visit: PropertySink<'_>) {
@@ -101,6 +106,15 @@ pub(super) fn visit_properties(visit: PropertySink<'_>) {
             IntrinsicKeySpec::InternedString(RealmNameId::TypedArrayBytesPerElement),
             PropertyLayout::data(false, false, false),
             width,
+        ));
+        visit(accessor(
+            constructor,
+            IntrinsicKeySpec::WellKnownSymbol(PredefinedAtom::SymbolSpecies),
+            PropertyLayout::accessor(false, true),
+            Some(IntrinsicFunctionId(
+                NativeFunctionKind::TypedArraySpeciesGetter,
+            )),
+            None,
         ));
         visit(method(
             prototype,

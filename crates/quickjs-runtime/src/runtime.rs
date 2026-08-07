@@ -1206,6 +1206,7 @@ pub(crate) enum NativeFunctionKind {
     DataViewConstructor,
     DataViewPrototype(DataViewPrototypeMethod),
     TypedArrayConstructor(TypedArrayElementType),
+    TypedArraySpeciesGetter,
     TypedArrayPrototype(TypedArrayPrototypeMethod),
     DateConstructor,
     DateStatic(DateStaticMethod),
