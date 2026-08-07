@@ -188,6 +188,16 @@ pub(super) struct TypedArrayPrototypeAtState {
     origin: JsStackFrame,
 }
 
+/// `%TypedArray%.prototype.includes` after its validated internal length and
+/// before `ToIntegerOrInfinity(fromIndex)` has completed.
+pub(super) struct TypedArrayPrototypeIncludesState {
+    object: ObjectId,
+    length: usize,
+    needle: StoredValue,
+    realm: RealmId,
+    origin: JsStackFrame,
+}
+
 impl TypedArrayConstructorLengthState {
     pub(super) const fn retained_values() -> u64 {
         1
@@ -300,6 +310,17 @@ impl TypedArrayPrototypeAtState {
 
     pub(super) fn trace_roots(&self, mark: &mut dyn FnMut(CollectionRoot)) {
         mark(CollectionRoot::Heap(HeapReference::Object(self.object)));
+    }
+}
+
+impl TypedArrayPrototypeIncludesState {
+    pub(super) const fn retained_values() -> u64 {
+        2
+    }
+
+    pub(super) fn trace_roots(&self, mark: &mut dyn FnMut(CollectionRoot)) {
+        mark(CollectionRoot::Heap(HeapReference::Object(self.object)));
+        trace_stored_value_root(&self.needle, mark);
     }
 }
 
@@ -1406,6 +1427,7 @@ pub(super) fn dispatch_typed_array_prototype(
         TypedArrayPrototypeMethod::Set
             | TypedArrayPrototypeMethod::Subarray
             | TypedArrayPrototypeMethod::At
+            | TypedArrayPrototypeMethod::Includes
     ) && !matches!(view, TypedArrayView::InBounds { .. })
     {
         return typed_array_type_error(realm, &origin, "TypedArray is out of bounds");
@@ -1473,8 +1495,83 @@ pub(super) fn dispatch_typed_array_prototype(
                 execution_budget,
             );
         }
+        TypedArrayPrototypeMethod::Includes => {
+            return begin_typed_array_prototype_includes(
+                runtime,
+                *object,
+                arguments.take_first_or_undefined(),
+                arguments.take_first_or_undefined(),
+                realm,
+                return_to,
+                origin,
+                execution_budget,
+            );
+        }
     };
     Ok(NativeDispatch::Immediate(value))
+}
+
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the native entry point preserves the uncoerced search value and fromIndex across conversion"
+)]
+fn begin_typed_array_prototype_includes(
+    runtime: &mut Runtime,
+    object: ObjectId,
+    needle: StoredValue,
+    from_index: StoredValue,
+    realm: RealmId,
+    return_to: Option<CallReturn>,
+    origin: JsStackFrame,
+    execution_budget: &mut ExecutionBudget,
+) -> Result<NativeDispatch, NativeFailure> {
+    let (_, length) = typed_array_require_in_bounds(runtime, object, realm, &origin)?;
+    if length == 0 {
+        return Ok(NativeDispatch::Immediate(StoredValue::Boolean(false)));
+    }
+    begin_operator_primitive_conversion(
+        runtime,
+        from_index,
+        OperatorPrimitiveHint::Number,
+        OperatorPrimitiveTarget::TypedArrayPrototypeIncludesFromIndex(Box::new(
+            TypedArrayPrototypeIncludesState {
+                object,
+                length,
+                needle,
+                realm,
+                origin: origin.clone(),
+            },
+        )),
+        realm,
+        return_to,
+        origin,
+        execution_budget,
+    )
+}
+
+#[allow(
+    clippy::needless_pass_by_value,
+    reason = "the primitive-conversion target transfers its owned continuation state"
+)]
+pub(super) fn finish_typed_array_prototype_includes_from_index(
+    runtime: &mut Runtime,
+    state: TypedArrayPrototypeIncludesState,
+    value: StoredValue,
+    execution_budget: &mut ExecutionBudget,
+) -> Result<NativeDispatch, NativeFailure> {
+    let relative =
+        number_to_integer_or_infinity(operator_to_number(value, state.realm, &state.origin)?);
+    let start = typed_array_relative_bound(relative, state.length);
+    for index in start..state.length {
+        execution_budget.charge_instructions(1)?;
+        if runtime
+            .typed_array_read_index(state.object, index)?
+            .is_some_and(|element| state.needle.same_value_zero(&element))
+        {
+            return Ok(NativeDispatch::Immediate(StoredValue::Boolean(true)));
+        }
+    }
+    Ok(NativeDispatch::Immediate(StoredValue::Boolean(false)))
 }
 
 fn begin_typed_array_prototype_at(
@@ -1835,7 +1932,7 @@ fn typed_array_prototype_subarray_continuation(
 }
 
 fn typed_array_relative_bound(value: f64, length: usize) -> usize {
-    if value <= 0.0 {
+    if value < 0.0 {
         if value == f64::NEG_INFINITY {
             return 0;
         }

@@ -1785,10 +1785,11 @@ pub(crate) enum TypedArrayPrototypeMethod {
     Set,
     Subarray,
     At,
+    Includes,
 }
 
 impl TypedArrayPrototypeMethod {
-    pub(crate) const ALL: [Self; 8] = [
+    pub(crate) const ALL: [Self; 9] = [
         Self::Buffer,
         Self::ByteLength,
         Self::ByteOffset,
@@ -1797,6 +1798,7 @@ impl TypedArrayPrototypeMethod {
         Self::Set,
         Self::Subarray,
         Self::At,
+        Self::Includes,
     ];
 
     #[must_use]
@@ -1810,6 +1812,7 @@ impl TypedArrayPrototypeMethod {
             Self::Set => "set",
             Self::Subarray => "subarray",
             Self::At => "at",
+            Self::Includes => "includes",
         }
     }
 
@@ -1824,18 +1827,19 @@ impl TypedArrayPrototypeMethod {
             Self::Set => "set",
             Self::Subarray => "subarray",
             Self::At => "at",
+            Self::Includes => "includes",
         }
     }
 
     #[must_use]
     pub(crate) const fn is_accessor(self) -> bool {
-        !matches!(self, Self::Set | Self::Subarray | Self::At)
+        !matches!(self, Self::Set | Self::Subarray | Self::At | Self::Includes)
     }
 
     #[must_use]
     pub(crate) const fn arity(self) -> i32 {
         match self {
-            Self::Set | Self::At => 1,
+            Self::Set | Self::At | Self::Includes => 1,
             Self::Subarray => 2,
             Self::Buffer
             | Self::ByteLength

@@ -243,13 +243,13 @@ fn typed_array_set_copies_typed_and_array_like_sources_with_fresh_target_indices
 fn typed_array_subarray_uses_relative_bounds_shared_storage_and_species() {
     assert_eq!(
         rendered(
-            "var source=new Uint16Array([1,2,3,4]),view=source.subarray(1,-1);view[0]=99;\
+            "var source=new Uint16Array([1,2,3,4]),zeroStart=source.subarray(0,1),view=source.subarray(1,-1);view[0]=99;\
              var speciesSource=new Uint8Array([7,8,9]);\
              speciesSource.constructor={[Symbol.species]:Uint8Array};var speciesView=speciesSource.subarray(1,2);\
-             return [view.length,view.byteOffset,view[0],source[1],view.buffer===source.buffer,\
+             return [zeroStart[0],view.length,view.byteOffset,view[0],source[1],view.buffer===source.buffer,\
                speciesView.constructor===Uint8Array,speciesView.length,speciesView[0]].join('|');"
         ),
-        "2|2|99|99|true|true|1|8"
+        "1|2|2|99|99|true|true|1|8"
     );
     assert_eq!(
         thrown(
@@ -281,5 +281,25 @@ fn typed_array_at_uses_the_initial_length_but_a_fresh_element_witness() {
              values[1]=7;return String(values.at({valueOf(){buffer.resize(1);return 1}}));"
         ),
         "undefined"
+    );
+}
+
+#[test]
+fn typed_array_includes_uses_same_value_zero_without_coercing_the_search_value() {
+    assert_eq!(
+        rendered(
+            "var floats=new Float32Array([NaN,-0,4]),bigints=new BigInt64Array([1n]);\
+             return [floats.includes(NaN),floats.includes(0),floats.includes(4,3),\
+               floats.includes(NaN,1),bigints.includes(1n),bigints.includes(1),\
+               new Uint8Array(0).includes(0,{valueOf(){throw new Error('unexpected')}})].join('|');"
+        ),
+        "true|true|false|false|true|false|false"
+    );
+    assert_eq!(
+        rendered(
+            "var buffer=new ArrayBuffer(4,{maxByteLength:4}),values=new Uint8Array(buffer);\
+             values[1]=7;return String(values.includes(7,{valueOf(){buffer.resize(1);return 0}}));"
+        ),
+        "false"
     );
 }
