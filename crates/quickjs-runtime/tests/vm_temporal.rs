@@ -369,6 +369,25 @@ fn zoned_date_time_equals_accepts_branded_values_and_strings() {
 }
 
 #[test]
+fn zoned_date_time_compare_accepts_branded_values_and_strings() {
+    assert_eq!(
+        rendered(
+            "var first=new Temporal.ZonedDateTime(0n,'UTC','iso8601');
+             var compare=Object.getOwnPropertyDescriptor(Temporal.ZonedDateTime,'compare');
+             return [Temporal.ZonedDateTime.compare(first,new Temporal.ZonedDateTime(1n,'UTC')),
+               Temporal.ZonedDateTime.compare('1970-01-01T00:00+00:00[UTC]',first),
+               compare.value.length,compare.value.name,compare.enumerable,compare.writable,
+               compare.configurable].join('|');"
+        ),
+        "-1|0|2|compare|false|true|true"
+    );
+    assert_eq!(
+        thrown("return Temporal.ZonedDateTime.compare({},{});"),
+        ExceptionKind::TypeError
+    );
+}
+
+#[test]
 fn plain_date_time_constructor_accessors_and_iso_formatting_are_spec_shaped() {
     assert_eq!(
         rendered(

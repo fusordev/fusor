@@ -2050,36 +2050,77 @@ pub(super) fn begin_temporal_zoned_date_time_static(
     origin: JsStackFrame,
     _execution_budget: &mut ExecutionBudget,
 ) -> Result<NativeDispatch, NativeFailure> {
-    let value = arguments.take_first_or_undefined();
     match method {
         TemporalZonedDateTimeStaticMethod::From => {
-            if let StoredValue::Object(object) = value
-                && let Some(date_time) = runtime.temporal_zoned_date_time(object)?
+            let date_time = temporal_zoned_date_time_from_brand_or_string(
+                runtime,
+                arguments.take_first_or_undefined(),
+                realm,
+                &origin,
+            )?;
+            allocate_temporal_zoned_date_time_result(runtime, realm, date_time)
+        }
+        TemporalZonedDateTimeStaticMethod::Compare => {
+            let first = temporal_zoned_date_time_from_brand_or_string(
+                runtime,
+                arguments.take_first_or_undefined(),
+                realm,
+                &origin,
+            )?;
+            let second = temporal_zoned_date_time_from_brand_or_string(
+                runtime,
+                arguments.take_first_or_undefined(),
+                realm,
+                &origin,
+            )?;
+            let result = match first
+                .epoch_nanoseconds()
+                .as_i128()
+                .cmp(&second.epoch_nanoseconds().as_i128())
             {
-                return allocate_temporal_zoned_date_time_result(runtime, realm, date_time);
-            }
-            let StoredValue::String(value) = value else {
-                return temporal_type_error(
-                    realm,
-                    &origin,
-                    "Temporal.ZonedDateTime.from currently requires a string or ZonedDateTime",
-                );
+                std::cmp::Ordering::Less => -1,
+                std::cmp::Ordering::Equal => 0,
+                std::cmp::Ordering::Greater => 1,
             };
-            let date_time = match ZonedDateTime::from_utf8(
+            Ok(NativeDispatch::Immediate(StoredValue::Number(
+                JsNumber::from_i64(result),
+            )))
+        }
+    }
+}
+
+fn temporal_zoned_date_time_from_brand_or_string(
+    runtime: &Runtime,
+    value: StoredValue,
+    realm: RealmId,
+    origin: &JsStackFrame,
+) -> Result<ZonedDateTime, NativeFailure> {
+    match value {
+        StoredValue::Object(object) => {
+            if let Some(date_time) = runtime.temporal_zoned_date_time(object)? {
+                return Ok(date_time);
+            }
+        }
+        StoredValue::String(value) => {
+            return match ZonedDateTime::from_utf8(
                 value.to_utf8_lossy()?.as_bytes(),
                 Disambiguation::Compatible,
                 OffsetDisambiguation::Reject,
             ) {
-                Ok(date_time) => date_time,
-                Err(error) => {
-                    return Err(NativeFailure::Abrupt(temporal_exception_from_error(
-                        realm, &origin, error,
-                    )?));
-                }
+                Ok(date_time) => Ok(date_time),
+                Err(error) => Err(NativeFailure::Abrupt(temporal_exception_from_error(
+                    realm, origin, error,
+                )?)),
             };
-            allocate_temporal_zoned_date_time_result(runtime, realm, date_time)
         }
+        _ => {}
     }
+    Err(NativeFailure::Abrupt(temporal_pending_exception(
+        realm,
+        origin,
+        ExceptionKind::TypeError,
+        "Temporal.ZonedDateTime currently requires a string or ZonedDateTime",
+    )?))
 }
 
 fn allocate_temporal_zoned_date_time_result(
@@ -2234,31 +2275,12 @@ pub(super) fn dispatch_temporal_zoned_date_time_prototype(
             allocate_temporal_zoned_date_time_result(runtime, realm, start)
         }
         TemporalZonedDateTimePrototypeMethod::Equals => {
-            let value = arguments.take_first_or_undefined();
-            let other = if let StoredValue::Object(object) = value
-                && let Some(other) = runtime.temporal_zoned_date_time(object)?
-            {
-                other
-            } else if let StoredValue::String(value) = value {
-                match ZonedDateTime::from_utf8(
-                    value.to_utf8_lossy()?.as_bytes(),
-                    Disambiguation::Compatible,
-                    OffsetDisambiguation::Reject,
-                ) {
-                    Ok(other) => other,
-                    Err(error) => {
-                        return Err(NativeFailure::Abrupt(temporal_exception_from_error(
-                            realm, origin, error,
-                        )?));
-                    }
-                }
-            } else {
-                return temporal_type_error(
-                    realm,
-                    origin,
-                    "Temporal.ZonedDateTime.equals currently requires a string or ZonedDateTime",
-                );
-            };
+            let other = temporal_zoned_date_time_from_brand_or_string(
+                runtime,
+                arguments.take_first_or_undefined(),
+                realm,
+                origin,
+            )?;
             let equals = match date_time.equals(&other) {
                 Ok(equals) => equals,
                 Err(error) => {

@@ -2318,6 +2318,7 @@ pub(crate) enum TemporalPlainYearMonthStaticMethod {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum TemporalZonedDateTimeStaticMethod {
     From,
+    Compare,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -2802,17 +2803,19 @@ impl TemporalPlainYearMonthStaticMethod {
 }
 
 impl TemporalZonedDateTimeStaticMethod {
-    pub(crate) const ALL: [Self; 1] = [Self::From];
+    pub(crate) const ALL: [Self; 2] = [Self::From, Self::Compare];
 
     pub(crate) const fn name(self) -> &'static str {
         match self {
             Self::From => "from",
+            Self::Compare => "compare",
         }
     }
 
     pub(crate) const fn length(self) -> i32 {
         match self {
             Self::From => 1,
+            Self::Compare => 2,
         }
     }
 }

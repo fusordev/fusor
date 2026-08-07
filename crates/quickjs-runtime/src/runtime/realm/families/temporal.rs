@@ -370,9 +370,17 @@ pub(super) fn visit_functions(visit: FunctionSink<'_>) {
         2,
     ));
     for method in TemporalZonedDateTimeStaticMethod::ALL {
+        let name = match method {
+            TemporalZonedDateTimeStaticMethod::From => {
+                IntrinsicNameSpec::Predefined(PredefinedAtom::From)
+            }
+            TemporalZonedDateTimeStaticMethod::Compare => {
+                IntrinsicNameSpec::RealmName(RealmNameId::TemporalZonedDateTimeStatic(method))
+            }
+        };
         visit(ordinary(
             NativeFunctionKind::TemporalZonedDateTimeStatic(method),
-            IntrinsicNameSpec::Predefined(PredefinedAtom::From),
+            name,
             method.length(),
         ));
     }
@@ -975,9 +983,17 @@ pub(super) fn visit_properties(visit: PropertySink<'_>) {
         NativeFunctionKind::TemporalZonedDateTimeConstructor,
     ));
     for method_id in TemporalZonedDateTimeStaticMethod::ALL {
+        let key = match method_id {
+            TemporalZonedDateTimeStaticMethod::From => {
+                IntrinsicKeySpec::PredefinedString(PredefinedAtom::From)
+            }
+            TemporalZonedDateTimeStaticMethod::Compare => IntrinsicKeySpec::InternedString(
+                RealmNameId::TemporalZonedDateTimeStatic(method_id),
+            ),
+        };
         visit(method(
             zoned_date_time_constructor,
-            IntrinsicKeySpec::PredefinedString(PredefinedAtom::From),
+            key,
             NativeFunctionKind::TemporalZonedDateTimeStatic(method_id),
         ));
     }
