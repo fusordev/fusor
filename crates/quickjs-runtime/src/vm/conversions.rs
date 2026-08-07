@@ -1854,6 +1854,9 @@ fn finish_operator_primitive_target(
         OperatorPrimitiveTarget::DataViewSetValue(state) => {
             finish_data_view_set_value(runtime, state.as_ref(), value)
         }
+        OperatorPrimitiveTarget::TypedArrayElementSet(state) => {
+            finish_typed_array_element_set(runtime, *state, value)
+        }
         OperatorPrimitiveTarget::ArrayBufferResize { object } => {
             finish_array_buffer_resize(runtime, object, value, realm, origin)
         }
@@ -3257,6 +3260,19 @@ fn finish_property_key_target(
                     value,
                     OperatorPrimitiveHint::Number,
                     target,
+                    realm,
+                    return_to,
+                    origin.clone(),
+                    execution_budget,
+                );
+            }
+            if let Some((object, key)) = typed_array_indexed_key(runtime, &base, &property.key)? {
+                return begin_typed_array_element_set(
+                    runtime,
+                    object,
+                    key,
+                    value,
+                    TypedArraySetCompletion::LanguageWrite,
                     realm,
                     return_to,
                     origin.clone(),

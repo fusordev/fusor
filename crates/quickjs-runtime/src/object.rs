@@ -258,6 +258,11 @@ impl KeyPhases {
         strings: true,
         symbols: true,
     };
+
+    #[must_use]
+    pub(crate) const fn includes_indices(self) -> bool {
+        self.indices
+    }
 }
 
 /// Which atom-keyed phase `push_atom_keys` appends.
@@ -284,6 +289,11 @@ pub(crate) struct ForInCandidate {
 }
 
 impl ForInCandidate {
+    #[must_use]
+    pub(crate) const fn new(key: PropertyKey, enumerable: bool) -> Self {
+        Self { key, enumerable }
+    }
+
     pub(crate) fn key(&self) -> &PropertyKey {
         &self.key
     }
@@ -314,6 +324,10 @@ impl ForInSnapshot {
         self.candidates.get(index)
     }
 
+    pub(crate) fn iter(&self) -> impl Iterator<Item = &ForInCandidate> {
+        self.candidates.iter()
+    }
+
     pub(crate) const fn sort_work(&self) -> u64 {
         self.sort_work
     }
@@ -329,6 +343,14 @@ impl ForInSnapshot {
             candidates,
             sort_work: 0,
         })
+    }
+
+    #[must_use]
+    pub(crate) const fn from_candidates(candidates: Vec<ForInCandidate>, sort_work: u64) -> Self {
+        Self {
+            candidates,
+            sort_work,
+        }
     }
 }
 
@@ -2156,6 +2178,133 @@ pub(crate) enum DataViewByteLength {
     Auto,
 }
 
+/// The element representation of an integer-indexed typed-array exotic.
+///
+/// This is intentionally distinct from a host integer type: the element
+/// representation determines both the byte width and the ECMAScript
+/// conversion operation used by an indexed write.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[allow(
+    dead_code,
+    reason = "the typed-array storage core is committed before its Realm constructors are exposed"
+)]
+pub(crate) enum TypedArrayElementType {
+    Int8,
+    Uint8,
+    Uint8Clamped,
+    Int16,
+    Uint16,
+    Int32,
+    Uint32,
+    BigInt64,
+    BigUint64,
+    Float16,
+    Float32,
+    Float64,
+}
+
+#[allow(
+    dead_code,
+    reason = "the typed-array storage core is committed before its Realm constructors are exposed"
+)]
+impl TypedArrayElementType {
+    pub(crate) const ALL: [Self; 12] = [
+        Self::Int8,
+        Self::Uint8,
+        Self::Uint8Clamped,
+        Self::Int16,
+        Self::Uint16,
+        Self::Int32,
+        Self::Uint32,
+        Self::BigInt64,
+        Self::BigUint64,
+        Self::Float16,
+        Self::Float32,
+        Self::Float64,
+    ];
+
+    #[must_use]
+    pub(crate) const fn byte_width(self) -> usize {
+        match self {
+            Self::Int8 | Self::Uint8 | Self::Uint8Clamped => 1,
+            Self::Int16 | Self::Uint16 | Self::Float16 => 2,
+            Self::Int32 | Self::Uint32 | Self::Float32 => 4,
+            Self::BigInt64 | Self::BigUint64 | Self::Float64 => 8,
+        }
+    }
+
+    #[must_use]
+    pub(crate) const fn is_bigint(self) -> bool {
+        matches!(self, Self::BigInt64 | Self::BigUint64)
+    }
+}
+
+/// A fixed-length or length-tracking typed-array view over a resizable
+/// `ArrayBuffer`.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[allow(
+    dead_code,
+    reason = "the typed-array storage core is committed before its Realm constructors are exposed"
+)]
+pub(crate) enum TypedArrayLength {
+    Fixed(usize),
+    Auto,
+}
+
+/// The specification-level slots of an integer-indexed typed-array exotic.
+///
+/// Elements live only in the backing `ArrayBuffer`; this record keeps the
+/// view metadata so detached and out-of-bounds checks are always taken from a
+/// fresh buffer witness.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct TypedArrayState {
+    buffer: ObjectId,
+    byte_offset: usize,
+    length: TypedArrayLength,
+    element: TypedArrayElementType,
+}
+
+impl TypedArrayState {
+    #[must_use]
+    #[allow(
+        dead_code,
+        reason = "the typed-array storage core is committed before its Realm constructors are exposed"
+    )]
+    pub(crate) const fn new(
+        buffer: ObjectId,
+        byte_offset: usize,
+        length: TypedArrayLength,
+        element: TypedArrayElementType,
+    ) -> Self {
+        Self {
+            buffer,
+            byte_offset,
+            length,
+            element,
+        }
+    }
+
+    #[must_use]
+    pub(crate) const fn buffer(self) -> ObjectId {
+        self.buffer
+    }
+
+    #[must_use]
+    pub(crate) const fn byte_offset(self) -> usize {
+        self.byte_offset
+    }
+
+    #[must_use]
+    pub(crate) const fn length(self) -> TypedArrayLength {
+        self.length
+    }
+
+    #[must_use]
+    pub(crate) const fn element(self) -> TypedArrayElementType {
+        self.element
+    }
+}
+
 impl DataViewState {
     #[must_use]
     pub(crate) const fn new(
@@ -2262,6 +2411,12 @@ pub(crate) enum HeapObjectKind {
     ArrayBuffer(ArrayBufferState),
     /// An ECMAScript `DataView` object with its view and buffer slots.
     DataView(DataViewState),
+    /// An ECMAScript integer-indexed typed-array exotic object.
+    #[allow(
+        dead_code,
+        reason = "the typed-array storage core is committed before its Realm constructors are exposed"
+    )]
+    TypedArray(TypedArrayState),
     /// An ECMAScript `Temporal.Instant` with an `[[EpochNanoseconds]]` slot.
     TemporalInstant(Instant),
     /// An ECMAScript `Temporal.Duration` with its ten duration fields.
@@ -2405,6 +2560,7 @@ impl HeapObjectKind {
             | Self::Date(_)
             | Self::ArrayBuffer(_)
             | Self::DataView(_)
+            | Self::TypedArray(_)
             | Self::TemporalInstant(_)
             | Self::TemporalDuration(_)
             | Self::Map(_)
@@ -2437,6 +2593,7 @@ impl HeapObjectKind {
             | Self::Date(_)
             | Self::ArrayBuffer(_)
             | Self::DataView(_)
+            | Self::TypedArray(_)
             | Self::TemporalInstant(_)
             | Self::TemporalDuration(_)
             | Self::Map(_)
@@ -2468,6 +2625,7 @@ impl HeapObjectKind {
             | Self::Date(_)
             | Self::ArrayBuffer(_)
             | Self::DataView(_)
+            | Self::TypedArray(_)
             | Self::TemporalInstant(_)
             | Self::TemporalDuration(_)
             | Self::Map(_)
@@ -2499,6 +2657,7 @@ impl HeapObjectKind {
             | Self::Date(_)
             | Self::ArrayBuffer(_)
             | Self::DataView(_)
+            | Self::TypedArray(_)
             | Self::TemporalInstant(_)
             | Self::TemporalDuration(_)
             | Self::Map(_)
@@ -2530,6 +2689,7 @@ impl HeapObjectKind {
             | Self::Date(_)
             | Self::ArrayBuffer(_)
             | Self::DataView(_)
+            | Self::TypedArray(_)
             | Self::TemporalInstant(_)
             | Self::TemporalDuration(_)
             | Self::Map(_)
@@ -2561,6 +2721,7 @@ impl HeapObjectKind {
             | Self::Date(_)
             | Self::ArrayBuffer(_)
             | Self::DataView(_)
+            | Self::TypedArray(_)
             | Self::TemporalInstant(_)
             | Self::TemporalDuration(_)
             | Self::Map(_)
@@ -2592,6 +2753,7 @@ impl HeapObjectKind {
             | Self::Date(_)
             | Self::ArrayBuffer(_)
             | Self::DataView(_)
+            | Self::TypedArray(_)
             | Self::TemporalInstant(_)
             | Self::TemporalDuration(_)
             | Self::Map(_)
@@ -2623,6 +2785,7 @@ impl HeapObjectKind {
             | Self::Date(_)
             | Self::ArrayBuffer(_)
             | Self::DataView(_)
+            | Self::TypedArray(_)
             | Self::TemporalInstant(_)
             | Self::TemporalDuration(_)
             | Self::Map(_)
@@ -2654,6 +2817,7 @@ impl HeapObjectKind {
             | Self::Date(_)
             | Self::ArrayBuffer(_)
             | Self::DataView(_)
+            | Self::TypedArray(_)
             | Self::TemporalInstant(_)
             | Self::TemporalDuration(_)
             | Self::Map(_)
@@ -2977,6 +3141,19 @@ impl HeapObject {
     }
 
     #[must_use]
+    #[allow(
+        dead_code,
+        reason = "the typed-array storage core is committed before its Realm constructors are exposed"
+    )]
+    pub(crate) const fn typed_array(record: ObjectRecord, state: TypedArrayState) -> Self {
+        Self {
+            kind: HeapObjectKind::TypedArray(state),
+            record,
+            public_roots: 0,
+        }
+    }
+
+    #[must_use]
     pub(crate) const fn temporal_instant(record: ObjectRecord, instant: Instant) -> Self {
         Self {
             kind: HeapObjectKind::TemporalInstant(instant),
@@ -3159,6 +3336,13 @@ impl HeapObject {
         }
     }
 
+    pub(crate) const fn typed_array_state(&self) -> Option<&TypedArrayState> {
+        match &self.kind {
+            HeapObjectKind::TypedArray(state) => Some(state),
+            _ => None,
+        }
+    }
+
     pub(crate) const fn temporal_instant_value(&self) -> Option<Instant> {
         match &self.kind {
             HeapObjectKind::TemporalInstant(instant) => Some(*instant),
@@ -3196,6 +3380,7 @@ impl HeapObject {
             | HeapObjectKind::Date(_)
             | HeapObjectKind::ArrayBuffer(_)
             | HeapObjectKind::DataView(_)
+            | HeapObjectKind::TypedArray(_)
             | HeapObjectKind::TemporalInstant(_)
             | HeapObjectKind::TemporalDuration(_)
             | HeapObjectKind::Map(_)
@@ -3227,6 +3412,7 @@ impl HeapObject {
             | HeapObjectKind::Date(_)
             | HeapObjectKind::ArrayBuffer(_)
             | HeapObjectKind::DataView(_)
+            | HeapObjectKind::TypedArray(_)
             | HeapObjectKind::TemporalInstant(_)
             | HeapObjectKind::TemporalDuration(_)
             | HeapObjectKind::Map(_)
@@ -3260,6 +3446,7 @@ impl HeapObject {
             | HeapObjectKind::Date(_)
             | HeapObjectKind::ArrayBuffer(_)
             | HeapObjectKind::DataView(_)
+            | HeapObjectKind::TypedArray(_)
             | HeapObjectKind::TemporalInstant(_)
             | HeapObjectKind::TemporalDuration(_)
             | HeapObjectKind::Map(_)

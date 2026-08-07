@@ -856,6 +856,51 @@ pub(super) fn begin_internal_define_own_property(
 ) -> Result<NativeDispatch, NativeFailure> {
     let Some(proxy_state) = runtime.proxy_state(proxy)?.copied() else {
         let base = proxy_reference_value(proxy);
+        if let HeapReference::Object(object) = proxy
+            && let Some(action) =
+                typed_array_define_own_property_action(runtime, object, &key, &definition)?
+        {
+            match action {
+                TypedArrayDefineAction::Ordinary => {}
+                TypedArrayDefineAction::Rejected => {
+                    return match result {
+                        DefinePropertyResult::Boolean => {
+                            Ok(NativeDispatch::Immediate(StoredValue::Boolean(false)))
+                        }
+                        DefinePropertyResult::Target => proxy_abrupt(
+                            realm,
+                            origin,
+                            "typed-array property definition was rejected",
+                        ),
+                    };
+                }
+                TypedArrayDefineAction::Complete => {
+                    return Ok(NativeDispatch::Immediate(match result {
+                        DefinePropertyResult::Target => base,
+                        DefinePropertyResult::Boolean => StoredValue::Boolean(true),
+                    }));
+                }
+                TypedArrayDefineAction::Store(index) => {
+                    let value =
+                        definition
+                            .present_data_value()
+                            .ok_or(EngineFault::RuntimeInvariant {
+                                message: "typed-array define store lost its descriptor value",
+                            })?;
+                    return begin_typed_array_element_set(
+                        runtime,
+                        object,
+                        TypedArrayPropertyKey::Index(index),
+                        value.duplicate(),
+                        TypedArraySetCompletion::Define(result),
+                        realm,
+                        return_to,
+                        origin,
+                        execution_budget,
+                    );
+                }
+            }
+        }
         if is_array_length_target(runtime, &base, &key)?
             && let Some(value) = definition.requested_value()
         {
@@ -1677,6 +1722,11 @@ pub(super) fn begin_internal_prevent_extensions(
             execution_budget,
         );
     }
+    if let HeapReference::Object(object) = reference
+        && runtime.typed_array_is_fixed_length(object)? == Some(false)
+    {
+        return Ok(NativeDispatch::Immediate(StoredValue::Boolean(false)));
+    }
     runtime.prevent_extensions(reference)?;
     Ok(NativeDispatch::Immediate(StoredValue::Boolean(true)))
 }
@@ -2007,6 +2057,14 @@ pub(super) fn begin_internal_has(
                 execution_budget,
             );
         }
+        if let HeapReference::Object(object) = current
+            && let TypedArrayOwnProperty::IntegerIndexed(property) =
+                runtime.typed_array_own_property(object, &key)?
+        {
+            return Ok(NativeDispatch::Immediate(StoredValue::Boolean(
+                property.is_some(),
+            )));
+        }
         if heap_own_property(runtime, current, &key)?.is_some() {
             return Ok(NativeDispatch::Immediate(StoredValue::Boolean(true)));
         }
@@ -2212,6 +2270,42 @@ pub(super) fn begin_internal_set(
     origin: JsStackFrame,
     execution_budget: &mut ExecutionBudget,
 ) -> Result<NativeDispatch, NativeFailure> {
+    if let HeapReference::Object(object) = reference
+        && let Some(key) = runtime.typed_array_property_key(object, &key)?
+        && key != TypedArrayPropertyKey::Ordinary
+    {
+        if receiver.strict_equals(&StoredValue::Object(object)) {
+            return begin_typed_array_element_set(
+                runtime,
+                object,
+                key,
+                value,
+                if boolean_result {
+                    TypedArraySetCompletion::ReflectSet
+                } else {
+                    TypedArraySetCompletion::LanguageWrite
+                },
+                realm,
+                return_to,
+                origin,
+                execution_budget,
+            );
+        }
+        let valid = match key {
+            TypedArrayPropertyKey::Index(index) => {
+                runtime.typed_array_read_index(object, index)?.is_some()
+            }
+            TypedArrayPropertyKey::Invalid => false,
+            TypedArrayPropertyKey::Ordinary => unreachable!("filtered above"),
+        };
+        if !valid {
+            return Ok(NativeDispatch::Immediate(if boolean_result {
+                StoredValue::Boolean(true)
+            } else {
+                StoredValue::Undefined
+            }));
+        }
+    }
     let completion = if boolean_result {
         ProxyBooleanCompletion::Boolean
     } else {

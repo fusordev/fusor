@@ -72,9 +72,10 @@ use crate::{
         PromiseResolvingKind, PromiseStatic, RealmGlobalBindingState, ReflectMethod, RegExpFlag,
         RegExpSymbolMethod, SetMethod, SetPrototypeOutcome, StringArgument, StringMethod,
         TemporalDurationPrototypeMethod, TemporalDurationStaticMethod,
-        TemporalInstantPrototypeMethod, TemporalInstantStaticMethod, UriFunction, WeakMapMethod,
-        WeakSetMethod, array_length_from_number, check_execution_limit, global_declaration_error,
-        usize_to_u64,
+        TemporalInstantPrototypeMethod, TemporalInstantStaticMethod, TypedArrayElementValue,
+        TypedArrayOwnProperty, TypedArrayPropertyKey, TypedArrayStoreOutcome, UriFunction,
+        WeakMapMethod, WeakSetMethod, array_length_from_number, check_execution_limit,
+        global_declaration_error, usize_to_u64,
     },
     value::{HeapReference, SlotValue, StoredValue},
 };
@@ -131,6 +132,7 @@ mod string_raw;
 mod string_replace;
 mod string_split;
 mod temporal;
+mod typed_array;
 mod uri;
 mod weak_collections;
 mod weak_references;
@@ -151,8 +153,8 @@ use {
     generator::*, group_by::*, iterators::*, json_parse::*, json_stringify::*, locale_string::*,
     map::*, math::*, math_sum_precise::*, native::*, object_intrinsics::*, promise::*,
     promise_combinators::*, properties::*, proxy::*, reflect::*, regexp::*, set::*, stack::*,
-    string_methods::*, string_raw::*, string_replace::*, string_split::*, temporal::*, uri::*,
-    weak_collections::*, weak_references::*,
+    string_methods::*, string_raw::*, string_replace::*, string_split::*, temporal::*,
+    typed_array::*, uri::*, weak_collections::*, weak_references::*,
 };
 
 /// Inclusive per-call interpreter limits.
@@ -1957,6 +1959,8 @@ enum OperatorPrimitiveTarget {
     DataViewSetOffset(Box<DataViewSetOffsetState>),
     /// `DataView.prototype.set*` after `ToNumber` or `ToBigInt(value)`.
     DataViewSetValue(Box<DataViewSetValueState>),
+    /// An integer-indexed typed-array write after `ToNumber` or `ToBigInt`.
+    TypedArrayElementSet(Box<TypedArrayElementSetState>),
     /// `ArrayBuffer.prototype.resize`'s new length, after the brand checks.
     ArrayBufferResize {
         object: ObjectId,
@@ -2196,6 +2200,7 @@ impl OperatorPrimitiveTarget {
             Self::DataViewGetIndex(_) => DataViewGetState::retained_values(),
             Self::DataViewSetOffset(_) => DataViewSetOffsetState::retained_values(),
             Self::DataViewSetValue(_) => DataViewSetValueState::retained_values(),
+            Self::TypedArrayElementSet(_) => TypedArrayElementSetState::retained_values(),
             Self::TemporalDurationConstructor(state) => state.retained_values(),
             Self::TemporalDurationBag(state) => state.retained_values(),
             Self::TemporalDurationRoundLargestUnit(_state)
@@ -2532,6 +2537,7 @@ fn trace_operator_primitive_target_roots(
         OperatorPrimitiveTarget::DataViewGetIndex(state) => state.trace_roots(mark),
         OperatorPrimitiveTarget::DataViewSetOffset(state) => state.trace_roots(mark),
         OperatorPrimitiveTarget::DataViewSetValue(state) => state.trace_roots(mark),
+        OperatorPrimitiveTarget::TypedArrayElementSet(state) => state.trace_roots(mark),
         OperatorPrimitiveTarget::ErrorConstructorMessage(state) => state.trace_roots(mark),
         OperatorPrimitiveTarget::ErrorToStringName(state)
         | OperatorPrimitiveTarget::ErrorToStringMessage(state) => state.trace_roots(mark),

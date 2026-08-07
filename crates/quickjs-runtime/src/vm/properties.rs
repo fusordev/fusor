@@ -731,6 +731,15 @@ pub(super) fn lookup_heap_property(
             .into());
         }
         remaining -= 1;
+        if let HeapReference::Object(object) = reference
+            && let TypedArrayOwnProperty::IntegerIndexed(property) =
+                runtime.typed_array_own_property(object, key)?
+        {
+            // Canonical numeric keys are fully owned by the integer-indexed
+            // exotic, including an absent element. They never continue onto a
+            // prototype property with the same key.
+            return Ok(property);
+        }
         if let Some(property) = heap_own_property(runtime, reference, key)? {
             return Ok(Some(property));
         }
@@ -744,6 +753,12 @@ pub(super) fn heap_own_property(
     reference: HeapReference,
     key: &PropertyKey,
 ) -> Result<Option<OwnProperty>, ExecutionError> {
+    if let HeapReference::Object(object) = reference
+        && let TypedArrayOwnProperty::IntegerIndexed(property) =
+            runtime.typed_array_own_property(object, key)?
+    {
+        return Ok(property);
+    }
     if let Some(property) = string_exotic_index_property(runtime, reference, key)? {
         return Ok(Some(property));
     }
@@ -877,6 +892,16 @@ pub(super) fn delete_static_property(
     };
     if string_exotic_index_is_present(runtime, reference, key)? {
         return Ok(PropertyDeleteOutcome::Refused);
+    }
+    if let HeapReference::Object(object) = reference
+        && let TypedArrayOwnProperty::IntegerIndexed(property) =
+            runtime.typed_array_own_property(object, key)?
+    {
+        return Ok(if property.is_some() {
+            PropertyDeleteOutcome::Refused
+        } else {
+            PropertyDeleteOutcome::Deleted
+        });
     }
     Ok(match runtime.delete_own_property(reference, key)? {
         PropertyDeletion::Missing | PropertyDeletion::Deleted => PropertyDeleteOutcome::Deleted,

@@ -328,6 +328,19 @@ pub(super) fn reflect_set_property(
         );
     }
     if target.strict_equals(&receiver) {
+        if let Some((object, key)) = typed_array_indexed_key(runtime, &target, &key)? {
+            return begin_typed_array_element_set(
+                runtime,
+                object,
+                key,
+                value,
+                TypedArraySetCompletion::ReflectSet,
+                realm,
+                return_to,
+                origin,
+                execution_budget,
+            );
+        }
         if is_array_length_target(runtime, &target, &key)? {
             let conversion = array_length_write_target(target, name, false, true, &value);
             return begin_operator_primitive_conversion(
@@ -346,6 +359,22 @@ pub(super) fn reflect_set_property(
             return_to,
             origin,
         );
+    }
+
+    if let StoredValue::Object(object) = &target
+        && let Some(key) = runtime.typed_array_property_key(*object, &key)?
+        && key != TypedArrayPropertyKey::Ordinary
+    {
+        let valid = match key {
+            TypedArrayPropertyKey::Index(index) => {
+                runtime.typed_array_read_index(*object, index)?.is_some()
+            }
+            TypedArrayPropertyKey::Invalid => false,
+            TypedArrayPropertyKey::Ordinary => unreachable!("filtered above"),
+        };
+        if !valid {
+            return Ok(NativeDispatch::Immediate(StoredValue::Boolean(true)));
+        }
     }
 
     let reference = target

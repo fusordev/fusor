@@ -310,6 +310,19 @@ impl JsBigInt {
         Some(low | (high << LIMB_BITS))
     }
 
+    /// Returns the low 64 bits of the value's infinite two's-complement
+    /// representation.
+    ///
+    /// `BigInt64Array` and `BigUint64Array` write exactly this modulo-`2^64`
+    /// projection.  Keeping it limb-local avoids allocating an intermediate
+    /// `asIntN(64)`/`asUintN(64)` result in the typed-array element path.
+    #[must_use]
+    pub(crate) fn low_u64_twos_complement(&self) -> u64 {
+        let low = u64::from(self.limb(0));
+        let high = u64::from(self.limb(1));
+        low | (high << LIMB_BITS)
+    }
+
     /// Converts the value to the nearest binary64, rounding half to even.
     ///
     /// This is the `BigInt` branch of ECMAScript `ToNumber`, which is reachable

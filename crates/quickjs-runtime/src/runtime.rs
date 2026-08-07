@@ -51,6 +51,7 @@ use crate::{
         DataViewState, DateState, ForInIterator, ForInSnapshot, HeapObject, KeyPhases,
         ObjectRecord, OwnProperty, PromiseCapability, PromiseReaction, PropertyDeletion,
         ProxyState, RegExpState, RegExpStringIterator, ShapeInterner, StringIterator,
+        TypedArrayState,
     },
     value::{HeapReference, PrimitiveValue, ReleaseMailbox, RootTarget, SlotValue, StoredValue},
 };
@@ -68,10 +69,14 @@ mod regexps;
 mod sets;
 mod symbols;
 mod temporals;
+mod typed_arrays;
 mod weak_collections;
 mod weak_references;
 pub(crate) use iterators::PreparedIteratorResultPlan;
 pub use limits::{RuntimeLimits, RuntimeUsage};
+pub(crate) use typed_arrays::{
+    TypedArrayElementValue, TypedArrayOwnProperty, TypedArrayPropertyKey, TypedArrayStoreOutcome,
+};
 
 struct RealmState {
     object_prototype: ObjectId,

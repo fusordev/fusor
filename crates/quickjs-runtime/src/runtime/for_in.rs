@@ -605,6 +605,27 @@ impl Runtime {
         replacing: usize,
         phases: KeyPhases,
     ) -> Result<(ForInSnapshot, u64), crate::ExecutionError> {
+        if let HeapReference::Object(object) = reference
+            && self.typed_array_state(object)?.is_some()
+        {
+            let snapshot = self.try_typed_array_own_key_snapshot(object, phases)?;
+            let observed = self
+                .for_in_entries
+                .saturating_sub(usize_to_u64(replacing))
+                .saturating_add(usize_to_u64(snapshot.len()));
+            check_execution_limit(
+                RuntimeResource::ForInEntries,
+                self.limits.max_for_in_entries,
+                observed,
+            )?;
+            let property_count = self.object_record(reference)?.property_count();
+            let work = usize_to_u64(property_count)
+                .saturating_mul(4)
+                .saturating_add(usize_to_u64(snapshot.len()))
+                .saturating_add(snapshot.sort_work())
+                .saturating_add(1);
+            return Ok((snapshot, work));
+        }
         let string_length = match reference {
             HeapReference::Function(_) => None,
             HeapReference::Object(object) => self.boxed_string(object)?.map(JsString::len),

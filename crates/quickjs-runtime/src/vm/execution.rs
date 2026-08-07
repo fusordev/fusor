@@ -2081,6 +2081,30 @@ pub(super) fn execute_one(
                     return_to,
                 );
             }
+            if let Some((object, key)) = typed_array_indexed_key(runtime, &base, &property.key)? {
+                let return_to =
+                    CallReturn::discard(verified_instruction.successors().fallthrough().ok_or(
+                        EngineFault::InvalidSuccessor {
+                            function: frame.template,
+                            pc: source_pc,
+                        },
+                    )?);
+                let origin = instruction_location(runtime, frame, source_pc)?;
+                return native_step(
+                    begin_typed_array_element_set(
+                        runtime,
+                        object,
+                        key,
+                        value,
+                        TypedArraySetCompletion::LanguageWrite,
+                        realm,
+                        Some(return_to),
+                        origin,
+                        execution_budget,
+                    ),
+                    return_to,
+                );
+            }
             match write_static_property(
                 runtime,
                 realm,

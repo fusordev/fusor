@@ -564,9 +564,7 @@ fn apply_collected_descriptor(
 
     let definition = property_definition_from_fields(fields, realm, &origin)?;
 
-    if let Some(reference) = target.heap_reference()
-        && runtime.proxy_state(reference)?.is_some()
-    {
+    if let Some(reference) = target.heap_reference() {
         return begin_internal_define_own_property(
             runtime,
             reference,

@@ -1078,6 +1078,14 @@ impl Runtime {
                                     &mut work,
                                 );
                             }
+                            if let Some(array) = object.typed_array_state() {
+                                mark_heap_reference(
+                                    HeapReference::Object(array.buffer()),
+                                    &mut marked_functions,
+                                    &mut marked_objects,
+                                    &mut work,
+                                );
+                            }
                             if let Some(matcher) = object
                                 .regexp_string_iterator_state()
                                 .and_then(crate::object::RegExpStringIterator::matcher)
