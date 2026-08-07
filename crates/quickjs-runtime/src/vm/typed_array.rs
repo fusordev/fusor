@@ -50,7 +50,7 @@ pub(super) struct TypedArrayConstructorLengthState {
 /// the optional byte offset. The length operand remains rooted because its
 /// conversion must happen only after the offset has been validated.
 pub(super) struct TypedArrayConstructorBufferOffsetState {
-    new_target: FunctionId,
+    prototype: HeapReference,
     buffer: ObjectId,
     byte_length: StoredValue,
     element: TypedArrayElementType,
@@ -61,9 +61,23 @@ pub(super) struct TypedArrayConstructorBufferOffsetState {
 /// `%TypedArray%` construction from an `ArrayBuffer`, awaiting `ToIndex` for
 /// the explicit element length.
 pub(super) struct TypedArrayConstructorBufferLengthState {
-    new_target: FunctionId,
+    prototype: HeapReference,
     buffer: ObjectId,
     byte_offset: usize,
+    element: TypedArrayElementType,
+    realm: RealmId,
+    origin: JsStackFrame,
+}
+
+/// `%TypedArray%` construction from an object. `AllocateTypedArray` performs
+/// the `newTarget.prototype` lookup before it dispatches to the typed-array,
+/// ArrayBuffer, iterable, or array-like initializer, so all object operands
+/// stay rooted in one continuation across that lookup.
+pub(super) struct TypedArrayConstructorObjectState {
+    new_target: FunctionId,
+    source: StoredValue,
+    byte_offset: StoredValue,
+    byte_length: StoredValue,
     element: TypedArrayElementType,
     realm: RealmId,
     origin: JsStackFrame,
@@ -87,9 +101,7 @@ impl TypedArrayConstructorBufferOffsetState {
     }
 
     pub(super) fn trace_roots(&self, mark: &mut dyn FnMut(CollectionRoot)) {
-        mark(CollectionRoot::Heap(HeapReference::Function(
-            self.new_target,
-        )));
+        mark(CollectionRoot::Heap(self.prototype));
         mark(CollectionRoot::Heap(HeapReference::Object(self.buffer)));
         trace_stored_value_root(&self.byte_length, mark);
     }
@@ -101,10 +113,23 @@ impl TypedArrayConstructorBufferLengthState {
     }
 
     pub(super) fn trace_roots(&self, mark: &mut dyn FnMut(CollectionRoot)) {
+        mark(CollectionRoot::Heap(self.prototype));
+        mark(CollectionRoot::Heap(HeapReference::Object(self.buffer)));
+    }
+}
+
+impl TypedArrayConstructorObjectState {
+    pub(super) const fn retained_values() -> u64 {
+        4
+    }
+
+    pub(super) fn trace_roots(&self, mark: &mut dyn FnMut(CollectionRoot)) {
         mark(CollectionRoot::Heap(HeapReference::Function(
             self.new_target,
         )));
-        mark(CollectionRoot::Heap(HeapReference::Object(self.buffer)));
+        trace_stored_value_root(&self.source, mark);
+        trace_stored_value_root(&self.byte_offset, mark);
+        trace_stored_value_root(&self.byte_length, mark);
     }
 }
 
@@ -182,34 +207,20 @@ pub(super) fn begin_typed_array_constructor(
     let source = arguments.take_first_or_undefined();
     let byte_offset = arguments.take_first_or_undefined();
     let byte_length = arguments.take_first_or_undefined();
-    if let StoredValue::Object(buffer) = source
-        && runtime.array_buffer_state(buffer)?.is_some()
-    {
-        return begin_operator_primitive_conversion(
-            runtime,
-            byte_offset,
-            OperatorPrimitiveHint::Number,
-            OperatorPrimitiveTarget::TypedArrayConstructorBufferOffset(Box::new(
-                TypedArrayConstructorBufferOffsetState {
-                    new_target,
-                    buffer,
-                    byte_length,
-                    element,
-                    realm,
-                    origin: origin.clone(),
-                },
-            )),
-            realm,
-            return_to,
-            origin,
-            execution_budget,
-        );
-    }
     if matches!(source, StoredValue::Object(_) | StoredValue::Function(_)) {
-        return typed_array_type_error(
-            realm,
-            &origin,
-            "TypedArray object, iterable, and array-like initializers are not implemented",
+        return begin_typed_array_constructor_object_prototype_get(
+            runtime,
+            TypedArrayConstructorObjectState {
+                new_target,
+                source,
+                byte_offset,
+                byte_length,
+                element,
+                realm,
+                origin: origin.clone(),
+            },
+            return_to,
+            execution_budget,
         );
     }
     begin_operator_primitive_conversion(
@@ -231,6 +242,129 @@ pub(super) fn begin_typed_array_constructor(
     )
 }
 
+#[allow(
+    clippy::too_many_arguments,
+    reason = "the ArrayBuffer initializer has already selected its constructor prototype before coercing byteOffset"
+)]
+pub(super) fn begin_typed_array_constructor_buffer_offset(
+    runtime: &mut Runtime,
+    prototype: HeapReference,
+    buffer: ObjectId,
+    byte_offset: StoredValue,
+    byte_length: StoredValue,
+    element: TypedArrayElementType,
+    realm: RealmId,
+    return_to: Option<CallReturn>,
+    origin: JsStackFrame,
+    execution_budget: &mut ExecutionBudget,
+) -> Result<NativeDispatch, NativeFailure> {
+    begin_operator_primitive_conversion(
+        runtime,
+        byte_offset,
+        OperatorPrimitiveHint::Number,
+        OperatorPrimitiveTarget::TypedArrayConstructorBufferOffset(Box::new(
+            TypedArrayConstructorBufferOffsetState {
+                prototype,
+                buffer,
+                byte_length,
+                element,
+                realm,
+                origin: origin.clone(),
+            },
+        )),
+        realm,
+        return_to,
+        origin,
+        execution_budget,
+    )
+}
+
+fn begin_typed_array_constructor_object_prototype_get(
+    runtime: &mut Runtime,
+    state: TypedArrayConstructorObjectState,
+    return_to: Option<CallReturn>,
+    execution_budget: &mut ExecutionBudget,
+) -> Result<NativeDispatch, NativeFailure> {
+    let receiver = StoredValue::Function(state.new_target);
+    charge_heap_property_lookup(runtime, &receiver, execution_budget)?;
+    let prototype_key = runtime.predefined_property_key(PredefinedAtom::Prototype);
+    let dispatch = begin_value_get(
+        runtime,
+        &receiver,
+        prototype_key,
+        None,
+        state.realm,
+        return_to,
+        state.origin.clone(),
+        execution_budget,
+    )?;
+    continue_get_after(
+        dispatch,
+        state,
+        typed_array_constructor_object_continuation,
+        |state, value| {
+            advance_typed_array_constructor_object(
+                runtime,
+                state,
+                Some(value),
+                return_to,
+                execution_budget,
+            )
+        },
+        "TypedArray constructor prototype Get produced a structured result",
+    )
+}
+
+pub(super) fn advance_typed_array_constructor_object(
+    runtime: &mut Runtime,
+    state: TypedArrayConstructorObjectState,
+    completion: Option<StoredValue>,
+    return_to: Option<CallReturn>,
+    execution_budget: &mut ExecutionBudget,
+) -> Result<NativeDispatch, NativeFailure> {
+    let requested = completion.ok_or(EngineFault::RuntimeInvariant {
+        message: "TypedArray constructor prototype lookup resumed without a completion",
+    })?;
+    let prototype =
+        typed_array_constructor_prototype(runtime, state.new_target, state.element, &requested)?;
+    let StoredValue::Object(source) = state.source else {
+        return typed_array_type_error(
+            state.realm,
+            &state.origin,
+            "TypedArray object initializer lost its object identity",
+        );
+    };
+    if runtime.array_buffer_state(source)?.is_some() {
+        return begin_typed_array_constructor_buffer_offset(
+            runtime,
+            prototype,
+            source,
+            state.byte_offset,
+            state.byte_length,
+            state.element,
+            state.realm,
+            return_to,
+            state.origin,
+            execution_budget,
+        );
+    }
+    if runtime.typed_array_state(source)?.is_some() {
+        return finish_typed_array_constructor_from_typed_array(
+            runtime,
+            prototype,
+            source,
+            state.element,
+            state.realm,
+            &state.origin,
+        );
+    }
+    typed_array_type_error(
+        state.realm,
+        &state.origin,
+        "TypedArray iterable and array-like initializers are not implemented",
+    )
+}
+
 pub(super) fn finish_typed_array_constructor_buffer_offset(
     runtime: &mut Runtime,
     state: TypedArrayConstructorBufferOffsetState,
@@ -239,16 +373,7 @@ pub(super) fn finish_typed_array_constructor_buffer_offset(
     execution_budget: &mut ExecutionBudget,
 ) -> Result<NativeDispatch, NativeFailure> {
     let byte_offset = typed_array_to_index(value, state.realm, &state.origin)?;
-    let (buffer_byte_length, resizable) =
-        typed_array_buffer_length(runtime, state.buffer, state.realm, &state.origin)?;
     let element_width = state.element.byte_width();
-    if byte_offset > buffer_byte_length {
-        return typed_array_range_error(
-            state.realm,
-            &state.origin,
-            "TypedArray byte offset is outside buffer",
-        );
-    }
     if byte_offset % element_width != 0 {
         return typed_array_range_error(
             state.realm,
@@ -256,52 +381,60 @@ pub(super) fn finish_typed_array_constructor_buffer_offset(
             "TypedArray byte offset is not aligned to its element size",
         );
     }
-    if matches!(state.byte_length, StoredValue::Undefined) {
+    if !matches!(state.byte_length, StoredValue::Undefined) {
+        let byte_length = state.byte_length.duplicate();
+        return begin_operator_primitive_conversion(
+            runtime,
+            byte_length,
+            OperatorPrimitiveHint::Number,
+            OperatorPrimitiveTarget::TypedArrayConstructorBufferLength(Box::new(
+                TypedArrayConstructorBufferLengthState {
+                    prototype: state.prototype,
+                    buffer: state.buffer,
+                    byte_offset,
+                    element: state.element,
+                    realm: state.realm,
+                    origin: state.origin.clone(),
+                },
+            )),
+            state.realm,
+            return_to,
+            state.origin,
+            execution_budget,
+        );
+    }
+    let (buffer_byte_length, resizable) =
+        typed_array_buffer_length(runtime, state.buffer, state.realm, &state.origin)?;
+    if byte_offset > buffer_byte_length {
+        return typed_array_range_error(
+            state.realm,
+            &state.origin,
+            "TypedArray byte offset is outside buffer",
+        );
+    }
+    let length = if resizable {
+        TypedArrayLength::Auto
+    } else {
         let remainder = buffer_byte_length.saturating_sub(byte_offset);
-        if remainder % element_width != 0 {
+        if buffer_byte_length % element_width != 0 {
             return typed_array_range_error(
                 state.realm,
                 &state.origin,
                 "TypedArray byte length is not aligned to its element size",
             );
         }
-        let length = if resizable {
-            TypedArrayLength::Auto
-        } else {
-            TypedArrayLength::Fixed(remainder / element_width)
-        };
-        return begin_typed_array_constructor_buffer_prototype_get(
-            runtime,
-            state.new_target,
-            state.element,
-            state.buffer,
-            byte_offset,
-            length,
-            state.realm,
-            state.origin,
-            return_to,
-            execution_budget,
-        );
-    }
-    let byte_length = state.byte_length.duplicate();
-    begin_operator_primitive_conversion(
+        TypedArrayLength::Fixed(remainder / element_width)
+    };
+    let _ = (return_to, execution_budget);
+    finish_typed_array_constructor_buffer(
         runtime,
-        byte_length,
-        OperatorPrimitiveHint::Number,
-        OperatorPrimitiveTarget::TypedArrayConstructorBufferLength(Box::new(
-            TypedArrayConstructorBufferLengthState {
-                new_target: state.new_target,
-                buffer: state.buffer,
-                byte_offset,
-                element: state.element,
-                realm: state.realm,
-                origin: state.origin.clone(),
-            },
-        )),
+        state.prototype,
+        state.element,
+        state.buffer,
+        byte_offset,
+        length,
         state.realm,
-        return_to,
-        state.origin,
-        execution_budget,
+        &state.origin,
     )
 }
 
@@ -333,17 +466,16 @@ pub(super) fn finish_typed_array_constructor_buffer_length(
             "TypedArray length is outside buffer",
         );
     }
-    begin_typed_array_constructor_buffer_prototype_get(
+    let _ = (return_to, execution_budget);
+    finish_typed_array_constructor_buffer(
         runtime,
-        state.new_target,
+        state.prototype,
         state.element,
         state.buffer,
         state.byte_offset,
         TypedArrayLength::Fixed(length),
         state.realm,
-        state.origin,
-        return_to,
-        execution_budget,
+        &state.origin,
     )
 }
 
@@ -380,44 +512,6 @@ pub(super) fn finish_typed_array_constructor_length(
     )
 }
 
-#[allow(
-    clippy::too_many_arguments,
-    reason = "the ArrayBuffer view constructor retains its validated slots across an observable prototype lookup"
-)]
-fn begin_typed_array_constructor_buffer_prototype_get(
-    runtime: &mut Runtime,
-    new_target: FunctionId,
-    element: TypedArrayElementType,
-    buffer: ObjectId,
-    byte_offset: usize,
-    length: TypedArrayLength,
-    realm: RealmId,
-    origin: JsStackFrame,
-    return_to: Option<CallReturn>,
-    execution_budget: &mut ExecutionBudget,
-) -> Result<NativeDispatch, NativeFailure> {
-    let prototype_key = runtime.predefined_property_key(PredefinedAtom::Prototype);
-    begin_intrinsic_get(
-        runtime,
-        realm,
-        HeapReference::Function(new_target),
-        StoredValue::Function(new_target),
-        &prototype_key,
-        IntrinsicGetContinuation::TypedArrayConstructorBuffer {
-            new_target,
-            element,
-            buffer,
-            byte_offset,
-            length,
-            realm,
-            origin: origin.clone(),
-        },
-        return_to,
-        Some(origin),
-        execution_budget,
-    )
-}
-
 pub(super) fn finish_typed_array_constructor_wrapper(
     runtime: &mut Runtime,
     new_target: FunctionId,
@@ -426,19 +520,7 @@ pub(super) fn finish_typed_array_constructor_wrapper(
     requested: &StoredValue,
 ) -> Result<NativeDispatch, NativeFailure> {
     let realm = runtime.function_realm(new_target)?;
-    let prototype = match requested {
-        StoredValue::Function(function) => HeapReference::Function(*function),
-        StoredValue::Object(object) => HeapReference::Object(*object),
-        StoredValue::Undefined
-        | StoredValue::Null
-        | StoredValue::Boolean(_)
-        | StoredValue::Number(_)
-        | StoredValue::BigInt(_)
-        | StoredValue::String(_)
-        | StoredValue::Symbol(_) => {
-            HeapReference::Object(runtime.realm_typed_array_prototype(realm, element)?)
-        }
-    };
+    let prototype = typed_array_constructor_prototype(runtime, new_target, element, requested)?;
     let byte_length =
         length
             .checked_mul(element.byte_width())
@@ -463,20 +545,18 @@ pub(super) fn finish_typed_array_constructor_wrapper(
 
 #[allow(
     clippy::too_many_arguments,
-    reason = "the post-Get ArrayBuffer witness includes the constructor, element kind, view slots, realm, and source origin"
+    reason = "the ArrayBuffer view allocation carries its selected prototype, element kind, view slots, realm, and source origin"
 )]
-pub(super) fn finish_typed_array_constructor_buffer_wrapper(
+pub(super) fn finish_typed_array_constructor_buffer(
     runtime: &mut Runtime,
-    new_target: FunctionId,
+    prototype: HeapReference,
     element: TypedArrayElementType,
     buffer: ObjectId,
     byte_offset: usize,
     length: TypedArrayLength,
     realm: RealmId,
     origin: &JsStackFrame,
-    requested: &StoredValue,
 ) -> Result<NativeDispatch, NativeFailure> {
-    let prototype = typed_array_constructor_prototype(runtime, new_target, element, requested)?;
     let (buffer_byte_length, _) = typed_array_buffer_length(runtime, buffer, realm, origin)?;
     let valid = match length {
         TypedArrayLength::Auto => byte_offset <= buffer_byte_length,
@@ -501,6 +581,108 @@ pub(super) fn finish_typed_array_constructor_buffer_wrapper(
     Ok(NativeDispatch::Immediate(StoredValue::Object(object)))
 }
 
+#[allow(
+    clippy::too_many_arguments,
+    reason = "typed-array cloning retains the selected prototype, source identity, destination element kind, realm, and source origin"
+)]
+fn finish_typed_array_constructor_from_typed_array(
+    runtime: &mut Runtime,
+    prototype: HeapReference,
+    source: ObjectId,
+    element: TypedArrayElementType,
+    realm: RealmId,
+    origin: &JsStackFrame,
+) -> Result<NativeDispatch, NativeFailure> {
+    let source_state =
+        runtime
+            .typed_array_state(source)?
+            .copied()
+            .ok_or(EngineFault::RuntimeInvariant {
+                message: "TypedArray source lost its internal slots",
+            })?;
+    let TypedArrayView::InBounds {
+        buffer: source_buffer,
+        byte_offset: source_offset,
+        length,
+        element: source_element,
+    } = runtime.typed_array_view(source)?
+    else {
+        return typed_array_type_error(realm, origin, "TypedArray source is out of bounds");
+    };
+    let Some(byte_length) = length.checked_mul(element.byte_width()) else {
+        return typed_array_range_error(
+            realm,
+            origin,
+            "TypedArray length exceeds implementation range",
+        );
+    };
+    if source_state.element().is_bigint() != element.is_bigint() {
+        return typed_array_type_error(
+            realm,
+            origin,
+            "TypedArray source and destination content types differ",
+        );
+    }
+    let target_buffer = runtime
+        .allocate_array_buffer(
+            HeapReference::Object(runtime.realm_array_buffer_prototype(realm)?),
+            byte_length,
+            None,
+        )
+        .map_err(NativeFailure::Execution)?;
+    if source_element == element {
+        runtime
+            .copy_array_buffer_bytes(source_buffer, source_offset, target_buffer, byte_length)
+            .map_err(NativeFailure::Execution)?;
+    }
+    let target = runtime
+        .allocate_typed_array(
+            prototype,
+            TypedArrayState::new(target_buffer, 0, TypedArrayLength::Fixed(length), element),
+        )
+        .map_err(NativeFailure::Execution)?;
+    if source_element != element {
+        for index in 0..length {
+            let value = runtime.typed_array_read_index(source, index)?.ok_or(
+                EngineFault::RuntimeInvariant {
+                    message: "typed-array source view changed during internal copy",
+                },
+            )?;
+            let outcome = match value {
+                StoredValue::Number(value) => runtime.typed_array_store_index(
+                    target,
+                    index,
+                    TypedArrayElementValue::Number(value),
+                )?,
+                StoredValue::BigInt(value) => runtime.typed_array_store_index(
+                    target,
+                    index,
+                    TypedArrayElementValue::BigInt(value.as_ref()),
+                )?,
+                StoredValue::Undefined
+                | StoredValue::Null
+                | StoredValue::Boolean(_)
+                | StoredValue::String(_)
+                | StoredValue::Symbol(_)
+                | StoredValue::Object(_)
+                | StoredValue::Function(_) => {
+                    return Err(EngineFault::RuntimeInvariant {
+                        message: "typed-array source read produced a non-numeric value",
+                    }
+                    .into());
+                }
+            };
+            if outcome != TypedArrayStoreOutcome::Stored {
+                return Err(EngineFault::RuntimeInvariant {
+                    message: "typed-array destination lost its fresh element slot",
+                }
+                .into());
+            }
+        }
+    }
+    Ok(NativeDispatch::Immediate(StoredValue::Object(target)))
+}
+
 fn typed_array_constructor_prototype(
     runtime: &Runtime,
     new_target: FunctionId,
@@ -521,6 +703,12 @@ fn typed_array_constructor_prototype(
             HeapReference::Object(runtime.realm_typed_array_prototype(realm, element)?)
         }
     })
+}
+
+fn typed_array_constructor_object_continuation(
+    state: TypedArrayConstructorObjectState,
+) -> NativeContinuation {
+    NativeContinuation::TypedArrayConstructorObject(Box::new(state))
 }
 
 pub(super) fn dispatch_typed_array_prototype(

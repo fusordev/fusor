@@ -482,6 +482,15 @@ pub(super) fn resume_native_continuations(
             NativeContinuation::DataViewConstructor(state) => {
                 finish_data_view_constructor_prototype(runtime, state.as_ref(), &value)?
             }
+            NativeContinuation::TypedArrayConstructorObject(state) => {
+                advance_typed_array_constructor_object(
+                    runtime,
+                    *state,
+                    Some(value),
+                    return_to,
+                    execution_budget,
+                )?
+            }
             NativeContinuation::ArrayBufferSlice(state) => {
                 advance_array_buffer_slice(runtime, *state, value, return_to, execution_budget)?
             }

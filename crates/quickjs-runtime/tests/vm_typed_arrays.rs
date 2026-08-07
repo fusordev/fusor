@@ -160,3 +160,20 @@ fn typed_array_constructors_create_fixed_and_length_tracking_array_buffer_views(
         ExceptionKind::RangeError
     );
 }
+
+#[test]
+fn typed_array_constructors_clone_typed_array_sources_and_check_content_types() {
+    assert_eq!(
+        rendered(
+            "var source=new Int16Array(3);source[0]=-2;source[1]=258;source[2]=7;\
+             var converted=new Uint8Array(source),same=new Int16Array(source);source[0]=9;\
+             return [converted.length,converted[0],converted[1],converted[2],\
+               same[0],same[1],same[2]].join('|');"
+        ),
+        "3|254|2|7|-2|258|7"
+    );
+    assert_eq!(
+        thrown("return new BigInt64Array(new Int8Array(1));"),
+        ExceptionKind::TypeError
+    );
+}

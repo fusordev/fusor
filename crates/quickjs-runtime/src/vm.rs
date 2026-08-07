@@ -748,6 +748,7 @@ enum NativeContinuation {
     ArrayBufferConstructor(Box<ArrayBufferConstructorContinuation>),
     ArrayBufferSlice(Box<ArrayBufferSliceContinuation>),
     DataViewConstructor(Box<DataViewConstructorState>),
+    TypedArrayConstructorObject(Box<TypedArrayConstructorObjectState>),
     DateToJson(DateToJsonContinuation),
     TemporalDurationBag(Box<TemporalDurationBagContinuation>),
     TemporalDurationCompareOptions(TemporalDurationCompareOptionsContinuation),
@@ -856,6 +857,9 @@ impl NativeContinuation {
             }
             Self::ArrayBufferSlice(_) => ArrayBufferSliceContinuation::retained_values(),
             Self::DataViewConstructor(_) => DataViewConstructorState::retained_values(),
+            Self::TypedArrayConstructorObject(_) => {
+                TypedArrayConstructorObjectState::retained_values()
+            }
             Self::DateToJson(_) => DateToJsonContinuation::retained_values(),
             Self::TemporalDurationBag(state) => state.retained_values(),
             Self::TemporalDurationCompareOptions(_) => {
@@ -1208,15 +1212,6 @@ enum IntrinsicGetContinuation {
         element: TypedArrayElementType,
         length: usize,
     },
-    TypedArrayConstructorBuffer {
-        new_target: FunctionId,
-        element: TypedArrayElementType,
-        buffer: ObjectId,
-        byte_offset: usize,
-        length: TypedArrayLength,
-        realm: RealmId,
-        origin: JsStackFrame,
-    },
     TemporalInstantConstructor {
         new_target: FunctionId,
         epoch_nanoseconds: i128,
@@ -1281,7 +1276,6 @@ impl IntrinsicGetContinuation {
             | Self::TemporalInstantConstructor { .. }
             | Self::TemporalDurationConstructor { .. }
             | Self::StringConstructor { .. } => 1,
-            Self::TypedArrayConstructorBuffer { .. } => 2,
             Self::ArrayConstructor { arguments, .. } => {
                 1_u64.saturating_add(usize_to_u64(arguments.len()))
             }
@@ -2717,6 +2711,7 @@ fn trace_native_continuation_roots(
         NativeContinuation::ArrayBufferConstructor(state) => state.trace_roots(mark),
         NativeContinuation::ArrayBufferSlice(state) => state.trace_roots(mark),
         NativeContinuation::DataViewConstructor(state) => state.trace_roots(mark),
+        NativeContinuation::TypedArrayConstructorObject(state) => state.trace_roots(mark),
         NativeContinuation::DateToJson(state) => state.trace_roots(mark),
         NativeContinuation::TemporalDurationBag(state) => state.trace_roots(mark),
         NativeContinuation::TemporalDurationCompareOptions(state) => state.trace_roots(mark),
@@ -2736,12 +2731,6 @@ fn trace_native_continuation_roots(
             | IntrinsicGetContinuation::TemporalDurationConstructor { new_target, .. }
             | IntrinsicGetContinuation::StringConstructor { new_target, .. } => {
                 mark(CollectionRoot::Heap(HeapReference::Function(*new_target)));
-            }
-            IntrinsicGetContinuation::TypedArrayConstructorBuffer {
-                new_target, buffer, ..
-            } => {
-                mark(CollectionRoot::Heap(HeapReference::Function(*new_target)));
-                mark(CollectionRoot::Heap(HeapReference::Object(*buffer)));
             }
             IntrinsicGetContinuation::ArrayConstructor {
                 new_target,
