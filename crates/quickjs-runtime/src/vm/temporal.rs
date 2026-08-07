@@ -3073,6 +3073,9 @@ pub(super) fn dispatch_temporal_plain_date_time_prototype(
             origin.clone(),
             execution_budget,
         ),
+        TemporalPlainDateTimePrototypeMethod::ToPlainDate => {
+            allocate_temporal_plain_date_result(runtime, realm, date_time.to_plain_date())
+        }
         TemporalPlainDateTimePrototypeMethod::Until
         | TemporalPlainDateTimePrototypeMethod::Since => {
             let other = arguments.take_first_or_undefined();

@@ -36,8 +36,8 @@ use super::{
 };
 
 const REALM_OBJECT_SLOTS: u64 = 64;
-const REALM_PROPERTY_SLOTS: u64 = 1_989;
-const REALM_FUNCTION_SLOTS: u64 = 587;
+const REALM_PROPERTY_SLOTS: u64 = 1_992;
+const REALM_FUNCTION_SLOTS: u64 = 588;
 
 #[test]
 fn finalization_job_limit_failure_does_not_clear_weak_targets() {
@@ -2085,9 +2085,9 @@ fn realm_installs_the_exact_function_intrinsic_graph() {
     assert_eq!(
         runtime.atom_usage(),
         AtomUsage {
-            live_atoms: PREDEFINED_ATOM_COUNT + 320,
-            live_description_code_units: PREDEFINED_DESCRIPTION_CODE_UNITS + 2_723,
-            interner_slots: PREDEFINED_INTERNER_SLOTS + 320,
+            live_atoms: PREDEFINED_ATOM_COUNT + 321,
+            live_description_code_units: PREDEFINED_DESCRIPTION_CODE_UNITS + 2_734,
+            interner_slots: PREDEFINED_INTERNER_SLOTS + 321,
         }
     );
 
@@ -2741,9 +2741,9 @@ fn function_call_is_realm_owned_while_its_dynamic_atom_is_reused() {
     assert_eq!(
         runtime.atom_usage(),
         AtomUsage {
-            live_atoms: PREDEFINED_ATOM_COUNT + 320,
-            live_description_code_units: PREDEFINED_DESCRIPTION_CODE_UNITS + 2_723,
-            interner_slots: PREDEFINED_INTERNER_SLOTS + 320,
+            live_atoms: PREDEFINED_ATOM_COUNT + 321,
+            live_description_code_units: PREDEFINED_DESCRIPTION_CODE_UNITS + 2_734,
+            interner_slots: PREDEFINED_INTERNER_SLOTS + 321,
         }
     );
 }
@@ -2790,9 +2790,9 @@ fn function_apply_is_realm_owned_while_its_predefined_atom_is_reused() {
     assert_eq!(
         runtime.atom_usage(),
         AtomUsage {
-            live_atoms: PREDEFINED_ATOM_COUNT + 320,
-            live_description_code_units: PREDEFINED_DESCRIPTION_CODE_UNITS + 2_723,
-            interner_slots: PREDEFINED_INTERNER_SLOTS + 320,
+            live_atoms: PREDEFINED_ATOM_COUNT + 321,
+            live_description_code_units: PREDEFINED_DESCRIPTION_CODE_UNITS + 2_734,
+            interner_slots: PREDEFINED_INTERNER_SLOTS + 321,
         }
     );
 }

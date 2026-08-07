@@ -610,6 +610,23 @@ fn plain_date_time_round_preserves_option_order_and_date_time_rounding_rules() {
 }
 
 #[test]
+fn plain_date_time_to_plain_date_allocates_a_branded_calendar_preserving_copy() {
+    assert_eq!(
+        rendered(
+            "var value=new Temporal.PlainDateTime(2020,2,29,12,34,56,7,8,9);
+             var date=value.toPlainDate();
+             return [Temporal.PlainDateTime.prototype.toPlainDate.length,date.toString(),
+               date.calendarId,date===value,Object.getPrototypeOf(date)===Temporal.PlainDate.prototype].join('|');"
+        ),
+        "0|2020-02-29|iso8601|false|true"
+    );
+    assert_eq!(
+        thrown("return Temporal.PlainDateTime.prototype.toPlainDate.call({});"),
+        ExceptionKind::TypeError
+    );
+}
+
+#[test]
 fn plain_date_with_prepares_partial_fields_before_reading_overflow() {
     assert_eq!(
         rendered(
