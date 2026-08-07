@@ -109,15 +109,28 @@ impl TemporalPlainDateWithContinuation {
 }
 
 enum TemporalPlainDateLikeTarget {
-    From { options: StoredValue },
-    CompareFirst { second: StoredValue },
-    CompareSecond { first: PlainDate },
+    From {
+        options: StoredValue,
+    },
+    CompareFirst {
+        second: StoredValue,
+    },
+    CompareSecond {
+        first: PlainDate,
+    },
+    Difference {
+        receiver: PlainDate,
+        options: StoredValue,
+        since: bool,
+    },
 }
 
 impl TemporalPlainDateLikeTarget {
     fn trace_roots(&self, mark: &mut dyn FnMut(CollectionRoot)) {
         match self {
-            Self::From { options } | Self::CompareFirst { second: options } => {
+            Self::From { options }
+            | Self::CompareFirst { second: options }
+            | Self::Difference { options, .. } => {
                 trace_stored_value_root(options, mark);
             }
             Self::CompareSecond { .. } => {}
@@ -656,6 +669,21 @@ fn continue_temporal_plain_date_like(
                 JsNumber::from_i32(result),
             )))
         }
+        TemporalPlainDateLikeTarget::Difference {
+            receiver,
+            options,
+            since,
+        } => begin_temporal_plain_date_difference(
+            runtime,
+            receiver,
+            date,
+            options,
+            since,
+            realm,
+            return_to,
+            origin,
+            execution_budget,
+        ),
     }
 }
 
@@ -1388,6 +1416,7 @@ fn temporal_plain_date_with_continuation(
 
 #[allow(
     clippy::too_many_arguments,
+    clippy::too_many_lines,
     reason = "the shared dispatcher carries the native call context explicitly"
 )]
 pub(super) fn dispatch_temporal_plain_date_prototype(
@@ -1470,6 +1499,23 @@ pub(super) fn dispatch_temporal_plain_date_prototype(
             origin.clone(),
             execution_budget,
         ),
+        TemporalPlainDatePrototypeMethod::Until | TemporalPlainDatePrototypeMethod::Since => {
+            let other = arguments.take_first_or_undefined();
+            let options = arguments.take_first_or_undefined();
+            begin_temporal_plain_date_like(
+                runtime,
+                other,
+                TemporalPlainDateLikeTarget::Difference {
+                    receiver: date,
+                    options,
+                    since: matches!(method, TemporalPlainDatePrototypeMethod::Since),
+                },
+                realm,
+                return_to,
+                origin.clone(),
+                execution_budget,
+            )
+        }
         TemporalPlainDatePrototypeMethod::Equals => begin_temporal_plain_date_equals(
             runtime,
             date,
@@ -1790,6 +1836,37 @@ pub(super) struct TemporalInstantDifferenceContinuation {
 }
 
 impl TemporalInstantDifferenceContinuation {
+    pub(super) const fn retained_values() -> u64 {
+        1
+    }
+
+    pub(super) fn trace_roots(&self, mark: &mut dyn FnMut(CollectionRoot)) {
+        trace_stored_value_root(&self.options, mark);
+    }
+}
+
+#[derive(Clone, Copy)]
+enum TemporalPlainDateDifferenceStage {
+    LargestUnit,
+    RoundingIncrement,
+    RoundingMode,
+    SmallestUnit,
+}
+
+pub(super) struct TemporalPlainDateDifferenceContinuation {
+    receiver: PlainDate,
+    other: PlainDate,
+    options: StoredValue,
+    largest_unit: Option<Unit>,
+    rounding_increment: RoundingIncrement,
+    rounding_mode: RoundingMode,
+    since: bool,
+    stage: TemporalPlainDateDifferenceStage,
+    realm: RealmId,
+    origin: JsStackFrame,
+}
+
+impl TemporalPlainDateDifferenceContinuation {
     pub(super) const fn retained_values() -> u64 {
         1
     }
@@ -4453,6 +4530,358 @@ fn complete_temporal_instant_difference(
         receiver.since(&other, settings)
     } else {
         receiver.until(&other, settings)
+    };
+    let duration = match duration {
+        Ok(duration) => duration,
+        Err(error) => {
+            return Err(NativeFailure::Abrupt(temporal_exception_from_error(
+                realm, origin, error,
+            )?));
+        }
+    };
+    allocate_temporal_duration_result(runtime, realm, duration)
+}
+
+#[allow(
+    clippy::too_many_arguments,
+    reason = "the date operand is converted before the observable options object"
+)]
+fn begin_temporal_plain_date_difference(
+    runtime: &mut Runtime,
+    receiver: PlainDate,
+    other: PlainDate,
+    options: StoredValue,
+    since: bool,
+    realm: RealmId,
+    return_to: Option<CallReturn>,
+    origin: JsStackFrame,
+    execution_budget: &mut ExecutionBudget,
+) -> Result<NativeDispatch, NativeFailure> {
+    if matches!(options, StoredValue::Undefined) {
+        return complete_temporal_plain_date_difference(
+            runtime,
+            &receiver,
+            &other,
+            None,
+            RoundingIncrement::ONE,
+            RoundingMode::Trunc,
+            None,
+            since,
+            realm,
+            &origin,
+        );
+    }
+    if options.heap_reference().is_none() {
+        return temporal_type_error(
+            realm,
+            &origin,
+            "Temporal.PlainDate.prototype.until options must be an object",
+        );
+    }
+    begin_temporal_plain_date_difference_get(
+        runtime,
+        TemporalPlainDateDifferenceContinuation {
+            receiver,
+            other,
+            options,
+            largest_unit: None,
+            rounding_increment: RoundingIncrement::ONE,
+            rounding_mode: RoundingMode::Trunc,
+            since,
+            stage: TemporalPlainDateDifferenceStage::LargestUnit,
+            realm,
+            origin,
+        },
+        "largestUnit",
+        TemporalPlainDateDifferenceStage::LargestUnit,
+        return_to,
+        execution_budget,
+    )
+}
+
+#[allow(
+    clippy::too_many_arguments,
+    reason = "each date-difference option Get owns the native call state across suspension"
+)]
+fn begin_temporal_plain_date_difference_get(
+    runtime: &mut Runtime,
+    mut state: TemporalPlainDateDifferenceContinuation,
+    name: &str,
+    next_stage: TemporalPlainDateDifferenceStage,
+    return_to: Option<CallReturn>,
+    execution_budget: &mut ExecutionBudget,
+) -> Result<NativeDispatch, NativeFailure> {
+    state.stage = next_stage;
+    charge_heap_property_lookup(runtime, &state.options, execution_budget)?;
+    let name = JsString::from_utf8(name)?;
+    let key = runtime.property_key_from_string(&name)?;
+    let realm = state.realm;
+    let origin = state.origin.clone();
+    let dispatch = begin_value_get(
+        runtime,
+        &state.options,
+        key,
+        Some(&name),
+        realm,
+        return_to,
+        origin,
+        execution_budget,
+    )?;
+    match continue_get_state_after(
+        dispatch,
+        state,
+        temporal_plain_date_difference_continuation,
+        "Temporal.PlainDate difference option Get produced a structured result",
+    )? {
+        GetContinuationDispatch::Ready { state, value } => {
+            advance_temporal_plain_date_difference_options(
+                runtime,
+                state,
+                value,
+                return_to,
+                execution_budget,
+            )
+        }
+        GetContinuationDispatch::Suspended(dispatch) => Ok(dispatch),
+    }
+}
+
+fn temporal_plain_date_difference_continuation(
+    state: TemporalPlainDateDifferenceContinuation,
+) -> NativeContinuation {
+    NativeContinuation::TemporalPlainDateDifferenceOptions(Box::new(state))
+}
+
+#[allow(
+    clippy::too_many_arguments,
+    clippy::too_many_lines,
+    reason = "one ordered state table preserves date-difference option observation across suspension"
+)]
+pub(super) fn advance_temporal_plain_date_difference_options(
+    runtime: &mut Runtime,
+    state: TemporalPlainDateDifferenceContinuation,
+    value: StoredValue,
+    return_to: Option<CallReturn>,
+    execution_budget: &mut ExecutionBudget,
+) -> Result<NativeDispatch, NativeFailure> {
+    match state.stage {
+        TemporalPlainDateDifferenceStage::LargestUnit => {
+            if matches!(value, StoredValue::Undefined) {
+                return begin_temporal_plain_date_difference_get(
+                    runtime,
+                    state,
+                    "roundingIncrement",
+                    TemporalPlainDateDifferenceStage::RoundingIncrement,
+                    return_to,
+                    execution_budget,
+                );
+            }
+            let realm = state.realm;
+            let origin = state.origin.clone();
+            begin_operator_primitive_conversion(
+                runtime,
+                value,
+                OperatorPrimitiveHint::String,
+                OperatorPrimitiveTarget::TemporalPlainDateDifferenceLargestUnit(Box::new(state)),
+                realm,
+                return_to,
+                origin,
+                execution_budget,
+            )
+        }
+        TemporalPlainDateDifferenceStage::RoundingIncrement => {
+            if matches!(value, StoredValue::Undefined) {
+                return begin_temporal_plain_date_difference_get(
+                    runtime,
+                    state,
+                    "roundingMode",
+                    TemporalPlainDateDifferenceStage::RoundingMode,
+                    return_to,
+                    execution_budget,
+                );
+            }
+            let realm = state.realm;
+            let origin = state.origin.clone();
+            begin_operator_primitive_conversion(
+                runtime,
+                value,
+                OperatorPrimitiveHint::Number,
+                OperatorPrimitiveTarget::TemporalPlainDateDifferenceRoundingIncrement(Box::new(
+                    state,
+                )),
+                realm,
+                return_to,
+                origin,
+                execution_budget,
+            )
+        }
+        TemporalPlainDateDifferenceStage::RoundingMode => {
+            if matches!(value, StoredValue::Undefined) {
+                return begin_temporal_plain_date_difference_get(
+                    runtime,
+                    state,
+                    "smallestUnit",
+                    TemporalPlainDateDifferenceStage::SmallestUnit,
+                    return_to,
+                    execution_budget,
+                );
+            }
+            let realm = state.realm;
+            let origin = state.origin.clone();
+            begin_operator_primitive_conversion(
+                runtime,
+                value,
+                OperatorPrimitiveHint::String,
+                OperatorPrimitiveTarget::TemporalPlainDateDifferenceRoundingMode(Box::new(state)),
+                realm,
+                return_to,
+                origin,
+                execution_budget,
+            )
+        }
+        TemporalPlainDateDifferenceStage::SmallestUnit => {
+            if matches!(value, StoredValue::Undefined) {
+                return complete_temporal_plain_date_difference(
+                    runtime,
+                    &state.receiver,
+                    &state.other,
+                    state.largest_unit,
+                    state.rounding_increment,
+                    state.rounding_mode,
+                    None,
+                    state.since,
+                    state.realm,
+                    &state.origin,
+                );
+            }
+            let realm = state.realm;
+            let origin = state.origin.clone();
+            begin_operator_primitive_conversion(
+                runtime,
+                value,
+                OperatorPrimitiveHint::String,
+                OperatorPrimitiveTarget::TemporalPlainDateDifferenceSmallestUnit(Box::new(state)),
+                realm,
+                return_to,
+                origin,
+                execution_budget,
+            )
+        }
+    }
+}
+
+pub(super) fn finish_temporal_plain_date_difference_largest_unit(
+    runtime: &mut Runtime,
+    mut state: TemporalPlainDateDifferenceContinuation,
+    value: StoredValue,
+    return_to: Option<CallReturn>,
+    execution_budget: &mut ExecutionBudget,
+) -> Result<NativeDispatch, NativeFailure> {
+    let source = operator_primitive_to_string(value, state.realm, &state.origin)?;
+    state.largest_unit = Some(temporal_round_unit(&source, state.realm, &state.origin)?);
+    begin_temporal_plain_date_difference_get(
+        runtime,
+        state,
+        "roundingIncrement",
+        TemporalPlainDateDifferenceStage::RoundingIncrement,
+        return_to,
+        execution_budget,
+    )
+}
+
+pub(super) fn finish_temporal_plain_date_difference_rounding_increment(
+    runtime: &mut Runtime,
+    mut state: TemporalPlainDateDifferenceContinuation,
+    value: StoredValue,
+    return_to: Option<CallReturn>,
+    execution_budget: &mut ExecutionBudget,
+) -> Result<NativeDispatch, NativeFailure> {
+    let value = operator_to_number(value, state.realm, &state.origin)?.as_f64();
+    state.rounding_increment = match RoundingIncrement::try_from(value) {
+        Ok(increment) => increment,
+        Err(error) => {
+            return Err(NativeFailure::Abrupt(temporal_exception_from_error(
+                state.realm,
+                &state.origin,
+                error,
+            )?));
+        }
+    };
+    begin_temporal_plain_date_difference_get(
+        runtime,
+        state,
+        "roundingMode",
+        TemporalPlainDateDifferenceStage::RoundingMode,
+        return_to,
+        execution_budget,
+    )
+}
+
+pub(super) fn finish_temporal_plain_date_difference_rounding_mode(
+    runtime: &mut Runtime,
+    mut state: TemporalPlainDateDifferenceContinuation,
+    value: StoredValue,
+    return_to: Option<CallReturn>,
+    execution_budget: &mut ExecutionBudget,
+) -> Result<NativeDispatch, NativeFailure> {
+    let source = operator_primitive_to_string(value, state.realm, &state.origin)?;
+    state.rounding_mode = temporal_rounding_mode(&source, state.realm, &state.origin)?;
+    begin_temporal_plain_date_difference_get(
+        runtime,
+        state,
+        "smallestUnit",
+        TemporalPlainDateDifferenceStage::SmallestUnit,
+        return_to,
+        execution_budget,
+    )
+}
+
+pub(super) fn finish_temporal_plain_date_difference_smallest_unit(
+    runtime: &mut Runtime,
+    state: &TemporalPlainDateDifferenceContinuation,
+    value: StoredValue,
+) -> Result<NativeDispatch, NativeFailure> {
+    let source = operator_primitive_to_string(value, state.realm, &state.origin)?;
+    let smallest_unit = temporal_round_unit(&source, state.realm, &state.origin)?;
+    complete_temporal_plain_date_difference(
+        runtime,
+        &state.receiver,
+        &state.other,
+        state.largest_unit,
+        state.rounding_increment,
+        state.rounding_mode,
+        Some(smallest_unit),
+        state.since,
+        state.realm,
+        &state.origin,
+    )
+}
+
+#[allow(
+    clippy::too_many_arguments,
+    reason = "the completed JavaScript difference settings are passed explicitly to the Temporal kernel"
+)]
+fn complete_temporal_plain_date_difference(
+    runtime: &mut Runtime,
+    receiver: &PlainDate,
+    other: &PlainDate,
+    largest_unit: Option<Unit>,
+    rounding_increment: RoundingIncrement,
+    rounding_mode: RoundingMode,
+    smallest_unit: Option<Unit>,
+    since: bool,
+    realm: RealmId,
+    origin: &JsStackFrame,
+) -> Result<NativeDispatch, NativeFailure> {
+    let mut settings = DifferenceSettings::default();
+    settings.largest_unit = largest_unit;
+    settings.smallest_unit = smallest_unit;
+    settings.rounding_mode = Some(rounding_mode);
+    settings.increment = Some(rounding_increment);
+    let duration = if since {
+        receiver.since(other, settings)
+    } else {
+        receiver.until(other, settings)
     };
     let duration = match duration {
         Ok(duration) => duration,
