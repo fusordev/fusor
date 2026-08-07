@@ -140,6 +140,41 @@ fn execution_budget_fails_closed_on_exponential_backtracking() {
     );
 }
 
+/// A one-pass, anchored quantified class must not retain one backtrack state
+/// for every matching code point. Test262's generated Unicode-property tests
+/// exercise this shape over nearly all Unicode scalar values.
+#[test]
+fn anchored_property_repeat_scales_without_linear_backtracking_storage() {
+    let expression = compile(r"^\P{ASCII}+$", "u");
+    let input = vec![0x0100; 1_100_000];
+    assert_eq!(
+        expression
+            .execute(&input, 0, ExecLimits::default())
+            .expect("anchored property repeat must stay within its execution limits")
+            .expect("all input code points satisfy \\P{ASCII}")
+            .range(),
+        0..input.len()
+    );
+}
+
+/// The terminal-repeat fast path must retain ordinary candidate search and
+/// defer to normal backtracking for multiline end anchors.
+#[test]
+fn terminal_repeat_preserves_candidate_and_multiline_semantics() {
+    assert_eq!(ranges("a+$", "", "zzzaaa"), [Some((3, 6))]);
+    assert!(
+        compile("^a+$", "")
+            .execute(
+                &"aaab".encode_utf16().collect::<Vec<_>>(),
+                0,
+                ExecLimits::default(),
+            )
+            .expect("ordinary non-match must stay within its execution limits")
+            .is_none()
+    );
+    assert_eq!(ranges("^a+$", "m", "a\nb"), [Some((0, 1))]);
+}
+
 #[test]
 fn constructor_sources_preserve_lone_surrogates_and_utf16_escape_rules() {
     let lone = [0xd800];
