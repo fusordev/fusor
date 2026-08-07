@@ -270,6 +270,45 @@ fn plain_date_add_and_subtract_reuse_duration_bags_then_read_overflow() {
 }
 
 #[test]
+fn plain_date_with_prepares_partial_fields_before_reading_overflow() {
+    assert_eq!(
+        rendered(
+            "var log=[];
+             var fields={
+               get calendar(){log.push('calendar');return undefined},
+               get timeZone(){log.push('timeZone');return undefined},
+               get day(){log.push('day');return {valueOf:function(){log.push('day number');return 1.7}}},
+               get month(){log.push('month');return {valueOf:function(){log.push('month number');return 2.8}}},
+               get monthCode(){log.push('monthCode');return undefined},
+               get year(){log.push('year');return undefined}
+             };
+             var options={get overflow(){log.push('overflow');return {toString:function(){log.push('overflow string');return 'constrain'}}}};
+             var date=new Temporal.PlainDate(2020,5,31).with(fields,options);
+             return [Temporal.PlainDate.prototype.with.length,date.toString(),log.join(',')].join('|');"
+        ),
+        "1|2020-02-01|calendar,timeZone,day,day number,month,month number,monthCode,year,overflow,overflow string"
+    );
+    assert_eq!(
+        rendered(
+            "var d=new Temporal.PlainDate(2006,1,24);return d.with({day:1,year:undefined}).toString();"
+        ),
+        "2006-01-01"
+    );
+    assert_eq!(
+        thrown("return new Temporal.PlainDate(2020,1,1).with({calendar:'iso8601'});"),
+        ExceptionKind::TypeError
+    );
+    assert_eq!(
+        thrown("return new Temporal.PlainDate(2020,1,1).with({timeZone:'UTC'});"),
+        ExceptionKind::TypeError
+    );
+    assert_eq!(
+        thrown("return new Temporal.PlainDate(2020,1,1).with({});"),
+        ExceptionKind::TypeError
+    );
+}
+
+#[test]
 fn plain_date_rejects_unbranded_receivers_invalid_components_and_call_without_new() {
     assert_eq!(
         thrown("return Temporal.PlainDate(2020,1,1);"),
