@@ -1749,6 +1749,21 @@ pub(super) fn dispatch_typed_array_prototype(
     let view = runtime.typed_array_view(*object)?;
     if matches!(
         method,
+        TypedArrayPrototypeMethod::Sort | TypedArrayPrototypeMethod::ToSorted
+    ) {
+        return begin_typed_array_sort(
+            runtime,
+            *object,
+            method == TypedArrayPrototypeMethod::ToSorted,
+            arguments,
+            realm,
+            return_to,
+            origin,
+            execution_budget,
+        );
+    }
+    if matches!(
+        method,
         TypedArrayPrototypeMethod::Set
             | TypedArrayPrototypeMethod::Subarray
             | TypedArrayPrototypeMethod::At
@@ -1967,6 +1982,9 @@ pub(super) fn dispatch_typed_array_prototype(
                 execution_budget,
             );
         }
+        TypedArrayPrototypeMethod::Sort | TypedArrayPrototypeMethod::ToSorted => {
+            unreachable!("typed-array sorting methods returned from their dedicated dispatch")
+        }
         TypedArrayPrototypeMethod::Entries => {
             return begin_array_iterator_method(
                 runtime,
@@ -2119,7 +2137,7 @@ fn typed_array_prototype_to_reversed(
     Ok(NativeDispatch::Immediate(StoredValue::Object(target)))
 }
 
-fn typed_array_create_same_type(
+pub(super) fn typed_array_create_same_type(
     runtime: &mut Runtime,
     realm: RealmId,
     element: TypedArrayElementType,
@@ -4824,7 +4842,7 @@ fn typed_array_prototype_set_continuation(
     NativeContinuation::TypedArrayPrototypeSet(Box::new(state))
 }
 
-fn typed_array_require_in_bounds(
+pub(super) fn typed_array_require_in_bounds(
     runtime: &Runtime,
     object: ObjectId,
     realm: RealmId,

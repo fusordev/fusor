@@ -1792,11 +1792,13 @@ pub(crate) enum TypedArrayPrototypeMethod {
     CopyWithin,
     Reverse,
     Slice,
+    Sort,
     Entries,
     Keys,
     Values,
     Join,
     ToReversed,
+    ToSorted,
     With,
     Every,
     Filter,
@@ -1812,7 +1814,7 @@ pub(crate) enum TypedArrayPrototypeMethod {
 }
 
 impl TypedArrayPrototypeMethod {
-    pub(crate) const ALL: [Self; 32] = [
+    pub(crate) const ALL: [Self; 34] = [
         Self::Buffer,
         Self::ByteLength,
         Self::ByteOffset,
@@ -1828,11 +1830,13 @@ impl TypedArrayPrototypeMethod {
         Self::CopyWithin,
         Self::Reverse,
         Self::Slice,
+        Self::Sort,
         Self::Entries,
         Self::Keys,
         Self::Values,
         Self::Join,
         Self::ToReversed,
+        Self::ToSorted,
         Self::With,
         Self::Every,
         Self::Filter,
@@ -1865,11 +1869,13 @@ impl TypedArrayPrototypeMethod {
             Self::CopyWithin => "copyWithin",
             Self::Reverse => "reverse",
             Self::Slice => "slice",
+            Self::Sort => "sort",
             Self::Entries => "entries",
             Self::Keys => "keys",
             Self::Values => "values",
             Self::Join => "join",
             Self::ToReversed => "toReversed",
+            Self::ToSorted => "toSorted",
             Self::With => "with",
             Self::Every => "every",
             Self::Filter => "filter",
@@ -1903,11 +1909,13 @@ impl TypedArrayPrototypeMethod {
             Self::CopyWithin => "copyWithin",
             Self::Reverse => "reverse",
             Self::Slice => "slice",
+            Self::Sort => "sort",
             Self::Entries => "entries",
             Self::Keys => "keys",
             Self::Values => "values",
             Self::Join => "join",
             Self::ToReversed => "toReversed",
+            Self::ToSorted => "toSorted",
             Self::With => "with",
             Self::Every => "every",
             Self::Filter => "filter",
@@ -1937,11 +1945,13 @@ impl TypedArrayPrototypeMethod {
                 | Self::CopyWithin
                 | Self::Reverse
                 | Self::Slice
+                | Self::Sort
                 | Self::Entries
                 | Self::Keys
                 | Self::Values
                 | Self::Join
                 | Self::ToReversed
+                | Self::ToSorted
                 | Self::With
                 | Self::Every
                 | Self::Filter
@@ -1967,6 +1977,8 @@ impl TypedArrayPrototypeMethod {
             | Self::LastIndexOf
             | Self::Fill
             | Self::Join
+            | Self::Sort
+            | Self::ToSorted
             | Self::Every
             | Self::Filter
             | Self::Find

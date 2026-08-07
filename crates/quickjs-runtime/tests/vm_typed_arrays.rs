@@ -782,3 +782,46 @@ fn typed_array_filter_collects_before_species_and_keeps_fresh_resizable_reads() 
         ExceptionKind::TypeError
     );
 }
+
+#[test]
+fn typed_array_sort_and_to_sorted_use_numeric_collections_before_comparisons() {
+    assert_eq!(
+        rendered(
+            "var source=new Float64Array([NaN,0,-0,3,-2,NaN]);\
+             source.constructor={get [Symbol.species](){throw new Error('species')}};\
+             var out=source.toSorted();\
+             return [Uint8Array.prototype.sort.length,Uint8Array.prototype.sort.name,\
+               Uint8Array.prototype.toSorted.length,Uint8Array.prototype.toSorted.name,\
+               out instanceof Float64Array,out===source,out[0],1/out[1],1/out[2],out[3],\
+               Number.isNaN(out[4]),Number.isNaN(out[5]),Number.isNaN(source[0]),1/source[1],1/source[2]].join('|');"
+        ),
+        "1|sort|1|toSorted|true|false|-2|-Infinity|Infinity|3|true|true|true|Infinity|-Infinity"
+    );
+    assert_eq!(
+        rendered(
+            "var values=new Uint8Array([3,1,2,1]),calls=[];\
+             var result=values.sort(function(left,right){calls.push(left+':'+right);return left-right});\
+             var bigints=new BigInt64Array([2n,-1n,0n]).toSorted();\
+             return [result===values,values[0],values[1],values[2],values[3],calls.length,\
+               String(bigints[0]),String(bigints[1]),String(bigints[2])].join('|');"
+        ),
+        "true|1|1|2|3|5|-1|0|2"
+    );
+    assert_eq!(
+        rendered(
+            "var buffer=new ArrayBuffer(4,{maxByteLength:4}),source=new Uint8Array(buffer),calls=0;\
+             source[0]=3;source[1]=1;source[2]=2;\
+             var copied=source.toSorted(function(left,right){if(calls++===0)buffer.resize(0);return left-right});\
+             return [copied.length,copied[0],copied[1],copied[2],copied[3],source.length].join('|');"
+        ),
+        "4|0|1|2|3|0"
+    );
+    assert_eq!(
+        thrown("return new Uint8Array(1).sort(1);"),
+        ExceptionKind::TypeError
+    );
+    assert_eq!(
+        thrown("return new Uint8Array(1).toSorted(1);"),
+        ExceptionKind::TypeError
+    );
+}
