@@ -4025,7 +4025,7 @@ fn advance_function_apply_indices(
             message: "apply argument index exceeds the array-index domain",
         })?;
         let key = PropertyKey::from_index(index);
-        charge_heap_property_lookup(runtime, &state.array_like, execution_budget)?;
+        charge_function_apply_index_lookup(runtime, &state.array_like, index, execution_budget)?;
         let dispatch = stamp_function_apply_native_caller(
             begin_value_get(
                 runtime,
@@ -4065,6 +4065,28 @@ fn advance_function_apply_indices(
         state.new_target,
         state.native_caller,
     )
+}
+
+/// Charges one `CreateListFromArrayLike` indexed Get.
+///
+/// A present dense Array element is a default own data property, so the
+/// following Get resolves in constant time and never visits `Array.prototype`.
+/// Keep sparse Arrays and every other receiver on the conservative general
+/// charge: their property lookup can still scan an ordinary shape or execute
+/// exotic internal methods.
+fn charge_function_apply_index_lookup(
+    runtime: &Runtime,
+    array_like: &StoredValue,
+    index: ArrayIndex,
+    execution_budget: &mut ExecutionBudget,
+) -> Result<(), NativeFailure> {
+    if let StoredValue::Object(object) = array_like
+        && runtime.is_array_object(*object)?
+        && runtime.array_dense_index_present(*object, index)?
+    {
+        return execution_budget.charge_instructions(1).map_err(Into::into);
+    }
+    charge_heap_property_lookup(runtime, array_like, execution_budget)
 }
 
 fn stamp_function_apply_native_caller(

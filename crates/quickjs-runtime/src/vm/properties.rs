@@ -1147,7 +1147,7 @@ pub(super) fn write_static_property(
             OwnProperty::Data { layout, .. } => {
                 if layout.writable() == Some(true) {
                     if let Some(array) = array {
-                        let work = runtime.preview_array_define_data_property_work(array)?;
+                        let work = runtime.preview_array_data_property_work(array, &key)?;
                         execution_budget.charge_instructions(work)?;
                         let outcome =
                             runtime.define_array_data_property(array, key, layout, value)?;
@@ -1218,7 +1218,7 @@ pub(super) fn write_static_property(
         });
     }
     if let Some(array) = array {
-        let work = runtime.preview_array_define_data_property_work(array)?;
+        let work = runtime.preview_array_data_property_work(array, &key)?;
         execution_budget.charge_instructions(work)?;
         let outcome = runtime.define_array_data_property(
             array,
@@ -1269,7 +1269,7 @@ pub(super) fn define_static_property(
                 PropertyFailure::NotConfigurable,
             ));
         }
-        let work = runtime.preview_array_define_data_property_work(object)?;
+        let work = runtime.preview_array_data_property_work(object, &key)?;
         execution_budget.charge_instructions(work)?;
         return Ok(
             match runtime.define_array_data_property(

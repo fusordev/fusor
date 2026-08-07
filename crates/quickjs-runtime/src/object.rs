@@ -2002,6 +2002,28 @@ impl ArrayState {
         (index.get() as usize) <= elements.len().saturating_add(MAX_DENSE_ARRAY_GAP)
     }
 
+    /// Returns a conservative upper bound for one default-data write to this
+    /// dense Array index. A vector growth copies existing slots only when its
+    /// capacity is exhausted; ordinary in-capacity appends remain constant
+    /// work, including their bounded hole fill.
+    pub(crate) fn dense_store_work(&self, index: ArrayIndex) -> Option<u64> {
+        let ArrayStorage::Dense { elements, .. } = &self.storage else {
+            return None;
+        };
+        if !self.can_store_dense(index) {
+            return None;
+        }
+        let index = index.get() as usize;
+        let additional = index.saturating_add(1).saturating_sub(elements.len());
+        let relocation = usize::from(index.saturating_add(1) > elements.capacity())
+            .saturating_mul(elements.len());
+        Some(
+            u64::try_from(additional.saturating_add(relocation))
+                .unwrap_or(u64::MAX)
+                .saturating_add(1),
+        )
+    }
+
     pub(crate) fn try_store_dense(
         &mut self,
         index: ArrayIndex,

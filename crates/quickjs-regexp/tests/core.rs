@@ -157,6 +157,42 @@ fn anchored_property_repeat_scales_without_linear_backtracking_storage() {
     );
 }
 
+/// Reproduces Test262's generated `ASCII` non-match string, including its
+/// deliberate lone-surrogate ranges and supplementary scalar values.
+#[test]
+fn anchored_property_repeat_accepts_test262_ascii_non_match_symbols() {
+    let mut input = Vec::new();
+    for code_unit in 0xDC00_u16..=0xDFFF {
+        input.push(code_unit);
+    }
+    for code_unit in 0x0080_u16..=0xDBFF {
+        input.push(code_unit);
+    }
+    for code_point in 0xE000_u32..=0x10_FFFF {
+        if let Ok(code_unit) = u16::try_from(code_point) {
+            input.push(code_unit);
+        } else {
+            let scalar = code_point - 0x1_0000;
+            input.push(
+                u16::try_from(0xD800_u32 + (scalar >> 10)).expect("high surrogate fits in UTF-16"),
+            );
+            input.push(
+                u16::try_from(0xDC00_u32 + (scalar & 0x03FF))
+                    .expect("low surrogate fits in UTF-16"),
+            );
+        }
+    }
+    let expression = compile(r"^\P{ASCII}+$", "u");
+    assert_eq!(
+        expression
+            .execute(&input, 0, ExecLimits::default())
+            .expect("generated property repeat must stay within its execution limits")
+            .expect("every generated code point satisfies \\P{ASCII}")
+            .range(),
+        0..input.len()
+    );
+}
+
 /// The terminal-repeat fast path must retain ordinary candidate search and
 /// defer to normal backtracking for multiline end anchors.
 #[test]

@@ -145,6 +145,34 @@ fn function_prototype_call_supplies_undefined_when_this_argument_is_missing() {
     assert_eq!(result.kind().expect("live value"), ValueKind::Undefined);
 }
 
+/// `Function.prototype.apply` reads present dense Array elements directly.
+/// This is the argument-list shape used by Test262's Unicode property helpers
+/// when they batch 10,000 code points through `String.fromCodePoint`.
+#[test]
+fn function_apply_reads_dense_argument_arrays_with_linear_fuel() {
+    let authority = compile(
+        "function run(){\
+            let values=[];\
+            for(let index=0;index<10000;index=index+1)values[index]=0x61;\
+            function count(){return arguments.length;}\
+            return count.apply(null,values);\
+        }",
+        "run",
+    );
+    let mut runtime = runtime();
+    let realm = runtime.create_realm().expect("realm");
+    let mut context = runtime.context(&realm).expect("context");
+    let run = context.instantiate(authority).expect("run");
+    let result = context
+        .call(
+            &run,
+            &[],
+            ExecutionLimits::default().with_instruction_fuel(500_000),
+        )
+        .expect("dense Function.apply argument list completed");
+    assert_number(&result, 10_000);
+}
+
 #[test]
 fn function_prototype_call_preserves_strict_null_and_primitive_receivers() {
     let authority = compile(

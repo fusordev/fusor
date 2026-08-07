@@ -26,10 +26,10 @@
 //! Array exotic allocation, indexed property definition, and length mutation.
 
 use super::{
-    ArrayDefineOutcome, ArrayLengthWriteOutcome, ArrayState, Atom, BindingCellId, HeapObject,
-    HeapReference, JsNumber, ObjectId, ObjectRecord, OwnProperty, PredefinedAtom, PropertyKey,
-    PropertyLayout, PropertyLayoutKind, RealmId, Runtime, RuntimeResource, SlotValue, StoredValue,
-    check_execution_limit, stale_heap_reference, usize_to_u64,
+    ArrayDefineOutcome, ArrayIndex, ArrayLengthWriteOutcome, ArrayState, Atom, BindingCellId,
+    HeapObject, HeapReference, JsNumber, ObjectId, ObjectRecord, OwnProperty, PredefinedAtom,
+    PropertyKey, PropertyLayout, PropertyLayoutKind, RealmId, Runtime, RuntimeResource, SlotValue,
+    StoredValue, check_execution_limit, stale_heap_reference, usize_to_u64,
 };
 use crate::object::HeapObjectKind;
 
@@ -359,6 +359,32 @@ impl Runtime {
         Ok(object.array_own_property(key))
     }
 
+    /// Whether an Array exotic object's dense element storage owns `index`.
+    ///
+    /// A `true` result guarantees a default data property, so an indexed Get
+    /// resolves without a prototype traversal. Sparse Arrays intentionally
+    /// return `false`: their ordinary shape lookup can still be linear.
+    pub(crate) fn array_dense_index_present(
+        &self,
+        object: ObjectId,
+        index: ArrayIndex,
+    ) -> Result<bool, crate::EngineFault> {
+        let object = self
+            .objects
+            .get(object)
+            .ok_or(crate::EngineFault::StaleHeapEdge {
+                edge: "object",
+                index: object.index(),
+                generation: object.generation(),
+            })?;
+        let state = object
+            .array_state()
+            .ok_or(crate::EngineFault::RuntimeInvariant {
+                message: "dense array lookup received a non-array object",
+            })?;
+        Ok(state.is_dense() && state.dense_value(index).is_some())
+    }
+
     /// Reports whether a heap object's own properties include an array index.
     ///
     /// This includes an Array exotic object's dense elements, which do not
@@ -428,6 +454,38 @@ impl Runtime {
             }
             .into());
         }
+        Ok(usize_to_u64(object.property_count())
+            .saturating_mul(4)
+            .saturating_add(4))
+    }
+
+    /// Previews one ordinary default-data Array definition, using dense storage
+    /// cost when that operation remains in the dense representation.
+    pub(crate) fn preview_array_data_property_work(
+        &self,
+        object: ObjectId,
+        key: &PropertyKey,
+    ) -> Result<u64, crate::ExecutionError> {
+        let object = self
+            .objects
+            .get(object)
+            .ok_or(crate::EngineFault::StaleHeapEdge {
+                edge: "array object",
+                index: object.index(),
+                generation: object.generation(),
+            })?;
+        let state = object
+            .array_state()
+            .ok_or(crate::EngineFault::RuntimeInvariant {
+                message: "array data definition work preview received a non-array object",
+            })?;
+        if let Some(index) = key.as_index()
+            && let Some(work) = state.dense_store_work(index)
+        {
+            return Ok(work);
+        }
+        // Sparse writes still linearly inspect and may compact the ordinary
+        // shape, so retain the existing complete structural upper bound.
         Ok(usize_to_u64(object.property_count())
             .saturating_mul(4)
             .saturating_add(4))

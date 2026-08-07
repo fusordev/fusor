@@ -1093,11 +1093,12 @@ pub(super) fn advance_iterator_append(
                 };
                 return begin_iterator_close(runtime, state, pending, return_to, execution_budget);
             };
-            let work = runtime.preview_array_define_data_property_work(state.array)?;
+            let key = PropertyKey::from_index(index);
+            let work = runtime.preview_array_data_property_work(state.array, &key)?;
             execution_budget.charge_instructions(work)?;
             match runtime.define_array_data_property(
                 state.array,
-                PropertyKey::from_index(index),
+                key,
                 PropertyLayout::data(true, true, true),
                 completion,
             )? {

@@ -2962,11 +2962,12 @@ fn append_regexp_split_element(
     let output = state.output.ok_or(EngineFault::RuntimeInvariant {
         message: "RegExp split lost its output array",
     })?;
-    let work = runtime.preview_array_define_data_property_work(output)?;
+    let key = PropertyKey::from_index(index);
+    let work = runtime.preview_array_data_property_work(output, &key)?;
     execution_budget.charge_instructions(work)?;
     match runtime.define_array_data_property(
         output,
-        PropertyKey::from_index(index),
+        key,
         PropertyLayout::data(true, true, true),
         value,
     )? {
@@ -3422,11 +3423,12 @@ fn append_global_regexp_match(
     let array = state.result_array.ok_or(EngineFault::RuntimeInvariant {
         message: "global RegExp match append has no result array",
     })?;
-    let work = runtime.preview_array_define_data_property_work(array)?;
+    let key = PropertyKey::from_index(index);
+    let work = runtime.preview_array_data_property_work(array, &key)?;
     execution_budget.charge_instructions(work)?;
     match runtime.define_array_data_property(
         array,
-        PropertyKey::from_index(index),
+        key,
         PropertyLayout::data(true, true, true),
         StoredValue::String(value),
     )? {
