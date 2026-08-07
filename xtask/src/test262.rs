@@ -942,8 +942,13 @@ fn execute_cases_parallel(
         return Ok(Vec::new());
     }
     let worker_count = jobs.min(cases.len()).max(1);
+    // `ThreadPool::scope` runs the progress receiver on a Rayon worker while
+    // the submitted test workers block on Tokio's channel. Reserve one Rayon
+    // thread for that coordinator so `--jobs 1` still has one executing test
+    // worker rather than deadlocking before its first completion.
+    let pool_thread_count = worker_count.saturating_add(1);
     let pool = ThreadPoolBuilder::new()
-        .num_threads(worker_count)
+        .num_threads(pool_thread_count)
         .stack_size(TEST262_WORKER_STACK_SIZE)
         .thread_name(|index| format!("test262-worker-{index}"))
         .build()
@@ -1336,20 +1341,27 @@ mod tests {
             sta: String::new(),
             root: PathBuf::from("unused-harness"),
         };
-        let mut completed = Vec::new();
-        let outcomes =
-            execute_cases_parallel(&cases, &harness, DEFAULT_INSTRUCTION_FUEL, 2, |index, _| {
-                completed.push(index);
-            })
+        for jobs in [1, 2] {
+            let mut completed = Vec::new();
+            let outcomes = execute_cases_parallel(
+                &cases,
+                &harness,
+                DEFAULT_INSTRUCTION_FUEL,
+                jobs,
+                |index, _| {
+                    completed.push(index);
+                },
+            )
             .expect("parallel execution");
-        assert_eq!(outcomes.len(), cases.len());
-        completed.sort_unstable();
-        assert_eq!(completed, vec![0, 1, 2, 3]);
-        assert!(
-            outcomes
-                .into_iter()
-                .all(|outcome| matches!(outcome, Ok(None)))
-        );
+            assert_eq!(outcomes.len(), cases.len());
+            completed.sort_unstable();
+            assert_eq!(completed, vec![0, 1, 2, 3]);
+            assert!(
+                outcomes
+                    .into_iter()
+                    .all(|outcome| matches!(outcome, Ok(None)))
+            );
+        }
     }
 
     #[test]
