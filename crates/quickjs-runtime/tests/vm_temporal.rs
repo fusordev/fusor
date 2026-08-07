@@ -328,6 +328,27 @@ fn zoned_date_time_accessors_expose_kernel_slots_and_getter_descriptors() {
 }
 
 #[test]
+fn zoned_date_time_projection_methods_preserve_branded_temporal_values() {
+    assert_eq!(
+        rendered(
+            "var value=new Temporal.ZonedDateTime(3600000000000n,'UTC','iso8601');
+             var start=value.startOfDay();
+             var instant=Object.getOwnPropertyDescriptor(Temporal.ZonedDateTime.prototype,'toInstant');
+             return [value.toInstant().toString(),value.toPlainDate().toString(),
+               value.toPlainTime().toString(),value.toPlainDateTime().toString(),
+               start.epochNanoseconds,start.timeZoneId,start.calendarId,
+               instant.value.length,instant.value.name,instant.enumerable,
+               instant.writable,instant.configurable].join('|');"
+        ),
+        "1970-01-01T01:00:00Z|1970-01-01|01:00:00|1970-01-01T01:00:00|0|UTC|iso8601|0|toInstant|false|true|true"
+    );
+    assert_eq!(
+        thrown("return Temporal.ZonedDateTime.prototype.toPlainDate.call({});"),
+        ExceptionKind::TypeError
+    );
+}
+
+#[test]
 fn plain_date_time_constructor_accessors_and_iso_formatting_are_spec_shaped() {
     assert_eq!(
         rendered(

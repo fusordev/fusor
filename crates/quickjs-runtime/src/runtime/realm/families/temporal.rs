@@ -377,7 +377,7 @@ pub(super) fn visit_functions(visit: FunctionSink<'_>) {
         ));
     }
     for method in TemporalZonedDateTimePrototypeMethod::ALL {
-        let name = if TemporalZonedDateTimePrototypeMethod::is_accessor() {
+        let name = if method.is_accessor() {
             IntrinsicNameSpec::Literal(method.function_name())
         } else {
             IntrinsicNameSpec::RealmName(RealmNameId::TemporalZonedDateTimePrototype(method))
@@ -985,7 +985,7 @@ pub(super) fn visit_properties(visit: PropertySink<'_>) {
         let key = IntrinsicKeySpec::InternedString(RealmNameId::TemporalZonedDateTimePrototype(
             method_id,
         ));
-        if TemporalZonedDateTimePrototypeMethod::is_accessor() {
+        if method_id.is_accessor() {
             visit(accessor(
                 zoned_date_time_prototype,
                 key,

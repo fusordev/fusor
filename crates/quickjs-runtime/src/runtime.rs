@@ -2350,6 +2350,11 @@ pub(crate) enum TemporalZonedDateTimePrototypeMethod {
     EpochMilliseconds,
     EpochNanoseconds,
     HoursInDay,
+    ToInstant,
+    ToPlainDate,
+    ToPlainTime,
+    ToPlainDateTime,
+    StartOfDay,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -2812,7 +2817,7 @@ impl TemporalZonedDateTimeStaticMethod {
 }
 
 impl TemporalZonedDateTimePrototypeMethod {
-    pub(crate) const ALL: [Self; 28] = [
+    pub(crate) const ALL: [Self; 33] = [
         Self::CalendarId,
         Self::TimeZoneId,
         Self::Year,
@@ -2841,6 +2846,11 @@ impl TemporalZonedDateTimePrototypeMethod {
         Self::EpochMilliseconds,
         Self::EpochNanoseconds,
         Self::HoursInDay,
+        Self::ToInstant,
+        Self::ToPlainDate,
+        Self::ToPlainTime,
+        Self::ToPlainDateTime,
+        Self::StartOfDay,
     ];
 
     pub(crate) const fn name(self) -> &'static str {
@@ -2873,6 +2883,11 @@ impl TemporalZonedDateTimePrototypeMethod {
             Self::EpochMilliseconds => "epochMilliseconds",
             Self::EpochNanoseconds => "epochNanoseconds",
             Self::HoursInDay => "hoursInDay",
+            Self::ToInstant => "toInstant",
+            Self::ToPlainDate => "toPlainDate",
+            Self::ToPlainTime => "toPlainTime",
+            Self::ToPlainDateTime => "toPlainDateTime",
+            Self::StartOfDay => "startOfDay",
         }
     }
 
@@ -2906,11 +2921,19 @@ impl TemporalZonedDateTimePrototypeMethod {
             Self::EpochMilliseconds => "get epochMilliseconds",
             Self::EpochNanoseconds => "get epochNanoseconds",
             Self::HoursInDay => "get hoursInDay",
+            method => method.name(),
         }
     }
 
-    pub(crate) const fn is_accessor() -> bool {
-        true
+    pub(crate) const fn is_accessor(self) -> bool {
+        !matches!(
+            self,
+            Self::ToInstant
+                | Self::ToPlainDate
+                | Self::ToPlainTime
+                | Self::ToPlainDateTime
+                | Self::StartOfDay
+        )
     }
 
     pub(crate) const fn length() -> i32 {

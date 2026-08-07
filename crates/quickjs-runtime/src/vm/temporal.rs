@@ -2210,6 +2210,29 @@ pub(super) fn dispatch_temporal_zoned_date_time_prototype(
                 JsNumber::from_f64(hours),
             )))
         }
+        TemporalZonedDateTimePrototypeMethod::ToInstant => {
+            allocate_temporal_instant_result(runtime, realm, date_time.to_instant())
+        }
+        TemporalZonedDateTimePrototypeMethod::ToPlainDate => {
+            allocate_temporal_plain_date_result(runtime, realm, date_time.to_plain_date())
+        }
+        TemporalZonedDateTimePrototypeMethod::ToPlainTime => {
+            allocate_temporal_plain_time_result(runtime, realm, date_time.to_plain_time())
+        }
+        TemporalZonedDateTimePrototypeMethod::ToPlainDateTime => {
+            allocate_temporal_plain_date_time_result(runtime, realm, date_time.to_plain_date_time())
+        }
+        TemporalZonedDateTimePrototypeMethod::StartOfDay => {
+            let start = match date_time.start_of_day() {
+                Ok(start) => start,
+                Err(error) => {
+                    return Err(NativeFailure::Abrupt(temporal_exception_from_error(
+                        realm, origin, error,
+                    )?));
+                }
+            };
+            allocate_temporal_zoned_date_time_result(runtime, realm, start)
+        }
     }
 }
 
