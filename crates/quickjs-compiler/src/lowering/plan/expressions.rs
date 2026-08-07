@@ -17,7 +17,7 @@ use super::super::{
 };
 use super::abrupt::{AbruptMarker, AbruptMarkerKind};
 use super::calls::MemberCallee;
-use oxc_ast::ast::StaticBlock;
+use oxc_ast::ast::{SpreadElement, StaticBlock};
 use std::collections::HashSet;
 
 pub(in crate::lowering) fn anonymous_named_evaluation_span(
@@ -3790,10 +3790,14 @@ impl<'compiler, 'unit, 'arena, 'scope> ExpressionPlanner<'compiler, 'unit, 'aren
     ) -> Result<(), LeafCompilationError> {
         for property in object.properties.iter().rev() {
             let ObjectPropertyKind::ObjectProperty(property) = property else {
-                return unsupported(
-                    UnsupportedLeafFeature::UnsupportedExpression,
-                    property.span(),
-                );
+                let ObjectPropertyKind::SpreadProperty(spread) = property else {
+                    return Err(LeafCompilationError::SemanticInvariant {
+                        invariant: "object property kind is either a property or spread element",
+                        span: Some(property.span()),
+                    });
+                };
+                Self::plan_object_spread_property(spread, work);
+                continue;
             };
             let method_kind = match (property.method, property.kind) {
                 (true, PropertyKind::Init) => Some(ObjectMethodKind::Method),
@@ -3871,6 +3875,36 @@ impl<'compiler, 'unit, 'arena, 'scope> ExpressionPlanner<'compiler, 'unit, 'aren
             object.span,
         )));
         Ok(())
+    }
+
+    fn plan_object_spread_property<'expression>(
+        spread: &'expression SpreadElement<'arena>,
+        work: &mut Vec<ExpressionWork<'expression, 'arena>>,
+    ) {
+        // CopyDataProperties retains its three operands. Keep the literal
+        // target below the source and an `undefined` exclusion marker, then
+        // discard the latter two after the resumable copy completes. The work
+        // stack is LIFO, so this evaluates every spread argument in source
+        // order with ordinary properties.
+        for opcode in [FinalOpcode::Drop, FinalOpcode::Drop] {
+            work.push(ExpressionWork::Emit(PlannedInstruction::new(
+                opcode,
+                Operands::None,
+                spread.span,
+            )));
+        }
+        work.push(ExpressionWork::Emit(PlannedInstruction::new(
+            FinalOpcode::CopyDataProperties,
+            // target depth 2, source depth 1, excluded depth 0.
+            Operands::U8(0b0000_0110),
+            spread.span,
+        )));
+        work.push(ExpressionWork::Emit(PlannedInstruction::new(
+            FinalOpcode::Undefined,
+            Operands::None,
+            spread.span,
+        )));
+        work.push(ExpressionWork::Visit(&spread.argument));
     }
 
     fn plan_inferred_static_property_name_for_initializer(

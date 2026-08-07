@@ -1,7 +1,5 @@
 use quickjs_bytecode::{BytecodePc, FinalOpcode, Operands, VerificationLimits};
-use quickjs_compiler::{
-    CompilationContext, CompiledLeafFunction, LeafCompilationError, UnsupportedLeafFeature,
-};
+use quickjs_compiler::{CompilationContext, CompiledLeafFunction};
 use quickjs_frontend::{CompilationGoal, FrontendOptions, GlobalScriptGoal, with_parsed_program};
 
 fn compile(source: &str, name: &str) -> CompiledLeafFunction {
@@ -17,24 +15,6 @@ fn compile(source: &str, name: &str) -> CompiledLeafFunction {
             context
                 .compile_leaf(&executable, VerificationLimits::default())
                 .expect("throw lowering must succeed")
-        },
-    )
-    .expect("front-end acceptance")
-}
-
-fn compile_error(source: &str, name: &str) -> LeafCompilationError {
-    with_parsed_program(
-        source,
-        FrontendOptions::for_goal(CompilationGoal::GlobalScript(GlobalScriptGoal::new())),
-        |unit| {
-            let context = CompilationContext::new(unit).expect("storage planning must succeed");
-            let executable = context
-                .executables()
-                .find(|executable| executable.metadata().name() == Some(name))
-                .expect("named function executable");
-            context
-                .compile_leaf(&executable, VerificationLimits::default())
-                .expect_err("unsupported unreachable source must still fail closed")
         },
     )
     .expect("front-end acceptance")
@@ -146,15 +126,35 @@ fn unreachable_statements_after_throw_are_still_lowered_and_terminated() {
 }
 
 #[test]
-fn unsupported_unreachable_source_after_throw_still_fails_closed() {
-    let source = "function f(a){throw a;({...a});}";
-    let LeafCompilationError::Unsupported { feature, span } = compile_error(source, "f") else {
-        panic!("unreachable object spread must remain unsupported");
-    };
-    assert_eq!(feature, UnsupportedLeafFeature::UnsupportedExpression);
-    assert!(
-        source[span.start as usize..span.end as usize].contains("...a"),
-        "unexpected source span: {:?}",
-        &source[span.start as usize..span.end as usize]
+fn unreachable_object_spread_is_still_lowered_and_preserves_the_throw_prefix() {
+    let compiled = compile("function f(a){throw a;({...a});}", "f");
+
+    assert_eq!(
+        decoded(&compiled),
+        [
+            (BytecodePc::new(0), FinalOpcode::GetArg0, Operands::NoneArg),
+            (BytecodePc::new(1), FinalOpcode::Throw, Operands::None),
+            (BytecodePc::new(2), FinalOpcode::Object, Operands::None),
+            (BytecodePc::new(3), FinalOpcode::GetArg0, Operands::NoneArg),
+            (BytecodePc::new(4), FinalOpcode::Undefined, Operands::None),
+            (
+                BytecodePc::new(5),
+                FinalOpcode::CopyDataProperties,
+                Operands::U8(0b0000_0110),
+            ),
+            (BytecodePc::new(7), FinalOpcode::Drop, Operands::None),
+            (BytecodePc::new(8), FinalOpcode::Drop, Operands::None),
+            (BytecodePc::new(9), FinalOpcode::Drop, Operands::None),
+            (
+                BytecodePc::new(10),
+                FinalOpcode::ReturnUndef,
+                Operands::None
+            ),
+        ]
+    );
+    assert_eq!(
+        compiled.control_flow().instructions()[2].entry_stack_depth(),
+        None,
+        "the unreachable object-spread tail remains in the verified structure"
     );
 }

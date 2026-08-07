@@ -4636,6 +4636,7 @@ fn verify_method_definitions(
                 FinalOpcode::DefineMethod
                     | FinalOpcode::DefineMethodComputed
                     | FinalOpcode::DefineClass
+                    | FinalOpcode::CopyDataProperties
                     | FinalOpcode::DefineArrayEl
                     | FinalOpcode::Append
                     | FinalOpcode::Dup1
@@ -5914,6 +5915,19 @@ fn verify_object_definition_provenance(
             {
                 return Err(method_target_error(id, decoded.pc()));
             }
+            FinalOpcode::CopyDataProperties => {
+                let Some(target) =
+                    copy_data_properties_target_index(&state, instruction.operands())
+                else {
+                    return Err(object_definition_error(id, decoded.pc()));
+                };
+                if !matches!(
+                    state.get(target),
+                    Some(ObjectDefinitionProvenance::FreshObject(_))
+                ) {
+                    return Err(object_definition_error(id, decoded.pc()));
+                }
+            }
             FinalOpcode::DefineArrayEl => {
                 let object = state.get(state.len().saturating_sub(3));
                 let key = state.get(state.len().saturating_sub(2));
@@ -6223,10 +6237,13 @@ fn transfer_object_definition_provenance(
             state.push(ObjectDefinitionProvenance::Unknown);
         }
         FinalOpcode::ToPropKey => convert_property_key_provenance(state),
-        // Both primitives mutate only the fresh closure at the top of the
-        // stack. They preserve the surrounding class constructor/prototype
-        // provenance needed by later public method definitions.
-        FinalOpcode::SetNameComputed | FinalOpcode::SetHomeObject => {}
+        // The closure-name/home-object primitives retain their surrounding
+        // class provenance. `copy_data_properties` likewise retains all
+        // referenced operands after its resumable work; its fresh target and
+        // packed depths were checked by the entry validation above.
+        FinalOpcode::SetNameComputed
+        | FinalOpcode::SetHomeObject
+        | FinalOpcode::CopyDataProperties => {}
         FinalOpcode::DefineField => {
             let base = state[state.len() - 2];
             let base = match base {
@@ -6365,6 +6382,27 @@ fn transfer_object_definition_provenance(
         return Err(object_definition_error(id, decoded.pc()));
     }
     Ok(true)
+}
+
+/// Returns the target slot of a well-formed packed `copy_data_properties`
+/// operand. Its fixed stack effect requires three values, while the packed
+/// source/excluded depths may refer farther down the stack; prove all three
+/// references are in bounds before granting the mutation authority.
+fn copy_data_properties_target_index(
+    state: &[ObjectDefinitionProvenance],
+    operands: Operands,
+) -> Option<usize> {
+    let Operands::U8(mask) = operands else {
+        return None;
+    };
+    let target_depth = usize::from(mask & 0b11);
+    let source_depth = usize::from((mask >> 2) & 0b111);
+    let excluded_depth = usize::from((mask >> 5) & 0b111);
+    let index_at_depth = |depth: usize| state.len().checked_sub(depth.saturating_add(1));
+    let target = index_at_depth(target_depth)?;
+    index_at_depth(source_depth)?;
+    index_at_depth(excluded_depth)?;
+    Some(target)
 }
 
 fn apply_nip_catch_provenance(
