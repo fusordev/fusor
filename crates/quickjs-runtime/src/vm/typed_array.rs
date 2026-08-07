@@ -1704,6 +1704,8 @@ pub(super) fn dispatch_typed_array_prototype(
             | TypedArrayPrototypeMethod::FindLastIndex
             | TypedArrayPrototypeMethod::ForEach
             | TypedArrayPrototypeMethod::Map
+            | TypedArrayPrototypeMethod::Reduce
+            | TypedArrayPrototypeMethod::ReduceRight
             | TypedArrayPrototypeMethod::Some
     ) && !matches!(view, TypedArrayView::InBounds { .. })
     {
@@ -1738,6 +1740,24 @@ pub(super) fn dispatch_typed_array_prototype(
             realm,
             StoredValue::Object(*object),
             usize_to_u64(length),
+            arguments,
+            return_to,
+            origin,
+            execution_budget,
+        );
+    }
+    let reduction = match method {
+        TypedArrayPrototypeMethod::Reduce => Some(ArrayReduction::Reduce),
+        TypedArrayPrototypeMethod::ReduceRight => Some(ArrayReduction::ReduceRight),
+        _ => None,
+    };
+    if let Some(reduction) = reduction {
+        return begin_typed_array_reduction(
+            runtime,
+            reduction,
+            realm,
+            StoredValue::Object(*object),
+            length,
             arguments,
             return_to,
             origin,
@@ -1957,6 +1977,8 @@ pub(super) fn dispatch_typed_array_prototype(
         | TypedArrayPrototypeMethod::FindLast
         | TypedArrayPrototypeMethod::FindLastIndex
         | TypedArrayPrototypeMethod::ForEach
+        | TypedArrayPrototypeMethod::Reduce
+        | TypedArrayPrototypeMethod::ReduceRight
         | TypedArrayPrototypeMethod::Some => {
             unreachable!("typed-array callback methods returned from their dedicated dispatch")
         }

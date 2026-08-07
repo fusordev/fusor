@@ -689,6 +689,12 @@ pub(crate) struct ArrayReductionContinuation {
     target: StoredValue,
     /// The callback, already verified to be callable.
     callback: FunctionId,
+    /// Whether this reduction performs `HasProperty` before each element read.
+    ///
+    /// Ordinary Array reductions skip holes. Typed arrays have no holes and
+    /// must instead perform a fresh `Get` for every index in their previously
+    /// captured length, even after a resizable backing buffer has shrunk.
+    skip_holes: bool,
     /// The accumulator, absent until it is seeded.
     accumulator: Option<StoredValue>,
     /// The element count from the single `ToLength` length read.
@@ -774,12 +780,73 @@ pub(super) fn begin_array_reduction(
         reduction,
         target: receiver,
         callback,
+        skip_holes: true,
         accumulator,
         length: 0,
         next: 0,
         current: 0,
         realm,
         stage: ArrayReductionStage::AwaitLength,
+        origin,
+    };
+    advance_array_reduction(runtime, state, None, return_to, execution_budget)
+}
+
+/// Starts a `%TypedArray%.prototype.reduce` or `reduceRight` operation.
+///
+/// The caller has already completed `ValidateTypedArray` and captured the
+/// length. That is deliberately before `IsCallable(callback)`, and direct
+/// `Get` operations replace ordinary array hole checks for the whole captured
+/// range.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the typed-array entry carries the shared reduction state and the native call context explicitly"
+)]
+pub(super) fn begin_typed_array_reduction(
+    runtime: &mut Runtime,
+    reduction: ArrayReduction,
+    realm: RealmId,
+    receiver: StoredValue,
+    length: usize,
+    mut arguments: CallArguments,
+    return_to: Option<CallReturn>,
+    origin: JsStackFrame,
+    execution_budget: &mut ExecutionBudget,
+) -> Result<NativeDispatch, NativeFailure> {
+    let StoredValue::Function(callback) = arguments.take_first_or_undefined() else {
+        return Err(NativeFailure::Abrupt(PendingException {
+            realm,
+            payload: PendingExceptionPayload::EngineError {
+                kind: ExceptionKind::TypeError,
+                message: JsString::from_utf8("not a function")?,
+            },
+            origin,
+        }));
+    };
+    // An omitted initial value differs from an explicit `undefined`: it makes
+    // the first (or last) element the accumulator without invoking callback.
+    let accumulator = arguments.take_first();
+    let has_initial = accumulator.is_some();
+    let length = usize_to_u64(length);
+    let state = ArrayReductionContinuation {
+        reduction,
+        target: receiver,
+        callback,
+        skip_holes: false,
+        accumulator,
+        length,
+        next: if reduction.is_backward() {
+            length.saturating_sub(1)
+        } else {
+            0
+        },
+        current: 0,
+        realm,
+        stage: if has_initial {
+            ArrayReductionStage::NextElement
+        } else {
+            ArrayReductionStage::SeedAccumulator
+        },
         origin,
     };
     advance_array_reduction(runtime, state, None, return_to, execution_budget)
@@ -870,23 +937,32 @@ pub(super) fn advance_array_reduction(
                 let index = state.next;
                 state.current = index;
                 state.advance();
-                let key = element_key(index)?;
-                charge_callback_lookup(runtime, &state.target, execution_budget)?;
-                state.stage = ArrayReductionStage::AwaitSeedPresence;
-                let dispatch = begin_value_has(
+                if state.skip_holes {
+                    let key = element_key(index)?;
+                    charge_callback_lookup(runtime, &state.target, execution_budget)?;
+                    state.stage = ArrayReductionStage::AwaitSeedPresence;
+                    let dispatch = begin_value_has(
+                        runtime,
+                        &state.target,
+                        key,
+                        state.realm,
+                        return_to,
+                        state.origin.clone(),
+                        execution_budget,
+                    )?;
+                    await_get!(continue_get_state_after(
+                        dispatch,
+                        state,
+                        array_reduction_continuation,
+                        "Array reduction seed HasProperty produced a structured result",
+                    ));
+                }
+                await_get!(begin_array_reduction_element_get(
                     runtime,
-                    &state.target,
-                    key,
-                    state.realm,
-                    return_to,
-                    state.origin.clone(),
-                    execution_budget,
-                )?;
-                await_get!(continue_get_state_after(
-                    dispatch,
                     state,
-                    array_reduction_continuation,
-                    "Array reduction seed HasProperty produced a structured result",
+                    ArrayReductionStage::AwaitSeedRead,
+                    return_to,
+                    execution_budget,
                 ));
             }
             ArrayReductionStage::AwaitSeedPresence => {
@@ -915,24 +991,33 @@ pub(super) fn advance_array_reduction(
                 let index = state.next;
                 state.current = index;
                 state.advance();
-                let key = element_key(index)?;
-                charge_callback_lookup(runtime, &state.target, execution_budget)?;
-                // A hole is skipped: the callback never sees it.
-                state.stage = ArrayReductionStage::AwaitElementPresence;
-                let dispatch = begin_value_has(
+                if state.skip_holes {
+                    let key = element_key(index)?;
+                    charge_callback_lookup(runtime, &state.target, execution_budget)?;
+                    // A hole is skipped: the callback never sees it.
+                    state.stage = ArrayReductionStage::AwaitElementPresence;
+                    let dispatch = begin_value_has(
+                        runtime,
+                        &state.target,
+                        key,
+                        state.realm,
+                        return_to,
+                        state.origin.clone(),
+                        execution_budget,
+                    )?;
+                    await_get!(continue_get_state_after(
+                        dispatch,
+                        state,
+                        array_reduction_continuation,
+                        "Array reduction HasProperty produced a structured result",
+                    ));
+                }
+                await_get!(begin_array_reduction_element_get(
                     runtime,
-                    &state.target,
-                    key,
-                    state.realm,
-                    return_to,
-                    state.origin.clone(),
-                    execution_budget,
-                )?;
-                await_get!(continue_get_state_after(
-                    dispatch,
                     state,
-                    array_reduction_continuation,
-                    "Array reduction HasProperty produced a structured result",
+                    ArrayReductionStage::AwaitElement,
+                    return_to,
+                    execution_budget,
                 ));
             }
             ArrayReductionStage::AwaitElementPresence => {

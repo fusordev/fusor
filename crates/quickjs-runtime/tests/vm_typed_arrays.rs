@@ -703,3 +703,46 @@ fn typed_array_map_constructs_species_before_callbacks_and_uses_fresh_writes() {
         ExceptionKind::TypeError
     );
 }
+
+#[test]
+fn typed_array_reductions_capture_the_initial_view_and_refresh_each_element_read() {
+    assert_eq!(
+        rendered(
+            "var values=new Uint8Array([1,2,3]),calls=[],rightCalls=[],callbackThis='not-set';\
+             var left=values.reduce(function(accumulator,value,index,array){calls.push(accumulator+':'+value+':'+index+':'+(array===values));return accumulator+value});\
+             var right=values.reduceRight(function(accumulator,value,index,array){'use strict';callbackThis=this;rightCalls.push(index+':'+(array===values));return accumulator-value});\
+             var explicit=values.reduce(function(accumulator,value){return String(accumulator)+value},undefined);\
+             var empty=new Uint8Array(0).reduce(function(){throw new Error('unexpected')},'seed');\
+             return [Uint8Array.prototype.reduce.length,Uint8Array.prototype.reduce.name,\
+               Uint8Array.prototype.reduceRight.length,Uint8Array.prototype.reduceRight.name,\
+               left,right,explicit,empty,callbackThis===undefined,calls.join(','),rightCalls.join(',')].join('|');"
+        ),
+        "1|reduce|1|reduceRight|6|0|undefined123|seed|true|1:2:1:true,3:3:2:true|1:true,0:true"
+    );
+    assert_eq!(
+        rendered(
+            "var buffer=new ArrayBuffer(4,{maxByteLength:4}),values=new Uint8Array(buffer),seen=[];\
+             values[0]=7;values[1]=8;\
+             var left=values.reduce(function(accumulator,value,index){seen.push(value===undefined?'u'+index:String(value));if(index===0)buffer.resize(1);return accumulator+String(value)},'');\
+             var reverseBuffer=new ArrayBuffer(4,{maxByteLength:4}),reverse=new Uint8Array(reverseBuffer),back=[];\
+             reverse[0]=9;reverse[3]=4;\
+             var right=reverse.reduceRight(function(accumulator,value,index){back.push(value===undefined?'u'+index:String(value));if(index===3)reverseBuffer.resize(1);return accumulator+String(value)},'');\
+             return [left,seen.join(','),right,back.join(',')].join('|');"
+        ),
+        "7undefinedundefinedundefined|7,u1,u2,u3|4undefinedundefined9|4,u2,u1,9"
+    );
+    assert_eq!(
+        thrown("return new Uint8Array(0).reduce(function(){});"),
+        ExceptionKind::TypeError
+    );
+    assert_eq!(
+        thrown("return new Uint8Array(0).reduceRight(function(){});"),
+        ExceptionKind::TypeError
+    );
+    assert_eq!(
+        thrown(
+            "var buffer=new ArrayBuffer(4,{maxByteLength:4}),values=new Uint8Array(buffer,2,2);buffer.resize(1);values.reduce(function(){});"
+        ),
+        ExceptionKind::TypeError
+    );
+}

@@ -141,7 +141,7 @@ impl RealmIntrinsicSchema {
             FamilyCardinality {
                 family: "Realm native functions",
                 actual: self.specs.len(),
-                expected: 496,
+                expected: 498,
             },
         ];
         validate_intrinsic_schema(IntrinsicSchema {
