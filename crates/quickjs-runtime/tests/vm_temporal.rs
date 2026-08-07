@@ -285,6 +285,61 @@ fn plain_time_add_and_subtract_convert_duration_like_and_ignore_date_units() {
 }
 
 #[test]
+fn plain_time_with_prepares_fields_before_overflow_and_rejects_temporal_inputs() {
+    assert_eq!(
+        rendered(
+            "var log=[];
+             function number(name,value){return {valueOf:function(){log.push(name+' number');return value}}}
+             var fields={
+               get calendar(){log.push('calendar');return undefined},
+               get timeZone(){log.push('timeZone');return undefined},
+               get hour(){log.push('hour');return number('hour',25.7)},
+               get microsecond(){log.push('microsecond');return number('microsecond',8.7)},
+               get millisecond(){log.push('millisecond');return number('millisecond',7.7)},
+               get minute(){log.push('minute');return number('minute',6.7)},
+               get nanosecond(){log.push('nanosecond');return number('nanosecond',9.7)},
+               get second(){log.push('second');return number('second',10.7)}
+             };
+             var options={get overflow(){log.push('overflow');return {toString:function(){log.push('overflow string');return 'constrain'}}}};
+             var result=new Temporal.PlainTime(12,34,56,1,2,3).with(fields,options);
+             return [Temporal.PlainTime.prototype.with.length,result.toString(),log.join(',')].join('|');"
+        ),
+        "1|23:06:10.007008009|calendar,timeZone,hour,hour number,microsecond,microsecond number,millisecond,millisecond number,minute,minute number,nanosecond,nanosecond number,second,second number,overflow,overflow string"
+    );
+    assert_eq!(
+        rendered(
+            "var time=new Temporal.PlainTime(12,34,56,7,8,9);
+             return [time.with({minute:60}).toString(),time.with({second:undefined,hour:8}).toString()].join('|');"
+        ),
+        "12:59:56.007008009|08:34:56.007008009"
+    );
+    assert_eq!(
+        thrown("return new Temporal.PlainTime().with({hour:25},{overflow:'reject'});"),
+        ExceptionKind::RangeError
+    );
+    assert_eq!(
+        thrown("return new Temporal.PlainTime().with(new Temporal.PlainTime());"),
+        ExceptionKind::TypeError
+    );
+    assert_eq!(
+        thrown("return new Temporal.PlainTime().with(new Temporal.PlainDate(2020,1,1));"),
+        ExceptionKind::TypeError
+    );
+    assert_eq!(
+        thrown("return new Temporal.PlainTime().with(new Temporal.PlainDateTime(2020,1,1));"),
+        ExceptionKind::TypeError
+    );
+    assert_eq!(
+        thrown("return new Temporal.PlainTime().with({calendar:'iso8601',hour:1});"),
+        ExceptionKind::TypeError
+    );
+    assert_eq!(
+        thrown("return Temporal.PlainTime.prototype.with.call({}, {hour:1});"),
+        ExceptionKind::TypeError
+    );
+}
+
+#[test]
 fn plain_date_time_constructor_preserves_order_defaults_and_branding() {
     assert_eq!(
         rendered(

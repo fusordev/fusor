@@ -2186,7 +2186,7 @@ fn finish_operator_primitive_target(
             )
         }
         OperatorPrimitiveTarget::TemporalPlainTimeOptions(state) => {
-            advance_temporal_plain_time_from_options(
+            advance_temporal_plain_time_options(
                 runtime,
                 *state,
                 Some(value),

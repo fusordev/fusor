@@ -575,7 +575,7 @@ pub(super) fn resume_native_continuations(
                 )?
             }
             NativeContinuation::TemporalPlainTimeOptions(state) => {
-                advance_temporal_plain_time_from_options(
+                advance_temporal_plain_time_options(
                     runtime,
                     *state,
                     Some(value),

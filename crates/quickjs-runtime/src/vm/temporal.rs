@@ -256,16 +256,30 @@ enum TemporalPlainDateTimeLikeTarget {
 }
 
 enum TemporalPlainTimeLikeTarget {
-    From { options: StoredValue },
-    CompareFirst { second: StoredValue },
-    CompareSecond { first: PlainTime },
-    Equals { receiver: PlainTime },
+    From {
+        options: StoredValue,
+    },
+    CompareFirst {
+        second: StoredValue,
+    },
+    CompareSecond {
+        first: PlainTime,
+    },
+    With {
+        receiver: PlainTime,
+        options: StoredValue,
+    },
+    Equals {
+        receiver: PlainTime,
+    },
 }
 
 impl TemporalPlainTimeLikeTarget {
     fn trace_roots(&self, mark: &mut dyn FnMut(CollectionRoot)) {
         match self {
-            Self::From { options } | Self::CompareFirst { second: options } => {
+            Self::From { options }
+            | Self::CompareFirst { second: options }
+            | Self::With { options, .. } => {
                 trace_stored_value_root(options, mark);
             }
             Self::CompareSecond { .. } | Self::Equals { .. } => {}
@@ -275,6 +289,10 @@ impl TemporalPlainTimeLikeTarget {
 
 #[derive(Clone, Copy)]
 enum TemporalPlainTimeBagStage {
+    ReadCalendar,
+    AwaitCalendar,
+    ReadTimeZone,
+    AwaitTimeZone,
     ReadField,
     AwaitField,
     AwaitConversion,
@@ -315,6 +333,10 @@ impl TemporalPlainTimeBagContinuation {
 enum TemporalPlainTimeOptionsTarget {
     Existing(PlainTime),
     Partial(PartialTime),
+    With {
+        receiver: PlainTime,
+        partial: PartialTime,
+    },
 }
 
 #[derive(Clone, Copy)]
@@ -324,9 +346,10 @@ enum TemporalPlainTimeOptionsStage {
     AwaitOverflowConversion,
 }
 
-/// `Temporal.PlainTime.from` options state. The input conversion always
-/// precedes `GetOptionsObject`, while the overflow Get/conversion precedes
-/// construction from a possibly out-of-range property bag.
+/// Resumable `PlainTime` overflow options state.
+///
+/// The input field conversion always precedes `GetOptionsObject`, while the
+/// overflow Get/conversion precedes construction or partial-field replacement.
 pub(super) struct TemporalPlainTimeOptionsContinuation {
     target: TemporalPlainTimeOptionsTarget,
     options: StoredValue,
@@ -1454,7 +1477,7 @@ fn continue_temporal_plain_time_like(
     execution_budget: &mut ExecutionBudget,
 ) -> Result<NativeDispatch, NativeFailure> {
     match target {
-        TemporalPlainTimeLikeTarget::From { options } => begin_temporal_plain_time_from_options(
+        TemporalPlainTimeLikeTarget::From { options } => begin_temporal_plain_time_options(
             runtime,
             TemporalPlainTimeOptionsTarget::Existing(time),
             options,
@@ -1482,10 +1505,67 @@ fn continue_temporal_plain_time_like(
                 JsNumber::from_i32(result),
             )))
         }
+        TemporalPlainTimeLikeTarget::With { .. } => {
+            unreachable!("Temporal.PlainTime.with completes from its property-bag state")
+        }
         TemporalPlainTimeLikeTarget::Equals { receiver } => Ok(NativeDispatch::Immediate(
             StoredValue::Boolean(receiver == time),
         )),
     }
+}
+
+#[allow(
+    clippy::too_many_arguments,
+    reason = "the native method retains fields and options through observable property access"
+)]
+fn begin_temporal_plain_time_with(
+    runtime: &mut Runtime,
+    receiver: PlainTime,
+    fields: StoredValue,
+    options: StoredValue,
+    realm: RealmId,
+    return_to: Option<CallReturn>,
+    origin: JsStackFrame,
+    execution_budget: &mut ExecutionBudget,
+) -> Result<NativeDispatch, NativeFailure> {
+    if fields.heap_reference().is_none() {
+        return temporal_type_error(
+            realm,
+            &origin,
+            "Temporal.PlainTime.with requires a property bag",
+        );
+    }
+    if let StoredValue::Object(object) = fields
+        && (runtime.temporal_plain_date(object)?.is_some()
+            || runtime.temporal_plain_date_time(object)?.is_some()
+            || runtime.temporal_plain_time(object)?.is_some())
+    {
+        return temporal_type_error(
+            realm,
+            &origin,
+            "Temporal.PlainTime.with does not accept a Temporal object",
+        );
+    }
+    advance_temporal_plain_time_property_bag(
+        runtime,
+        TemporalPlainTimeBagContinuation {
+            base: fields,
+            hour: None,
+            microsecond: None,
+            millisecond: None,
+            minute: None,
+            nanosecond: None,
+            second: None,
+            next: 0,
+            stage: TemporalPlainTimeBagStage::ReadCalendar,
+            target: TemporalPlainTimeLikeTarget::With { receiver, options },
+            realm,
+            origin,
+        },
+        None,
+        return_to,
+        execution_budget,
+    )
 }
 
 #[allow(
@@ -1503,14 +1583,120 @@ pub(super) fn advance_temporal_plain_time_property_bag(
     let mut completion = completion;
     loop {
         match state.stage {
+            TemporalPlainTimeBagStage::ReadCalendar => {
+                charge_heap_property_lookup(runtime, &state.base, execution_budget)?;
+                let name = JsString::from_utf8("calendar")?;
+                let key = runtime.property_key_from_string(&name)?;
+                state.stage = TemporalPlainTimeBagStage::AwaitCalendar;
+                let dispatch = begin_value_get(
+                    runtime,
+                    &state.base,
+                    key,
+                    Some(&name),
+                    state.realm,
+                    return_to,
+                    state.origin.clone(),
+                    execution_budget,
+                )?;
+                match continue_get_state_after(
+                    dispatch,
+                    state,
+                    temporal_plain_time_bag_continuation,
+                    "Temporal.PlainTime.with calendar Get produced a structured result",
+                )? {
+                    GetContinuationDispatch::Ready {
+                        state: resumed,
+                        value,
+                    } => {
+                        state = resumed;
+                        completion = Some(value);
+                    }
+                    GetContinuationDispatch::Suspended(dispatch) => return Ok(dispatch),
+                }
+            }
+            TemporalPlainTimeBagStage::AwaitCalendar => {
+                let value = completion.take().ok_or(EngineFault::RuntimeInvariant {
+                    message: "Temporal.PlainTime.with calendar Get resumed without a value",
+                })?;
+                if !matches!(value, StoredValue::Undefined) {
+                    return temporal_type_error(
+                        state.realm,
+                        &state.origin,
+                        "Temporal.PlainTime.with cannot override calendar",
+                    );
+                }
+                state.stage = TemporalPlainTimeBagStage::ReadTimeZone;
+            }
+            TemporalPlainTimeBagStage::ReadTimeZone => {
+                charge_heap_property_lookup(runtime, &state.base, execution_budget)?;
+                let name = JsString::from_utf8("timeZone")?;
+                let key = runtime.property_key_from_string(&name)?;
+                state.stage = TemporalPlainTimeBagStage::AwaitTimeZone;
+                let dispatch = begin_value_get(
+                    runtime,
+                    &state.base,
+                    key,
+                    Some(&name),
+                    state.realm,
+                    return_to,
+                    state.origin.clone(),
+                    execution_budget,
+                )?;
+                match continue_get_state_after(
+                    dispatch,
+                    state,
+                    temporal_plain_time_bag_continuation,
+                    "Temporal.PlainTime.with timeZone Get produced a structured result",
+                )? {
+                    GetContinuationDispatch::Ready {
+                        state: resumed,
+                        value,
+                    } => {
+                        state = resumed;
+                        completion = Some(value);
+                    }
+                    GetContinuationDispatch::Suspended(dispatch) => return Ok(dispatch),
+                }
+            }
+            TemporalPlainTimeBagStage::AwaitTimeZone => {
+                let value = completion.take().ok_or(EngineFault::RuntimeInvariant {
+                    message: "Temporal.PlainTime.with timeZone Get resumed without a value",
+                })?;
+                if !matches!(value, StoredValue::Undefined) {
+                    return temporal_type_error(
+                        state.realm,
+                        &state.origin,
+                        "Temporal.PlainTime.with cannot override timeZone",
+                    );
+                }
+                state.stage = TemporalPlainTimeBagStage::ReadField;
+            }
             TemporalPlainTimeBagStage::ReadField => {
                 if state.next == TEMPORAL_PLAIN_TIME_BAG_FIELDS.len() {
                     let partial = temporal_plain_time_partial_from_bag(&state)?;
                     return match state.target {
                         TemporalPlainTimeLikeTarget::From { options } => {
-                            begin_temporal_plain_time_from_options(
+                            begin_temporal_plain_time_options(
                                 runtime,
                                 TemporalPlainTimeOptionsTarget::Partial(partial),
+                                options,
+                                state.realm,
+                                return_to,
+                                state.origin,
+                                execution_budget,
+                            )
+                        }
+                        TemporalPlainTimeLikeTarget::With { receiver, options } => {
+                            if partial.is_empty() {
+                                return temporal_type_error(
+                                    state.realm,
+                                    &state.origin,
+                                    "Temporal.PlainTime.with requires at least one time field",
+                                );
+                            }
+                            begin_temporal_plain_time_options(
+                                runtime,
+                                TemporalPlainTimeOptionsTarget::With { receiver, partial },
                                 options,
                                 state.realm,
                                 return_to,
@@ -1686,7 +1872,7 @@ fn temporal_plain_time_optional_u16(
     clippy::too_many_lines,
     reason = "the explicit state machine preserves GetOptionsObject and overflow conversion order"
 )]
-fn begin_temporal_plain_time_from_options(
+fn begin_temporal_plain_time_options(
     runtime: &mut Runtime,
     target: TemporalPlainTimeOptionsTarget,
     options: StoredValue,
@@ -1696,7 +1882,7 @@ fn begin_temporal_plain_time_from_options(
     execution_budget: &mut ExecutionBudget,
 ) -> Result<NativeDispatch, NativeFailure> {
     if matches!(options, StoredValue::Undefined) {
-        return finish_temporal_plain_time_from_options(
+        return finish_temporal_plain_time_options(
             runtime,
             target,
             Overflow::Constrain,
@@ -1708,10 +1894,10 @@ fn begin_temporal_plain_time_from_options(
         return temporal_type_error(
             realm,
             &origin,
-            "Temporal.PlainTime.from options must be an object",
+            "Temporal.PlainTime options must be an object",
         );
     }
-    advance_temporal_plain_time_from_options(
+    advance_temporal_plain_time_options(
         runtime,
         TemporalPlainTimeOptionsContinuation {
             target,
@@ -1731,7 +1917,7 @@ fn begin_temporal_plain_time_from_options(
     clippy::too_many_lines,
     reason = "the explicit state machine preserves GetOptionsObject and overflow conversion order"
 )]
-pub(super) fn advance_temporal_plain_time_from_options(
+pub(super) fn advance_temporal_plain_time_options(
     runtime: &mut Runtime,
     mut state: TemporalPlainTimeOptionsContinuation,
     completion: Option<StoredValue>,
@@ -1760,7 +1946,7 @@ pub(super) fn advance_temporal_plain_time_from_options(
                     dispatch,
                     state,
                     temporal_plain_time_options_continuation,
-                    "Temporal.PlainTime.from overflow Get produced a structured result",
+                    "Temporal.PlainTime overflow Get produced a structured result",
                 )? {
                     GetContinuationDispatch::Ready {
                         state: resumed,
@@ -1774,10 +1960,10 @@ pub(super) fn advance_temporal_plain_time_from_options(
             }
             TemporalPlainTimeOptionsStage::AwaitOverflow => {
                 let value = completion.take().ok_or(EngineFault::RuntimeInvariant {
-                    message: "Temporal.PlainTime.from overflow Get resumed without a value",
+                    message: "Temporal.PlainTime overflow Get resumed without a value",
                 })?;
                 if matches!(value, StoredValue::Undefined) {
-                    return finish_temporal_plain_time_from_options(
+                    return finish_temporal_plain_time_options(
                         runtime,
                         state.target,
                         Overflow::Constrain,
@@ -1801,17 +1987,17 @@ pub(super) fn advance_temporal_plain_time_from_options(
             }
             TemporalPlainTimeOptionsStage::AwaitOverflowConversion => {
                 let value = completion.take().ok_or(EngineFault::RuntimeInvariant {
-                    message: "Temporal.PlainTime.from overflow conversion resumed without a value",
+                    message: "Temporal.PlainTime overflow conversion resumed without a value",
                 })?;
                 let value = operator_primitive_to_string(value, state.realm, &state.origin)?;
                 let Ok(overflow) = Overflow::from_str(&value.to_utf8_lossy()?) else {
                     return temporal_range_error(
                         state.realm,
                         &state.origin,
-                        "Temporal.PlainTime.from overflow must be constrain or reject",
+                        "Temporal.PlainTime overflow must be constrain or reject",
                     );
                 };
-                return finish_temporal_plain_time_from_options(
+                return finish_temporal_plain_time_options(
                     runtime,
                     state.target,
                     overflow,
@@ -1829,7 +2015,7 @@ fn temporal_plain_time_options_continuation(
     NativeContinuation::TemporalPlainTimeOptions(Box::new(state))
 }
 
-fn finish_temporal_plain_time_from_options(
+fn finish_temporal_plain_time_options(
     runtime: &mut Runtime,
     target: TemporalPlainTimeOptionsTarget,
     overflow: Overflow,
@@ -1840,6 +2026,16 @@ fn finish_temporal_plain_time_from_options(
         TemporalPlainTimeOptionsTarget::Existing(time) => time,
         TemporalPlainTimeOptionsTarget::Partial(partial) => {
             match PlainTime::from_partial(partial, Some(overflow)) {
+                Ok(time) => time,
+                Err(error) => {
+                    return Err(NativeFailure::Abrupt(temporal_exception_from_error(
+                        realm, origin, error,
+                    )?));
+                }
+            }
+        }
+        TemporalPlainTimeOptionsTarget::With { receiver, partial } => {
+            match receiver.with(partial, Some(overflow)) {
                 Ok(time) => time,
                 Err(error) => {
                     return Err(NativeFailure::Abrupt(temporal_exception_from_error(
@@ -4318,6 +4514,16 @@ pub(super) fn dispatch_temporal_plain_time_prototype(
                 execution_budget,
             )
         }
+        TemporalPlainTimePrototypeMethod::With => begin_temporal_plain_time_with(
+            runtime,
+            time,
+            arguments.take_first_or_undefined(),
+            arguments.take_first_or_undefined(),
+            realm,
+            return_to,
+            origin.clone(),
+            execution_budget,
+        ),
         TemporalPlainTimePrototypeMethod::Equals => begin_temporal_plain_time_like(
             runtime,
             arguments.take_first_or_undefined(),
