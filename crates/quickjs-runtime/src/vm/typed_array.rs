@@ -209,6 +209,30 @@ pub(super) struct TypedArrayPrototypeSliceState {
     origin: JsStackFrame,
 }
 
+#[allow(
+    clippy::enum_variant_names,
+    reason = "each name identifies the observable relative-index or numeric-conversion boundary being awaited"
+)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum TypedArrayPrototypeWithStage {
+    AwaitIndex,
+    AwaitValue,
+}
+
+/// Resumable `%TypedArray%.prototype.with` across index and replacement-value
+/// conversion. The replacement conversion deliberately precedes the final
+/// `IsValidIntegerIndex` check, so a resizable buffer can change that check.
+pub(super) struct TypedArrayPrototypeWithState {
+    source: ObjectId,
+    length: usize,
+    value: StoredValue,
+    actual_index: Option<usize>,
+    element: TypedArrayElementType,
+    realm: RealmId,
+    stage: TypedArrayPrototypeWithStage,
+    origin: JsStackFrame,
+}
+
 /// `%TypedArray%.prototype.at` after the initial validated length and before
 /// `ToIntegerOrInfinity(index)` has completed.
 pub(super) struct TypedArrayPrototypeAtState {
@@ -415,6 +439,17 @@ impl TypedArrayPrototypeSliceState {
     pub(super) fn trace_roots(&self, mark: &mut dyn FnMut(CollectionRoot)) {
         mark(CollectionRoot::Heap(HeapReference::Object(self.source)));
         trace_stored_value_root(&self.end, mark);
+    }
+}
+
+impl TypedArrayPrototypeWithState {
+    pub(super) const fn retained_values() -> u64 {
+        2
+    }
+
+    pub(super) fn trace_roots(&self, mark: &mut dyn FnMut(CollectionRoot)) {
+        mark(CollectionRoot::Heap(HeapReference::Object(self.source)));
+        trace_stored_value_root(&self.value, mark);
     }
 }
 
@@ -1603,6 +1638,7 @@ pub(super) fn dispatch_typed_array_prototype(
             | TypedArrayPrototypeMethod::Values
             | TypedArrayPrototypeMethod::Join
             | TypedArrayPrototypeMethod::ToReversed
+            | TypedArrayPrototypeMethod::With
     ) && !matches!(view, TypedArrayView::InBounds { .. })
     {
         return typed_array_type_error(realm, &origin, "TypedArray is out of bounds");
@@ -1801,6 +1837,18 @@ pub(super) fn dispatch_typed_array_prototype(
                 execution_budget,
             );
         }
+        TypedArrayPrototypeMethod::With => {
+            return begin_typed_array_prototype_with(
+                runtime,
+                *object,
+                arguments.take_first_or_undefined(),
+                arguments.take_first_or_undefined(),
+                realm,
+                return_to,
+                origin,
+                execution_budget,
+            );
+        }
     };
     Ok(NativeDispatch::Immediate(value))
 }
@@ -1841,31 +1889,8 @@ fn typed_array_prototype_to_reversed(
     execution_budget: &mut ExecutionBudget,
 ) -> Result<NativeDispatch, NativeFailure> {
     let (source_state, length) = typed_array_require_in_bounds(runtime, source, realm, origin)?;
-    let byte_length = length
-        .checked_mul(source_state.element().byte_width())
-        .ok_or(EngineFault::RuntimeInvariant {
-            message: "TypedArray.prototype.toReversed byte length overflowed",
-        })?;
-    let buffer = runtime
-        .allocate_array_buffer(
-            HeapReference::Object(runtime.realm_array_buffer_prototype(realm)?),
-            byte_length,
-            None,
-        )
-        .map_err(NativeFailure::Execution)?;
-    let target = runtime
-        .allocate_typed_array(
-            HeapReference::Object(
-                runtime.realm_typed_array_prototype(realm, source_state.element())?,
-            ),
-            TypedArrayState::new(
-                buffer,
-                0,
-                TypedArrayLength::Fixed(length),
-                source_state.element(),
-            ),
-        )
-        .map_err(NativeFailure::Execution)?;
+    let target =
+        typed_array_create_same_type(runtime, realm, source_state.element(), length, origin)?;
     for target_index in 0..length {
         execution_budget.charge_instructions(1)?;
         let source_index = length.saturating_sub(target_index + 1);
@@ -1877,6 +1902,198 @@ fn typed_array_prototype_to_reversed(
         typed_array_reverse_store(runtime, target, target_index, value, source_state.element())?;
     }
     Ok(NativeDispatch::Immediate(StoredValue::Object(target)))
+}
+
+fn typed_array_create_same_type(
+    runtime: &mut Runtime,
+    realm: RealmId,
+    element: TypedArrayElementType,
+    length: usize,
+    origin: &JsStackFrame,
+) -> Result<ObjectId, NativeFailure> {
+    let Some(byte_length) = length.checked_mul(element.byte_width()) else {
+        return typed_array_range_error(
+            realm,
+            origin,
+            "TypedArray length exceeds implementation range",
+        );
+    };
+    let buffer = runtime
+        .allocate_array_buffer(
+            HeapReference::Object(runtime.realm_array_buffer_prototype(realm)?),
+            byte_length,
+            None,
+        )
+        .map_err(NativeFailure::Execution)?;
+    runtime
+        .allocate_typed_array(
+            HeapReference::Object(runtime.realm_typed_array_prototype(realm, element)?),
+            TypedArrayState::new(buffer, 0, TypedArrayLength::Fixed(length), element),
+        )
+        .map_err(NativeFailure::Execution)
+}
+
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the native entry point preserves both uncoerced operands and the standard call context"
+)]
+fn begin_typed_array_prototype_with(
+    runtime: &mut Runtime,
+    source: ObjectId,
+    index: StoredValue,
+    value: StoredValue,
+    realm: RealmId,
+    return_to: Option<CallReturn>,
+    origin: JsStackFrame,
+    execution_budget: &mut ExecutionBudget,
+) -> Result<NativeDispatch, NativeFailure> {
+    let (source_state, length) = typed_array_require_in_bounds(runtime, source, realm, &origin)?;
+    begin_operator_primitive_conversion(
+        runtime,
+        index,
+        OperatorPrimitiveHint::Number,
+        OperatorPrimitiveTarget::TypedArrayPrototypeWithIndex(Box::new(
+            TypedArrayPrototypeWithState {
+                source,
+                length,
+                value,
+                actual_index: None,
+                element: source_state.element(),
+                realm,
+                stage: TypedArrayPrototypeWithStage::AwaitIndex,
+                origin: origin.clone(),
+            },
+        )),
+        realm,
+        return_to,
+        origin,
+        execution_budget,
+    )
+}
+
+pub(super) fn finish_typed_array_prototype_with_index(
+    runtime: &mut Runtime,
+    mut state: TypedArrayPrototypeWithState,
+    value: StoredValue,
+    return_to: Option<CallReturn>,
+    execution_budget: &mut ExecutionBudget,
+) -> Result<NativeDispatch, NativeFailure> {
+    debug_assert_eq!(state.stage, TypedArrayPrototypeWithStage::AwaitIndex);
+    let relative =
+        number_to_integer_or_infinity(operator_to_number(value, state.realm, &state.origin)?);
+    state.actual_index = typed_array_with_relative_index(relative, state.length);
+    state.stage = TypedArrayPrototypeWithStage::AwaitValue;
+    let value = state.value.duplicate();
+    let realm = state.realm;
+    let origin = state.origin.clone();
+    begin_operator_primitive_conversion(
+        runtime,
+        value,
+        OperatorPrimitiveHint::Number,
+        OperatorPrimitiveTarget::TypedArrayPrototypeWithValue(Box::new(state)),
+        realm,
+        return_to,
+        origin,
+        execution_budget,
+    )
+}
+
+pub(super) fn finish_typed_array_prototype_with_value(
+    runtime: &mut Runtime,
+    state: &TypedArrayPrototypeWithState,
+    value: StoredValue,
+    execution_budget: &mut ExecutionBudget,
+) -> Result<NativeDispatch, NativeFailure> {
+    debug_assert_eq!(state.stage, TypedArrayPrototypeWithStage::AwaitValue);
+    let replacement = if state.element.is_bigint() {
+        StoredValue::BigInt(to_bigint_from_primitive(
+            &value,
+            state.realm,
+            &state.origin,
+        )?)
+    } else {
+        StoredValue::Number(operator_to_number(value, state.realm, &state.origin)?)
+    };
+    let Some(actual_index) = state.actual_index else {
+        return typed_array_range_error(state.realm, &state.origin, "invalid TypedArray index");
+    };
+    let is_valid = matches!(
+        runtime.typed_array_view(state.source)?,
+        TypedArrayView::InBounds { length, .. } if actual_index < length
+    );
+    if !is_valid {
+        return typed_array_range_error(state.realm, &state.origin, "invalid TypedArray index");
+    }
+    let target = typed_array_create_same_type(
+        runtime,
+        state.realm,
+        state.element,
+        state.length,
+        &state.origin,
+    )?;
+    for index in 0..state.length {
+        execution_budget.charge_instructions(1)?;
+        let value = if index == actual_index {
+            replacement.duplicate()
+        } else {
+            runtime
+                .typed_array_read_index(state.source, index)?
+                .unwrap_or(StoredValue::Undefined)
+        };
+        typed_array_with_store(runtime, target, index, value, state.element, state)?;
+    }
+    Ok(NativeDispatch::Immediate(StoredValue::Object(target)))
+}
+
+fn typed_array_with_store(
+    runtime: &mut Runtime,
+    target: ObjectId,
+    index: usize,
+    value: StoredValue,
+    element: TypedArrayElementType,
+    state: &TypedArrayPrototypeWithState,
+) -> Result<(), NativeFailure> {
+    let stored = if element.is_bigint() {
+        let value = to_bigint_from_primitive(&value, state.realm, &state.origin)?;
+        runtime.typed_array_store_index(
+            target,
+            index,
+            TypedArrayElementValue::BigInt(value.as_ref()),
+        )?
+    } else {
+        let value = operator_to_number(value, state.realm, &state.origin)?;
+        runtime.typed_array_store_index(target, index, TypedArrayElementValue::Number(value))?
+    };
+    if stored != TypedArrayStoreOutcome::Stored {
+        return Err(EngineFault::RuntimeInvariant {
+            message: "TypedArray.prototype.with lost a validated destination element",
+        }
+        .into());
+    }
+    Ok(())
+}
+
+#[expect(
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss,
+    clippy::cast_precision_loss,
+    reason = "ToIntegerOrInfinity is finite here and is explicitly bounded before conversion to usize"
+)]
+fn typed_array_with_relative_index(relative: f64, length: usize) -> Option<usize> {
+    if !relative.is_finite() {
+        return None;
+    }
+    if relative >= 0.0 {
+        if relative > usize::MAX as f64 {
+            return None;
+        }
+        return Some(relative as usize);
+    }
+    let magnitude = -relative;
+    if magnitude > length as f64 {
+        return None;
+    }
+    length.checked_sub(magnitude as usize)
 }
 
 fn typed_array_reverse_store(

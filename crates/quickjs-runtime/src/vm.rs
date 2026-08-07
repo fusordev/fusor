@@ -1999,6 +1999,10 @@ enum OperatorPrimitiveTarget {
     TypedArrayPrototypeSliceStart(Box<TypedArrayPrototypeSliceState>),
     /// `%TypedArray%.prototype.slice`'s optional end index.
     TypedArrayPrototypeSliceEnd(Box<TypedArrayPrototypeSliceState>),
+    /// `%TypedArray%.prototype.with`'s relative replacement index.
+    TypedArrayPrototypeWithIndex(Box<TypedArrayPrototypeWithState>),
+    /// `%TypedArray%.prototype.with`'s replacement value.
+    TypedArrayPrototypeWithValue(Box<TypedArrayPrototypeWithState>),
     /// `%TypedArray%.prototype.at`'s relative index.
     TypedArrayPrototypeAtIndex(Box<TypedArrayPrototypeAtState>),
     /// `%TypedArray%.prototype.includes`'s optional relative start index.
@@ -2278,6 +2282,10 @@ impl OperatorPrimitiveTarget {
             Self::TypedArrayPrototypeSliceStart(_state)
             | Self::TypedArrayPrototypeSliceEnd(_state) => {
                 TypedArrayPrototypeSliceState::retained_values()
+            }
+            Self::TypedArrayPrototypeWithIndex(_state)
+            | Self::TypedArrayPrototypeWithValue(_state) => {
+                TypedArrayPrototypeWithState::retained_values()
             }
             Self::TypedArrayPrototypeAtIndex(_state) => {
                 TypedArrayPrototypeAtState::retained_values()
@@ -2646,6 +2654,8 @@ fn trace_operator_primitive_target_roots(
         | OperatorPrimitiveTarget::TypedArrayPrototypeSubarrayEnd(state) => state.trace_roots(mark),
         OperatorPrimitiveTarget::TypedArrayPrototypeSliceStart(state)
         | OperatorPrimitiveTarget::TypedArrayPrototypeSliceEnd(state) => state.trace_roots(mark),
+        OperatorPrimitiveTarget::TypedArrayPrototypeWithIndex(state)
+        | OperatorPrimitiveTarget::TypedArrayPrototypeWithValue(state) => state.trace_roots(mark),
         OperatorPrimitiveTarget::TypedArrayPrototypeAtIndex(state) => state.trace_roots(mark),
         OperatorPrimitiveTarget::TypedArrayPrototypeIncludesFromIndex(state) => {
             state.trace_roots(mark);

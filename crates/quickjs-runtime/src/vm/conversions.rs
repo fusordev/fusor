@@ -1958,6 +1958,18 @@ fn finish_operator_primitive_target(
                 execution_budget,
             )
         }
+        OperatorPrimitiveTarget::TypedArrayPrototypeWithIndex(state) => {
+            finish_typed_array_prototype_with_index(
+                runtime,
+                *state,
+                value,
+                return_to,
+                execution_budget,
+            )
+        }
+        OperatorPrimitiveTarget::TypedArrayPrototypeWithValue(state) => {
+            finish_typed_array_prototype_with_value(runtime, &state, value, execution_budget)
+        }
         OperatorPrimitiveTarget::TypedArrayPrototypeAtIndex(state) => {
             finish_typed_array_prototype_at_index(runtime, *state, value)
         }

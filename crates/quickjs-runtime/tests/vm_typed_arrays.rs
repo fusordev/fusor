@@ -588,3 +588,40 @@ fn typed_array_to_reversed_creates_an_independent_same_type_copy() {
         ExceptionKind::TypeError
     );
 }
+
+#[test]
+fn typed_array_with_converts_index_then_value_before_its_final_witness() {
+    assert_eq!(
+        rendered(
+            "var log=[],source=new Uint8Array([1,2,3]),out=source.with(\
+               {valueOf(){log.push('index');return -1}},\
+               {valueOf(){log.push('value');return 258}}),\
+             bigints=new BigInt64Array([1n,2n]).with(0,-2n);\
+             return [Uint8Array.prototype.with.length,Uint8Array.prototype.with.name,\
+               out.constructor===Uint8Array,out.buffer===source.buffer,out[0],out[1],out[2],\
+               String(bigints[0]),String(bigints[1]),log.join('|')].join('|');"
+        ),
+        "2|with|true|false|1|2|2|-2|2|index|value"
+    );
+    assert_eq!(
+        rendered(
+            "var buffer=new ArrayBuffer(4,{maxByteLength:4}),source=new Uint8Array(buffer);\
+             source[1]=9;var out=source.with({valueOf(){buffer.resize(1);return 0}},\
+               {valueOf(){return 7}});return [out.length,out[0],out[1],out[2],out[3]].join('|');"
+        ),
+        "4|7|0|0|0"
+    );
+    assert_eq!(
+        rendered(
+            "var log=[];try{new Uint8Array(1).with(1,{valueOf(){log.push('value');return 0}})}\
+             catch(error){return error.name+'|'+log.join('|');}"
+        ),
+        "RangeError|value"
+    );
+    assert_eq!(
+        thrown(
+            "var buffer=new ArrayBuffer(4,{maxByteLength:4}),values=new Uint8Array(buffer,2,2);buffer.resize(1);values.with(0,1);"
+        ),
+        ExceptionKind::TypeError
+    );
+}
