@@ -353,7 +353,15 @@ fn verify_checkout(suite: &Path, baseline: &Baseline) -> Result<PathBuf, String>
     let harness_diff = Command::new("git")
         .arg("-C")
         .arg(&suite)
-        .args(["diff", "--no-ext-diff", "--binary", "HEAD", "--", "harness"])
+        .args([
+            "diff",
+            "--no-ext-diff",
+            "--binary",
+            "--abbrev=7",
+            "HEAD",
+            "--",
+            "harness",
+        ])
         .output()
         .map_err(|error| format!("could not compare the patched Test262 harness: {error}"))?;
     if !harness_diff.status.success() {

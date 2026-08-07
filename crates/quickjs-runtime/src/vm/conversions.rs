@@ -1846,6 +1846,42 @@ fn finish_operator_primitive_target(
                 execution_budget,
             )
         }
+        OperatorPrimitiveTarget::TemporalDurationRoundLargestUnit(state) => {
+            finish_temporal_duration_round_largest_unit(
+                runtime,
+                *state,
+                value,
+                return_to,
+                execution_budget,
+            )
+        }
+        OperatorPrimitiveTarget::TemporalDurationRoundRoundingIncrement(state) => {
+            finish_temporal_duration_round_rounding_increment(
+                runtime,
+                *state,
+                value,
+                return_to,
+                execution_budget,
+            )
+        }
+        OperatorPrimitiveTarget::TemporalDurationRoundRoundingMode(state) => {
+            finish_temporal_duration_round_rounding_mode(
+                runtime,
+                *state,
+                value,
+                return_to,
+                execution_budget,
+            )
+        }
+        OperatorPrimitiveTarget::TemporalDurationRoundSmallestUnit(state) => {
+            finish_temporal_duration_round_smallest_unit(
+                runtime,
+                *state,
+                value,
+                return_to,
+                execution_budget,
+            )
+        }
         OperatorPrimitiveTarget::TemporalDurationTotalUnit(state) => {
             finish_temporal_duration_total_unit(*state, value)
         }

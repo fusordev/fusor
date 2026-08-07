@@ -1663,6 +1663,7 @@ pub(crate) enum TemporalDurationPrototypeMethod {
     With,
     Add,
     Subtract,
+    Round,
     Total,
     ToString,
     ToJson,
@@ -1695,7 +1696,7 @@ impl TemporalDurationStaticMethod {
 }
 
 impl TemporalDurationPrototypeMethod {
-    pub(crate) const ALL: [Self; 22] = [
+    pub(crate) const ALL: [Self; 23] = [
         Self::Years,
         Self::Months,
         Self::Weeks,
@@ -1713,6 +1714,7 @@ impl TemporalDurationPrototypeMethod {
         Self::With,
         Self::Add,
         Self::Subtract,
+        Self::Round,
         Self::Total,
         Self::ToString,
         Self::ToJson,
@@ -1739,6 +1741,7 @@ impl TemporalDurationPrototypeMethod {
             Self::With => "with",
             Self::Add => "add",
             Self::Subtract => "subtract",
+            Self::Round => "round",
             Self::Total => "total",
             Self::ToString => "toString",
             Self::ToJson => "toJSON",
@@ -1766,6 +1769,7 @@ impl TemporalDurationPrototypeMethod {
             Self::With => "with",
             Self::Add => "add",
             Self::Subtract => "subtract",
+            Self::Round => "round",
             Self::Total => "total",
             Self::ToString => "toString",
             Self::ToJson => "toJSON",
@@ -1794,7 +1798,7 @@ impl TemporalDurationPrototypeMethod {
 
     pub(crate) const fn length(self) -> i32 {
         match self {
-            Self::With | Self::Add | Self::Subtract | Self::Total => 1,
+            Self::With | Self::Add | Self::Subtract | Self::Round | Self::Total => 1,
             _ => 0,
         }
     }

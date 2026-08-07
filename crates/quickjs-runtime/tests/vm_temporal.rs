@@ -406,3 +406,73 @@ fn duration_total_validates_receiver_options_and_unit() {
         ExceptionKind::TypeError
     );
 }
+
+#[test]
+fn duration_round_supports_smallest_unit_modes_increments_and_relative_to() {
+    assert_eq!(
+        rendered(
+            "var duration=Temporal.Duration.from('PT1H29M31S');
+             return [Temporal.Duration.prototype.round.length,
+               duration.round('minute').toString(),
+               duration.round({smallestUnit:'minute',roundingMode:'trunc'}).toString(),
+               duration.round({smallestUnit:'minute',roundingIncrement:15}).toString(),
+               Temporal.Duration.from('PT26H').round('day').toString(),
+               Temporal.Duration.from('P1M15D').round({smallestUnit:'day',relativeTo:'2020-02-01'}).toString()].join('|');"
+        ),
+        "1|PT1H30M|PT1H29M|PT1H30M|P1D|P1M15D"
+    );
+}
+
+#[test]
+fn duration_round_observes_options_and_coercions_in_specified_order() {
+    assert_eq!(
+        rendered(
+            "var log=[],options={};
+             Object.defineProperties(options,{
+               largestUnit:{get:function(){log.push('get largestUnit');return {toString:function(){log.push('string largestUnit');return 'hour';}}}},
+               relativeTo:{get:function(){log.push('get relativeTo');return undefined}},
+               roundingIncrement:{get:function(){log.push('get roundingIncrement');return {valueOf:function(){log.push('number roundingIncrement');return 15;}}}},
+               roundingMode:{get:function(){log.push('get roundingMode');return {toString:function(){log.push('string roundingMode');return 'halfExpand';}}}},
+               smallestUnit:{get:function(){log.push('get smallestUnit');return {toString:function(){log.push('string smallestUnit');return 'minute';}}}}
+             });
+             return Temporal.Duration.from('PT1H29M31S').round(options).toString()+'|'+log.join(',');"
+        ),
+        "PT1H30M|get largestUnit,string largestUnit,get relativeTo,get roundingIncrement,number roundingIncrement,get roundingMode,string roundingMode,get smallestUnit,string smallestUnit"
+    );
+}
+
+#[test]
+fn duration_round_rejects_absent_invalid_and_unanchored_options() {
+    assert_eq!(
+        thrown("return Temporal.Duration.prototype.round.call({}, 'second');"),
+        ExceptionKind::TypeError
+    );
+    assert_eq!(
+        thrown("return new Temporal.Duration().round();"),
+        ExceptionKind::TypeError
+    );
+    assert_eq!(
+        thrown("return new Temporal.Duration().round({});"),
+        ExceptionKind::RangeError
+    );
+    assert_eq!(
+        thrown("return new Temporal.Duration().round({smallestUnit:'auto'});"),
+        ExceptionKind::RangeError
+    );
+    assert_eq!(
+        thrown(
+            "return new Temporal.Duration().round({smallestUnit:'minute',roundingIncrement:7});"
+        ),
+        ExceptionKind::RangeError
+    );
+    assert_eq!(
+        thrown(
+            "return new Temporal.Duration().round({smallestUnit:'minute',roundingMode:'invalid'});"
+        ),
+        ExceptionKind::RangeError
+    );
+    assert_eq!(
+        thrown("return new Temporal.Duration(1).round({smallestUnit:'day'});"),
+        ExceptionKind::RangeError
+    );
+}

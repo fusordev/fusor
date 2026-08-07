@@ -44,14 +44,14 @@ Finish frontend/diagnostics and language/compiler/execution before broad Test262
 - [ ] Audit remaining exotic and reflection/diagnostic paths as compiler operands become reachable.
 - [x] Globals; Object/Reflect; Error families; Boolean/Number/BigInt/Symbol; Array; JSON/Math; String; RegExp; Map/Set/weak collections; Promise; sync and async generators; and a runtime-owned FIFO job queue with resumable continuations.
 - [x] Date: TimeClip, normative ISO/local parsing, UTC/local getters and setters, primitive/JSON behavior, and non-Intl locale fallback over the shared `temporal_rs = 0.2.5` kernel.
-- [~] Temporal: `%Temporal.Instant%`, `%Temporal.Duration%`, and `Date.prototype.toTemporalInstant` share that kernel and have focused coverage. Next: Duration rounding, Instant arithmetic/zoned operations, remaining Temporal types, binary data/typed arrays, and Atomics.
+- [~] Temporal: `%Temporal.Instant%`, `%Temporal.Duration%`, `Date.prototype.toTemporalInstant`, and `Duration.prototype.round` share that kernel. Round preserves option-read/coercion order, string shorthand, modes, increments, `relativeTo`, resource limits, and realm topology. Next: Instant arithmetic/zoned operations, remaining Temporal types, binary data/typed arrays, and Atomics.
 - [ ] ECMA-402 / `quickjs-intl` is deliberately low priority. If resumed, isolate it behind direct ICU4X rather than mixing locale behavior into the runtime core.
 
 ### Modules, conformance, and host layers
 
 - [ ] Module linking/evaluation, cycles, resolver semantics, dynamic `import`, and top-level `await`. Parsing a Module is not execution.
 - [ ] Embedding API, ESM REPL, `qjs`, Rust-native `qjsc`, bytecode viewer, CDP adapter, and portable `std`/`os` modules.
-- [x] `cargo xtask test262` pins Test262 `5c8206929d81b2d3d727ca6aac56c18358c8d790` and fingerprints release patches, configuration, expected errors, mode inventory, and fresh-realm JSON results.
+- [x] `cargo xtask test262` and GitHub Actions pin Test262 `5c8206929d81b2d3d727ca6aac56c18358c8d790`, apply the exact QuickJS baseline patch, run a bounded PR smoke cohort plus scheduled/manual full suite, and upload the deterministic JSON report.
 - [ ] After the preceding language/compiler/module gates close, run Test262 by feature cohort; investigate every admitted failure against ECMA-262 and QuickJS/Node; remove temporary skips; then run the full configured suite.
 - [ ] Establish startup/memory/interpreter/compile benchmarks and finish release, resource, cancellation, dependency, and public-API audits.
 

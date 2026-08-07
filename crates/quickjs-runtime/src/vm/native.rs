@@ -485,6 +485,15 @@ pub(super) fn resume_native_continuations(
             NativeContinuation::TemporalDurationCompareOptions(state) => {
                 finish_temporal_duration_compare_options(runtime, &state, &value)?
             }
+            NativeContinuation::TemporalDurationRoundOptions(state) => {
+                advance_temporal_duration_round_options(
+                    runtime,
+                    *state,
+                    value,
+                    return_to,
+                    execution_budget,
+                )?
+            }
             NativeContinuation::TemporalDurationTotalOptions(state) => {
                 advance_temporal_duration_total_options(
                     runtime,

@@ -3,7 +3,9 @@
 use temporal_rs::{
     Duration, Instant, Sign,
     error::ErrorKind as TemporalErrorKind,
-    options::{RelativeTo, ToStringRoundingOptions, Unit},
+    options::{
+        RelativeTo, RoundingIncrement, RoundingMode, RoundingOptions, ToStringRoundingOptions, Unit,
+    },
 };
 
 #[allow(
@@ -146,6 +148,37 @@ pub(super) struct TemporalDurationTotalContinuation {
 }
 
 impl TemporalDurationTotalContinuation {
+    pub(super) const fn retained_values() -> u64 {
+        1
+    }
+
+    pub(super) fn trace_roots(&self, mark: &mut dyn FnMut(CollectionRoot)) {
+        trace_stored_value_root(&self.options, mark);
+    }
+}
+
+#[derive(Clone, Copy)]
+enum TemporalDurationRoundStage {
+    LargestUnit,
+    RelativeTo,
+    RoundingIncrement,
+    RoundingMode,
+    SmallestUnit,
+}
+
+pub(super) struct TemporalDurationRoundContinuation {
+    duration: Duration,
+    options: StoredValue,
+    largest_unit: Option<Unit>,
+    relative_to: Option<RelativeTo>,
+    rounding_increment: RoundingIncrement,
+    rounding_mode: RoundingMode,
+    stage: TemporalDurationRoundStage,
+    realm: RealmId,
+    origin: JsStackFrame,
+}
+
+impl TemporalDurationRoundContinuation {
     pub(super) const fn retained_values() -> u64 {
         1
     }
@@ -395,6 +428,15 @@ pub(super) fn dispatch_temporal_duration_prototype(
                 execution_budget,
             )
         }
+        TemporalDurationPrototypeMethod::Round => begin_temporal_duration_round(
+            runtime,
+            duration,
+            arguments.take_first_or_undefined(),
+            realm,
+            return_to,
+            origin.clone(),
+            execution_budget,
+        ),
         TemporalDurationPrototypeMethod::Total => begin_temporal_duration_total(
             runtime,
             duration,
@@ -468,6 +510,427 @@ fn temporal_duration_fields(duration: Duration) -> [Option<i128>; 10] {
         Some(duration.microseconds()),
         Some(duration.nanoseconds()),
     ]
+}
+
+#[allow(
+    clippy::too_many_arguments,
+    reason = "the ordered Temporal options reader carries its native call context across user code"
+)]
+fn begin_temporal_duration_round(
+    runtime: &mut Runtime,
+    duration: Duration,
+    round_to: StoredValue,
+    realm: RealmId,
+    return_to: Option<CallReturn>,
+    origin: JsStackFrame,
+    execution_budget: &mut ExecutionBudget,
+) -> Result<NativeDispatch, NativeFailure> {
+    match round_to {
+        StoredValue::Undefined => temporal_type_error(
+            realm,
+            &origin,
+            "Temporal.Duration.prototype.round requires an options object or smallest-unit string",
+        ),
+        StoredValue::String(source) => {
+            let smallest_unit = temporal_duration_round_unit(&source, realm, &origin)?;
+            complete_temporal_duration_round(
+                runtime,
+                duration,
+                None,
+                None,
+                RoundingIncrement::ONE,
+                RoundingMode::HalfExpand,
+                Some(smallest_unit),
+                realm,
+                &origin,
+            )
+        }
+        options if options.heap_reference().is_some() => begin_temporal_duration_round_get(
+            runtime,
+            TemporalDurationRoundContinuation {
+                duration,
+                options,
+                largest_unit: None,
+                relative_to: None,
+                rounding_increment: RoundingIncrement::ONE,
+                rounding_mode: RoundingMode::HalfExpand,
+                stage: TemporalDurationRoundStage::LargestUnit,
+                realm,
+                origin,
+            },
+            "largestUnit",
+            TemporalDurationRoundStage::LargestUnit,
+            return_to,
+            execution_budget,
+        ),
+        _ => temporal_type_error(
+            realm,
+            &origin,
+            "Temporal.Duration.prototype.round requires an options object or smallest-unit string",
+        ),
+    }
+}
+
+#[allow(
+    clippy::too_many_arguments,
+    reason = "each observable Temporal options Get retains the complete native continuation state"
+)]
+fn begin_temporal_duration_round_get(
+    runtime: &mut Runtime,
+    mut state: TemporalDurationRoundContinuation,
+    name: &str,
+    next_stage: TemporalDurationRoundStage,
+    return_to: Option<CallReturn>,
+    execution_budget: &mut ExecutionBudget,
+) -> Result<NativeDispatch, NativeFailure> {
+    state.stage = next_stage;
+    charge_heap_property_lookup(runtime, &state.options, execution_budget)?;
+    let name = JsString::from_utf8(name)?;
+    let key = runtime.property_key_from_string(&name)?;
+    let realm = state.realm;
+    let origin = state.origin.clone();
+    let dispatch = begin_value_get(
+        runtime,
+        &state.options,
+        key,
+        Some(&name),
+        realm,
+        return_to,
+        origin,
+        execution_budget,
+    )?;
+    match continue_get_state_after(
+        dispatch,
+        state,
+        temporal_duration_round_continuation,
+        "Temporal.Duration round option Get produced a structured result",
+    )? {
+        GetContinuationDispatch::Ready { state, value } => advance_temporal_duration_round_options(
+            runtime,
+            state,
+            value,
+            return_to,
+            execution_budget,
+        ),
+        GetContinuationDispatch::Suspended(dispatch) => Ok(dispatch),
+    }
+}
+
+fn temporal_duration_round_continuation(
+    state: TemporalDurationRoundContinuation,
+) -> NativeContinuation {
+    NativeContinuation::TemporalDurationRoundOptions(Box::new(state))
+}
+
+#[allow(
+    clippy::too_many_arguments,
+    clippy::too_many_lines,
+    reason = "one ordered state table preserves the specification's observable option-read and coercion sequence across suspension"
+)]
+pub(super) fn advance_temporal_duration_round_options(
+    runtime: &mut Runtime,
+    mut state: TemporalDurationRoundContinuation,
+    value: StoredValue,
+    return_to: Option<CallReturn>,
+    execution_budget: &mut ExecutionBudget,
+) -> Result<NativeDispatch, NativeFailure> {
+    match state.stage {
+        TemporalDurationRoundStage::LargestUnit => {
+            if matches!(value, StoredValue::Undefined) {
+                return begin_temporal_duration_round_get(
+                    runtime,
+                    state,
+                    "relativeTo",
+                    TemporalDurationRoundStage::RelativeTo,
+                    return_to,
+                    execution_budget,
+                );
+            }
+            let realm = state.realm;
+            let origin = state.origin.clone();
+            begin_operator_primitive_conversion(
+                runtime,
+                value,
+                OperatorPrimitiveHint::String,
+                OperatorPrimitiveTarget::TemporalDurationRoundLargestUnit(Box::new(state)),
+                realm,
+                return_to,
+                origin,
+                execution_budget,
+            )
+        }
+        TemporalDurationRoundStage::RelativeTo => {
+            state.relative_to =
+                temporal_relative_to_from_value(&value, state.realm, &state.origin)?;
+            begin_temporal_duration_round_get(
+                runtime,
+                state,
+                "roundingIncrement",
+                TemporalDurationRoundStage::RoundingIncrement,
+                return_to,
+                execution_budget,
+            )
+        }
+        TemporalDurationRoundStage::RoundingIncrement => {
+            if matches!(value, StoredValue::Undefined) {
+                return begin_temporal_duration_round_get(
+                    runtime,
+                    state,
+                    "roundingMode",
+                    TemporalDurationRoundStage::RoundingMode,
+                    return_to,
+                    execution_budget,
+                );
+            }
+            let realm = state.realm;
+            let origin = state.origin.clone();
+            begin_operator_primitive_conversion(
+                runtime,
+                value,
+                OperatorPrimitiveHint::Number,
+                OperatorPrimitiveTarget::TemporalDurationRoundRoundingIncrement(Box::new(state)),
+                realm,
+                return_to,
+                origin,
+                execution_budget,
+            )
+        }
+        TemporalDurationRoundStage::RoundingMode => {
+            if matches!(value, StoredValue::Undefined) {
+                return begin_temporal_duration_round_get(
+                    runtime,
+                    state,
+                    "smallestUnit",
+                    TemporalDurationRoundStage::SmallestUnit,
+                    return_to,
+                    execution_budget,
+                );
+            }
+            let realm = state.realm;
+            let origin = state.origin.clone();
+            begin_operator_primitive_conversion(
+                runtime,
+                value,
+                OperatorPrimitiveHint::String,
+                OperatorPrimitiveTarget::TemporalDurationRoundRoundingMode(Box::new(state)),
+                realm,
+                return_to,
+                origin,
+                execution_budget,
+            )
+        }
+        TemporalDurationRoundStage::SmallestUnit => {
+            if matches!(value, StoredValue::Undefined) {
+                return complete_temporal_duration_round(
+                    runtime,
+                    state.duration,
+                    state.largest_unit,
+                    state.relative_to,
+                    state.rounding_increment,
+                    state.rounding_mode,
+                    None,
+                    state.realm,
+                    &state.origin,
+                );
+            }
+            let realm = state.realm;
+            let origin = state.origin.clone();
+            begin_operator_primitive_conversion(
+                runtime,
+                value,
+                OperatorPrimitiveHint::String,
+                OperatorPrimitiveTarget::TemporalDurationRoundSmallestUnit(Box::new(state)),
+                realm,
+                return_to,
+                origin,
+                execution_budget,
+            )
+        }
+    }
+}
+
+#[allow(
+    clippy::too_many_arguments,
+    reason = "the post-coercion option continuation still owns the resumable native call context"
+)]
+pub(super) fn finish_temporal_duration_round_largest_unit(
+    runtime: &mut Runtime,
+    mut state: TemporalDurationRoundContinuation,
+    value: StoredValue,
+    return_to: Option<CallReturn>,
+    execution_budget: &mut ExecutionBudget,
+) -> Result<NativeDispatch, NativeFailure> {
+    let source = operator_primitive_to_string(value, state.realm, &state.origin)?;
+    state.largest_unit = Some(temporal_duration_round_unit(
+        &source,
+        state.realm,
+        &state.origin,
+    )?);
+    begin_temporal_duration_round_get(
+        runtime,
+        state,
+        "relativeTo",
+        TemporalDurationRoundStage::RelativeTo,
+        return_to,
+        execution_budget,
+    )
+}
+
+#[allow(
+    clippy::too_many_arguments,
+    reason = "the post-coercion option continuation still owns the resumable native call context"
+)]
+pub(super) fn finish_temporal_duration_round_rounding_increment(
+    runtime: &mut Runtime,
+    mut state: TemporalDurationRoundContinuation,
+    value: StoredValue,
+    return_to: Option<CallReturn>,
+    execution_budget: &mut ExecutionBudget,
+) -> Result<NativeDispatch, NativeFailure> {
+    let value = operator_to_number(value, state.realm, &state.origin)?.as_f64();
+    state.rounding_increment = match RoundingIncrement::try_from(value) {
+        Ok(increment) => increment,
+        Err(error) => {
+            return Err(NativeFailure::Abrupt(temporal_exception_from_error(
+                state.realm,
+                &state.origin,
+                error,
+            )?));
+        }
+    };
+    begin_temporal_duration_round_get(
+        runtime,
+        state,
+        "roundingMode",
+        TemporalDurationRoundStage::RoundingMode,
+        return_to,
+        execution_budget,
+    )
+}
+
+#[allow(
+    clippy::too_many_arguments,
+    reason = "the post-coercion option continuation still owns the resumable native call context"
+)]
+pub(super) fn finish_temporal_duration_round_rounding_mode(
+    runtime: &mut Runtime,
+    mut state: TemporalDurationRoundContinuation,
+    value: StoredValue,
+    return_to: Option<CallReturn>,
+    execution_budget: &mut ExecutionBudget,
+) -> Result<NativeDispatch, NativeFailure> {
+    let source = operator_primitive_to_string(value, state.realm, &state.origin)?;
+    state.rounding_mode = temporal_duration_rounding_mode(&source, state.realm, &state.origin)?;
+    begin_temporal_duration_round_get(
+        runtime,
+        state,
+        "smallestUnit",
+        TemporalDurationRoundStage::SmallestUnit,
+        return_to,
+        execution_budget,
+    )
+}
+
+#[allow(
+    clippy::too_many_arguments,
+    reason = "the final post-coercion option continuation owns the native result allocation context"
+)]
+pub(super) fn finish_temporal_duration_round_smallest_unit(
+    runtime: &mut Runtime,
+    state: TemporalDurationRoundContinuation,
+    value: StoredValue,
+    _return_to: Option<CallReturn>,
+    _execution_budget: &mut ExecutionBudget,
+) -> Result<NativeDispatch, NativeFailure> {
+    let source = operator_primitive_to_string(value, state.realm, &state.origin)?;
+    let smallest_unit = temporal_duration_round_unit(&source, state.realm, &state.origin)?;
+    complete_temporal_duration_round(
+        runtime,
+        state.duration,
+        state.largest_unit,
+        state.relative_to,
+        state.rounding_increment,
+        state.rounding_mode,
+        Some(smallest_unit),
+        state.realm,
+        &state.origin,
+    )
+}
+
+fn temporal_duration_round_unit(
+    source: &JsString,
+    realm: RealmId,
+    origin: &JsStackFrame,
+) -> Result<Unit, NativeFailure> {
+    let source = source.to_utf8_lossy()?;
+    match source.parse::<Unit>() {
+        Ok(unit) => Ok(unit),
+        Err(_) => Err(NativeFailure::Abrupt(temporal_pending_exception(
+            realm,
+            origin,
+            ExceptionKind::RangeError,
+            "invalid Temporal unit",
+        )?)),
+    }
+}
+
+fn temporal_duration_rounding_mode(
+    source: &JsString,
+    realm: RealmId,
+    origin: &JsStackFrame,
+) -> Result<RoundingMode, NativeFailure> {
+    let source = source.to_utf8_lossy()?;
+    let mode = match source.as_str() {
+        "ceil" => RoundingMode::Ceil,
+        "floor" => RoundingMode::Floor,
+        "expand" => RoundingMode::Expand,
+        "trunc" => RoundingMode::Trunc,
+        "halfCeil" => RoundingMode::HalfCeil,
+        "halfFloor" => RoundingMode::HalfFloor,
+        "halfExpand" => RoundingMode::HalfExpand,
+        "halfTrunc" => RoundingMode::HalfTrunc,
+        "halfEven" => RoundingMode::HalfEven,
+        _ => {
+            return Err(NativeFailure::Abrupt(temporal_pending_exception(
+                realm,
+                origin,
+                ExceptionKind::RangeError,
+                "invalid Temporal roundingMode",
+            )?));
+        }
+    };
+    Ok(mode)
+}
+
+#[allow(
+    clippy::too_many_arguments,
+    reason = "the completed JavaScript option record is passed explicitly to the shared temporal kernel"
+)]
+fn complete_temporal_duration_round(
+    runtime: &mut Runtime,
+    duration: Duration,
+    largest_unit: Option<Unit>,
+    relative_to: Option<RelativeTo>,
+    rounding_increment: RoundingIncrement,
+    rounding_mode: RoundingMode,
+    smallest_unit: Option<Unit>,
+    realm: RealmId,
+    origin: &JsStackFrame,
+) -> Result<NativeDispatch, NativeFailure> {
+    let mut options = RoundingOptions::default();
+    options.largest_unit = largest_unit;
+    options.smallest_unit = smallest_unit;
+    options.rounding_mode = Some(rounding_mode);
+    options.increment = Some(rounding_increment);
+    let rounded = match duration.round(options, relative_to) {
+        Ok(rounded) => rounded,
+        Err(error) => {
+            return Err(NativeFailure::Abrupt(temporal_exception_from_error(
+                realm, origin, error,
+            )?));
+        }
+    };
+    allocate_temporal_duration_result(runtime, realm, rounded)
 }
 
 #[allow(
