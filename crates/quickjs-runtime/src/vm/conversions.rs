@@ -1970,6 +1970,15 @@ fn finish_operator_primitive_target(
         OperatorPrimitiveTarget::TypedArrayPrototypeFill(state) => {
             finish_typed_array_prototype_fill(runtime, *state, value, return_to, execution_budget)
         }
+        OperatorPrimitiveTarget::TypedArrayPrototypeCopyWithin(state) => {
+            finish_typed_array_prototype_copy_within(
+                runtime,
+                *state,
+                value,
+                return_to,
+                execution_budget,
+            )
+        }
         OperatorPrimitiveTarget::DataViewGetIndex(state) => {
             finish_data_view_get_index(runtime, state.as_ref(), value)
         }

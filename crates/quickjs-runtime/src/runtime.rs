@@ -1789,11 +1789,12 @@ pub(crate) enum TypedArrayPrototypeMethod {
     IndexOf,
     LastIndexOf,
     Fill,
+    CopyWithin,
     Reverse,
 }
 
 impl TypedArrayPrototypeMethod {
-    pub(crate) const ALL: [Self; 13] = [
+    pub(crate) const ALL: [Self; 14] = [
         Self::Buffer,
         Self::ByteLength,
         Self::ByteOffset,
@@ -1806,6 +1807,7 @@ impl TypedArrayPrototypeMethod {
         Self::IndexOf,
         Self::LastIndexOf,
         Self::Fill,
+        Self::CopyWithin,
         Self::Reverse,
     ];
 
@@ -1824,6 +1826,7 @@ impl TypedArrayPrototypeMethod {
             Self::IndexOf => "indexOf",
             Self::LastIndexOf => "lastIndexOf",
             Self::Fill => "fill",
+            Self::CopyWithin => "copyWithin",
             Self::Reverse => "reverse",
         }
     }
@@ -1843,6 +1846,7 @@ impl TypedArrayPrototypeMethod {
             Self::IndexOf => "indexOf",
             Self::LastIndexOf => "lastIndexOf",
             Self::Fill => "fill",
+            Self::CopyWithin => "copyWithin",
             Self::Reverse => "reverse",
         }
     }
@@ -1858,6 +1862,7 @@ impl TypedArrayPrototypeMethod {
                 | Self::IndexOf
                 | Self::LastIndexOf
                 | Self::Fill
+                | Self::CopyWithin
                 | Self::Reverse
         )
     }
@@ -1871,7 +1876,7 @@ impl TypedArrayPrototypeMethod {
             | Self::IndexOf
             | Self::LastIndexOf
             | Self::Fill => 1,
-            Self::Subarray => 2,
+            Self::CopyWithin | Self::Subarray => 2,
             Self::Reverse
             | Self::Buffer
             | Self::ByteLength

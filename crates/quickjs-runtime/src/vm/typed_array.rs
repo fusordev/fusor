@@ -245,6 +245,33 @@ pub(super) struct TypedArrayPrototypeFillState {
     origin: JsStackFrame,
 }
 
+#[allow(
+    clippy::enum_variant_names,
+    reason = "each name identifies the observable conversion boundary being awaited"
+)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum TypedArrayPrototypeCopyWithinStage {
+    AwaitTarget,
+    AwaitStart,
+    AwaitEnd,
+}
+
+/// Resumable `%TypedArray%.prototype.copyWithin` across its three relative
+/// index conversions. Its final byte copy happens only after the conditional
+/// resizable-view witness required for a non-empty copied range.
+pub(super) struct TypedArrayPrototypeCopyWithinState {
+    object: ObjectId,
+    length: usize,
+    target: StoredValue,
+    start: StoredValue,
+    end: StoredValue,
+    target_index: usize,
+    start_index: usize,
+    realm: RealmId,
+    stage: TypedArrayPrototypeCopyWithinStage,
+    origin: JsStackFrame,
+}
+
 impl TypedArrayConstructorLengthState {
     pub(super) const fn retained_values() -> u64 {
         1
@@ -401,6 +428,19 @@ impl TypedArrayPrototypeFillState {
     pub(super) fn trace_roots(&self, mark: &mut dyn FnMut(CollectionRoot)) {
         mark(CollectionRoot::Heap(HeapReference::Object(self.object)));
         trace_stored_value_root(&self.value, mark);
+        trace_stored_value_root(&self.start, mark);
+        trace_stored_value_root(&self.end, mark);
+    }
+}
+
+impl TypedArrayPrototypeCopyWithinState {
+    pub(super) const fn retained_values() -> u64 {
+        4
+    }
+
+    pub(super) fn trace_roots(&self, mark: &mut dyn FnMut(CollectionRoot)) {
+        mark(CollectionRoot::Heap(HeapReference::Object(self.object)));
+        trace_stored_value_root(&self.target, mark);
         trace_stored_value_root(&self.start, mark);
         trace_stored_value_root(&self.end, mark);
     }
@@ -1514,6 +1554,7 @@ pub(super) fn dispatch_typed_array_prototype(
             | TypedArrayPrototypeMethod::IndexOf
             | TypedArrayPrototypeMethod::LastIndexOf
             | TypedArrayPrototypeMethod::Fill
+            | TypedArrayPrototypeMethod::CopyWithin
             | TypedArrayPrototypeMethod::Reverse
     ) && !matches!(view, TypedArrayView::InBounds { .. })
     {
@@ -1620,6 +1661,19 @@ pub(super) fn dispatch_typed_array_prototype(
         }
         TypedArrayPrototypeMethod::Fill => {
             return begin_typed_array_prototype_fill(
+                runtime,
+                *object,
+                arguments.take_first_or_undefined(),
+                arguments.take_first_or_undefined(),
+                arguments.take_first_or_undefined(),
+                realm,
+                return_to,
+                origin,
+                execution_budget,
+            );
+        }
+        TypedArrayPrototypeMethod::CopyWithin => {
+            return begin_typed_array_prototype_copy_within(
                 runtime,
                 *object,
                 arguments.take_first_or_undefined(),
@@ -2099,6 +2153,186 @@ fn typed_array_prototype_fill_stored(
             .into());
         }
     }
+    Ok(NativeDispatch::Immediate(StoredValue::Object(state.object)))
+}
+
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the native entry point preserves target, start, and end until their mandated conversion turns"
+)]
+fn begin_typed_array_prototype_copy_within(
+    runtime: &mut Runtime,
+    object: ObjectId,
+    target: StoredValue,
+    start: StoredValue,
+    end: StoredValue,
+    realm: RealmId,
+    return_to: Option<CallReturn>,
+    origin: JsStackFrame,
+    execution_budget: &mut ExecutionBudget,
+) -> Result<NativeDispatch, NativeFailure> {
+    let (_, length) = typed_array_require_in_bounds(runtime, object, realm, &origin)?;
+    begin_operator_primitive_conversion(
+        runtime,
+        target,
+        OperatorPrimitiveHint::Number,
+        OperatorPrimitiveTarget::TypedArrayPrototypeCopyWithin(Box::new(
+            TypedArrayPrototypeCopyWithinState {
+                object,
+                length,
+                target: StoredValue::Undefined,
+                start,
+                end,
+                target_index: 0,
+                start_index: 0,
+                realm,
+                stage: TypedArrayPrototypeCopyWithinStage::AwaitTarget,
+                origin: origin.clone(),
+            },
+        )),
+        realm,
+        return_to,
+        origin,
+        execution_budget,
+    )
+}
+
+#[allow(
+    clippy::needless_pass_by_value,
+    reason = "the primitive-conversion target transfers its owned continuation state"
+)]
+pub(super) fn finish_typed_array_prototype_copy_within(
+    runtime: &mut Runtime,
+    mut state: TypedArrayPrototypeCopyWithinState,
+    value: StoredValue,
+    return_to: Option<CallReturn>,
+    execution_budget: &mut ExecutionBudget,
+) -> Result<NativeDispatch, NativeFailure> {
+    match state.stage {
+        TypedArrayPrototypeCopyWithinStage::AwaitTarget => {
+            let relative = number_to_integer_or_infinity(operator_to_number(
+                value,
+                state.realm,
+                &state.origin,
+            )?);
+            state.target_index = typed_array_relative_bound(relative, state.length);
+            state.stage = TypedArrayPrototypeCopyWithinStage::AwaitStart;
+            let start = std::mem::replace(&mut state.start, StoredValue::Undefined);
+            let realm = state.realm;
+            let origin = state.origin.clone();
+            begin_operator_primitive_conversion(
+                runtime,
+                start,
+                OperatorPrimitiveHint::Number,
+                OperatorPrimitiveTarget::TypedArrayPrototypeCopyWithin(Box::new(state)),
+                realm,
+                return_to,
+                origin,
+                execution_budget,
+            )
+        }
+        TypedArrayPrototypeCopyWithinStage::AwaitStart => {
+            let relative = number_to_integer_or_infinity(operator_to_number(
+                value,
+                state.realm,
+                &state.origin,
+            )?);
+            state.start_index = typed_array_relative_bound(relative, state.length);
+            state.stage = TypedArrayPrototypeCopyWithinStage::AwaitEnd;
+            let end = std::mem::replace(&mut state.end, StoredValue::Undefined);
+            if matches!(end, StoredValue::Undefined) {
+                return typed_array_prototype_copy_within_bytes(
+                    runtime,
+                    &state,
+                    state.length,
+                    execution_budget,
+                );
+            }
+            let realm = state.realm;
+            let origin = state.origin.clone();
+            begin_operator_primitive_conversion(
+                runtime,
+                end,
+                OperatorPrimitiveHint::Number,
+                OperatorPrimitiveTarget::TypedArrayPrototypeCopyWithin(Box::new(state)),
+                realm,
+                return_to,
+                origin,
+                execution_budget,
+            )
+        }
+        TypedArrayPrototypeCopyWithinStage::AwaitEnd => {
+            let relative = number_to_integer_or_infinity(operator_to_number(
+                value,
+                state.realm,
+                &state.origin,
+            )?);
+            let end_index = typed_array_relative_bound(relative, state.length);
+            typed_array_prototype_copy_within_bytes(runtime, &state, end_index, execution_budget)
+        }
+    }
+}
+
+fn typed_array_prototype_copy_within_bytes(
+    runtime: &mut Runtime,
+    state: &TypedArrayPrototypeCopyWithinState,
+    end_index: usize,
+    execution_budget: &mut ExecutionBudget,
+) -> Result<NativeDispatch, NativeFailure> {
+    let count = end_index
+        .saturating_sub(state.start_index)
+        .min(state.length.saturating_sub(state.target_index));
+    if count == 0 {
+        return Ok(NativeDispatch::Immediate(StoredValue::Object(state.object)));
+    }
+    let (target, final_length) =
+        typed_array_require_in_bounds(runtime, state.object, state.realm, &state.origin)?;
+    let count = count
+        .min(final_length.saturating_sub(state.start_index))
+        .min(final_length.saturating_sub(state.target_index));
+    if count == 0 {
+        return Ok(NativeDispatch::Immediate(StoredValue::Object(state.object)));
+    }
+    let width = target.element().byte_width();
+    let byte_count = count
+        .checked_mul(width)
+        .ok_or(EngineFault::RuntimeInvariant {
+            message: "TypedArray.prototype.copyWithin byte count overflowed after range validation",
+        })?;
+    let source_offset = target
+        .byte_offset()
+        .checked_add(
+            state
+                .start_index
+                .checked_mul(width)
+                .ok_or(EngineFault::RuntimeInvariant {
+                    message: "TypedArray.prototype.copyWithin source offset overflowed after range validation",
+                })?,
+        )
+        .ok_or(EngineFault::RuntimeInvariant {
+            message: "TypedArray.prototype.copyWithin source offset overflowed after range validation",
+        })?;
+    let target_offset = target
+        .byte_offset()
+        .checked_add(
+            state
+                .target_index
+                .checked_mul(width)
+                .ok_or(EngineFault::RuntimeInvariant {
+                    message: "TypedArray.prototype.copyWithin target offset overflowed after range validation",
+                })?,
+        )
+        .ok_or(EngineFault::RuntimeInvariant {
+            message: "TypedArray.prototype.copyWithin target offset overflowed after range validation",
+        })?;
+    execution_budget.charge_instructions(1)?;
+    runtime.copy_array_buffer_bytes_to(
+        target.buffer(),
+        source_offset,
+        target.buffer(),
+        target_offset,
+        byte_count,
+    )?;
     Ok(NativeDispatch::Immediate(StoredValue::Object(state.object)))
 }
 

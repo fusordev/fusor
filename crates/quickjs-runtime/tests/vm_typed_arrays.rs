@@ -392,6 +392,50 @@ fn typed_array_fill_converts_value_before_range_and_revalidates_resizable_views(
 }
 
 #[test]
+fn typed_array_copy_within_preserves_raw_overlap_and_conditionally_revalidates() {
+    assert_eq!(
+        rendered(
+            "var values=new Uint8Array([1,2,3,4,5]),bigints=new BigInt64Array([1n,2n,3n]);\
+             var returned=values.copyWithin(1,0,4);bigints.copyWithin(1,0,2);\
+             return [Uint8Array.prototype.copyWithin.length,Uint8Array.prototype.copyWithin.name,returned===values,\
+               values[0],values[1],values[2],values[3],values[4],\
+               String(bigints[0]),String(bigints[1]),String(bigints[2])].join('|');"
+        ),
+        "2|copyWithin|true|1|1|2|3|4|1|1|2"
+    );
+    assert_eq!(
+        rendered(
+            "var log=[],target={valueOf(){log.push('target');return 1}},\
+             start={valueOf(){log.push('start');return 0}},end={valueOf(){log.push('end');return 2}};\
+             new Uint8Array(3).copyWithin(target,start,end);return log.join('|');"
+        ),
+        "target|start|end"
+    );
+    assert_eq!(
+        rendered(
+            "var buffer=new ArrayBuffer(4,{maxByteLength:4}),values=new Uint8Array(buffer);\
+             values[0]=3;values[1]=4;values.copyWithin({valueOf(){buffer.resize(3);return 1}},0,4);\
+             return [values.length,values[0],values[1],values[2]].join('|');"
+        ),
+        "3|3|3|4"
+    );
+    assert_eq!(
+        thrown(
+            "var buffer=new ArrayBuffer(4,{maxByteLength:4}),values=new Uint8Array(buffer,2,2);\
+             values.copyWithin(0,{valueOf(){buffer.resize(1);return 0}});"
+        ),
+        ExceptionKind::TypeError
+    );
+    assert_eq!(
+        rendered(
+            "var buffer=new ArrayBuffer(4,{maxByteLength:4}),values=new Uint8Array(buffer,2,2);\
+             return String(values.copyWithin(2,{valueOf(){buffer.resize(1);return 0}})===values);"
+        ),
+        "true"
+    );
+}
+
+#[test]
 fn typed_array_reverse_mutates_in_place_for_number_and_bigint_content() {
     assert_eq!(
         rendered(
