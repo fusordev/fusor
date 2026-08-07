@@ -578,6 +578,38 @@ fn plain_date_time_differences_convert_before_options_and_normalize_duration_fie
 }
 
 #[test]
+fn plain_date_time_round_preserves_option_order_and_date_time_rounding_rules() {
+    assert_eq!(
+        rendered(
+            "var log=[],options={};
+             Object.defineProperties(options,{
+               roundingIncrement:{get:function(){log.push('increment');return {valueOf:function(){log.push('increment number');return 15}}}},
+               roundingMode:{get:function(){log.push('mode');return {toString:function(){log.push('mode string');return 'trunc'}}}},
+               smallestUnit:{get:function(){log.push('unit');return {toString:function(){log.push('unit string');return 'minute'}}}}
+             });
+             var value=new Temporal.PlainDateTime(2020,1,1,12,34,35,678,901,234);
+             return [Temporal.PlainDateTime.prototype.round.length,
+               value.round('minute').toString(),value.round(options).toString(),
+               new Temporal.PlainDateTime(2020,1,1,12).round('day').toString(),
+               log.join(',')].join('|');"
+        ),
+        "1|2020-01-01T12:35:00|2020-01-01T12:30:00|2020-01-02T00:00:00|increment,increment number,mode,mode string,unit,unit string"
+    );
+    assert_eq!(
+        thrown("return Temporal.PlainDateTime.prototype.round.call({}, 'second');"),
+        ExceptionKind::TypeError
+    );
+    assert_eq!(
+        thrown("return new Temporal.PlainDateTime(2020,1,1).round();"),
+        ExceptionKind::TypeError
+    );
+    assert_eq!(
+        thrown("return new Temporal.PlainDateTime(2020,1,1).round({smallestUnit:'invalid'});"),
+        ExceptionKind::RangeError
+    );
+}
+
+#[test]
 fn plain_date_with_prepares_partial_fields_before_reading_overflow() {
     assert_eq!(
         rendered(

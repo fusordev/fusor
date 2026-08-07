@@ -777,6 +777,7 @@ enum NativeContinuation {
     TemporalPlainDateWith(Box<TemporalPlainDateWithContinuation>),
     TemporalPlainDateDifferenceOptions(Box<TemporalPlainDateDifferenceContinuation>),
     TemporalPlainDateTimeDifferenceOptions(Box<TemporalPlainDateTimeDifferenceContinuation>),
+    TemporalPlainDateTimeRoundOptions(Box<TemporalPlainDateTimeRoundContinuation>),
     TemporalDurationBag(Box<TemporalDurationBagContinuation>),
     TemporalDurationCompareOptions(TemporalDurationCompareOptionsContinuation),
     TemporalDurationRoundOptions(Box<TemporalDurationRoundContinuation>),
@@ -909,6 +910,9 @@ impl NativeContinuation {
             }
             Self::TemporalPlainDateTimeDifferenceOptions(_) => {
                 TemporalPlainDateTimeDifferenceContinuation::retained_values()
+            }
+            Self::TemporalPlainDateTimeRoundOptions(_) => {
+                TemporalPlainDateTimeRoundContinuation::retained_values()
             }
             Self::TemporalDurationBag(state) => state.retained_values(),
             Self::TemporalDurationCompareOptions(_) => {
@@ -2149,6 +2153,9 @@ enum OperatorPrimitiveTarget {
     ),
     TemporalPlainDateTimeDifferenceRoundingMode(Box<TemporalPlainDateTimeDifferenceContinuation>),
     TemporalPlainDateTimeDifferenceSmallestUnit(Box<TemporalPlainDateTimeDifferenceContinuation>),
+    TemporalPlainDateTimeRoundRoundingIncrement(Box<TemporalPlainDateTimeRoundContinuation>),
+    TemporalPlainDateTimeRoundRoundingMode(Box<TemporalPlainDateTimeRoundContinuation>),
+    TemporalPlainDateTimeRoundSmallestUnit(Box<TemporalPlainDateTimeRoundContinuation>),
     TemporalDurationBag(Box<TemporalDurationBagContinuation>),
     TemporalDurationRoundLargestUnit(Box<TemporalDurationRoundContinuation>),
     TemporalDurationRoundRoundingIncrement(Box<TemporalDurationRoundContinuation>),
@@ -2431,6 +2438,11 @@ impl OperatorPrimitiveTarget {
             | Self::TemporalPlainDateTimeDifferenceRoundingMode(_)
             | Self::TemporalPlainDateTimeDifferenceSmallestUnit(_) => {
                 TemporalPlainDateTimeDifferenceContinuation::retained_values()
+            }
+            Self::TemporalPlainDateTimeRoundRoundingIncrement(_)
+            | Self::TemporalPlainDateTimeRoundRoundingMode(_)
+            | Self::TemporalPlainDateTimeRoundSmallestUnit(_) => {
+                TemporalPlainDateTimeRoundContinuation::retained_values()
             }
             Self::TemporalDurationBag(state) => state.retained_values(),
             Self::TemporalDurationRoundLargestUnit(_state)
@@ -2723,6 +2735,11 @@ fn trace_operator_primitive_target_roots(
         | OperatorPrimitiveTarget::TemporalPlainDateTimeDifferenceSmallestUnit(state) => {
             state.trace_roots(mark);
         }
+        OperatorPrimitiveTarget::TemporalPlainDateTimeRoundRoundingIncrement(state)
+        | OperatorPrimitiveTarget::TemporalPlainDateTimeRoundRoundingMode(state)
+        | OperatorPrimitiveTarget::TemporalPlainDateTimeRoundSmallestUnit(state) => {
+            state.trace_roots(mark);
+        }
         OperatorPrimitiveTarget::TemporalDurationBag(state) => state.trace_roots(mark),
         OperatorPrimitiveTarget::TemporalDurationRoundLargestUnit(state)
         | OperatorPrimitiveTarget::TemporalDurationRoundRoundingIncrement(state)
@@ -2985,6 +3002,7 @@ fn trace_native_continuation_roots(
         NativeContinuation::TemporalPlainDateTimeDifferenceOptions(state) => {
             state.trace_roots(mark);
         }
+        NativeContinuation::TemporalPlainDateTimeRoundOptions(state) => state.trace_roots(mark),
         NativeContinuation::TemporalDurationBag(state) => state.trace_roots(mark),
         NativeContinuation::TemporalDurationCompareOptions(state) => state.trace_roots(mark),
         NativeContinuation::TemporalDurationRoundOptions(state) => state.trace_roots(mark),
