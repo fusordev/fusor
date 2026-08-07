@@ -708,6 +708,11 @@ enum TemporalPlainDateOverflowTarget {
         duration: Duration,
         subtract: bool,
     },
+    ZonedDateTimeArithmetic {
+        receiver: ZonedDateTime,
+        duration: Duration,
+        subtract: bool,
+    },
     DateTimeWith {
         receiver: PlainDateTime,
         fields: TemporalPlainDateTimeWithFields,
@@ -2349,6 +2354,24 @@ pub(super) fn dispatch_temporal_zoned_date_time_prototype(
                 }
             };
             allocate_temporal_zoned_date_time_result(runtime, realm, result)
+        }
+        TemporalZonedDateTimePrototypeMethod::Add
+        | TemporalZonedDateTimePrototypeMethod::Subtract => {
+            let duration = arguments.take_first_or_undefined();
+            let options = arguments.take_first_or_undefined();
+            begin_temporal_duration_like(
+                runtime,
+                duration,
+                TemporalDurationLikeTarget::ZonedDateTimeArithmetic {
+                    receiver: date_time,
+                    subtract: matches!(method, TemporalZonedDateTimePrototypeMethod::Subtract),
+                    options,
+                },
+                realm,
+                return_to,
+                origin.clone(),
+                execution_budget,
+            )
         }
         TemporalZonedDateTimePrototypeMethod::ToString => begin_temporal_zoned_date_time_to_string(
             runtime,
@@ -5569,6 +5592,26 @@ fn finish_temporal_plain_date_from_options(
             };
             return allocate_temporal_plain_date_time_result(runtime, realm, date_time);
         }
+        TemporalPlainDateOverflowTarget::ZonedDateTimeArithmetic {
+            receiver,
+            duration,
+            subtract,
+        } => {
+            let result = if subtract {
+                receiver.subtract(&duration, Some(overflow))
+            } else {
+                receiver.add(&duration, Some(overflow))
+            };
+            let date_time = match result {
+                Ok(date_time) => date_time,
+                Err(error) => {
+                    return Err(NativeFailure::Abrupt(temporal_exception_from_error(
+                        realm, origin, error,
+                    )?));
+                }
+            };
+            return allocate_temporal_zoned_date_time_result(runtime, realm, date_time);
+        }
         TemporalPlainDateOverflowTarget::DateTimeWith { receiver, fields } => {
             let fields = temporal_plain_date_time_with_fields(&fields, realm, origin)?;
             let date_time = match receiver.with(fields, Some(overflow)) {
@@ -5634,6 +5677,7 @@ fn finish_temporal_plain_date_from_options(
         | TemporalPlainDateOverflowTarget::FromMonthDayFields(_)
         | TemporalPlainDateOverflowTarget::MonthDayWith { .. }
         | TemporalPlainDateOverflowTarget::DateTimeArithmetic { .. }
+        | TemporalPlainDateOverflowTarget::ZonedDateTimeArithmetic { .. }
         | TemporalPlainDateOverflowTarget::DateTimeWith { .. } => {
             unreachable!("Temporal PlainDateTime overflow targets return above")
         }
@@ -10497,6 +10541,11 @@ enum TemporalDurationLikeTarget {
         subtract: bool,
         options: StoredValue,
     },
+    ZonedDateTimeArithmetic {
+        receiver: ZonedDateTime,
+        subtract: bool,
+        options: StoredValue,
+    },
 }
 
 impl TemporalDurationLikeTarget {
@@ -10510,7 +10559,8 @@ impl TemporalDurationLikeTarget {
             Self::CompareSecond { .. }
             | Self::PlainDateArithmetic { .. }
             | Self::PlainDateTimeArithmetic { .. }
-            | Self::PlainYearMonthArithmetic { .. } => 1,
+            | Self::PlainYearMonthArithmetic { .. }
+            | Self::ZonedDateTimeArithmetic { .. } => 1,
         }
     }
 
@@ -10527,7 +10577,8 @@ impl TemporalDurationLikeTarget {
             Self::CompareSecond { options, .. }
             | Self::PlainDateArithmetic { options, .. }
             | Self::PlainDateTimeArithmetic { options, .. }
-            | Self::PlainYearMonthArithmetic { options, .. } => {
+            | Self::PlainYearMonthArithmetic { options, .. }
+            | Self::ZonedDateTimeArithmetic { options, .. } => {
                 trace_stored_value_root(options, mark);
             }
         }
@@ -12480,6 +12531,23 @@ fn continue_temporal_duration_like(
         } => begin_temporal_plain_date_from_options(
             runtime,
             TemporalPlainDateOverflowTarget::YearMonthArithmetic {
+                receiver,
+                duration,
+                subtract,
+            },
+            options,
+            realm,
+            return_to,
+            origin.clone(),
+            execution_budget,
+        ),
+        TemporalDurationLikeTarget::ZonedDateTimeArithmetic {
+            receiver,
+            subtract,
+            options,
+        } => begin_temporal_plain_date_from_options(
+            runtime,
+            TemporalPlainDateOverflowTarget::ZonedDateTimeArithmetic {
                 receiver,
                 duration,
                 subtract,

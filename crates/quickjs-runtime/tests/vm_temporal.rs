@@ -524,6 +524,42 @@ fn zoned_date_time_with_plain_time_uses_shared_temporal_time_conversion() {
 }
 
 #[test]
+fn zoned_date_time_arithmetic_uses_resumable_duration_and_overflow_options() {
+    assert_eq!(
+        rendered(
+            "var log=[],duration={},options={};
+             function field(name,value){Object.defineProperty(duration,name,{get:function(){
+               log.push('get '+name);return {valueOf:function(){log.push('number '+name);return value;}};
+             }});}
+             field('days',1);field('hours',2);field('microseconds',0);field('milliseconds',0);
+             field('minutes',3);field('months',0);field('nanoseconds',0);field('seconds',0);
+             field('weeks',0);field('years',0);
+             Object.defineProperty(options,'overflow',{get:function(){log.push('get overflow');return {
+               toString:function(){log.push('string overflow');return 'constrain';}
+             };}});
+             var value=new Temporal.ZonedDateTime(0n,'UTC');
+             var added=value.add(duration,options),subtracted=added.subtract('PT2H3M');
+             var monthEnd=new Temporal.ZonedDateTime(2592000000000000n,'UTC').add({months:1});
+             var add=Object.getOwnPropertyDescriptor(Temporal.ZonedDateTime.prototype,'add');
+             var subtract=Object.getOwnPropertyDescriptor(Temporal.ZonedDateTime.prototype,'subtract');
+             return [added.toPlainDateTime().toString(),subtracted.toPlainDateTime().toString(),
+               monthEnd.toPlainDateTime().toString(),add.value.length,add.value.name,
+               subtract.value.length,subtract.value.name,add.enumerable,add.writable,add.configurable,
+               log.join(',')].join('|');"
+        ),
+        "1970-01-02T02:03:00|1970-01-02T00:00:00|1970-02-28T00:00:00|1|add|1|subtract|false|true|true|get days,number days,get hours,number hours,get microseconds,number microseconds,get milliseconds,number milliseconds,get minutes,number minutes,get months,number months,get nanoseconds,number nanoseconds,get seconds,number seconds,get weeks,number weeks,get years,number years,get overflow,string overflow"
+    );
+    assert_eq!(
+        thrown("return new Temporal.ZonedDateTime(0n,'UTC').add({days:1},null);"),
+        ExceptionKind::TypeError
+    );
+    assert_eq!(
+        thrown("return new Temporal.ZonedDateTime(0n,'UTC').subtract(1);"),
+        ExceptionKind::TypeError
+    );
+}
+
+#[test]
 fn plain_date_time_constructor_accessors_and_iso_formatting_are_spec_shaped() {
     assert_eq!(
         rendered(

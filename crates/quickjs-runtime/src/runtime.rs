@@ -2360,6 +2360,8 @@ pub(crate) enum TemporalZonedDateTimePrototypeMethod {
     GetTimeZoneTransition,
     WithPlainTime,
     WithTimeZone,
+    Add,
+    Subtract,
     ToString,
     ToJson,
     ToLocaleString,
@@ -2828,7 +2830,7 @@ impl TemporalZonedDateTimeStaticMethod {
 }
 
 impl TemporalZonedDateTimePrototypeMethod {
-    pub(crate) const ALL: [Self; 41] = [
+    pub(crate) const ALL: [Self; 43] = [
         Self::CalendarId,
         Self::TimeZoneId,
         Self::Year,
@@ -2866,6 +2868,8 @@ impl TemporalZonedDateTimePrototypeMethod {
         Self::GetTimeZoneTransition,
         Self::WithPlainTime,
         Self::WithTimeZone,
+        Self::Add,
+        Self::Subtract,
         Self::ToString,
         Self::ToJson,
         Self::ToLocaleString,
@@ -2911,6 +2915,8 @@ impl TemporalZonedDateTimePrototypeMethod {
             Self::GetTimeZoneTransition => "getTimeZoneTransition",
             Self::WithPlainTime => "withPlainTime",
             Self::WithTimeZone => "withTimeZone",
+            Self::Add => "add",
+            Self::Subtract => "subtract",
             Self::ToString => "toString",
             Self::ToJson => "toJSON",
             Self::ToLocaleString => "toLocaleString",
@@ -2964,6 +2970,8 @@ impl TemporalZonedDateTimePrototypeMethod {
                 | Self::GetTimeZoneTransition
                 | Self::WithPlainTime
                 | Self::WithTimeZone
+                | Self::Add
+                | Self::Subtract
                 | Self::ToString
                 | Self::ToJson
                 | Self::ToLocaleString
@@ -2973,7 +2981,11 @@ impl TemporalZonedDateTimePrototypeMethod {
 
     pub(crate) const fn length(self) -> i32 {
         match self {
-            Self::Equals | Self::GetTimeZoneTransition | Self::WithTimeZone => 1,
+            Self::Equals
+            | Self::GetTimeZoneTransition
+            | Self::Add
+            | Self::Subtract
+            | Self::WithTimeZone => 1,
             _ => 0,
         }
     }
