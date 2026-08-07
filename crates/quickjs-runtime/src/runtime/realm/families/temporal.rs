@@ -385,10 +385,20 @@ pub(super) fn visit_functions(visit: FunctionSink<'_>) {
         ));
     }
     for method in TemporalZonedDateTimePrototypeMethod::ALL {
-        let name = if method.is_accessor() {
-            IntrinsicNameSpec::Literal(method.function_name())
-        } else {
-            IntrinsicNameSpec::RealmName(RealmNameId::TemporalZonedDateTimePrototype(method))
+        let name = match method {
+            TemporalZonedDateTimePrototypeMethod::ToJson => {
+                IntrinsicNameSpec::Predefined(PredefinedAtom::ToJson)
+            }
+            TemporalZonedDateTimePrototypeMethod::ToLocaleString => {
+                IntrinsicNameSpec::Predefined(PredefinedAtom::ToLocaleString)
+            }
+            TemporalZonedDateTimePrototypeMethod::ValueOf => {
+                IntrinsicNameSpec::Predefined(PredefinedAtom::ValueOf)
+            }
+            method if method.is_accessor() => IntrinsicNameSpec::Literal(method.function_name()),
+            method => {
+                IntrinsicNameSpec::RealmName(RealmNameId::TemporalZonedDateTimePrototype(method))
+            }
         };
         visit(ordinary(
             NativeFunctionKind::TemporalZonedDateTimePrototype(method),
@@ -998,9 +1008,20 @@ pub(super) fn visit_properties(visit: PropertySink<'_>) {
         ));
     }
     for method_id in TemporalZonedDateTimePrototypeMethod::ALL {
-        let key = IntrinsicKeySpec::InternedString(RealmNameId::TemporalZonedDateTimePrototype(
-            method_id,
-        ));
+        let key = match method_id {
+            TemporalZonedDateTimePrototypeMethod::ToJson => {
+                IntrinsicKeySpec::PredefinedString(PredefinedAtom::ToJson)
+            }
+            TemporalZonedDateTimePrototypeMethod::ToLocaleString => {
+                IntrinsicKeySpec::PredefinedString(PredefinedAtom::ToLocaleString)
+            }
+            TemporalZonedDateTimePrototypeMethod::ValueOf => {
+                IntrinsicKeySpec::PredefinedString(PredefinedAtom::ValueOf)
+            }
+            method => IntrinsicKeySpec::InternedString(
+                RealmNameId::TemporalZonedDateTimePrototype(method),
+            ),
+        };
         if method_id.is_accessor() {
             visit(accessor(
                 zoned_date_time_prototype,

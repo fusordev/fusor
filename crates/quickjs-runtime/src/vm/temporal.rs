@@ -7,9 +7,9 @@ use temporal_rs::{
     error::ErrorKind as TemporalErrorKind,
     fields::{CalendarFields, DateTimeFields, YearMonthCalendarFields},
     options::{
-        DifferenceSettings, Disambiguation, DisplayCalendar, OffsetDisambiguation, Overflow,
-        RelativeTo, RoundingIncrement, RoundingMode, RoundingOptions, ToStringRoundingOptions,
-        Unit,
+        DifferenceSettings, Disambiguation, DisplayCalendar, DisplayOffset, DisplayTimeZone,
+        OffsetDisambiguation, Overflow, RelativeTo, RoundingIncrement, RoundingMode,
+        RoundingOptions, ToStringRoundingOptions, Unit,
     },
     parsers::Precision,
     partial::{PartialDate, PartialDateTime, PartialTime, PartialYearMonth},
@@ -2291,7 +2291,39 @@ pub(super) fn dispatch_temporal_zoned_date_time_prototype(
             };
             Ok(NativeDispatch::Immediate(StoredValue::Boolean(equals)))
         }
+        TemporalZonedDateTimePrototypeMethod::ToJson
+        | TemporalZonedDateTimePrototypeMethod::ToLocaleString => {
+            render_temporal_zoned_date_time(&date_time, realm, origin)
+        }
+        TemporalZonedDateTimePrototypeMethod::ValueOf => temporal_type_error(
+            realm,
+            origin,
+            "Temporal.ZonedDateTime cannot be converted to a primitive value",
+        ),
     }
+}
+
+fn render_temporal_zoned_date_time(
+    date_time: &ZonedDateTime,
+    realm: RealmId,
+    origin: &JsStackFrame,
+) -> Result<NativeDispatch, NativeFailure> {
+    let rendered = match date_time.to_ixdtf_string(
+        DisplayOffset::Auto,
+        DisplayTimeZone::Auto,
+        DisplayCalendar::Auto,
+        ToStringRoundingOptions::default(),
+    ) {
+        Ok(rendered) => rendered,
+        Err(error) => {
+            return Err(NativeFailure::Abrupt(temporal_exception_from_error(
+                realm, origin, error,
+            )?));
+        }
+    };
+    Ok(NativeDispatch::Immediate(StoredValue::String(
+        JsString::from_utf8(&rendered)?,
+    )))
 }
 
 #[allow(

@@ -388,6 +388,23 @@ fn zoned_date_time_compare_accepts_branded_values_and_strings() {
 }
 
 #[test]
+fn zoned_date_time_json_and_non_intl_locale_rendering_are_ixdtf() {
+    assert_eq!(
+        rendered(
+            "var value=new Temporal.ZonedDateTime(0n,'UTC','iso8601');
+             var json=Object.getOwnPropertyDescriptor(Temporal.ZonedDateTime.prototype,'toJSON');
+             return [value.toJSON(),value.toLocaleString(),json.value.length,json.value.name,
+               json.enumerable,json.writable,json.configurable].join('|');"
+        ),
+        "1970-01-01T00:00:00+00:00[UTC]|1970-01-01T00:00:00+00:00[UTC]|0|toJSON|false|true|true"
+    );
+    assert_eq!(
+        thrown("return new Temporal.ZonedDateTime(0n,'UTC').valueOf();"),
+        ExceptionKind::TypeError
+    );
+}
+
+#[test]
 fn plain_date_time_constructor_accessors_and_iso_formatting_are_spec_shaped() {
     assert_eq!(
         rendered(
