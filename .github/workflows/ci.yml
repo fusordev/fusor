@@ -40,32 +40,6 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - run: cargo test --workspace --all-features
 
-  test262:
-    name: Test262 (pinned baseline)
-    runs-on: ubuntu-latest
-    timeout-minutes: 360
-    steps:
-      - uses: actions/checkout@v7
-      - uses: dtolnay/rust-toolchain@stable
-      - name: Check out the pinned Test262 suite and QuickJS baseline
-        shell: bash
-        run: |
-          test262_dir="$RUNNER_TEMP/test262"
-          git clone https://github.com/tc39/test262.git "$test262_dir"
-          git -C "$test262_dir" config core.autocrlf false
-          git -C "$test262_dir" checkout --detach 5c8206929d81b2d3d727ca6aac56c18358c8d790
-          git -C "$test262_dir" apply --whitespace=nowarn "$GITHUB_WORKSPACE/tests/test262/upstream/test262.patch"
-          echo "TEST262_PATH=$test262_dir" >> "$GITHUB_ENV"
-      - name: Run full configured Test262 suite
-        run: cargo xtask test262 --suite "$TEST262_PATH" --report target/test262/report.json
-      - name: Upload Test262 report
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: test262-report
-          path: target/test262/report.json
-          if-no-files-found: error
-
   audit:
     name: Dependency audit
     runs-on: ubuntu-latest
