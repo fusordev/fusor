@@ -3,7 +3,7 @@
 use crate::{
     Atom,
     runtime::{
-        ArrayBufferPrototypeMethod, DatePrototypeMethod, DateStaticMethod,
+        ArrayBufferPrototypeMethod, DataViewPrototypeMethod, DatePrototypeMethod, DateStaticMethod,
         TemporalDurationPrototypeMethod, TemporalDurationStaticMethod,
         TemporalInstantPrototypeMethod, TemporalInstantStaticMethod,
     },
@@ -244,6 +244,9 @@ fn visit_realm_name_order(
             visit(RealmNameId::ArrayBufferPrototype(method))?;
         }
     }
+    for method in DataViewPrototypeMethod::ALL {
+        visit(RealmNameId::DataViewPrototype(method))?;
+    }
     for method in DateStaticMethod::ALL {
         visit(RealmNameId::DateStatic(method))?;
     }
@@ -477,6 +480,7 @@ fn realm_name_description(id: RealmNameId) -> &'static str {
         RealmNameId::ArrayFromAsync => "fromAsync",
         RealmNameId::ArrayBufferIsView => "isView",
         RealmNameId::ArrayBufferPrototype(method) => method.name(),
+        RealmNameId::DataViewPrototype(method) => method.name(),
         RealmNameId::DateStatic(method) => method.name(),
         RealmNameId::DatePrototype(method) => method.name(),
         RealmNameId::Temporal => "Temporal",
@@ -508,8 +512,8 @@ mod tests {
         let schema = RealmIntrinsicSchema::try_new().expect("Realm schema");
         let plan = RealmAtomPlan::try_new(&schema).expect("atom plan");
 
-        assert_eq!(plan.len(), 259);
-        assert_eq!(plan.description_code_units(), 2_204);
+        assert_eq!(plan.len(), 283);
+        assert_eq!(plan.description_code_units(), 2_424);
     }
 
     #[test]

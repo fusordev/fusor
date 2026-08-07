@@ -479,6 +479,9 @@ pub(super) fn resume_native_continuations(
                     execution_budget,
                 )?
             }
+            NativeContinuation::DataViewConstructor(state) => {
+                finish_data_view_constructor_prototype(runtime, state.as_ref(), &value)?
+            }
             NativeContinuation::ArrayBufferSlice(state) => {
                 advance_array_buffer_slice(runtime, *state, value, return_to, execution_budget)?
             }
@@ -2334,8 +2337,26 @@ pub(super) fn dispatch_native_call_with_frames(
             origin.unwrap_or_else(native_function_host_origin),
             execution_budget,
         ),
-        NativeFunctionKind::ArrayBufferIsView => Ok(array_buffer_is_view(inputs.arguments)),
+        NativeFunctionKind::ArrayBufferIsView => array_buffer_is_view(runtime, inputs.arguments),
         NativeFunctionKind::ArrayBufferPrototype(method) => dispatch_array_buffer_prototype(
+            runtime,
+            method,
+            native.realm,
+            &inputs.receiver,
+            inputs.arguments,
+            return_to,
+            origin.unwrap_or_else(native_function_host_origin),
+            execution_budget,
+        ),
+        NativeFunctionKind::DataViewConstructor => begin_data_view_constructor(
+            runtime,
+            native.realm,
+            inputs,
+            return_to,
+            origin.unwrap_or_else(native_function_host_origin),
+            execution_budget,
+        ),
+        NativeFunctionKind::DataViewPrototype(method) => dispatch_data_view_prototype(
             runtime,
             method,
             native.realm,

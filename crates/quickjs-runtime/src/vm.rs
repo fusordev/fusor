@@ -42,9 +42,9 @@ use crate::{
     OrdinaryDynamicFunctionCompiler, OrdinaryDynamicFunctionSource, PredefinedAtom, PropertyKey,
     PropertyLayout, Runtime, RuntimeError, RuntimeResource,
     conversion::{
-        MAX_SAFE_INTEGER, number_to_index, number_to_int32, number_to_integer_or_infinity,
-        number_to_length, number_to_uint16, number_to_uint32, string_to_number,
-        string_to_parse_float, string_to_parse_int,
+        MAX_SAFE_INTEGER, number_to_index, number_to_int8, number_to_int16, number_to_int32,
+        number_to_integer_or_infinity, number_to_length, number_to_uint8, number_to_uint16,
+        number_to_uint32, string_to_number, string_to_parse_float, string_to_parse_int,
     },
     define_property::{
         DefinitionDecision, PropertyDefinition, Requested, validate_and_apply_existing,
@@ -53,24 +53,28 @@ use crate::{
     ids::{BindingCellId, FunctionId, InstalledCodeId, ObjectId, RealmGlobalBindingId, RealmId},
     interrupt::InterruptCounter,
     number::decimal::{DecimalDigits, exact_fixed, exact_significant},
-    object::{ForInSnapshot, IntegrityLevel, KeyPhases, OwnProperty, PropertyDeletion},
+    object::{
+        DataViewByteLength, DataViewState, ForInSnapshot, IntegrityLevel, KeyPhases, OwnProperty,
+        PropertyDeletion,
+    },
     runtime::{
         ArrayBufferPrototypeMethod, ArrayCallback, ArrayCopier, ArrayDefineOutcome, ArrayFlatten,
         ArrayLengthWriteOutcome, ArrayMutator, ArrayReduction, ArraySearch, ArraySort, ArrayStatic,
-        BindingCell, BoundFunction, BytecodeFunction, CollectionRoot, DatePrototypeMethod,
-        DateStaticMethod, EnvironmentBinding, FinalizationRegistryMethod, FrameBindingAddress,
-        FunctionImplementation, GlobalNumericFunction, HeapFunction, InstalledCode,
-        InstalledConstant, InstalledRoot, InstalledTemplate, LocaleStringMethod, MapMethod,
-        MathMethod, NativeFunction, NativeFunctionKind, NumberFormat, NumberPredicate,
-        PreparedIteratorResultPlan, PromiseCapabilityCapture, PromiseCapabilityExecutor,
-        PromiseCombinatorElementFunction, PromiseCombinatorElementKind, PromiseCombinatorKind,
-        PromiseCombinatorShared, PromiseFinallyFunction, PromiseFinallyThunkKind, PromiseJob,
-        PromiseResolvingFunction, PromiseResolvingKind, PromiseStatic, RealmGlobalBindingState,
-        ReflectMethod, RegExpFlag, RegExpSymbolMethod, SetMethod, SetPrototypeOutcome,
-        StringArgument, StringMethod, TemporalDurationPrototypeMethod,
-        TemporalDurationStaticMethod, TemporalInstantPrototypeMethod, TemporalInstantStaticMethod,
-        UriFunction, WeakMapMethod, WeakSetMethod, array_length_from_number, check_execution_limit,
-        global_declaration_error, usize_to_u64,
+        BindingCell, BoundFunction, BytecodeFunction, CollectionRoot, DataViewElementType,
+        DataViewPrototypeMethod, DatePrototypeMethod, DateStaticMethod, EnvironmentBinding,
+        FinalizationRegistryMethod, FrameBindingAddress, FunctionImplementation,
+        GlobalNumericFunction, HeapFunction, InstalledCode, InstalledConstant, InstalledRoot,
+        InstalledTemplate, LocaleStringMethod, MapMethod, MathMethod, NativeFunction,
+        NativeFunctionKind, NumberFormat, NumberPredicate, PreparedIteratorResultPlan,
+        PromiseCapabilityCapture, PromiseCapabilityExecutor, PromiseCombinatorElementFunction,
+        PromiseCombinatorElementKind, PromiseCombinatorKind, PromiseCombinatorShared,
+        PromiseFinallyFunction, PromiseFinallyThunkKind, PromiseJob, PromiseResolvingFunction,
+        PromiseResolvingKind, PromiseStatic, RealmGlobalBindingState, ReflectMethod, RegExpFlag,
+        RegExpSymbolMethod, SetMethod, SetPrototypeOutcome, StringArgument, StringMethod,
+        TemporalDurationPrototypeMethod, TemporalDurationStaticMethod,
+        TemporalInstantPrototypeMethod, TemporalInstantStaticMethod, UriFunction, WeakMapMethod,
+        WeakSetMethod, array_length_from_number, check_execution_limit, global_declaration_error,
+        usize_to_u64,
     },
     value::{HeapReference, SlotValue, StoredValue},
 };
@@ -92,6 +96,7 @@ mod async_generator;
 mod bigint_intrinsics;
 mod bindings;
 mod conversions;
+mod data_view;
 mod date;
 mod define_property_intrinsics;
 mod dynamic;
@@ -141,13 +146,13 @@ use {
     aggregate_error::*, array_buffer::*, array_callbacks::*, array_copiers::*, array_flatten::*,
     array_from_async::*, array_join::*, array_mutators::*, array_search::*, array_sort::*,
     array_statics::*, async_from_sync::*, async_generator::*, bigint_intrinsics::*, bindings::*,
-    conversions::*, date::*, define_property_intrinsics::*, dynamic::*, error_stack::*, errors::*,
-    exceptions::*, execution::*, for_in::*, from_entries::*, generator::*, group_by::*,
-    iterators::*, json_parse::*, json_stringify::*, locale_string::*, map::*, math::*,
-    math_sum_precise::*, native::*, object_intrinsics::*, promise::*, promise_combinators::*,
-    properties::*, proxy::*, reflect::*, regexp::*, set::*, stack::*, string_methods::*,
-    string_raw::*, string_replace::*, string_split::*, temporal::*, uri::*, weak_collections::*,
-    weak_references::*,
+    conversions::*, data_view::*, date::*, define_property_intrinsics::*, dynamic::*,
+    error_stack::*, errors::*, exceptions::*, execution::*, for_in::*, from_entries::*,
+    generator::*, group_by::*, iterators::*, json_parse::*, json_stringify::*, locale_string::*,
+    map::*, math::*, math_sum_precise::*, native::*, object_intrinsics::*, promise::*,
+    promise_combinators::*, properties::*, proxy::*, reflect::*, regexp::*, set::*, stack::*,
+    string_methods::*, string_raw::*, string_replace::*, string_split::*, temporal::*, uri::*,
+    weak_collections::*, weak_references::*,
 };
 
 /// Inclusive per-call interpreter limits.
@@ -740,6 +745,7 @@ enum NativeContinuation {
     OperatorPrimitive(OperatorPrimitiveContinuation),
     ArrayBufferConstructor(Box<ArrayBufferConstructorContinuation>),
     ArrayBufferSlice(Box<ArrayBufferSliceContinuation>),
+    DataViewConstructor(Box<DataViewConstructorState>),
     DateToJson(DateToJsonContinuation),
     TemporalDurationBag(Box<TemporalDurationBagContinuation>),
     TemporalDurationCompareOptions(TemporalDurationCompareOptionsContinuation),
@@ -847,6 +853,7 @@ impl NativeContinuation {
                 ArrayBufferConstructorContinuation::retained_values()
             }
             Self::ArrayBufferSlice(_) => ArrayBufferSliceContinuation::retained_values(),
+            Self::DataViewConstructor(_) => DataViewConstructorState::retained_values(),
             Self::DateToJson(_) => DateToJsonContinuation::retained_values(),
             Self::TemporalDurationBag(state) => state.retained_values(),
             Self::TemporalDurationCompareOptions(_) => {
@@ -1940,6 +1947,16 @@ enum OperatorPrimitiveTarget {
         new_target: FunctionId,
         byte_length: usize,
     },
+    /// `%DataView%`'s `byteOffset`, after the backing-buffer brand check.
+    DataViewConstructorOffset(Box<DataViewConstructorOffsetState>),
+    /// `%DataView%`'s optional explicit `byteLength`, after `ToIndex`.
+    DataViewConstructorByteLength(Box<DataViewConstructorByteLengthState>),
+    /// `DataView.prototype.get*` after `ToIndex(byteOffset)`.
+    DataViewGetIndex(Box<DataViewGetState>),
+    /// `DataView.prototype.set*` after `ToIndex(byteOffset)`.
+    DataViewSetOffset(Box<DataViewSetOffsetState>),
+    /// `DataView.prototype.set*` after `ToNumber` or `ToBigInt(value)`.
+    DataViewSetValue(Box<DataViewSetValueState>),
     /// `ArrayBuffer.prototype.resize`'s new length, after the brand checks.
     ArrayBufferResize {
         object: ObjectId,
@@ -2172,6 +2189,13 @@ impl OperatorPrimitiveTarget {
             Self::ArrayBufferSliceStart(_) | Self::ArrayBufferSliceEnd(_) => {
                 ArrayBufferSliceContinuation::retained_values()
             }
+            Self::DataViewConstructorOffset(_) => DataViewConstructorOffsetState::retained_values(),
+            Self::DataViewConstructorByteLength(_) => {
+                DataViewConstructorByteLengthState::retained_values()
+            }
+            Self::DataViewGetIndex(_) => DataViewGetState::retained_values(),
+            Self::DataViewSetOffset(_) => DataViewSetOffsetState::retained_values(),
+            Self::DataViewSetValue(_) => DataViewSetValueState::retained_values(),
             Self::TemporalDurationConstructor(state) => state.retained_values(),
             Self::TemporalDurationBag(state) => state.retained_values(),
             Self::TemporalDurationRoundLargestUnit(_state)
@@ -2503,6 +2527,11 @@ fn trace_operator_primitive_target_roots(
         OperatorPrimitiveTarget::ArrayBufferConstructorLength(state) => state.trace_roots(mark),
         OperatorPrimitiveTarget::ArrayBufferSliceStart(state)
         | OperatorPrimitiveTarget::ArrayBufferSliceEnd(state) => state.trace_roots(mark),
+        OperatorPrimitiveTarget::DataViewConstructorOffset(state) => state.trace_roots(mark),
+        OperatorPrimitiveTarget::DataViewConstructorByteLength(state) => state.trace_roots(mark),
+        OperatorPrimitiveTarget::DataViewGetIndex(state) => state.trace_roots(mark),
+        OperatorPrimitiveTarget::DataViewSetOffset(state) => state.trace_roots(mark),
+        OperatorPrimitiveTarget::DataViewSetValue(state) => state.trace_roots(mark),
         OperatorPrimitiveTarget::ErrorConstructorMessage(state) => state.trace_roots(mark),
         OperatorPrimitiveTarget::ErrorToStringName(state)
         | OperatorPrimitiveTarget::ErrorToStringMessage(state) => state.trace_roots(mark),
@@ -2647,6 +2676,7 @@ fn trace_native_continuation_roots(
         }
         NativeContinuation::ArrayBufferConstructor(state) => state.trace_roots(mark),
         NativeContinuation::ArrayBufferSlice(state) => state.trace_roots(mark),
+        NativeContinuation::DataViewConstructor(state) => state.trace_roots(mark),
         NativeContinuation::DateToJson(state) => state.trace_roots(mark),
         NativeContinuation::TemporalDurationBag(state) => state.trace_roots(mark),
         NativeContinuation::TemporalDurationCompareOptions(state) => state.trace_roots(mark),

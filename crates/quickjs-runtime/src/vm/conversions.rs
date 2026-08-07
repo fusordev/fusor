@@ -1833,6 +1833,27 @@ fn finish_operator_primitive_target(
             origin,
             execution_budget,
         ),
+        OperatorPrimitiveTarget::DataViewConstructorOffset(state) => {
+            finish_data_view_constructor_offset(runtime, *state, value, return_to, execution_budget)
+        }
+        OperatorPrimitiveTarget::DataViewConstructorByteLength(state) => {
+            finish_data_view_constructor_byte_length(
+                runtime,
+                *state,
+                value,
+                return_to,
+                execution_budget,
+            )
+        }
+        OperatorPrimitiveTarget::DataViewGetIndex(state) => {
+            finish_data_view_get_index(runtime, state.as_ref(), value)
+        }
+        OperatorPrimitiveTarget::DataViewSetOffset(state) => {
+            finish_data_view_set_offset(runtime, *state, value, return_to, execution_budget)
+        }
+        OperatorPrimitiveTarget::DataViewSetValue(state) => {
+            finish_data_view_set_value(runtime, state.as_ref(), value)
+        }
         OperatorPrimitiveTarget::ArrayBufferResize { object } => {
             finish_array_buffer_resize(runtime, object, value, realm, origin)
         }

@@ -47,16 +47,17 @@ use crate::{
     ids::{BindingCellId, FunctionId, InstalledCodeId, ObjectId, RealmGlobalBindingId, RealmId},
     interrupt::InterruptState,
     object::{
-        ArrayBufferState, ArrayIterator, ArrayIteratorKind, ArrayState, BoxedPrimitive, DateState,
-        ForInIterator, ForInSnapshot, HeapObject, KeyPhases, ObjectRecord, OwnProperty,
-        PromiseCapability, PromiseReaction, PropertyDeletion, ProxyState, RegExpState,
-        RegExpStringIterator, ShapeInterner, StringIterator,
+        ArrayBufferState, ArrayIterator, ArrayIteratorKind, ArrayState, BoxedPrimitive,
+        DataViewState, DateState, ForInIterator, ForInSnapshot, HeapObject, KeyPhases,
+        ObjectRecord, OwnProperty, PromiseCapability, PromiseReaction, PropertyDeletion,
+        ProxyState, RegExpState, RegExpStringIterator, ShapeInterner, StringIterator,
     },
     value::{HeapReference, PrimitiveValue, ReleaseMailbox, RootTarget, SlotValue, StoredValue},
 };
 
 mod array_buffers;
 mod async_functions;
+mod data_views;
 mod dates;
 mod iterators;
 mod limits;
@@ -100,6 +101,7 @@ enum RealmIntrinsics {
         string: StringIntrinsics,
         array: ArrayIntrinsics,
         array_buffer: ArrayBufferIntrinsics,
+        data_view: DataViewIntrinsics,
         date: DateIntrinsics,
         temporal: TemporalIntrinsics,
         map: MapIntrinsics,
@@ -255,6 +257,12 @@ struct ArrayIntrinsics {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 struct ArrayBufferIntrinsics {
+    prototype: ObjectId,
+    constructor: FunctionId,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct DataViewIntrinsics {
     prototype: ObjectId,
     constructor: FunctionId,
 }
@@ -1182,6 +1190,8 @@ pub(crate) enum NativeFunctionKind {
     ArrayBufferIsView,
     ArrayBufferSpeciesGetter,
     ArrayBufferPrototype(ArrayBufferPrototypeMethod),
+    DataViewConstructor,
+    DataViewPrototype(DataViewPrototypeMethod),
     DateConstructor,
     DateStatic(DateStaticMethod),
     DatePrototype(DatePrototypeMethod),
@@ -1549,6 +1559,201 @@ pub(crate) enum ArrayBufferPrototypeMethod {
     Slice,
     Transfer,
     TransferToFixedLength,
+}
+
+/// Element representations shared by `DataView` methods and the later
+/// typed-array indexed exotic implementation.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum DataViewElementType {
+    BigInt64,
+    BigUint64,
+    Float16,
+    Float32,
+    Float64,
+    Int8,
+    Int16,
+    Int32,
+    Uint8,
+    Uint16,
+    Uint32,
+}
+
+impl DataViewElementType {
+    #[must_use]
+    pub(crate) const fn byte_width(self) -> usize {
+        match self {
+            Self::BigInt64 | Self::BigUint64 | Self::Float64 => 8,
+            Self::Float32 | Self::Int32 | Self::Uint32 => 4,
+            Self::Float16 | Self::Int16 | Self::Uint16 => 2,
+            Self::Int8 | Self::Uint8 => 1,
+        }
+    }
+
+    #[must_use]
+    pub(crate) const fn is_bigint(self) -> bool {
+        matches!(self, Self::BigInt64 | Self::BigUint64)
+    }
+}
+
+/// Methods and accessors published on `%DataView.prototype%`.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum DataViewPrototypeMethod {
+    Buffer,
+    ByteLength,
+    ByteOffset,
+    GetBigInt64,
+    GetBigUint64,
+    GetFloat16,
+    GetFloat32,
+    GetFloat64,
+    GetInt8,
+    GetInt16,
+    GetInt32,
+    GetUint8,
+    GetUint16,
+    GetUint32,
+    SetBigInt64,
+    SetBigUint64,
+    SetFloat16,
+    SetFloat32,
+    SetFloat64,
+    SetInt8,
+    SetInt16,
+    SetInt32,
+    SetUint8,
+    SetUint16,
+    SetUint32,
+}
+
+impl DataViewPrototypeMethod {
+    pub(crate) const ALL: [Self; 25] = [
+        Self::Buffer,
+        Self::ByteLength,
+        Self::ByteOffset,
+        Self::GetBigInt64,
+        Self::GetBigUint64,
+        Self::GetFloat16,
+        Self::GetFloat32,
+        Self::GetFloat64,
+        Self::GetInt8,
+        Self::GetInt16,
+        Self::GetInt32,
+        Self::GetUint8,
+        Self::GetUint16,
+        Self::GetUint32,
+        Self::SetBigInt64,
+        Self::SetBigUint64,
+        Self::SetFloat16,
+        Self::SetFloat32,
+        Self::SetFloat64,
+        Self::SetInt8,
+        Self::SetInt16,
+        Self::SetInt32,
+        Self::SetUint8,
+        Self::SetUint16,
+        Self::SetUint32,
+    ];
+
+    #[must_use]
+    pub(crate) const fn name(self) -> &'static str {
+        match self {
+            Self::Buffer => "buffer",
+            Self::ByteLength => "byteLength",
+            Self::ByteOffset => "byteOffset",
+            Self::GetBigInt64 => "getBigInt64",
+            Self::GetBigUint64 => "getBigUint64",
+            Self::GetFloat16 => "getFloat16",
+            Self::GetFloat32 => "getFloat32",
+            Self::GetFloat64 => "getFloat64",
+            Self::GetInt8 => "getInt8",
+            Self::GetInt16 => "getInt16",
+            Self::GetInt32 => "getInt32",
+            Self::GetUint8 => "getUint8",
+            Self::GetUint16 => "getUint16",
+            Self::GetUint32 => "getUint32",
+            Self::SetBigInt64 => "setBigInt64",
+            Self::SetBigUint64 => "setBigUint64",
+            Self::SetFloat16 => "setFloat16",
+            Self::SetFloat32 => "setFloat32",
+            Self::SetFloat64 => "setFloat64",
+            Self::SetInt8 => "setInt8",
+            Self::SetInt16 => "setInt16",
+            Self::SetInt32 => "setInt32",
+            Self::SetUint8 => "setUint8",
+            Self::SetUint16 => "setUint16",
+            Self::SetUint32 => "setUint32",
+        }
+    }
+
+    #[must_use]
+    pub(crate) const fn length(self) -> i32 {
+        match self {
+            Self::Buffer | Self::ByteLength | Self::ByteOffset => 0,
+            Self::GetBigInt64
+            | Self::GetBigUint64
+            | Self::GetFloat16
+            | Self::GetFloat32
+            | Self::GetFloat64
+            | Self::GetInt8
+            | Self::GetInt16
+            | Self::GetInt32
+            | Self::GetUint8
+            | Self::GetUint16
+            | Self::GetUint32 => 1,
+            Self::SetBigInt64
+            | Self::SetBigUint64
+            | Self::SetFloat16
+            | Self::SetFloat32
+            | Self::SetFloat64
+            | Self::SetInt8
+            | Self::SetInt16
+            | Self::SetInt32
+            | Self::SetUint8
+            | Self::SetUint16
+            | Self::SetUint32 => 2,
+        }
+    }
+
+    #[must_use]
+    pub(crate) const fn is_accessor(self) -> bool {
+        matches!(self, Self::Buffer | Self::ByteLength | Self::ByteOffset)
+    }
+
+    #[must_use]
+    pub(crate) const fn is_setter(self) -> bool {
+        matches!(
+            self,
+            Self::SetBigInt64
+                | Self::SetBigUint64
+                | Self::SetFloat16
+                | Self::SetFloat32
+                | Self::SetFloat64
+                | Self::SetInt8
+                | Self::SetInt16
+                | Self::SetInt32
+                | Self::SetUint8
+                | Self::SetUint16
+                | Self::SetUint32
+        )
+    }
+
+    #[must_use]
+    pub(crate) const fn element_type(self) -> Option<DataViewElementType> {
+        match self {
+            Self::Buffer | Self::ByteLength | Self::ByteOffset => None,
+            Self::GetBigInt64 | Self::SetBigInt64 => Some(DataViewElementType::BigInt64),
+            Self::GetBigUint64 | Self::SetBigUint64 => Some(DataViewElementType::BigUint64),
+            Self::GetFloat16 | Self::SetFloat16 => Some(DataViewElementType::Float16),
+            Self::GetFloat32 | Self::SetFloat32 => Some(DataViewElementType::Float32),
+            Self::GetFloat64 | Self::SetFloat64 => Some(DataViewElementType::Float64),
+            Self::GetInt8 | Self::SetInt8 => Some(DataViewElementType::Int8),
+            Self::GetInt16 | Self::SetInt16 => Some(DataViewElementType::Int16),
+            Self::GetInt32 | Self::SetInt32 => Some(DataViewElementType::Int32),
+            Self::GetUint8 | Self::SetUint8 => Some(DataViewElementType::Uint8),
+            Self::GetUint16 | Self::SetUint16 => Some(DataViewElementType::Uint16),
+            Self::GetUint32 | Self::SetUint32 => Some(DataViewElementType::Uint32),
+        }
+    }
 }
 
 impl ArrayBufferPrototypeMethod {
@@ -2311,6 +2516,7 @@ impl NativeFunctionKind {
                 | Self::StringConstructor
                 | Self::ArrayConstructor
                 | Self::ArrayBufferConstructor
+                | Self::DataViewConstructor
                 | Self::DateConstructor
                 | Self::TemporalDurationConstructor
                 | Self::TemporalInstantConstructor

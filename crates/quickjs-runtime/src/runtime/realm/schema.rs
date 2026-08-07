@@ -12,7 +12,7 @@ use super::{
     PropertyLayout, ReflectMethod, SetMethod, StringMethod, UriFunction,
 };
 use crate::runtime::{
-    ArrayBufferPrototypeMethod, DatePrototypeMethod, DateStaticMethod,
+    ArrayBufferPrototypeMethod, DataViewPrototypeMethod, DatePrototypeMethod, DateStaticMethod,
     TemporalDurationPrototypeMethod, TemporalDurationStaticMethod, TemporalInstantPrototypeMethod,
     TemporalInstantStaticMethod,
 };
@@ -32,6 +32,7 @@ pub(in crate::runtime) enum IntrinsicObjectId {
     StringPrototype,
     ArrayPrototype,
     ArrayBufferPrototype,
+    DataViewPrototype,
     DatePrototype,
     Temporal,
     TemporalDurationPrototype,
@@ -64,7 +65,7 @@ pub(in crate::runtime) enum IntrinsicObjectId {
 }
 
 impl IntrinsicObjectId {
-    pub(in crate::runtime) const ALL: [Self; 46] = [
+    pub(in crate::runtime) const ALL: [Self; 47] = [
         Self::ObjectPrototype,
         Self::GlobalObject,
         Self::ErrorPrototype(ErrorIntrinsicKind::Error),
@@ -82,6 +83,7 @@ impl IntrinsicObjectId {
         Self::StringPrototype,
         Self::ArrayPrototype,
         Self::ArrayBufferPrototype,
+        Self::DataViewPrototype,
         Self::DatePrototype,
         Self::Temporal,
         Self::TemporalDurationPrototype,
@@ -158,6 +160,7 @@ pub(in crate::runtime) enum RealmNameId {
     ArrayFromAsync,
     ArrayBufferIsView,
     ArrayBufferPrototype(ArrayBufferPrototypeMethod),
+    DataViewPrototype(DataViewPrototypeMethod),
     DateStatic(DateStaticMethod),
     DatePrototype(DatePrototypeMethod),
     Temporal,

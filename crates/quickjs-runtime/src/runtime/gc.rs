@@ -341,6 +341,7 @@ impl Runtime {
                 string,
                 array,
                 array_buffer,
+                data_view,
                 map,
                 set,
                 weak_map,
@@ -487,6 +488,17 @@ impl Runtime {
                 for reference in [
                     HeapReference::Object(array_buffer.prototype),
                     HeapReference::Function(array_buffer.constructor),
+                ] {
+                    mark_heap_reference(
+                        reference,
+                        &mut marked_functions,
+                        &mut marked_objects,
+                        &mut work,
+                    );
+                }
+                for reference in [
+                    HeapReference::Object(data_view.prototype),
+                    HeapReference::Function(data_view.constructor),
                 ] {
                     mark_heap_reference(
                         reference,
@@ -1053,6 +1065,14 @@ impl Runtime {
                             if let Some(current) = object.array_iterator_current() {
                                 mark_heap_reference(
                                     current,
+                                    &mut marked_functions,
+                                    &mut marked_objects,
+                                    &mut work,
+                                );
+                            }
+                            if let Some(view) = object.data_view_state() {
+                                mark_heap_reference(
+                                    HeapReference::Object(view.buffer()),
                                     &mut marked_functions,
                                     &mut marked_objects,
                                     &mut work,

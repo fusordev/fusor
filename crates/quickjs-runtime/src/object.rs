@@ -2137,6 +2137,55 @@ pub(crate) struct ArrayBufferState {
     max_byte_length: Option<usize>,
 }
 
+/// The specification-level slots of an ECMAScript `DataView` object.
+///
+/// The `Auto` form represents a length-tracking view over a resizable backing
+/// buffer.  It deliberately records the referenced buffer by stable arena ID,
+/// rather than sharing or aliasing its byte storage: all byte access remains
+/// mediated by the owner `ArrayBuffer` state.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct DataViewState {
+    buffer: ObjectId,
+    byte_offset: usize,
+    byte_length: DataViewByteLength,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum DataViewByteLength {
+    Fixed(usize),
+    Auto,
+}
+
+impl DataViewState {
+    #[must_use]
+    pub(crate) const fn new(
+        buffer: ObjectId,
+        byte_offset: usize,
+        byte_length: DataViewByteLength,
+    ) -> Self {
+        Self {
+            buffer,
+            byte_offset,
+            byte_length,
+        }
+    }
+
+    #[must_use]
+    pub(crate) const fn buffer(self) -> ObjectId {
+        self.buffer
+    }
+
+    #[must_use]
+    pub(crate) const fn byte_offset(self) -> usize {
+        self.byte_offset
+    }
+
+    #[must_use]
+    pub(crate) const fn byte_length(self) -> DataViewByteLength {
+        self.byte_length
+    }
+}
+
 impl ArrayBufferState {
     pub(crate) const fn new(data: Vec<u8>, max_byte_length: Option<usize>) -> Self {
         Self {
@@ -2211,6 +2260,8 @@ pub(crate) enum HeapObjectKind {
     Date(DateState),
     /// An ECMAScript `ArrayBuffer` object with its byte-data block slots.
     ArrayBuffer(ArrayBufferState),
+    /// An ECMAScript `DataView` object with its view and buffer slots.
+    DataView(DataViewState),
     /// An ECMAScript `Temporal.Instant` with an `[[EpochNanoseconds]]` slot.
     TemporalInstant(Instant),
     /// An ECMAScript `Temporal.Duration` with its ten duration fields.
@@ -2353,6 +2404,7 @@ impl HeapObjectKind {
             | Self::RegExp(_)
             | Self::Date(_)
             | Self::ArrayBuffer(_)
+            | Self::DataView(_)
             | Self::TemporalInstant(_)
             | Self::TemporalDuration(_)
             | Self::Map(_)
@@ -2384,6 +2436,7 @@ impl HeapObjectKind {
             | Self::RegExp(_)
             | Self::Date(_)
             | Self::ArrayBuffer(_)
+            | Self::DataView(_)
             | Self::TemporalInstant(_)
             | Self::TemporalDuration(_)
             | Self::Map(_)
@@ -2414,6 +2467,7 @@ impl HeapObjectKind {
             | Self::RegExp(_)
             | Self::Date(_)
             | Self::ArrayBuffer(_)
+            | Self::DataView(_)
             | Self::TemporalInstant(_)
             | Self::TemporalDuration(_)
             | Self::Map(_)
@@ -2444,6 +2498,7 @@ impl HeapObjectKind {
             | Self::RegExp(_)
             | Self::Date(_)
             | Self::ArrayBuffer(_)
+            | Self::DataView(_)
             | Self::TemporalInstant(_)
             | Self::TemporalDuration(_)
             | Self::Map(_)
@@ -2474,6 +2529,7 @@ impl HeapObjectKind {
             | Self::RegExp(_)
             | Self::Date(_)
             | Self::ArrayBuffer(_)
+            | Self::DataView(_)
             | Self::TemporalInstant(_)
             | Self::TemporalDuration(_)
             | Self::Map(_)
@@ -2504,6 +2560,7 @@ impl HeapObjectKind {
             | Self::RegExp(_)
             | Self::Date(_)
             | Self::ArrayBuffer(_)
+            | Self::DataView(_)
             | Self::TemporalInstant(_)
             | Self::TemporalDuration(_)
             | Self::Map(_)
@@ -2534,6 +2591,7 @@ impl HeapObjectKind {
             | Self::RegExp(_)
             | Self::Date(_)
             | Self::ArrayBuffer(_)
+            | Self::DataView(_)
             | Self::TemporalInstant(_)
             | Self::TemporalDuration(_)
             | Self::Map(_)
@@ -2564,6 +2622,7 @@ impl HeapObjectKind {
             | Self::RegExp(_)
             | Self::Date(_)
             | Self::ArrayBuffer(_)
+            | Self::DataView(_)
             | Self::TemporalInstant(_)
             | Self::TemporalDuration(_)
             | Self::Map(_)
@@ -2594,6 +2653,7 @@ impl HeapObjectKind {
             | Self::RegExp(_)
             | Self::Date(_)
             | Self::ArrayBuffer(_)
+            | Self::DataView(_)
             | Self::TemporalInstant(_)
             | Self::TemporalDuration(_)
             | Self::Map(_)
@@ -2908,6 +2968,15 @@ impl HeapObject {
     }
 
     #[must_use]
+    pub(crate) const fn data_view(record: ObjectRecord, state: DataViewState) -> Self {
+        Self {
+            kind: HeapObjectKind::DataView(state),
+            record,
+            public_roots: 0,
+        }
+    }
+
+    #[must_use]
     pub(crate) const fn temporal_instant(record: ObjectRecord, instant: Instant) -> Self {
         Self {
             kind: HeapObjectKind::TemporalInstant(instant),
@@ -3083,6 +3152,13 @@ impl HeapObject {
         }
     }
 
+    pub(crate) const fn data_view_state(&self) -> Option<&DataViewState> {
+        match &self.kind {
+            HeapObjectKind::DataView(state) => Some(state),
+            _ => None,
+        }
+    }
+
     pub(crate) const fn temporal_instant_value(&self) -> Option<Instant> {
         match &self.kind {
             HeapObjectKind::TemporalInstant(instant) => Some(*instant),
@@ -3119,6 +3195,7 @@ impl HeapObject {
             | HeapObjectKind::RegExp(_)
             | HeapObjectKind::Date(_)
             | HeapObjectKind::ArrayBuffer(_)
+            | HeapObjectKind::DataView(_)
             | HeapObjectKind::TemporalInstant(_)
             | HeapObjectKind::TemporalDuration(_)
             | HeapObjectKind::Map(_)
@@ -3149,6 +3226,7 @@ impl HeapObject {
             | HeapObjectKind::RegExp(_)
             | HeapObjectKind::Date(_)
             | HeapObjectKind::ArrayBuffer(_)
+            | HeapObjectKind::DataView(_)
             | HeapObjectKind::TemporalInstant(_)
             | HeapObjectKind::TemporalDuration(_)
             | HeapObjectKind::Map(_)
@@ -3181,6 +3259,7 @@ impl HeapObject {
             | HeapObjectKind::RegExp(_)
             | HeapObjectKind::Date(_)
             | HeapObjectKind::ArrayBuffer(_)
+            | HeapObjectKind::DataView(_)
             | HeapObjectKind::TemporalInstant(_)
             | HeapObjectKind::TemporalDuration(_)
             | HeapObjectKind::Map(_)

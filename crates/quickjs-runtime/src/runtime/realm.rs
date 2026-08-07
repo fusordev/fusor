@@ -38,18 +38,19 @@ use super::{
     Arc, Arena, ArrayBufferIntrinsics, ArrayCallback, ArrayCopier, ArrayFlatten, ArrayIntrinsics,
     ArrayMutator, ArrayReduction, ArraySearch, ArraySort, ArrayState, ArrayStatic,
     AsyncFunctionIntrinsics, AsyncGeneratorIntrinsics, AtomError, AtomTable, BigIntIntrinsics,
-    BooleanIntrinsics, Context, DateIntrinsics, ErrorIntrinsic, ErrorIntrinsicKind,
-    ErrorIntrinsics, FinalizationRegistryIntrinsics, FunctionId, FunctionImplementation,
-    GeneratorIntrinsics, GlobalNumericFunction, HandleError, HandleKind, HashMap, HeapFunction,
-    HeapObject, HeapReference, InterruptState, IteratorIntrinsics, JsNumber, JsString,
-    LocaleStringMethod, MapIntrinsics, MapMethod, MathMethod, NativeFunction, NativeFunctionKind,
-    NumberFormat, NumberIntrinsics, NumberPredicate, ObjectId, ObjectRecord, PredefinedAtom,
-    PromiseIntrinsics, PromiseRejectionState, PromiseStatic, PropertyKey, PropertyLayout, Rc,
-    Realm, RealmHandle, RealmId, RealmIntrinsics, RealmState, RefCell, ReflectMethod,
-    RegExpIntrinsics, ReleaseMailbox, Runtime, RuntimeError, RuntimeIdentity, RuntimeLimits,
-    RuntimeResource, SetIntrinsics, SetMethod, ShapeInterner, StoredValue, StringIntrinsics,
-    StringMethod, SymbolIntrinsics, TemporalIntrinsics, UriFunction, VecDeque, WeakMapIntrinsics,
-    WeakRefIntrinsics, WeakSetIntrinsics, check_limit, predefined_string, usize_to_u64,
+    BooleanIntrinsics, Context, DataViewIntrinsics, DateIntrinsics, ErrorIntrinsic,
+    ErrorIntrinsicKind, ErrorIntrinsics, FinalizationRegistryIntrinsics, FunctionId,
+    FunctionImplementation, GeneratorIntrinsics, GlobalNumericFunction, HandleError, HandleKind,
+    HashMap, HeapFunction, HeapObject, HeapReference, InterruptState, IteratorIntrinsics, JsNumber,
+    JsString, LocaleStringMethod, MapIntrinsics, MapMethod, MathMethod, NativeFunction,
+    NativeFunctionKind, NumberFormat, NumberIntrinsics, NumberPredicate, ObjectId, ObjectRecord,
+    PredefinedAtom, PromiseIntrinsics, PromiseRejectionState, PromiseStatic, PropertyKey,
+    PropertyLayout, Rc, Realm, RealmHandle, RealmId, RealmIntrinsics, RealmState, RefCell,
+    ReflectMethod, RegExpIntrinsics, ReleaseMailbox, Runtime, RuntimeError, RuntimeIdentity,
+    RuntimeLimits, RuntimeResource, SetIntrinsics, SetMethod, ShapeInterner, StoredValue,
+    StringIntrinsics, StringMethod, SymbolIntrinsics, TemporalIntrinsics, UriFunction, VecDeque,
+    WeakMapIntrinsics, WeakRefIntrinsics, WeakSetIntrinsics, check_limit, predefined_string,
+    usize_to_u64,
 };
 
 use allocation::IntrinsicRecords;
@@ -663,6 +664,10 @@ impl RealmBuildTransaction<'_> {
             array_buffer: ArrayBufferIntrinsics {
                 prototype: object(IntrinsicObjectId::ArrayBufferPrototype),
                 constructor: function(NativeFunctionKind::ArrayBufferConstructor),
+            },
+            data_view: DataViewIntrinsics {
+                prototype: object(IntrinsicObjectId::DataViewPrototype),
+                constructor: function(NativeFunctionKind::DataViewConstructor),
             },
             date: DateIntrinsics {
                 prototype: object(IntrinsicObjectId::DatePrototype),

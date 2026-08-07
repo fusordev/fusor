@@ -327,11 +327,23 @@ pub(super) fn finish_array_buffer_constructor_wrapper(
     Ok(NativeDispatch::Immediate(StoredValue::Object(object)))
 }
 
-pub(super) fn array_buffer_is_view(mut arguments: CallArguments) -> NativeDispatch {
-    let _ = arguments.take_first_or_undefined();
-    // No view exotic has been allocated before DataView and typed-array
-    // support arrives.  Returning false here is the exact current predicate.
-    NativeDispatch::Immediate(StoredValue::Boolean(false))
+pub(super) fn array_buffer_is_view(
+    runtime: &Runtime,
+    mut arguments: CallArguments,
+) -> Result<NativeDispatch, NativeFailure> {
+    let value = arguments.take_first_or_undefined();
+    let is_view = match value {
+        StoredValue::Object(object) => runtime.data_view_state(object)?.is_some(),
+        StoredValue::Undefined
+        | StoredValue::Null
+        | StoredValue::Boolean(_)
+        | StoredValue::Number(_)
+        | StoredValue::BigInt(_)
+        | StoredValue::String(_)
+        | StoredValue::Symbol(_)
+        | StoredValue::Function(_) => false,
+    };
+    Ok(NativeDispatch::Immediate(StoredValue::Boolean(is_view)))
 }
 
 #[allow(
