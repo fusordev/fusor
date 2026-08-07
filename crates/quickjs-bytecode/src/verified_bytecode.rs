@@ -2365,7 +2365,7 @@ fn verify_function_metadata(
         &metadata.closures,
     )?;
     verify_source(id, flow, metadata)?;
-    verify_supported_opcodes(id, flow, metadata, authority_kind)?;
+    verify_supported_opcodes(id, flow, metadata)?;
     let mut internal_stack = verify_internal_operand_stack(id, function, limits, usage)?;
     let realm_global_initializer_prefix = verify_realm_global_function_initializers(
         id,
@@ -6931,7 +6931,6 @@ fn verify_supported_opcodes(
     id: FunctionTemplateId,
     flow: &VerifiedControlFlow,
     metadata: &UnverifiedFunctionMetadata,
-    authority_kind: CompilerExecutableKind,
 ) -> Result<(), BytecodeVerificationError> {
     let executable_kind = metadata.executable_kind;
     let mut arguments_object_count = 0_u8;
@@ -6955,15 +6954,6 @@ fn verify_supported_opcodes(
         CompilerExecutableKind::AsyncGeneratorFunction
             | CompilerExecutableKind::AsyncGeneratorMethod
     );
-    let method = matches!(
-        executable_kind,
-        CompilerExecutableKind::OrdinaryMethod
-            | CompilerExecutableKind::ClassConstructor
-            | CompilerExecutableKind::GeneratorMethod
-            | CompilerExecutableKind::AsyncMethod
-            | CompilerExecutableKind::AsyncGeneratorMethod
-    );
-    let lexical_this = executable_kind == CompilerExecutableKind::OrdinaryArrow;
     let static_field_super = metadata
         .variables
         .iter()
@@ -7046,11 +7036,6 @@ fn verify_supported_opcodes(
             ) && !generator)
             || (matches!(opcode, FinalOpcode::Return | FinalOpcode::ReturnUndef)
                 && (generator || asynchronous))
-            || (opcode == FinalOpcode::PushThis
-                && !flow.function_header().mode().is_strict()
-                && !method
-                && !lexical_this
-                && !is_script_authority_kind(authority_kind))
             || (opcode == FinalOpcode::CheckCtorReturn
                 && !(executable_kind == CompilerExecutableKind::ClassConstructor
                     && flow

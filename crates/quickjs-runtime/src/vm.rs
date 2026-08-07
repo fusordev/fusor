@@ -3446,10 +3446,9 @@ fn normalize_receiver(
         StoredValue::String(value) => runtime
             .allocate_boxed_string(realm, value)
             .map(StoredValue::Object),
-        StoredValue::Symbol(_) => Err(EngineFault::RuntimeInvariant {
-            message: "primitive sloppy receiver reached the pre-wrapper object profile",
-        }
-        .into()),
+        StoredValue::Symbol(value) => runtime
+            .allocate_boxed_symbol(realm, value)
+            .map(StoredValue::Object),
     }
 }
 

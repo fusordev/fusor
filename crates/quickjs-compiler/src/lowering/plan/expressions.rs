@@ -13,7 +13,7 @@ use super::super::{
     StatementCompletion, StatementControlStack, StatementPlanningState, StatementWork,
     StaticMemberExpression, StoragePlacement, UnaryExpression, UnaryOperator,
     UnsupportedLeafFeature, UpdateExpression, UpdateOperator, compiled_static_property_key,
-    object_method_or_accessor_span, plan_put_slot, unsupported,
+    plan_put_slot, unsupported,
 };
 use super::abrupt::{AbruptMarker, AbruptMarkerKind};
 use super::calls::MemberCallee;
@@ -200,7 +200,7 @@ pub(in crate::lowering) const fn binary_opcode(operator: BinaryOperator) -> Fina
     }
 }
 
-const fn super_member_update_opcode(update: &UpdateExpression<'_>) -> FinalOpcode {
+const fn update_opcode(update: &UpdateExpression<'_>) -> FinalOpcode {
     match (update.operator, update.prefix) {
         (UpdateOperator::Increment, true) => FinalOpcode::Inc,
         (UpdateOperator::Decrement, true) => FinalOpcode::Dec,
@@ -1087,12 +1087,7 @@ impl<'compiler, 'unit, 'arena, 'scope> ExpressionPlanner<'compiler, 'unit, 'aren
             update.span,
         )));
         work.push(ExpressionWork::Emit(PlannedInstruction::new(
-            match (update.operator, update.prefix) {
-                (UpdateOperator::Increment, true) => FinalOpcode::Inc,
-                (UpdateOperator::Decrement, true) => FinalOpcode::Dec,
-                (UpdateOperator::Increment, false) => FinalOpcode::PostInc,
-                (UpdateOperator::Decrement, false) => FinalOpcode::PostDec,
-            },
+            update_opcode(update),
             Operands::None,
             update.span,
         )));
@@ -3295,23 +3290,6 @@ impl<'compiler, 'unit, 'arena, 'scope> ExpressionPlanner<'compiler, 'unit, 'aren
         if let Some(receiver) = self.static_class_receiver_read(span, layout)? {
             return Ok(receiver);
         }
-        let executable = self.planned.plan.executable(layout.executable).ok_or(
-            LeafCompilationError::InvalidExecutable {
-                executable: layout.executable,
-            },
-        )?;
-        let is_script_authority = crate::is_supported_script_root_goal(self.unit.goal());
-        let is_object_method = self
-            .planned
-            .identities
-            .node_by_executable
-            .get(layout.executable.index())
-            .copied()
-            .and_then(|node_id| object_method_or_accessor_span(self.unit, node_id))
-            .is_some();
-        if !executable.is_strict() && !is_script_authority && !is_object_method {
-            return unsupported(UnsupportedLeafFeature::UnsupportedExpression, span);
-        }
         Ok(PlannedInstruction::new(
             FinalOpcode::PushThis,
             Operands::None,
@@ -4581,7 +4559,7 @@ impl<'compiler, 'unit, 'arena, 'scope> ExpressionPlanner<'compiler, 'unit, 'aren
             update.span,
         )));
         work.push(ExpressionWork::Emit(PlannedInstruction::new(
-            super_member_update_opcode(update),
+            update_opcode(update),
             Operands::None,
             update.span,
         )));
@@ -4629,7 +4607,7 @@ impl<'compiler, 'unit, 'arena, 'scope> ExpressionPlanner<'compiler, 'unit, 'aren
             update.span,
         )));
         work.push(ExpressionWork::Emit(PlannedInstruction::new(
-            super_member_update_opcode(update),
+            update_opcode(update),
             Operands::None,
             update.span,
         )));
@@ -5117,6 +5095,109 @@ impl<'compiler, 'unit, 'arena, 'scope> ExpressionPlanner<'compiler, 'unit, 'aren
         )
     }
 
+    fn plan_static_member_update<'expression>(
+        update: &'expression UpdateExpression<'arena>,
+        member: &'expression StaticMemberExpression<'arena>,
+        constants: &CompiledConstantPool,
+        work: &mut Vec<ExpressionWork<'expression, 'arena>>,
+    ) -> Result<(), LeafCompilationError> {
+        if matches!(&member.object, Expression::Super(_)) {
+            return Self::plan_static_super_member_update(update, member, constants, work);
+        }
+        if member.optional {
+            return unsupported(
+                UnsupportedLeafFeature::UnsupportedExpression,
+                update.argument.span(),
+            );
+        }
+        // `dup; get_field` preserves the base for the write. A prefix update
+        // duplicates the new value before `put_field`; a postfix update leaves
+        // `old, new`, and `perm3` changes `[base, old, new]` into
+        // `[old, base, new]` so the original value remains as the completion.
+        work.push(ExpressionWork::Emit(PlannedInstruction::new(
+            FinalOpcode::PutField,
+            Operands::Atom(constants.property_atom_index(member.property.span)?),
+            member.span,
+        )));
+        work.push(ExpressionWork::Emit(PlannedInstruction::new(
+            if update.prefix {
+                FinalOpcode::Insert2
+            } else {
+                FinalOpcode::Perm3
+            },
+            Operands::None,
+            update.span,
+        )));
+        work.push(ExpressionWork::Emit(PlannedInstruction::new(
+            update_opcode(update),
+            Operands::None,
+            update.span,
+        )));
+        work.push(ExpressionWork::Emit(PlannedInstruction::new(
+            FinalOpcode::GetField,
+            Operands::Atom(constants.property_atom_index(member.property.span)?),
+            member.span,
+        )));
+        work.push(ExpressionWork::Emit(PlannedInstruction::new(
+            FinalOpcode::Dup,
+            Operands::None,
+            member.span,
+        )));
+        work.push(ExpressionWork::Visit(&member.object));
+        Ok(())
+    }
+
+    fn plan_computed_member_update<'expression>(
+        update: &'expression UpdateExpression<'arena>,
+        member: &'expression ComputedMemberExpression<'arena>,
+        work: &mut Vec<ExpressionWork<'expression, 'arena>>,
+    ) -> Result<(), LeafCompilationError> {
+        if matches!(&member.object, Expression::Super(_)) {
+            return Self::plan_computed_super_member_update(update, member, work);
+        }
+        if member.optional {
+            return unsupported(
+                UnsupportedLeafFeature::UnsupportedExpression,
+                update.argument.span(),
+            );
+        }
+        // `dup2; get_array_el` preserves the base and raw key for the write.
+        // A prefix update keeps its new value as the completion; a postfix
+        // update moves the old value below the saved reference triple.
+        work.push(ExpressionWork::Emit(PlannedInstruction::new(
+            FinalOpcode::PutArrayEl,
+            Operands::None,
+            member.span,
+        )));
+        work.push(ExpressionWork::Emit(PlannedInstruction::new(
+            if update.prefix {
+                FinalOpcode::Insert3
+            } else {
+                FinalOpcode::Perm4
+            },
+            Operands::None,
+            update.span,
+        )));
+        work.push(ExpressionWork::Emit(PlannedInstruction::new(
+            update_opcode(update),
+            Operands::None,
+            update.span,
+        )));
+        work.push(ExpressionWork::Emit(PlannedInstruction::new(
+            FinalOpcode::GetArrayEl,
+            Operands::None,
+            member.span,
+        )));
+        work.push(ExpressionWork::Emit(PlannedInstruction::new(
+            FinalOpcode::Dup2,
+            Operands::None,
+            member.span,
+        )));
+        work.push(ExpressionWork::Visit(&member.expression));
+        work.push(ExpressionWork::Visit(&member.object));
+        Ok(())
+    }
+
     fn plan_update_expression<'expression>(
         &self,
         update: &'expression UpdateExpression<'arena>,
@@ -5129,15 +5210,11 @@ impl<'compiler, 'unit, 'arena, 'scope> ExpressionPlanner<'compiler, 'unit, 'aren
             return self.plan_private_member_update(update, member, layout, work);
         }
         let identifier = match &update.argument {
-            SimpleAssignmentTarget::StaticMemberExpression(member)
-                if matches!(&member.object, Expression::Super(_)) =>
-            {
-                return Self::plan_static_super_member_update(update, member, constants, work);
+            SimpleAssignmentTarget::StaticMemberExpression(member) => {
+                return Self::plan_static_member_update(update, member, constants, work);
             }
-            SimpleAssignmentTarget::ComputedMemberExpression(member)
-                if matches!(&member.object, Expression::Super(_)) =>
-            {
-                return Self::plan_computed_super_member_update(update, member, work);
+            SimpleAssignmentTarget::ComputedMemberExpression(member) => {
+                return Self::plan_computed_member_update(update, member, work);
             }
             SimpleAssignmentTarget::AssignmentTargetIdentifier(identifier) => identifier,
             _ => {
@@ -5170,12 +5247,7 @@ impl<'compiler, 'unit, 'arena, 'scope> ExpressionPlanner<'compiler, 'unit, 'aren
                     )));
                 }
                 work.push(ExpressionWork::Emit(PlannedInstruction::new(
-                    match (update.operator, update.prefix) {
-                        (UpdateOperator::Increment, true) => FinalOpcode::Inc,
-                        (UpdateOperator::Decrement, true) => FinalOpcode::Dec,
-                        (UpdateOperator::Increment, false) => FinalOpcode::PostInc,
-                        (UpdateOperator::Decrement, false) => FinalOpcode::PostDec,
-                    },
+                    update_opcode(update),
                     Operands::None,
                     update.span,
                 )));
@@ -5190,12 +5262,7 @@ impl<'compiler, 'unit, 'arena, 'scope> ExpressionPlanner<'compiler, 'unit, 'aren
 
         self.push_slot_write(binding, frame_slot, update.prefix, identifier.span, work)?;
         work.push(ExpressionWork::Emit(PlannedInstruction::new(
-            match (update.operator, update.prefix) {
-                (UpdateOperator::Increment, true) => FinalOpcode::Inc,
-                (UpdateOperator::Decrement, true) => FinalOpcode::Dec,
-                (UpdateOperator::Increment, false) => FinalOpcode::PostInc,
-                (UpdateOperator::Decrement, false) => FinalOpcode::PostDec,
-            },
+            update_opcode(update),
             Operands::None,
             update.span,
         )));

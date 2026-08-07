@@ -168,6 +168,28 @@ fn function_prototype_call_preserves_strict_null_and_primitive_receivers() {
 }
 
 #[test]
+fn non_strict_functions_normalize_null_and_primitive_receivers() {
+    let authority = compile(
+        "function run(){\
+            function globalReceiver(){return typeof this==='object';}\
+            function numberReceiver(){return typeof this==='object'&&this.valueOf()===7;}\
+            return globalReceiver.call(null)&&numberReceiver.call(7);\
+        }",
+        "run",
+    );
+    let mut runtime = runtime();
+    let realm = runtime.create_realm().expect("realm");
+    let mut context = runtime.context(&realm).expect("context");
+    let run = context.instantiate(authority).expect("run");
+
+    let result = context
+        .call(&run, &[], ExecutionLimits::default())
+        .expect("non-strict receiver normalization");
+
+    assert_eq!(result.as_boolean().expect("live value"), Some(true));
+}
+
+#[test]
 fn function_prototype_call_can_target_itself_with_bounded_native_continuations() {
     let authority = compile(
         "function run(){\
