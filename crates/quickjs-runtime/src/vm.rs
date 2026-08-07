@@ -753,6 +753,8 @@ enum NativeContinuation {
     TypedArrayPrototypeSet(Box<TypedArrayPrototypeSetState>),
     TypedArrayPrototypeSubarray(Box<TypedArrayPrototypeSubarrayState>),
     TypedArrayPrototypeSlice(Box<TypedArrayPrototypeSliceState>),
+    TypedArrayPrototypeMap(Box<TypedArrayPrototypeMapState>),
+    TypedArrayPrototypeFilter(Box<TypedArrayPrototypeFilterState>),
     DateToJson(DateToJsonContinuation),
     TemporalDurationBag(Box<TemporalDurationBagContinuation>),
     TemporalDurationCompareOptions(TemporalDurationCompareOptionsContinuation),
@@ -870,6 +872,8 @@ impl NativeContinuation {
                 TypedArrayPrototypeSubarrayState::retained_values()
             }
             Self::TypedArrayPrototypeSlice(_) => TypedArrayPrototypeSliceState::retained_values(),
+            Self::TypedArrayPrototypeMap(_) => TypedArrayPrototypeMapState::retained_values(),
+            Self::TypedArrayPrototypeFilter(state) => state.retained_values(),
             Self::DateToJson(_) => DateToJsonContinuation::retained_values(),
             Self::TemporalDurationBag(state) => state.retained_values(),
             Self::TemporalDurationCompareOptions(_) => {
@@ -1216,6 +1220,8 @@ enum IntrinsicGetContinuation {
         new_target: FunctionId,
         byte_length: usize,
         max_byte_length: Option<usize>,
+        shared: bool,
+        origin: JsStackFrame,
     },
     TypedArrayConstructor {
         new_target: FunctionId,
@@ -1304,6 +1310,7 @@ impl IntrinsicGetContinuation {
 #[derive(Clone, Copy)]
 enum ObjectPrototypeTag {
     ArrayBuffer,
+    SharedArrayBuffer,
     Arguments,
     Array,
     BigInt,
@@ -1322,6 +1329,7 @@ impl ObjectPrototypeTag {
     const fn name(self) -> &'static str {
         match self {
             Self::ArrayBuffer => "ArrayBuffer",
+            Self::SharedArrayBuffer => "SharedArrayBuffer",
             Self::Arguments => "Arguments",
             Self::Array => "Array",
             Self::BigInt => "BigInt",
@@ -1968,6 +1976,7 @@ enum OperatorPrimitiveTarget {
     ArrayBufferConstructorMax {
         new_target: FunctionId,
         byte_length: usize,
+        shared: bool,
     },
     /// `%DataView%`'s `byteOffset`, after the backing-buffer brand check.
     DataViewConstructorOffset(Box<DataViewConstructorOffsetState>),
@@ -2025,6 +2034,11 @@ enum OperatorPrimitiveTarget {
     TypedArrayElementSet(Box<TypedArrayElementSetState>),
     /// `ArrayBuffer.prototype.resize`'s new length, after the brand checks.
     ArrayBufferResize {
+        object: ObjectId,
+    },
+    /// `SharedArrayBuffer.prototype.grow`'s new length, after the shared
+    /// buffer brand and growability checks.
+    SharedArrayBufferGrow {
         object: ObjectId,
     },
     /// `ArrayBuffer.prototype.transfer` or `transferToFixedLength` after
@@ -2211,6 +2225,7 @@ impl OperatorPrimitiveTarget {
             | Self::NumberIntrinsic { new_target: None }
             | Self::DateParse
             | Self::ArrayBufferResize { .. }
+            | Self::SharedArrayBufferGrow { .. }
             | Self::DateSetTime { .. }
             | Self::DateToPrimitive
             | Self::TemporalInstantNanoseconds { new_target: None }
@@ -2308,7 +2323,7 @@ impl OperatorPrimitiveTarget {
             Self::DataViewGetIndex(_) => DataViewGetState::retained_values(),
             Self::DataViewSetOffset(_) => DataViewSetOffsetState::retained_values(),
             Self::DataViewSetValue(_) => DataViewSetValueState::retained_values(),
-            Self::TypedArrayElementSet(_) => TypedArrayElementSetState::retained_values(),
+            Self::TypedArrayElementSet(state) => state.retained_values(),
             Self::TemporalDurationConstructor(state) => state.retained_values(),
             Self::TemporalDurationBag(state) => state.retained_values(),
             Self::TemporalDurationRoundLargestUnit(_state)
@@ -2564,6 +2579,7 @@ fn trace_operator_primitive_target_roots(
         | OperatorPrimitiveTarget::MathBinaryFinish { .. } => {}
         OperatorPrimitiveTarget::DateSetTime { object }
         | OperatorPrimitiveTarget::ArrayBufferResize { object }
+        | OperatorPrimitiveTarget::SharedArrayBufferGrow { object }
         | OperatorPrimitiveTarget::ArrayBufferTransfer { object, .. } => {
             mark(CollectionRoot::Heap(HeapReference::Object(*object)));
         }
@@ -2822,6 +2838,8 @@ fn trace_native_continuation_roots(
         NativeContinuation::TypedArrayPrototypeSet(state) => state.trace_roots(mark),
         NativeContinuation::TypedArrayPrototypeSubarray(state) => state.trace_roots(mark),
         NativeContinuation::TypedArrayPrototypeSlice(state) => state.trace_roots(mark),
+        NativeContinuation::TypedArrayPrototypeMap(state) => state.trace_roots(mark),
+        NativeContinuation::TypedArrayPrototypeFilter(state) => state.trace_roots(mark),
         NativeContinuation::DateToJson(state) => state.trace_roots(mark),
         NativeContinuation::TemporalDurationBag(state) => state.trace_roots(mark),
         NativeContinuation::TemporalDurationCompareOptions(state) => state.trace_roots(mark),

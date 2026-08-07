@@ -525,6 +525,22 @@ pub(super) fn resume_native_continuations(
                     execution_budget,
                 )?
             }
+            NativeContinuation::TypedArrayPrototypeMap(state) => advance_typed_array_prototype_map(
+                runtime,
+                *state,
+                value,
+                return_to,
+                execution_budget,
+            )?,
+            NativeContinuation::TypedArrayPrototypeFilter(state) => {
+                advance_typed_array_prototype_filter(
+                    runtime,
+                    *state,
+                    value,
+                    return_to,
+                    execution_budget,
+                )?
+            }
             NativeContinuation::ArrayBufferSlice(state) => {
                 advance_array_buffer_slice(runtime, *state, value, return_to, execution_budget)?
             }
@@ -2380,6 +2396,14 @@ pub(super) fn dispatch_native_call_with_frames(
             origin.unwrap_or_else(native_function_host_origin),
             execution_budget,
         ),
+        NativeFunctionKind::SharedArrayBufferConstructor => begin_shared_array_buffer_constructor(
+            runtime,
+            native.realm,
+            inputs,
+            return_to,
+            origin.unwrap_or_else(native_function_host_origin),
+            execution_budget,
+        ),
         NativeFunctionKind::ArrayBufferIsView => array_buffer_is_view(runtime, inputs.arguments),
         NativeFunctionKind::ArrayBufferPrototype(method) => dispatch_array_buffer_prototype(
             runtime,
@@ -2391,6 +2415,18 @@ pub(super) fn dispatch_native_call_with_frames(
             origin.unwrap_or_else(native_function_host_origin),
             execution_budget,
         ),
+        NativeFunctionKind::SharedArrayBufferPrototype(method) => {
+            dispatch_shared_array_buffer_prototype(
+                runtime,
+                method,
+                native.realm,
+                &inputs.receiver,
+                inputs.arguments,
+                return_to,
+                origin.unwrap_or_else(native_function_host_origin),
+                execution_budget,
+            )
+        }
         NativeFunctionKind::DataViewConstructor => begin_data_view_constructor(
             runtime,
             native.realm,
@@ -2408,6 +2444,11 @@ pub(super) fn dispatch_native_call_with_frames(
             return_to,
             origin.unwrap_or_else(native_function_host_origin),
             execution_budget,
+        ),
+        NativeFunctionKind::TypedArrayBaseConstructor => typed_array_type_error(
+            native.realm,
+            &origin.unwrap_or_else(native_function_host_origin),
+            "abstract TypedArray constructor is not directly constructable",
         ),
         NativeFunctionKind::TypedArrayConstructor(element) => begin_typed_array_constructor(
             runtime,
@@ -3158,6 +3199,7 @@ pub(super) fn dispatch_native_call_with_frames(
         }
         NativeFunctionKind::ArraySpeciesGetter
         | NativeFunctionKind::ArrayBufferSpeciesGetter
+        | NativeFunctionKind::SharedArrayBufferSpeciesGetter
         | NativeFunctionKind::TypedArraySpeciesGetter
         | NativeFunctionKind::PromiseSpeciesGetter
         | NativeFunctionKind::MapSpeciesGetter

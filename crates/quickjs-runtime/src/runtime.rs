@@ -107,6 +107,7 @@ enum RealmIntrinsics {
         string: StringIntrinsics,
         array: ArrayIntrinsics,
         array_buffer: ArrayBufferIntrinsics,
+        shared_array_buffer: SharedArrayBufferIntrinsics,
         data_view: DataViewIntrinsics,
         typed_array: TypedArrayIntrinsics,
         date: DateIntrinsics,
@@ -264,6 +265,12 @@ struct ArrayIntrinsics {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 struct ArrayBufferIntrinsics {
+    prototype: ObjectId,
+    constructor: FunctionId,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct SharedArrayBufferIntrinsics {
     prototype: ObjectId,
     constructor: FunctionId,
 }
@@ -1204,8 +1211,15 @@ pub(crate) enum NativeFunctionKind {
     ArrayBufferIsView,
     ArrayBufferSpeciesGetter,
     ArrayBufferPrototype(ArrayBufferPrototypeMethod),
+    SharedArrayBufferConstructor,
+    SharedArrayBufferSpeciesGetter,
+    SharedArrayBufferPrototype(SharedArrayBufferPrototypeMethod),
     DataViewConstructor,
     DataViewPrototype(DataViewPrototypeMethod),
+    /// The hidden abstract `%TypedArray%` constructor shared by every
+    /// concrete typed-array constructor. It is reachable through
+    /// `Object.getPrototypeOf(Int8Array)`, but never installed globally.
+    TypedArrayBaseConstructor,
     TypedArrayConstructor(TypedArrayElementType),
     TypedArraySpeciesGetter,
     TypedArrayPrototype(TypedArrayPrototypeMethod),
@@ -1578,6 +1592,51 @@ pub(crate) enum ArrayBufferPrototypeMethod {
     TransferToFixedLength,
 }
 
+/// Methods and accessors published on `%SharedArrayBuffer.prototype%`.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum SharedArrayBufferPrototypeMethod {
+    ByteLength,
+    Growable,
+    MaxByteLength,
+    Grow,
+    Slice,
+}
+
+impl SharedArrayBufferPrototypeMethod {
+    pub(crate) const ALL: [Self; 5] = [
+        Self::ByteLength,
+        Self::Growable,
+        Self::MaxByteLength,
+        Self::Grow,
+        Self::Slice,
+    ];
+
+    pub(crate) const fn name(self) -> &'static str {
+        match self {
+            Self::ByteLength => "byteLength",
+            Self::Growable => "growable",
+            Self::MaxByteLength => "maxByteLength",
+            Self::Grow => "grow",
+            Self::Slice => "slice",
+        }
+    }
+
+    pub(crate) const fn length(self) -> i32 {
+        match self {
+            Self::Grow => 1,
+            Self::Slice => 2,
+            Self::ByteLength | Self::Growable | Self::MaxByteLength => 0,
+        }
+    }
+
+    pub(crate) const fn is_accessor(self) -> bool {
+        matches!(
+            self,
+            Self::ByteLength | Self::Growable | Self::MaxByteLength
+        )
+    }
+}
+
 /// Element representations shared by `DataView` methods and the later
 /// typed-array indexed exotic implementation.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -1792,23 +1851,29 @@ pub(crate) enum TypedArrayPrototypeMethod {
     CopyWithin,
     Reverse,
     Slice,
+    Sort,
     Entries,
     Keys,
     Values,
     Join,
     ToReversed,
+    ToSorted,
     With,
     Every,
+    Filter,
     Find,
     FindIndex,
     FindLast,
     FindLastIndex,
     ForEach,
+    Map,
+    Reduce,
+    ReduceRight,
     Some,
 }
 
 impl TypedArrayPrototypeMethod {
-    pub(crate) const ALL: [Self; 28] = [
+    pub(crate) const ALL: [Self; 34] = [
         Self::Buffer,
         Self::ByteLength,
         Self::ByteOffset,
@@ -1824,18 +1889,24 @@ impl TypedArrayPrototypeMethod {
         Self::CopyWithin,
         Self::Reverse,
         Self::Slice,
+        Self::Sort,
         Self::Entries,
         Self::Keys,
         Self::Values,
         Self::Join,
         Self::ToReversed,
+        Self::ToSorted,
         Self::With,
         Self::Every,
+        Self::Filter,
         Self::Find,
         Self::FindIndex,
         Self::FindLast,
         Self::FindLastIndex,
         Self::ForEach,
+        Self::Map,
+        Self::Reduce,
+        Self::ReduceRight,
         Self::Some,
     ];
 
@@ -1857,18 +1928,24 @@ impl TypedArrayPrototypeMethod {
             Self::CopyWithin => "copyWithin",
             Self::Reverse => "reverse",
             Self::Slice => "slice",
+            Self::Sort => "sort",
             Self::Entries => "entries",
             Self::Keys => "keys",
             Self::Values => "values",
             Self::Join => "join",
             Self::ToReversed => "toReversed",
+            Self::ToSorted => "toSorted",
             Self::With => "with",
             Self::Every => "every",
+            Self::Filter => "filter",
             Self::Find => "find",
             Self::FindIndex => "findIndex",
             Self::FindLast => "findLast",
             Self::FindLastIndex => "findLastIndex",
             Self::ForEach => "forEach",
+            Self::Map => "map",
+            Self::Reduce => "reduce",
+            Self::ReduceRight => "reduceRight",
             Self::Some => "some",
         }
     }
@@ -1891,18 +1968,24 @@ impl TypedArrayPrototypeMethod {
             Self::CopyWithin => "copyWithin",
             Self::Reverse => "reverse",
             Self::Slice => "slice",
+            Self::Sort => "sort",
             Self::Entries => "entries",
             Self::Keys => "keys",
             Self::Values => "values",
             Self::Join => "join",
             Self::ToReversed => "toReversed",
+            Self::ToSorted => "toSorted",
             Self::With => "with",
             Self::Every => "every",
+            Self::Filter => "filter",
             Self::Find => "find",
             Self::FindIndex => "findIndex",
             Self::FindLast => "findLast",
             Self::FindLastIndex => "findLastIndex",
             Self::ForEach => "forEach",
+            Self::Map => "map",
+            Self::Reduce => "reduce",
+            Self::ReduceRight => "reduceRight",
             Self::Some => "some",
         }
     }
@@ -1921,18 +2004,24 @@ impl TypedArrayPrototypeMethod {
                 | Self::CopyWithin
                 | Self::Reverse
                 | Self::Slice
+                | Self::Sort
                 | Self::Entries
                 | Self::Keys
                 | Self::Values
                 | Self::Join
                 | Self::ToReversed
+                | Self::ToSorted
                 | Self::With
                 | Self::Every
+                | Self::Filter
                 | Self::Find
                 | Self::FindIndex
                 | Self::FindLast
                 | Self::FindLastIndex
                 | Self::ForEach
+                | Self::Map
+                | Self::Reduce
+                | Self::ReduceRight
                 | Self::Some
         )
     }
@@ -1947,12 +2036,18 @@ impl TypedArrayPrototypeMethod {
             | Self::LastIndexOf
             | Self::Fill
             | Self::Join
+            | Self::Sort
+            | Self::ToSorted
             | Self::Every
+            | Self::Filter
             | Self::Find
             | Self::FindIndex
             | Self::FindLast
             | Self::FindLastIndex
             | Self::ForEach
+            | Self::Map
+            | Self::Reduce
+            | Self::ReduceRight
             | Self::Some => 1,
             Self::CopyWithin | Self::Subarray | Self::Slice | Self::With => 2,
             Self::Reverse
@@ -2729,6 +2824,7 @@ impl NativeFunctionKind {
                 | Self::StringConstructor
                 | Self::ArrayConstructor
                 | Self::ArrayBufferConstructor
+                | Self::SharedArrayBufferConstructor
                 | Self::DataViewConstructor
                 | Self::TypedArrayConstructor(_)
                 | Self::DateConstructor

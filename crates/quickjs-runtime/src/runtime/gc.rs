@@ -341,6 +341,7 @@ impl Runtime {
                 string,
                 array,
                 array_buffer,
+                shared_array_buffer,
                 data_view,
                 typed_array,
                 map,
@@ -489,6 +490,17 @@ impl Runtime {
                 for reference in [
                     HeapReference::Object(array_buffer.prototype),
                     HeapReference::Function(array_buffer.constructor),
+                ] {
+                    mark_heap_reference(
+                        reference,
+                        &mut marked_functions,
+                        &mut marked_objects,
+                        &mut work,
+                    );
+                }
+                for reference in [
+                    HeapReference::Object(shared_array_buffer.prototype),
+                    HeapReference::Function(shared_array_buffer.constructor),
                 ] {
                     mark_heap_reference(
                         reference,

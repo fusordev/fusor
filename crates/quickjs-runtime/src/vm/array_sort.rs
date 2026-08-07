@@ -75,12 +75,39 @@ enum ArraySortStage {
     Done,
 }
 
+/// The comparison relation selected by the public sorting method.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum SortComparison {
+    /// `Array.prototype.sort` stringifies values when no comparator exists.
+    Lexicographic,
+    /// Typed arrays use `CompareTypedArrayElements`, which compares their
+    /// numeric element values directly when no comparator exists.
+    TypedArray(TypedArrayElementType),
+}
+
+/// The publication destination after the common `SortIndexedProperties`
+/// collection and merge work has completed.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum SortOutput {
+    /// An Array method either writes back to the receiver or creates a fresh
+    /// dense Array for `toSorted`.
+    Array { destination: Option<ObjectId> },
+    /// A typed-array method writes directly to its receiver or an already
+    /// allocated same-type copy.
+    TypedArray {
+        destination: ObjectId,
+        element: TypedArrayElementType,
+    },
+}
+
 /// One in-progress `SortIndexedProperties` invocation and result publication.
 pub(crate) struct ArraySortContinuation {
     method: ArraySort,
     target: StoredValue,
     comparator: Option<FunctionId>,
-    destination: Option<ObjectId>,
+    skip_holes: bool,
+    comparison: SortComparison,
+    output: SortOutput,
     length: u64,
     next_read: u64,
     items: Vec<SortItem>,
@@ -103,7 +130,10 @@ impl ArraySortContinuation {
     pub(crate) fn retained_values(&self) -> u64 {
         1_u64
             .saturating_add(u64::from(self.comparator.is_some()))
-            .saturating_add(u64::from(self.destination.is_some()))
+            .saturating_add(match self.output {
+                SortOutput::Array { destination } => u64::from(destination.is_some()),
+                SortOutput::TypedArray { .. } => 1,
+            })
             .saturating_add(usize_to_u64(self.items.len()))
             .saturating_add(usize_to_u64(self.scratch.len()))
     }
@@ -113,8 +143,14 @@ impl ArraySortContinuation {
         if let Some(comparator) = self.comparator {
             mark(CollectionRoot::Heap(HeapReference::Function(comparator)));
         }
-        if let Some(destination) = self.destination {
-            mark(CollectionRoot::Heap(HeapReference::Object(destination)));
+        match self.output {
+            SortOutput::Array {
+                destination: Some(destination),
+            }
+            | SortOutput::TypedArray { destination, .. } => {
+                mark(CollectionRoot::Heap(HeapReference::Object(destination)));
+            }
+            SortOutput::Array { destination: None } => {}
         }
         for item in self.items.iter().chain(&self.scratch) {
             trace_stored_value_root(&item.value, mark);
@@ -150,7 +186,9 @@ pub(super) fn begin_array_sort(
         method,
         target,
         comparator,
-        destination: None,
+        skip_holes: !method.copies(),
+        comparison: SortComparison::Lexicographic,
+        output: SortOutput::Array { destination: None },
         length: 0,
         next_read: 0,
         items: Vec::new(),
@@ -166,6 +204,69 @@ pub(super) fn begin_array_sort(
         left_string: None,
         realm,
         stage: ArraySortStage::AwaitLength,
+        origin,
+    };
+    advance_array_sort(runtime, state, None, return_to, execution_budget)
+}
+
+/// Starts a `%TypedArray%.prototype.sort` or `.toSorted` operation after the
+/// caller has selected its concrete method. Comparator validation deliberately
+/// precedes typed-array validation, matching the public algorithms.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the typed entry preserves its receiver, comparator, same-type result, and standard call context"
+)]
+pub(super) fn begin_typed_array_sort(
+    runtime: &mut Runtime,
+    source: ObjectId,
+    copies: bool,
+    mut arguments: CallArguments,
+    realm: RealmId,
+    return_to: Option<CallReturn>,
+    origin: JsStackFrame,
+    execution_budget: &mut ExecutionBudget,
+) -> Result<NativeDispatch, NativeFailure> {
+    let comparator = match arguments.take_first_or_undefined() {
+        StoredValue::Undefined => None,
+        StoredValue::Function(function) => Some(function),
+        _ => return Err(sort_type_error(realm, &origin, "not a function")),
+    };
+    let (source_state, length) = typed_array_require_in_bounds(runtime, source, realm, &origin)?;
+    let element = source_state.element();
+    let destination = if copies {
+        typed_array_create_same_type(runtime, realm, element, length, &origin)?
+    } else {
+        source
+    };
+    let state = ArraySortContinuation {
+        method: if copies {
+            ArraySort::ToSorted
+        } else {
+            ArraySort::Sort
+        },
+        target: StoredValue::Object(source),
+        comparator,
+        skip_holes: false,
+        comparison: SortComparison::TypedArray(element),
+        output: SortOutput::TypedArray {
+            destination,
+            element,
+        },
+        length: usize_to_u64(length),
+        next_read: 0,
+        items: Vec::new(),
+        scratch: Vec::new(),
+        undefined_count: 0,
+        width: 1,
+        merge_start: 0,
+        left: 0,
+        left_end: 0,
+        right: 0,
+        right_end: 0,
+        next_write: 0,
+        left_string: None,
+        realm,
+        stage: ArraySortStage::NextRead,
         origin,
     };
     advance_array_sort(runtime, state, None, return_to, execution_budget)
@@ -251,7 +352,7 @@ pub(super) fn advance_array_sort(
                 let index = state.next_read;
                 state.next_read = state.next_read.saturating_add(1);
                 let key = sort_element_key(runtime, index)?;
-                if !state.method.copies() {
+                if state.skip_holes {
                     charge_sort_lookup(runtime, &state.target, execution_budget)?;
                     state.stage = ArraySortStage::AwaitPresence;
                     let dispatch = begin_value_has(
@@ -323,7 +424,19 @@ pub(super) fn advance_array_sort(
                             return_to,
                         );
                     }
-                    state.stage = ArraySortStage::AwaitLeftString;
+                    match state.comparison {
+                        SortComparison::Lexicographic => {
+                            state.stage = ArraySortStage::AwaitLeftString;
+                        }
+                        SortComparison::TypedArray(element) => {
+                            let take_left = compare_typed_array_items(
+                                &state.items[state.left].value,
+                                &state.items[state.right].value,
+                                element,
+                            )?;
+                            finish_sort_comparison(&mut state, take_left)?;
+                        }
+                    }
                 }
             },
             ArraySortStage::AwaitComparator => {
@@ -407,10 +520,12 @@ pub(super) fn advance_array_sort(
                 let sortable = usize_to_u64(state.items.len());
                 let item_count = sortable.saturating_add(state.undefined_count);
                 if state.next_write >= item_count {
-                    state.stage = if state.method.copies() {
-                        ArraySortStage::Done
-                    } else {
-                        ArraySortStage::NextDelete
+                    state.stage = match state.output {
+                        SortOutput::Array { destination: None } => ArraySortStage::NextDelete,
+                        SortOutput::Array {
+                            destination: Some(_),
+                        }
+                        | SortOutput::TypedArray { .. } => ArraySortStage::Done,
                     };
                     continue;
                 }
@@ -427,41 +542,53 @@ pub(super) fn advance_array_sort(
                 } else {
                     StoredValue::Undefined
                 };
-                if let Some(destination) = state.destination {
-                    define_sorted_element(runtime, destination, index, value)?;
-                    state.next_write = state.next_write.saturating_add(1);
-                    continue;
-                }
-                let key = sort_element_key(runtime, index)?;
-                charge_sort_lookup(runtime, &state.target, execution_budget)?;
-                match write_static_property(
-                    runtime,
-                    state.realm,
-                    &state.target,
-                    key,
-                    value,
-                    true,
-                    execution_budget,
-                )? {
-                    PropertyWriteOutcome::Complete => {
+                match state.output {
+                    SortOutput::Array {
+                        destination: Some(destination),
+                    } => {
+                        define_sorted_element(runtime, destination, index, value)?;
                         state.next_write = state.next_write.saturating_add(1);
                     }
-                    PropertyWriteOutcome::Setter {
-                        function,
-                        receiver,
-                        value,
-                    } => {
-                        state.stage = ArraySortStage::AwaitWrite;
-                        return suspend_sort(
-                            state,
-                            function,
-                            receiver,
-                            single_sort_argument(value)?,
-                            return_to,
-                        );
+                    SortOutput::Array { destination: None } => {
+                        let key = sort_element_key(runtime, index)?;
+                        charge_sort_lookup(runtime, &state.target, execution_budget)?;
+                        match write_static_property(
+                            runtime,
+                            state.realm,
+                            &state.target,
+                            key,
+                            value,
+                            true,
+                            execution_budget,
+                        )? {
+                            PropertyWriteOutcome::Complete => {
+                                state.next_write = state.next_write.saturating_add(1);
+                            }
+                            PropertyWriteOutcome::Setter {
+                                function,
+                                receiver,
+                                value,
+                            } => {
+                                state.stage = ArraySortStage::AwaitWrite;
+                                return suspend_sort(
+                                    state,
+                                    function,
+                                    receiver,
+                                    single_sort_argument(value)?,
+                                    return_to,
+                                );
+                            }
+                            PropertyWriteOutcome::Failed(failure) => {
+                                return Err(sort_property_failure(&state, failure));
+                            }
+                        }
                     }
-                    PropertyWriteOutcome::Failed(failure) => {
-                        return Err(sort_property_failure(&state, failure));
+                    SortOutput::TypedArray {
+                        destination,
+                        element,
+                    } => {
+                        typed_array_sorted_store(runtime, destination, index, value, element)?;
+                        state.next_write = state.next_write.saturating_add(1);
                     }
                 }
             }
@@ -491,9 +618,15 @@ pub(super) fn advance_array_sort(
                 }
             }
             ArraySortStage::Done => {
-                let result = state
-                    .destination
-                    .map_or_else(|| state.target.duplicate(), StoredValue::Object);
+                let result = match state.output {
+                    SortOutput::Array {
+                        destination: Some(destination),
+                    }
+                    | SortOutput::TypedArray { destination, .. } => {
+                        StoredValue::Object(destination)
+                    }
+                    SortOutput::Array { destination: None } => state.target.duplicate(),
+                };
                 return Ok(NativeDispatch::Immediate(result));
             }
         }
@@ -516,6 +649,85 @@ fn append_sort_value(
             additional: 1,
         })?;
     state.items.push(SortItem { value, text: None });
+    Ok(())
+}
+
+/// Applies the default `CompareTypedArrayElements` ordering and returns
+/// whether the left item should win the stable merge. Comparator calls use the
+/// common `ToNumber` path in `advance_array_sort` instead.
+#[expect(
+    clippy::float_cmp,
+    reason = "ECMA-262 CompareTypedArrayElements requires exact IEEE-754 equality, including signed zero"
+)]
+fn compare_typed_array_items(
+    left: &StoredValue,
+    right: &StoredValue,
+    element: TypedArrayElementType,
+) -> Result<bool, NativeFailure> {
+    match (left, right, element.is_bigint()) {
+        (StoredValue::Number(left), StoredValue::Number(right), false) => {
+            let left = left.as_f64();
+            let right = right.as_f64();
+            if left.is_nan() {
+                return Ok(right.is_nan());
+            }
+            if right.is_nan() {
+                return Ok(true);
+            }
+            if left == right {
+                if left == 0.0 && right == 0.0 {
+                    return Ok(left.is_sign_negative() || !right.is_sign_negative());
+                }
+                return Ok(true);
+            }
+            Ok(left < right)
+        }
+        (StoredValue::BigInt(left), StoredValue::BigInt(right), true) => Ok(left <= right),
+        _ => Err(EngineFault::RuntimeInvariant {
+            message: "TypedArray sort collected a value with the wrong content type",
+        }
+        .into()),
+    }
+}
+
+/// Publishes a collected typed-array value without another observable
+/// conversion. The source and destination content types were fixed by the
+/// initial typed-array validation; an out-of-bounds source after a comparator
+/// is the specified no-op integer-indexed write outcome.
+fn typed_array_sorted_store(
+    runtime: &mut Runtime,
+    destination: ObjectId,
+    index: u64,
+    value: StoredValue,
+    element: TypedArrayElementType,
+) -> Result<(), NativeFailure> {
+    let index = usize::try_from(index).map_err(|_| EngineFault::RuntimeInvariant {
+        message: "TypedArray sort output index exceeded the implementation range",
+    })?;
+    let outcome = match (value, element.is_bigint()) {
+        (StoredValue::Number(value), false) => runtime.typed_array_store_index(
+            destination,
+            index,
+            TypedArrayElementValue::Number(value),
+        )?,
+        (StoredValue::BigInt(value), true) => runtime.typed_array_store_index(
+            destination,
+            index,
+            TypedArrayElementValue::BigInt(value.as_ref()),
+        )?,
+        _ => {
+            return Err(EngineFault::RuntimeInvariant {
+                message: "TypedArray sort published a value with the wrong content type",
+            }
+            .into());
+        }
+    };
+    if outcome == TypedArrayStoreOutcome::ContentTypeMismatch {
+        return Err(EngineFault::RuntimeInvariant {
+            message: "TypedArray sort destination changed its content type",
+        }
+        .into());
+    }
     Ok(())
 }
 
@@ -635,7 +847,13 @@ fn allocate_sorted_destination(
         )
     })?;
     let prototype = runtime.realm_array_prototype(state.realm)?;
-    state.destination = Some(
+    let SortOutput::Array { destination } = &mut state.output else {
+        return Err(EngineFault::RuntimeInvariant {
+            message: "an Array toSorted allocation used a typed-array output",
+        }
+        .into());
+    };
+    *destination = Some(
         runtime.allocate_sparse_array_with_prototype(HeapReference::Object(prototype), length)?,
     );
     Ok(())

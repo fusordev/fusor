@@ -452,6 +452,18 @@ fn spread_after_quickjs_stack_prefix_uses_static_index_and_checked_dynamic_curso
 }
 
 #[test]
+fn dense_array_literals_compile_without_host_stack_growth() {
+    let elements = (0..128)
+        .map(|value| value.to_string())
+        .collect::<Vec<_>>()
+        .join(",");
+    let source = format!("function make(){{return [{elements}];}}");
+
+    let tree = compile(&source);
+    assert_eq!(tree.root().control_flow().computed_stack_size(), 128);
+}
+
+#[test]
 fn array_element_count_beyond_u16_fails_before_encoding() {
     let elements = (0..=u16::MAX).map(|_| "0").collect::<Vec<_>>().join(",");
     let source = format!("function make(){{return [{elements}];}}");

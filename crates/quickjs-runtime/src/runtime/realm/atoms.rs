@@ -4,8 +4,9 @@ use crate::{
     Atom,
     runtime::{
         ArrayBufferPrototypeMethod, DataViewPrototypeMethod, DatePrototypeMethod, DateStaticMethod,
-        TemporalDurationPrototypeMethod, TemporalDurationStaticMethod,
-        TemporalInstantPrototypeMethod, TemporalInstantStaticMethod, TypedArrayPrototypeMethod,
+        SharedArrayBufferPrototypeMethod, TemporalDurationPrototypeMethod,
+        TemporalDurationStaticMethod, TemporalInstantPrototypeMethod, TemporalInstantStaticMethod,
+        TypedArrayPrototypeMethod,
     },
 };
 
@@ -242,6 +243,11 @@ fn visit_realm_name_order(
     for method in ArrayBufferPrototypeMethod::ALL {
         if !matches!(method, ArrayBufferPrototypeMethod::MaxByteLength) {
             visit(RealmNameId::ArrayBufferPrototype(method))?;
+        }
+    }
+    for method in SharedArrayBufferPrototypeMethod::ALL {
+        if !matches!(method, SharedArrayBufferPrototypeMethod::MaxByteLength) {
+            visit(RealmNameId::SharedArrayBufferPrototype(method))?;
         }
     }
     for method in DataViewPrototypeMethod::ALL {
@@ -486,6 +492,7 @@ fn realm_name_description(id: RealmNameId) -> &'static str {
         RealmNameId::ArrayFromAsync => "fromAsync",
         RealmNameId::ArrayBufferIsView => "isView",
         RealmNameId::ArrayBufferPrototype(method) => method.name(),
+        RealmNameId::SharedArrayBufferPrototype(method) => method.name(),
         RealmNameId::DataViewPrototype(method) => method.name(),
         RealmNameId::TypedArrayPrototype(method) => method.name(),
         RealmNameId::TypedArrayBytesPerElement => "BYTES_PER_ELEMENT",

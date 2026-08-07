@@ -47,10 +47,10 @@ use super::{
     PredefinedAtom, PromiseIntrinsics, PromiseRejectionState, PromiseStatic, PropertyKey,
     PropertyLayout, Rc, Realm, RealmHandle, RealmId, RealmIntrinsics, RealmState, RefCell,
     ReflectMethod, RegExpIntrinsics, ReleaseMailbox, Runtime, RuntimeError, RuntimeIdentity,
-    RuntimeLimits, RuntimeResource, SetIntrinsics, SetMethod, ShapeInterner, StoredValue,
-    StringIntrinsics, StringMethod, SymbolIntrinsics, TemporalIntrinsics, TypedArrayIntrinsics,
-    UriFunction, VecDeque, WeakMapIntrinsics, WeakRefIntrinsics, WeakSetIntrinsics, check_limit,
-    predefined_string, usize_to_u64,
+    RuntimeLimits, RuntimeResource, SetIntrinsics, SetMethod, ShapeInterner,
+    SharedArrayBufferIntrinsics, StoredValue, StringIntrinsics, StringMethod, SymbolIntrinsics,
+    TemporalIntrinsics, TypedArrayIntrinsics, UriFunction, VecDeque, WeakMapIntrinsics,
+    WeakRefIntrinsics, WeakSetIntrinsics, check_limit, predefined_string, usize_to_u64,
 };
 use crate::object::TypedArrayElementType;
 
@@ -665,6 +665,10 @@ impl RealmBuildTransaction<'_> {
             array_buffer: ArrayBufferIntrinsics {
                 prototype: object(IntrinsicObjectId::ArrayBufferPrototype),
                 constructor: function(NativeFunctionKind::ArrayBufferConstructor),
+            },
+            shared_array_buffer: SharedArrayBufferIntrinsics {
+                prototype: object(IntrinsicObjectId::SharedArrayBufferPrototype),
+                constructor: function(NativeFunctionKind::SharedArrayBufferConstructor),
             },
             data_view: DataViewIntrinsics {
                 prototype: object(IntrinsicObjectId::DataViewPrototype),

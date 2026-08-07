@@ -1,8 +1,8 @@
 //! Concrete typed-array constructors and their shared prototype surface.
 
 use super::{
-    FunctionSink, ObjectSink, PropertySink, accessor, data, method, object, object_prototype,
-    ordinary,
+    FunctionSink, ObjectSink, PropertySink, accessor, data, function, function_prototype, method,
+    object, object_prototype, ordinary,
 };
 use crate::runtime::realm::{
     CONSTRUCTOR_PROTOTYPE_PROPERTY, NativeFunctionKind,
@@ -34,9 +34,17 @@ pub(super) fn visit_objects(visit: ObjectSink<'_>) {
 }
 
 pub(super) fn visit_functions(visit: FunctionSink<'_>) {
+    visit(function(
+        NativeFunctionKind::TypedArrayBaseConstructor,
+        PrototypeSpec::Intrinsic(IntrinsicIdentity::Function(function_prototype())),
+        IntrinsicNameSpec::Literal("TypedArray"),
+        0,
+    ));
+    let abstract_constructor = IntrinsicFunctionId(NativeFunctionKind::TypedArrayBaseConstructor);
     for element in TypedArrayElementType::ALL {
-        visit(ordinary(
+        visit(function(
             NativeFunctionKind::TypedArrayConstructor(element),
+            PrototypeSpec::Intrinsic(IntrinsicIdentity::Function(abstract_constructor)),
             IntrinsicNameSpec::Predefined(constructor_atom(element)),
             3,
         ));
@@ -56,7 +64,37 @@ pub(super) fn visit_functions(visit: FunctionSink<'_>) {
 }
 
 pub(super) fn visit_properties(visit: PropertySink<'_>) {
+    visit_abstract_constructor_properties(&mut *visit);
     let prototype = IntrinsicIdentity::Object(IntrinsicObjectId::TypedArrayPrototype);
+    visit_typed_array_prototype_properties(&mut *visit, prototype);
+
+    for element in TypedArrayElementType::ALL {
+        visit_concrete_typed_array_properties(&mut *visit, element);
+    }
+}
+
+fn visit_abstract_constructor_properties(visit: PropertySink<'_>) {
+    let prototype = IntrinsicIdentity::Object(IntrinsicObjectId::TypedArrayPrototype);
+    let abstract_constructor = IntrinsicIdentity::Function(IntrinsicFunctionId(
+        NativeFunctionKind::TypedArrayBaseConstructor,
+    ));
+    visit(data(
+        abstract_constructor,
+        IntrinsicKeySpec::PredefinedString(PredefinedAtom::Prototype),
+        CONSTRUCTOR_PROTOTYPE_PROPERTY,
+        IntrinsicValueSpec::Object(IntrinsicObjectId::TypedArrayPrototype),
+    ));
+    visit(data(
+        prototype,
+        IntrinsicKeySpec::PredefinedString(PredefinedAtom::Constructor),
+        PropertyLayout::data(true, false, true),
+        IntrinsicValueSpec::Function(IntrinsicFunctionId(
+            NativeFunctionKind::TypedArrayBaseConstructor,
+        )),
+    ));
+}
+
+fn visit_typed_array_prototype_properties(visit: PropertySink<'_>, prototype: IntrinsicIdentity) {
     for prototype_method in TypedArrayPrototypeMethod::ALL {
         let key = match prototype_method {
             TypedArrayPrototypeMethod::ToStringTag => {
@@ -101,53 +139,53 @@ pub(super) fn visit_properties(visit: PropertySink<'_>) {
         IntrinsicKeySpec::WellKnownSymbol(PredefinedAtom::SymbolIterator),
         NativeFunctionKind::TypedArrayPrototype(TypedArrayPrototypeMethod::Values),
     ));
+}
 
-    for element in TypedArrayElementType::ALL {
-        let constructor = IntrinsicIdentity::Function(IntrinsicFunctionId(
-            NativeFunctionKind::TypedArrayConstructor(element),
-        ));
-        let prototype =
-            IntrinsicIdentity::Object(IntrinsicObjectId::TypedArrayInstancePrototype(element));
-        let width = IntrinsicValueSpec::NumberBits(element_width(element).to_bits());
+fn visit_concrete_typed_array_properties(visit: PropertySink<'_>, element: TypedArrayElementType) {
+    let constructor = IntrinsicIdentity::Function(IntrinsicFunctionId(
+        NativeFunctionKind::TypedArrayConstructor(element),
+    ));
+    let prototype =
+        IntrinsicIdentity::Object(IntrinsicObjectId::TypedArrayInstancePrototype(element));
+    let width = IntrinsicValueSpec::NumberBits(element_width(element).to_bits());
 
-        visit(method(
-            IntrinsicIdentity::Object(IntrinsicObjectId::GlobalObject),
-            IntrinsicKeySpec::PredefinedString(constructor_atom(element)),
-            NativeFunctionKind::TypedArrayConstructor(element),
-        ));
-        visit(data(
-            constructor,
-            IntrinsicKeySpec::PredefinedString(PredefinedAtom::Prototype),
-            CONSTRUCTOR_PROTOTYPE_PROPERTY,
-            IntrinsicValueSpec::Object(IntrinsicObjectId::TypedArrayInstancePrototype(element)),
-        ));
-        visit(data(
-            constructor,
-            IntrinsicKeySpec::InternedString(RealmNameId::TypedArrayBytesPerElement),
-            PropertyLayout::data(false, false, false),
-            width,
-        ));
-        visit(accessor(
-            constructor,
-            IntrinsicKeySpec::WellKnownSymbol(PredefinedAtom::SymbolSpecies),
-            PropertyLayout::accessor(false, true),
-            Some(IntrinsicFunctionId(
-                NativeFunctionKind::TypedArraySpeciesGetter,
-            )),
-            None,
-        ));
-        visit(method(
-            prototype,
-            IntrinsicKeySpec::PredefinedString(PredefinedAtom::Constructor),
-            NativeFunctionKind::TypedArrayConstructor(element),
-        ));
-        visit(data(
-            prototype,
-            IntrinsicKeySpec::InternedString(RealmNameId::TypedArrayBytesPerElement),
-            PropertyLayout::data(false, false, false),
-            width,
-        ));
-    }
+    visit(method(
+        IntrinsicIdentity::Object(IntrinsicObjectId::GlobalObject),
+        IntrinsicKeySpec::PredefinedString(constructor_atom(element)),
+        NativeFunctionKind::TypedArrayConstructor(element),
+    ));
+    visit(data(
+        constructor,
+        IntrinsicKeySpec::PredefinedString(PredefinedAtom::Prototype),
+        CONSTRUCTOR_PROTOTYPE_PROPERTY,
+        IntrinsicValueSpec::Object(IntrinsicObjectId::TypedArrayInstancePrototype(element)),
+    ));
+    visit(data(
+        constructor,
+        IntrinsicKeySpec::InternedString(RealmNameId::TypedArrayBytesPerElement),
+        PropertyLayout::data(false, false, false),
+        width,
+    ));
+    visit(accessor(
+        constructor,
+        IntrinsicKeySpec::WellKnownSymbol(PredefinedAtom::SymbolSpecies),
+        PropertyLayout::accessor(false, true),
+        Some(IntrinsicFunctionId(
+            NativeFunctionKind::TypedArraySpeciesGetter,
+        )),
+        None,
+    ));
+    visit(method(
+        prototype,
+        IntrinsicKeySpec::PredefinedString(PredefinedAtom::Constructor),
+        NativeFunctionKind::TypedArrayConstructor(element),
+    ));
+    visit(data(
+        prototype,
+        IntrinsicKeySpec::InternedString(RealmNameId::TypedArrayBytesPerElement),
+        PropertyLayout::data(false, false, false),
+        width,
+    ));
 }
 
 const fn constructor_atom(element: TypedArrayElementType) -> PredefinedAtom {

@@ -205,6 +205,27 @@ fn typed_array_constructors_expose_the_shared_species_getter() {
 }
 
 #[test]
+fn typed_array_constructors_inherit_from_the_hidden_abstract_constructor() {
+    assert_eq!(
+        rendered(
+            "var TypedArray=Object.getPrototypeOf(Int8Array),descriptor=Object.getOwnPropertyDescriptor(TypedArray,'prototype');\
+             return [TypedArray.name,TypedArray.length,TypedArray.prototype.constructor===TypedArray,\
+               Object.getPrototypeOf(Int8Array)===TypedArray,Object.getPrototypeOf(BigInt64Array)===TypedArray,\
+               descriptor.writable,descriptor.enumerable,descriptor.configurable].join('|');"
+        ),
+        "TypedArray|0|true|true|true|false|false|false"
+    );
+    assert_eq!(
+        thrown("var TypedArray=Object.getPrototypeOf(Int8Array);TypedArray();"),
+        ExceptionKind::TypeError
+    );
+    assert_eq!(
+        thrown("var TypedArray=Object.getPrototypeOf(Int8Array);new TypedArray();"),
+        ExceptionKind::TypeError
+    );
+}
+
+#[test]
 fn typed_array_set_copies_typed_and_array_like_sources_with_fresh_target_indices() {
     assert_eq!(
         rendered(
@@ -664,5 +685,195 @@ fn typed_array_callbacks_capture_the_initial_view_and_visit_later_missing_indice
             "var buffer=new ArrayBuffer(4,{maxByteLength:4}),values=new Uint8Array(buffer,2,2);buffer.resize(1);values.find(function(){return true});"
         ),
         ExceptionKind::TypeError
+    );
+}
+
+#[test]
+fn typed_array_map_constructs_species_before_callbacks_and_uses_fresh_writes() {
+    assert_eq!(
+        rendered(
+            "var source=new Uint8Array([1,2,3]),log=[];source.constructor={[Symbol.species]:Uint16Array};\
+             var out=source.map(function(value,index,array){log.push(value+':'+index+':'+(array===source));return value*257});\
+             return [Uint8Array.prototype.map.length,Uint8Array.prototype.map.name,\
+               out.constructor===Uint16Array,out.length,out[0],out[1],out[2],log.join(',')].join('|');"
+        ),
+        "1|map|true|3|257|514|771|1:0:true,2:1:true,3:2:true"
+    );
+    assert_eq!(
+        rendered(
+            "var buffer=new ArrayBuffer(4,{maxByteLength:4}),source=new Uint8Array(buffer),order=[];\
+             source[0]=7;source[1]=8;source.constructor={[Symbol.species]:function C(length){order.push('species'+length);return new Uint8Array(length)}};\
+             var out=source.map(function(value,index){order.push(value===undefined?'u'+index:String(value));if(index===0)buffer.resize(1);return index+1});\
+             return [out.length,out[0],out[1],out[2],out[3],order.join(',')].join('|');"
+        ),
+        "4|1|2|3|4|species4,7,u1,u2,u3"
+    );
+    assert_eq!(
+        rendered(
+            "var source=new Uint8Array([1,2,3,4]),buffer=new ArrayBuffer(4,{maxByteLength:4}),target;\
+             source.constructor={[Symbol.species]:function C(length){target=new Uint8Array(buffer);return target}};\
+             var out=source.map(function(value,index){return {valueOf(){if(index===0)buffer.resize(1);return value+1}}});\
+             return [out===target,out.length,out[0]].join('|');"
+        ),
+        "true|1|2"
+    );
+    assert_eq!(
+        thrown(
+            "var source=new Uint8Array(2);source.constructor={[Symbol.species]:BigInt64Array};source.map(function(value){return value});"
+        ),
+        ExceptionKind::TypeError
+    );
+}
+
+#[test]
+fn typed_array_reductions_capture_the_initial_view_and_refresh_each_element_read() {
+    assert_eq!(
+        rendered(
+            "var values=new Uint8Array([1,2,3]),calls=[],rightCalls=[],callbackThis='not-set';\
+             var left=values.reduce(function(accumulator,value,index,array){calls.push(accumulator+':'+value+':'+index+':'+(array===values));return accumulator+value});\
+             var right=values.reduceRight(function(accumulator,value,index,array){'use strict';callbackThis=this;rightCalls.push(index+':'+(array===values));return accumulator-value});\
+             var explicit=values.reduce(function(accumulator,value){return String(accumulator)+value},undefined);\
+             var empty=new Uint8Array(0).reduce(function(){throw new Error('unexpected')},'seed');\
+             return [Uint8Array.prototype.reduce.length,Uint8Array.prototype.reduce.name,\
+               Uint8Array.prototype.reduceRight.length,Uint8Array.prototype.reduceRight.name,\
+               left,right,explicit,empty,callbackThis===undefined,calls.join(','),rightCalls.join(',')].join('|');"
+        ),
+        "1|reduce|1|reduceRight|6|0|undefined123|seed|true|1:2:1:true,3:3:2:true|1:true,0:true"
+    );
+    assert_eq!(
+        rendered(
+            "var buffer=new ArrayBuffer(4,{maxByteLength:4}),values=new Uint8Array(buffer),seen=[];\
+             values[0]=7;values[1]=8;\
+             var left=values.reduce(function(accumulator,value,index){seen.push(value===undefined?'u'+index:String(value));if(index===0)buffer.resize(1);return accumulator+String(value)},'');\
+             var reverseBuffer=new ArrayBuffer(4,{maxByteLength:4}),reverse=new Uint8Array(reverseBuffer),back=[];\
+             reverse[0]=9;reverse[3]=4;\
+             var right=reverse.reduceRight(function(accumulator,value,index){back.push(value===undefined?'u'+index:String(value));if(index===3)reverseBuffer.resize(1);return accumulator+String(value)},'');\
+             return [left,seen.join(','),right,back.join(',')].join('|');"
+        ),
+        "7undefinedundefinedundefined|7,u1,u2,u3|4undefinedundefined9|4,u2,u1,9"
+    );
+    assert_eq!(
+        thrown("return new Uint8Array(0).reduce(function(){});"),
+        ExceptionKind::TypeError
+    );
+    assert_eq!(
+        thrown("return new Uint8Array(0).reduceRight(function(){});"),
+        ExceptionKind::TypeError
+    );
+    assert_eq!(
+        thrown(
+            "var buffer=new ArrayBuffer(4,{maxByteLength:4}),values=new Uint8Array(buffer,2,2);buffer.resize(1);values.reduce(function(){});"
+        ),
+        ExceptionKind::TypeError
+    );
+}
+
+#[test]
+fn typed_array_filter_collects_before_species_and_keeps_fresh_resizable_reads() {
+    assert_eq!(
+        rendered(
+            "var source=new Uint8Array([1,2,3,4]),calls=[],context={tag:'x'};\
+             source.constructor={[Symbol.species]:Uint16Array};\
+             var out=source.filter(function(value,index,array){calls.push(this.tag+value+index+(array===source));return value%2===0},context);\
+             return [Uint8Array.prototype.filter.length,Uint8Array.prototype.filter.name,\
+               out.constructor===Uint16Array,out.length,out[0],out[1],calls.join(',')].join('|');"
+        ),
+        "1|filter|true|2|2|4|x10true,x21true,x32true,x43true"
+    );
+    assert_eq!(
+        rendered(
+            "var buffer=new ArrayBuffer(4,{maxByteLength:4}),source=new Uint8Array(buffer),order=[];\
+             source[0]=7;source[1]=8;\
+             source.constructor={[Symbol.species]:function C(length){order.push('species'+length);return new Uint8Array(length)}};\
+             var out=source.filter(function(value,index){order.push(value===undefined?'u'+index:String(value));if(index===0)buffer.resize(1);return true});\
+             return [out.length,out[0],out[1],out[2],out[3],order.join(',')].join('|');"
+        ),
+        "4|7|0|0|0|7,u1,u2,u3,species4"
+    );
+    assert_eq!(
+        thrown(
+            "var source=new Uint8Array(2);source.constructor={[Symbol.species]:BigInt64Array};source.filter(function(){return true});"
+        ),
+        ExceptionKind::TypeError
+    );
+    assert_eq!(
+        thrown(
+            "var buffer=new ArrayBuffer(4,{maxByteLength:4}),values=new Uint8Array(buffer,2,2);buffer.resize(1);values.filter(function(){return true});"
+        ),
+        ExceptionKind::TypeError
+    );
+}
+
+#[test]
+fn typed_array_sort_and_to_sorted_use_numeric_collections_before_comparisons() {
+    assert_eq!(
+        rendered(
+            "var source=new Float64Array([NaN,0,-0,3,-2,NaN]);\
+             source.constructor={get [Symbol.species](){throw new Error('species')}};\
+             var out=source.toSorted();\
+             return [Uint8Array.prototype.sort.length,Uint8Array.prototype.sort.name,\
+               Uint8Array.prototype.toSorted.length,Uint8Array.prototype.toSorted.name,\
+               out instanceof Float64Array,out===source,out[0],1/out[1],1/out[2],out[3],\
+               Number.isNaN(out[4]),Number.isNaN(out[5]),Number.isNaN(source[0]),1/source[1],1/source[2]].join('|');"
+        ),
+        "1|sort|1|toSorted|true|false|-2|-Infinity|Infinity|3|true|true|true|Infinity|-Infinity"
+    );
+    assert_eq!(
+        rendered(
+            "var values=new Uint8Array([3,1,2,1]),calls=[];\
+             var result=values.sort(function(left,right){calls.push(left+':'+right);return left-right});\
+             var bigints=new BigInt64Array([2n,-1n,0n]).toSorted();\
+             return [result===values,values[0],values[1],values[2],values[3],calls.length,\
+               String(bigints[0]),String(bigints[1]),String(bigints[2])].join('|');"
+        ),
+        "true|1|1|2|3|5|-1|0|2"
+    );
+    assert_eq!(
+        rendered(
+            "var buffer=new ArrayBuffer(4,{maxByteLength:4}),source=new Uint8Array(buffer),calls=0;\
+             source[0]=3;source[1]=1;source[2]=2;\
+             var copied=source.toSorted(function(left,right){if(calls++===0)buffer.resize(0);return left-right});\
+             return [copied.length,copied[0],copied[1],copied[2],copied[3],source.length].join('|');"
+        ),
+        "4|0|1|2|3|0"
+    );
+    assert_eq!(
+        thrown("return new Uint8Array(1).sort(1);"),
+        ExceptionKind::TypeError
+    );
+    assert_eq!(
+        thrown("return new Uint8Array(1).toSorted(1);"),
+        ExceptionKind::TypeError
+    );
+}
+
+#[test]
+fn typed_array_sort_resumes_large_comparator_collections_without_growing_the_host_stack() {
+    let reverse = (0..128)
+        .rev()
+        .map(|value| value.to_string())
+        .collect::<Vec<_>>()
+        .join(",");
+    assert_eq!(
+        rendered(&format!(
+            "var values=new Int32Array([{reverse}]),calls=0;\
+             values.sort(function(left,right){{calls+=1;return(left/4|0)-(right/4|0)}});\
+             return [values[0]===3,values[3]===0,values[124]===127,values[127]===124,calls>0].join('|');"
+        )),
+        "true|true|true|true|true"
+    );
+}
+
+#[test]
+fn typed_array_constructor_consumes_large_array_literals_without_growing_the_host_stack() {
+    let values = (0..128)
+        .map(|value| value.to_string())
+        .collect::<Vec<_>>()
+        .join(",");
+    assert_eq!(
+        rendered(&format!(
+            "return String(new Int32Array([{values}]).length);"
+        )),
+        "128"
     );
 }

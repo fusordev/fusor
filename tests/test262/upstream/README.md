@@ -1,19 +1,26 @@
-# Pinned Test262 baseline
+# Test262 filter policy
 
-These three files are copied verbatim from QuickJS `2026-06-04` and form one
-baseline with Test262 commit `5c8206929d81b2d3d727ca6aac56c18358c8d790`:
+The complete Test262 suite is not vendored. The manually dispatched GitHub
+workflow clones the current upstream default branch for each run. The runner
+requires an unmodified checkout with LF line endings and applies this
+repository's policy from `test262.conf`:
 
-- `test262.patch` must already be applied to the external Test262 checkout;
-- `test262.conf` supplies the upstream feature skips and explicit exclusions;
-- `test262_errors.txt` records the upstream release's known failures.
+- `[features]` entries marked `=skip` remain skipped;
+- `[exclude]` paths remain excluded, including Annex B and ECMA-402.
 
-The suite itself is not vendored. Prepare a checkout with LF line endings, pin
-it to the commit above, apply `test262.patch`, then run:
+The policy is intentionally independent of a particular upstream revision, so
+new upstream tests are classified by the same engine-support boundary. The
+report records the checked-out commit and the policy fingerprint.
+
+`test262.patch` and `test262_errors.txt` are retained verbatim as QuickJS
+`2026-06-04` provenance artifacts. They are not applied to, or used to filter,
+the current upstream Test262 checkout.
+
+To inspect a bounded local selection without executing the full suite:
 
 ```sh
 cargo xtask test262 --suite /path/to/test262 --inventory-only
 cargo xtask test262 --suite /path/to/test262 --filter built-ins/Array --report target/test262.json
 ```
 
-The runner rejects another revision, `core.autocrlf=true`, or an unpatched
-checkout. ECMA-402 paths are inventoried as low-priority skips.
+ECMA-402 paths are inventoried as low-priority skips.

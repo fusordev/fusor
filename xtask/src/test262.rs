@@ -13,16 +13,12 @@ use std::ffi::OsString;
 use std::fs;
 use std::path::{Component, Path, PathBuf};
 use std::process::Command;
+use std::sync::Arc;
+use std::thread;
 
-pub const PINNED_TEST262_REVISION: &str = "5c8206929d81b2d3d727ca6aac56c18358c8d790";
-const PINNED_QUICKJS_RELEASE: &str = "2026-06-04";
 const DEFAULT_BASELINE: &str = "tests/test262/upstream";
 const DEFAULT_INSTRUCTION_FUEL: u64 = 10_000_000;
 const STRICT_PREFIX: &str = "\"use strict\";\n";
-const BASELINE_CONFIG_FNV1A64: u64 = 0xcd1b_b878_684d_5709;
-const BASELINE_PATCH_FNV1A64: u64 = 0x69b9_930a_3213_9bb8;
-const BASELINE_ERRORS_FNV1A64: u64 = 0xdcb6_b795_f816_719f;
-const BASELINE_EXPECTED_ERROR_LINES: usize = 58;
 
 #[derive(Debug, Eq, PartialEq)]
 pub struct Test262Options {
@@ -34,6 +30,8 @@ pub struct Test262Options {
     pub report: Option<PathBuf>,
     pub inventory_only: bool,
     pub instruction_fuel: u64,
+    pub jobs: usize,
+    pub verbose: bool,
 }
 
 pub fn parse_options(
@@ -47,6 +45,8 @@ pub fn parse_options(
     let mut report = None;
     let mut inventory_only = false;
     let mut instruction_fuel = DEFAULT_INSTRUCTION_FUEL;
+    let mut jobs = default_jobs();
+    let mut verbose = false;
 
     while let Some(option) = arguments.next() {
         match option.to_string_lossy().as_ref() {
@@ -77,6 +77,8 @@ pub fn parse_options(
             "--instruction-fuel" => {
                 instruction_fuel = required_positive_u64(&mut arguments, "--instruction-fuel")?;
             }
+            "--jobs" => jobs = required_positive_usize(&mut arguments, "--jobs")?,
+            "--verbose" | "-v" => verbose = true,
             unknown => return Err(format!("unknown test262 option `{unknown}`")),
         }
     }
@@ -90,7 +92,13 @@ pub fn parse_options(
         report,
         inventory_only,
         instruction_fuel,
+        jobs,
+        verbose,
     })
+}
+
+fn default_jobs() -> usize {
+    thread::available_parallelism().map_or(1, std::num::NonZeroUsize::get)
 }
 
 fn required_value(
@@ -141,13 +149,8 @@ fn required_positive_u64(
 
 #[derive(Debug)]
 struct Baseline {
-    root: PathBuf,
     policy: BaselinePolicy,
-    expected_error_lines: usize,
-    expected_errors: BTreeSet<(String, bool)>,
     config_fingerprint: u64,
-    patch_fingerprint: u64,
-    errors_fingerprint: u64,
 }
 
 impl Baseline {
@@ -155,87 +158,19 @@ impl Baseline {
         let root = root
             .canonicalize()
             .map_err(|error| format!("could not resolve baseline {}: {error}", root.display()))?;
-        let config = read_required(&root.join("test262.conf"), "QuickJS Test262 configuration")?;
-        let patch = read_required(&root.join("test262.patch"), "QuickJS Test262 patch")?;
-        let errors = read_required(
-            &root.join("test262_errors.txt"),
-            "QuickJS Test262 expected errors",
-        )?;
+        let config = read_required(&root.join("test262.conf"), "Test262 filter policy")?;
         let policy = BaselinePolicy::parse(&config)?;
-        let expected_errors = errors
-            .lines()
-            .filter(|line| !line.trim().is_empty())
-            .map(validate_expected_error_line)
-            .collect::<Result<Vec<_>, _>>()?
-            .into_iter()
-            .collect::<BTreeSet<_>>();
-        let expected_error_lines = expected_errors.len();
         let config_fingerprint = fnv1a64(config.as_bytes());
-        let patch_fingerprint = fnv1a64(patch.as_bytes());
-        let errors_fingerprint = fnv1a64(errors.as_bytes());
-        validate_baseline_fingerprint("test262.conf", config_fingerprint, BASELINE_CONFIG_FNV1A64)?;
-        validate_baseline_fingerprint("test262.patch", patch_fingerprint, BASELINE_PATCH_FNV1A64)?;
-        validate_baseline_fingerprint(
-            "test262_errors.txt",
-            errors_fingerprint,
-            BASELINE_ERRORS_FNV1A64,
-        )?;
-        if expected_error_lines != BASELINE_EXPECTED_ERROR_LINES {
-            return Err(format!(
-                "test262_errors.txt has {expected_error_lines} entries, expected {BASELINE_EXPECTED_ERROR_LINES}"
-            ));
-        }
         Ok(Self {
-            root,
             policy,
-            expected_error_lines,
-            expected_errors,
             config_fingerprint,
-            patch_fingerprint,
-            errors_fingerprint,
         })
-    }
-
-    fn patch_path(&self) -> PathBuf {
-        self.root.join("test262.patch")
-    }
-
-    fn expects_failure(&self, path: &str, mode: &str) -> bool {
-        self.expected_errors
-            .contains(&(path.to_owned(), mode == "strict"))
-    }
-}
-
-fn validate_baseline_fingerprint(label: &str, actual: u64, expected: u64) -> Result<(), String> {
-    if actual == expected {
-        Ok(())
-    } else {
-        Err(format!(
-            "{label} fingerprint {actual:016x} does not match pinned QuickJS {PINNED_QUICKJS_RELEASE} fingerprint {expected:016x}"
-        ))
     }
 }
 
 fn read_required(path: &Path, label: &str) -> Result<String, String> {
     fs::read_to_string(path)
         .map_err(|error| format!("could not read {label} {}: {error}", path.display()))
-}
-
-fn validate_expected_error_line(line: &str) -> Result<(String, bool), String> {
-    let line = line
-        .strip_prefix("test262/test/")
-        .ok_or_else(|| format!("invalid QuickJS expected-error entry `{line}`"))?;
-    let (path, detail) = line
-        .split_once(':')
-        .ok_or_else(|| format!("invalid QuickJS expected-error entry `{line}`"))?;
-    if !Path::new(path)
-        .extension()
-        .is_some_and(|extension| extension.eq_ignore_ascii_case("js"))
-        || !detail.contains(": ")
-    {
-        return Err(format!("invalid QuickJS expected-error entry `{line}`"));
-    }
-    Ok((path.to_owned(), detail.contains("strict mode:")))
 }
 
 #[derive(Debug, Default)]
@@ -272,7 +207,7 @@ impl BaselinePolicy {
         policy.exclusions.sort();
         policy.exclusions.dedup();
         if policy.skipped_features.is_empty() || policy.exclusions.is_empty() {
-            return Err("QuickJS test262.conf is missing feature or exclusion policy".to_owned());
+            return Err("Test262 filter policy is missing feature or exclusion rules".to_owned());
         }
         Ok(policy)
     }
@@ -299,7 +234,13 @@ fn normalize_baseline_path(path: &str) -> Result<String, String> {
     })
 }
 
-fn verify_checkout(suite: &Path, baseline: &Baseline) -> Result<PathBuf, String> {
+#[derive(Debug)]
+struct VerifiedCheckout {
+    root: PathBuf,
+    revision: String,
+}
+
+fn verify_checkout(suite: &Path) -> Result<VerifiedCheckout, String> {
     let suite = suite.canonicalize().map_err(|error| {
         format!(
             "could not resolve Test262 checkout {}: {error}",
@@ -315,10 +256,11 @@ fn verify_checkout(suite: &Path, baseline: &Baseline) -> Result<PathBuf, String>
         }
     }
     let revision = git_output(&suite, &["rev-parse", "HEAD"])?;
-    if revision.trim() != PINNED_TEST262_REVISION {
+    let revision = revision.trim();
+    if revision.is_empty() {
         return Err(format!(
-            "Test262 checkout is at {}, expected {PINNED_TEST262_REVISION}",
-            revision.trim()
+            "could not determine the Test262 checkout revision at {}",
+            suite.display()
         ));
     }
     let autocrlf = Command::new("git")
@@ -333,60 +275,43 @@ fn verify_checkout(suite: &Path, baseline: &Baseline) -> Result<PathBuf, String>
                 .to_owned(),
         );
     }
-    let patch = baseline
-        .patch_path()
-        .canonicalize()
-        .map_err(|error| format!("could not resolve Test262 patch: {error}"))?;
-    let patched = Command::new("git")
+    let test_and_harness_diff = Command::new("git")
         .arg("-C")
         .arg(&suite)
-        .args(["apply", "--reverse", "--check", "--whitespace=nowarn"])
-        .arg(&patch)
-        .output()
-        .map_err(|error| format!("could not validate the QuickJS Test262 patch: {error}"))?;
-    if !patched.status.success() {
+        .args(["diff", "--quiet", "HEAD", "--", "test", "harness"])
+        .status()
+        .map_err(|error| format!("could not validate Test262 sources: {error}"))?;
+    if !test_and_harness_diff.success() {
         return Err(format!(
-            "Test262 checkout does not contain the pinned QuickJS {PINNED_QUICKJS_RELEASE} patch: {}",
-            String::from_utf8_lossy(&patched.stderr).trim()
+            "Test262 test or harness sources differ from upstream revision {revision}"
         ));
     }
-    let harness_diff = Command::new("git")
+    let changes = Command::new("git")
         .arg("-C")
         .arg(&suite)
         .args([
-            "diff",
-            "--no-ext-diff",
-            "--binary",
-            "--abbrev=7",
-            "HEAD",
+            "status",
+            "--porcelain",
+            "--untracked-files=all",
             "--",
+            "test",
             "harness",
         ])
         .output()
-        .map_err(|error| format!("could not compare the patched Test262 harness: {error}"))?;
-    if !harness_diff.status.success() {
+        .map_err(|error| format!("could not inspect Test262 source status: {error}"))?;
+    if !changes.status.success() {
         return Err(format!(
-            "could not compare the patched Test262 harness: {}",
-            String::from_utf8_lossy(&harness_diff.stderr).trim()
+            "could not inspect Test262 source status: {}",
+            String::from_utf8_lossy(&changes.stderr).trim()
         ));
     }
-    let pinned_patch = fs::read(&patch)
-        .map_err(|error| format!("could not read pinned Test262 patch: {error}"))?;
-    if harness_diff.stdout != pinned_patch {
-        return Err(
-            "Test262 harness changes are not exactly the pinned QuickJS release patch".to_owned(),
-        );
+    if !changes.stdout.is_empty() {
+        return Err("Test262 test or harness sources contain local changes".to_owned());
     }
-    let test_diff = Command::new("git")
-        .arg("-C")
-        .arg(&suite)
-        .args(["diff", "--quiet", "HEAD", "--", "test"])
-        .status()
-        .map_err(|error| format!("could not validate tracked Test262 sources: {error}"))?;
-    if !test_diff.success() {
-        return Err("Test262 test sources differ from the pinned revision".to_owned());
-    }
-    Ok(suite)
+    Ok(VerifiedCheckout {
+        root: suite,
+        revision: revision.to_owned(),
+    })
 }
 
 fn git_output(root: &Path, arguments: &[&str]) -> Result<String, String> {
@@ -527,7 +452,7 @@ fn modes(metadata: &Metadata) -> Result<Vec<TestMode>, String> {
     }
 }
 
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 struct TestPlan {
     path: PathBuf,
     relative: String,
@@ -786,14 +711,13 @@ struct FailureRecord {
 }
 
 impl FailureRecord {
-    fn json(&self, baseline: &Baseline) -> JsonValue {
+    fn json(&self) -> JsonValue {
         json!({
             "path": self.path,
             "mode": self.mode,
             "expected": self.expected,
             "actual": self.actual,
             "detail": self.detail,
-            "quickjs_baseline_known_failure": baseline.expects_failure(&self.path, self.mode),
         })
     }
 }
@@ -827,9 +751,9 @@ pub fn run_test262(options: &Test262Options) -> Result<bool, String> {
             ));
         }
     }
-    let suite = verify_checkout(&options.suite, &baseline)?;
+    let suite = verify_checkout(&options.suite)?;
     let inventory = Inventory::collect(
-        &suite,
+        &suite.root,
         &baseline,
         options.filter.as_deref(),
         options.admit_feature.as_deref(),
@@ -838,18 +762,42 @@ pub fn run_test262(options: &Test262Options) -> Result<bool, String> {
     if inventory.plans.is_empty() {
         return Err("Test262 selection contains no runnable test source files".to_owned());
     }
+    if options.verbose {
+        println!(
+            "test262: selection filter={} files={} admitted-cases={} skipped-cases={} workers={} fuel={}",
+            options.filter.as_deref().unwrap_or("test"),
+            inventory.plans.len(),
+            inventory.admitted_cases(),
+            inventory.skipped_cases(),
+            if options.inventory_only {
+                0
+            } else {
+                options.jobs.min(inventory.admitted_cases())
+            },
+            options.instruction_fuel,
+        );
+        for (reason, count) in &inventory.skip_counts {
+            println!("test262: skipped {count} cases ({reason})");
+        }
+    }
     let execution = if options.inventory_only {
         ExecutionSummary::default()
     } else {
-        execute_inventory(&suite, &inventory, options.instruction_fuel)?
+        execute_inventory(
+            &suite.root,
+            &inventory,
+            options.instruction_fuel,
+            options.jobs,
+            options.verbose,
+        )?
     };
-    let report = build_report(options, &baseline, &inventory, &execution);
+    let report = build_report(options, &suite, &baseline, &inventory, &execution);
     if let Some(path) = &options.report {
         write_report(path, &report)?;
     }
     println!(
-        "test262: revision={} files={} admitted-cases={} skipped-cases={} passed={} failed={} pass-rate={}{}",
-        PINNED_TEST262_REVISION,
+        "test262: revision={} files={} admitted-cases={} skipped-cases={} passed={} failed={} pass-rate={}{} workers={}",
+        suite.revision,
         inventory.plans.len(),
         inventory.admitted_cases(),
         inventory.skipped_cases(),
@@ -860,7 +808,12 @@ pub fn run_test262(options: &Test262Options) -> Result<bool, String> {
             " inventory-only"
         } else {
             ""
-        }
+        },
+        if options.inventory_only {
+            0
+        } else {
+            options.jobs.min(inventory.admitted_cases())
+        },
     );
     for failure in execution.failures.iter().take(20) {
         eprintln!(
@@ -894,26 +847,120 @@ fn execute_inventory(
     suite: &Path,
     inventory: &Inventory,
     instruction_fuel: u64,
+    jobs: usize,
+    verbose: bool,
 ) -> Result<ExecutionSummary, String> {
     let harness = HarnessSources::load(suite)?;
-    let mut summary = ExecutionSummary::default();
+    let mut cases = Vec::new();
     for plan in &inventory.plans {
         if plan.skip_reason.is_some() {
             continue;
         }
-        let source = fs::read_to_string(&plan.path)
-            .map_err(|error| format!("could not read test/{}: {error}", plan.relative))?;
+        let source = Arc::<str>::from(
+            fs::read_to_string(&plan.path)
+                .map_err(|error| format!("could not read test/{}: {error}", plan.relative))?,
+        );
         for &mode in &plan.modes {
-            match execute_case(plan, mode, &source, &harness, instruction_fuel)? {
-                None => summary.passed += 1,
-                Some(failure) => {
-                    summary.failed += 1;
-                    summary.failures.push(failure);
+            cases.push(ExecutionCase {
+                plan: plan.clone(),
+                mode,
+                source: Arc::clone(&source),
+            });
+        }
+    }
+    let results = execute_cases_parallel(&cases, &harness, instruction_fuel, jobs)?;
+    let mut summary = ExecutionSummary::default();
+    for (case, result) in cases.iter().zip(results) {
+        match result? {
+            None => {
+                summary.passed += 1;
+                if verbose {
+                    println!(
+                        "test262: pass test/{} [{}]",
+                        case.plan.relative,
+                        case.mode.name()
+                    );
                 }
+            }
+            Some(failure) => {
+                summary.failed += 1;
+                if verbose {
+                    println!(
+                        "test262: fail test/{} [{}]: expected {}; got {}: {}",
+                        failure.path,
+                        failure.mode,
+                        failure.expected,
+                        failure.actual,
+                        failure.detail,
+                    );
+                }
+                summary.failures.push(failure);
             }
         }
     }
     Ok(summary)
+}
+
+#[derive(Clone)]
+struct ExecutionCase {
+    plan: TestPlan,
+    mode: TestMode,
+    source: Arc<str>,
+}
+
+fn execute_cases_parallel(
+    cases: &[ExecutionCase],
+    harness: &HarnessSources,
+    instruction_fuel: u64,
+    jobs: usize,
+) -> Result<Vec<Result<Option<FailureRecord>, String>>, String> {
+    let worker_count = jobs.min(cases.len()).max(1);
+    if worker_count == 1 {
+        return Ok(cases
+            .iter()
+            .map(|case| {
+                execute_case(
+                    &case.plan,
+                    case.mode,
+                    &case.source,
+                    harness,
+                    instruction_fuel,
+                )
+            })
+            .collect());
+    }
+    let mut ordered = thread::scope(|scope| {
+        let mut handles = Vec::new();
+        for worker in 0..worker_count {
+            handles.push(scope.spawn(move || {
+                let mut results = Vec::new();
+                for index in (worker..cases.len()).step_by(worker_count) {
+                    let case = &cases[index];
+                    results.push((
+                        index,
+                        execute_case(
+                            &case.plan,
+                            case.mode,
+                            &case.source,
+                            harness,
+                            instruction_fuel,
+                        ),
+                    ));
+                }
+                results
+            }));
+        }
+        let mut results = Vec::with_capacity(cases.len());
+        for handle in handles {
+            let mut worker_results = handle
+                .join()
+                .map_err(|_| "a Test262 worker thread panicked".to_owned())?;
+            results.append(&mut worker_results);
+        }
+        Ok::<_, String>(results)
+    })?;
+    ordered.sort_unstable_by_key(|(index, _)| *index);
+    Ok(ordered.into_iter().map(|(_, result)| result).collect())
 }
 
 fn execute_case(
@@ -1119,6 +1166,7 @@ const fn exception_kind_name(kind: ExceptionKind) -> &'static str {
 
 fn build_report(
     options: &Test262Options,
+    suite: &VerifiedCheckout,
     baseline: &Baseline,
     inventory: &Inventory,
     execution: &ExecutionSummary,
@@ -1128,30 +1176,22 @@ fn build_report(
         .iter()
         .map(|(reason, count)| (reason.clone(), json!(count)))
         .collect::<serde_json::Map<_, _>>();
-    let observed_quickjs_baseline_failures = execution
-        .failures
-        .iter()
-        .filter(|failure| baseline.expects_failure(&failure.path, failure.mode))
-        .count();
     json!({
         "schema": 1,
         "test262": {
-            "revision": PINNED_TEST262_REVISION,
-            "package_version": "5.0.0",
+            "revision": suite.revision,
         },
-        "quickjs_baseline": {
-            "release": PINNED_QUICKJS_RELEASE,
+        "filter_policy": {
+            "path": "tests/test262/upstream/test262.conf",
             "config_fnv1a64": format!("{:016x}", baseline.config_fingerprint),
-            "patch_fnv1a64": format!("{:016x}", baseline.patch_fingerprint),
-            "expected_errors_fnv1a64": format!("{:016x}", baseline.errors_fingerprint),
-            "expected_error_lines": baseline.expected_error_lines,
-            "observed_known_failures": observed_quickjs_baseline_failures,
         },
         "selection": {
             "filter": options.filter,
             "admitted_feature": options.admit_feature,
             "limit": options.limit,
             "instruction_fuel": options.instruction_fuel,
+            "jobs": options.jobs,
+            "verbose": options.verbose,
         },
         "inventory": {
             "test_files": inventory.plans.len(),
@@ -1164,7 +1204,7 @@ fn build_report(
             "enabled": !options.inventory_only,
             "passed": execution.passed,
             "failed": execution.failed,
-            "failures": execution.failures.iter().map(|failure| failure.json(baseline)).collect::<Vec<_>>(),
+            "failures": execution.failures.iter().map(FailureRecord::json).collect::<Vec<_>>(),
         },
     })
 }
@@ -1220,6 +1260,9 @@ mod tests {
             "/tmp/report.json",
             "--instruction-fuel",
             "5000",
+            "--jobs",
+            "3",
+            "--verbose",
             "--inventory-only",
         ]
         .into_iter()
@@ -1235,6 +1278,8 @@ mod tests {
                 report: Some(PathBuf::from("/tmp/report.json")),
                 inventory_only: true,
                 instruction_fuel: 5_000,
+                jobs: 3,
+                verbose: true,
             })
         );
     }
@@ -1244,6 +1289,37 @@ mod tests {
         assert_eq!(test262_pass_rate(0, 0), "n/a");
         assert_eq!(test262_pass_rate(1, 2), "1/3 (33.33%)");
         assert_eq!(test262_pass_rate(100, 0), "100/100 (100.00%)");
+    }
+
+    #[test]
+    fn parallel_execution_preserves_case_order_and_isolates_runtimes() {
+        let plan = TestPlan {
+            path: PathBuf::from("parallel.js"),
+            relative: "parallel.js".to_owned(),
+            metadata: Metadata::default(),
+            modes: vec![TestMode::Raw],
+            skip_reason: None,
+        };
+        let cases = (0..4)
+            .map(|_| ExecutionCase {
+                plan: plan.clone(),
+                mode: TestMode::Raw,
+                source: Arc::<str>::from("var state = 1;"),
+            })
+            .collect::<Vec<_>>();
+        let harness = HarnessSources {
+            assert: String::new(),
+            sta: String::new(),
+            root: PathBuf::from("unused-harness"),
+        };
+        let outcomes = execute_cases_parallel(&cases, &harness, DEFAULT_INSTRUCTION_FUEL, 2)
+            .expect("parallel execution");
+        assert_eq!(outcomes.len(), cases.len());
+        assert!(
+            outcomes
+                .into_iter()
+                .all(|outcome| matches!(outcome, Ok(None)))
+        );
     }
 
     #[test]
@@ -1336,18 +1412,12 @@ throw new TypeError();",
     }
 
     #[test]
-    fn checked_in_quickjs_baseline_is_exact_and_complete() {
+    fn checked_in_test262_filter_policy_is_parseable() {
         let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../tests/test262/upstream");
-        let baseline = Baseline::load(&root).expect("pinned baseline");
-        assert_eq!(baseline.expected_error_lines, BASELINE_EXPECTED_ERROR_LINES);
-        assert!(baseline.expects_failure(
-            "language/identifier-resolution/assign-to-global-undefined.js",
-            "strict"
-        ));
-        assert!(!baseline.expects_failure(
-            "language/identifier-resolution/assign-to-global-undefined.js",
-            "non-strict"
-        ));
+        let baseline = Baseline::load(&root).expect("filter policy");
+        assert!(baseline.config_fingerprint != 0);
+        assert!(baseline.policy.skipped_features.contains("Intl.Locale"));
+        assert!(baseline.policy.excludes("annexB/language/basic.js"));
     }
 
     #[test]
@@ -1389,7 +1459,7 @@ throw new TypeError();",
         std::env::temp_dir().join(format!(
             "quickjs-test262-{label}-{}-{:?}",
             std::process::id(),
-            std::thread::current().id()
+            thread::current().id()
         ))
     }
 }

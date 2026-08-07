@@ -18,12 +18,16 @@
 The release archive is the normative source target. The moving Git branch is
 recorded only for traceability and must not silently change compatibility.
 
-The Test262 revision comes from the release `Makefile`. Conformance runs must
-also apply the release's `tests/test262.patch`, use `test262.conf`, and compare
-against `test262_errors.txt`; the revision alone is not the upstream baseline.
-The verbatim artifacts live in `tests/test262/upstream/`; `cargo xtask test262`
-rejects a different revision, CRLF checkout, modified baseline, or missing
-patch before inventory or execution.
+The Test262 revision comes from the release `Makefile`; together with
+`tests/test262.patch`, `test262.conf`, and `test262_errors.txt`, it remains the
+QuickJS `2026-06-04` reference baseline. Those verbatim artifacts live in
+`tests/test262/upstream/`.
+
+Engine conformance is separately run against the latest Test262 upstream
+default branch by the manually dispatched GitHub workflow. `cargo xtask test262`
+requires a clean LF checkout and applies only this repository's feature and
+path exclusions from `tests/test262/upstream/test262.conf`; it does not apply
+the QuickJS harness patch or constrain the checkout to the old release revision.
 
 With the release's `SHORT_OPCODES=1` configuration, `quickjs-opcode.h` defines
 244 final table entries (including byte zero's reserved `invalid` sentinel) and

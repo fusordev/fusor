@@ -2149,7 +2149,8 @@ impl DateState {
     }
 }
 
-/// The specification-level slots of an ECMAScript `ArrayBuffer` object.
+/// The specification-level slots shared by ECMAScript `ArrayBuffer` and
+/// `SharedArrayBuffer` objects.
 ///
 /// A detached buffer has no backing block. A fixed-length buffer has no
 /// `[[ArrayBufferMaxByteLength]]`, while a resizable buffer retains the
@@ -2157,6 +2158,7 @@ impl DateState {
 pub(crate) struct ArrayBufferState {
     data: Option<Vec<u8>>,
     max_byte_length: Option<usize>,
+    shared: bool,
 }
 
 /// The specification-level slots of an ECMAScript `DataView` object.
@@ -2358,7 +2360,21 @@ impl ArrayBufferState {
         Self {
             data: Some(data),
             max_byte_length,
+            shared: false,
         }
+    }
+
+    pub(crate) const fn shared(data: Vec<u8>, max_byte_length: Option<usize>) -> Self {
+        Self {
+            data: Some(data),
+            max_byte_length,
+            shared: true,
+        }
+    }
+
+    #[must_use]
+    pub(crate) const fn is_shared(&self) -> bool {
+        self.shared
     }
 
     #[must_use]

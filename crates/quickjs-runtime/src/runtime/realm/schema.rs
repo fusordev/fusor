@@ -14,8 +14,9 @@ use super::{
 use crate::object::TypedArrayElementType;
 use crate::runtime::{
     ArrayBufferPrototypeMethod, DataViewPrototypeMethod, DatePrototypeMethod, DateStaticMethod,
-    TemporalDurationPrototypeMethod, TemporalDurationStaticMethod, TemporalInstantPrototypeMethod,
-    TemporalInstantStaticMethod, TypedArrayPrototypeMethod,
+    SharedArrayBufferPrototypeMethod, TemporalDurationPrototypeMethod,
+    TemporalDurationStaticMethod, TemporalInstantPrototypeMethod, TemporalInstantStaticMethod,
+    TypedArrayPrototypeMethod,
 };
 
 /// Stable identity of an object allocated by Realm bootstrap.
@@ -33,6 +34,7 @@ pub(in crate::runtime) enum IntrinsicObjectId {
     StringPrototype,
     ArrayPrototype,
     ArrayBufferPrototype,
+    SharedArrayBufferPrototype,
     DataViewPrototype,
     TypedArrayPrototype,
     TypedArrayInstancePrototype(TypedArrayElementType),
@@ -68,7 +70,7 @@ pub(in crate::runtime) enum IntrinsicObjectId {
 }
 
 impl IntrinsicObjectId {
-    pub(in crate::runtime) const ALL: [Self; 60] = [
+    pub(in crate::runtime) const ALL: [Self; 61] = [
         Self::ObjectPrototype,
         Self::GlobalObject,
         Self::ErrorPrototype(ErrorIntrinsicKind::Error),
@@ -86,6 +88,7 @@ impl IntrinsicObjectId {
         Self::StringPrototype,
         Self::ArrayPrototype,
         Self::ArrayBufferPrototype,
+        Self::SharedArrayBufferPrototype,
         Self::DataViewPrototype,
         Self::TypedArrayPrototype,
         Self::TypedArrayInstancePrototype(TypedArrayElementType::Int8),
@@ -176,6 +179,7 @@ pub(in crate::runtime) enum RealmNameId {
     ArrayFromAsync,
     ArrayBufferIsView,
     ArrayBufferPrototype(ArrayBufferPrototypeMethod),
+    SharedArrayBufferPrototype(SharedArrayBufferPrototypeMethod),
     DataViewPrototype(DataViewPrototypeMethod),
     TypedArrayPrototype(TypedArrayPrototypeMethod),
     TypedArrayBytesPerElement,
