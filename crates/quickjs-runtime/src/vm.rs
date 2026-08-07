@@ -2187,6 +2187,10 @@ enum OperatorPrimitiveTarget {
     },
     ArrayJoinSeparator(Box<ArrayJoinContinuation>),
     ArrayJoinElement(Box<ArrayJoinContinuation>),
+    /// An `Array.prototype` callback method's length, awaiting `ToNumber`.
+    ArrayCallbackLength(Box<ArrayCallbackContinuation>),
+    /// An `Array.prototype` reduction's length, awaiting `ToNumber`.
+    ArrayReductionLength(Box<ArrayReductionContinuation>),
     /// An `Array.prototype` search's position argument, awaiting `ToNumber`.
     ArraySearchPosition(Box<ArraySearchContinuation>),
     /// An `Array.prototype` mutator's argument, awaiting `ToNumber`.
@@ -2405,6 +2409,8 @@ impl OperatorPrimitiveTarget {
             Self::StringMethodSubject(state) | Self::StringMethodArgument(state) => {
                 state.retained_values()
             }
+            Self::ArrayCallbackLength(_) => ArrayCallbackContinuation::retained_values(),
+            Self::ArrayReductionLength(_) => ArrayReductionContinuation::retained_values(),
             Self::ArraySearchPosition(_) => ArraySearchContinuation::retained_values(),
             Self::ArrayMutatorArgument(state) => state.retained_values(),
             Self::ArrayCopierArgument(state) => state.retained_values(),
@@ -2734,6 +2740,8 @@ fn trace_operator_primitive_target_roots(
         }
         OperatorPrimitiveTarget::StringMethodSubject(state)
         | OperatorPrimitiveTarget::StringMethodArgument(state) => state.trace_roots(mark),
+        OperatorPrimitiveTarget::ArrayCallbackLength(state) => state.trace_roots(mark),
+        OperatorPrimitiveTarget::ArrayReductionLength(state) => state.trace_roots(mark),
         OperatorPrimitiveTarget::ArraySearchPosition(state) => state.trace_roots(mark),
         OperatorPrimitiveTarget::ArrayMutatorArgument(state) => state.trace_roots(mark),
         OperatorPrimitiveTarget::ArrayCopierArgument(state) => state.trace_roots(mark),

@@ -80,8 +80,9 @@ pub(crate) struct ArrayCallbackContinuation {
     method: ArrayCallback,
     /// The coerced receiver whose elements are visited.
     target: StoredValue,
-    /// The callback, already verified to be callable.
-    callback: FunctionId,
+    /// The callback value. It is retained through `LengthOfArrayLike`, then
+    /// checked for callability as the specification requires.
+    callback: StoredValue,
     /// Whether this traversal tests `HasProperty` before reading an index.
     ///
     /// Ordinary array callbacks skip holes for most methods. Typed arrays have
@@ -110,17 +111,17 @@ pub(crate) struct ArrayCallbackContinuation {
 }
 
 impl ArrayCallbackContinuation {
-    /// The receiver, the `thisArg`, the current element, and the result.
+    /// The receiver, callback, `thisArg`, current element, and result.
     pub(crate) const fn retained_values() -> u64 {
-        4
+        5
     }
 
     /// Reports the traced roots this continuation retains.
     pub(crate) fn trace_roots(&self, mark: &mut dyn FnMut(CollectionRoot)) {
         trace_stored_value_root(&self.target, mark);
+        trace_stored_value_root(&self.callback, mark);
         trace_stored_value_root(&self.this_argument, mark);
         trace_stored_value_root(&self.result, mark);
-        mark(CollectionRoot::Heap(HeapReference::Function(self.callback)));
         if let Some(element) = &self.element {
             trace_stored_value_root(element, mark);
         }
@@ -146,35 +147,15 @@ pub(super) fn begin_array_callback(
     execution_budget: &mut ExecutionBudget,
 ) -> Result<NativeDispatch, NativeFailure> {
     // `ToObject(this)` runs before the callback is checked, so a nullish
-    // receiver throws even when the callback is also invalid.
-    if matches!(receiver, StoredValue::Undefined | StoredValue::Null) {
-        return Err(NativeFailure::Abrupt(PendingException {
-            realm,
-            payload: PendingExceptionPayload::EngineError {
-                kind: ExceptionKind::TypeError,
-                message: JsString::from_utf8("cannot convert to object")?,
-            },
-            origin,
-        }));
-    }
-    // The callback must be callable before the length is read, which the oracle
-    // confirms: `[1].forEach()` throws `not a function`.
-    let StoredValue::Function(callback) = arguments.take_first_or_undefined() else {
-        return Err(NativeFailure::Abrupt(PendingException {
-            realm,
-            payload: PendingExceptionPayload::EngineError {
-                kind: ExceptionKind::TypeError,
-                message: JsString::from_utf8("not a function")?,
-            },
-            origin,
-        }));
+    // receiver throws even when the callback is also invalid. Retaining the
+    // resulting wrapper also matters: the callback's third argument is `O`,
+    // not the original primitive receiver.
+    let receiver = match to_object_value(runtime, realm, receiver, origin.clone())? {
+        Ok(receiver) => receiver,
+        Err(exception) => return Err(NativeFailure::Abrupt(exception)),
     };
+    let callback = arguments.take_first_or_undefined();
     let this_argument = arguments.take_first_or_undefined();
-    let destination = if method.builds_array() {
-        Some(runtime.allocate_array(realm, Vec::new())?)
-    } else {
-        None
-    };
     let state = ArrayCallbackContinuation {
         method,
         target: receiver,
@@ -185,7 +166,7 @@ pub(super) fn begin_array_callback(
         next: 0,
         current: 0,
         element: None,
-        destination,
+        destination: None,
         written: 0,
         // The default result is each method's "nothing matched" answer.
         result: default_result(method),
@@ -234,7 +215,7 @@ pub(super) fn begin_typed_array_callback(
     let state = ArrayCallbackContinuation {
         method,
         target: receiver,
-        callback,
+        callback: StoredValue::Function(callback),
         skip_holes: false,
         this_argument: arguments.take_first_or_undefined(),
         length,
@@ -311,8 +292,35 @@ pub(super) fn advance_array_callback(
                 // The length is snapshotted once, so a callback that grows the
                 // array does not extend the loop.
                 let value = take_completion(&mut completion)?;
+                if needs_conversion(&value) {
+                    let realm = state.realm;
+                    let origin = state.origin.clone();
+                    return begin_operator_primitive_conversion(
+                        runtime,
+                        value,
+                        OperatorPrimitiveHint::Number,
+                        OperatorPrimitiveTarget::ArrayCallbackLength(Box::new(state)),
+                        realm,
+                        return_to,
+                        origin,
+                        execution_budget,
+                    );
+                }
                 let number = operator_to_number(value, state.realm, &state.origin)?;
                 state.length = number_to_length(number);
+                let StoredValue::Function(_) = state.callback else {
+                    return Err(NativeFailure::Abrupt(PendingException {
+                        realm: state.realm,
+                        payload: PendingExceptionPayload::EngineError {
+                            kind: ExceptionKind::TypeError,
+                            message: JsString::from_utf8("not a function")?,
+                        },
+                        origin: state.origin.clone(),
+                    }));
+                };
+                if state.method.builds_array() {
+                    state.destination = Some(runtime.allocate_array(state.realm, Vec::new())?);
+                }
                 state.next = if state.method.is_backward() {
                     state.length.saturating_sub(1)
                 } else {
@@ -392,7 +400,12 @@ pub(super) fn advance_array_callback(
                 callback_arguments.push(state.target.duplicate());
                 state.element = Some(element);
                 state.stage = ArrayCallbackStage::AwaitCallback;
-                let callback = state.callback;
+                let StoredValue::Function(callback) = state.callback else {
+                    return Err(EngineFault::RuntimeInvariant {
+                        message: "Array callback resumed without a callable callback",
+                    }
+                    .into());
+                };
                 let receiver = state.this_argument.duplicate();
                 return suspend(state, callback, receiver, callback_arguments, return_to);
             }
@@ -687,8 +700,8 @@ pub(crate) struct ArrayReductionContinuation {
     reduction: ArrayReduction,
     /// The coerced receiver whose elements are folded.
     target: StoredValue,
-    /// The callback, already verified to be callable.
-    callback: FunctionId,
+    /// The callback value, validated after the `LengthOfArrayLike` step.
+    callback: StoredValue,
     /// Whether this reduction performs `HasProperty` before each element read.
     ///
     /// Ordinary Array reductions skip holes. Typed arrays have no holes and
@@ -709,15 +722,15 @@ pub(crate) struct ArrayReductionContinuation {
 }
 
 impl ArrayReductionContinuation {
-    /// The receiver and the accumulator.
+    /// The receiver, callback, and accumulator.
     pub(crate) const fn retained_values() -> u64 {
-        2
+        3
     }
 
     /// Reports the traced roots this continuation retains.
     pub(crate) fn trace_roots(&self, mark: &mut dyn FnMut(CollectionRoot)) {
         trace_stored_value_root(&self.target, mark);
-        mark(CollectionRoot::Heap(HeapReference::Function(self.callback)));
+        trace_stored_value_root(&self.callback, mark);
         if let Some(accumulator) = &self.accumulator {
             trace_stored_value_root(accumulator, mark);
         }
@@ -752,26 +765,13 @@ pub(super) fn begin_array_reduction(
     origin: JsStackFrame,
     execution_budget: &mut ExecutionBudget,
 ) -> Result<NativeDispatch, NativeFailure> {
-    if matches!(receiver, StoredValue::Undefined | StoredValue::Null) {
-        return Err(NativeFailure::Abrupt(PendingException {
-            realm,
-            payload: PendingExceptionPayload::EngineError {
-                kind: ExceptionKind::TypeError,
-                message: JsString::from_utf8("cannot convert to object")?,
-            },
-            origin,
-        }));
-    }
-    let StoredValue::Function(callback) = arguments.take_first_or_undefined() else {
-        return Err(NativeFailure::Abrupt(PendingException {
-            realm,
-            payload: PendingExceptionPayload::EngineError {
-                kind: ExceptionKind::TypeError,
-                message: JsString::from_utf8("not a function")?,
-            },
-            origin,
-        }));
+    // `ToObject(this)` precedes `IsCallable(callback)`, and reductions retain
+    // the wrapper as the source of their subsequent indexed operations.
+    let receiver = match to_object_value(runtime, realm, receiver, origin.clone())? {
+        Ok(receiver) => receiver,
+        Err(exception) => return Err(NativeFailure::Abrupt(exception)),
     };
+    let callback = arguments.take_first_or_undefined();
     // An absent initial value is distinct from an explicit `undefined` one: the
     // former seeds from the first present element while the latter is the
     // accumulator.
@@ -831,7 +831,7 @@ pub(super) fn begin_typed_array_reduction(
     let state = ArrayReductionContinuation {
         reduction,
         target: receiver,
-        callback,
+        callback: StoredValue::Function(callback),
         skip_holes: false,
         accumulator,
         length,
@@ -906,8 +906,32 @@ pub(super) fn advance_array_reduction(
             }
             ArrayReductionStage::AwaitLengthConversion => {
                 let value = take_completion(&mut completion)?;
+                if needs_conversion(&value) {
+                    let realm = state.realm;
+                    let origin = state.origin.clone();
+                    return begin_operator_primitive_conversion(
+                        runtime,
+                        value,
+                        OperatorPrimitiveHint::Number,
+                        OperatorPrimitiveTarget::ArrayReductionLength(Box::new(state)),
+                        realm,
+                        return_to,
+                        origin,
+                        execution_budget,
+                    );
+                }
                 let number = operator_to_number(value, state.realm, &state.origin)?;
                 state.length = number_to_length(number);
+                let StoredValue::Function(_) = state.callback else {
+                    return Err(NativeFailure::Abrupt(PendingException {
+                        realm: state.realm,
+                        payload: PendingExceptionPayload::EngineError {
+                            kind: ExceptionKind::TypeError,
+                            message: JsString::from_utf8("not a function")?,
+                        },
+                        origin: state.origin.clone(),
+                    }));
+                };
                 state.next = if state.reduction.is_backward() {
                     state.length.saturating_sub(1)
                 } else {
@@ -1057,7 +1081,12 @@ pub(super) fn advance_array_reduction(
                 ))));
                 callback_arguments.push(state.target.duplicate());
                 state.stage = ArrayReductionStage::AwaitCallback;
-                let callback = state.callback;
+                let StoredValue::Function(callback) = state.callback else {
+                    return Err(EngineFault::RuntimeInvariant {
+                        message: "Array reduction resumed without a callable callback",
+                    }
+                    .into());
+                };
                 return suspend_reduction(
                     state,
                     callback,
@@ -1078,6 +1107,11 @@ pub(super) fn advance_array_reduction(
             }
         }
     }
+}
+
+/// Returns whether `ToNumber` must first perform a resumable `ToPrimitive`.
+const fn needs_conversion(value: &StoredValue) -> bool {
+    matches!(value, StoredValue::Function(_) | StoredValue::Object(_))
 }
 
 fn array_reduction_continuation(state: ArrayReductionContinuation) -> NativeContinuation {

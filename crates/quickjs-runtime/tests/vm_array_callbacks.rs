@@ -296,6 +296,82 @@ fn the_callback_methods_accept_an_array_like_receiver() {
     ]);
 }
 
+/// Generic callback methods retain `ToObject(this)` as the callback's third
+/// argument rather than passing the original primitive receiver.
+#[test]
+fn callback_methods_box_primitive_receivers_before_callback_invocation() {
+    assert_all(&[(
+        "(function(){\
+            let accessed=false;\
+            Boolean.prototype[0]=1;\
+            Boolean.prototype.length=1;\
+            const result=Array.prototype.every.call(false,function(value,index,object){\
+                accessed=value===1&&index===0&&object instanceof Boolean;\
+                return accessed;\
+            });\
+            return result+'|'+accessed;\
+        })()",
+        "true|true",
+    )]);
+}
+
+/// `LengthOfArrayLike` applies `ToLength`, including a resumable
+/// `ToPrimitive(number)` for an object-valued `length`.
+#[test]
+fn callback_methods_convert_object_valued_lengths_before_iteration() {
+    assert_all(&[
+        (
+            "(function(){\
+                let log='';\
+                const source={0:1,length:{valueOf(){log+='valueOf|';return 1;}}};\
+                const result=Array.prototype.every.call(source,function(value){return value===1;});\
+                return result+'|'+log;\
+            })()",
+            "true|valueOf|",
+        ),
+        (
+            "(function(){\
+                let log='';\
+                const source={0:1,length:{\
+                    valueOf(){log+='valueOf|';return {};},\
+                    toString(){log+='toString|';return '1';}\
+                }};\
+                const result=Array.prototype.every.call(source,function(value){return value===1;});\
+                return result+'|'+log;\
+            })()",
+            "true|valueOf|toString|",
+        ),
+    ]);
+}
+
+/// Generic callback methods run `LengthOfArrayLike` before testing whether the
+/// callback is callable, preserving the observable getter and coercion order.
+#[test]
+fn callback_methods_read_and_convert_length_before_rejecting_a_bad_callback() {
+    assert_all(&[
+        (
+            "(function(){\
+                let log='';\
+                const source={get length(){log+='length|';return 1;}};\
+                try{Array.prototype.every.call(source,null);}catch(error){\
+                    return (error instanceof TypeError)+'|'+log;\
+                }\
+            })()",
+            "true|length|",
+        ),
+        (
+            "(function(){\
+                let log='';\
+                const source={get length(){return {toString(){log+='toString|';return '1';}};}};\
+                try{Array.prototype.every.call(source,null);}catch(error){\
+                    return (error instanceof TypeError)+'|'+log;\
+                }\
+            })()",
+            "true|toString|",
+        ),
+    ]);
+}
+
 /// Generic callback methods observe a Proxy's `get` and `has` traps in the
 /// order required by `LengthOfArrayLike` and the indexed iteration.
 #[test]

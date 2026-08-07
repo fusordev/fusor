@@ -106,19 +106,11 @@ pub(super) fn begin_array_join(
     execution_budget: &mut ExecutionBudget,
 ) -> Result<NativeDispatch, NativeFailure> {
     // `join` begins with `ToObject(this)`, so a nullish receiver throws before
-    // the separator is converted.
-    let target = match receiver {
-        StoredValue::Undefined | StoredValue::Null => {
-            return Err(NativeFailure::Abrupt(PendingException {
-                realm,
-                payload: PendingExceptionPayload::EngineError {
-                    kind: ExceptionKind::TypeError,
-                    message: JsString::from_utf8("cannot convert to object")?,
-                },
-                origin,
-            }));
-        }
-        value => value,
+    // the separator is converted. It must retain the resulting wrapper so
+    // indexed access to primitive receivers uses its ordinary object state.
+    let target = match to_object_value(runtime, realm, receiver, origin.clone())? {
+        Ok(target) => target,
+        Err(exception) => return Err(NativeFailure::Abrupt(exception)),
     };
     let state = ArrayJoinContinuation {
         target,
@@ -281,6 +273,20 @@ pub(super) fn advance_array_join(
                 let value = take_completion(&mut completion)?;
                 // The length is read once, before any element, and every later
                 // index derives from it. `js_get_length64` applies `ToLength`.
+                if matches!(value, StoredValue::Function(_) | StoredValue::Object(_)) {
+                    let realm = state.realm;
+                    let origin = state.origin.clone();
+                    return begin_operator_primitive_conversion(
+                        runtime,
+                        value,
+                        OperatorPrimitiveHint::Number,
+                        OperatorPrimitiveTarget::ArrayJoinElement(Box::new(state)),
+                        realm,
+                        return_to,
+                        origin,
+                        execution_budget,
+                    );
+                }
                 let number = operator_to_number(value, state.realm, &state.origin)?;
                 state.length = number_to_length(number);
                 state.stage = ArrayJoinStage::NextElement;

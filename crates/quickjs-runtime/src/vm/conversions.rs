@@ -2535,6 +2535,12 @@ fn finish_operator_primitive_target(
         | OperatorPrimitiveTarget::ArrayJoinElement(state) => {
             advance_array_join(runtime, *state, Some(value), return_to, execution_budget)
         }
+        OperatorPrimitiveTarget::ArrayCallbackLength(state) => {
+            advance_array_callback(runtime, *state, Some(value), return_to, execution_budget)
+        }
+        OperatorPrimitiveTarget::ArrayReductionLength(state) => {
+            advance_array_reduction(runtime, *state, Some(value), return_to, execution_budget)
+        }
         OperatorPrimitiveTarget::ArraySearchPosition(state) => {
             advance_array_search(runtime, *state, Some(value), return_to, execution_budget)
         }

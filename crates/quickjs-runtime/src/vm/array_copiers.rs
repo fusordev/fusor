@@ -148,16 +148,13 @@ pub(super) fn begin_array_copier(
     origin: JsStackFrame,
     execution_budget: &mut ExecutionBudget,
 ) -> Result<NativeDispatch, NativeFailure> {
-    if matches!(receiver, StoredValue::Undefined | StoredValue::Null) {
-        return Err(NativeFailure::Abrupt(PendingException {
-            realm,
-            payload: PendingExceptionPayload::EngineError {
-                kind: ExceptionKind::TypeError,
-                message: JsString::from_utf8("cannot convert to object")?,
-            },
-            origin,
-        }));
-    }
+    // Each generic copier begins with `ToObject(this)`, including `concat`'s
+    // first source. The wrapper—not the primitive—is what later property
+    // reads and `@@isConcatSpreadable` observe.
+    let receiver = match to_object_value(runtime, realm, receiver, origin.clone())? {
+        Ok(receiver) => receiver,
+        Err(exception) => return Err(NativeFailure::Abrupt(exception)),
+    };
     let mut collected = Vec::new();
     for value in arguments.into_remaining_iter() {
         collected
