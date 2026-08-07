@@ -31,6 +31,7 @@ use super::{
     PropertyLayout, PropertyLayoutKind, RealmId, Runtime, RuntimeResource, SlotValue, StoredValue,
     check_execution_limit, stale_heap_reference, usize_to_u64,
 };
+use crate::object::HeapObjectKind;
 
 struct ArrayDefinitionFacts {
     length: u32,
@@ -356,6 +357,57 @@ impl Runtime {
             });
         }
         Ok(object.array_own_property(key))
+    }
+
+    /// Reports whether a heap object's own properties include an array index.
+    ///
+    /// This includes an Array exotic object's dense elements, which do not
+    /// live in its ordinary [`ObjectRecord`] shape.
+    pub(crate) fn heap_has_indexed_own_property(
+        &self,
+        reference: HeapReference,
+    ) -> Result<bool, crate::EngineFault> {
+        if self.object_record(reference)?.has_indexed_property() {
+            return Ok(true);
+        }
+        let HeapReference::Object(object) = reference else {
+            return Ok(false);
+        };
+        let object = self
+            .objects
+            .get(object)
+            .ok_or_else(|| stale_heap_reference(reference))?;
+        Ok(object
+            .array_state()
+            .is_some_and(|state| state.dense_property_count() != 0))
+    }
+
+    /// Whether indexed-property queries on `reference` are entirely described
+    /// by its ordinary record and (for Arrays) dense element storage.
+    ///
+    /// Proxy, boxed-String, arguments, and typed-array exotics can synthesize
+    /// indexed properties without an ordinary shape entry, so optimized Array
+    /// traversals must continue through their general internal-method path.
+    pub(crate) fn has_static_indexed_properties(
+        &self,
+        reference: HeapReference,
+    ) -> Result<bool, crate::EngineFault> {
+        if self.proxy_state(reference)?.is_some() {
+            return Ok(false);
+        }
+        let HeapReference::Object(object) = reference else {
+            return Ok(true);
+        };
+        let object = self
+            .objects
+            .get(object)
+            .ok_or_else(|| stale_heap_reference(reference))?;
+        Ok(!matches!(
+            object.kind(),
+            HeapObjectKind::Arguments(_)
+                | HeapObjectKind::BoxedPrimitive(_)
+                | HeapObjectKind::TypedArray(_)
+        ))
     }
 
     pub(crate) fn preview_array_define_data_property_work(

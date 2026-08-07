@@ -105,13 +105,21 @@ fn dynamic_function(context: &mut Context<'_>, body: &str) -> Function {
         .expect("dynamic Function")
 }
 
-fn evaluate<T>(body: &str, project: impl FnOnce(Result<JsValue, ExecutionError>) -> T) -> T {
+fn evaluate_with_limits<T>(
+    body: &str,
+    limits: ExecutionLimits,
+    project: impl FnOnce(Result<JsValue, ExecutionError>) -> T,
+) -> T {
     let mut runtime = Runtime::try_new(RuntimeLimits::default()).expect("runtime");
     let realm = runtime.create_realm().expect("realm");
     let mut context = runtime.context(&realm).expect("context");
     let run = dynamic_function(&mut context, body);
-    let result = context.call(&run, &[], ExecutionLimits::default());
+    let result = context.call(&run, &[], limits);
     project(result)
+}
+
+fn evaluate<T>(body: &str, project: impl FnOnce(Result<JsValue, ExecutionError>) -> T) -> T {
+    evaluate_with_limits(body, ExecutionLimits::default(), project)
 }
 
 /// Evaluates `expression` and renders the result with `String()`.
@@ -221,6 +229,59 @@ fn the_index_searches_skip_holes_while_includes_reads_them() {
         ),
         ("Array.prototype.indexOf.call({length:3},undefined)", "-1"),
     ]);
+}
+
+/// Direct sparse Arrays may skip consecutive holes quickly, but a getter can
+/// still install an inherited index that the following iteration must see.
+#[test]
+fn sparse_searches_preserve_getter_installed_inherited_indices() {
+    assert_all(&[(
+        "(function(){\
+            const source=[1,,3];\
+            Object.defineProperty(source,0,{get:function(){\
+                Array.prototype[1]='inherited';return 1;\
+            }});\
+            return source.indexOf(3);\
+        })()",
+        "2",
+    )]);
+}
+
+/// The legacy Test262 `lastIndexOf` coverage performs several searches through
+/// a sparse 123,457-slot Array. These finite scans must complete with the CI
+/// runner's instruction budget without weakening Proxy or inherited-index
+/// semantics.
+#[test]
+fn sparse_searches_complete_with_test262_instruction_fuel() {
+    evaluate_with_limits(
+        "return (function(){\
+            const value=[];\
+            value[100]=1;\
+            value[99999]='';\
+            value[10]={};\
+            value[5555]=5.5;\
+            value[123456]='str';\
+            value[5]=Infinity;\
+            return [\
+                value.lastIndexOf(1),value.lastIndexOf(''),\
+                value.lastIndexOf('str'),value.lastIndexOf(5.5),\
+                value.lastIndexOf(Infinity),value.lastIndexOf(true),\
+                value.lastIndexOf(5),value.lastIndexOf('str1'),\
+                value.lastIndexOf(null),value.lastIndexOf({})\
+            ].join('|');\
+        })();",
+        ExecutionLimits::default().with_instruction_fuel(50_000_000),
+        |result| {
+            let result = result.expect("finite sparse search completed");
+            let result = result
+                .as_string()
+                .expect("live value")
+                .expect("String")
+                .to_utf8_lossy()
+                .expect("UTF-8");
+            assert_eq!(result, "100|99999|123456|5555|5|-1|-1|-1|-1|-1");
+        },
+    );
 }
 
 /// The searches accept any array-like receiver.

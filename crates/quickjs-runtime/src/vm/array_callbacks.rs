@@ -97,6 +97,11 @@ pub(crate) struct ArrayCallbackContinuation {
     /// no holes, and—critically for resizable buffers—must still `Get` every
     /// index in the captured range after a later shrink.
     skip_holes: bool,
+    /// Whether the direct Array receiver's prototype chain was just proven to
+    /// contain no indexed properties. The proof is discarded before every
+    /// user-observable element read, so a getter or callback can still install
+    /// an inherited index for the next iteration.
+    own_presence_only: bool,
     /// The `thisArg` the callback receives.
     this_argument: StoredValue,
     /// The element count from the single `ToLength` length read.
@@ -169,6 +174,7 @@ pub(super) fn begin_array_callback(
         target: receiver,
         callback,
         skip_holes: method.skips_holes(),
+        own_presence_only: false,
         this_argument,
         length: 0,
         next: 0,
@@ -225,6 +231,7 @@ pub(super) fn begin_typed_array_callback(
         target: receiver,
         callback: StoredValue::Function(callback),
         skip_holes: false,
+        own_presence_only: false,
         this_argument: arguments.take_first_or_undefined(),
         length,
         next: if method.is_backward() {
@@ -459,6 +466,28 @@ pub(super) fn advance_array_callback(
                 // Most methods skip a missing index; the `find` family visits it
                 // and sees `undefined`.
                 if state.skip_holes {
+                    if let Some(array) = array_callback_own_presence_array(runtime, &mut state)? {
+                        if runtime.array_own_property(array, &key)?.is_none() {
+                            // No user code ran while proving the absence, so the
+                            // same prototype-chain proof remains valid for the
+                            // following hole.
+                            if matches!(state.method, ArrayCallback::Map) {
+                                state.written = state.written.saturating_add(1);
+                            }
+                            state.stage = ArrayCallbackStage::NextElement;
+                            continue;
+                        }
+                        // The subsequent Get can enter an accessor, and its
+                        // callback can mutate a prototype, so revalidate before
+                        // using the shortcut again.
+                        state.own_presence_only = false;
+                        await_get!(begin_array_callback_element_get(
+                            runtime,
+                            state,
+                            return_to,
+                            execution_budget,
+                        ));
+                    }
                     charge_callback_lookup(runtime, &state.target, execution_budget)?;
                     state.stage = ArrayCallbackStage::AwaitPresence;
                     let dispatch = begin_value_has(
@@ -816,6 +845,42 @@ fn charge_callback_lookup(
         return Ok(());
     }
     charge_heap_property_lookup(runtime, base, execution_budget)
+}
+
+/// Returns the direct Array whose next `HasProperty` can be answered from its
+/// own indexed storage alone.
+///
+/// The proof is deliberately short-lived: after an element `Get` or a callback
+/// invokes user code, the next loop iteration traverses the prototype chain
+/// again. That keeps inherited indexed accessors and callback-installed
+/// prototype properties observable while avoiding repeated scans of ordinary
+/// `Array.prototype` and `Object.prototype` for consecutive holes.
+fn array_callback_own_presence_array(
+    runtime: &Runtime,
+    state: &mut ArrayCallbackContinuation,
+) -> Result<Option<ObjectId>, NativeFailure> {
+    let StoredValue::Object(array) = state.target else {
+        return Ok(None);
+    };
+    if !runtime.is_array_object(array)? {
+        return Ok(None);
+    }
+    if state.own_presence_only {
+        return Ok(Some(array));
+    }
+    let mut current = runtime
+        .object_record(HeapReference::Object(array))?
+        .prototype();
+    while let Some(reference) = current {
+        if !runtime.has_static_indexed_properties(reference)?
+            || runtime.heap_has_indexed_own_property(reference)?
+        {
+            return Ok(None);
+        }
+        current = runtime.object_record(reference)?.prototype();
+    }
+    state.own_presence_only = true;
+    Ok(Some(array))
 }
 
 /// Converts an index to binary64.

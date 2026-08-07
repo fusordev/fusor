@@ -1326,6 +1326,15 @@ impl ObjectRecord {
         self.slots.len()
     }
 
+    /// Whether this ordinary property record has an array-indexed own
+    /// property. Array exotic dense elements are tracked separately by
+    /// [`ArrayState`].
+    pub(crate) fn has_indexed_property(&self) -> bool {
+        self.shape
+            .iter()
+            .any(|property| property.key.as_index().is_some())
+    }
+
     pub(crate) fn values(&self) -> impl Iterator<Item = &StoredValue> {
         self.slots.iter().filter_map(|slot| match slot {
             PropertySlot::Data(value) => Some(value),
