@@ -121,6 +121,17 @@ fn private_instance_fields_have_fresh_class_identities_and_bypass_public_propert
 }
 
 #[test]
+fn private_field_compound_logical_and_update_writes_preserve_values_and_order() {
+    run_with(
+        "function run(){class Box{#value=1;compound(){return this.#value+=2;}or(){let calls=0;let value=this.#value||=(calls=calls+1);return value===3&&calls===0;}and(){let calls=0;let value=this.#value&&=(calls=calls+1);return value===1&&calls===1;}nullish(){this.#value=null;let calls=0;let value=this.#value??=(calls=calls+2);return value===2&&calls===2;}pre(){return ++this.#value;}post(){return this.#value++;}value(){return this.#value;}}let box=new Box;return box.compound()===3&&box.or()&&box.and()&&box.nullish()&&box.pre()===3&&box.post()===3&&box.value()===4;}",
+        |result| {
+            let value = result.expect("private compound and update execution");
+            assert_eq!(value.as_boolean().expect("live Boolean"), Some(true));
+        },
+    );
+}
+
+#[test]
 fn static_private_fields_are_class_owned_and_captured_by_static_methods() {
     run_with(
         "function run(){class First{static #value=1;static #named=function(){};static read(){return this.#value;}static write(next){return this.#value=next;}static has(candidate){return #value in candidate;}static name(){return this.#named.name;}}class Second{static #value=2;}let invisible=First.hasOwnProperty('#value')===false;let values=First.read()===1&&First.write(4)===4&&First.read()===4&&First.name()==='#named';let rejected=false;try{First.read.call(Second);}catch(error){rejected=error.name==='TypeError';}return invisible&&values&&First.has(First)&&!First.has(Second)&&!First.has({})&&rejected;}",

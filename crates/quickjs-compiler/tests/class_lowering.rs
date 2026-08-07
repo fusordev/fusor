@@ -121,6 +121,27 @@ fn public_private_instance_fields_receive_fresh_class_scope_names() {
 }
 
 #[test]
+fn private_member_writes_lower_as_single_receiver_name_references() {
+    let tree = compile(
+        "function make(){class Box{#value=1;compound(next){return this.#value+=next;}or(next){return this.#value||=next;}and(next){return this.#value&&=next;}nullish(next){return this.#value??=next;}pre(){return ++this.#value;}post(){return this.#value--;}}return Box;}",
+        "make",
+    );
+    let opcodes = tree
+        .functions()
+        .iter()
+        .flat_map(|function| function.control_flow().instructions())
+        .map(|instruction| instruction.decoded().instruction().opcode())
+        .collect::<Vec<_>>();
+
+    assert!(opcodes.contains(&FinalOpcode::GetPrivateField));
+    assert!(opcodes.contains(&FinalOpcode::PutPrivateField));
+    assert!(opcodes.contains(&FinalOpcode::Dup2));
+    assert!(opcodes.contains(&FinalOpcode::Insert3));
+    assert!(opcodes.contains(&FinalOpcode::Perm4));
+    assert!(opcodes.contains(&FinalOpcode::PostDec));
+}
+
+#[test]
 fn private_instance_methods_keep_distinct_names_shared_closures_and_home_objects() {
     let tree = compile(
         "function make(){class Base{value(){return 40;}}class Box extends Base{#method(){return super.value()+2;}call(){return this.#method();}same(other){return this.#method===other.#method;}name(){return this.#method.name;}static has(candidate){return #method in candidate;}}return Box;}",

@@ -3852,6 +3852,7 @@ const fn is_supported_opcode(opcode: FinalOpcode) -> bool {
             | FinalOpcode::GetSuperValue
             | FinalOpcode::PutSuperValue
             | FinalOpcode::Perm3
+            | FinalOpcode::Perm4
             | FinalOpcode::Perm5
             | FinalOpcode::Throw
             | FinalOpcode::Return

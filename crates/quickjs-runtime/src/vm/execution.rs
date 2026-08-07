@@ -1156,6 +1156,16 @@ pub(super) fn execute_one(
             push(frame, first);
             push(frame, third);
         }
+        FinalOpcode::Perm4 => {
+            let fourth = pop(frame)?;
+            let third = pop(frame)?;
+            let second = pop(frame)?;
+            let first = pop(frame)?;
+            push(frame, third);
+            push(frame, first);
+            push(frame, second);
+            push(frame, fourth);
+        }
         FinalOpcode::Perm5 => {
             let fifth = pop(frame)?;
             let fourth = pop(frame)?;

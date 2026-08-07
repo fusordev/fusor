@@ -825,9 +825,10 @@ impl<'compiler, 'unit, 'arena, 'scope> ExpressionPlanner<'compiler, 'unit, 'aren
         assignment: &'expression AssignmentExpression<'arena>,
         member: &'expression PrivateFieldExpression<'arena>,
         layout: &FrameLayout,
+        flow: &mut PlannedControlFlow,
         work: &mut Vec<ExpressionWork<'expression, 'arena>>,
     ) -> Result<(), LeafCompilationError> {
-        if assignment.operator != AssignmentOperator::Assign || member.optional {
+        if member.optional {
             return unsupported(
                 UnsupportedLeafFeature::UnsupportedExpression,
                 assignment.left.span(),
@@ -839,9 +840,36 @@ impl<'compiler, 'unit, 'arena, 'scope> ExpressionPlanner<'compiler, 'unit, 'aren
             member.span,
             layout,
         )?;
-        // As with computed-member assignment, preserve the RHS as the
-        // assignment completion below the receiver/name/value triple consumed
-        // by `put_private_field`.
+        match assignment.operator {
+            AssignmentOperator::Assign => {
+                self.plan_private_simple_assignment(assignment, member, binding, slot, work)?;
+            }
+            AssignmentOperator::LogicalOr
+            | AssignmentOperator::LogicalAnd
+            | AssignmentOperator::LogicalNullish => {
+                self.plan_private_logical_assignment(
+                    assignment, member, binding, slot, flow, work,
+                )?;
+            }
+            operator => {
+                self.plan_private_compound_assignment(
+                    assignment, member, binding, slot, operator, work,
+                )?;
+            }
+        }
+        Ok(())
+    }
+
+    fn plan_private_simple_assignment<'expression>(
+        &self,
+        assignment: &'expression AssignmentExpression<'arena>,
+        member: &'expression PrivateFieldExpression<'arena>,
+        binding: BindingId,
+        slot: FrameSlot,
+        work: &mut Vec<ExpressionWork<'expression, 'arena>>,
+    ) -> Result<(), LeafCompilationError> {
+        // Preserve the RHS as the assignment completion below the
+        // receiver/name/value triple consumed by `put_private_field`.
         work.push(ExpressionWork::Emit(PlannedInstruction::new(
             FinalOpcode::PutPrivateField,
             Operands::None,
@@ -853,6 +881,231 @@ impl<'compiler, 'unit, 'arena, 'scope> ExpressionPlanner<'compiler, 'unit, 'aren
             assignment.span,
         )));
         work.push(ExpressionWork::Visit(&assignment.right));
+        work.push(ExpressionWork::Emit(self.plan_read_slot(
+            binding,
+            slot,
+            member.field.span,
+        )?));
+        work.push(ExpressionWork::Visit(&member.object));
+        Ok(())
+    }
+
+    fn plan_private_logical_assignment<'expression>(
+        &self,
+        assignment: &'expression AssignmentExpression<'arena>,
+        member: &'expression PrivateFieldExpression<'arena>,
+        binding: BindingId,
+        slot: FrameSlot,
+        flow: &mut PlannedControlFlow,
+        work: &mut Vec<ExpressionWork<'expression, 'arena>>,
+    ) -> Result<(), LeafCompilationError> {
+        let short_circuit = flow.new_label(assignment.span)?;
+        let done = flow.new_label(assignment.span)?;
+        let branch_kind = if assignment.operator == AssignmentOperator::LogicalOr {
+            BranchKind::IfTrue
+        } else {
+            BranchKind::IfFalse
+        };
+
+        // `dup2; get_private_field` retains the receiver/name pair. A
+        // short-circuit removes it and returns `old`; the write path drops
+        // `old`, evaluates the RHS, then returns the stored RHS.
+        work.push(ExpressionWork::Bind(done.clone()));
+        for opcode in [
+            FinalOpcode::Drop,
+            FinalOpcode::Swap,
+            FinalOpcode::Drop,
+            FinalOpcode::Swap,
+        ] {
+            work.push(ExpressionWork::Emit(PlannedInstruction::new(
+                opcode,
+                Operands::None,
+                member.span,
+            )));
+        }
+        work.push(ExpressionWork::Bind(short_circuit.clone()));
+        work.push(ExpressionWork::Branch {
+            kind: BranchKind::Goto,
+            target: done,
+            span: assignment.span,
+        });
+        Self::plan_private_write_after_value(assignment, member, work);
+        work.push(ExpressionWork::Emit(PlannedInstruction::new(
+            FinalOpcode::Drop,
+            Operands::None,
+            member.span,
+        )));
+        work.push(ExpressionWork::Branch {
+            kind: branch_kind,
+            target: short_circuit,
+            span: assignment.span,
+        });
+        if assignment.operator == AssignmentOperator::LogicalNullish {
+            work.push(ExpressionWork::Emit(PlannedInstruction::new(
+                FinalOpcode::IsUndefinedOrNull,
+                Operands::None,
+                member.span,
+            )));
+        }
+        work.push(ExpressionWork::Emit(PlannedInstruction::new(
+            FinalOpcode::Dup,
+            Operands::None,
+            member.span,
+        )));
+        self.plan_private_read_reference(member, binding, slot, work)?;
+        Ok(())
+    }
+
+    fn plan_private_compound_assignment<'expression>(
+        &self,
+        assignment: &'expression AssignmentExpression<'arena>,
+        member: &'expression PrivateFieldExpression<'arena>,
+        binding: BindingId,
+        slot: FrameSlot,
+        operator: AssignmentOperator,
+        work: &mut Vec<ExpressionWork<'expression, 'arena>>,
+    ) -> Result<(), LeafCompilationError> {
+        let binary =
+            operator
+                .to_binary_operator()
+                .ok_or(LeafCompilationError::SemanticInvariant {
+                    invariant: "nonlogical private assignment has a binary operator",
+                    span: Some(assignment.span),
+                })?;
+        Self::plan_private_compound_write_after_value(
+            assignment,
+            member,
+            binary_opcode(binary),
+            work,
+        );
+        self.plan_private_read_reference(member, binding, slot, work)
+    }
+
+    fn plan_private_compound_write_after_value<'expression>(
+        assignment: &'expression AssignmentExpression<'arena>,
+        member: &'expression PrivateFieldExpression<'arena>,
+        binary: FinalOpcode,
+        work: &mut Vec<ExpressionWork<'expression, 'arena>>,
+    ) {
+        work.push(ExpressionWork::Emit(PlannedInstruction::new(
+            FinalOpcode::PutPrivateField,
+            Operands::None,
+            member.span,
+        )));
+        work.push(ExpressionWork::Emit(PlannedInstruction::new(
+            FinalOpcode::Insert3,
+            Operands::None,
+            assignment.span,
+        )));
+        work.push(ExpressionWork::Emit(PlannedInstruction::new(
+            binary,
+            Operands::None,
+            assignment.span,
+        )));
+        work.push(ExpressionWork::Visit(&assignment.right));
+    }
+
+    fn plan_private_write_after_value<'expression>(
+        assignment: &'expression AssignmentExpression<'arena>,
+        member: &'expression PrivateFieldExpression<'arena>,
+        work: &mut Vec<ExpressionWork<'expression, 'arena>>,
+    ) {
+        work.push(ExpressionWork::Emit(PlannedInstruction::new(
+            FinalOpcode::PutPrivateField,
+            Operands::None,
+            member.span,
+        )));
+        work.push(ExpressionWork::Emit(PlannedInstruction::new(
+            FinalOpcode::Insert3,
+            Operands::None,
+            assignment.span,
+        )));
+        work.push(ExpressionWork::Visit(&assignment.right));
+    }
+
+    fn plan_private_read_reference<'expression>(
+        &self,
+        member: &'expression PrivateFieldExpression<'arena>,
+        binding: BindingId,
+        slot: FrameSlot,
+        work: &mut Vec<ExpressionWork<'expression, 'arena>>,
+    ) -> Result<(), LeafCompilationError> {
+        work.push(ExpressionWork::Emit(PlannedInstruction::new(
+            FinalOpcode::GetPrivateField,
+            Operands::None,
+            member.span,
+        )));
+        work.push(ExpressionWork::Emit(PlannedInstruction::new(
+            FinalOpcode::Dup2,
+            Operands::None,
+            member.span,
+        )));
+        work.push(ExpressionWork::Emit(self.plan_read_slot(
+            binding,
+            slot,
+            member.field.span,
+        )?));
+        work.push(ExpressionWork::Visit(&member.object));
+        Ok(())
+    }
+
+    fn plan_private_member_update<'expression>(
+        &self,
+        update: &'expression UpdateExpression<'arena>,
+        member: &'expression PrivateFieldExpression<'arena>,
+        layout: &FrameLayout,
+        work: &mut Vec<ExpressionWork<'expression, 'arena>>,
+    ) -> Result<(), LeafCompilationError> {
+        if member.optional {
+            return unsupported(
+                UnsupportedLeafFeature::UnsupportedExpression,
+                update.argument.span(),
+            );
+        }
+        let (binding, slot) = self.private_name_binding_for_access(
+            member.node_id.get(),
+            member.field.name.as_str(),
+            member.span,
+            layout,
+        )?;
+        // `dup2; get_private_field` preserves `[receiver, name]`. A prefix
+        // update duplicates the new value before the private store; a postfix
+        // update leaves `old, new`, and `perm4` changes
+        // `[receiver, name, old, new]` into `[old, receiver, name, new]`.
+        work.push(ExpressionWork::Emit(PlannedInstruction::new(
+            FinalOpcode::PutPrivateField,
+            Operands::None,
+            member.span,
+        )));
+        work.push(ExpressionWork::Emit(PlannedInstruction::new(
+            if update.prefix {
+                FinalOpcode::Insert3
+            } else {
+                FinalOpcode::Perm4
+            },
+            Operands::None,
+            update.span,
+        )));
+        work.push(ExpressionWork::Emit(PlannedInstruction::new(
+            match (update.operator, update.prefix) {
+                (UpdateOperator::Increment, true) => FinalOpcode::Inc,
+                (UpdateOperator::Decrement, true) => FinalOpcode::Dec,
+                (UpdateOperator::Increment, false) => FinalOpcode::PostInc,
+                (UpdateOperator::Decrement, false) => FinalOpcode::PostDec,
+            },
+            Operands::None,
+            update.span,
+        )));
+        work.push(ExpressionWork::Emit(PlannedInstruction::new(
+            FinalOpcode::GetPrivateField,
+            Operands::None,
+            member.span,
+        )));
+        work.push(ExpressionWork::Emit(PlannedInstruction::new(
+            FinalOpcode::Dup2,
+            Operands::None,
+            member.span,
+        )));
         work.push(ExpressionWork::Emit(self.plan_read_slot(
             binding,
             slot,
@@ -3849,7 +4102,7 @@ impl<'compiler, 'unit, 'arena, 'scope> ExpressionPlanner<'compiler, 'unit, 'aren
         work: &mut Vec<ExpressionWork<'expression, 'arena>>,
     ) -> Result<(), LeafCompilationError> {
         if let AssignmentTarget::PrivateFieldExpression(member) = &assignment.left {
-            return self.plan_private_member_assignment(assignment, member, layout, work);
+            return self.plan_private_member_assignment(assignment, member, layout, flow, work);
         }
         if let AssignmentTarget::StaticMemberExpression(member) = &assignment.left {
             if matches!(
@@ -4872,6 +5125,9 @@ impl<'compiler, 'unit, 'arena, 'scope> ExpressionPlanner<'compiler, 'unit, 'aren
         constants: &CompiledConstantPool,
         work: &mut Vec<ExpressionWork<'expression, 'arena>>,
     ) -> Result<(), LeafCompilationError> {
+        if let SimpleAssignmentTarget::PrivateFieldExpression(member) = &update.argument {
+            return self.plan_private_member_update(update, member, layout, work);
+        }
         let identifier = match &update.argument {
             SimpleAssignmentTarget::StaticMemberExpression(member)
                 if matches!(&member.object, Expression::Super(_)) =>
