@@ -751,6 +751,7 @@ enum NativeContinuation {
     TemporalDurationCompareOptions(TemporalDurationCompareOptionsContinuation),
     TemporalDurationRoundOptions(Box<TemporalDurationRoundContinuation>),
     TemporalDurationTotalOptions(Box<TemporalDurationTotalContinuation>),
+    TemporalInstantRoundOptions(Box<TemporalInstantRoundContinuation>),
     IntrinsicGet(IntrinsicGetContinuation),
     AggregateError(AggregateErrorContinuation),
     FromEntries(Box<FromEntriesContinuation>),
@@ -852,6 +853,9 @@ impl NativeContinuation {
             }
             Self::TemporalDurationTotalOptions(_) => {
                 TemporalDurationTotalContinuation::retained_values()
+            }
+            Self::TemporalInstantRoundOptions(_) => {
+                TemporalInstantRoundContinuation::retained_values()
             }
             Self::IntrinsicGet(state) => state.retained_values(),
             Self::AggregateError(state) => state.retained_values(),
@@ -1947,6 +1951,9 @@ enum OperatorPrimitiveTarget {
     TemporalDurationRoundRoundingMode(Box<TemporalDurationRoundContinuation>),
     TemporalDurationRoundSmallestUnit(Box<TemporalDurationRoundContinuation>),
     TemporalDurationTotalUnit(Box<TemporalDurationTotalContinuation>),
+    TemporalInstantRoundRoundingIncrement(Box<TemporalInstantRoundContinuation>),
+    TemporalInstantRoundRoundingMode(Box<TemporalInstantRoundContinuation>),
+    TemporalInstantRoundSmallestUnit(Box<TemporalInstantRoundContinuation>),
     NumberToString {
         number: JsNumber,
     },
@@ -2119,6 +2126,11 @@ impl OperatorPrimitiveTarget {
             }
             Self::TemporalDurationTotalUnit(_) => {
                 TemporalDurationTotalContinuation::retained_values()
+            }
+            Self::TemporalInstantRoundRoundingIncrement(_state)
+            | Self::TemporalInstantRoundRoundingMode(_state)
+            | Self::TemporalInstantRoundSmallestUnit(_state) => {
+                TemporalInstantRoundContinuation::retained_values()
             }
             Self::DateSetter(state) => state.retained_values(),
             Self::DateToJson(_) => DateToJsonContinuation::retained_values(),
@@ -2367,6 +2379,11 @@ fn trace_operator_primitive_target_roots(
             state.trace_roots(mark);
         }
         OperatorPrimitiveTarget::TemporalDurationTotalUnit(state) => state.trace_roots(mark),
+        OperatorPrimitiveTarget::TemporalInstantRoundRoundingIncrement(state)
+        | OperatorPrimitiveTarget::TemporalInstantRoundRoundingMode(state)
+        | OperatorPrimitiveTarget::TemporalInstantRoundSmallestUnit(state) => {
+            state.trace_roots(mark);
+        }
         OperatorPrimitiveTarget::DateSetter(state) => state.trace_roots(mark),
         OperatorPrimitiveTarget::DateToJson(state) => state.trace_roots(mark),
         OperatorPrimitiveTarget::TemporalInstantString(state) => state.trace_roots(mark),
@@ -2545,6 +2562,7 @@ fn trace_native_continuation_roots(
         NativeContinuation::TemporalDurationCompareOptions(state) => state.trace_roots(mark),
         NativeContinuation::TemporalDurationRoundOptions(state) => state.trace_roots(mark),
         NativeContinuation::TemporalDurationTotalOptions(state) => state.trace_roots(mark),
+        NativeContinuation::TemporalInstantRoundOptions(state) => state.trace_roots(mark),
         NativeContinuation::IntrinsicGet(state) => match state {
             IntrinsicGetContinuation::BooleanConstructor { new_target, .. }
             | IntrinsicGetContinuation::NumberConstructor { new_target, .. }

@@ -389,6 +389,74 @@ fn instant_arithmetic_reads_duration_bags_before_rejecting_date_units() {
 }
 
 #[test]
+fn instant_round_supports_string_shorthand_modes_and_increments() {
+    assert_eq!(
+        rendered(
+            "var instant=Temporal.Instant.fromEpochNanoseconds(123456789123456789n);
+             var descriptor=Object.getOwnPropertyDescriptor(Temporal.Instant.prototype,'round');
+             return [Temporal.Instant.prototype.round.length,descriptor.enumerable,
+               descriptor.writable,descriptor.configurable,
+               instant.round('second').toString(),
+               instant.round({smallestUnit:'minute',roundingIncrement:15,roundingMode:'ceil'}).toString(),
+               instant.round({smallestUnit:'millisecond',roundingMode:'floor'}).toString(),
+               instant.round('second')===instant].join('|');"
+        ),
+        "1|false|true|true|1973-11-29T21:33:09Z|1973-11-29T21:45:00Z|1973-11-29T21:33:09.123Z|false"
+    );
+}
+
+#[test]
+fn instant_round_observes_options_and_coercions_in_specified_order() {
+    assert_eq!(
+        rendered(
+            "var log=[],options={};
+             Object.defineProperties(options,{
+               roundingIncrement:{get:function(){log.push('get roundingIncrement');return {
+                 valueOf:function(){log.push('number roundingIncrement');return 1;}}}},
+               roundingMode:{get:function(){log.push('get roundingMode');return {
+                 toString:function(){log.push('string roundingMode');return 'floor';}}}},
+               smallestUnit:{get:function(){log.push('get smallestUnit');return {
+                 toString:function(){log.push('string smallestUnit');return 'second';}}}}
+             });
+             return Temporal.Instant.fromEpochNanoseconds(123456789123456789n).round(options).toString()+'|'+log.join(',');"
+        ),
+        "1973-11-29T21:33:09Z|get roundingIncrement,number roundingIncrement,get roundingMode,string roundingMode,get smallestUnit,string smallestUnit"
+    );
+}
+
+#[test]
+fn instant_round_requires_a_time_smallest_unit_and_a_branded_receiver() {
+    assert_eq!(
+        thrown("return Temporal.Instant.prototype.round.call({}, 'second');"),
+        ExceptionKind::TypeError
+    );
+    assert_eq!(
+        thrown("return new Temporal.Instant(0n).round();"),
+        ExceptionKind::TypeError
+    );
+    assert_eq!(
+        thrown("return new Temporal.Instant(0n).round({});"),
+        ExceptionKind::RangeError
+    );
+    assert_eq!(
+        thrown("return new Temporal.Instant(0n).round({smallestUnit:'day'});"),
+        ExceptionKind::RangeError
+    );
+    assert_eq!(
+        thrown(
+            "return new Temporal.Instant(0n).round({smallestUnit:'second',roundingIncrement:86401});"
+        ),
+        ExceptionKind::RangeError
+    );
+    assert_eq!(
+        thrown(
+            "return new Temporal.Instant(0n).round({smallestUnit:'second',roundingMode:'invalid'});"
+        ),
+        ExceptionKind::RangeError
+    );
+}
+
+#[test]
 fn duration_with_merges_defined_fields_in_normative_order() {
     assert_eq!(
         rendered(

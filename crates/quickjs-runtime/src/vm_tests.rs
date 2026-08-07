@@ -4966,8 +4966,14 @@ fn define_method_property_limit_failure_does_not_publish_or_charge_the_target_sl
             }",
         "make",
     );
-    let mut runtime = Runtime::try_new(RuntimeLimits::default().with_max_object_properties(1_450))
-        .expect("runtime");
+    let mut probe = Runtime::try_new(RuntimeLimits::default()).expect("probe runtime");
+    let _probe_realm = probe.create_realm().expect("probe realm");
+    // The compiled maker needs four slots at installation, then the unpublished
+    // method function needs `name` and `length` before its target property fails.
+    let property_limit = probe.usage().object_properties().saturating_add(6);
+    let mut runtime =
+        Runtime::try_new(RuntimeLimits::default().with_max_object_properties(property_limit))
+            .expect("runtime");
     let realm = runtime.create_realm().expect("realm");
     let maker = runtime
         .context(&realm)
@@ -4989,9 +4995,9 @@ fn define_method_property_limit_failure_does_not_publish_or_charge_the_target_sl
             error,
             ExecutionError::LimitExceeded {
                 resource: RuntimeResource::ObjectProperties,
-                limit: 1_450,
-                observed: 1_451,
-            }
+                limit,
+                observed,
+            } if limit == property_limit && observed == property_limit + 1
         ),
         "{error:?}"
     );

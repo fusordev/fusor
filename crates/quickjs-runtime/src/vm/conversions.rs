@@ -1885,6 +1885,33 @@ fn finish_operator_primitive_target(
         OperatorPrimitiveTarget::TemporalDurationTotalUnit(state) => {
             finish_temporal_duration_total_unit(*state, value)
         }
+        OperatorPrimitiveTarget::TemporalInstantRoundRoundingIncrement(state) => {
+            finish_temporal_instant_round_rounding_increment(
+                runtime,
+                *state,
+                value,
+                return_to,
+                execution_budget,
+            )
+        }
+        OperatorPrimitiveTarget::TemporalInstantRoundRoundingMode(state) => {
+            finish_temporal_instant_round_rounding_mode(
+                runtime,
+                *state,
+                value,
+                return_to,
+                execution_budget,
+            )
+        }
+        OperatorPrimitiveTarget::TemporalInstantRoundSmallestUnit(state) => {
+            finish_temporal_instant_round_smallest_unit(
+                runtime,
+                &state,
+                value,
+                return_to,
+                execution_budget,
+            )
+        }
         OperatorPrimitiveTarget::DateSetTime { object } => {
             finish_date_set_time(runtime, object, value, realm, origin)
         }

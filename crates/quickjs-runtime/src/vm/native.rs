@@ -503,6 +503,15 @@ pub(super) fn resume_native_continuations(
                     execution_budget,
                 )?
             }
+            NativeContinuation::TemporalInstantRoundOptions(state) => {
+                advance_temporal_instant_round_options(
+                    runtime,
+                    *state,
+                    value,
+                    return_to,
+                    execution_budget,
+                )?
+            }
             NativeContinuation::IntrinsicGet(IntrinsicGetContinuation::ArrayConstructor {
                 realm,
                 new_target,

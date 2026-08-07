@@ -111,6 +111,7 @@ pub(super) fn visit_functions(visit: FunctionSink<'_>) {
             }
             TemporalInstantPrototypeMethod::Add
             | TemporalInstantPrototypeMethod::Subtract
+            | TemporalInstantPrototypeMethod::Round
             | TemporalInstantPrototypeMethod::Equals => {
                 IntrinsicNameSpec::RealmName(RealmNameId::TemporalInstantPrototype(method))
             }
@@ -284,6 +285,7 @@ pub(super) fn visit_properties(visit: PropertySink<'_>) {
             )),
             TemporalInstantPrototypeMethod::Add
             | TemporalInstantPrototypeMethod::Subtract
+            | TemporalInstantPrototypeMethod::Round
             | TemporalInstantPrototypeMethod::Equals => visit(method(
                 prototype,
                 IntrinsicKeySpec::InternedString(RealmNameId::TemporalInstantPrototype(method_id)),
