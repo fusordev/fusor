@@ -1220,6 +1220,8 @@ enum IntrinsicGetContinuation {
         new_target: FunctionId,
         byte_length: usize,
         max_byte_length: Option<usize>,
+        shared: bool,
+        origin: JsStackFrame,
     },
     TypedArrayConstructor {
         new_target: FunctionId,
@@ -1308,6 +1310,7 @@ impl IntrinsicGetContinuation {
 #[derive(Clone, Copy)]
 enum ObjectPrototypeTag {
     ArrayBuffer,
+    SharedArrayBuffer,
     Arguments,
     Array,
     BigInt,
@@ -1326,6 +1329,7 @@ impl ObjectPrototypeTag {
     const fn name(self) -> &'static str {
         match self {
             Self::ArrayBuffer => "ArrayBuffer",
+            Self::SharedArrayBuffer => "SharedArrayBuffer",
             Self::Arguments => "Arguments",
             Self::Array => "Array",
             Self::BigInt => "BigInt",
@@ -1972,6 +1976,7 @@ enum OperatorPrimitiveTarget {
     ArrayBufferConstructorMax {
         new_target: FunctionId,
         byte_length: usize,
+        shared: bool,
     },
     /// `%DataView%`'s `byteOffset`, after the backing-buffer brand check.
     DataViewConstructorOffset(Box<DataViewConstructorOffsetState>),
@@ -2029,6 +2034,11 @@ enum OperatorPrimitiveTarget {
     TypedArrayElementSet(Box<TypedArrayElementSetState>),
     /// `ArrayBuffer.prototype.resize`'s new length, after the brand checks.
     ArrayBufferResize {
+        object: ObjectId,
+    },
+    /// `SharedArrayBuffer.prototype.grow`'s new length, after the shared
+    /// buffer brand and growability checks.
+    SharedArrayBufferGrow {
         object: ObjectId,
     },
     /// `ArrayBuffer.prototype.transfer` or `transferToFixedLength` after
@@ -2215,6 +2225,7 @@ impl OperatorPrimitiveTarget {
             | Self::NumberIntrinsic { new_target: None }
             | Self::DateParse
             | Self::ArrayBufferResize { .. }
+            | Self::SharedArrayBufferGrow { .. }
             | Self::DateSetTime { .. }
             | Self::DateToPrimitive
             | Self::TemporalInstantNanoseconds { new_target: None }
@@ -2568,6 +2579,7 @@ fn trace_operator_primitive_target_roots(
         | OperatorPrimitiveTarget::MathBinaryFinish { .. } => {}
         OperatorPrimitiveTarget::DateSetTime { object }
         | OperatorPrimitiveTarget::ArrayBufferResize { object }
+        | OperatorPrimitiveTarget::SharedArrayBufferGrow { object }
         | OperatorPrimitiveTarget::ArrayBufferTransfer { object, .. } => {
             mark(CollectionRoot::Heap(HeapReference::Object(*object)));
         }

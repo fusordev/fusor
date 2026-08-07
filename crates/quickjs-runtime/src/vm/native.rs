@@ -2396,6 +2396,14 @@ pub(super) fn dispatch_native_call_with_frames(
             origin.unwrap_or_else(native_function_host_origin),
             execution_budget,
         ),
+        NativeFunctionKind::SharedArrayBufferConstructor => begin_shared_array_buffer_constructor(
+            runtime,
+            native.realm,
+            inputs,
+            return_to,
+            origin.unwrap_or_else(native_function_host_origin),
+            execution_budget,
+        ),
         NativeFunctionKind::ArrayBufferIsView => array_buffer_is_view(runtime, inputs.arguments),
         NativeFunctionKind::ArrayBufferPrototype(method) => dispatch_array_buffer_prototype(
             runtime,
@@ -2407,6 +2415,18 @@ pub(super) fn dispatch_native_call_with_frames(
             origin.unwrap_or_else(native_function_host_origin),
             execution_budget,
         ),
+        NativeFunctionKind::SharedArrayBufferPrototype(method) => {
+            dispatch_shared_array_buffer_prototype(
+                runtime,
+                method,
+                native.realm,
+                &inputs.receiver,
+                inputs.arguments,
+                return_to,
+                origin.unwrap_or_else(native_function_host_origin),
+                execution_budget,
+            )
+        }
         NativeFunctionKind::DataViewConstructor => begin_data_view_constructor(
             runtime,
             native.realm,
@@ -3179,6 +3199,7 @@ pub(super) fn dispatch_native_call_with_frames(
         }
         NativeFunctionKind::ArraySpeciesGetter
         | NativeFunctionKind::ArrayBufferSpeciesGetter
+        | NativeFunctionKind::SharedArrayBufferSpeciesGetter
         | NativeFunctionKind::TypedArraySpeciesGetter
         | NativeFunctionKind::PromiseSpeciesGetter
         | NativeFunctionKind::MapSpeciesGetter

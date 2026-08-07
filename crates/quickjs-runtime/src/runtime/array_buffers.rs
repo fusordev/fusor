@@ -17,6 +17,28 @@ impl Runtime {
         byte_length: usize,
         max_byte_length: Option<usize>,
     ) -> Result<ObjectId, crate::ExecutionError> {
+        self.allocate_buffer(prototype, byte_length, max_byte_length, false)
+    }
+
+    /// Allocates one zero-initialized ECMAScript `SharedArrayBuffer` data
+    /// block. Shared buffers use the same view backing representation as
+    /// `ArrayBuffer`, but retain their distinct brand and are never detached.
+    pub(crate) fn allocate_shared_array_buffer(
+        &mut self,
+        prototype: HeapReference,
+        byte_length: usize,
+        max_byte_length: Option<usize>,
+    ) -> Result<ObjectId, crate::ExecutionError> {
+        self.allocate_buffer(prototype, byte_length, max_byte_length, true)
+    }
+
+    fn allocate_buffer(
+        &mut self,
+        prototype: HeapReference,
+        byte_length: usize,
+        max_byte_length: Option<usize>,
+        shared: bool,
+    ) -> Result<ObjectId, crate::ExecutionError> {
         if !self.heap_reference_is_live(prototype) {
             return Err(stale_heap_reference(prototype).into());
         }
@@ -25,6 +47,19 @@ impl Runtime {
             RuntimeResource::HeapObjects,
             self.limits.max_heap_objects,
             usize_to_u64(self.objects.len()).saturating_add(1),
+        )?;
+        // A resizable or growable buffer makes its maximum allocation
+        // observable at construction. Reserve that capacity against the
+        // runtime limit before creating the object, so impossible maxima are
+        // reported synchronously instead of becoming a later host failure.
+        let reservation = max_byte_length.unwrap_or(byte_length);
+        let observed_reservation = self
+            .array_buffer_bytes
+            .saturating_add(usize_to_u64(reservation));
+        check_execution_limit(
+            RuntimeResource::ArrayBufferBytes,
+            self.limits.max_array_buffer_bytes,
+            observed_reservation,
         )?;
         let observed_bytes = self
             .array_buffer_bytes
@@ -44,7 +79,11 @@ impl Runtime {
         let object = self
             .insert_heap_object(HeapObject::array_buffer(
                 ObjectRecord::empty(Some(prototype)),
-                ArrayBufferState::new(data, max_byte_length),
+                if shared {
+                    ArrayBufferState::shared(data, max_byte_length)
+                } else {
+                    ArrayBufferState::new(data, max_byte_length)
+                },
             ))
             .map_err(|_| crate::ExecutionError::AllocationFailed {
                 resource: RuntimeResource::HeapObjects,
@@ -121,6 +160,72 @@ impl Runtime {
             });
         }
         Ok(array_buffer.constructor)
+    }
+
+    pub(crate) fn realm_shared_array_buffer_prototype(
+        &self,
+        realm: super::RealmId,
+    ) -> Result<ObjectId, crate::EngineFault> {
+        let state = self
+            .realms
+            .get(realm)
+            .ok_or(crate::EngineFault::StaleHeapEdge {
+                edge: "realm",
+                index: realm.index(),
+                generation: realm.generation(),
+            })?;
+        let super::RealmIntrinsics::Ready {
+            shared_array_buffer,
+            ..
+        } = state.intrinsics
+        else {
+            return Err(crate::EngineFault::RuntimeInvariant {
+                message: "realm SharedArrayBuffer intrinsics are not initialized",
+            });
+        };
+        if self.objects.get(shared_array_buffer.prototype).is_none() {
+            return Err(crate::EngineFault::StaleHeapEdge {
+                edge: "SharedArrayBuffer.prototype intrinsic",
+                index: shared_array_buffer.prototype.index(),
+                generation: shared_array_buffer.prototype.generation(),
+            });
+        }
+        Ok(shared_array_buffer.prototype)
+    }
+
+    pub(crate) fn realm_shared_array_buffer_constructor(
+        &self,
+        realm: super::RealmId,
+    ) -> Result<super::FunctionId, crate::EngineFault> {
+        let state = self
+            .realms
+            .get(realm)
+            .ok_or(crate::EngineFault::StaleHeapEdge {
+                edge: "realm",
+                index: realm.index(),
+                generation: realm.generation(),
+            })?;
+        let super::RealmIntrinsics::Ready {
+            shared_array_buffer,
+            ..
+        } = state.intrinsics
+        else {
+            return Err(crate::EngineFault::RuntimeInvariant {
+                message: "realm SharedArrayBuffer intrinsics are not initialized",
+            });
+        };
+        if self
+            .functions
+            .get(shared_array_buffer.constructor)
+            .is_none()
+        {
+            return Err(crate::EngineFault::StaleHeapEdge {
+                edge: "SharedArrayBuffer constructor intrinsic",
+                index: shared_array_buffer.constructor.index(),
+                generation: shared_array_buffer.constructor.generation(),
+            });
+        }
+        Ok(shared_array_buffer.constructor)
     }
 
     /// Copies a non-observable backing-store range after both `ArrayBuffer`

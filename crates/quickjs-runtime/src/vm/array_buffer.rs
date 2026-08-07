@@ -35,10 +35,12 @@
     reason = "this private VM sibling participates in the shared interpreter implementation namespace"
 )]
 use super::*;
+use crate::runtime::SharedArrayBufferPrototypeMethod;
 
 pub(super) struct ArrayBufferConstructorLengthContinuation {
     new_target: FunctionId,
     options: StoredValue,
+    shared: bool,
     realm: RealmId,
     origin: JsStackFrame,
 }
@@ -46,6 +48,7 @@ pub(super) struct ArrayBufferConstructorLengthContinuation {
 pub(super) struct ArrayBufferConstructorContinuation {
     new_target: FunctionId,
     byte_length: usize,
+    shared: bool,
     realm: RealmId,
     origin: JsStackFrame,
 }
@@ -60,6 +63,7 @@ enum ArrayBufferSliceStage {
 pub(super) struct ArrayBufferSliceContinuation {
     object: ObjectId,
     initial_length: usize,
+    shared: bool,
     end: StoredValue,
     first: usize,
     new_length: usize,
@@ -112,8 +116,59 @@ pub(super) fn begin_array_buffer_constructor(
     origin: JsStackFrame,
     execution_budget: &mut ExecutionBudget,
 ) -> Result<NativeDispatch, NativeFailure> {
+    begin_buffer_constructor(
+        runtime,
+        realm,
+        inputs,
+        return_to,
+        origin,
+        execution_budget,
+        false,
+    )
+}
+
+pub(super) fn begin_shared_array_buffer_constructor(
+    runtime: &mut Runtime,
+    realm: RealmId,
+    inputs: CallInputs,
+    return_to: Option<CallReturn>,
+    origin: JsStackFrame,
+    execution_budget: &mut ExecutionBudget,
+) -> Result<NativeDispatch, NativeFailure> {
+    begin_buffer_constructor(
+        runtime,
+        realm,
+        inputs,
+        return_to,
+        origin,
+        execution_budget,
+        true,
+    )
+}
+
+#[allow(
+    clippy::too_many_arguments,
+    reason = "the shared constructor path preserves observable arguments and its buffer brand"
+)]
+fn begin_buffer_constructor(
+    runtime: &mut Runtime,
+    realm: RealmId,
+    inputs: CallInputs,
+    return_to: Option<CallReturn>,
+    origin: JsStackFrame,
+    execution_budget: &mut ExecutionBudget,
+    shared: bool,
+) -> Result<NativeDispatch, NativeFailure> {
     let Some(new_target) = inputs.new_target else {
-        return array_buffer_type_error(realm, &origin, "ArrayBuffer constructor requires 'new'");
+        return array_buffer_type_error(
+            realm,
+            &origin,
+            if shared {
+                "SharedArrayBuffer constructor requires 'new'"
+            } else {
+                "ArrayBuffer constructor requires 'new'"
+            },
+        );
     };
     let mut arguments = inputs.arguments;
     let length = arguments.take_first_or_undefined();
@@ -126,6 +181,7 @@ pub(super) fn begin_array_buffer_constructor(
             ArrayBufferConstructorLengthContinuation {
                 new_target,
                 options,
+                shared,
                 realm,
                 origin: origin.clone(),
             },
@@ -152,6 +208,7 @@ pub(super) fn finish_array_buffer_constructor_length(
             state.new_target,
             byte_length,
             None,
+            state.shared,
             return_to,
             state.origin,
             execution_budget,
@@ -163,6 +220,7 @@ pub(super) fn finish_array_buffer_constructor_length(
         ArrayBufferConstructorContinuation {
             new_target: state.new_target,
             byte_length,
+            shared: state.shared,
             realm: state.realm,
             origin: state.origin,
         },
@@ -218,6 +276,7 @@ pub(super) fn advance_array_buffer_constructor_max(
             state.new_target,
             state.byte_length,
             None,
+            state.shared,
             return_to,
             state.origin,
             execution_budget,
@@ -230,6 +289,7 @@ pub(super) fn advance_array_buffer_constructor_max(
         OperatorPrimitiveTarget::ArrayBufferConstructorMax {
             new_target: state.new_target,
             byte_length: state.byte_length,
+            shared: state.shared,
         },
         state.realm,
         return_to,
@@ -246,6 +306,7 @@ pub(super) fn finish_array_buffer_constructor_max(
     runtime: &mut Runtime,
     new_target: FunctionId,
     byte_length: usize,
+    shared: bool,
     value: StoredValue,
     realm: RealmId,
     return_to: Option<CallReturn>,
@@ -262,6 +323,7 @@ pub(super) fn finish_array_buffer_constructor_max(
         new_target,
         byte_length,
         Some(max_byte_length),
+        shared,
         return_to,
         origin.clone(),
         execution_budget,
@@ -278,6 +340,7 @@ fn begin_array_buffer_constructor_wrapper(
     new_target: FunctionId,
     byte_length: usize,
     max_byte_length: Option<usize>,
+    shared: bool,
     return_to: Option<CallReturn>,
     origin: JsStackFrame,
     execution_budget: &mut ExecutionBudget,
@@ -293,6 +356,8 @@ fn begin_array_buffer_constructor_wrapper(
             new_target,
             byte_length,
             max_byte_length,
+            shared,
+            origin: origin.clone(),
         },
         return_to,
         Some(origin),
@@ -305,7 +370,9 @@ pub(super) fn finish_array_buffer_constructor_wrapper(
     new_target: FunctionId,
     byte_length: usize,
     max_byte_length: Option<usize>,
+    shared: bool,
     requested: &StoredValue,
+    origin: &JsStackFrame,
 ) -> Result<NativeDispatch, NativeFailure> {
     let prototype = match requested {
         StoredValue::Function(function) => HeapReference::Function(*function),
@@ -318,12 +385,35 @@ pub(super) fn finish_array_buffer_constructor_wrapper(
         | StoredValue::String(_)
         | StoredValue::Symbol(_) => {
             let realm = runtime.function_realm(new_target)?;
-            HeapReference::Object(runtime.realm_array_buffer_prototype(realm)?)
+            HeapReference::Object(if shared {
+                runtime.realm_shared_array_buffer_prototype(realm)?
+            } else {
+                runtime.realm_array_buffer_prototype(realm)?
+            })
         }
     };
-    let object = runtime
-        .allocate_array_buffer(prototype, byte_length, max_byte_length)
-        .map_err(NativeFailure::Execution)?;
+    let allocation = if shared {
+        runtime.allocate_shared_array_buffer(prototype, byte_length, max_byte_length)
+    } else {
+        runtime.allocate_array_buffer(prototype, byte_length, max_byte_length)
+    };
+    let object = match allocation {
+        Ok(object) => object,
+        Err(
+            ExecutionError::LimitExceeded {
+                resource: RuntimeResource::ArrayBufferBytes,
+                ..
+            }
+            | ExecutionError::AllocationFailed {
+                resource: RuntimeResource::ArrayBufferBytes,
+                ..
+            },
+        ) => {
+            let realm = runtime.function_realm(new_target)?;
+            return array_buffer_range_error(realm, origin, "invalid buffer length");
+        }
+        Err(error) => return Err(NativeFailure::Execution(error)),
+    };
     Ok(NativeDispatch::Immediate(StoredValue::Object(object)))
 }
 
@@ -439,8 +529,71 @@ pub(super) fn dispatch_array_buffer_prototype(
                 return_to,
                 origin,
                 execution_budget,
+                false,
             )
         }
+    }
+}
+
+#[allow(
+    clippy::too_many_arguments,
+    reason = "native dispatch supplies the method, realm, receiver, arguments, source origin, and shared budget"
+)]
+pub(super) fn dispatch_shared_array_buffer_prototype(
+    runtime: &mut Runtime,
+    method: SharedArrayBufferPrototypeMethod,
+    realm: RealmId,
+    receiver: &StoredValue,
+    mut arguments: CallArguments,
+    return_to: Option<CallReturn>,
+    origin: JsStackFrame,
+    execution_budget: &mut ExecutionBudget,
+) -> Result<NativeDispatch, NativeFailure> {
+    let (object, byte_length, max_byte_length, growable) =
+        shared_array_buffer_receiver_state(runtime, receiver, realm, &origin)?;
+    match method {
+        SharedArrayBufferPrototypeMethod::ByteLength => Ok(NativeDispatch::Immediate(
+            StoredValue::Number(JsNumber::from_f64(array_buffer_length_as_f64(byte_length))),
+        )),
+        SharedArrayBufferPrototypeMethod::MaxByteLength => {
+            Ok(NativeDispatch::Immediate(StoredValue::Number(
+                JsNumber::from_f64(array_buffer_length_as_f64(max_byte_length)),
+            )))
+        }
+        SharedArrayBufferPrototypeMethod::Growable => {
+            Ok(NativeDispatch::Immediate(StoredValue::Boolean(growable)))
+        }
+        SharedArrayBufferPrototypeMethod::Grow => {
+            if !growable {
+                return array_buffer_type_error(
+                    realm,
+                    &origin,
+                    "SharedArrayBuffer is not growable",
+                );
+            }
+            begin_operator_primitive_conversion(
+                runtime,
+                arguments.take_first_or_undefined(),
+                OperatorPrimitiveHint::Number,
+                OperatorPrimitiveTarget::SharedArrayBufferGrow { object },
+                realm,
+                return_to,
+                origin,
+                execution_budget,
+            )
+        }
+        SharedArrayBufferPrototypeMethod::Slice => begin_array_buffer_slice(
+            runtime,
+            object,
+            byte_length,
+            arguments.take_first_or_undefined(),
+            arguments.take_first_or_undefined(),
+            realm,
+            return_to,
+            origin,
+            execution_budget,
+            true,
+        ),
     }
 }
 
@@ -458,6 +611,7 @@ fn begin_array_buffer_slice(
     return_to: Option<CallReturn>,
     origin: JsStackFrame,
     execution_budget: &mut ExecutionBudget,
+    shared: bool,
 ) -> Result<NativeDispatch, NativeFailure> {
     begin_operator_primitive_conversion(
         runtime,
@@ -466,6 +620,7 @@ fn begin_array_buffer_slice(
         OperatorPrimitiveTarget::ArrayBufferSliceStart(Box::new(ArrayBufferSliceContinuation {
             object,
             initial_length,
+            shared,
             end,
             first: 0,
             new_length: 0,
@@ -563,108 +718,151 @@ fn begin_array_buffer_slice_constructor_get(
 )]
 pub(super) fn advance_array_buffer_slice(
     runtime: &mut Runtime,
-    mut state: ArrayBufferSliceContinuation,
+    state: ArrayBufferSliceContinuation,
     value: StoredValue,
     return_to: Option<CallReturn>,
     execution_budget: &mut ExecutionBudget,
 ) -> Result<NativeDispatch, NativeFailure> {
     match state.stage {
-        ArrayBufferSliceStage::Constructor => {
-            if let StoredValue::Function(function) = value
-                && function_is_constructor(runtime, function)?
-            {
-                let function_realm = runtime.function_realm(function)?;
-                if function_realm != state.realm
-                    && function == runtime.realm_array_buffer_constructor(function_realm)?
-                {
-                    let constructor = runtime.realm_array_buffer_constructor(state.realm)?;
-                    return begin_array_buffer_slice_construct(state, constructor, return_to);
-                }
-            }
-            if matches!(value, StoredValue::Undefined) {
-                let constructor = runtime.realm_array_buffer_constructor(state.realm)?;
-                return begin_array_buffer_slice_construct(state, constructor, return_to);
-            }
-            if !matches!(value, StoredValue::Object(_) | StoredValue::Function(_)) {
-                return array_buffer_type_error(state.realm, &state.origin, "not a constructor");
-            }
-            state.stage = ArrayBufferSliceStage::Species;
-            begin_array_buffer_slice_get_species(
-                runtime,
-                state,
-                &value,
-                return_to,
-                execution_budget,
-            )
-        }
+        ArrayBufferSliceStage::Constructor => advance_array_buffer_slice_constructor(
+            runtime,
+            state,
+            &value,
+            return_to,
+            execution_budget,
+        ),
         ArrayBufferSliceStage::Species => {
-            let constructor = if matches!(value, StoredValue::Undefined | StoredValue::Null) {
-                runtime.realm_array_buffer_constructor(state.realm)?
-            } else if let StoredValue::Function(function) = value {
-                if !function_is_constructor(runtime, function)? {
-                    return array_buffer_type_error(
-                        state.realm,
-                        &state.origin,
-                        "not a constructor",
-                    );
-                }
-                function
-            } else {
-                return array_buffer_type_error(state.realm, &state.origin, "not a constructor");
-            };
+            let constructor =
+                resolve_array_buffer_slice_species_constructor(runtime, &state, &value)?;
             begin_array_buffer_slice_construct(state, constructor, return_to)
         }
         ArrayBufferSliceStage::Construct => {
-            let StoredValue::Object(target) = value else {
-                return array_buffer_type_error(
-                    state.realm,
-                    &state.origin,
-                    "ArrayBuffer species constructor returned a primitive",
-                );
-            };
-            if target == state.object {
-                return array_buffer_type_error(
-                    state.realm,
-                    &state.origin,
-                    "ArrayBuffer species constructor returned its source",
-                );
-            }
-            let Some(target_state) = runtime.array_buffer_state(target)? else {
-                return array_buffer_type_error(
-                    state.realm,
-                    &state.origin,
-                    "ArrayBuffer species constructor returned a non-ArrayBuffer",
-                );
-            };
-            if target_state.is_detached() || target_state.byte_length() < state.new_length {
-                return array_buffer_type_error(
-                    state.realm,
-                    &state.origin,
-                    "ArrayBuffer species constructor returned an invalid buffer",
-                );
-            }
-            let Some(source_state) = runtime.array_buffer_state(state.object)? else {
-                return Err(EngineFault::RuntimeInvariant {
-                    message: "ArrayBuffer slice source lost its internal slots",
-                }
-                .into());
-            };
-            if source_state.is_detached() {
-                return array_buffer_type_error(
-                    state.realm,
-                    &state.origin,
-                    "ArrayBuffer is detached",
-                );
-            }
-            let count = state
-                .new_length
-                .min(source_state.byte_length().saturating_sub(state.first));
-            runtime
-                .copy_array_buffer_bytes(state.object, state.first, target, count)
-                .map_err(NativeFailure::Execution)?;
-            Ok(NativeDispatch::Immediate(StoredValue::Object(target)))
+            finish_array_buffer_slice_construct(runtime, &state, &value)
         }
     }
+}
+
+fn realm_array_buffer_constructor(
+    runtime: &Runtime,
+    realm: RealmId,
+    shared: bool,
+) -> Result<FunctionId, NativeFailure> {
+    if shared {
+        Ok(runtime.realm_shared_array_buffer_constructor(realm)?)
+    } else {
+        Ok(runtime.realm_array_buffer_constructor(realm)?)
+    }
+}
+
+fn advance_array_buffer_slice_constructor(
+    runtime: &mut Runtime,
+    mut state: ArrayBufferSliceContinuation,
+    value: &StoredValue,
+    return_to: Option<CallReturn>,
+    execution_budget: &mut ExecutionBudget,
+) -> Result<NativeDispatch, NativeFailure> {
+    let default_constructor = realm_array_buffer_constructor(runtime, state.realm, state.shared)?;
+    if matches!(value, StoredValue::Undefined) {
+        return begin_array_buffer_slice_construct(state, default_constructor, return_to);
+    }
+    if let StoredValue::Function(function) = value
+        && function_is_constructor(runtime, *function)?
+        && runtime.function_realm(*function)? != state.realm
+        && *function
+            == realm_array_buffer_constructor(
+                runtime,
+                runtime.function_realm(*function)?,
+                state.shared,
+            )?
+    {
+        return begin_array_buffer_slice_construct(state, default_constructor, return_to);
+    }
+    if !matches!(value, StoredValue::Object(_) | StoredValue::Function(_)) {
+        return array_buffer_type_error(state.realm, &state.origin, "not a constructor");
+    }
+    state.stage = ArrayBufferSliceStage::Species;
+    begin_array_buffer_slice_get_species(runtime, state, value, return_to, execution_budget)
+}
+
+fn resolve_array_buffer_slice_species_constructor(
+    runtime: &Runtime,
+    state: &ArrayBufferSliceContinuation,
+    value: &StoredValue,
+) -> Result<FunctionId, NativeFailure> {
+    if matches!(value, StoredValue::Undefined | StoredValue::Null) {
+        return realm_array_buffer_constructor(runtime, state.realm, state.shared);
+    }
+    let StoredValue::Function(function) = *value else {
+        return array_buffer_type_error(state.realm, &state.origin, "not a constructor");
+    };
+    if !function_is_constructor(runtime, function)? {
+        return array_buffer_type_error(state.realm, &state.origin, "not a constructor");
+    }
+    Ok(function)
+}
+
+fn finish_array_buffer_slice_construct(
+    runtime: &mut Runtime,
+    state: &ArrayBufferSliceContinuation,
+    value: &StoredValue,
+) -> Result<NativeDispatch, NativeFailure> {
+    let StoredValue::Object(target) = *value else {
+        return array_buffer_type_error(
+            state.realm,
+            &state.origin,
+            "ArrayBuffer species constructor returned a primitive",
+        );
+    };
+    if target == state.object {
+        return array_buffer_type_error(
+            state.realm,
+            &state.origin,
+            "ArrayBuffer species constructor returned its source",
+        );
+    }
+    let Some(target_state) = runtime.array_buffer_state(target)? else {
+        return array_buffer_type_error(
+            state.realm,
+            &state.origin,
+            "ArrayBuffer species constructor returned a non-ArrayBuffer",
+        );
+    };
+    if target_state.is_shared() != state.shared {
+        return array_buffer_type_error(
+            state.realm,
+            &state.origin,
+            "ArrayBuffer species constructor returned the wrong buffer type",
+        );
+    }
+    if target_state.is_detached() || target_state.byte_length() < state.new_length {
+        return array_buffer_type_error(
+            state.realm,
+            &state.origin,
+            "ArrayBuffer species constructor returned an invalid buffer",
+        );
+    }
+    let Some(source_state) = runtime.array_buffer_state(state.object)? else {
+        return Err(EngineFault::RuntimeInvariant {
+            message: "ArrayBuffer slice source lost its internal slots",
+        }
+        .into());
+    };
+    if source_state.is_shared() != state.shared {
+        return Err(EngineFault::RuntimeInvariant {
+            message: "ArrayBuffer slice source changed its buffer type",
+        }
+        .into());
+    }
+    if source_state.is_detached() {
+        return array_buffer_type_error(state.realm, &state.origin, "ArrayBuffer is detached");
+    }
+    let count = state
+        .new_length
+        .min(source_state.byte_length().saturating_sub(state.first));
+    runtime
+        .copy_array_buffer_bytes(state.object, state.first, target, count)
+        .map_err(NativeFailure::Execution)?;
+    Ok(NativeDispatch::Immediate(StoredValue::Object(target)))
 }
 
 fn begin_array_buffer_slice_get_species(
@@ -818,6 +1016,42 @@ pub(super) fn finish_array_buffer_resize(
     Ok(NativeDispatch::Immediate(StoredValue::Undefined))
 }
 
+pub(super) fn finish_shared_array_buffer_grow(
+    runtime: &mut Runtime,
+    object: ObjectId,
+    value: StoredValue,
+    realm: RealmId,
+    origin: &JsStackFrame,
+) -> Result<NativeDispatch, NativeFailure> {
+    let new_byte_length = array_buffer_to_index(value, realm, origin)?;
+    let Some(state) = runtime.array_buffer_state(object)? else {
+        return Err(EngineFault::RuntimeInvariant {
+            message: "SharedArrayBuffer grow target lost its internal slots",
+        }
+        .into());
+    };
+    if !state.is_shared() || !state.is_resizable() {
+        return array_buffer_type_error(realm, origin, "SharedArrayBuffer is not growable");
+    }
+    let current = state.byte_length();
+    let maximum = state
+        .resizable_max_byte_length()
+        .ok_or(EngineFault::RuntimeInvariant {
+            message: "growable SharedArrayBuffer lost its maxByteLength",
+        })?;
+    if new_byte_length < current || new_byte_length > maximum {
+        return array_buffer_range_error(
+            realm,
+            origin,
+            "SharedArrayBuffer length is outside its growable range",
+        );
+    }
+    runtime
+        .resize_array_buffer(object, new_byte_length)
+        .map_err(NativeFailure::Execution)?;
+    Ok(NativeDispatch::Immediate(StoredValue::Undefined))
+}
+
 pub(super) fn finish_array_buffer_transfer(
     runtime: &mut Runtime,
     object: ObjectId,
@@ -863,9 +1097,35 @@ fn array_buffer_receiver_state(
     let Some(state) = runtime.array_buffer_state(*object)? else {
         return array_buffer_type_error(realm, origin, "not an ArrayBuffer");
     };
+    if state.is_shared() {
+        return array_buffer_type_error(realm, origin, "not an ArrayBuffer");
+    }
     Ok((
         *object,
         state.is_detached(),
+        state.byte_length(),
+        state.max_byte_length(),
+        state.is_resizable(),
+    ))
+}
+
+fn shared_array_buffer_receiver_state(
+    runtime: &Runtime,
+    receiver: &StoredValue,
+    realm: RealmId,
+    origin: &JsStackFrame,
+) -> Result<(ObjectId, usize, usize, bool), NativeFailure> {
+    let StoredValue::Object(object) = receiver else {
+        return array_buffer_type_error(realm, origin, "not a SharedArrayBuffer");
+    };
+    let Some(state) = runtime.array_buffer_state(*object)? else {
+        return array_buffer_type_error(realm, origin, "not a SharedArrayBuffer");
+    };
+    if !state.is_shared() {
+        return array_buffer_type_error(realm, origin, "not a SharedArrayBuffer");
+    }
+    Ok((
+        *object,
         state.byte_length(),
         state.max_byte_length(),
         state.is_resizable(),

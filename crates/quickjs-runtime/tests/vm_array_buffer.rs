@@ -157,3 +157,51 @@ fn array_buffer_constructor_and_brand_failures_are_the_required_error_kinds() {
         ExceptionKind::TypeError
     );
 }
+
+#[test]
+fn shared_array_buffer_construction_growth_views_slice_and_intrinsics_are_branded() {
+    assert_eq!(
+        rendered(
+            "var fixed=new SharedArrayBuffer(4),growable=new SharedArrayBuffer(2,{maxByteLength:6});\
+             var view=new Uint8Array(fixed);view[0]=7;growable.grow(5);var slice=fixed.slice(0,1);\
+             return [typeof SharedArrayBuffer,SharedArrayBuffer.length,SharedArrayBuffer.name,\
+               fixed.byteLength,fixed.maxByteLength,fixed.growable,view[0],\
+               growable.byteLength,growable.maxByteLength,growable.growable,\
+               slice.byteLength,Object.prototype.toString.call(fixed),\
+               ArrayBuffer.isView(view),ArrayBuffer.isView(fixed)].join('|');"
+        ),
+        "function|1|SharedArrayBuffer|4|4|false|7|5|6|true|1|[object SharedArrayBuffer]|true|false"
+    );
+}
+
+#[test]
+fn shared_array_buffer_preserves_the_distinct_array_buffer_brand() {
+    assert_eq!(
+        thrown("return SharedArrayBuffer(1);"),
+        ExceptionKind::TypeError
+    );
+    assert_eq!(
+        thrown("return ArrayBuffer.prototype.slice.call(new SharedArrayBuffer(1));"),
+        ExceptionKind::TypeError
+    );
+    assert_eq!(
+        thrown("return SharedArrayBuffer.prototype.slice.call(new ArrayBuffer(1));"),
+        ExceptionKind::TypeError
+    );
+    assert_eq!(
+        thrown("return new SharedArrayBuffer(2,{maxByteLength:1});"),
+        ExceptionKind::RangeError
+    );
+    assert_eq!(
+        thrown("return new SharedArrayBuffer(1).grow(1);"),
+        ExceptionKind::TypeError
+    );
+    assert_eq!(
+        thrown("return new SharedArrayBuffer(7 * Math.pow(1024,5));"),
+        ExceptionKind::RangeError
+    );
+    assert_eq!(
+        thrown("return new SharedArrayBuffer(0,{maxByteLength:7 * Math.pow(1024,5)});"),
+        ExceptionKind::RangeError
+    );
+}

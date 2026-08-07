@@ -20,6 +20,7 @@ mod proxy;
 mod reflect;
 mod regexp;
 mod set;
+mod shared_array_buffer;
 mod string;
 mod symbol;
 mod temporal;
@@ -136,12 +137,12 @@ impl RealmIntrinsicSchema {
             FamilyCardinality {
                 family: "Realm intrinsic objects",
                 actual: self.objects.len(),
-                expected: 60,
+                expected: 61,
             },
             FamilyCardinality {
                 family: "Realm native functions",
                 actual: self.specs.len(),
-                expected: 502,
+                expected: 509,
             },
         ];
         validate_intrinsic_schema(IntrinsicSchema {
@@ -166,6 +167,7 @@ pub(super) const fn is_declarative_object(id: IntrinsicObjectId) -> bool {
             | IntrinsicObjectId::StringPrototype
             | IntrinsicObjectId::ArrayPrototype
             | IntrinsicObjectId::ArrayBufferPrototype
+            | IntrinsicObjectId::SharedArrayBufferPrototype
             | IntrinsicObjectId::DataViewPrototype
             | IntrinsicObjectId::TypedArrayPrototype
             | IntrinsicObjectId::TypedArrayInstancePrototype(_)
@@ -240,6 +242,9 @@ pub(super) const fn is_declarative_function(id: IntrinsicFunctionId) -> bool {
             | NativeFunctionKind::ArrayBufferIsView
             | NativeFunctionKind::ArrayBufferSpeciesGetter
             | NativeFunctionKind::ArrayBufferPrototype(_)
+            | NativeFunctionKind::SharedArrayBufferConstructor
+            | NativeFunctionKind::SharedArrayBufferSpeciesGetter
+            | NativeFunctionKind::SharedArrayBufferPrototype(_)
             | NativeFunctionKind::DataViewConstructor
             | NativeFunctionKind::DataViewPrototype(_)
             | NativeFunctionKind::TypedArrayBaseConstructor
@@ -511,6 +516,7 @@ fn special_reference_batch(
         | NativeFunctionKind::StringConstructor => Some(DeclarativeBatch::PrimitiveGlobals),
         NativeFunctionKind::ArrayConstructor
         | NativeFunctionKind::ArrayBufferConstructor
+        | NativeFunctionKind::SharedArrayBufferConstructor
         | NativeFunctionKind::DataViewConstructor
         | NativeFunctionKind::TypedArrayConstructor(_) => Some(DeclarativeBatch::ArrayGlobals),
         NativeFunctionKind::DateConstructor => Some(DeclarativeBatch::DateGlobals),
@@ -575,6 +581,7 @@ const fn is_array_identity(id: IntrinsicIdentity) -> bool {
         IntrinsicIdentity::Object(
             IntrinsicObjectId::ArrayPrototype
             | IntrinsicObjectId::ArrayBufferPrototype
+            | IntrinsicObjectId::SharedArrayBufferPrototype
             | IntrinsicObjectId::DataViewPrototype
             | IntrinsicObjectId::TypedArrayPrototype
             | IntrinsicObjectId::TypedArrayInstancePrototype(_),
@@ -814,6 +821,9 @@ const fn is_array_function(id: IntrinsicFunctionId) -> bool {
             | NativeFunctionKind::ArrayBufferIsView
             | NativeFunctionKind::ArrayBufferSpeciesGetter
             | NativeFunctionKind::ArrayBufferPrototype(_)
+            | NativeFunctionKind::SharedArrayBufferConstructor
+            | NativeFunctionKind::SharedArrayBufferSpeciesGetter
+            | NativeFunctionKind::SharedArrayBufferPrototype(_)
             | NativeFunctionKind::DataViewConstructor
             | NativeFunctionKind::DataViewPrototype(_)
             | NativeFunctionKind::TypedArrayBaseConstructor
@@ -944,6 +954,7 @@ fn visit_object_specs(visit: ObjectSink<'_>) {
     primitives::visit_objects(visit);
     array::visit_objects(visit);
     array_buffer::visit_objects(visit);
+    shared_array_buffer::visit_objects(visit);
     data_view::visit_objects(visit);
     typed_array::visit_objects(visit);
     date::visit_objects(visit);
@@ -972,6 +983,7 @@ fn visit_function_specs(visit: FunctionSink<'_>) {
     string::visit_functions(visit);
     array::visit_kernel_functions(visit);
     array_buffer::visit_functions(visit);
+    shared_array_buffer::visit_functions(visit);
     data_view::visit_functions(visit);
     typed_array::visit_functions(visit);
     date::visit_functions(visit);
@@ -1002,6 +1014,7 @@ fn visit_property_specs(visit: PropertySink<'_>) {
     string::visit_properties(visit);
     array::visit_properties(visit);
     array_buffer::visit_properties(visit);
+    shared_array_buffer::visit_properties(visit);
     data_view::visit_properties(visit);
     typed_array::visit_properties(visit);
     date::visit_properties(visit);

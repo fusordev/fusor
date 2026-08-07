@@ -107,6 +107,7 @@ enum RealmIntrinsics {
         string: StringIntrinsics,
         array: ArrayIntrinsics,
         array_buffer: ArrayBufferIntrinsics,
+        shared_array_buffer: SharedArrayBufferIntrinsics,
         data_view: DataViewIntrinsics,
         typed_array: TypedArrayIntrinsics,
         date: DateIntrinsics,
@@ -264,6 +265,12 @@ struct ArrayIntrinsics {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 struct ArrayBufferIntrinsics {
+    prototype: ObjectId,
+    constructor: FunctionId,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct SharedArrayBufferIntrinsics {
     prototype: ObjectId,
     constructor: FunctionId,
 }
@@ -1204,6 +1211,9 @@ pub(crate) enum NativeFunctionKind {
     ArrayBufferIsView,
     ArrayBufferSpeciesGetter,
     ArrayBufferPrototype(ArrayBufferPrototypeMethod),
+    SharedArrayBufferConstructor,
+    SharedArrayBufferSpeciesGetter,
+    SharedArrayBufferPrototype(SharedArrayBufferPrototypeMethod),
     DataViewConstructor,
     DataViewPrototype(DataViewPrototypeMethod),
     /// The hidden abstract `%TypedArray%` constructor shared by every
@@ -1580,6 +1590,51 @@ pub(crate) enum ArrayBufferPrototypeMethod {
     Slice,
     Transfer,
     TransferToFixedLength,
+}
+
+/// Methods and accessors published on `%SharedArrayBuffer.prototype%`.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum SharedArrayBufferPrototypeMethod {
+    ByteLength,
+    Growable,
+    MaxByteLength,
+    Grow,
+    Slice,
+}
+
+impl SharedArrayBufferPrototypeMethod {
+    pub(crate) const ALL: [Self; 5] = [
+        Self::ByteLength,
+        Self::Growable,
+        Self::MaxByteLength,
+        Self::Grow,
+        Self::Slice,
+    ];
+
+    pub(crate) const fn name(self) -> &'static str {
+        match self {
+            Self::ByteLength => "byteLength",
+            Self::Growable => "growable",
+            Self::MaxByteLength => "maxByteLength",
+            Self::Grow => "grow",
+            Self::Slice => "slice",
+        }
+    }
+
+    pub(crate) const fn length(self) -> i32 {
+        match self {
+            Self::Grow => 1,
+            Self::Slice => 2,
+            Self::ByteLength | Self::Growable | Self::MaxByteLength => 0,
+        }
+    }
+
+    pub(crate) const fn is_accessor(self) -> bool {
+        matches!(
+            self,
+            Self::ByteLength | Self::Growable | Self::MaxByteLength
+        )
+    }
 }
 
 /// Element representations shared by `DataView` methods and the later
@@ -2769,6 +2824,7 @@ impl NativeFunctionKind {
                 | Self::StringConstructor
                 | Self::ArrayConstructor
                 | Self::ArrayBufferConstructor
+                | Self::SharedArrayBufferConstructor
                 | Self::DataViewConstructor
                 | Self::TypedArrayConstructor(_)
                 | Self::DateConstructor

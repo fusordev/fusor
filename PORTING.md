@@ -46,7 +46,7 @@ Finish frontend/diagnostics and language/compiler/execution before broad Test262
 - [x] Annex B is intentionally absent: no legacy Object.prototype accessors, String HTML/`substr`/trim aliases, object-literal `__proto__` mutation, HTML comments, or legacy octal literals/escapes. A static `__proto__` key is an ordinary own property; use `Object.setPrototypeOf` for prototype mutation.
 - [x] Date: TimeClip, normative ISO/local parsing, UTC/local getters and setters, primitive/JSON behavior, and non-Intl locale fallback over the shared `temporal_rs = 0.2.5` kernel.
 - [~] Temporal: `%Temporal.Instant%`, `%Temporal.Duration%`, and `Date.prototype.toTemporalInstant` share `temporal_rs = 0.2.5`; focused options-order, rounding, IANA/fixed-offset formatting, and stringification semantics are covered. Next: Zoned operations and remaining Temporal types.
-- [~] Binary data: fixed/resizable `ArrayBuffer` and `DataView` (including Float16/BigInt and resizable-view witnesses) are complete. Typed arrays have dense backing/GC/indexed-exotic rules, the hidden `%TypedArray%` hierarchy, all source constructors/accessors/`@@species`, overlap-safe `set`/`copyWithin`/`slice`/`subarray`, iterators and searches, copying methods, callbacks, reductions, `filter`, and resumable stable numeric `sort`/`toSorted`. Next: `SharedArrayBuffer`, Atomics, and immutable ArrayBuffer support.
+- [~] Binary data: fixed/resizable `ArrayBuffer`, fixed/growable `SharedArrayBuffer`, and `DataView` (including Float16/BigInt and resizable-view witnesses) are complete. Typed arrays have dense backing/GC/indexed-exotic rules, the hidden `%TypedArray%` hierarchy, all source constructors/accessors/`@@species`, overlap-safe `set`/`copyWithin`/`slice`/`subarray`, iterators and searches, copying methods, callbacks, reductions, `filter`, and resumable stable numeric `sort`/`toSorted`. Next: Atomics and immutable ArrayBuffer support.
 - [ ] ECMA-402 / `quickjs-intl` is deliberately low priority. If resumed, isolate it behind direct ICU4X rather than mixing locale behavior into the runtime core.
 
 ### Modules, conformance, and host layers
@@ -92,4 +92,4 @@ cargo audit
 4. Use explicit worklists and typed continuations; Rust recursion, locks, and Tokio must not define JavaScript behavior.
 5. Runtime/context/heap/JS handles are thread-affine and `!Send + !Sync`.
 6. Keep the core safe; foreign pointers belong only to an audited boundary.
-7. Performance changes require profiles and differential evidence; `unsafe` is never an optimization escape. Proper tail calls and `Atomics.waitAsync` remain out of scope.
+7. Performance changes require profiles and differential evidence; `unsafe` is never an optimization escape. Proper tail calls remain out of scope; `Atomics.waitAsync` is deferred until the runtime-owned shared-memory waiter and timeout model is in place.

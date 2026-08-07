@@ -527,12 +527,16 @@ pub(super) fn finish_intrinsic_get(
             new_target,
             byte_length,
             max_byte_length,
+            shared,
+            origin,
         } => finish_array_buffer_constructor_wrapper(
             runtime,
             new_target,
             byte_length,
             max_byte_length,
+            shared,
             &value,
+            &origin,
         ),
         IntrinsicGetContinuation::TypedArrayConstructor {
             new_target,
@@ -1828,10 +1832,12 @@ fn finish_operator_primitive_target(
         OperatorPrimitiveTarget::ArrayBufferConstructorMax {
             new_target,
             byte_length,
+            shared,
         } => finish_array_buffer_constructor_max(
             runtime,
             new_target,
             byte_length,
+            shared,
             value,
             realm,
             return_to,
@@ -2023,6 +2029,9 @@ fn finish_operator_primitive_target(
         }
         OperatorPrimitiveTarget::ArrayBufferResize { object } => {
             finish_array_buffer_resize(runtime, object, value, realm, origin)
+        }
+        OperatorPrimitiveTarget::SharedArrayBufferGrow { object } => {
+            finish_shared_array_buffer_grow(runtime, object, value, realm, origin)
         }
         OperatorPrimitiveTarget::ArrayBufferTransfer {
             object,
