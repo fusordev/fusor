@@ -353,6 +353,7 @@ Options:
   --inventory-only    Verify and classify Test262 without executing cases
   --instruction-fuel N
                       Per-Script Test262 interpreter fuel (default: 10000000)
+  --jobs N           Parallel Test262 workers (default: available CPU parallelism)
   -h, --help          Show this help
 
 Dynamic Function --oracle must be the pinned QuickJS 2026-06-04 qjsc compiler.

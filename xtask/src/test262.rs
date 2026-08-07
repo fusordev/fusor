@@ -13,6 +13,8 @@ use std::ffi::OsString;
 use std::fs;
 use std::path::{Component, Path, PathBuf};
 use std::process::Command;
+use std::sync::Arc;
+use std::thread;
 
 const DEFAULT_BASELINE: &str = "tests/test262/upstream";
 const DEFAULT_INSTRUCTION_FUEL: u64 = 10_000_000;
@@ -28,6 +30,7 @@ pub struct Test262Options {
     pub report: Option<PathBuf>,
     pub inventory_only: bool,
     pub instruction_fuel: u64,
+    pub jobs: usize,
 }
 
 pub fn parse_options(
@@ -41,6 +44,7 @@ pub fn parse_options(
     let mut report = None;
     let mut inventory_only = false;
     let mut instruction_fuel = DEFAULT_INSTRUCTION_FUEL;
+    let mut jobs = default_jobs();
 
     while let Some(option) = arguments.next() {
         match option.to_string_lossy().as_ref() {
@@ -71,6 +75,7 @@ pub fn parse_options(
             "--instruction-fuel" => {
                 instruction_fuel = required_positive_u64(&mut arguments, "--instruction-fuel")?;
             }
+            "--jobs" => jobs = required_positive_usize(&mut arguments, "--jobs")?,
             unknown => return Err(format!("unknown test262 option `{unknown}`")),
         }
     }
@@ -84,7 +89,12 @@ pub fn parse_options(
         report,
         inventory_only,
         instruction_fuel,
+        jobs,
     })
+}
+
+fn default_jobs() -> usize {
+    thread::available_parallelism().map_or(1, std::num::NonZeroUsize::get)
 }
 
 fn required_value(
@@ -438,7 +448,7 @@ fn modes(metadata: &Metadata) -> Result<Vec<TestMode>, String> {
     }
 }
 
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 struct TestPlan {
     path: PathBuf,
     relative: String,
@@ -751,14 +761,19 @@ pub fn run_test262(options: &Test262Options) -> Result<bool, String> {
     let execution = if options.inventory_only {
         ExecutionSummary::default()
     } else {
-        execute_inventory(&suite.root, &inventory, options.instruction_fuel)?
+        execute_inventory(
+            &suite.root,
+            &inventory,
+            options.instruction_fuel,
+            options.jobs,
+        )?
     };
     let report = build_report(options, &suite, &baseline, &inventory, &execution);
     if let Some(path) = &options.report {
         write_report(path, &report)?;
     }
     println!(
-        "test262: revision={} files={} admitted-cases={} skipped-cases={} passed={} failed={} pass-rate={}{}",
+        "test262: revision={} files={} admitted-cases={} skipped-cases={} passed={} failed={} pass-rate={}{} workers={}",
         suite.revision,
         inventory.plans.len(),
         inventory.admitted_cases(),
@@ -770,7 +785,12 @@ pub fn run_test262(options: &Test262Options) -> Result<bool, String> {
             " inventory-only"
         } else {
             ""
-        }
+        },
+        if options.inventory_only {
+            0
+        } else {
+            options.jobs.min(inventory.admitted_cases())
+        },
     );
     for failure in execution.failures.iter().take(20) {
         eprintln!(
@@ -804,26 +824,100 @@ fn execute_inventory(
     suite: &Path,
     inventory: &Inventory,
     instruction_fuel: u64,
+    jobs: usize,
 ) -> Result<ExecutionSummary, String> {
     let harness = HarnessSources::load(suite)?;
-    let mut summary = ExecutionSummary::default();
+    let mut cases = Vec::new();
     for plan in &inventory.plans {
         if plan.skip_reason.is_some() {
             continue;
         }
-        let source = fs::read_to_string(&plan.path)
-            .map_err(|error| format!("could not read test/{}: {error}", plan.relative))?;
+        let source = Arc::<str>::from(
+            fs::read_to_string(&plan.path)
+                .map_err(|error| format!("could not read test/{}: {error}", plan.relative))?,
+        );
         for &mode in &plan.modes {
-            match execute_case(plan, mode, &source, &harness, instruction_fuel)? {
-                None => summary.passed += 1,
-                Some(failure) => {
-                    summary.failed += 1;
-                    summary.failures.push(failure);
-                }
+            cases.push(ExecutionCase {
+                plan: plan.clone(),
+                mode,
+                source: Arc::clone(&source),
+            });
+        }
+    }
+    let results = execute_cases_parallel(&cases, &harness, instruction_fuel, jobs)?;
+    let mut summary = ExecutionSummary::default();
+    for result in results {
+        match result? {
+            None => summary.passed += 1,
+            Some(failure) => {
+                summary.failed += 1;
+                summary.failures.push(failure);
             }
         }
     }
     Ok(summary)
+}
+
+#[derive(Clone)]
+struct ExecutionCase {
+    plan: TestPlan,
+    mode: TestMode,
+    source: Arc<str>,
+}
+
+fn execute_cases_parallel(
+    cases: &[ExecutionCase],
+    harness: &HarnessSources,
+    instruction_fuel: u64,
+    jobs: usize,
+) -> Result<Vec<Result<Option<FailureRecord>, String>>, String> {
+    let worker_count = jobs.min(cases.len()).max(1);
+    if worker_count == 1 {
+        return Ok(cases
+            .iter()
+            .map(|case| {
+                execute_case(
+                    &case.plan,
+                    case.mode,
+                    &case.source,
+                    harness,
+                    instruction_fuel,
+                )
+            })
+            .collect());
+    }
+    let mut ordered = thread::scope(|scope| {
+        let mut handles = Vec::new();
+        for worker in 0..worker_count {
+            handles.push(scope.spawn(move || {
+                let mut results = Vec::new();
+                for index in (worker..cases.len()).step_by(worker_count) {
+                    let case = &cases[index];
+                    results.push((
+                        index,
+                        execute_case(
+                            &case.plan,
+                            case.mode,
+                            &case.source,
+                            harness,
+                            instruction_fuel,
+                        ),
+                    ));
+                }
+                results
+            }));
+        }
+        let mut results = Vec::with_capacity(cases.len());
+        for handle in handles {
+            let mut worker_results = handle
+                .join()
+                .map_err(|_| "a Test262 worker thread panicked".to_owned())?;
+            results.append(&mut worker_results);
+        }
+        Ok::<_, String>(results)
+    })?;
+    ordered.sort_unstable_by_key(|(index, _)| *index);
+    Ok(ordered.into_iter().map(|(_, result)| result).collect())
 }
 
 fn execute_case(
@@ -1053,6 +1147,7 @@ fn build_report(
             "admitted_feature": options.admit_feature,
             "limit": options.limit,
             "instruction_fuel": options.instruction_fuel,
+            "jobs": options.jobs,
         },
         "inventory": {
             "test_files": inventory.plans.len(),
@@ -1121,6 +1216,8 @@ mod tests {
             "/tmp/report.json",
             "--instruction-fuel",
             "5000",
+            "--jobs",
+            "3",
             "--inventory-only",
         ]
         .into_iter()
@@ -1136,6 +1233,7 @@ mod tests {
                 report: Some(PathBuf::from("/tmp/report.json")),
                 inventory_only: true,
                 instruction_fuel: 5_000,
+                jobs: 3,
             })
         );
     }
@@ -1145,6 +1243,37 @@ mod tests {
         assert_eq!(test262_pass_rate(0, 0), "n/a");
         assert_eq!(test262_pass_rate(1, 2), "1/3 (33.33%)");
         assert_eq!(test262_pass_rate(100, 0), "100/100 (100.00%)");
+    }
+
+    #[test]
+    fn parallel_execution_preserves_case_order_and_isolates_runtimes() {
+        let plan = TestPlan {
+            path: PathBuf::from("parallel.js"),
+            relative: "parallel.js".to_owned(),
+            metadata: Metadata::default(),
+            modes: vec![TestMode::Raw],
+            skip_reason: None,
+        };
+        let cases = (0..4)
+            .map(|_| ExecutionCase {
+                plan: plan.clone(),
+                mode: TestMode::Raw,
+                source: Arc::<str>::from("var state = 1;"),
+            })
+            .collect::<Vec<_>>();
+        let harness = HarnessSources {
+            assert: String::new(),
+            sta: String::new(),
+            root: PathBuf::from("unused-harness"),
+        };
+        let outcomes = execute_cases_parallel(&cases, &harness, DEFAULT_INSTRUCTION_FUEL, 2)
+            .expect("parallel execution");
+        assert_eq!(outcomes.len(), cases.len());
+        assert!(
+            outcomes
+                .into_iter()
+                .all(|outcome| matches!(outcome, Ok(None)))
+        );
     }
 
     #[test]
@@ -1284,7 +1413,7 @@ throw new TypeError();",
         std::env::temp_dir().join(format!(
             "quickjs-test262-{label}-{}-{:?}",
             std::process::id(),
-            std::thread::current().id()
+            thread::current().id()
         ))
     }
 }
