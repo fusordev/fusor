@@ -522,6 +522,14 @@ impl Runtime {
                         &mut work,
                     );
                 }
+                for constructor in typed_array.constructors {
+                    mark_heap_reference(
+                        HeapReference::Function(constructor),
+                        &mut marked_functions,
+                        &mut marked_objects,
+                        &mut work,
+                    );
+                }
                 for reference in [
                     HeapReference::Object(map.prototype),
                     HeapReference::Object(map.iterator_prototype),

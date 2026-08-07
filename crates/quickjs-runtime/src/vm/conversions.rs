@@ -1922,6 +1922,24 @@ fn finish_operator_primitive_target(
                 execution_budget,
             )
         }
+        OperatorPrimitiveTarget::TypedArrayPrototypeSubarrayBegin(state) => {
+            finish_typed_array_prototype_subarray_begin(
+                runtime,
+                *state,
+                value,
+                return_to,
+                execution_budget,
+            )
+        }
+        OperatorPrimitiveTarget::TypedArrayPrototypeSubarrayEnd(state) => {
+            finish_typed_array_prototype_subarray_end(
+                runtime,
+                *state,
+                value,
+                return_to,
+                execution_budget,
+            )
+        }
         OperatorPrimitiveTarget::DataViewGetIndex(state) => {
             finish_data_view_get_index(runtime, state.as_ref(), value)
         }

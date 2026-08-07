@@ -674,6 +674,8 @@ impl RealmBuildTransaction<'_> {
                 prototype: object(IntrinsicObjectId::TypedArrayPrototype),
                 instance_prototypes: TypedArrayElementType::ALL
                     .map(|element| object(IntrinsicObjectId::TypedArrayInstancePrototype(element))),
+                constructors: TypedArrayElementType::ALL
+                    .map(|element| function(NativeFunctionKind::TypedArrayConstructor(element))),
             },
             date: DateIntrinsics {
                 prototype: object(IntrinsicObjectId::DatePrototype),

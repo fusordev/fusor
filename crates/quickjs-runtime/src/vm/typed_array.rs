@@ -148,6 +148,37 @@ pub(super) struct TypedArrayPrototypeSetState {
     origin: JsStackFrame,
 }
 
+#[allow(
+    clippy::enum_variant_names,
+    reason = "each name identifies the observable conversion or species boundary being awaited"
+)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum TypedArrayPrototypeSubarrayStage {
+    AwaitConstructor,
+    AwaitSpecies,
+    AwaitConstruct,
+}
+
+/// Resumable `%TypedArray%.prototype.subarray` construction.
+///
+/// The initial validation witness fixes source length and byte offset before
+/// either relative-index conversion can run user code. Species lookup and
+/// construction then follow the same observable ordering as
+/// `TypedArraySpeciesCreate`.
+pub(super) struct TypedArrayPrototypeSubarrayState {
+    source: ObjectId,
+    buffer: ObjectId,
+    source_byte_offset: usize,
+    source_length: usize,
+    begin: usize,
+    new_length: usize,
+    end: StoredValue,
+    element: TypedArrayElementType,
+    realm: RealmId,
+    stage: TypedArrayPrototypeSubarrayStage,
+    origin: JsStackFrame,
+}
+
 impl TypedArrayConstructorLengthState {
     pub(super) const fn retained_values() -> u64 {
         1
@@ -238,6 +269,18 @@ impl TypedArrayPrototypeSetState {
     pub(super) fn trace_roots(&self, mark: &mut dyn FnMut(CollectionRoot)) {
         mark(CollectionRoot::Heap(HeapReference::Object(self.target)));
         trace_stored_value_root(&self.source, mark);
+    }
+}
+
+impl TypedArrayPrototypeSubarrayState {
+    pub(super) const fn retained_values() -> u64 {
+        3
+    }
+
+    pub(super) fn trace_roots(&self, mark: &mut dyn FnMut(CollectionRoot)) {
+        mark(CollectionRoot::Heap(HeapReference::Object(self.source)));
+        mark(CollectionRoot::Heap(HeapReference::Object(self.buffer)));
+        trace_stored_value_root(&self.end, mark);
     }
 }
 
@@ -1339,8 +1382,10 @@ pub(super) fn dispatch_typed_array_prototype(
         return typed_array_type_error(realm, &origin, "not a TypedArray");
     };
     let view = runtime.typed_array_view(*object)?;
-    if matches!(method, TypedArrayPrototypeMethod::Set)
-        && !matches!(view, TypedArrayView::InBounds { .. })
+    if matches!(
+        method,
+        TypedArrayPrototypeMethod::Set | TypedArrayPrototypeMethod::Subarray
+    ) && !matches!(view, TypedArrayView::InBounds { .. })
     {
         return typed_array_type_error(realm, &origin, "TypedArray is out of bounds");
     }
@@ -1384,8 +1429,363 @@ pub(super) fn dispatch_typed_array_prototype(
                 execution_budget,
             );
         }
+        TypedArrayPrototypeMethod::Subarray => {
+            return begin_typed_array_prototype_subarray(
+                runtime,
+                *object,
+                arguments.take_first_or_undefined(),
+                arguments.take_first_or_undefined(),
+                realm,
+                return_to,
+                origin,
+                execution_budget,
+            );
+        }
     };
     Ok(NativeDispatch::Immediate(value))
+}
+
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the native entry point preserves both relative-index operands and the standard call context"
+)]
+fn begin_typed_array_prototype_subarray(
+    runtime: &mut Runtime,
+    source: ObjectId,
+    begin: StoredValue,
+    end: StoredValue,
+    realm: RealmId,
+    return_to: Option<CallReturn>,
+    origin: JsStackFrame,
+    execution_budget: &mut ExecutionBudget,
+) -> Result<NativeDispatch, NativeFailure> {
+    let Some(source_state) = runtime.typed_array_state(source)?.copied() else {
+        return typed_array_type_error(realm, &origin, "not a TypedArray");
+    };
+    let TypedArrayView::InBounds {
+        buffer,
+        byte_offset,
+        length,
+        ..
+    } = runtime.typed_array_view(source)?
+    else {
+        return typed_array_type_error(realm, &origin, "TypedArray is out of bounds");
+    };
+    begin_operator_primitive_conversion(
+        runtime,
+        begin,
+        OperatorPrimitiveHint::Number,
+        OperatorPrimitiveTarget::TypedArrayPrototypeSubarrayBegin(Box::new(
+            TypedArrayPrototypeSubarrayState {
+                source,
+                buffer,
+                source_byte_offset: byte_offset,
+                source_length: length,
+                begin: 0,
+                new_length: 0,
+                end,
+                element: source_state.element(),
+                realm,
+                stage: TypedArrayPrototypeSubarrayStage::AwaitConstructor,
+                origin: origin.clone(),
+            },
+        )),
+        realm,
+        return_to,
+        origin,
+        execution_budget,
+    )
+}
+
+pub(super) fn finish_typed_array_prototype_subarray_begin(
+    runtime: &mut Runtime,
+    mut state: TypedArrayPrototypeSubarrayState,
+    value: StoredValue,
+    return_to: Option<CallReturn>,
+    execution_budget: &mut ExecutionBudget,
+) -> Result<NativeDispatch, NativeFailure> {
+    let relative =
+        number_to_integer_or_infinity(operator_to_number(value, state.realm, &state.origin)?);
+    state.begin = typed_array_relative_bound(relative, state.source_length);
+    if matches!(state.end, StoredValue::Undefined) {
+        state.new_length = state.source_length.saturating_sub(state.begin);
+        return begin_typed_array_subarray_constructor_get(
+            runtime,
+            state,
+            return_to,
+            execution_budget,
+        );
+    }
+    let end = state.end.duplicate();
+    let realm = state.realm;
+    let origin = state.origin.clone();
+    begin_operator_primitive_conversion(
+        runtime,
+        end,
+        OperatorPrimitiveHint::Number,
+        OperatorPrimitiveTarget::TypedArrayPrototypeSubarrayEnd(Box::new(state)),
+        realm,
+        return_to,
+        origin,
+        execution_budget,
+    )
+}
+
+pub(super) fn finish_typed_array_prototype_subarray_end(
+    runtime: &mut Runtime,
+    mut state: TypedArrayPrototypeSubarrayState,
+    value: StoredValue,
+    return_to: Option<CallReturn>,
+    execution_budget: &mut ExecutionBudget,
+) -> Result<NativeDispatch, NativeFailure> {
+    let relative =
+        number_to_integer_or_infinity(operator_to_number(value, state.realm, &state.origin)?);
+    let end = typed_array_relative_bound(relative, state.source_length);
+    state.new_length = end.saturating_sub(state.begin);
+    begin_typed_array_subarray_constructor_get(runtime, state, return_to, execution_budget)
+}
+
+#[allow(
+    clippy::needless_pass_by_value,
+    reason = "native continuation completion values are transferred by value across every stage"
+)]
+pub(super) fn advance_typed_array_prototype_subarray(
+    runtime: &mut Runtime,
+    mut state: TypedArrayPrototypeSubarrayState,
+    value: StoredValue,
+    return_to: Option<CallReturn>,
+    execution_budget: &mut ExecutionBudget,
+) -> Result<NativeDispatch, NativeFailure> {
+    match state.stage {
+        TypedArrayPrototypeSubarrayStage::AwaitConstructor => {
+            if let StoredValue::Function(function) = value
+                && function_is_constructor(runtime, function)?
+            {
+                let function_realm = runtime.function_realm(function)?;
+                if function_realm != state.realm
+                    && function
+                        == runtime.realm_typed_array_constructor(function_realm, state.element)?
+                {
+                    let constructor =
+                        runtime.realm_typed_array_constructor(state.realm, state.element)?;
+                    return begin_typed_array_subarray_construct(state, constructor, return_to);
+                }
+            }
+            if matches!(value, StoredValue::Undefined) {
+                let constructor =
+                    runtime.realm_typed_array_constructor(state.realm, state.element)?;
+                return begin_typed_array_subarray_construct(state, constructor, return_to);
+            }
+            if !matches!(value, StoredValue::Object(_) | StoredValue::Function(_)) {
+                return typed_array_type_error(state.realm, &state.origin, "not a constructor");
+            }
+            state.stage = TypedArrayPrototypeSubarrayStage::AwaitSpecies;
+            begin_typed_array_subarray_species_get(
+                runtime,
+                state,
+                &value,
+                return_to,
+                execution_budget,
+            )
+        }
+        TypedArrayPrototypeSubarrayStage::AwaitSpecies => {
+            let constructor = if matches!(value, StoredValue::Undefined | StoredValue::Null) {
+                runtime.realm_typed_array_constructor(state.realm, state.element)?
+            } else if let StoredValue::Function(function) = value {
+                if !function_is_constructor(runtime, function)? {
+                    return typed_array_type_error(state.realm, &state.origin, "not a constructor");
+                }
+                function
+            } else {
+                return typed_array_type_error(state.realm, &state.origin, "not a constructor");
+            };
+            begin_typed_array_subarray_construct(state, constructor, return_to)
+        }
+        TypedArrayPrototypeSubarrayStage::AwaitConstruct => {
+            let StoredValue::Object(result) = value else {
+                return typed_array_type_error(
+                    state.realm,
+                    &state.origin,
+                    "TypedArray species constructor returned a non-TypedArray",
+                );
+            };
+            let Some(result_state) = runtime.typed_array_state(result)?.copied() else {
+                return typed_array_type_error(
+                    state.realm,
+                    &state.origin,
+                    "TypedArray species constructor returned a non-TypedArray",
+                );
+            };
+            if result_state.element().is_bigint() != state.element.is_bigint() {
+                return typed_array_type_error(
+                    state.realm,
+                    &state.origin,
+                    "TypedArray species constructor returned a different content type",
+                );
+            }
+            Ok(NativeDispatch::Immediate(StoredValue::Object(result)))
+        }
+    }
+}
+
+fn begin_typed_array_subarray_constructor_get(
+    runtime: &mut Runtime,
+    mut state: TypedArrayPrototypeSubarrayState,
+    return_to: Option<CallReturn>,
+    execution_budget: &mut ExecutionBudget,
+) -> Result<NativeDispatch, NativeFailure> {
+    state.stage = TypedArrayPrototypeSubarrayStage::AwaitConstructor;
+    let source = StoredValue::Object(state.source);
+    charge_heap_property_lookup(runtime, &source, execution_budget)?;
+    let dispatch = begin_value_get(
+        runtime,
+        &source,
+        runtime.predefined_property_key(PredefinedAtom::Constructor),
+        None,
+        state.realm,
+        return_to,
+        state.origin.clone(),
+        execution_budget,
+    )?;
+    continue_get_after(
+        dispatch,
+        state,
+        typed_array_prototype_subarray_continuation,
+        |state, value| {
+            advance_typed_array_prototype_subarray(
+                runtime,
+                state,
+                value,
+                return_to,
+                execution_budget,
+            )
+        },
+        "TypedArray.prototype.subarray constructor Get produced a structured result",
+    )
+}
+
+fn begin_typed_array_subarray_species_get(
+    runtime: &mut Runtime,
+    state: TypedArrayPrototypeSubarrayState,
+    constructor: &StoredValue,
+    return_to: Option<CallReturn>,
+    execution_budget: &mut ExecutionBudget,
+) -> Result<NativeDispatch, NativeFailure> {
+    charge_heap_property_lookup(runtime, constructor, execution_budget)?;
+    let dispatch = begin_value_get(
+        runtime,
+        constructor,
+        runtime.predefined_symbol_property_key(PredefinedAtom::SymbolSpecies),
+        None,
+        state.realm,
+        return_to,
+        state.origin.clone(),
+        execution_budget,
+    )?;
+    continue_get_after(
+        dispatch,
+        state,
+        typed_array_prototype_subarray_continuation,
+        |state, value| {
+            advance_typed_array_prototype_subarray(
+                runtime,
+                state,
+                value,
+                return_to,
+                execution_budget,
+            )
+        },
+        "TypedArray.prototype.subarray species Get produced a structured result",
+    )
+}
+
+fn begin_typed_array_subarray_construct(
+    mut state: TypedArrayPrototypeSubarrayState,
+    constructor: FunctionId,
+    return_to: Option<CallReturn>,
+) -> Result<NativeDispatch, NativeFailure> {
+    let element_width = state.element.byte_width();
+    let byte_offset = state
+        .source_byte_offset
+        .checked_add(state.begin.checked_mul(element_width).ok_or(
+            EngineFault::RuntimeInvariant {
+                message: "TypedArray subarray byte offset overflowed after relative bounds",
+            },
+        )?)
+        .ok_or(EngineFault::RuntimeInvariant {
+            message: "TypedArray subarray byte offset overflowed after relative bounds",
+        })?;
+    state.stage = TypedArrayPrototypeSubarrayStage::AwaitConstruct;
+    let mut arguments = Vec::new();
+    arguments
+        .try_reserve_exact(3)
+        .map_err(|_| ExecutionError::AllocationFailed {
+            resource: RuntimeResource::FrameValues,
+            additional: 3,
+        })?;
+    arguments.push(StoredValue::Object(state.buffer));
+    arguments.push(typed_array_usize_number(byte_offset));
+    arguments.push(typed_array_usize_number(state.new_length));
+    let origin = state.origin.clone();
+    let mut continuations = Vec::new();
+    continuations
+        .try_reserve_exact(1)
+        .map_err(|_| ExecutionError::AllocationFailed {
+            resource: RuntimeResource::Frames,
+            additional: 1,
+        })?;
+    continuations.push(typed_array_prototype_subarray_continuation(state));
+    Ok(NativeDispatch::Call(NativeCall {
+        function: constructor,
+        receiver: StoredValue::Undefined,
+        arguments: CallArguments::from_values(arguments),
+        return_to,
+        origin,
+        continuations,
+        pre_call: None,
+        new_target: Some(constructor),
+        native_caller: None,
+    }))
+}
+
+fn typed_array_prototype_subarray_continuation(
+    state: TypedArrayPrototypeSubarrayState,
+) -> NativeContinuation {
+    NativeContinuation::TypedArrayPrototypeSubarray(Box::new(state))
+}
+
+fn typed_array_relative_bound(value: f64, length: usize) -> usize {
+    if value <= 0.0 {
+        if value == f64::NEG_INFINITY {
+            return 0;
+        }
+        #[expect(
+            clippy::cast_possible_truncation,
+            clippy::cast_sign_loss,
+            reason = "the finite negative relative index is bounded against the usize source length"
+        )]
+        let magnitude = (-value) as u128;
+        return usize::try_from(magnitude).map_or(0, |magnitude| length.saturating_sub(magnitude));
+    }
+    if value == f64::INFINITY {
+        return length;
+    }
+    #[expect(
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss,
+        reason = "the finite positive relative index is bounded against the usize source length"
+    )]
+    let value = value as u128;
+    usize::try_from(value).map_or(length, |value| value.min(length))
+}
+
+fn typed_array_usize_number(value: usize) -> StoredValue {
+    #[expect(
+        clippy::cast_precision_loss,
+        reason = "TypedArray element lengths and byte offsets are bounded by ToIndex"
+    )]
+    let value = value as f64;
+    StoredValue::Number(JsNumber::from_f64(value))
 }
 
 #[expect(

@@ -190,6 +190,48 @@ impl Runtime {
         Ok(prototype)
     }
 
+    /// Returns one realm's concrete `%Int8Array%`-style constructor.
+    pub(crate) fn realm_typed_array_constructor(
+        &self,
+        realm: super::RealmId,
+        element: TypedArrayElementType,
+    ) -> Result<super::FunctionId, crate::EngineFault> {
+        let state = self
+            .realms
+            .get(realm)
+            .ok_or(crate::EngineFault::StaleHeapEdge {
+                edge: "realm",
+                index: realm.index(),
+                generation: realm.generation(),
+            })?;
+        let super::RealmIntrinsics::Ready { typed_array, .. } = state.intrinsics else {
+            return Err(crate::EngineFault::RuntimeInvariant {
+                message: "realm typed-array intrinsics are not initialized",
+            });
+        };
+        let constructor = typed_array.constructors[element.index()];
+        let function =
+            self.functions
+                .get(constructor)
+                .ok_or(crate::EngineFault::StaleHeapEdge {
+                    edge: "typed-array constructor intrinsic",
+                    index: constructor.index(),
+                    generation: constructor.generation(),
+                })?;
+        if !matches!(
+            function.native(),
+            Some(super::NativeFunction {
+                realm: function_realm,
+                kind: super::NativeFunctionKind::TypedArrayConstructor(kind),
+            }) if *function_realm == realm && *kind == element
+        ) {
+            return Err(crate::EngineFault::RuntimeInvariant {
+                message: "realm typed-array constructor intrinsic has the wrong implementation",
+            });
+        }
+        Ok(constructor)
+    }
+
     /// Takes the current backing-buffer witness used by every typed-array
     /// indexed operation. A length-tracking view observes the largest complete
     /// element prefix after each resizable-buffer change; a fixed view becomes

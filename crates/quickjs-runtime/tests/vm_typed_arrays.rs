@@ -238,3 +238,30 @@ fn typed_array_set_copies_typed_and_array_like_sources_with_fresh_target_indices
         ExceptionKind::TypeError
     );
 }
+
+#[test]
+fn typed_array_subarray_uses_relative_bounds_shared_storage_and_species() {
+    assert_eq!(
+        rendered(
+            "var source=new Uint16Array([1,2,3,4]),view=source.subarray(1,-1);view[0]=99;\
+             var speciesSource=new Uint8Array([7,8,9]);\
+             speciesSource.constructor={[Symbol.species]:Uint8Array};var speciesView=speciesSource.subarray(1,2);\
+             return [view.length,view.byteOffset,view[0],source[1],view.buffer===source.buffer,\
+               speciesView.constructor===Uint8Array,speciesView.length,speciesView[0]].join('|');"
+        ),
+        "2|2|99|99|true|true|1|8"
+    );
+    assert_eq!(
+        thrown(
+            "var source=new Uint8Array(8);source.constructor={[Symbol.species]:BigInt64Array};source.subarray(0,1);"
+        ),
+        ExceptionKind::TypeError
+    );
+    assert_eq!(
+        thrown(
+            "var buffer=new ArrayBuffer(8,{maxByteLength:8}),source=new Uint8Array(buffer);\
+             source.subarray({valueOf(){buffer.resize(2);return 1}});"
+        ),
+        ExceptionKind::RangeError
+    );
+}

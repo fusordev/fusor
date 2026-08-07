@@ -278,6 +278,7 @@ struct DataViewIntrinsics {
 struct TypedArrayIntrinsics {
     prototype: ObjectId,
     instance_prototypes: [ObjectId; 12],
+    constructors: [FunctionId; 12],
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -1782,16 +1783,18 @@ pub(crate) enum TypedArrayPrototypeMethod {
     Length,
     ToStringTag,
     Set,
+    Subarray,
 }
 
 impl TypedArrayPrototypeMethod {
-    pub(crate) const ALL: [Self; 6] = [
+    pub(crate) const ALL: [Self; 7] = [
         Self::Buffer,
         Self::ByteLength,
         Self::ByteOffset,
         Self::Length,
         Self::ToStringTag,
         Self::Set,
+        Self::Subarray,
     ];
 
     #[must_use]
@@ -1803,6 +1806,7 @@ impl TypedArrayPrototypeMethod {
             Self::Length => "length",
             Self::ToStringTag => "[Symbol.toStringTag]",
             Self::Set => "set",
+            Self::Subarray => "subarray",
         }
     }
 
@@ -1815,18 +1819,20 @@ impl TypedArrayPrototypeMethod {
             Self::Length => "get length",
             Self::ToStringTag => "get [Symbol.toStringTag]",
             Self::Set => "set",
+            Self::Subarray => "subarray",
         }
     }
 
     #[must_use]
     pub(crate) const fn is_accessor(self) -> bool {
-        !matches!(self, Self::Set)
+        !matches!(self, Self::Set | Self::Subarray)
     }
 
     #[must_use]
     pub(crate) const fn arity(self) -> i32 {
         match self {
             Self::Set => 1,
+            Self::Subarray => 2,
             Self::Buffer
             | Self::ByteLength
             | Self::ByteOffset

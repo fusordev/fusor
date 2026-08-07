@@ -751,6 +751,7 @@ enum NativeContinuation {
     TypedArrayConstructorObject(Box<TypedArrayConstructorObjectState>),
     TypedArrayConstructorSequence(Box<TypedArrayConstructorSequenceState>),
     TypedArrayPrototypeSet(Box<TypedArrayPrototypeSetState>),
+    TypedArrayPrototypeSubarray(Box<TypedArrayPrototypeSubarrayState>),
     DateToJson(DateToJsonContinuation),
     TemporalDurationBag(Box<TemporalDurationBagContinuation>),
     TemporalDurationCompareOptions(TemporalDurationCompareOptionsContinuation),
@@ -864,6 +865,9 @@ impl NativeContinuation {
             }
             Self::TypedArrayConstructorSequence(state) => state.retained_values(),
             Self::TypedArrayPrototypeSet(_) => TypedArrayPrototypeSetState::retained_values(),
+            Self::TypedArrayPrototypeSubarray(_) => {
+                TypedArrayPrototypeSubarrayState::retained_values()
+            }
             Self::DateToJson(_) => DateToJsonContinuation::retained_values(),
             Self::TemporalDurationBag(state) => state.retained_values(),
             Self::TemporalDurationCompareOptions(_) => {
@@ -1985,6 +1989,10 @@ enum OperatorPrimitiveTarget {
     TypedArrayPrototypeSetSourceLength(Box<TypedArrayPrototypeSetState>),
     /// One array-like source element awaiting destination numeric conversion.
     TypedArrayPrototypeSetElement(Box<TypedArrayPrototypeSetState>),
+    /// `%TypedArray%.prototype.subarray`'s initial relative index.
+    TypedArrayPrototypeSubarrayBegin(Box<TypedArrayPrototypeSubarrayState>),
+    /// `%TypedArray%.prototype.subarray`'s optional end index.
+    TypedArrayPrototypeSubarrayEnd(Box<TypedArrayPrototypeSubarrayState>),
     /// `DataView.prototype.get*` after `ToIndex(byteOffset)`.
     DataViewGetIndex(Box<DataViewGetState>),
     /// `DataView.prototype.set*` after `ToIndex(byteOffset)`.
@@ -2244,6 +2252,10 @@ impl OperatorPrimitiveTarget {
             | Self::TypedArrayPrototypeSetSourceLength(_state)
             | Self::TypedArrayPrototypeSetElement(_state) => {
                 TypedArrayPrototypeSetState::retained_values()
+            }
+            Self::TypedArrayPrototypeSubarrayBegin(_state)
+            | Self::TypedArrayPrototypeSubarrayEnd(_state) => {
+                TypedArrayPrototypeSubarrayState::retained_values()
             }
             Self::DataViewGetIndex(_) => DataViewGetState::retained_values(),
             Self::DataViewSetOffset(_) => DataViewSetOffsetState::retained_values(),
@@ -2590,6 +2602,8 @@ fn trace_operator_primitive_target_roots(
         OperatorPrimitiveTarget::TypedArrayPrototypeSetOffset(state)
         | OperatorPrimitiveTarget::TypedArrayPrototypeSetSourceLength(state)
         | OperatorPrimitiveTarget::TypedArrayPrototypeSetElement(state) => state.trace_roots(mark),
+        OperatorPrimitiveTarget::TypedArrayPrototypeSubarrayBegin(state)
+        | OperatorPrimitiveTarget::TypedArrayPrototypeSubarrayEnd(state) => state.trace_roots(mark),
         OperatorPrimitiveTarget::DataViewGetIndex(state) => state.trace_roots(mark),
         OperatorPrimitiveTarget::DataViewSetOffset(state) => state.trace_roots(mark),
         OperatorPrimitiveTarget::DataViewSetValue(state) => state.trace_roots(mark),
@@ -2742,6 +2756,7 @@ fn trace_native_continuation_roots(
         NativeContinuation::TypedArrayConstructorObject(state) => state.trace_roots(mark),
         NativeContinuation::TypedArrayConstructorSequence(state) => state.trace_roots(mark),
         NativeContinuation::TypedArrayPrototypeSet(state) => state.trace_roots(mark),
+        NativeContinuation::TypedArrayPrototypeSubarray(state) => state.trace_roots(mark),
         NativeContinuation::DateToJson(state) => state.trace_roots(mark),
         NativeContinuation::TemporalDurationBag(state) => state.trace_roots(mark),
         NativeContinuation::TemporalDurationCompareOptions(state) => state.trace_roots(mark),
