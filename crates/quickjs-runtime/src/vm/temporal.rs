@@ -2102,7 +2102,7 @@ pub(super) fn dispatch_temporal_zoned_date_time_prototype(
     method: TemporalZonedDateTimePrototypeMethod,
     realm: RealmId,
     receiver: &StoredValue,
-    _arguments: CallArguments,
+    mut arguments: CallArguments,
     _return_to: Option<CallReturn>,
     origin: &JsStackFrame,
     _execution_budget: &mut ExecutionBudget,
@@ -2232,6 +2232,42 @@ pub(super) fn dispatch_temporal_zoned_date_time_prototype(
                 }
             };
             allocate_temporal_zoned_date_time_result(runtime, realm, start)
+        }
+        TemporalZonedDateTimePrototypeMethod::Equals => {
+            let value = arguments.take_first_or_undefined();
+            let other = if let StoredValue::Object(object) = value
+                && let Some(other) = runtime.temporal_zoned_date_time(object)?
+            {
+                other
+            } else if let StoredValue::String(value) = value {
+                match ZonedDateTime::from_utf8(
+                    value.to_utf8_lossy()?.as_bytes(),
+                    Disambiguation::Compatible,
+                    OffsetDisambiguation::Reject,
+                ) {
+                    Ok(other) => other,
+                    Err(error) => {
+                        return Err(NativeFailure::Abrupt(temporal_exception_from_error(
+                            realm, origin, error,
+                        )?));
+                    }
+                }
+            } else {
+                return temporal_type_error(
+                    realm,
+                    origin,
+                    "Temporal.ZonedDateTime.equals currently requires a string or ZonedDateTime",
+                );
+            };
+            let equals = match date_time.equals(&other) {
+                Ok(equals) => equals,
+                Err(error) => {
+                    return Err(NativeFailure::Abrupt(temporal_exception_from_error(
+                        realm, origin, error,
+                    )?));
+                }
+            };
+            Ok(NativeDispatch::Immediate(StoredValue::Boolean(equals)))
         }
     }
 }

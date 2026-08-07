@@ -349,6 +349,26 @@ fn zoned_date_time_projection_methods_preserve_branded_temporal_values() {
 }
 
 #[test]
+fn zoned_date_time_equals_accepts_branded_values_and_strings() {
+    assert_eq!(
+        rendered(
+            "var value=new Temporal.ZonedDateTime(0n,'UTC','iso8601');
+             var equals=Object.getOwnPropertyDescriptor(Temporal.ZonedDateTime.prototype,'equals');
+             return [value.equals(new Temporal.ZonedDateTime(0n,'UTC','iso8601')),
+               value.equals(new Temporal.ZonedDateTime(1n,'UTC','iso8601')),
+               value.equals('1970-01-01T00:00+00:00[UTC][u-ca=iso8601]'),
+               equals.value.length,equals.value.name,equals.enumerable,equals.writable,
+               equals.configurable].join('|');"
+        ),
+        "true|false|true|1|equals|false|true|true"
+    );
+    assert_eq!(
+        thrown("return Temporal.ZonedDateTime.prototype.equals.call({});"),
+        ExceptionKind::TypeError
+    );
+}
+
+#[test]
 fn plain_date_time_constructor_accessors_and_iso_formatting_are_spec_shaped() {
     assert_eq!(
         rendered(

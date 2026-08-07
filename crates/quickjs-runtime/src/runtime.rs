@@ -2355,6 +2355,7 @@ pub(crate) enum TemporalZonedDateTimePrototypeMethod {
     ToPlainTime,
     ToPlainDateTime,
     StartOfDay,
+    Equals,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -2817,7 +2818,7 @@ impl TemporalZonedDateTimeStaticMethod {
 }
 
 impl TemporalZonedDateTimePrototypeMethod {
-    pub(crate) const ALL: [Self; 33] = [
+    pub(crate) const ALL: [Self; 34] = [
         Self::CalendarId,
         Self::TimeZoneId,
         Self::Year,
@@ -2851,6 +2852,7 @@ impl TemporalZonedDateTimePrototypeMethod {
         Self::ToPlainTime,
         Self::ToPlainDateTime,
         Self::StartOfDay,
+        Self::Equals,
     ];
 
     pub(crate) const fn name(self) -> &'static str {
@@ -2888,6 +2890,7 @@ impl TemporalZonedDateTimePrototypeMethod {
             Self::ToPlainTime => "toPlainTime",
             Self::ToPlainDateTime => "toPlainDateTime",
             Self::StartOfDay => "startOfDay",
+            Self::Equals => "equals",
         }
     }
 
@@ -2933,11 +2936,15 @@ impl TemporalZonedDateTimePrototypeMethod {
                 | Self::ToPlainTime
                 | Self::ToPlainDateTime
                 | Self::StartOfDay
+                | Self::Equals
         )
     }
 
-    pub(crate) const fn length() -> i32 {
-        0
+    pub(crate) const fn length(self) -> i32 {
+        match self {
+            Self::Equals => 1,
+            _ => 0,
+        }
     }
 }
 

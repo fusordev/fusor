@@ -385,7 +385,7 @@ pub(super) fn visit_functions(visit: FunctionSink<'_>) {
         visit(ordinary(
             NativeFunctionKind::TemporalZonedDateTimePrototype(method),
             name,
-            TemporalZonedDateTimePrototypeMethod::length(),
+            method.length(),
         ));
     }
 }
