@@ -58,10 +58,22 @@ pub(super) fn visit_functions(visit: FunctionSink<'_>) {
 pub(super) fn visit_properties(visit: PropertySink<'_>) {
     let prototype = IntrinsicIdentity::Object(IntrinsicObjectId::TypedArrayPrototype);
     for prototype_method in TypedArrayPrototypeMethod::ALL {
-        let key = if prototype_method == TypedArrayPrototypeMethod::ToStringTag {
-            IntrinsicKeySpec::WellKnownSymbol(PredefinedAtom::SymbolToStringTag)
-        } else {
-            IntrinsicKeySpec::InternedString(RealmNameId::TypedArrayPrototype(prototype_method))
+        let key = match prototype_method {
+            TypedArrayPrototypeMethod::ToStringTag => {
+                IntrinsicKeySpec::WellKnownSymbol(PredefinedAtom::SymbolToStringTag)
+            }
+            TypedArrayPrototypeMethod::Entries => {
+                IntrinsicKeySpec::InternedString(RealmNameId::Entries)
+            }
+            TypedArrayPrototypeMethod::Keys => {
+                IntrinsicKeySpec::PredefinedString(PredefinedAtom::Keys)
+            }
+            TypedArrayPrototypeMethod::Values => {
+                IntrinsicKeySpec::PredefinedString(PredefinedAtom::Values)
+            }
+            _ => {
+                IntrinsicKeySpec::InternedString(RealmNameId::TypedArrayPrototype(prototype_method))
+            }
         };
         if prototype_method.is_accessor() {
             visit(accessor(
@@ -81,6 +93,11 @@ pub(super) fn visit_properties(visit: PropertySink<'_>) {
             ));
         }
     }
+    visit(method(
+        prototype,
+        IntrinsicKeySpec::WellKnownSymbol(PredefinedAtom::SymbolIterator),
+        NativeFunctionKind::TypedArrayPrototype(TypedArrayPrototypeMethod::Values),
+    ));
 
     for element in TypedArrayElementType::ALL {
         let constructor = IntrinsicIdentity::Function(IntrinsicFunctionId(

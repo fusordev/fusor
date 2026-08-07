@@ -1598,6 +1598,9 @@ pub(super) fn dispatch_typed_array_prototype(
             | TypedArrayPrototypeMethod::CopyWithin
             | TypedArrayPrototypeMethod::Reverse
             | TypedArrayPrototypeMethod::Slice
+            | TypedArrayPrototypeMethod::Entries
+            | TypedArrayPrototypeMethod::Keys
+            | TypedArrayPrototypeMethod::Values
     ) && !matches!(view, TypedArrayView::InBounds { .. })
     {
         return typed_array_type_error(realm, &origin, "TypedArray is out of bounds");
@@ -1746,6 +1749,33 @@ pub(super) fn dispatch_typed_array_prototype(
                 return_to,
                 origin,
                 execution_budget,
+            );
+        }
+        TypedArrayPrototypeMethod::Entries => {
+            return begin_array_iterator_method(
+                runtime,
+                StoredValue::Object(*object),
+                crate::object::ArrayIteratorKind::KeyAndValue,
+                realm,
+                origin,
+            );
+        }
+        TypedArrayPrototypeMethod::Keys => {
+            return begin_array_iterator_method(
+                runtime,
+                StoredValue::Object(*object),
+                crate::object::ArrayIteratorKind::Key,
+                realm,
+                origin,
+            );
+        }
+        TypedArrayPrototypeMethod::Values => {
+            return begin_array_iterator_method(
+                runtime,
+                StoredValue::Object(*object),
+                crate::object::ArrayIteratorKind::Value,
+                realm,
+                origin,
             );
         }
     };

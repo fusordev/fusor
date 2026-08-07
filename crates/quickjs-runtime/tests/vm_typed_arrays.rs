@@ -513,3 +513,33 @@ fn typed_array_slice_revalidates_after_species_and_observes_forward_overlap() {
         "0"
     );
 }
+
+#[test]
+fn typed_array_iterators_share_the_values_function_and_observe_live_views() {
+    assert_eq!(
+        rendered(
+            "var values=new Uint8Array([2,3]),valueIterator=values.values(),keyIterator=values.keys(),\
+             entry=values.entries().next();\
+             return [Uint8Array.prototype.entries.length,Uint8Array.prototype.entries.name,\
+               Uint8Array.prototype.keys.length,Uint8Array.prototype.keys.name,\
+               Uint8Array.prototype.values.length,Uint8Array.prototype.values.name,\
+               values.values===values[Symbol.iterator],valueIterator.next().value,keyIterator.next().value,\
+               entry.value[0],entry.value[1],values[Symbol.iterator]().next().value].join('|');"
+        ),
+        "0|entries|0|keys|0|values|true|2|0|0|2|2"
+    );
+    assert_eq!(
+        rendered(
+            "var buffer=new ArrayBuffer(4,{maxByteLength:4}),values=new Uint8Array(buffer);values[0]=7;\
+             var iterator=values.values();buffer.resize(1);var first=iterator.next();buffer.resize(0);\
+             var done=iterator.next();return [first.value,first.done,done.value,done.done].join('|');"
+        ),
+        "7|false||true"
+    );
+    assert_eq!(
+        thrown(
+            "var buffer=new ArrayBuffer(4,{maxByteLength:4}),values=new Uint8Array(buffer,2,2);buffer.resize(1);values.entries();"
+        ),
+        ExceptionKind::TypeError
+    );
+}
