@@ -2515,6 +2515,46 @@ fn allocate_temporal_plain_date_time_result(
     Ok(NativeDispatch::Immediate(StoredValue::Object(object)))
 }
 
+fn finish_temporal_plain_date_time_with_calendar(
+    runtime: &mut Runtime,
+    date_time: &PlainDateTime,
+    value: StoredValue,
+    realm: RealmId,
+    origin: &JsStackFrame,
+) -> Result<NativeDispatch, NativeFailure> {
+    let calendar = match value {
+        StoredValue::String(source) => match Calendar::from_str(&source.to_utf8_lossy()?) {
+            Ok(calendar) => calendar,
+            Err(error) => {
+                return Err(NativeFailure::Abrupt(temporal_exception_from_error(
+                    realm, origin, error,
+                )?));
+            }
+        },
+        StoredValue::Object(object) => {
+            if let Some(date) = runtime.temporal_plain_date(object)? {
+                date.calendar().clone()
+            } else if let Some(other) = runtime.temporal_plain_date_time(object)? {
+                other.calendar().clone()
+            } else {
+                return temporal_type_error(
+                    realm,
+                    origin,
+                    "Temporal.PlainDateTime.withCalendar requires a calendar identifier or Temporal object",
+                );
+            }
+        }
+        _ => {
+            return temporal_type_error(
+                realm,
+                origin,
+                "Temporal.PlainDateTime.withCalendar requires a calendar identifier or Temporal object",
+            );
+        }
+    };
+    allocate_temporal_plain_date_time_result(runtime, realm, date_time.with_calendar(calendar))
+}
+
 #[allow(
     clippy::too_many_arguments,
     reason = "the native method owns its field/options values across observable conversion"
@@ -3075,6 +3115,12 @@ pub(super) fn dispatch_temporal_plain_date_time_prototype(
         ),
         TemporalPlainDateTimePrototypeMethod::ToPlainDate => {
             allocate_temporal_plain_date_result(runtime, realm, date_time.to_plain_date())
+        }
+        TemporalPlainDateTimePrototypeMethod::WithCalendar => {
+            let calendar = arguments.take_first_or_undefined();
+            finish_temporal_plain_date_time_with_calendar(
+                runtime, &date_time, calendar, realm, origin,
+            )
         }
         TemporalPlainDateTimePrototypeMethod::Until
         | TemporalPlainDateTimePrototypeMethod::Since => {
