@@ -177,3 +177,17 @@ fn typed_array_constructors_clone_typed_array_sources_and_check_content_types() 
         ExceptionKind::TypeError
     );
 }
+
+#[test]
+fn typed_array_constructors_initialize_iterable_and_array_like_inputs_in_their_distinct_orders() {
+    assert_eq!(
+        rendered(
+            "var iterable=new Uint8Array([1,258,3]);\
+             var arrayLike={0:4,1:261,length:2};var copied=new Uint8Array(arrayLike);\
+             var bigints=new BigInt64Array([1n,-2n]);\
+             return [iterable.length,iterable[0],iterable[1],iterable[2],\
+               copied.length,copied[0],copied[1],String(bigints[0]),String(bigints[1])].join('|');"
+        ),
+        "3|1|2|3|2|4|5|1|-2"
+    );
+}

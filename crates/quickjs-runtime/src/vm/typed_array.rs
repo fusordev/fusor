@@ -83,6 +83,39 @@ pub(super) struct TypedArrayConstructorObjectState {
     origin: JsStackFrame,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum TypedArrayConstructorSequenceStage {
+    AwaitIteratorMethod,
+    AwaitIterator,
+    AwaitNextMethod,
+    AwaitNextResult,
+    AwaitDone,
+    AwaitIteratorValue,
+    AwaitArrayLikeLength,
+    AwaitArrayLikeLengthConversion,
+    AwaitArrayLikeElement,
+}
+
+/// Resumable initialization of a freshly allocated typed array from an
+/// iterable or array-like object. Iterable values are collected before the
+/// destination buffer is allocated; array-like values are read only after the
+/// length-established destination exists.
+pub(super) struct TypedArrayConstructorSequenceState {
+    prototype: HeapReference,
+    source: StoredValue,
+    element: TypedArrayElementType,
+    values: Vec<StoredValue>,
+    iterator: Option<StoredValue>,
+    next: Option<StoredValue>,
+    result: Option<StoredValue>,
+    target: Option<ObjectId>,
+    length: usize,
+    index: usize,
+    realm: RealmId,
+    stage: TypedArrayConstructorSequenceStage,
+    origin: JsStackFrame,
+}
+
 impl TypedArrayConstructorLengthState {
     pub(super) const fn retained_values() -> u64 {
         1
@@ -130,6 +163,38 @@ impl TypedArrayConstructorObjectState {
         trace_stored_value_root(&self.source, mark);
         trace_stored_value_root(&self.byte_offset, mark);
         trace_stored_value_root(&self.byte_length, mark);
+    }
+}
+
+impl TypedArrayConstructorSequenceState {
+    pub(super) fn retained_values(&self) -> u64 {
+        2_u64
+            .saturating_add(usize_to_u64(self.values.len()))
+            .saturating_add(u64::from(self.iterator.is_some()))
+            .saturating_add(u64::from(self.next.is_some()))
+            .saturating_add(u64::from(self.result.is_some()))
+            .saturating_add(u64::from(self.target.is_some()))
+    }
+
+    pub(super) fn trace_roots(&self, mark: &mut dyn FnMut(CollectionRoot)) {
+        mark(CollectionRoot::Heap(self.prototype));
+        trace_stored_value_root(&self.source, mark);
+        for value in &self.values {
+            trace_stored_value_root(value, mark);
+        }
+        for value in [
+            self.iterator.as_ref(),
+            self.next.as_ref(),
+            self.result.as_ref(),
+        ]
+        .into_iter()
+        .flatten()
+        {
+            trace_stored_value_root(value, mark);
+        }
+        if let Some(target) = self.target {
+            mark(CollectionRoot::Heap(HeapReference::Object(target)));
+        }
     }
 }
 
@@ -327,41 +392,529 @@ pub(super) fn advance_typed_array_constructor_object(
     })?;
     let prototype =
         typed_array_constructor_prototype(runtime, state.new_target, state.element, &requested)?;
-    let StoredValue::Object(source) = state.source else {
+    if let StoredValue::Object(source) = state.source {
+        if runtime.array_buffer_state(source)?.is_some() {
+            return begin_typed_array_constructor_buffer_offset(
+                runtime,
+                prototype,
+                source,
+                state.byte_offset,
+                state.byte_length,
+                state.element,
+                state.realm,
+                return_to,
+                state.origin,
+                execution_budget,
+            );
+        }
+        if runtime.typed_array_state(source)?.is_some() {
+            return finish_typed_array_constructor_from_typed_array(
+                runtime,
+                prototype,
+                source,
+                state.element,
+                state.realm,
+                &state.origin,
+            );
+        }
+    }
+    begin_typed_array_constructor_sequence(
+        runtime,
+        TypedArrayConstructorSequenceState {
+            prototype,
+            source: state.source,
+            element: state.element,
+            values: Vec::new(),
+            iterator: None,
+            next: None,
+            result: None,
+            target: None,
+            length: 0,
+            index: 0,
+            realm: state.realm,
+            stage: TypedArrayConstructorSequenceStage::AwaitIteratorMethod,
+            origin: state.origin,
+        },
+        return_to,
+        execution_budget,
+    )
+}
+
+fn begin_typed_array_constructor_sequence(
+    runtime: &mut Runtime,
+    state: TypedArrayConstructorSequenceState,
+    return_to: Option<CallReturn>,
+    execution_budget: &mut ExecutionBudget,
+) -> Result<NativeDispatch, NativeFailure> {
+    typed_array_sequence_read(
+        runtime,
+        state,
+        runtime.predefined_symbol_property_key(PredefinedAtom::SymbolIterator),
+        return_to,
+        execution_budget,
+    )
+}
+
+#[allow(
+    clippy::too_many_lines,
+    reason = "one explicit state machine preserves the distinct iterable-list and array-like typed-array initialization orders"
+)]
+pub(super) fn advance_typed_array_constructor_sequence(
+    runtime: &mut Runtime,
+    mut state: TypedArrayConstructorSequenceState,
+    completion: Option<StoredValue>,
+    return_to: Option<CallReturn>,
+    execution_budget: &mut ExecutionBudget,
+) -> Result<NativeDispatch, NativeFailure> {
+    let mut completion = completion;
+    loop {
+        match state.stage {
+            TypedArrayConstructorSequenceStage::AwaitIteratorMethod => {
+                let method = typed_array_take_completion(&mut completion)?;
+                match method {
+                    StoredValue::Undefined | StoredValue::Null => {
+                        state.stage = TypedArrayConstructorSequenceStage::AwaitArrayLikeLength;
+                        return typed_array_sequence_read(
+                            runtime,
+                            state,
+                            runtime.predefined_property_key(PredefinedAtom::Length),
+                            return_to,
+                            execution_budget,
+                        );
+                    }
+                    StoredValue::Function(function) => {
+                        state.stage = TypedArrayConstructorSequenceStage::AwaitIterator;
+                        let receiver = state.source.duplicate();
+                        return typed_array_sequence_call(
+                            state,
+                            function,
+                            receiver,
+                            Vec::new(),
+                            return_to,
+                        );
+                    }
+                    _ => {
+                        return typed_array_type_error(
+                            state.realm,
+                            &state.origin,
+                            "TypedArray Symbol.iterator is not callable",
+                        );
+                    }
+                }
+            }
+            TypedArrayConstructorSequenceStage::AwaitIterator => {
+                let iterator = typed_array_require_object(
+                    &state,
+                    typed_array_take_completion(&mut completion)?,
+                )?;
+                state.iterator = Some(iterator);
+                state.stage = TypedArrayConstructorSequenceStage::AwaitNextMethod;
+                return typed_array_sequence_read(
+                    runtime,
+                    state,
+                    runtime.predefined_property_key(PredefinedAtom::Next),
+                    return_to,
+                    execution_budget,
+                );
+            }
+            TypedArrayConstructorSequenceStage::AwaitNextMethod => {
+                state.next = Some(typed_array_take_completion(&mut completion)?);
+                return typed_array_sequence_call_next(state, return_to, execution_budget);
+            }
+            TypedArrayConstructorSequenceStage::AwaitNextResult => {
+                state.result = Some(typed_array_require_object(
+                    &state,
+                    typed_array_take_completion(&mut completion)?,
+                )?);
+                state.stage = TypedArrayConstructorSequenceStage::AwaitDone;
+                return typed_array_sequence_read(
+                    runtime,
+                    state,
+                    runtime.predefined_property_key(PredefinedAtom::Done),
+                    return_to,
+                    execution_budget,
+                );
+            }
+            TypedArrayConstructorSequenceStage::AwaitDone => {
+                if typed_array_take_completion(&mut completion)?.is_truthy() {
+                    state.iterator = None;
+                    state.next = None;
+                    state.result = None;
+                    state.length = state.values.len();
+                    typed_array_sequence_allocate(runtime, &mut state)?;
+                    state.stage = TypedArrayConstructorSequenceStage::AwaitIteratorValue;
+                    return typed_array_sequence_begin_next_element(
+                        runtime,
+                        state,
+                        return_to,
+                        execution_budget,
+                    );
+                }
+                state.stage = TypedArrayConstructorSequenceStage::AwaitIteratorValue;
+                return typed_array_sequence_read(
+                    runtime,
+                    state,
+                    runtime.predefined_property_key(PredefinedAtom::Value),
+                    return_to,
+                    execution_budget,
+                );
+            }
+            TypedArrayConstructorSequenceStage::AwaitIteratorValue => {
+                let value = typed_array_take_completion(&mut completion)?;
+                state
+                    .values
+                    .try_reserve(1)
+                    .map_err(|_| ExecutionError::AllocationFailed {
+                        resource: RuntimeResource::Frames,
+                        additional: 1,
+                    })?;
+                state.values.push(value);
+                state.result = None;
+                return typed_array_sequence_call_next(state, return_to, execution_budget);
+            }
+            TypedArrayConstructorSequenceStage::AwaitArrayLikeLength => {
+                let value = typed_array_take_completion(&mut completion)?;
+                state.stage = TypedArrayConstructorSequenceStage::AwaitArrayLikeLengthConversion;
+                let realm = state.realm;
+                let origin = state.origin.clone();
+                return begin_operator_primitive_conversion(
+                    runtime,
+                    value,
+                    OperatorPrimitiveHint::Number,
+                    OperatorPrimitiveTarget::TypedArrayConstructorArrayLikeLength(Box::new(state)),
+                    realm,
+                    return_to,
+                    origin,
+                    execution_budget,
+                );
+            }
+            TypedArrayConstructorSequenceStage::AwaitArrayLikeLengthConversion => {
+                let length = number_to_length(operator_to_number(
+                    typed_array_take_completion(&mut completion)?,
+                    state.realm,
+                    &state.origin,
+                )?);
+                let Ok(length) = usize::try_from(length) else {
+                    return typed_array_range_error(
+                        state.realm,
+                        &state.origin,
+                        "TypedArray length exceeds implementation range",
+                    );
+                };
+                state.length = length;
+                typed_array_sequence_allocate(runtime, &mut state)?;
+                return typed_array_sequence_begin_next_element(
+                    runtime,
+                    state,
+                    return_to,
+                    execution_budget,
+                );
+            }
+            TypedArrayConstructorSequenceStage::AwaitArrayLikeElement => {
+                return typed_array_sequence_begin_element_conversion(
+                    runtime,
+                    state,
+                    typed_array_take_completion(&mut completion)?,
+                    return_to,
+                    execution_budget,
+                );
+            }
+        }
+    }
+}
+
+pub(super) fn finish_typed_array_constructor_array_like_length(
+    runtime: &mut Runtime,
+    mut state: TypedArrayConstructorSequenceState,
+    value: StoredValue,
+    return_to: Option<CallReturn>,
+    execution_budget: &mut ExecutionBudget,
+) -> Result<NativeDispatch, NativeFailure> {
+    state.stage = TypedArrayConstructorSequenceStage::AwaitArrayLikeLengthConversion;
+    advance_typed_array_constructor_sequence(
+        runtime,
+        state,
+        Some(value),
+        return_to,
+        execution_budget,
+    )
+}
+
+pub(super) fn finish_typed_array_constructor_element(
+    runtime: &mut Runtime,
+    mut state: TypedArrayConstructorSequenceState,
+    value: StoredValue,
+    return_to: Option<CallReturn>,
+    execution_budget: &mut ExecutionBudget,
+) -> Result<NativeDispatch, NativeFailure> {
+    let target = state.target.ok_or(EngineFault::RuntimeInvariant {
+        message: "TypedArray constructor element conversion lost its target",
+    })?;
+    let stored = if state.element.is_bigint() {
+        let value = to_bigint_from_primitive(&value, state.realm, &state.origin)?;
+        runtime.typed_array_store_index(
+            target,
+            state.index,
+            TypedArrayElementValue::BigInt(value.as_ref()),
+        )?
+    } else {
+        let value = operator_to_number(value, state.realm, &state.origin)?;
+        runtime.typed_array_store_index(
+            target,
+            state.index,
+            TypedArrayElementValue::Number(value),
+        )?
+    };
+    if stored != TypedArrayStoreOutcome::Stored {
+        return Err(EngineFault::RuntimeInvariant {
+            message: "TypedArray constructor destination lost its element slot",
+        }
+        .into());
+    }
+    state.index = state.index.saturating_add(1);
+    typed_array_sequence_begin_next_element(runtime, state, return_to, execution_budget)
+}
+
+fn typed_array_sequence_allocate(
+    runtime: &mut Runtime,
+    state: &mut TypedArrayConstructorSequenceState,
+) -> Result<(), NativeFailure> {
+    let Some(byte_length) = state.length.checked_mul(state.element.byte_width()) else {
+        return typed_array_range_error(
+            state.realm,
+            &state.origin,
+            "TypedArray length exceeds implementation range",
+        );
+    };
+    let buffer = runtime
+        .allocate_array_buffer(
+            HeapReference::Object(runtime.realm_array_buffer_prototype(state.realm)?),
+            byte_length,
+            None,
+        )
+        .map_err(NativeFailure::Execution)?;
+    let target = runtime
+        .allocate_typed_array(
+            state.prototype,
+            TypedArrayState::new(
+                buffer,
+                0,
+                TypedArrayLength::Fixed(state.length),
+                state.element,
+            ),
+        )
+        .map_err(NativeFailure::Execution)?;
+    state.target = Some(target);
+    Ok(())
+}
+
+fn typed_array_sequence_begin_next_element(
+    runtime: &mut Runtime,
+    mut state: TypedArrayConstructorSequenceState,
+    return_to: Option<CallReturn>,
+    execution_budget: &mut ExecutionBudget,
+) -> Result<NativeDispatch, NativeFailure> {
+    if state.index >= state.length {
+        let target = state.target.ok_or(EngineFault::RuntimeInvariant {
+            message: "TypedArray constructor completed without a target",
+        })?;
+        return Ok(NativeDispatch::Immediate(StoredValue::Object(target)));
+    }
+    match state.stage {
+        TypedArrayConstructorSequenceStage::AwaitIteratorValue => {
+            let value = state.values[state.index].duplicate();
+            typed_array_sequence_begin_element_conversion(
+                runtime,
+                state,
+                value,
+                return_to,
+                execution_budget,
+            )
+        }
+        TypedArrayConstructorSequenceStage::AwaitArrayLikeLengthConversion
+        | TypedArrayConstructorSequenceStage::AwaitArrayLikeElement => {
+            let index = u64::try_from(state.index).map_err(|_| EngineFault::RuntimeInvariant {
+                message: "TypedArray array-like index does not fit u64",
+            })?;
+            let key = array_static_index_key(runtime, index)?;
+            state.stage = TypedArrayConstructorSequenceStage::AwaitArrayLikeElement;
+            typed_array_sequence_read(
+                runtime,
+                state,
+                key,
+                return_to,
+                execution_budget,
+            )
+        }
+        _ => Err(EngineFault::RuntimeInvariant {
+            message: "TypedArray constructor attempted element initialization from an invalid stage",
+        }
+        .into()),
+    }
+}
+
+fn typed_array_sequence_begin_element_conversion(
+    runtime: &mut Runtime,
+    state: TypedArrayConstructorSequenceState,
+    value: StoredValue,
+    return_to: Option<CallReturn>,
+    execution_budget: &mut ExecutionBudget,
+) -> Result<NativeDispatch, NativeFailure> {
+    let realm = state.realm;
+    let origin = state.origin.clone();
+    begin_operator_primitive_conversion(
+        runtime,
+        value,
+        OperatorPrimitiveHint::Number,
+        OperatorPrimitiveTarget::TypedArrayConstructorElement(Box::new(state)),
+        realm,
+        return_to,
+        origin,
+        execution_budget,
+    )
+}
+
+fn typed_array_sequence_read(
+    runtime: &mut Runtime,
+    state: TypedArrayConstructorSequenceState,
+    key: PropertyKey,
+    return_to: Option<CallReturn>,
+    execution_budget: &mut ExecutionBudget,
+) -> Result<NativeDispatch, NativeFailure> {
+    let base = match state.stage {
+        TypedArrayConstructorSequenceStage::AwaitIteratorMethod
+        | TypedArrayConstructorSequenceStage::AwaitArrayLikeLength
+        | TypedArrayConstructorSequenceStage::AwaitArrayLikeElement => state.source.duplicate(),
+        TypedArrayConstructorSequenceStage::AwaitNextMethod => state
+            .iterator
+            .as_ref()
+            .ok_or(EngineFault::RuntimeInvariant {
+                message: "TypedArray iterable initializer lost its iterator",
+            })?
+            .duplicate(),
+        TypedArrayConstructorSequenceStage::AwaitDone
+        | TypedArrayConstructorSequenceStage::AwaitIteratorValue => state
+            .result
+            .as_ref()
+            .ok_or(EngineFault::RuntimeInvariant {
+                message: "TypedArray iterable initializer lost its iterator result",
+            })?
+            .duplicate(),
+        _ => {
+            return Err(EngineFault::RuntimeInvariant {
+                message: "TypedArray constructor attempted a property read from an invalid stage",
+            }
+            .into());
+        }
+    };
+    charge_heap_property_lookup(runtime, &base, execution_budget)?;
+    let dispatch = begin_value_get(
+        runtime,
+        &base,
+        key,
+        None,
+        state.realm,
+        return_to,
+        state.origin.clone(),
+        execution_budget,
+    )?;
+    continue_get_after(
+        dispatch,
+        state,
+        typed_array_constructor_sequence_continuation,
+        |state, value| {
+            advance_typed_array_constructor_sequence(
+                runtime,
+                state,
+                Some(value),
+                return_to,
+                execution_budget,
+            )
+        },
+        "TypedArray constructor Get produced a structured result",
+    )
+}
+
+fn typed_array_sequence_call(
+    state: TypedArrayConstructorSequenceState,
+    function: FunctionId,
+    receiver: StoredValue,
+    arguments: Vec<StoredValue>,
+    return_to: Option<CallReturn>,
+) -> Result<NativeDispatch, NativeFailure> {
+    let origin = state.origin.clone();
+    let mut continuations = Vec::new();
+    continuations
+        .try_reserve_exact(1)
+        .map_err(|_| ExecutionError::AllocationFailed {
+            resource: RuntimeResource::Frames,
+            additional: 1,
+        })?;
+    continuations.push(typed_array_constructor_sequence_continuation(state));
+    Ok(NativeDispatch::Call(NativeCall {
+        function,
+        receiver,
+        arguments: CallArguments::from_values(arguments),
+        return_to,
+        origin,
+        continuations,
+        pre_call: None,
+        new_target: None,
+        native_caller: None,
+    }))
+}
+
+fn typed_array_sequence_call_next(
+    mut state: TypedArrayConstructorSequenceState,
+    return_to: Option<CallReturn>,
+    execution_budget: &mut ExecutionBudget,
+) -> Result<NativeDispatch, NativeFailure> {
+    let StoredValue::Function(next) = state.next.as_ref().ok_or(EngineFault::RuntimeInvariant {
+        message: "TypedArray iterable initializer lost its next method",
+    })?
+    else {
         return typed_array_type_error(
             state.realm,
             &state.origin,
-            "TypedArray object initializer lost its object identity",
+            "TypedArray iterator next is not callable",
         );
     };
-    if runtime.array_buffer_state(source)?.is_some() {
-        return begin_typed_array_constructor_buffer_offset(
-            runtime,
-            prototype,
-            source,
-            state.byte_offset,
-            state.byte_length,
-            state.element,
-            state.realm,
-            return_to,
-            state.origin,
-            execution_budget,
-        );
-    }
-    if runtime.typed_array_state(source)?.is_some() {
-        return finish_typed_array_constructor_from_typed_array(
-            runtime,
-            prototype,
-            source,
-            state.element,
+    execution_budget.charge_instructions(1)?;
+    let function = *next;
+    let receiver = state
+        .iterator
+        .as_ref()
+        .ok_or(EngineFault::RuntimeInvariant {
+            message: "TypedArray iterable initializer lost its iterator",
+        })?
+        .duplicate();
+    state.stage = TypedArrayConstructorSequenceStage::AwaitNextResult;
+    typed_array_sequence_call(state, function, receiver, Vec::new(), return_to)
+}
+
+fn typed_array_require_object(
+    state: &TypedArrayConstructorSequenceState,
+    value: StoredValue,
+) -> Result<StoredValue, NativeFailure> {
+    if value.heap_reference().is_some() {
+        Ok(value)
+    } else {
+        typed_array_type_error(
             state.realm,
             &state.origin,
-        );
+            "TypedArray iterator result is not an object",
+        )
     }
-    typed_array_type_error(
-        state.realm,
-        &state.origin,
-        "TypedArray iterable and array-like initializers are not implemented",
+}
+
+fn typed_array_take_completion(
+    completion: &mut Option<StoredValue>,
+) -> Result<StoredValue, NativeFailure> {
+    completion.take().ok_or(
+        EngineFault::RuntimeInvariant {
+            message: "TypedArray constructor resumed without a completion",
+        }
+        .into(),
     )
 }
 
@@ -709,6 +1262,12 @@ fn typed_array_constructor_object_continuation(
     state: TypedArrayConstructorObjectState,
 ) -> NativeContinuation {
     NativeContinuation::TypedArrayConstructorObject(Box::new(state))
+}
+
+fn typed_array_constructor_sequence_continuation(
+    state: TypedArrayConstructorSequenceState,
+) -> NativeContinuation {
+    NativeContinuation::TypedArrayConstructorSequence(Box::new(state))
 }
 
 pub(super) fn dispatch_typed_array_prototype(

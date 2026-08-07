@@ -1877,6 +1877,24 @@ fn finish_operator_primitive_target(
                 execution_budget,
             )
         }
+        OperatorPrimitiveTarget::TypedArrayConstructorArrayLikeLength(state) => {
+            finish_typed_array_constructor_array_like_length(
+                runtime,
+                *state,
+                value,
+                return_to,
+                execution_budget,
+            )
+        }
+        OperatorPrimitiveTarget::TypedArrayConstructorElement(state) => {
+            finish_typed_array_constructor_element(
+                runtime,
+                *state,
+                value,
+                return_to,
+                execution_budget,
+            )
+        }
         OperatorPrimitiveTarget::DataViewGetIndex(state) => {
             finish_data_view_get_index(runtime, state.as_ref(), value)
         }
