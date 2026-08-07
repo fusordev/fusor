@@ -481,6 +481,25 @@ impl TemporalPlainDateOptionsContinuation {
     }
 }
 
+/// Resumable `calendarName` option state for
+/// `Temporal.PlainDate.prototype.toString`.
+pub(super) struct TemporalPlainDateToStringContinuation {
+    date: PlainDate,
+    options: StoredValue,
+    realm: RealmId,
+    origin: JsStackFrame,
+}
+
+impl TemporalPlainDateToStringContinuation {
+    pub(super) const fn retained_values() -> u64 {
+        1
+    }
+
+    pub(super) fn trace_roots(&self, mark: &mut dyn FnMut(CollectionRoot)) {
+        trace_stored_value_root(&self.options, mark);
+    }
+}
+
 impl TemporalPlainDateConstructorContinuation {
     pub(super) fn retained_values(&self) -> u64 {
         usize_to_u64(self.arguments.len()).saturating_add(1)
@@ -4248,8 +4267,16 @@ pub(super) fn dispatch_temporal_plain_date_prototype(
             origin.clone(),
             execution_budget,
         ),
-        TemporalPlainDatePrototypeMethod::ToString
-        | TemporalPlainDatePrototypeMethod::ToJson
+        TemporalPlainDatePrototypeMethod::ToString => begin_temporal_plain_date_to_string(
+            runtime,
+            date,
+            arguments.take_first_or_undefined(),
+            realm,
+            return_to,
+            origin.clone(),
+            execution_budget,
+        ),
+        TemporalPlainDatePrototypeMethod::ToJson
         | TemporalPlainDatePrototypeMethod::ToLocaleString => {
             Ok(NativeDispatch::Immediate(StoredValue::String(
                 JsString::from_utf8(&date.to_ixdtf_string(DisplayCalendar::Auto))?,
@@ -4261,6 +4288,136 @@ pub(super) fn dispatch_temporal_plain_date_prototype(
             "Temporal.PlainDate cannot be converted to a primitive value",
         ),
     }
+}
+
+#[allow(
+    clippy::too_many_arguments,
+    reason = "the ordered PlainDate calendar formatting reader owns its resumable native call context"
+)]
+fn begin_temporal_plain_date_to_string(
+    runtime: &mut Runtime,
+    date: PlainDate,
+    options: StoredValue,
+    realm: RealmId,
+    return_to: Option<CallReturn>,
+    origin: JsStackFrame,
+    execution_budget: &mut ExecutionBudget,
+) -> Result<NativeDispatch, NativeFailure> {
+    if matches!(options, StoredValue::Undefined) {
+        return complete_temporal_plain_date_to_string(&date, DisplayCalendar::Auto);
+    }
+    if options.heap_reference().is_none() {
+        return temporal_type_error(
+            realm,
+            &origin,
+            "Temporal.PlainDate.prototype.toString options must be an object",
+        );
+    }
+    begin_temporal_plain_date_to_string_get(
+        runtime,
+        TemporalPlainDateToStringContinuation {
+            date,
+            options,
+            realm,
+            origin,
+        },
+        return_to,
+        execution_budget,
+    )
+}
+
+#[allow(
+    clippy::too_many_arguments,
+    reason = "the observable PlainDate calendarName Get retains native call state"
+)]
+fn begin_temporal_plain_date_to_string_get(
+    runtime: &mut Runtime,
+    state: TemporalPlainDateToStringContinuation,
+    return_to: Option<CallReturn>,
+    execution_budget: &mut ExecutionBudget,
+) -> Result<NativeDispatch, NativeFailure> {
+    charge_heap_property_lookup(runtime, &state.options, execution_budget)?;
+    let name = JsString::from_utf8("calendarName")?;
+    let key = runtime.property_key_from_string(&name)?;
+    let realm = state.realm;
+    let origin = state.origin.clone();
+    let dispatch = begin_value_get(
+        runtime,
+        &state.options,
+        key,
+        Some(&name),
+        realm,
+        return_to,
+        origin,
+        execution_budget,
+    )?;
+    match continue_get_state_after(
+        dispatch,
+        state,
+        temporal_plain_date_to_string_continuation,
+        "Temporal.PlainDate toString calendarName Get produced a structured result",
+    )? {
+        GetContinuationDispatch::Ready { state, value } => advance_temporal_plain_date_to_string(
+            runtime,
+            state,
+            value,
+            return_to,
+            execution_budget,
+        ),
+        GetContinuationDispatch::Suspended(dispatch) => Ok(dispatch),
+    }
+}
+
+fn temporal_plain_date_to_string_continuation(
+    state: TemporalPlainDateToStringContinuation,
+) -> NativeContinuation {
+    NativeContinuation::TemporalPlainDateToStringOptions(Box::new(state))
+}
+
+#[allow(
+    clippy::too_many_arguments,
+    reason = "the PlainDate calendarName option may complete through observable primitive conversion"
+)]
+pub(super) fn advance_temporal_plain_date_to_string(
+    runtime: &mut Runtime,
+    state: TemporalPlainDateToStringContinuation,
+    value: StoredValue,
+    return_to: Option<CallReturn>,
+    execution_budget: &mut ExecutionBudget,
+) -> Result<NativeDispatch, NativeFailure> {
+    if matches!(value, StoredValue::Undefined) {
+        return complete_temporal_plain_date_to_string(&state.date, DisplayCalendar::Auto);
+    }
+    let realm = state.realm;
+    let origin = state.origin.clone();
+    begin_operator_primitive_conversion(
+        runtime,
+        value,
+        OperatorPrimitiveHint::String,
+        OperatorPrimitiveTarget::TemporalPlainDateToStringCalendarName(Box::new(state)),
+        realm,
+        return_to,
+        origin,
+        execution_budget,
+    )
+}
+
+pub(super) fn finish_temporal_plain_date_to_string_calendar_name(
+    state: &TemporalPlainDateToStringContinuation,
+    value: StoredValue,
+) -> Result<NativeDispatch, NativeFailure> {
+    let source = operator_primitive_to_string(value, state.realm, &state.origin)?;
+    let display_calendar = temporal_display_calendar(&source, state.realm, &state.origin)?;
+    complete_temporal_plain_date_to_string(&state.date, display_calendar)
+}
+
+fn complete_temporal_plain_date_to_string(
+    date: &PlainDate,
+    display_calendar: DisplayCalendar,
+) -> Result<NativeDispatch, NativeFailure> {
+    Ok(NativeDispatch::Immediate(StoredValue::String(
+        JsString::from_utf8(&date.to_ixdtf_string(display_calendar))?,
+    )))
 }
 
 #[allow(

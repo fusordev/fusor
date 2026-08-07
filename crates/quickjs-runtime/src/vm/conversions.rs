@@ -2203,6 +2203,9 @@ fn finish_operator_primitive_target(
                 execution_budget,
             )
         }
+        OperatorPrimitiveTarget::TemporalPlainDateToStringCalendarName(state) => {
+            finish_temporal_plain_date_to_string_calendar_name(state.as_ref(), value)
+        }
         OperatorPrimitiveTarget::TemporalPlainDateWith(state) => advance_temporal_plain_date_with(
             runtime,
             *state,

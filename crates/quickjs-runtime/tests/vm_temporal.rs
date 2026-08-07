@@ -141,6 +141,36 @@ fn plain_date_intrinsic_constructor_accessors_and_iso_formatting_are_spec_shaped
 }
 
 #[test]
+fn plain_date_to_string_reads_calendar_name_resumably() {
+    assert_eq!(
+        rendered(
+            "var date=new Temporal.PlainDate(2020,12,24);
+             return [date.toString({calendarName:'always'}),
+               date.toString({calendarName:'critical'}),
+               date.toString({calendarName:'never'}),date.toJSON()].join('|');"
+        ),
+        "2020-12-24[u-ca=iso8601]|2020-12-24[!u-ca=iso8601]|2020-12-24|2020-12-24"
+    );
+    assert_eq!(
+        rendered(
+            "var log=[];
+             var options={get calendarName(){log.push('calendarName');return {toString:function(){log.push('calendarName string');return 'auto'}}}};
+             var result=new Temporal.PlainDate(2020,12,24).toString(options);
+             return [result,log.join(',')].join('|');"
+        ),
+        "2020-12-24|calendarName,calendarName string"
+    );
+    assert_eq!(
+        thrown("return new Temporal.PlainDate(2020,1,1).toString({calendarName:'invalid'});"),
+        ExceptionKind::RangeError
+    );
+    assert_eq!(
+        thrown("return new Temporal.PlainDate(2020,1,1).toString(1);"),
+        ExceptionKind::TypeError
+    );
+}
+
+#[test]
 fn plain_date_time_constructor_accessors_and_iso_formatting_are_spec_shaped() {
     assert_eq!(
         rendered(

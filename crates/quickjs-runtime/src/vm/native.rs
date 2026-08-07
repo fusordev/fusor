@@ -592,6 +592,15 @@ pub(super) fn resume_native_continuations(
                     execution_budget,
                 )?
             }
+            NativeContinuation::TemporalPlainDateToStringOptions(state) => {
+                advance_temporal_plain_date_to_string(
+                    runtime,
+                    *state,
+                    value,
+                    return_to,
+                    execution_budget,
+                )?
+            }
             NativeContinuation::TemporalPlainDateWith(state) => advance_temporal_plain_date_with(
                 runtime,
                 *state,

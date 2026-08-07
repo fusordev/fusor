@@ -776,6 +776,7 @@ enum NativeContinuation {
     TemporalPlainTimeBag(Box<TemporalPlainTimeBagContinuation>),
     TemporalPlainTimeOptions(Box<TemporalPlainTimeOptionsContinuation>),
     TemporalPlainDateOptions(Box<TemporalPlainDateOptionsContinuation>),
+    TemporalPlainDateToStringOptions(Box<TemporalPlainDateToStringContinuation>),
     TemporalPlainDateWith(Box<TemporalPlainDateWithContinuation>),
     TemporalPlainDateDifferenceOptions(Box<TemporalPlainDateDifferenceContinuation>),
     TemporalPlainDateTimeDifferenceOptions(Box<TemporalPlainDateTimeDifferenceContinuation>),
@@ -913,6 +914,9 @@ impl NativeContinuation {
             }
             Self::TemporalPlainDateOptions(_) => {
                 TemporalPlainDateOptionsContinuation::retained_values()
+            }
+            Self::TemporalPlainDateToStringOptions(_) => {
+                TemporalPlainDateToStringContinuation::retained_values()
             }
             Self::TemporalPlainDateWith(_) => TemporalPlainDateWithContinuation::retained_values(),
             Self::TemporalPlainDateDifferenceOptions(_) => {
@@ -2172,6 +2176,7 @@ enum OperatorPrimitiveTarget {
     TemporalPlainTimeBag(Box<TemporalPlainTimeBagContinuation>),
     TemporalPlainTimeOptions(Box<TemporalPlainTimeOptionsContinuation>),
     TemporalPlainDateOptions(Box<TemporalPlainDateOptionsContinuation>),
+    TemporalPlainDateToStringCalendarName(Box<TemporalPlainDateToStringContinuation>),
     TemporalPlainDateWith(Box<TemporalPlainDateWithContinuation>),
     TemporalPlainDateDifferenceLargestUnit(Box<TemporalPlainDateDifferenceContinuation>),
     TemporalPlainDateDifferenceRoundingIncrement(Box<TemporalPlainDateDifferenceContinuation>),
@@ -2476,6 +2481,9 @@ impl OperatorPrimitiveTarget {
             }
             Self::TemporalPlainDateOptions(_) => {
                 TemporalPlainDateOptionsContinuation::retained_values()
+            }
+            Self::TemporalPlainDateToStringCalendarName(_) => {
+                TemporalPlainDateToStringContinuation::retained_values()
             }
             Self::TemporalPlainDateWith(_) => TemporalPlainDateWithContinuation::retained_values(),
             Self::TemporalPlainDateDifferenceLargestUnit(_)
@@ -2798,6 +2806,9 @@ fn trace_operator_primitive_target_roots(
         OperatorPrimitiveTarget::TemporalPlainTimeBag(state) => state.trace_roots(mark),
         OperatorPrimitiveTarget::TemporalPlainTimeOptions(state) => state.trace_roots(mark),
         OperatorPrimitiveTarget::TemporalPlainDateOptions(state) => state.trace_roots(mark),
+        OperatorPrimitiveTarget::TemporalPlainDateToStringCalendarName(state) => {
+            state.trace_roots(mark);
+        }
         OperatorPrimitiveTarget::TemporalPlainDateWith(state) => state.trace_roots(mark),
         OperatorPrimitiveTarget::TemporalPlainDateDifferenceLargestUnit(state)
         | OperatorPrimitiveTarget::TemporalPlainDateDifferenceRoundingIncrement(state)
@@ -3097,6 +3108,7 @@ fn trace_native_continuation_roots(
         NativeContinuation::TemporalPlainTimeBag(state) => state.trace_roots(mark),
         NativeContinuation::TemporalPlainTimeOptions(state) => state.trace_roots(mark),
         NativeContinuation::TemporalPlainDateOptions(state) => state.trace_roots(mark),
+        NativeContinuation::TemporalPlainDateToStringOptions(state) => state.trace_roots(mark),
         NativeContinuation::TemporalPlainDateWith(state) => state.trace_roots(mark),
         NativeContinuation::TemporalPlainDateDifferenceOptions(state) => state.trace_roots(mark),
         NativeContinuation::TemporalPlainDateTimeDifferenceOptions(state) => {
