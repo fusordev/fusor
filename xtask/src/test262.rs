@@ -14,15 +14,9 @@ use std::fs;
 use std::path::{Component, Path, PathBuf};
 use std::process::Command;
 
-pub const PINNED_TEST262_REVISION: &str = "5c8206929d81b2d3d727ca6aac56c18358c8d790";
-const PINNED_QUICKJS_RELEASE: &str = "2026-06-04";
 const DEFAULT_BASELINE: &str = "tests/test262/upstream";
 const DEFAULT_INSTRUCTION_FUEL: u64 = 10_000_000;
 const STRICT_PREFIX: &str = "\"use strict\";\n";
-const BASELINE_CONFIG_FNV1A64: u64 = 0xcd1b_b878_684d_5709;
-const BASELINE_PATCH_FNV1A64: u64 = 0x69b9_930a_3213_9bb8;
-const BASELINE_ERRORS_FNV1A64: u64 = 0xdcb6_b795_f816_719f;
-const BASELINE_EXPECTED_ERROR_LINES: usize = 58;
 
 #[derive(Debug, Eq, PartialEq)]
 pub struct Test262Options {
@@ -141,13 +135,8 @@ fn required_positive_u64(
 
 #[derive(Debug)]
 struct Baseline {
-    root: PathBuf,
     policy: BaselinePolicy,
-    expected_error_lines: usize,
-    expected_errors: BTreeSet<(String, bool)>,
     config_fingerprint: u64,
-    patch_fingerprint: u64,
-    errors_fingerprint: u64,
 }
 
 impl Baseline {
@@ -155,87 +144,19 @@ impl Baseline {
         let root = root
             .canonicalize()
             .map_err(|error| format!("could not resolve baseline {}: {error}", root.display()))?;
-        let config = read_required(&root.join("test262.conf"), "QuickJS Test262 configuration")?;
-        let patch = read_required(&root.join("test262.patch"), "QuickJS Test262 patch")?;
-        let errors = read_required(
-            &root.join("test262_errors.txt"),
-            "QuickJS Test262 expected errors",
-        )?;
+        let config = read_required(&root.join("test262.conf"), "Test262 filter policy")?;
         let policy = BaselinePolicy::parse(&config)?;
-        let expected_errors = errors
-            .lines()
-            .filter(|line| !line.trim().is_empty())
-            .map(validate_expected_error_line)
-            .collect::<Result<Vec<_>, _>>()?
-            .into_iter()
-            .collect::<BTreeSet<_>>();
-        let expected_error_lines = expected_errors.len();
         let config_fingerprint = fnv1a64(config.as_bytes());
-        let patch_fingerprint = fnv1a64(patch.as_bytes());
-        let errors_fingerprint = fnv1a64(errors.as_bytes());
-        validate_baseline_fingerprint("test262.conf", config_fingerprint, BASELINE_CONFIG_FNV1A64)?;
-        validate_baseline_fingerprint("test262.patch", patch_fingerprint, BASELINE_PATCH_FNV1A64)?;
-        validate_baseline_fingerprint(
-            "test262_errors.txt",
-            errors_fingerprint,
-            BASELINE_ERRORS_FNV1A64,
-        )?;
-        if expected_error_lines != BASELINE_EXPECTED_ERROR_LINES {
-            return Err(format!(
-                "test262_errors.txt has {expected_error_lines} entries, expected {BASELINE_EXPECTED_ERROR_LINES}"
-            ));
-        }
         Ok(Self {
-            root,
             policy,
-            expected_error_lines,
-            expected_errors,
             config_fingerprint,
-            patch_fingerprint,
-            errors_fingerprint,
         })
-    }
-
-    fn patch_path(&self) -> PathBuf {
-        self.root.join("test262.patch")
-    }
-
-    fn expects_failure(&self, path: &str, mode: &str) -> bool {
-        self.expected_errors
-            .contains(&(path.to_owned(), mode == "strict"))
-    }
-}
-
-fn validate_baseline_fingerprint(label: &str, actual: u64, expected: u64) -> Result<(), String> {
-    if actual == expected {
-        Ok(())
-    } else {
-        Err(format!(
-            "{label} fingerprint {actual:016x} does not match pinned QuickJS {PINNED_QUICKJS_RELEASE} fingerprint {expected:016x}"
-        ))
     }
 }
 
 fn read_required(path: &Path, label: &str) -> Result<String, String> {
     fs::read_to_string(path)
         .map_err(|error| format!("could not read {label} {}: {error}", path.display()))
-}
-
-fn validate_expected_error_line(line: &str) -> Result<(String, bool), String> {
-    let line = line
-        .strip_prefix("test262/test/")
-        .ok_or_else(|| format!("invalid QuickJS expected-error entry `{line}`"))?;
-    let (path, detail) = line
-        .split_once(':')
-        .ok_or_else(|| format!("invalid QuickJS expected-error entry `{line}`"))?;
-    if !Path::new(path)
-        .extension()
-        .is_some_and(|extension| extension.eq_ignore_ascii_case("js"))
-        || !detail.contains(": ")
-    {
-        return Err(format!("invalid QuickJS expected-error entry `{line}`"));
-    }
-    Ok((path.to_owned(), detail.contains("strict mode:")))
 }
 
 #[derive(Debug, Default)]
@@ -272,7 +193,7 @@ impl BaselinePolicy {
         policy.exclusions.sort();
         policy.exclusions.dedup();
         if policy.skipped_features.is_empty() || policy.exclusions.is_empty() {
-            return Err("QuickJS test262.conf is missing feature or exclusion policy".to_owned());
+            return Err("Test262 filter policy is missing feature or exclusion rules".to_owned());
         }
         Ok(policy)
     }
@@ -299,7 +220,13 @@ fn normalize_baseline_path(path: &str) -> Result<String, String> {
     })
 }
 
-fn verify_checkout(suite: &Path, baseline: &Baseline) -> Result<PathBuf, String> {
+#[derive(Debug)]
+struct VerifiedCheckout {
+    root: PathBuf,
+    revision: String,
+}
+
+fn verify_checkout(suite: &Path) -> Result<VerifiedCheckout, String> {
     let suite = suite.canonicalize().map_err(|error| {
         format!(
             "could not resolve Test262 checkout {}: {error}",
@@ -315,10 +242,11 @@ fn verify_checkout(suite: &Path, baseline: &Baseline) -> Result<PathBuf, String>
         }
     }
     let revision = git_output(&suite, &["rev-parse", "HEAD"])?;
-    if revision.trim() != PINNED_TEST262_REVISION {
+    let revision = revision.trim();
+    if revision.is_empty() {
         return Err(format!(
-            "Test262 checkout is at {}, expected {PINNED_TEST262_REVISION}",
-            revision.trim()
+            "could not determine the Test262 checkout revision at {}",
+            suite.display()
         ));
     }
     let autocrlf = Command::new("git")
@@ -333,60 +261,43 @@ fn verify_checkout(suite: &Path, baseline: &Baseline) -> Result<PathBuf, String>
                 .to_owned(),
         );
     }
-    let patch = baseline
-        .patch_path()
-        .canonicalize()
-        .map_err(|error| format!("could not resolve Test262 patch: {error}"))?;
-    let patched = Command::new("git")
+    let test_and_harness_diff = Command::new("git")
         .arg("-C")
         .arg(&suite)
-        .args(["apply", "--reverse", "--check", "--whitespace=nowarn"])
-        .arg(&patch)
-        .output()
-        .map_err(|error| format!("could not validate the QuickJS Test262 patch: {error}"))?;
-    if !patched.status.success() {
+        .args(["diff", "--quiet", "HEAD", "--", "test", "harness"])
+        .status()
+        .map_err(|error| format!("could not validate Test262 sources: {error}"))?;
+    if !test_and_harness_diff.success() {
         return Err(format!(
-            "Test262 checkout does not contain the pinned QuickJS {PINNED_QUICKJS_RELEASE} patch: {}",
-            String::from_utf8_lossy(&patched.stderr).trim()
+            "Test262 test or harness sources differ from upstream revision {revision}"
         ));
     }
-    let harness_diff = Command::new("git")
+    let changes = Command::new("git")
         .arg("-C")
         .arg(&suite)
         .args([
-            "diff",
-            "--no-ext-diff",
-            "--binary",
-            "--abbrev=7",
-            "HEAD",
+            "status",
+            "--porcelain",
+            "--untracked-files=all",
             "--",
+            "test",
             "harness",
         ])
         .output()
-        .map_err(|error| format!("could not compare the patched Test262 harness: {error}"))?;
-    if !harness_diff.status.success() {
+        .map_err(|error| format!("could not inspect Test262 source status: {error}"))?;
+    if !changes.status.success() {
         return Err(format!(
-            "could not compare the patched Test262 harness: {}",
-            String::from_utf8_lossy(&harness_diff.stderr).trim()
+            "could not inspect Test262 source status: {}",
+            String::from_utf8_lossy(&changes.stderr).trim()
         ));
     }
-    let pinned_patch = fs::read(&patch)
-        .map_err(|error| format!("could not read pinned Test262 patch: {error}"))?;
-    if harness_diff.stdout != pinned_patch {
-        return Err(
-            "Test262 harness changes are not exactly the pinned QuickJS release patch".to_owned(),
-        );
+    if !changes.stdout.is_empty() {
+        return Err("Test262 test or harness sources contain local changes".to_owned());
     }
-    let test_diff = Command::new("git")
-        .arg("-C")
-        .arg(&suite)
-        .args(["diff", "--quiet", "HEAD", "--", "test"])
-        .status()
-        .map_err(|error| format!("could not validate tracked Test262 sources: {error}"))?;
-    if !test_diff.success() {
-        return Err("Test262 test sources differ from the pinned revision".to_owned());
-    }
-    Ok(suite)
+    Ok(VerifiedCheckout {
+        root: suite,
+        revision: revision.to_owned(),
+    })
 }
 
 fn git_output(root: &Path, arguments: &[&str]) -> Result<String, String> {
@@ -786,14 +697,13 @@ struct FailureRecord {
 }
 
 impl FailureRecord {
-    fn json(&self, baseline: &Baseline) -> JsonValue {
+    fn json(&self) -> JsonValue {
         json!({
             "path": self.path,
             "mode": self.mode,
             "expected": self.expected,
             "actual": self.actual,
             "detail": self.detail,
-            "quickjs_baseline_known_failure": baseline.expects_failure(&self.path, self.mode),
         })
     }
 }
@@ -827,9 +737,9 @@ pub fn run_test262(options: &Test262Options) -> Result<bool, String> {
             ));
         }
     }
-    let suite = verify_checkout(&options.suite, &baseline)?;
+    let suite = verify_checkout(&options.suite)?;
     let inventory = Inventory::collect(
-        &suite,
+        &suite.root,
         &baseline,
         options.filter.as_deref(),
         options.admit_feature.as_deref(),
@@ -841,15 +751,15 @@ pub fn run_test262(options: &Test262Options) -> Result<bool, String> {
     let execution = if options.inventory_only {
         ExecutionSummary::default()
     } else {
-        execute_inventory(&suite, &inventory, options.instruction_fuel)?
+        execute_inventory(&suite.root, &inventory, options.instruction_fuel)?
     };
-    let report = build_report(options, &baseline, &inventory, &execution);
+    let report = build_report(options, &suite, &baseline, &inventory, &execution);
     if let Some(path) = &options.report {
         write_report(path, &report)?;
     }
     println!(
         "test262: revision={} files={} admitted-cases={} skipped-cases={} passed={} failed={} pass-rate={}{}",
-        PINNED_TEST262_REVISION,
+        suite.revision,
         inventory.plans.len(),
         inventory.admitted_cases(),
         inventory.skipped_cases(),
@@ -1119,6 +1029,7 @@ const fn exception_kind_name(kind: ExceptionKind) -> &'static str {
 
 fn build_report(
     options: &Test262Options,
+    suite: &VerifiedCheckout,
     baseline: &Baseline,
     inventory: &Inventory,
     execution: &ExecutionSummary,
@@ -1128,24 +1039,14 @@ fn build_report(
         .iter()
         .map(|(reason, count)| (reason.clone(), json!(count)))
         .collect::<serde_json::Map<_, _>>();
-    let observed_quickjs_baseline_failures = execution
-        .failures
-        .iter()
-        .filter(|failure| baseline.expects_failure(&failure.path, failure.mode))
-        .count();
     json!({
         "schema": 1,
         "test262": {
-            "revision": PINNED_TEST262_REVISION,
-            "package_version": "5.0.0",
+            "revision": suite.revision,
         },
-        "quickjs_baseline": {
-            "release": PINNED_QUICKJS_RELEASE,
+        "filter_policy": {
+            "path": "tests/test262/upstream/test262.conf",
             "config_fnv1a64": format!("{:016x}", baseline.config_fingerprint),
-            "patch_fnv1a64": format!("{:016x}", baseline.patch_fingerprint),
-            "expected_errors_fnv1a64": format!("{:016x}", baseline.errors_fingerprint),
-            "expected_error_lines": baseline.expected_error_lines,
-            "observed_known_failures": observed_quickjs_baseline_failures,
         },
         "selection": {
             "filter": options.filter,
@@ -1164,7 +1065,7 @@ fn build_report(
             "enabled": !options.inventory_only,
             "passed": execution.passed,
             "failed": execution.failed,
-            "failures": execution.failures.iter().map(|failure| failure.json(baseline)).collect::<Vec<_>>(),
+            "failures": execution.failures.iter().map(FailureRecord::json).collect::<Vec<_>>(),
         },
     })
 }
@@ -1336,18 +1237,12 @@ throw new TypeError();",
     }
 
     #[test]
-    fn checked_in_quickjs_baseline_is_exact_and_complete() {
+    fn checked_in_test262_filter_policy_is_parseable() {
         let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../tests/test262/upstream");
-        let baseline = Baseline::load(&root).expect("pinned baseline");
-        assert_eq!(baseline.expected_error_lines, BASELINE_EXPECTED_ERROR_LINES);
-        assert!(baseline.expects_failure(
-            "language/identifier-resolution/assign-to-global-undefined.js",
-            "strict"
-        ));
-        assert!(!baseline.expects_failure(
-            "language/identifier-resolution/assign-to-global-undefined.js",
-            "non-strict"
-        ));
+        let baseline = Baseline::load(&root).expect("filter policy");
+        assert!(baseline.config_fingerprint != 0);
+        assert!(baseline.policy.skipped_features.contains("Intl.Locale"));
+        assert!(baseline.policy.excludes("annexB/language/basic.js"));
     }
 
     #[test]
