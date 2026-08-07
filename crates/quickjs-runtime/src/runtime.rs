@@ -2331,6 +2331,7 @@ pub(crate) enum TemporalPlainDateTimePrototypeMethod {
     InLeapYear,
     Era,
     EraYear,
+    With,
     Add,
     Subtract,
     Equals,
@@ -2720,7 +2721,7 @@ impl TemporalPlainDatePrototypeMethod {
 }
 
 impl TemporalPlainDateTimePrototypeMethod {
-    pub(crate) const ALL: [Self; 29] = [
+    pub(crate) const ALL: [Self; 30] = [
         Self::CalendarId,
         Self::Year,
         Self::Month,
@@ -2743,6 +2744,7 @@ impl TemporalPlainDateTimePrototypeMethod {
         Self::InLeapYear,
         Self::Era,
         Self::EraYear,
+        Self::With,
         Self::Add,
         Self::Subtract,
         Self::Equals,
@@ -2776,6 +2778,7 @@ impl TemporalPlainDateTimePrototypeMethod {
             Self::InLeapYear => "inLeapYear",
             Self::Era => "era",
             Self::EraYear => "eraYear",
+            Self::With => "with",
             Self::Add => "add",
             Self::Subtract => "subtract",
             Self::Equals => "equals",
@@ -2810,6 +2813,7 @@ impl TemporalPlainDateTimePrototypeMethod {
             Self::InLeapYear => "get inLeapYear",
             Self::Era => "get era",
             Self::EraYear => "get eraYear",
+            Self::With => "with",
             Self::Add => "add",
             Self::Subtract => "subtract",
             Self::Equals => "equals",
@@ -2850,7 +2854,7 @@ impl TemporalPlainDateTimePrototypeMethod {
 
     pub(crate) const fn length(self) -> i32 {
         match self {
-            Self::Add | Self::Subtract | Self::Equals => 1,
+            Self::With | Self::Add | Self::Subtract | Self::Equals => 1,
             _ => 0,
         }
     }

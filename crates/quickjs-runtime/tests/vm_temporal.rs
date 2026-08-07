@@ -472,6 +472,50 @@ fn plain_date_time_add_and_subtract_reuse_duration_bags_then_read_overflow() {
 }
 
 #[test]
+fn plain_date_time_with_prepares_all_fields_before_reading_overflow() {
+    assert_eq!(
+        rendered(
+            "var log=[];
+             function number(name,value){return {valueOf:function(){log.push(name+' number');return value}}}
+             var fields={
+               get calendar(){log.push('calendar');return undefined},
+               get timeZone(){log.push('timeZone');return undefined},
+               get day(){log.push('day');return number('day',1.7)},
+               get hour(){log.push('hour');return number('hour',5.7)},
+               get microsecond(){log.push('microsecond');return number('microsecond',8.7)},
+               get millisecond(){log.push('millisecond');return number('millisecond',7.7)},
+               get minute(){log.push('minute');return number('minute',6.7)},
+               get month(){log.push('month');return number('month',2.8)},
+               get monthCode(){log.push('monthCode');return {toString:function(){log.push('monthCode string');return 'M02'}}},
+               get nanosecond(){log.push('nanosecond');return number('nanosecond',9.7)},
+               get second(){log.push('second');return number('second',10.7)},
+               get year(){log.push('year');return number('year',2021.7)}
+             };
+             var options={get overflow(){log.push('overflow');return {toString:function(){log.push('overflow string');return 'constrain'}}}};
+             var result=new Temporal.PlainDateTime(2020,5,31,12,34,56,7,8,9).with(fields,options);
+             return [Temporal.PlainDateTime.prototype.with.length,result.toString(),log.join(',')].join('|');"
+        ),
+        "1|2021-02-01T05:06:10.007008009|calendar,timeZone,day,day number,hour,hour number,microsecond,microsecond number,millisecond,millisecond number,minute,minute number,month,month number,monthCode,monthCode string,nanosecond,nanosecond number,second,second number,year,year number,overflow,overflow string"
+    );
+    assert_eq!(
+        thrown("return new Temporal.PlainDateTime(2021,1,1).with({});"),
+        ExceptionKind::TypeError
+    );
+    assert_eq!(
+        thrown("return new Temporal.PlainDateTime(2021,1,1).with({calendar:'iso8601'});"),
+        ExceptionKind::TypeError
+    );
+    assert_eq!(
+        thrown("return new Temporal.PlainDateTime(2021,1,1).with({timeZone:'UTC'});"),
+        ExceptionKind::TypeError
+    );
+    assert_eq!(
+        thrown("return new Temporal.PlainDateTime(2021,1,31).with({month:2},{overflow:'reject'});"),
+        ExceptionKind::RangeError
+    );
+}
+
+#[test]
 fn plain_date_with_prepares_partial_fields_before_reading_overflow() {
     assert_eq!(
         rendered(
