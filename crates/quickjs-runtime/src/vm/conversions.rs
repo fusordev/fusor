@@ -2531,6 +2531,15 @@ fn finish_operator_primitive_target(
                 execution_budget,
             )
         }
+        OperatorPrimitiveTarget::TemporalZonedDateTimeTransition(state) => {
+            finish_temporal_zoned_date_time_transition(
+                runtime,
+                state.as_ref(),
+                value,
+                return_to,
+                execution_budget,
+            )
+        }
         OperatorPrimitiveTarget::TemporalDurationBag(state) => {
             advance_temporal_duration_property_bag(
                 runtime,

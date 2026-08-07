@@ -452,6 +452,44 @@ fn zoned_date_time_with_time_zone_preserves_the_instant() {
 }
 
 #[test]
+fn zoned_date_time_transition_accepts_string_and_resumable_options_forms() {
+    assert_eq!(
+        rendered(
+            "var log=[],options={};
+             Object.defineProperty(options,'direction',{get:function(){
+               log.push('get direction');return {toString:function(){log.push('string direction');return 'previous';}};
+             }});
+             var fixed=new Temporal.ZonedDateTime(0n,'+01:00');
+             var berlin=new Temporal.ZonedDateTime(1616893200000000000n,'Europe/Berlin');
+             var previous=berlin.getTimeZoneTransition(options);
+             var method=Object.getOwnPropertyDescriptor(Temporal.ZonedDateTime.prototype,'getTimeZoneTransition');
+             return [fixed.getTimeZoneTransition('next'),fixed.getTimeZoneTransition('previous'),
+               previous.toString(),method.value.length,method.value.name,method.enumerable,
+               method.writable,method.configurable,log.join(',')].join('|');"
+        ),
+        "||2020-10-25T02:00:00+01:00[Europe/Berlin]|1|getTimeZoneTransition|false|true|true|get direction,string direction"
+    );
+    assert_eq!(
+        thrown("return new Temporal.ZonedDateTime(0n,'UTC').getTimeZoneTransition();"),
+        ExceptionKind::TypeError
+    );
+    assert_eq!(
+        thrown("return new Temporal.ZonedDateTime(0n,'UTC').getTimeZoneTransition({});"),
+        ExceptionKind::RangeError
+    );
+    assert_eq!(
+        thrown("return new Temporal.ZonedDateTime(0n,'UTC').getTimeZoneTransition(false);"),
+        ExceptionKind::TypeError
+    );
+    assert_eq!(
+        thrown(
+            "return new Temporal.ZonedDateTime(0n,'UTC').getTimeZoneTransition({direction:false});"
+        ),
+        ExceptionKind::RangeError
+    );
+}
+
+#[test]
 fn plain_date_time_constructor_accessors_and_iso_formatting_are_spec_shaped() {
     assert_eq!(
         rendered(

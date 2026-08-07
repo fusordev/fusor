@@ -13,6 +13,7 @@ use temporal_rs::{
     },
     parsers::Precision,
     partial::{PartialDate, PartialDateTime, PartialTime, PartialYearMonth},
+    provider::TransitionDirection,
 };
 
 use super::conversions::operator_primitive_to_string;
@@ -2291,6 +2292,17 @@ pub(super) fn dispatch_temporal_zoned_date_time_prototype(
             };
             Ok(NativeDispatch::Immediate(StoredValue::Boolean(equals)))
         }
+        TemporalZonedDateTimePrototypeMethod::GetTimeZoneTransition => {
+            begin_temporal_zoned_date_time_get_time_zone_transition(
+                runtime,
+                date_time,
+                arguments.take_first_or_undefined(),
+                realm,
+                return_to,
+                origin.clone(),
+                execution_budget,
+            )
+        }
         TemporalZonedDateTimePrototypeMethod::WithTimeZone => {
             let value = arguments.take_first_or_undefined();
             let StoredValue::String(value) = value else {
@@ -2340,6 +2352,184 @@ pub(super) fn dispatch_temporal_zoned_date_time_prototype(
             origin,
             "Temporal.ZonedDateTime cannot be converted to a primitive value",
         ),
+    }
+}
+
+#[allow(
+    clippy::too_many_arguments,
+    reason = "the options-object direction Get retains the complete native transition call context"
+)]
+fn begin_temporal_zoned_date_time_get_time_zone_transition(
+    runtime: &mut Runtime,
+    date_time: ZonedDateTime,
+    direction_param: StoredValue,
+    realm: RealmId,
+    return_to: Option<CallReturn>,
+    origin: JsStackFrame,
+    execution_budget: &mut ExecutionBudget,
+) -> Result<NativeDispatch, NativeFailure> {
+    match direction_param {
+        StoredValue::String(direction) => complete_temporal_zoned_date_time_transition(
+            runtime, &date_time, &direction, realm, &origin,
+        ),
+        StoredValue::Undefined => temporal_type_error(
+            realm,
+            &origin,
+            "Temporal.ZonedDateTime.getTimeZoneTransition requires a direction",
+        ),
+        options if options.heap_reference().is_some() => {
+            begin_temporal_zoned_date_time_transition_direction_get(
+                runtime,
+                TemporalZonedDateTimeTransitionContinuation {
+                    date_time,
+                    options,
+                    realm,
+                    origin,
+                },
+                return_to,
+                execution_budget,
+            )
+        }
+        _ => temporal_type_error(
+            realm,
+            &origin,
+            "Temporal.ZonedDateTime.getTimeZoneTransition direction must be a string or object",
+        ),
+    }
+}
+
+#[allow(
+    clippy::too_many_arguments,
+    reason = "the observable direction Get retains its Temporal native call context"
+)]
+fn begin_temporal_zoned_date_time_transition_direction_get(
+    runtime: &mut Runtime,
+    state: TemporalZonedDateTimeTransitionContinuation,
+    return_to: Option<CallReturn>,
+    execution_budget: &mut ExecutionBudget,
+) -> Result<NativeDispatch, NativeFailure> {
+    charge_heap_property_lookup(runtime, &state.options, execution_budget)?;
+    let name = JsString::from_utf8("direction")?;
+    let key = runtime.property_key_from_string(&name)?;
+    let realm = state.realm;
+    let origin = state.origin.clone();
+    let dispatch = begin_value_get(
+        runtime,
+        &state.options,
+        key,
+        Some(&name),
+        realm,
+        return_to,
+        origin,
+        execution_budget,
+    )?;
+    match continue_get_state_after(
+        dispatch,
+        state,
+        temporal_zoned_date_time_transition_continuation,
+        "Temporal.ZonedDateTime getTimeZoneTransition direction Get produced a structured result",
+    )? {
+        GetContinuationDispatch::Ready { state, value } => {
+            advance_temporal_zoned_date_time_transition(
+                runtime,
+                state,
+                value,
+                return_to,
+                execution_budget,
+            )
+        }
+        GetContinuationDispatch::Suspended(dispatch) => Ok(dispatch),
+    }
+}
+
+fn temporal_zoned_date_time_transition_continuation(
+    state: TemporalZonedDateTimeTransitionContinuation,
+) -> NativeContinuation {
+    NativeContinuation::TemporalZonedDateTimeTransition(Box::new(state))
+}
+
+#[allow(
+    clippy::too_many_arguments,
+    reason = "the direction primitive conversion remains resumable and GC-safe"
+)]
+pub(super) fn advance_temporal_zoned_date_time_transition(
+    runtime: &mut Runtime,
+    state: TemporalZonedDateTimeTransitionContinuation,
+    value: StoredValue,
+    return_to: Option<CallReturn>,
+    execution_budget: &mut ExecutionBudget,
+) -> Result<NativeDispatch, NativeFailure> {
+    if matches!(value, StoredValue::Undefined) {
+        return temporal_range_error(
+            state.realm,
+            &state.origin,
+            "Temporal.ZonedDateTime.getTimeZoneTransition direction is required",
+        );
+    }
+    let realm = state.realm;
+    let origin = state.origin.clone();
+    begin_operator_primitive_conversion(
+        runtime,
+        value,
+        OperatorPrimitiveHint::String,
+        OperatorPrimitiveTarget::TemporalZonedDateTimeTransition(Box::new(state)),
+        realm,
+        return_to,
+        origin,
+        execution_budget,
+    )
+}
+
+#[allow(
+    clippy::too_many_arguments,
+    reason = "the post-coercion continuation retains the native transition call context"
+)]
+pub(super) fn finish_temporal_zoned_date_time_transition(
+    runtime: &mut Runtime,
+    state: &TemporalZonedDateTimeTransitionContinuation,
+    value: StoredValue,
+    _return_to: Option<CallReturn>,
+    _execution_budget: &mut ExecutionBudget,
+) -> Result<NativeDispatch, NativeFailure> {
+    let direction = operator_primitive_to_string(value, state.realm, &state.origin)?;
+    complete_temporal_zoned_date_time_transition(
+        runtime,
+        &state.date_time,
+        &direction,
+        state.realm,
+        &state.origin,
+    )
+}
+
+fn complete_temporal_zoned_date_time_transition(
+    runtime: &mut Runtime,
+    date_time: &ZonedDateTime,
+    direction: &JsString,
+    realm: RealmId,
+    origin: &JsStackFrame,
+) -> Result<NativeDispatch, NativeFailure> {
+    let direction = match direction.to_utf8_lossy()?.as_str() {
+        "next" => TransitionDirection::Next,
+        "previous" => TransitionDirection::Previous,
+        _ => {
+            return temporal_range_error(
+                realm,
+                origin,
+                "invalid Temporal time-zone transition direction",
+            );
+        }
+    };
+    let transition = match date_time.get_time_zone_transition(direction) {
+        Ok(transition) => transition,
+        Err(error) => {
+            return Err(NativeFailure::Abrupt(temporal_exception_from_error(
+                realm, origin, error,
+            )?));
+        }
+    };
+    match transition {
+        Some(transition) => allocate_temporal_zoned_date_time_result(runtime, realm, transition),
+        None => Ok(NativeDispatch::Immediate(StoredValue::Null)),
     }
 }
 
@@ -10482,6 +10672,26 @@ pub(super) struct TemporalZonedDateTimeToStringContinuation {
     stage: TemporalZonedDateTimeToStringStage,
     realm: RealmId,
     origin: JsStackFrame,
+}
+
+/// Resumable options-object state for
+/// `Temporal.ZonedDateTime.prototype.getTimeZoneTransition`.
+/// Its sole `direction` Get and string coercion may invoke JavaScript.
+pub(super) struct TemporalZonedDateTimeTransitionContinuation {
+    date_time: ZonedDateTime,
+    options: StoredValue,
+    realm: RealmId,
+    origin: JsStackFrame,
+}
+
+impl TemporalZonedDateTimeTransitionContinuation {
+    pub(super) const fn retained_values() -> u64 {
+        1
+    }
+
+    pub(super) fn trace_roots(&self, mark: &mut dyn FnMut(CollectionRoot)) {
+        trace_stored_value_root(&self.options, mark);
+    }
 }
 
 impl TemporalZonedDateTimeToStringContinuation {
