@@ -1,9 +1,9 @@
 use super::super::{
     Argument, AssignmentExpression, AssignmentOperator, CallExpression, ChainExpression,
     CompiledConstantPool, ComputedMemberExpression, Expression, FinalOpcode, FrameLayout, GetSpan,
-    LeafCompilationError, NewExpression, Operands, PlannedInstruction, Span,
-    StaticMemberExpression, TaggedTemplateExpression, UnsupportedLeafFeature, plan_push_integer,
-    unsupported,
+    LeafCompilationError, NewExpression, Operands, PlannedInstruction, PrivateFieldExpression,
+    Span, StaticMemberExpression, TaggedTemplateExpression, UnsupportedLeafFeature,
+    plan_push_integer, unsupported,
 };
 use super::expressions::{ExpressionPlanner, ExpressionWork};
 
@@ -12,6 +12,7 @@ pub(in crate::lowering) enum MemberCallee<'expression, 'arena> {
     Static(&'expression StaticMemberExpression<'arena>),
     Computed(&'expression ComputedMemberExpression<'arena>),
     Chain(&'expression ChainExpression<'arena>),
+    Private(&'expression PrivateFieldExpression<'arena>),
 }
 
 pub(in crate::lowering) fn plan_direct_call(argument_count: u16, span: Span) -> PlannedInstruction {
@@ -27,7 +28,9 @@ pub(in crate::lowering) fn plan_direct_call(argument_count: u16, span: Span) -> 
 
 impl<'arena> ExpressionPlanner<'_, '_, 'arena, '_> {
     pub(in crate::lowering) fn plan_tagged_template_expression<'expression>(
+        &self,
         tagged: &'expression TaggedTemplateExpression<'arena>,
+        layout: &FrameLayout,
         constants: &CompiledConstantPool,
         work: &mut Vec<ExpressionWork<'expression, 'arena>>,
     ) -> Result<(), LeafCompilationError> {
@@ -127,6 +130,9 @@ impl<'arena> ExpressionPlanner<'_, '_, 'arena, '_> {
                     preserve_final_reference: true,
                 });
             }
+            Some(MemberCallee::Private(member)) => {
+                self.plan_private_member_callee(member, layout, work)?;
+            }
             None => work.push(ExpressionWork::Visit(&tagged.tag)),
         }
         Ok(())
@@ -177,7 +183,7 @@ impl<'arena> ExpressionPlanner<'_, '_, 'arena, '_> {
                     span: Some(call.span),
                 });
             }
-            if !instance_fields.fields.is_empty() {
+            if !instance_fields.elements.is_empty() {
                 work.push(ExpressionWork::InitializeInstanceFields);
             }
             work.push(ExpressionWork::Emit(PlannedInstruction::new(
@@ -335,6 +341,9 @@ impl<'arena> ExpressionPlanner<'_, '_, 'arena, '_> {
                         preserve_final_reference: true,
                     });
                 }
+                Some(MemberCallee::Private(member)) => {
+                    self.plan_private_member_callee(member, layout, work)?;
+                }
                 None => work.push(ExpressionWork::Visit(&call.callee)),
             }
             return Ok(());
@@ -424,6 +433,9 @@ impl<'arena> ExpressionPlanner<'_, '_, 'arena, '_> {
                     preserve_final_reference: true,
                 });
             }
+            Some(MemberCallee::Private(member)) => {
+                self.plan_private_member_callee(member, layout, work)?;
+            }
             None => work.push(ExpressionWork::Visit(&call.callee)),
         }
         Ok(())
@@ -474,7 +486,7 @@ impl<'arena> ExpressionPlanner<'_, '_, 'arena, '_> {
                 span: Some(call.span),
             });
         }
-        if !instance_fields.fields.is_empty() {
+        if !instance_fields.elements.is_empty() {
             work.push(ExpressionWork::InitializeInstanceFields);
         }
         work.push(ExpressionWork::Emit(PlannedInstruction::new(
@@ -842,6 +854,12 @@ impl<'arena> ExpressionPlanner<'_, '_, 'arena, '_> {
                     return Ok(Some(MemberCallee::Computed(member)));
                 }
                 Expression::ComputedMemberExpression(member) => {
+                    return unsupported(UnsupportedLeafFeature::UnsupportedExpression, member.span);
+                }
+                Expression::PrivateFieldExpression(member) if !member.optional => {
+                    return Ok(Some(MemberCallee::Private(member)));
+                }
+                Expression::PrivateFieldExpression(member) => {
                     return unsupported(UnsupportedLeafFeature::UnsupportedExpression, member.span);
                 }
                 Expression::ChainExpression(chain)

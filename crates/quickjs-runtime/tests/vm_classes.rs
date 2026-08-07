@@ -121,6 +121,17 @@ fn private_instance_fields_have_fresh_class_identities_and_bypass_public_propert
 }
 
 #[test]
+fn private_instance_methods_share_a_closure_and_preserve_the_super_home_object() {
+    run_with(
+        "function run(){class Base{value(){return 40;}}class Box extends Base{#method(){return super.value()+2;}call(){return this.#method();}same(other){return this.#method===other.#method;}name(){return this.#method.name;}static has(candidate){return #method in candidate;}}let first=new Box;let second=new Box;let rejected=false;try{Box.prototype.call.call({});}catch(error){rejected=error.name==='TypeError';}return first.call()===42&&first.same(second)&&first.name()==='#method'&&Box.has(first)&&!Box.has({})&&rejected;}",
+        |result| {
+            let value = result.expect("private instance method execution");
+            assert_eq!(value.as_boolean().expect("live Boolean"), Some(true));
+        },
+    );
+}
+
+#[test]
 fn private_in_uses_private_identity_and_requires_an_object() {
     run_with(
         "function run(){class First{#value=1;static has(candidate){return #value in candidate;}}class Second{#value=2;}let first=new First;let second=new Second;let primitive=false;try{First.has(null);}catch(error){primitive=error.name==='TypeError';}return First.has(first)&&!First.has(second)&&!First.has({})&&primitive;}",

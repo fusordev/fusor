@@ -71,14 +71,18 @@ fn synthesized_class_constructor_flow(
     Ok(flow)
 }
 
-/// Each public field in the admitted noncomputed class subset is initialized
-/// in the constructor frame, preserving per-instance evaluation order.
+/// Each supported instance element is initialized in the constructor frame,
+/// preserving source order for fields and private-method brand installation.
 pub(in crate::lowering) struct InstanceFieldDefinitions {
     pub(in crate::lowering) derived: bool,
-    pub(in crate::lowering) fields: Vec<NodeId>,
+    pub(in crate::lowering) elements: Vec<NodeId>,
 }
 
 impl CompilationContext<'_, '_, '_> {
+    #[allow(
+        clippy::too_many_lines,
+        reason = "constructor-instance element discovery validates its class, owner, and source order together"
+    )]
     pub(in crate::lowering) fn instance_field_definitions(
         &self,
         executable: ExecutableId,
@@ -129,42 +133,63 @@ impl CompilationContext<'_, '_, '_> {
             }
             _ => return Ok(None),
         };
-        let mut fields = Vec::new();
+        let mut elements = Vec::new();
         for element in &class.body.body {
-            let ClassElement::PropertyDefinition(field) = element else {
-                continue;
-            };
-            if field.r#static {
-                continue;
+            match element {
+                ClassElement::PropertyDefinition(field) => {
+                    if field.r#static {
+                        continue;
+                    }
+                    if !field.decorators.is_empty() {
+                        return unsupported(
+                            UnsupportedLeafFeature::UnsupportedDeclaration,
+                            field.span,
+                        );
+                    }
+                    if matches!(field.key, super::OxcPropertyKey::PrivateIdentifier(_)) {
+                        // Class definition creates the fresh private name and
+                        // construction installs the field through the typed
+                        // private-field opcode.
+                    } else if field.computed {
+                        field
+                            .key
+                            .as_expression()
+                            .ok_or(LeafCompilationError::Unsupported {
+                                feature: UnsupportedLeafFeature::UnsupportedDeclaration,
+                                span: field.key.span(),
+                            })?;
+                    } else {
+                        compiled_static_property_key(&field.key)?.ok_or(
+                            LeafCompilationError::Unsupported {
+                                feature: UnsupportedLeafFeature::UnsupportedDeclaration,
+                                span: field.key.span(),
+                            },
+                        )?;
+                    }
+                    elements.push(field.node_id.get());
+                }
+                ClassElement::MethodDefinition(method)
+                    if matches!(method.key, super::OxcPropertyKey::PrivateIdentifier(_)) =>
+                {
+                    if method.r#static
+                        || method.kind != MethodDefinitionKind::Method
+                        || method.value.generator
+                        || method.value.r#async
+                        || !method.decorators.is_empty()
+                    {
+                        return unsupported(
+                            UnsupportedLeafFeature::UnsupportedDeclaration,
+                            method.span,
+                        );
+                    }
+                    elements.push(method.node_id.get());
+                }
+                _ => {}
             }
-            if !field.decorators.is_empty() {
-                return unsupported(UnsupportedLeafFeature::UnsupportedDeclaration, field.span);
-            }
-            if matches!(field.key, super::OxcPropertyKey::PrivateIdentifier(_)) {
-                // The class-definition planner creates the fresh private name
-                // and the constructor installs the field through the typed
-                // private-field opcode.
-            } else if field.computed {
-                field
-                    .key
-                    .as_expression()
-                    .ok_or(LeafCompilationError::Unsupported {
-                        feature: UnsupportedLeafFeature::UnsupportedDeclaration,
-                        span: field.key.span(),
-                    })?;
-            } else {
-                compiled_static_property_key(&field.key)?.ok_or(
-                    LeafCompilationError::Unsupported {
-                        feature: UnsupportedLeafFeature::UnsupportedDeclaration,
-                        span: field.key.span(),
-                    },
-                )?;
-            }
-            fields.push(field.node_id.get());
         }
         Ok(Some(InstanceFieldDefinitions {
             derived: class.super_class.is_some(),
-            fields,
+            elements,
         }))
     }
 }
@@ -254,7 +279,7 @@ impl<'compiler, 'statement, 'unit, 'arena, 'scope, 'layout>
         }
         if let Some(instance_fields) = instance_fields
             && !instance_fields.derived
-            && !instance_fields.fields.is_empty()
+            && !instance_fields.elements.is_empty()
         {
             work.push(StatementWork::InitializeInstanceFields);
         }
@@ -516,7 +541,7 @@ impl CompilationContext<'_, '_, '_> {
         }
         let mut flow =
             synthesized_class_constructor_flow(derived_class_constructor, class.span, limits)?;
-        if !instance_fields.fields.is_empty() {
+        if !instance_fields.elements.is_empty() {
             ExpressionPlanner::new(self).plan_instance_field_initializations(
                 executable_id,
                 &layout,
@@ -579,7 +604,7 @@ impl CompilationContext<'_, '_, '_> {
         for ancestor in nodes.ancestor_ids(child_node) {
             match nodes.kind(ancestor) {
                 AstKind::Function(_) | AstKind::ArrowFunctionExpression(_) => return Ok(false),
-                AstKind::PropertyDefinition(_) => return Ok(fields.fields.contains(&ancestor)),
+                AstKind::PropertyDefinition(_) => return Ok(fields.elements.contains(&ancestor)),
                 _ => {}
             }
         }

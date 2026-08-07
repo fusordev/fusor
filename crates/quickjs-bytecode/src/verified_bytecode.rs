@@ -4597,7 +4597,17 @@ fn verify_method_definitions(
                     definition_index,
                 )
             });
-            if pair.map(|(defined, _)| defined) != Some(*child) {
+            let private_method = index.checked_add(4).and_then(|set_name_index| {
+                private_method_name_pair(
+                    parent,
+                    metadata,
+                    instructions,
+                    &predecessor_counts,
+                    internal_stack,
+                    set_name_index,
+                )
+            });
+            if pair.map(|(defined, _)| defined) != Some(*child) && private_method != Some(*child) {
                 return Err(BytecodeVerificationError::function(
                     parent_id,
                     BytecodeVerificationErrorKind::OrdinaryMethodTemplatePlacementMismatch {
@@ -4713,21 +4723,17 @@ fn verify_inferred_function_names(
 
         for (index, verified) in instructions.iter().enumerate() {
             let decoded = verified.decoded();
-            if !matches!(
-                decoded.instruction().opcode(),
-                FinalOpcode::SetName | FinalOpcode::SetNameComputed
-            ) {
-                continue;
-            }
-            if inferred_function_name_pair(
-                parent,
-                metadata,
-                instructions,
-                &predecessor_counts,
-                internal_stack,
-                index,
-            )
-            .is_none()
+            let opcode = decoded.instruction().opcode();
+            if matches!(opcode, FinalOpcode::SetName | FinalOpcode::SetNameComputed)
+                && inferred_function_name_pair(
+                    parent,
+                    metadata,
+                    instructions,
+                    &predecessor_counts,
+                    internal_stack,
+                    index,
+                )
+                .is_none()
                 && inferred_computed_class_name_pair(
                     graph,
                     parent,
@@ -4749,15 +4755,148 @@ fn verify_inferred_function_names(
                     index,
                 )
                 .is_none()
+                && private_method_name_pair(
+                    parent,
+                    metadata,
+                    instructions,
+                    &predecessor_counts,
+                    internal_stack,
+                    index,
+                )
+                .is_none()
             {
                 return Err(BytecodeVerificationError::function(
                     parent_id,
                     BytecodeVerificationErrorKind::SetNameTemplateMismatch { pc: decoded.pc() },
                 ));
             }
+            if opcode == FinalOpcode::SetHomeObject
+                && !private_method_home_object_pair(
+                    parent,
+                    metadata,
+                    instructions,
+                    &predecessor_counts,
+                    internal_stack,
+                    index,
+                )
+            {
+                return Err(BytecodeVerificationError::function(
+                    parent_id,
+                    BytecodeVerificationErrorKind::UnsupportedCompilerOpcode {
+                        pc: decoded.pc(),
+                        opcode,
+                    },
+                ));
+            }
         }
     }
     Ok(())
+}
+
+/// Certifies one private instance method closure created during class
+/// definition evaluation. The method name is set only on a fresh anonymous
+/// method template, after the surrounding class prototype has become its home
+/// object, and the function is immediately retained in a class-local cell.
+fn private_method_name_pair(
+    parent: &VerifiedCompilerFunction,
+    metadata: &[VerifiedFunctionMetadata],
+    instructions: &[VerifiedInstruction],
+    predecessor_counts: &[u32],
+    internal_stack: &InternalStackCertificate,
+    set_name_index: usize,
+) -> Option<FunctionTemplateId> {
+    let set_name = instructions.get(set_name_index)?.decoded().instruction();
+    if !matches!(
+        (set_name.opcode(), set_name.operands()),
+        (FinalOpcode::SetName, Operands::Atom(_))
+    ) || predecessor_counts.get(set_name_index) != Some(&1)
+    {
+        return None;
+    }
+    let closure_index = set_name_index.checked_sub(4)?;
+    if !matches!(
+        instructions
+            .get(closure_index)?
+            .decoded()
+            .instruction()
+            .opcode(),
+        FinalOpcode::FClosure | FinalOpcode::FClosure8
+    ) {
+        return None;
+    }
+    let expected = [
+        (closure_index.checked_add(1)?, FinalOpcode::Swap),
+        (closure_index.checked_add(2)?, FinalOpcode::SetHomeObject),
+        (closure_index.checked_add(3)?, FinalOpcode::Swap),
+    ];
+    for (index, opcode) in expected {
+        let instruction = instructions.get(index)?.decoded().instruction();
+        if instruction.opcode() != opcode {
+            return None;
+        }
+    }
+    let store_index = set_name_index.checked_add(1)?;
+    if !matches!(
+        instructions
+            .get(store_index)?
+            .decoded()
+            .instruction()
+            .opcode(),
+        FinalOpcode::PutLoc
+            | FinalOpcode::PutLoc8
+            | FinalOpcode::PutLoc0
+            | FinalOpcode::PutLoc1
+            | FinalOpcode::PutLoc2
+            | FinalOpcode::PutLoc3
+    ) {
+        return None;
+    }
+    for (from, to) in [
+        (closure_index, closure_index.checked_add(1)?),
+        (closure_index.checked_add(1)?, closure_index.checked_add(2)?),
+        (closure_index.checked_add(2)?, closure_index.checked_add(3)?),
+        (closure_index.checked_add(3)?, set_name_index),
+        (set_name_index, store_index),
+    ] {
+        if !internal_stack.has_effective_successor(instructions, from, usize_to_u32(to)) {
+            return None;
+        }
+    }
+    let closure = instructions.get(closure_index)?.decoded().instruction();
+    let constant = closure_constant(closure.opcode(), closure.operands())?;
+    let crate::CompilerConstant::Function(child) = parent.constants().get(constant as usize)?
+    else {
+        return None;
+    };
+    let child_metadata = usize::try_from(child.get())
+        .ok()
+        .and_then(|index| metadata.get(index))?;
+    (child_metadata.executable_kind == CompilerExecutableKind::OrdinaryMethod
+        && child_metadata.function_name.is_none())
+    .then_some(*child)
+}
+
+fn private_method_home_object_pair(
+    parent: &VerifiedCompilerFunction,
+    metadata: &[VerifiedFunctionMetadata],
+    instructions: &[VerifiedInstruction],
+    predecessor_counts: &[u32],
+    internal_stack: &InternalStackCertificate,
+    home_object_index: usize,
+) -> bool {
+    home_object_index
+        .checked_add(2)
+        .and_then(|set_name_index| {
+            private_method_name_pair(
+                parent,
+                metadata,
+                instructions,
+                predecessor_counts,
+                internal_stack,
+                set_name_index,
+            )
+        })
+        .is_some()
 }
 
 fn inferred_function_name_pair(
@@ -5361,7 +5500,15 @@ fn derived_default_constructor_pair(
                     && first_drop.decoded().instruction().opcode() == FinalOpcode::Drop
                     && second_drop.decoded().instruction().opcode() == FinalOpcode::Drop
         );
-        if !static_field_region && !computed_field_region {
+        let private_field_region = matches!(
+            region,
+            [push_this, private_name, .., define, drop]
+                if push_this.decoded().instruction().opcode() == FinalOpcode::PushThis
+                    && private_name.decoded().instruction().opcode() == FinalOpcode::GetVarRefCheck
+                    && define.decoded().instruction().opcode() == FinalOpcode::DefinePrivateField
+                    && drop.decoded().instruction().opcode() == FinalOpcode::Drop
+        );
+        if !static_field_region && !computed_field_region && !private_field_region {
             return false;
         }
         let open_index = fields_start.saturating_add(next);
@@ -5922,7 +6069,10 @@ fn transfer_object_definition_provenance(
             state.push(ObjectDefinitionProvenance::Unknown);
         }
         FinalOpcode::ToPropKey => convert_property_key_provenance(state),
-        FinalOpcode::SetNameComputed => {}
+        // Both primitives mutate only the fresh closure at the top of the
+        // stack. They preserve the surrounding class constructor/prototype
+        // provenance needed by later public method definitions.
+        FinalOpcode::SetNameComputed | FinalOpcode::SetHomeObject => {}
         FinalOpcode::DefineField => {
             let base = state[state.len() - 2];
             let base = match base {
@@ -6906,6 +7056,7 @@ const fn supported_compiler_opcode(opcode: FinalOpcode) -> bool {
             | FinalOpcode::FClosure
             | FinalOpcode::SetName
             | FinalOpcode::SetNameComputed
+            | FinalOpcode::SetHomeObject
             | FinalOpcode::PushAtomValue
             | FinalOpcode::Undefined
             | FinalOpcode::Null

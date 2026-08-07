@@ -106,6 +106,34 @@ fn public_private_instance_fields_receive_fresh_class_scope_names() {
 }
 
 #[test]
+fn private_instance_methods_keep_distinct_names_shared_closures_and_home_objects() {
+    let tree = compile(
+        "function make(){class Base{value(){return 40;}}class Box extends Base{#method(){return super.value()+2;}call(){return this.#method();}same(other){return this.#method===other.#method;}name(){return this.#method.name;}static has(candidate){return #method in candidate;}}return Box;}",
+        "make",
+    );
+    let opcodes = tree
+        .functions()
+        .iter()
+        .flat_map(|function| function.control_flow().instructions())
+        .map(|instruction| instruction.decoded().instruction().opcode())
+        .collect::<Vec<_>>();
+
+    assert!(opcodes.contains(&FinalOpcode::PrivateSymbol));
+    assert!(opcodes.contains(&FinalOpcode::DefinePrivateField));
+    assert!(opcodes.contains(&FinalOpcode::GetPrivateField));
+    assert!(opcodes.contains(&FinalOpcode::SetHomeObject));
+    assert!(opcodes.contains(&FinalOpcode::CallMethod));
+    assert!(tree.functions().iter().any(|function| {
+        function
+            .closure_variables()
+            .iter()
+            .filter(|closure| closure.policy().kind() == DeclarationKind::ClassPrivateName)
+            .count()
+            >= 2
+    }));
+}
+
+#[test]
 fn a_base_class_without_a_constructor_uses_a_synthesized_typed_template() {
     let tree = compile(
         "function make(){class Box{static answer(){return 7;}}return Box;}",

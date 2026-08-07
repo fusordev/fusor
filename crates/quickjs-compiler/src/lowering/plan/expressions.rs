@@ -434,7 +434,9 @@ impl<'compiler, 'unit, 'arena, 'scope> ExpressionPlanner<'compiler, 'unit, 'aren
                             self.plan_call_expression(call, layout, constants, &mut work)?;
                         }
                         Expression::TaggedTemplateExpression(tagged) => {
-                            Self::plan_tagged_template_expression(tagged, constants, &mut work)?;
+                            self.plan_tagged_template_expression(
+                                tagged, layout, constants, &mut work,
+                            )?;
                         }
                         Expression::NewExpression(constructor) => {
                             Self::plan_new_expression(constructor, &mut work)?;
@@ -688,6 +690,42 @@ impl<'compiler, 'unit, 'arena, 'scope> ExpressionPlanner<'compiler, 'unit, 'aren
         Ok(())
     }
 
+    /// Plans a private member reference for `CallMethod`: retain the base as
+    /// receiver, then resolve the private slot without consulting prototypes.
+    pub(in crate::lowering) fn plan_private_member_callee<'expression>(
+        &self,
+        member: &'expression PrivateFieldExpression<'arena>,
+        layout: &FrameLayout,
+        work: &mut Vec<ExpressionWork<'expression, 'arena>>,
+    ) -> Result<(), LeafCompilationError> {
+        if member.optional {
+            return unsupported(UnsupportedLeafFeature::UnsupportedExpression, member.span);
+        }
+        let (binding, slot) = self.private_name_binding_for_access(
+            member.node_id.get(),
+            member.field.name.as_str(),
+            member.span,
+            layout,
+        )?;
+        work.push(ExpressionWork::Emit(PlannedInstruction::new(
+            FinalOpcode::GetPrivateField,
+            Operands::None,
+            member.span,
+        )));
+        work.push(ExpressionWork::Emit(self.plan_read_slot(
+            binding,
+            slot,
+            member.field.span,
+        )?));
+        work.push(ExpressionWork::Emit(PlannedInstruction::new(
+            FinalOpcode::Dup,
+            Operands::None,
+            member.object.span(),
+        )));
+        work.push(ExpressionWork::Visit(&member.object));
+        Ok(())
+    }
+
     fn private_name_binding_for_access(
         &self,
         access_node: NodeId,
@@ -701,11 +739,20 @@ impl<'compiler, 'unit, 'arena, 'scope> ExpressionPlanner<'compiler, 'unit, 'aren
                 continue;
             };
             for element in &class.body.body {
-                let ClassElement::PropertyDefinition(field) = element else {
-                    continue;
-                };
-                let OxcPropertyKey::PrivateIdentifier(identifier) = &field.key else {
-                    continue;
+                let (element_node, identifier) = match element {
+                    ClassElement::PropertyDefinition(field) => {
+                        let OxcPropertyKey::PrivateIdentifier(identifier) = &field.key else {
+                            continue;
+                        };
+                        (field.node_id.get(), identifier)
+                    }
+                    ClassElement::MethodDefinition(method) => {
+                        let OxcPropertyKey::PrivateIdentifier(identifier) = &method.key else {
+                            continue;
+                        };
+                        (method.node_id.get(), identifier)
+                    }
+                    _ => continue,
                 };
                 if identifier.name.as_str() != name {
                     continue;
@@ -714,7 +761,7 @@ impl<'compiler, 'unit, 'arena, 'scope> ExpressionPlanner<'compiler, 'unit, 'aren
                     .planned
                     .identities
                     .class_private_name_bindings
-                    .get(&field.node_id.get())
+                    .get(&element_node)
                     .copied()
                     .ok_or(LeafCompilationError::Unsupported {
                         feature: UnsupportedLeafFeature::UnsupportedExpression,
@@ -791,6 +838,18 @@ impl<'compiler, 'unit, 'arena, 'scope> ExpressionPlanner<'compiler, 'unit, 'aren
             member.span,
             layout,
         )?;
+        if self
+            .planned
+            .identities
+            .class_private_method_bindings
+            .values()
+            .any(|method_binding| *method_binding == binding)
+        {
+            return unsupported(
+                UnsupportedLeafFeature::UnsupportedExpression,
+                assignment.left.span(),
+            );
+        }
         // As with computed-member assignment, preserve the RHS as the
         // assignment completion below the receiver/name/value triple consumed
         // by `put_private_field`.
@@ -986,6 +1045,17 @@ impl<'compiler, 'unit, 'arena, 'scope> ExpressionPlanner<'compiler, 'unit, 'aren
             }
             return Ok(());
         }
+        if matches!(method.key, OxcPropertyKey::PrivateIdentifier(_)) {
+            if method.r#static
+                || method.kind != MethodDefinitionKind::Method
+                || method.computed
+                || method.value.generator
+                || method.value.r#async
+            {
+                return unsupported(UnsupportedLeafFeature::UnsupportedDeclaration, method.span);
+            }
+            return Ok(());
+        }
         if method.computed {
             if method.key.as_expression().is_none() {
                 return unsupported(
@@ -995,11 +1065,7 @@ impl<'compiler, 'unit, 'arena, 'scope> ExpressionPlanner<'compiler, 'unit, 'aren
             }
             return Ok(());
         }
-        // Private methods/accessors use PrivateIdentifier keys and have their own
-        // lowering path; public identifiers still need to be compile-time atoms.
-        if !matches!(method.key, OxcPropertyKey::PrivateIdentifier(_))
-            && compiled_static_property_key(&method.key)?.is_none()
-        {
+        if compiled_static_property_key(&method.key)?.is_none() {
             return Err(LeafCompilationError::Unsupported {
                 feature: UnsupportedLeafFeature::UnsupportedDeclaration,
                 span: method.key.span(),
@@ -1127,7 +1193,8 @@ impl<'compiler, 'unit, 'arena, 'scope> ExpressionPlanner<'compiler, 'unit, 'aren
 
     #[allow(
         clippy::too_many_arguments,
-        reason = "class method lowering needs the complete function-closure context"
+        clippy::too_many_lines,
+        reason = "class method lowering keeps public and private class-definition stack contracts in one auditable sequence"
     )]
     fn plan_base_class_method(
         &self,
@@ -1142,65 +1209,47 @@ impl<'compiler, 'unit, 'arena, 'scope> ExpressionPlanner<'compiler, 'unit, 'aren
         }
         let is_private_method = matches!(method.key, OxcPropertyKey::PrivateIdentifier(_));
         if is_private_method {
-            // Private methods and accessors: set_home_object + set_name + scope_put_var_init
-            // ECMA-262: private elements are stored as private-name bindings in the class
-            // environment and the function's home object is set for brand checks.
             let OxcPropertyKey::PrivateIdentifier(identifier) = &method.key else {
                 unreachable!("private method key is PrivateIdentifier");
             };
-            let private_atom = constants.property_atom_index(identifier.span)?;
-            if method.computed {
-                // Computed private methods are not valid ECMA-262 syntax.
-                return unsupported(UnsupportedLeafFeature::UnsupportedDeclaration, method.span);
-            }
+            let (_, function_slot) =
+                self.private_instance_method_function_binding(method, layout)?;
+            let FrameSlot::Local(_) = function_slot else {
+                return Err(LeafCompilationError::SemanticInvariant {
+                    invariant: "private method closure is stored in its class local frame",
+                    span: Some(method.span),
+                });
+            };
             flow.emit(self.plan_function_closure(
                 &method.value,
                 layout.executable,
                 tree_layout,
                 constants,
             )?)?;
-            // set_home_object: function home_object -> function home_object
+            // `set_home_object` consumes `[function, home]` and preserves that
+            // order. The class-definition stack is `[constructor, prototype,
+            // function]`, so swap twice to retain its canonical shape.
+            flow.emit(PlannedInstruction::new(
+                FinalOpcode::Swap,
+                Operands::None,
+                method.span,
+            ))?;
             flow.emit(PlannedInstruction::new(
                 FinalOpcode::SetHomeObject,
                 Operands::None,
                 method.span,
             ))?;
-            // set_name: function name -> function
             flow.emit(PlannedInstruction::new(
-                FinalOpcode::SetName,
-                Operands::Atom(private_atom),
+                FinalOpcode::Swap,
+                Operands::None,
                 method.span,
             ))?;
-            // Write the named function into its class-scope local slot so the
-            // private-name binding initializes to the method function object.
-            let binding = self
-                .planned
-                .identities
-                .class_private_name_bindings
-                .get(&method.node_id.get())
-                .copied()
-                .ok_or(LeafCompilationError::SemanticInvariant {
-                    invariant: "private method has a class-scope name binding",
-                    span: Some(identifier.span),
-                })?;
-            let FrameSlot::Local(slot) =
-                layout
-                    .slot(binding)
-                    .ok_or(LeafCompilationError::SemanticInvariant {
-                        invariant: "private method name binding has a local frame slot",
-                        span: Some(identifier.span),
-                    })?
-            else {
-                return Err(LeafCompilationError::SemanticInvariant {
-                    invariant: "private method name binding uses local storage",
-                    span: Some(identifier.span),
-                });
-            };
             flow.emit(PlannedInstruction::new(
-                FinalOpcode::PutLoc,
-                Operands::Loc(slot.index() as u16),
-                identifier.span,
+                FinalOpcode::SetName,
+                Operands::Atom(constants.property_atom_index(identifier.span)?),
+                method.span,
             ))?;
+            flow.emit(plan_put_slot(function_slot, identifier.span))?;
             return Ok(());
         }
         let flags = match method.kind {
@@ -1504,22 +1553,30 @@ impl<'compiler, 'unit, 'arena, 'scope> ExpressionPlanner<'compiler, 'unit, 'aren
                 .kind(),
             ExecutableKind::ClassDefaultConstructor
         );
-        for field_node in definitions.fields {
-            let AstKind::PropertyDefinition(field) = self.unit.semantic().nodes().kind(field_node)
-            else {
-                return Err(LeafCompilationError::SemanticInvariant {
-                    invariant: "instance field identity remains a property definition",
-                    span: None,
-                });
-            };
-            self.plan_instance_field_initialization(
-                field,
-                layout,
-                tree_layout,
-                constants,
-                synthesized_default,
-                flow,
-            )?;
+        for element_node in definitions.elements {
+            match self.unit.semantic().nodes().kind(element_node) {
+                AstKind::PropertyDefinition(field) => self.plan_instance_field_initialization(
+                    field,
+                    layout,
+                    tree_layout,
+                    constants,
+                    synthesized_default,
+                    flow,
+                )?,
+                AstKind::MethodDefinition(method) => self
+                    .plan_private_instance_method_initialization(
+                        method,
+                        layout,
+                        synthesized_default,
+                        flow,
+                    )?,
+                _ => {
+                    return Err(LeafCompilationError::SemanticInvariant {
+                        invariant: "instance element identity remains a field or private method",
+                        span: None,
+                    });
+                }
+            }
         }
         Ok(())
     }
@@ -1662,6 +1719,57 @@ impl<'compiler, 'unit, 'arena, 'scope> ExpressionPlanner<'compiler, 'unit, 'aren
                 FinalOpcode::Nop,
                 Operands::None,
                 field.span,
+            ))?;
+        }
+        Ok(())
+    }
+
+    fn plan_private_instance_method_initialization(
+        &self,
+        method: &MethodDefinition<'arena>,
+        layout: &FrameLayout,
+        synthesized_default: bool,
+        flow: &mut PlannedControlFlow,
+    ) -> Result<(), LeafCompilationError> {
+        let (name_binding, name_slot) =
+            self.private_instance_method_name_binding(method, layout)?;
+        let (function_binding, function_slot) =
+            self.private_instance_method_function_binding(method, layout)?;
+        let (FrameSlot::Capture(_), FrameSlot::Capture(_)) = (name_slot, function_slot) else {
+            return Err(LeafCompilationError::SemanticInvariant {
+                invariant: "instance constructor captures private method name and function",
+                span: Some(method.span),
+            });
+        };
+        if synthesized_default {
+            flow.emit(PlannedInstruction::new(
+                FinalOpcode::Nop,
+                Operands::None,
+                method.span,
+            ))?;
+        }
+        flow.emit(PlannedInstruction::new(
+            FinalOpcode::PushThis,
+            Operands::None,
+            method.span,
+        ))?;
+        flow.emit(self.plan_read_slot(name_binding, name_slot, method.key.span())?)?;
+        flow.emit(self.plan_read_slot(function_binding, function_slot, method.key.span())?)?;
+        flow.emit(PlannedInstruction::new(
+            FinalOpcode::DefinePrivateField,
+            Operands::None,
+            method.span,
+        ))?;
+        flow.emit(PlannedInstruction::new(
+            FinalOpcode::Drop,
+            Operands::None,
+            method.span,
+        ))?;
+        if synthesized_default {
+            flow.emit(PlannedInstruction::new(
+                FinalOpcode::Nop,
+                Operands::None,
+                method.span,
             ))?;
         }
         Ok(())
@@ -1822,6 +1930,104 @@ impl<'compiler, 'unit, 'arena, 'scope> ExpressionPlanner<'compiler, 'unit, 'aren
             .ok_or(LeafCompilationError::SemanticInvariant {
                 invariant: "private instance field name binding has a frame slot",
                 span: Some(field.key.span()),
+            })?;
+        Ok((binding, slot))
+    }
+
+    fn private_instance_method_name_binding(
+        &self,
+        method: &MethodDefinition<'arena>,
+        layout: &FrameLayout,
+    ) -> Result<(BindingId, FrameSlot), LeafCompilationError> {
+        if method.r#static
+            || method.kind != MethodDefinitionKind::Method
+            || !matches!(method.key, OxcPropertyKey::PrivateIdentifier(_))
+        {
+            return Err(LeafCompilationError::SemanticInvariant {
+                invariant: "private method name binding belongs to a private instance method",
+                span: Some(method.span),
+            });
+        }
+        let binding = self
+            .planned
+            .identities
+            .class_private_name_bindings
+            .get(&method.node_id.get())
+            .copied()
+            .ok_or(LeafCompilationError::SemanticInvariant {
+                invariant: "private instance method has a class-scope name binding",
+                span: Some(method.key.span()),
+            })?;
+        let storage =
+            self.planned
+                .plan
+                .binding(binding)
+                .ok_or(LeafCompilationError::SemanticInvariant {
+                    invariant: "private instance method name binding exists",
+                    span: Some(method.key.span()),
+                })?;
+        if storage.policy().kind() != DeclarationKind::ClassPrivateName
+            || storage.placement() != StoragePlacement::Local
+        {
+            return Err(LeafCompilationError::SemanticInvariant {
+                invariant: "private instance method name is immutable local storage",
+                span: Some(method.key.span()),
+            });
+        }
+        let slot = layout
+            .slot(binding)
+            .ok_or(LeafCompilationError::SemanticInvariant {
+                invariant: "private instance method name binding has a frame slot",
+                span: Some(method.key.span()),
+            })?;
+        Ok((binding, slot))
+    }
+
+    fn private_instance_method_function_binding(
+        &self,
+        method: &MethodDefinition<'arena>,
+        layout: &FrameLayout,
+    ) -> Result<(BindingId, FrameSlot), LeafCompilationError> {
+        if method.r#static
+            || method.kind != MethodDefinitionKind::Method
+            || !matches!(method.key, OxcPropertyKey::PrivateIdentifier(_))
+        {
+            return Err(LeafCompilationError::SemanticInvariant {
+                invariant: "private method function binding belongs to a private instance method",
+                span: Some(method.span),
+            });
+        }
+        let binding = self
+            .planned
+            .identities
+            .class_private_method_bindings
+            .get(&method.node_id.get())
+            .copied()
+            .ok_or(LeafCompilationError::SemanticInvariant {
+                invariant: "private instance method has a class-scope function binding",
+                span: Some(method.key.span()),
+            })?;
+        let storage =
+            self.planned
+                .plan
+                .binding(binding)
+                .ok_or(LeafCompilationError::SemanticInvariant {
+                    invariant: "private instance method function binding exists",
+                    span: Some(method.key.span()),
+                })?;
+        if storage.policy().kind() != DeclarationKind::ClassPrivateName
+            || storage.placement() != StoragePlacement::Local
+        {
+            return Err(LeafCompilationError::SemanticInvariant {
+                invariant: "private instance method function is immutable local storage",
+                span: Some(method.key.span()),
+            });
+        }
+        let slot = layout
+            .slot(binding)
+            .ok_or(LeafCompilationError::SemanticInvariant {
+                invariant: "private instance method function binding has a frame slot",
+                span: Some(method.key.span()),
             })?;
         Ok((binding, slot))
     }
@@ -2179,6 +2385,9 @@ impl<'compiler, 'unit, 'arena, 'scope> ExpressionPlanner<'compiler, 'unit, 'aren
                     chain,
                     preserve_final_reference: true,
                 });
+            }
+            Some(MemberCallee::Private(member)) => {
+                return unsupported(UnsupportedLeafFeature::UnsupportedExpression, member.span);
             }
             None => planned.push(ExpressionWork::Visit(root)),
         }

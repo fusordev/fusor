@@ -267,7 +267,7 @@ pub enum DeclarationKind {
     /// computed public instance-field key for its class definition.
     ClassFieldKey,
     /// The compiler-created immutable class-scope cell that holds one fresh
-    /// private name for a public private instance field.
+    /// private-name identity for an instance private element.
     ClassPrivateName,
     /// The compiler-created immutable class-scope cell that holds a class
     /// constructor while its static field initializers execute.
@@ -607,9 +607,13 @@ pub(crate) struct OxcIdentityMap {
     /// re-evaluates an observable key expression.
     pub(crate) class_field_key_bindings: HashMap<NodeId, BindingId>,
     /// The immutable class-scope private-name cell for each supported private
-    /// instance field. Constructors and member closures capture the cell so
+    /// instance element. Constructors and member closures capture the cell so
     /// each evaluation of a class expression receives a fresh identity.
     pub(crate) class_private_name_bindings: HashMap<NodeId, BindingId>,
+    /// The immutable class-scope method cell for every supported private
+    /// instance method. Constructors capture it so every branded instance
+    /// refers to the one closure created by class definition evaluation.
+    pub(crate) class_private_method_bindings: HashMap<NodeId, BindingId>,
     /// The immutable class-scope receiver cell for each class whose static
     /// field initializer lexically observes `this`.
     pub(crate) class_static_receiver_bindings: HashMap<NodeId, BindingId>,
@@ -842,6 +846,7 @@ struct BindingDraft {
     class_node: Option<NodeId>,
     class_field_node: Option<NodeId>,
     class_private_name_node: Option<NodeId>,
+    class_private_method_node: Option<NodeId>,
     class_static_receiver_node: Option<NodeId>,
     executable: ExecutableId,
     name: Arc<str>,
@@ -859,6 +864,7 @@ struct FrozenBindings {
     class_name_bindings: HashMap<NodeId, BindingId>,
     class_field_key_bindings: HashMap<NodeId, BindingId>,
     class_private_name_bindings: HashMap<NodeId, BindingId>,
+    class_private_method_bindings: HashMap<NodeId, BindingId>,
     class_static_receiver_bindings: HashMap<NodeId, BindingId>,
 }
 
@@ -1054,6 +1060,7 @@ impl<'unit, 'arena, 'scope> Planner<'unit, 'arena, 'scope> {
         self.add_class_name_bindings(&mut binding_drafts)?;
         self.add_class_field_key_bindings(&mut binding_drafts)?;
         self.add_class_private_name_bindings(&mut binding_drafts)?;
+        self.add_class_private_method_bindings(&mut binding_drafts)?;
         self.add_class_static_receiver_bindings(&mut binding_drafts)?;
         binding_drafts.sort_by_key(|binding| {
             let first = binding
@@ -1077,6 +1084,7 @@ impl<'unit, 'arena, 'scope> Planner<'unit, 'arena, 'scope> {
             class_name_bindings,
             class_field_key_bindings,
             class_private_name_bindings,
+            class_private_method_bindings,
             class_static_receiver_bindings,
         } = self.freeze_binding_drafts(binding_drafts)?;
         let scope_by_binding = self.binding_scope_map(
@@ -1085,6 +1093,7 @@ impl<'unit, 'arena, 'scope> Planner<'unit, 'arena, 'scope> {
             &class_name_bindings,
             &class_field_key_bindings,
             &class_private_name_bindings,
+            &class_private_method_bindings,
             &class_static_receiver_bindings,
             &bindings,
         )?;
@@ -1116,10 +1125,13 @@ impl<'unit, 'arena, 'scope> Planner<'unit, 'arena, 'scope> {
             self.class_field_key_capture_requests(&class_field_key_bindings, &bindings)?;
         let class_private_name_captures =
             self.class_private_name_capture_requests(&class_private_name_bindings, &bindings)?;
+        let class_private_method_captures =
+            self.class_private_method_capture_requests(&class_private_method_bindings, &bindings)?;
         let class_static_receiver_captures = self
             .class_static_receiver_capture_requests(&class_static_receiver_bindings, &bindings)?;
         let mut synthetic_captures = class_field_key_captures;
         synthetic_captures.extend(class_private_name_captures);
+        synthetic_captures.extend(class_private_method_captures);
         synthetic_captures.extend(class_static_receiver_captures);
         synthetic_captures.sort_unstable_by_key(|request| {
             (
@@ -1192,6 +1204,7 @@ impl<'unit, 'arena, 'scope> Planner<'unit, 'arena, 'scope> {
                 class_name_bindings,
                 class_field_key_bindings,
                 class_private_name_bindings,
+                class_private_method_bindings,
                 class_static_receiver_bindings,
                 scope_by_binding: scope_by_binding.into_boxed_slice(),
                 reference_by_id: reference_by_id.into_boxed_slice(),
@@ -1217,6 +1230,7 @@ impl<'unit, 'arena, 'scope> Planner<'unit, 'arena, 'scope> {
         class_name_bindings: &HashMap<NodeId, BindingId>,
         class_field_key_bindings: &HashMap<NodeId, BindingId>,
         class_private_name_bindings: &HashMap<NodeId, BindingId>,
+        class_private_method_bindings: &HashMap<NodeId, BindingId>,
         class_static_receiver_bindings: &HashMap<NodeId, BindingId>,
         bindings: &[BindingStorage],
     ) -> Result<Vec<Option<ScopeId>>, CompilerError> {
@@ -1307,6 +1321,7 @@ impl<'unit, 'arena, 'scope> Planner<'unit, 'arena, 'scope> {
         }
         self.bind_class_field_key_scopes(&mut scopes, class_field_key_bindings)?;
         self.bind_class_private_name_scopes(&mut scopes, class_private_name_bindings)?;
+        self.bind_class_private_method_scopes(&mut scopes, class_private_method_bindings)?;
         self.bind_class_static_receiver_scopes(&mut scopes, class_static_receiver_bindings)?;
         Ok(scopes)
     }
@@ -1366,29 +1381,37 @@ impl<'unit, 'arena, 'scope> Planner<'unit, 'arena, 'scope> {
         class_private_name_bindings: &HashMap<NodeId, BindingId>,
     ) -> Result<(), CompilerError> {
         for (&node_id, &binding) in class_private_name_bindings {
-            let AstKind::PropertyDefinition(field) = self.unit.semantic().nodes().kind(node_id)
-            else {
-                return Err(CompilerError::SemanticInvariant {
-                    invariant: "private-name binding belongs to a property definition",
-                    span: None,
-                });
-            };
-            if field.r#static || !matches!(field.key, PropertyKey::PrivateIdentifier(_)) {
-                return Err(CompilerError::SemanticInvariant {
-                    invariant: "private-name binding belongs to a private instance field",
-                    span: Some(field.span),
-                });
-            }
             let nodes = self.unit.semantic().nodes();
+            let span = match nodes.kind(node_id) {
+                AstKind::PropertyDefinition(field)
+                    if !field.r#static
+                        && matches!(field.key, PropertyKey::PrivateIdentifier(_)) =>
+                {
+                    field.span
+                }
+                AstKind::MethodDefinition(method)
+                    if !method.r#static
+                        && method.kind == MethodDefinitionKind::Method
+                        && matches!(method.key, PropertyKey::PrivateIdentifier(_)) =>
+                {
+                    method.span
+                }
+                _ => {
+                    return Err(CompilerError::SemanticInvariant {
+                        invariant: "private-name binding belongs to a supported private instance element",
+                        span: None,
+                    });
+                }
+            };
             let AstKind::ClassBody(body) = nodes.parent_kind(node_id) else {
                 return Err(CompilerError::SemanticInvariant {
-                    invariant: "private instance field belongs to a class body",
-                    span: Some(field.span),
+                    invariant: "private instance element belongs to a class body",
+                    span: Some(span),
                 });
             };
             let AstKind::Class(class) = nodes.parent_kind(body.node_id.get()) else {
                 return Err(CompilerError::SemanticInvariant {
-                    invariant: "private instance-field class body belongs to a class",
+                    invariant: "private instance-element class body belongs to a class",
                     span: Some(body.span),
                 });
             };
@@ -1397,12 +1420,63 @@ impl<'unit, 'arena, 'scope> Planner<'unit, 'arena, 'scope> {
                     .get_mut(binding.index())
                     .ok_or(CompilerError::SemanticInvariant {
                         invariant: "private-name binding scope index is in range",
-                        span: Some(field.span),
+                        span: Some(span),
                     })?;
             if target.replace(class.scope_id()).is_some() {
                 return Err(CompilerError::SemanticInvariant {
                     invariant: "private-name binding has one class scope",
-                    span: Some(field.span),
+                    span: Some(span),
+                });
+            }
+        }
+        Ok(())
+    }
+
+    fn bind_class_private_method_scopes(
+        &self,
+        scopes: &mut [Option<ScopeId>],
+        class_private_method_bindings: &HashMap<NodeId, BindingId>,
+    ) -> Result<(), CompilerError> {
+        let nodes = self.unit.semantic().nodes();
+        for (&node_id, &binding) in class_private_method_bindings {
+            let AstKind::MethodDefinition(method) = nodes.kind(node_id) else {
+                return Err(CompilerError::SemanticInvariant {
+                    invariant: "private-method binding belongs to a method definition",
+                    span: None,
+                });
+            };
+            if method.r#static
+                || method.kind != MethodDefinitionKind::Method
+                || !matches!(method.key, PropertyKey::PrivateIdentifier(_))
+            {
+                return Err(CompilerError::SemanticInvariant {
+                    invariant: "private-method binding belongs to a private instance method",
+                    span: Some(method.span),
+                });
+            }
+            let AstKind::ClassBody(body) = nodes.parent_kind(node_id) else {
+                return Err(CompilerError::SemanticInvariant {
+                    invariant: "private instance method belongs to a class body",
+                    span: Some(method.span),
+                });
+            };
+            let AstKind::Class(class) = nodes.parent_kind(body.node_id.get()) else {
+                return Err(CompilerError::SemanticInvariant {
+                    invariant: "private instance-method class body belongs to a class",
+                    span: Some(body.span),
+                });
+            };
+            let target =
+                scopes
+                    .get_mut(binding.index())
+                    .ok_or(CompilerError::SemanticInvariant {
+                        invariant: "private-method binding scope index is in range",
+                        span: Some(method.span),
+                    })?;
+            if target.replace(class.scope_id()).is_some() {
+                return Err(CompilerError::SemanticInvariant {
+                    invariant: "private-method binding has one class scope",
+                    span: Some(method.span),
                 });
             }
         }
@@ -1966,6 +2040,10 @@ impl<'unit, 'arena, 'scope> Planner<'unit, 'arena, 'scope> {
         Ok(())
     }
 
+    #[allow(
+        clippy::too_many_lines,
+        reason = "source and synthetic bindings must share one stable planning order"
+    )]
     fn binding_drafts(&self) -> Result<Vec<BindingDraft>, CompilerError> {
         let semantic = self.unit.semantic();
         let scoping = semantic.scoping();
@@ -2014,6 +2092,7 @@ impl<'unit, 'arena, 'scope> Planner<'unit, 'arena, 'scope> {
                     class_node: None,
                     class_field_node: None,
                     class_private_name_node: None,
+                    class_private_method_node: None,
                     class_static_receiver_node: None,
                     executable: owner,
                     name: Arc::clone(&name),
@@ -2033,6 +2112,7 @@ impl<'unit, 'arena, 'scope> Planner<'unit, 'arena, 'scope> {
                     class_node: None,
                     class_field_node: None,
                     class_private_name_node: None,
+                    class_private_method_node: None,
                     class_static_receiver_node: None,
                     executable: owner,
                     name,
@@ -2057,6 +2137,7 @@ impl<'unit, 'arena, 'scope> Planner<'unit, 'arena, 'scope> {
                 class_node: None,
                 class_field_node: None,
                 class_private_name_node: None,
+                class_private_method_node: None,
                 class_static_receiver_node: None,
                 executable: owner,
                 name,
@@ -2321,6 +2402,7 @@ impl<'unit, 'arena, 'scope> Planner<'unit, 'arena, 'scope> {
             class_node: None,
             class_field_node: None,
             class_private_name_node: None,
+            class_private_method_node: None,
             class_static_receiver_node: None,
             executable: ExecutableId(0),
             name: Arc::from("*default*"),
@@ -2356,6 +2438,7 @@ impl<'unit, 'arena, 'scope> Planner<'unit, 'arena, 'scope> {
                 class_node: Some(node_id),
                 class_field_node: None,
                 class_private_name_node: None,
+                class_private_method_node: None,
                 class_static_receiver_node: None,
                 executable: owner,
                 name: Arc::from(identifier.name.as_str()),
@@ -2395,6 +2478,7 @@ impl<'unit, 'arena, 'scope> Planner<'unit, 'arena, 'scope> {
                     class_node: None,
                     class_field_node: Some(field_node),
                     class_private_name_node: None,
+                    class_private_method_node: None,
                     class_static_receiver_node: None,
                     executable: owner,
                     name: Arc::from(format!("[[class-field-key:{}]]", field_node.index())),
@@ -2479,8 +2563,8 @@ impl<'unit, 'arena, 'scope> Planner<'unit, 'arena, 'scope> {
         Ok(requests)
     }
 
-    /// Creates one immutable class-scope cell for every supported public
-    /// private instance field. `private_symbol` fills the cell once during
+    /// Creates one immutable class-scope cell for every supported private
+    /// instance element. `private_symbol` fills the cell once during
     /// `ClassDefinitionEvaluation`; no source-visible binding carries the
     /// identity.
     fn add_class_private_name_bindings(
@@ -2494,74 +2578,115 @@ impl<'unit, 'arena, 'scope> Planner<'unit, 'arena, 'scope> {
             };
             let owner = self.scope_owner(class.scope_id(), Some(class.span))?;
             for element in &class.body.body {
-                match element {
-                    ClassElement::PropertyDefinition(field) => {
+                let (element_node, identifier) = match element {
+                    ClassElement::PropertyDefinition(field)
+                        if !field.r#static
+                            && matches!(field.key, PropertyKey::PrivateIdentifier(_)) =>
+                    {
                         let PropertyKey::PrivateIdentifier(identifier) = &field.key else {
-                            continue;
+                            unreachable!("private property key was matched")
                         };
-                        // Both instance and static private fields get name bindings.
-                        let field_node = field.node_id.get();
-                        bindings.push(BindingDraft {
-                            symbol_id: None,
-                            primary_symbol_binding: false,
-                            class_node: None,
-                            class_field_node: None,
-                            class_private_name_node: Some(field_node),
-                            class_static_receiver_node: None,
-                            executable: owner,
-                            name: Arc::from(format!(
-                                "[[class-private-name:{}]]",
-                                field_node.index()
-                            )),
-                            declaration_spans: Arc::from([identifier.span]),
-                            placement: StoragePlacement::Local,
-                            policy: self.declaration_policy(
-                                owner,
-                                DeclarationKind::ClassPrivateName,
-                                false,
-                            ),
-                            arguments_object: false,
-                        });
+                        (field.node_id.get(), identifier)
                     }
-                    ClassElement::MethodDefinition(method) => {
+                    ClassElement::MethodDefinition(method)
+                        if !method.r#static
+                            && method.kind == MethodDefinitionKind::Method
+                            && !method.value.generator
+                            && !method.value.r#async
+                            && matches!(method.key, PropertyKey::PrivateIdentifier(_)) =>
+                    {
                         let PropertyKey::PrivateIdentifier(identifier) = &method.key else {
-                            continue;
+                            unreachable!("private method key was matched")
                         };
-                        // Private methods and accessors need name bindings too.
-                        let method_node = method.node_id.get();
-                        bindings.push(BindingDraft {
-                            symbol_id: None,
-                            primary_symbol_binding: false,
-                            class_node: None,
-                            class_field_node: None,
-                            class_private_name_node: Some(method_node),
-                            class_static_receiver_node: None,
-                            executable: owner,
-                            name: Arc::from(format!(
-                                "[[class-private-name:{}]]",
-                                method_node.index()
-                            )),
-                            declaration_spans: Arc::from([identifier.span]),
-                            placement: StoragePlacement::Local,
-                            policy: self.declaration_policy(
-                                owner,
-                                DeclarationKind::ClassPrivateName,
-                                false,
-                            ),
-                            arguments_object: false,
-                        });
+                        (method.node_id.get(), identifier)
                     }
                     _ => continue,
+                };
+                bindings.push(BindingDraft {
+                    symbol_id: None,
+                    primary_symbol_binding: false,
+                    class_node: None,
+                    class_field_node: None,
+                    class_private_name_node: Some(element_node),
+                    class_private_method_node: None,
+                    class_static_receiver_node: None,
+                    executable: owner,
+                    name: Arc::from(format!("[[class-private-name:{}]]", element_node.index())),
+                    declaration_spans: Arc::from([identifier.span]),
+                    placement: StoragePlacement::Local,
+                    policy: self.declaration_policy(
+                        owner,
+                        DeclarationKind::ClassPrivateName,
+                        false,
+                    ),
+                    arguments_object: false,
+                });
+            }
+        }
+        Ok(())
+    }
+
+    /// Creates one immutable class-scope function cell for every supported
+    /// private instance method. It is intentionally distinct from the private
+    /// name cell: construction installs the fresh name as the private-slot
+    /// key and this shared closure as its value.
+    fn add_class_private_method_bindings(
+        &self,
+        bindings: &mut Vec<BindingDraft>,
+    ) -> Result<(), CompilerError> {
+        let semantic = self.unit.semantic();
+        for (_class_node, node) in semantic.nodes().iter_enumerated() {
+            let AstKind::Class(class) = node.kind() else {
+                continue;
+            };
+            let owner = self.scope_owner(class.scope_id(), Some(class.span))?;
+            for element in &class.body.body {
+                let ClassElement::MethodDefinition(method) = element else {
+                    continue;
+                };
+                if method.r#static
+                    || method.kind != MethodDefinitionKind::Method
+                    || method.value.generator
+                    || method.value.r#async
+                {
+                    continue;
                 }
+                let PropertyKey::PrivateIdentifier(identifier) = &method.key else {
+                    continue;
+                };
+                let method_node = method.node_id.get();
+                bindings.push(BindingDraft {
+                    symbol_id: None,
+                    primary_symbol_binding: false,
+                    class_node: None,
+                    class_field_node: None,
+                    class_private_name_node: None,
+                    class_private_method_node: Some(method_node),
+                    class_static_receiver_node: None,
+                    executable: owner,
+                    name: Arc::from(format!("[[class-private-method:{}]]", method_node.index())),
+                    declaration_spans: Arc::from([identifier.span]),
+                    placement: StoragePlacement::Local,
+                    policy: self.declaration_policy(
+                        owner,
+                        DeclarationKind::ClassPrivateName,
+                        false,
+                    ),
+                    arguments_object: false,
+                });
             }
         }
         Ok(())
     }
 
     /// Captures private-name cells into each constructor that installs the
-    /// corresponding field and into every nested executable that directly
+    /// corresponding element and into every nested executable that directly
     /// accesses one. The identity therefore follows lexical class scope,
     /// rather than the spelling of the private name.
+    #[allow(
+        clippy::too_many_lines,
+        reason = "private-element capture planning keeps class ownership and direct-access checks together"
+    )]
     fn class_private_name_capture_requests(
         &self,
         class_private_name_bindings: &HashMap<NodeId, BindingId>,
@@ -2570,28 +2695,37 @@ impl<'unit, 'arena, 'scope> Planner<'unit, 'arena, 'scope> {
         let nodes = self.unit.semantic().nodes();
         let mut requests = Vec::new();
 
-        for (&field_node, &binding) in class_private_name_bindings {
-            let AstKind::PropertyDefinition(field) = nodes.kind(field_node) else {
-                return Err(CompilerError::SemanticInvariant {
-                    invariant: "private-name binding belongs to a property definition",
-                    span: None,
-                });
+        for (&element_node, &binding) in class_private_name_bindings {
+            let element_span = match nodes.kind(element_node) {
+                AstKind::PropertyDefinition(field)
+                    if !field.r#static
+                        && matches!(field.key, PropertyKey::PrivateIdentifier(_)) =>
+                {
+                    field.span
+                }
+                AstKind::MethodDefinition(method)
+                    if !method.r#static
+                        && method.kind == MethodDefinitionKind::Method
+                        && matches!(method.key, PropertyKey::PrivateIdentifier(_)) =>
+                {
+                    method.span
+                }
+                _ => {
+                    return Err(CompilerError::SemanticInvariant {
+                        invariant: "private-name binding belongs to a supported private instance element",
+                        span: None,
+                    });
+                }
             };
-            if field.r#static || !matches!(field.key, PropertyKey::PrivateIdentifier(_)) {
+            let AstKind::ClassBody(body) = nodes.parent_kind(element_node) else {
                 return Err(CompilerError::SemanticInvariant {
-                    invariant: "private-name binding belongs to a private instance field",
-                    span: Some(field.span),
-                });
-            }
-            let AstKind::ClassBody(body) = nodes.parent_kind(field_node) else {
-                return Err(CompilerError::SemanticInvariant {
-                    invariant: "private instance field belongs to a class body",
-                    span: Some(field.span),
+                    invariant: "private instance element belongs to a class body",
+                    span: Some(element_span),
                 });
             };
             let AstKind::Class(class) = nodes.parent_kind(body.node_id.get()) else {
                 return Err(CompilerError::SemanticInvariant {
-                    invariant: "private instance-field class body belongs to a class",
+                    invariant: "private instance-element class body belongs to a class",
                     span: Some(body.span),
                 });
             };
@@ -2600,27 +2734,27 @@ impl<'unit, 'arena, 'scope> Planner<'unit, 'arena, 'scope> {
                     .get(binding.index())
                     .ok_or(CompilerError::SemanticInvariant {
                         invariant: "private-name capture binding exists",
-                        span: Some(field.key.span()),
+                        span: Some(element_span),
                     })?;
             if storage.placement != StoragePlacement::Local
                 || storage.policy.kind != DeclarationKind::ClassPrivateName
             {
                 return Err(CompilerError::SemanticInvariant {
                     invariant: "private-name capture uses immutable local storage",
-                    span: Some(field.key.span()),
+                    span: Some(element_span),
                 });
             }
             let constructor = self.instance_field_constructor_owner(class.node_id.get(), class)?;
             if constructor == storage.executable {
                 return Err(CompilerError::SemanticInvariant {
                     invariant: "class constructor captures a distinct class private-name binding",
-                    span: Some(field.key.span()),
+                    span: Some(element_span),
                 });
             }
             requests.push(CaptureRequest {
                 executable: constructor,
                 binding,
-                span: field.key.span(),
+                span: element_span,
             });
         }
 
@@ -2669,6 +2803,83 @@ impl<'unit, 'arena, 'scope> Planner<'unit, 'arena, 'scope> {
         Ok(requests)
     }
 
+    /// Constructors capture the class-evaluation method cell so each
+    /// constructed instance receives the same function in its private slot.
+    fn class_private_method_capture_requests(
+        &self,
+        class_private_method_bindings: &HashMap<NodeId, BindingId>,
+        bindings: &[BindingStorage],
+    ) -> Result<Vec<CaptureRequest>, CompilerError> {
+        let nodes = self.unit.semantic().nodes();
+        let mut requests = Vec::with_capacity(class_private_method_bindings.len());
+        for (&method_node, &binding) in class_private_method_bindings {
+            let AstKind::MethodDefinition(method) = nodes.kind(method_node) else {
+                return Err(CompilerError::SemanticInvariant {
+                    invariant: "private-method capture belongs to a method definition",
+                    span: None,
+                });
+            };
+            if method.r#static
+                || method.kind != MethodDefinitionKind::Method
+                || !matches!(method.key, PropertyKey::PrivateIdentifier(_))
+            {
+                return Err(CompilerError::SemanticInvariant {
+                    invariant: "private-method capture belongs to a private instance method",
+                    span: Some(method.span),
+                });
+            }
+            let AstKind::ClassBody(body) = nodes.parent_kind(method_node) else {
+                return Err(CompilerError::SemanticInvariant {
+                    invariant: "private instance method belongs to a class body",
+                    span: Some(method.span),
+                });
+            };
+            let AstKind::Class(class) = nodes.parent_kind(body.node_id.get()) else {
+                return Err(CompilerError::SemanticInvariant {
+                    invariant: "private instance-method class body belongs to a class",
+                    span: Some(body.span),
+                });
+            };
+            let storage =
+                bindings
+                    .get(binding.index())
+                    .ok_or(CompilerError::SemanticInvariant {
+                        invariant: "private-method capture binding exists",
+                        span: Some(method.span),
+                    })?;
+            if storage.placement != StoragePlacement::Local
+                || storage.policy.kind != DeclarationKind::ClassPrivateName
+            {
+                return Err(CompilerError::SemanticInvariant {
+                    invariant: "private-method capture uses immutable local storage",
+                    span: Some(method.span),
+                });
+            }
+            let constructor = self.instance_field_constructor_owner(class.node_id.get(), class)?;
+            if constructor == storage.executable {
+                return Err(CompilerError::SemanticInvariant {
+                    invariant: "class constructor captures a distinct class private-method binding",
+                    span: Some(method.span),
+                });
+            }
+            requests.push(CaptureRequest {
+                executable: constructor,
+                binding,
+                span: method.span,
+            });
+        }
+        requests.sort_unstable_by_key(|request| {
+            (
+                request.executable.index(),
+                request.binding.index(),
+                request.span.start,
+                request.span.end,
+            )
+        });
+        requests.dedup_by_key(|request| (request.executable, request.binding));
+        Ok(requests)
+    }
+
     fn private_name_binding_for_access(
         &self,
         access_node: NodeId,
@@ -2681,18 +2892,25 @@ impl<'unit, 'arena, 'scope> Planner<'unit, 'arena, 'scope> {
                 continue;
             };
             for element in &class.body.body {
-                let ClassElement::PropertyDefinition(field) = element else {
-                    continue;
-                };
-                let PropertyKey::PrivateIdentifier(identifier) = &field.key else {
-                    continue;
+                let (element_node, identifier) = match element {
+                    ClassElement::PropertyDefinition(field) => {
+                        let PropertyKey::PrivateIdentifier(identifier) = &field.key else {
+                            continue;
+                        };
+                        (field.node_id.get(), identifier)
+                    }
+                    ClassElement::MethodDefinition(method) => {
+                        let PropertyKey::PrivateIdentifier(identifier) = &method.key else {
+                            continue;
+                        };
+                        (method.node_id.get(), identifier)
+                    }
+                    _ => continue,
                 };
                 if identifier.name.as_str() != name {
                     continue;
                 }
-                return class_private_name_bindings
-                    .get(&field.node_id.get())
-                    .copied();
+                return class_private_name_bindings.get(&element_node).copied();
             }
         }
         None
@@ -2721,6 +2939,7 @@ impl<'unit, 'arena, 'scope> Planner<'unit, 'arena, 'scope> {
                 class_node: None,
                 class_field_node: None,
                 class_private_name_node: None,
+                class_private_method_node: None,
                 class_static_receiver_node: Some(class_node),
                 executable: owner,
                 name: Arc::from(format!("[[class-static-receiver:{}]]", class_node.index())),
@@ -3097,6 +3316,7 @@ impl<'unit, 'arena, 'scope> Planner<'unit, 'arena, 'scope> {
                 class_node: None,
                 class_field_node: None,
                 class_private_name_node: None,
+                class_private_method_node: None,
                 class_static_receiver_node: None,
                 executable: owner,
                 name: Arc::from("arguments"),
@@ -3581,6 +3801,10 @@ fn placement_order(placement: StoragePlacement) -> u8 {
     }
 }
 
+#[allow(
+    clippy::too_many_lines,
+    reason = "freezing all source and synthetic binding maps is one failure-atomic transaction"
+)]
 fn freeze_bindings(
     drafts: Vec<BindingDraft>,
     symbol_count: usize,
@@ -3592,6 +3816,7 @@ fn freeze_bindings(
     let mut class_name_bindings = HashMap::new();
     let mut class_field_key_bindings = HashMap::new();
     let mut class_private_name_bindings = HashMap::new();
+    let mut class_private_method_bindings = HashMap::new();
     let mut class_static_receiver_bindings = HashMap::new();
     for (index, draft) in drafts.into_iter().enumerate() {
         let id = u32::try_from(index)
@@ -3647,6 +3872,16 @@ fn freeze_bindings(
                 span: draft.declaration_spans.first().copied(),
             });
         }
+        if let Some(method_node) = draft.class_private_method_node
+            && class_private_method_bindings
+                .insert(method_node, id)
+                .is_some()
+        {
+            return Err(CompilerError::SemanticInvariant {
+                invariant: "one synthetic private-method binding per method node",
+                span: draft.declaration_spans.first().copied(),
+            });
+        }
         if let Some(class_node) = draft.class_static_receiver_node
             && class_static_receiver_bindings
                 .insert(class_node, id)
@@ -3683,6 +3918,7 @@ fn freeze_bindings(
         class_name_bindings,
         class_field_key_bindings,
         class_private_name_bindings,
+        class_private_method_bindings,
         class_static_receiver_bindings,
     })
 }

@@ -3173,6 +3173,7 @@ const fn is_supported_opcode(opcode: FinalOpcode) -> bool {
             | FinalOpcode::FClosure
             | FinalOpcode::SetName
             | FinalOpcode::SetNameComputed
+            | FinalOpcode::SetHomeObject
             | FinalOpcode::PushAtomValue
             | FinalOpcode::PrivateSymbol
             | FinalOpcode::PushBigIntI32
