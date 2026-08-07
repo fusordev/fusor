@@ -20,7 +20,7 @@ use crate::runtime::{
     TemporalPlainMonthDayPrototypeMethod, TemporalPlainMonthDayStaticMethod,
     TemporalPlainTimePrototypeMethod, TemporalPlainTimeStaticMethod,
     TemporalPlainYearMonthPrototypeMethod, TemporalPlainYearMonthStaticMethod,
-    TemporalZonedDateTimeStaticMethod,
+    TemporalZonedDateTimePrototypeMethod, TemporalZonedDateTimeStaticMethod,
 };
 
 pub(super) fn visit_objects(visit: ObjectSink<'_>) {
@@ -374,6 +374,18 @@ pub(super) fn visit_functions(visit: FunctionSink<'_>) {
             NativeFunctionKind::TemporalZonedDateTimeStatic(method),
             IntrinsicNameSpec::Predefined(PredefinedAtom::From),
             method.length(),
+        ));
+    }
+    for method in TemporalZonedDateTimePrototypeMethod::ALL {
+        let name = if TemporalZonedDateTimePrototypeMethod::is_accessor() {
+            IntrinsicNameSpec::Literal(method.function_name())
+        } else {
+            IntrinsicNameSpec::RealmName(RealmNameId::TemporalZonedDateTimePrototype(method))
+        };
+        visit(ordinary(
+            NativeFunctionKind::TemporalZonedDateTimePrototype(method),
+            name,
+            TemporalZonedDateTimePrototypeMethod::length(),
         ));
     }
 }
@@ -968,6 +980,28 @@ pub(super) fn visit_properties(visit: PropertySink<'_>) {
             IntrinsicKeySpec::PredefinedString(PredefinedAtom::From),
             NativeFunctionKind::TemporalZonedDateTimeStatic(method_id),
         ));
+    }
+    for method_id in TemporalZonedDateTimePrototypeMethod::ALL {
+        let key = IntrinsicKeySpec::InternedString(RealmNameId::TemporalZonedDateTimePrototype(
+            method_id,
+        ));
+        if TemporalZonedDateTimePrototypeMethod::is_accessor() {
+            visit(accessor(
+                zoned_date_time_prototype,
+                key,
+                PropertyLayout::accessor(false, true),
+                Some(IntrinsicFunctionId(
+                    NativeFunctionKind::TemporalZonedDateTimePrototype(method_id),
+                )),
+                None,
+            ));
+        } else {
+            visit(method(
+                zoned_date_time_prototype,
+                key,
+                NativeFunctionKind::TemporalZonedDateTimePrototype(method_id),
+            ));
+        }
     }
     visit(data(
         zoned_date_time_prototype,

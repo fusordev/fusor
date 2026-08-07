@@ -1263,6 +1263,7 @@ pub(crate) enum NativeFunctionKind {
     TemporalPlainYearMonthPrototype(TemporalPlainYearMonthPrototypeMethod),
     TemporalZonedDateTimeConstructor,
     TemporalZonedDateTimeStatic(TemporalZonedDateTimeStaticMethod),
+    TemporalZonedDateTimePrototype(TemporalZonedDateTimePrototypeMethod),
     FunctionPrototypeToString,
     ErrorConstructor(ErrorIntrinsicKind),
     ErrorPrototypeToString,
@@ -2320,6 +2321,38 @@ pub(crate) enum TemporalZonedDateTimeStaticMethod {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum TemporalZonedDateTimePrototypeMethod {
+    CalendarId,
+    TimeZoneId,
+    Year,
+    Month,
+    MonthCode,
+    Day,
+    Hour,
+    Minute,
+    Second,
+    Millisecond,
+    Microsecond,
+    Nanosecond,
+    Offset,
+    OffsetNanoseconds,
+    DayOfWeek,
+    DayOfYear,
+    WeekOfYear,
+    YearOfWeek,
+    DaysInWeek,
+    DaysInMonth,
+    DaysInYear,
+    MonthsInYear,
+    InLeapYear,
+    Era,
+    EraYear,
+    EpochMilliseconds,
+    EpochNanoseconds,
+    HoursInDay,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum TemporalPlainDatePrototypeMethod {
     CalendarId,
     Year,
@@ -2775,6 +2808,113 @@ impl TemporalZonedDateTimeStaticMethod {
         match self {
             Self::From => 1,
         }
+    }
+}
+
+impl TemporalZonedDateTimePrototypeMethod {
+    pub(crate) const ALL: [Self; 28] = [
+        Self::CalendarId,
+        Self::TimeZoneId,
+        Self::Year,
+        Self::Month,
+        Self::MonthCode,
+        Self::Day,
+        Self::Hour,
+        Self::Minute,
+        Self::Second,
+        Self::Millisecond,
+        Self::Microsecond,
+        Self::Nanosecond,
+        Self::Offset,
+        Self::OffsetNanoseconds,
+        Self::DayOfWeek,
+        Self::DayOfYear,
+        Self::WeekOfYear,
+        Self::YearOfWeek,
+        Self::DaysInWeek,
+        Self::DaysInMonth,
+        Self::DaysInYear,
+        Self::MonthsInYear,
+        Self::InLeapYear,
+        Self::Era,
+        Self::EraYear,
+        Self::EpochMilliseconds,
+        Self::EpochNanoseconds,
+        Self::HoursInDay,
+    ];
+
+    pub(crate) const fn name(self) -> &'static str {
+        match self {
+            Self::CalendarId => "calendarId",
+            Self::TimeZoneId => "timeZoneId",
+            Self::Year => "year",
+            Self::Month => "month",
+            Self::MonthCode => "monthCode",
+            Self::Day => "day",
+            Self::Hour => "hour",
+            Self::Minute => "minute",
+            Self::Second => "second",
+            Self::Millisecond => "millisecond",
+            Self::Microsecond => "microsecond",
+            Self::Nanosecond => "nanosecond",
+            Self::Offset => "offset",
+            Self::OffsetNanoseconds => "offsetNanoseconds",
+            Self::DayOfWeek => "dayOfWeek",
+            Self::DayOfYear => "dayOfYear",
+            Self::WeekOfYear => "weekOfYear",
+            Self::YearOfWeek => "yearOfWeek",
+            Self::DaysInWeek => "daysInWeek",
+            Self::DaysInMonth => "daysInMonth",
+            Self::DaysInYear => "daysInYear",
+            Self::MonthsInYear => "monthsInYear",
+            Self::InLeapYear => "inLeapYear",
+            Self::Era => "era",
+            Self::EraYear => "eraYear",
+            Self::EpochMilliseconds => "epochMilliseconds",
+            Self::EpochNanoseconds => "epochNanoseconds",
+            Self::HoursInDay => "hoursInDay",
+        }
+    }
+
+    pub(crate) const fn function_name(self) -> &'static str {
+        match self {
+            Self::CalendarId => "get calendarId",
+            Self::TimeZoneId => "get timeZoneId",
+            Self::Year => "get year",
+            Self::Month => "get month",
+            Self::MonthCode => "get monthCode",
+            Self::Day => "get day",
+            Self::Hour => "get hour",
+            Self::Minute => "get minute",
+            Self::Second => "get second",
+            Self::Millisecond => "get millisecond",
+            Self::Microsecond => "get microsecond",
+            Self::Nanosecond => "get nanosecond",
+            Self::Offset => "get offset",
+            Self::OffsetNanoseconds => "get offsetNanoseconds",
+            Self::DayOfWeek => "get dayOfWeek",
+            Self::DayOfYear => "get dayOfYear",
+            Self::WeekOfYear => "get weekOfYear",
+            Self::YearOfWeek => "get yearOfWeek",
+            Self::DaysInWeek => "get daysInWeek",
+            Self::DaysInMonth => "get daysInMonth",
+            Self::DaysInYear => "get daysInYear",
+            Self::MonthsInYear => "get monthsInYear",
+            Self::InLeapYear => "get inLeapYear",
+            Self::Era => "get era",
+            Self::EraYear => "get eraYear",
+            Self::EpochMilliseconds => "get epochMilliseconds",
+            Self::EpochNanoseconds => "get epochNanoseconds",
+            Self::HoursInDay => "get hoursInDay",
+        }
+    }
+
+    pub(crate) const fn is_accessor() -> bool {
+        true
+    }
+
+    pub(crate) const fn length() -> i32 {
+        0
     }
 }
 

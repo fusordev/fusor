@@ -291,6 +291,43 @@ fn zoned_date_time_constructor_and_string_from_preserve_branded_slots() {
 }
 
 #[test]
+fn zoned_date_time_accessors_expose_kernel_slots_and_getter_descriptors() {
+    assert_eq!(
+        rendered(
+            "var value=new Temporal.ZonedDateTime(0n,'UTC','iso8601');
+             var calendar=Object.getOwnPropertyDescriptor(Temporal.ZonedDateTime.prototype,'calendarId');
+             return [value.calendarId,value.timeZoneId,value.year,value.month,value.monthCode,
+               value.day,value.hour,value.minute,value.second,value.millisecond,value.microsecond,
+               value.nanosecond,calendar.enumerable,calendar.get.name].join('|');"
+        ),
+        "iso8601|UTC|1970|1|M01|1|0|0|0|0|0|0|false|get calendarId"
+    );
+    assert_eq!(
+        rendered(
+            "var value=new Temporal.ZonedDateTime(0n,'UTC','iso8601');
+             return [value.offset,value.offsetNanoseconds,value.dayOfWeek,value.dayOfYear,
+               value.weekOfYear,value.yearOfWeek,value.daysInWeek,value.daysInMonth,
+               value.daysInYear,value.monthsInYear,value.inLeapYear].join('|');"
+        ),
+        "+00:00|0|4|1|1|1970|7|31|365|12|false"
+    );
+    assert_eq!(
+        rendered(
+            "var value=new Temporal.ZonedDateTime(0n,'UTC','iso8601');
+             return [value.era,value.eraYear,value.epochMilliseconds,value.epochNanoseconds,
+               value.hoursInDay].join('|');"
+        ),
+        "||0|0|24"
+    );
+    assert_eq!(
+        thrown(
+            "return Object.getOwnPropertyDescriptor(Temporal.ZonedDateTime.prototype,'year').get.call({});"
+        ),
+        ExceptionKind::TypeError
+    );
+}
+
+#[test]
 fn plain_date_time_constructor_accessors_and_iso_formatting_are_spec_shaped() {
     assert_eq!(
         rendered(

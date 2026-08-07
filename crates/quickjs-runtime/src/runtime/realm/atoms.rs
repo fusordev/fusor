@@ -11,7 +11,8 @@ use crate::{
         TemporalPlainMonthDayPrototypeMethod, TemporalPlainMonthDayStaticMethod,
         TemporalPlainTimePrototypeMethod, TemporalPlainTimeStaticMethod,
         TemporalPlainYearMonthPrototypeMethod, TemporalPlainYearMonthStaticMethod,
-        TemporalZonedDateTimeStaticMethod, TypedArrayPrototypeMethod,
+        TemporalZonedDateTimePrototypeMethod, TemporalZonedDateTimeStaticMethod,
+        TypedArrayPrototypeMethod,
     },
 };
 
@@ -343,6 +344,9 @@ fn visit_realm_name_order(
     for method in TemporalZonedDateTimeStaticMethod::ALL {
         visit(RealmNameId::TemporalZonedDateTimeStatic(method))?;
     }
+    for method in TemporalZonedDateTimePrototypeMethod::ALL {
+        visit(RealmNameId::TemporalZonedDateTimePrototype(method))?;
+    }
     visit(RealmNameId::RegExpEscape)?;
     visit(RealmNameId::RegExpCompile)?;
     visit(RealmNameId::RegExpTest)?;
@@ -574,6 +578,7 @@ fn realm_name_description(id: RealmNameId) -> &'static str {
         RealmNameId::TemporalPlainYearMonthStatic(method) => method.name(),
         RealmNameId::TemporalPlainYearMonthPrototype(method) => method.name(),
         RealmNameId::TemporalZonedDateTimeStatic(method) => method.name(),
+        RealmNameId::TemporalZonedDateTimePrototype(method) => method.name(),
         RealmNameId::RegExpEscape => "escape",
         RealmNameId::RegExpCompile => "compile",
         RealmNameId::RegExpTest => "test",
@@ -598,8 +603,8 @@ mod tests {
         let schema = RealmIntrinsicSchema::try_new().expect("Realm schema");
         let plan = RealmAtomPlan::try_new(&schema).expect("atom plan");
 
-        assert_eq!(plan.len(), 333);
-        assert_eq!(plan.description_code_units(), 2_842);
+        assert_eq!(plan.len(), 337);
+        assert_eq!(plan.description_code_units(), 2_885);
     }
 
     #[test]

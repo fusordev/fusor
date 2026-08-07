@@ -21,7 +21,7 @@ use super::conversions::operator_primitive_to_string;
     reason = "this private VM sibling participates in the shared interpreter implementation namespace"
 )]
 use super::*;
-use crate::runtime::TemporalZonedDateTimeStaticMethod;
+use crate::runtime::{TemporalZonedDateTimePrototypeMethod, TemporalZonedDateTimeStaticMethod};
 
 pub(super) struct TemporalDurationConstructorContinuation {
     arguments: Vec<StoredValue>,
@@ -2090,6 +2090,127 @@ fn allocate_temporal_zoned_date_time_result(
     let prototype = HeapReference::Object(runtime.realm_temporal_zoned_date_time_prototype(realm)?);
     let object = runtime.allocate_temporal_zoned_date_time(prototype, date_time)?;
     Ok(NativeDispatch::Immediate(StoredValue::Object(object)))
+}
+
+#[allow(
+    clippy::too_many_arguments,
+    clippy::too_many_lines,
+    reason = "one exhaustive accessor dispatcher keeps branded-slot reads and errors auditable"
+)]
+pub(super) fn dispatch_temporal_zoned_date_time_prototype(
+    runtime: &mut Runtime,
+    method: TemporalZonedDateTimePrototypeMethod,
+    realm: RealmId,
+    receiver: &StoredValue,
+    _arguments: CallArguments,
+    _return_to: Option<CallReturn>,
+    origin: &JsStackFrame,
+    _execution_budget: &mut ExecutionBudget,
+) -> Result<NativeDispatch, NativeFailure> {
+    let date_time = require_temporal_zoned_date_time(runtime, receiver, realm, origin)?;
+    let number = |value| NativeDispatch::Immediate(StoredValue::Number(JsNumber::from_i64(value)));
+    match method {
+        TemporalZonedDateTimePrototypeMethod::CalendarId => Ok(NativeDispatch::Immediate(
+            StoredValue::String(JsString::from_utf8(date_time.calendar().identifier())?),
+        )),
+        TemporalZonedDateTimePrototypeMethod::TimeZoneId => {
+            let identifier = match date_time.time_zone().identifier() {
+                Ok(identifier) => identifier,
+                Err(error) => {
+                    return Err(NativeFailure::Abrupt(temporal_exception_from_error(
+                        realm, origin, error,
+                    )?));
+                }
+            };
+            Ok(NativeDispatch::Immediate(StoredValue::String(
+                JsString::from_utf8(&identifier)?,
+            )))
+        }
+        TemporalZonedDateTimePrototypeMethod::Year => Ok(number(i64::from(date_time.year()))),
+        TemporalZonedDateTimePrototypeMethod::Month => Ok(number(i64::from(date_time.month()))),
+        TemporalZonedDateTimePrototypeMethod::MonthCode => Ok(NativeDispatch::Immediate(
+            StoredValue::String(JsString::from_utf8(date_time.month_code().as_str())?),
+        )),
+        TemporalZonedDateTimePrototypeMethod::Day => Ok(number(i64::from(date_time.day()))),
+        TemporalZonedDateTimePrototypeMethod::Hour => Ok(number(i64::from(date_time.hour()))),
+        TemporalZonedDateTimePrototypeMethod::Minute => Ok(number(i64::from(date_time.minute()))),
+        TemporalZonedDateTimePrototypeMethod::Second => Ok(number(i64::from(date_time.second()))),
+        TemporalZonedDateTimePrototypeMethod::Millisecond => {
+            Ok(number(i64::from(date_time.millisecond())))
+        }
+        TemporalZonedDateTimePrototypeMethod::Microsecond => {
+            Ok(number(i64::from(date_time.microsecond())))
+        }
+        TemporalZonedDateTimePrototypeMethod::Nanosecond => {
+            Ok(number(i64::from(date_time.nanosecond())))
+        }
+        TemporalZonedDateTimePrototypeMethod::Offset => Ok(NativeDispatch::Immediate(
+            StoredValue::String(JsString::from_utf8(&date_time.offset())?),
+        )),
+        TemporalZonedDateTimePrototypeMethod::OffsetNanoseconds => {
+            Ok(number(date_time.offset_nanoseconds()))
+        }
+        TemporalZonedDateTimePrototypeMethod::DayOfWeek => {
+            Ok(number(i64::from(date_time.day_of_week())))
+        }
+        TemporalZonedDateTimePrototypeMethod::DayOfYear => {
+            Ok(number(i64::from(date_time.day_of_year())))
+        }
+        TemporalZonedDateTimePrototypeMethod::WeekOfYear => Ok(match date_time.week_of_year() {
+            Some(value) => number(i64::from(value)),
+            None => NativeDispatch::Immediate(StoredValue::Undefined),
+        }),
+        TemporalZonedDateTimePrototypeMethod::YearOfWeek => Ok(match date_time.year_of_week() {
+            Some(value) => number(i64::from(value)),
+            None => NativeDispatch::Immediate(StoredValue::Undefined),
+        }),
+        TemporalZonedDateTimePrototypeMethod::DaysInWeek => {
+            Ok(number(i64::from(date_time.days_in_week())))
+        }
+        TemporalZonedDateTimePrototypeMethod::DaysInMonth => {
+            Ok(number(i64::from(date_time.days_in_month())))
+        }
+        TemporalZonedDateTimePrototypeMethod::DaysInYear => {
+            Ok(number(i64::from(date_time.days_in_year())))
+        }
+        TemporalZonedDateTimePrototypeMethod::MonthsInYear => {
+            Ok(number(i64::from(date_time.months_in_year())))
+        }
+        TemporalZonedDateTimePrototypeMethod::InLeapYear => Ok(NativeDispatch::Immediate(
+            StoredValue::Boolean(date_time.in_leap_year()),
+        )),
+        TemporalZonedDateTimePrototypeMethod::Era => Ok(match date_time.era() {
+            Some(value) => {
+                NativeDispatch::Immediate(StoredValue::String(JsString::from_utf8(value.as_str())?))
+            }
+            None => NativeDispatch::Immediate(StoredValue::Undefined),
+        }),
+        TemporalZonedDateTimePrototypeMethod::EraYear => Ok(match date_time.era_year() {
+            Some(value) => number(i64::from(value)),
+            None => NativeDispatch::Immediate(StoredValue::Undefined),
+        }),
+        TemporalZonedDateTimePrototypeMethod::EpochMilliseconds => Ok(NativeDispatch::Immediate(
+            StoredValue::Number(JsNumber::from_i64(date_time.epoch_milliseconds())),
+        )),
+        TemporalZonedDateTimePrototypeMethod::EpochNanoseconds => {
+            Ok(NativeDispatch::Immediate(StoredValue::BigInt(Arc::new(
+                JsBigInt::from_i128(date_time.epoch_nanoseconds().as_i128()),
+            ))))
+        }
+        TemporalZonedDateTimePrototypeMethod::HoursInDay => {
+            let hours = match date_time.hours_in_day() {
+                Ok(hours) => hours,
+                Err(error) => {
+                    return Err(NativeFailure::Abrupt(temporal_exception_from_error(
+                        realm, origin, error,
+                    )?));
+                }
+            };
+            Ok(NativeDispatch::Immediate(StoredValue::Number(
+                JsNumber::from_f64(hours),
+            )))
+        }
+    }
 }
 
 #[allow(
@@ -9550,6 +9671,25 @@ fn require_temporal_plain_date_time(
         origin,
         ExceptionKind::TypeError,
         "not a Temporal.PlainDateTime object",
+    )?))
+}
+
+fn require_temporal_zoned_date_time(
+    runtime: &Runtime,
+    receiver: &StoredValue,
+    realm: RealmId,
+    origin: &JsStackFrame,
+) -> Result<ZonedDateTime, NativeFailure> {
+    if let StoredValue::Object(object) = receiver
+        && let Some(date_time) = runtime.temporal_zoned_date_time(*object)?
+    {
+        return Ok(date_time);
+    }
+    Err(NativeFailure::Abrupt(temporal_pending_exception(
+        realm,
+        origin,
+        ExceptionKind::TypeError,
+        "not a Temporal.ZonedDateTime object",
     )?))
 }
 
