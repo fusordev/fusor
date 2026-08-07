@@ -178,6 +178,57 @@ fn static_data_properties_are_defined_in_source_order() {
 }
 
 #[test]
+fn shorthand_data_properties_read_bindings_and_define_static_keys() {
+    let source = "function make(alpha,beta){return {alpha,beta};}";
+    let compiled = compile(source, "make");
+
+    assert_eq!(
+        instructions(&compiled),
+        [
+            (FinalOpcode::Object, Operands::None),
+            (FinalOpcode::GetArg0, Operands::NoneArg),
+            (
+                FinalOpcode::DefineField,
+                Operands::Atom(AtomPoolIndex::new(0)),
+            ),
+            (FinalOpcode::GetArg1, Operands::NoneArg),
+            (
+                FinalOpcode::DefineField,
+                Operands::Atom(AtomPoolIndex::new(1)),
+            ),
+            (FinalOpcode::Return, Operands::None),
+        ]
+    );
+    assert_eq!(
+        atom_code_units(&compiled, 0),
+        "alpha".encode_utf16().collect::<Vec<_>>()
+    );
+    assert_eq!(
+        atom_code_units(&compiled, 1),
+        "beta".encode_utf16().collect::<Vec<_>>()
+    );
+    assert_eq!(compiled.control_flow().computed_stack_size(), 2);
+
+    let definitions = compiled
+        .control_flow()
+        .instructions()
+        .iter()
+        .filter_map(|instruction| {
+            let decoded = instruction.decoded();
+            (decoded.instruction().opcode() == FinalOpcode::DefineField).then_some(decoded.pc())
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        definitions
+            .iter()
+            .map(|pc| source_slice_at(&compiled, source, *pc))
+            .collect::<Vec<_>>(),
+        ["alpha", "beta"],
+        "shorthand mappings retain the exact source property spelling"
+    );
+}
+
+#[test]
 fn quoted_data_keys_use_exact_cooked_utf16_and_raw_source_spans() {
     let source = r#"function make(){return {"\u0061":1,"a":2,"\uD800":3,"":4,"0":5,0:6};}"#;
     let compiled = compile(source, "make");

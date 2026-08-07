@@ -489,7 +489,6 @@ impl<'arena> CompilationContext<'_, 'arena, '_> {
             }
             AstKind::ObjectProperty(property) => {
                 if !property.computed
-                    && !property.shorthand
                     && let Some(key) = compiled_static_property_key(&property.key)?
                 {
                     record_property_candidate(owner, key.value, key.span, atom_candidates)?;

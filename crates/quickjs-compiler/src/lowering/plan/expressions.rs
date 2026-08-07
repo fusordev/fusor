@@ -3566,9 +3566,6 @@ impl<'compiler, 'unit, 'arena, 'scope> ExpressionPlanner<'compiler, 'unit, 'aren
                     property.span(),
                 );
             };
-            if property.shorthand {
-                return unsupported(UnsupportedLeafFeature::UnsupportedExpression, property.span);
-            }
             let method_kind = match (property.method, property.kind) {
                 (true, PropertyKind::Init) => Some(ObjectMethodKind::Method),
                 (false, PropertyKind::Get) => Some(ObjectMethodKind::Getter),
