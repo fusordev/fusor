@@ -1912,6 +1912,36 @@ fn finish_operator_primitive_target(
                 execution_budget,
             )
         }
+        OperatorPrimitiveTarget::TemporalInstantDifferenceLargestUnit(state) => {
+            finish_temporal_instant_difference_largest_unit(
+                runtime,
+                *state,
+                value,
+                return_to,
+                execution_budget,
+            )
+        }
+        OperatorPrimitiveTarget::TemporalInstantDifferenceRoundingIncrement(state) => {
+            finish_temporal_instant_difference_rounding_increment(
+                runtime,
+                *state,
+                value,
+                return_to,
+                execution_budget,
+            )
+        }
+        OperatorPrimitiveTarget::TemporalInstantDifferenceRoundingMode(state) => {
+            finish_temporal_instant_difference_rounding_mode(
+                runtime,
+                *state,
+                value,
+                return_to,
+                execution_budget,
+            )
+        }
+        OperatorPrimitiveTarget::TemporalInstantDifferenceSmallestUnit(state) => {
+            finish_temporal_instant_difference_smallest_unit(runtime, &state, value)
+        }
         OperatorPrimitiveTarget::DateSetTime { object } => {
             finish_date_set_time(runtime, object, value, realm, origin)
         }

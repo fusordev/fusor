@@ -457,6 +457,67 @@ fn instant_round_requires_a_time_smallest_unit_and_a_branded_receiver() {
 }
 
 #[test]
+fn instant_difference_supports_until_since_defaults_and_time_unit_rounding() {
+    assert_eq!(
+        rendered(
+            "var before=Temporal.Instant.from('2020-01-01T00:00:00Z');
+             var after=Temporal.Instant.from('2020-01-02T01:02:03.456789123Z');
+             return [Temporal.Instant.prototype.until.length,
+               Temporal.Instant.prototype.since.length,
+               before.until(after).toString(),before.since(after).toString(),
+               before.until(after,{smallestUnit:'minute'}).toString(),
+               before.until(after,{largestUnit:'hour',smallestUnit:'minute'}).toString()].join('|');"
+        ),
+        "1|1|PT90123.456789123S|-PT90123.456789123S|PT1502M|PT25H2M"
+    );
+}
+
+#[test]
+fn instant_difference_observes_operand_then_options_and_coercions_in_specified_order() {
+    assert_eq!(
+        rendered(
+            "var log=[];
+             var other={toString:function(){log.push('other toString');return '2020-01-01T00:00:01Z';}};
+             var options={};
+             Object.defineProperties(options,{
+               largestUnit:{get:function(){log.push('get largestUnit');return {toString:function(){log.push('string largestUnit');return 'second';}}}},
+               roundingIncrement:{get:function(){log.push('get roundingIncrement');return {valueOf:function(){log.push('number roundingIncrement');return 1;}}}},
+               roundingMode:{get:function(){log.push('get roundingMode');return {toString:function(){log.push('string roundingMode');return 'trunc';}}}},
+               smallestUnit:{get:function(){log.push('get smallestUnit');return {toString:function(){log.push('string smallestUnit');return 'second';}}}}
+             });
+             return Temporal.Instant.from('2020-01-01T00:00:00Z').until(other,options).toString()+'|'+log.join(',');"
+        ),
+        "PT1S|other toString,get largestUnit,string largestUnit,get roundingIncrement,number roundingIncrement,get roundingMode,string roundingMode,get smallestUnit,string smallestUnit"
+    );
+}
+
+#[test]
+fn instant_difference_rejects_invalid_receivers_options_and_units_after_reading_all_options() {
+    assert_eq!(
+        thrown("return Temporal.Instant.prototype.until.call({}, '2020-01-01T00:00Z');"),
+        ExceptionKind::TypeError
+    );
+    assert_eq!(
+        thrown("return new Temporal.Instant(0n).until('2020-01-01T00:00Z', null);"),
+        ExceptionKind::TypeError
+    );
+    assert_eq!(
+        rendered(
+            "var log=[],options={};
+             Object.defineProperties(options,{
+               largestUnit:{get:function(){log.push('largest');return 'year';}},
+               roundingIncrement:{get:function(){log.push('increment');return 1;}},
+               roundingMode:{get:function(){log.push('mode');return 'trunc';}},
+               smallestUnit:{get:function(){log.push('smallest');return 'second';}}
+             });
+             try { new Temporal.Instant(0n).until('2020-01-01T00:00Z',options); }
+             catch (error) { return error.name+'|'+log.join(','); }"
+        ),
+        "RangeError|largest,increment,mode,smallest"
+    );
+}
+
+#[test]
 fn duration_with_merges_defined_fields_in_normative_order() {
     assert_eq!(
         rendered(

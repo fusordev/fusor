@@ -4,7 +4,8 @@ use temporal_rs::{
     Duration, Instant, Sign,
     error::ErrorKind as TemporalErrorKind,
     options::{
-        RelativeTo, RoundingIncrement, RoundingMode, RoundingOptions, ToStringRoundingOptions, Unit,
+        DifferenceSettings, RelativeTo, RoundingIncrement, RoundingMode, RoundingOptions,
+        ToStringRoundingOptions, Unit,
     },
 };
 
@@ -210,6 +211,37 @@ pub(super) struct TemporalInstantRoundContinuation {
 }
 
 impl TemporalInstantRoundContinuation {
+    pub(super) const fn retained_values() -> u64 {
+        1
+    }
+
+    pub(super) fn trace_roots(&self, mark: &mut dyn FnMut(CollectionRoot)) {
+        trace_stored_value_root(&self.options, mark);
+    }
+}
+
+#[derive(Clone, Copy)]
+enum TemporalInstantDifferenceStage {
+    LargestUnit,
+    RoundingIncrement,
+    RoundingMode,
+    SmallestUnit,
+}
+
+pub(super) struct TemporalInstantDifferenceContinuation {
+    receiver: Instant,
+    other: Instant,
+    options: StoredValue,
+    largest_unit: Option<Unit>,
+    rounding_increment: RoundingIncrement,
+    rounding_mode: RoundingMode,
+    since: bool,
+    stage: TemporalInstantDifferenceStage,
+    realm: RealmId,
+    origin: JsStackFrame,
+}
+
+impl TemporalInstantDifferenceContinuation {
     pub(super) const fn retained_values() -> u64 {
         1
     }
@@ -1889,6 +1921,21 @@ fn continue_temporal_instant_like(
         } => Ok(NativeDispatch::Immediate(StoredValue::Boolean(
             receiver_epoch_nanoseconds == instant.as_i128(),
         ))),
+        TemporalInstantLikeTarget::Difference {
+            receiver,
+            options,
+            since,
+        } => begin_temporal_instant_difference(
+            runtime,
+            receiver,
+            instant,
+            options,
+            since,
+            realm,
+            return_to,
+            origin.clone(),
+            execution_budget,
+        ),
     }
 }
 
@@ -2048,6 +2095,23 @@ pub(super) fn dispatch_temporal_instant_prototype(
                 TemporalDurationLikeTarget::InstantArithmetic {
                     receiver: instant,
                     subtract: matches!(method, TemporalInstantPrototypeMethod::Subtract),
+                },
+                realm,
+                return_to,
+                origin.clone(),
+                execution_budget,
+            )
+        }
+        TemporalInstantPrototypeMethod::Until | TemporalInstantPrototypeMethod::Since => {
+            let other = arguments.take_first_or_undefined();
+            let options = arguments.take_first_or_undefined();
+            begin_temporal_instant_like(
+                runtime,
+                other,
+                TemporalInstantLikeTarget::Difference {
+                    receiver: instant,
+                    options,
+                    since: matches!(method, TemporalInstantPrototypeMethod::Since),
                 },
                 realm,
                 return_to,
@@ -2395,6 +2459,370 @@ fn complete_temporal_instant_round(
         }
     };
     allocate_temporal_instant_result(runtime, realm, rounded)
+}
+
+#[allow(
+    clippy::too_many_arguments,
+    reason = "the difference operand is converted before the options object is observed"
+)]
+fn begin_temporal_instant_difference(
+    runtime: &mut Runtime,
+    receiver: Instant,
+    other: Instant,
+    options: StoredValue,
+    since: bool,
+    realm: RealmId,
+    return_to: Option<CallReturn>,
+    origin: JsStackFrame,
+    execution_budget: &mut ExecutionBudget,
+) -> Result<NativeDispatch, NativeFailure> {
+    if matches!(options, StoredValue::Undefined) {
+        return complete_temporal_instant_difference(
+            runtime,
+            receiver,
+            other,
+            None,
+            RoundingIncrement::ONE,
+            RoundingMode::Trunc,
+            None,
+            since,
+            realm,
+            &origin,
+        );
+    }
+    if options.heap_reference().is_none() {
+        return temporal_type_error(
+            realm,
+            &origin,
+            "Temporal.Instant.prototype.until options must be an object",
+        );
+    }
+    begin_temporal_instant_difference_get(
+        runtime,
+        TemporalInstantDifferenceContinuation {
+            receiver,
+            other,
+            options,
+            largest_unit: None,
+            rounding_increment: RoundingIncrement::ONE,
+            rounding_mode: RoundingMode::Trunc,
+            since,
+            stage: TemporalInstantDifferenceStage::LargestUnit,
+            realm,
+            origin,
+        },
+        "largestUnit",
+        TemporalInstantDifferenceStage::LargestUnit,
+        return_to,
+        execution_budget,
+    )
+}
+
+#[allow(
+    clippy::too_many_arguments,
+    reason = "each observable difference option Get retains the complete native call context"
+)]
+fn begin_temporal_instant_difference_get(
+    runtime: &mut Runtime,
+    mut state: TemporalInstantDifferenceContinuation,
+    name: &str,
+    next_stage: TemporalInstantDifferenceStage,
+    return_to: Option<CallReturn>,
+    execution_budget: &mut ExecutionBudget,
+) -> Result<NativeDispatch, NativeFailure> {
+    state.stage = next_stage;
+    charge_heap_property_lookup(runtime, &state.options, execution_budget)?;
+    let name = JsString::from_utf8(name)?;
+    let key = runtime.property_key_from_string(&name)?;
+    let realm = state.realm;
+    let origin = state.origin.clone();
+    let dispatch = begin_value_get(
+        runtime,
+        &state.options,
+        key,
+        Some(&name),
+        realm,
+        return_to,
+        origin,
+        execution_budget,
+    )?;
+    match continue_get_state_after(
+        dispatch,
+        state,
+        temporal_instant_difference_continuation,
+        "Temporal.Instant difference option Get produced a structured result",
+    )? {
+        GetContinuationDispatch::Ready { state, value } => {
+            advance_temporal_instant_difference_options(
+                runtime,
+                state,
+                value,
+                return_to,
+                execution_budget,
+            )
+        }
+        GetContinuationDispatch::Suspended(dispatch) => Ok(dispatch),
+    }
+}
+
+fn temporal_instant_difference_continuation(
+    state: TemporalInstantDifferenceContinuation,
+) -> NativeContinuation {
+    NativeContinuation::TemporalInstantDifferenceOptions(Box::new(state))
+}
+
+#[allow(
+    clippy::too_many_arguments,
+    clippy::too_many_lines,
+    reason = "one ordered state table preserves the specification's observable difference option-read and coercion sequence across suspension"
+)]
+pub(super) fn advance_temporal_instant_difference_options(
+    runtime: &mut Runtime,
+    state: TemporalInstantDifferenceContinuation,
+    value: StoredValue,
+    return_to: Option<CallReturn>,
+    execution_budget: &mut ExecutionBudget,
+) -> Result<NativeDispatch, NativeFailure> {
+    match state.stage {
+        TemporalInstantDifferenceStage::LargestUnit => {
+            if matches!(value, StoredValue::Undefined) {
+                return begin_temporal_instant_difference_get(
+                    runtime,
+                    state,
+                    "roundingIncrement",
+                    TemporalInstantDifferenceStage::RoundingIncrement,
+                    return_to,
+                    execution_budget,
+                );
+            }
+            let realm = state.realm;
+            let origin = state.origin.clone();
+            begin_operator_primitive_conversion(
+                runtime,
+                value,
+                OperatorPrimitiveHint::String,
+                OperatorPrimitiveTarget::TemporalInstantDifferenceLargestUnit(Box::new(state)),
+                realm,
+                return_to,
+                origin,
+                execution_budget,
+            )
+        }
+        TemporalInstantDifferenceStage::RoundingIncrement => {
+            if matches!(value, StoredValue::Undefined) {
+                return begin_temporal_instant_difference_get(
+                    runtime,
+                    state,
+                    "roundingMode",
+                    TemporalInstantDifferenceStage::RoundingMode,
+                    return_to,
+                    execution_budget,
+                );
+            }
+            let realm = state.realm;
+            let origin = state.origin.clone();
+            begin_operator_primitive_conversion(
+                runtime,
+                value,
+                OperatorPrimitiveHint::Number,
+                OperatorPrimitiveTarget::TemporalInstantDifferenceRoundingIncrement(Box::new(
+                    state,
+                )),
+                realm,
+                return_to,
+                origin,
+                execution_budget,
+            )
+        }
+        TemporalInstantDifferenceStage::RoundingMode => {
+            if matches!(value, StoredValue::Undefined) {
+                return begin_temporal_instant_difference_get(
+                    runtime,
+                    state,
+                    "smallestUnit",
+                    TemporalInstantDifferenceStage::SmallestUnit,
+                    return_to,
+                    execution_budget,
+                );
+            }
+            let realm = state.realm;
+            let origin = state.origin.clone();
+            begin_operator_primitive_conversion(
+                runtime,
+                value,
+                OperatorPrimitiveHint::String,
+                OperatorPrimitiveTarget::TemporalInstantDifferenceRoundingMode(Box::new(state)),
+                realm,
+                return_to,
+                origin,
+                execution_budget,
+            )
+        }
+        TemporalInstantDifferenceStage::SmallestUnit => {
+            if matches!(value, StoredValue::Undefined) {
+                return complete_temporal_instant_difference(
+                    runtime,
+                    state.receiver,
+                    state.other,
+                    state.largest_unit,
+                    state.rounding_increment,
+                    state.rounding_mode,
+                    None,
+                    state.since,
+                    state.realm,
+                    &state.origin,
+                );
+            }
+            let realm = state.realm;
+            let origin = state.origin.clone();
+            begin_operator_primitive_conversion(
+                runtime,
+                value,
+                OperatorPrimitiveHint::String,
+                OperatorPrimitiveTarget::TemporalInstantDifferenceSmallestUnit(Box::new(state)),
+                realm,
+                return_to,
+                origin,
+                execution_budget,
+            )
+        }
+    }
+}
+
+#[allow(
+    clippy::too_many_arguments,
+    reason = "the post-coercion option continuation retains the native difference call context"
+)]
+pub(super) fn finish_temporal_instant_difference_largest_unit(
+    runtime: &mut Runtime,
+    mut state: TemporalInstantDifferenceContinuation,
+    value: StoredValue,
+    return_to: Option<CallReturn>,
+    execution_budget: &mut ExecutionBudget,
+) -> Result<NativeDispatch, NativeFailure> {
+    let source = operator_primitive_to_string(value, state.realm, &state.origin)?;
+    state.largest_unit = Some(temporal_round_unit(&source, state.realm, &state.origin)?);
+    begin_temporal_instant_difference_get(
+        runtime,
+        state,
+        "roundingIncrement",
+        TemporalInstantDifferenceStage::RoundingIncrement,
+        return_to,
+        execution_budget,
+    )
+}
+
+#[allow(
+    clippy::too_many_arguments,
+    reason = "the post-coercion option continuation retains the native difference call context"
+)]
+pub(super) fn finish_temporal_instant_difference_rounding_increment(
+    runtime: &mut Runtime,
+    mut state: TemporalInstantDifferenceContinuation,
+    value: StoredValue,
+    return_to: Option<CallReturn>,
+    execution_budget: &mut ExecutionBudget,
+) -> Result<NativeDispatch, NativeFailure> {
+    let value = operator_to_number(value, state.realm, &state.origin)?.as_f64();
+    state.rounding_increment = match RoundingIncrement::try_from(value) {
+        Ok(increment) => increment,
+        Err(error) => {
+            return Err(NativeFailure::Abrupt(temporal_exception_from_error(
+                state.realm,
+                &state.origin,
+                error,
+            )?));
+        }
+    };
+    begin_temporal_instant_difference_get(
+        runtime,
+        state,
+        "roundingMode",
+        TemporalInstantDifferenceStage::RoundingMode,
+        return_to,
+        execution_budget,
+    )
+}
+
+#[allow(
+    clippy::too_many_arguments,
+    reason = "the post-coercion option continuation retains the native difference call context"
+)]
+pub(super) fn finish_temporal_instant_difference_rounding_mode(
+    runtime: &mut Runtime,
+    mut state: TemporalInstantDifferenceContinuation,
+    value: StoredValue,
+    return_to: Option<CallReturn>,
+    execution_budget: &mut ExecutionBudget,
+) -> Result<NativeDispatch, NativeFailure> {
+    let source = operator_primitive_to_string(value, state.realm, &state.origin)?;
+    state.rounding_mode = temporal_rounding_mode(&source, state.realm, &state.origin)?;
+    begin_temporal_instant_difference_get(
+        runtime,
+        state,
+        "smallestUnit",
+        TemporalInstantDifferenceStage::SmallestUnit,
+        return_to,
+        execution_budget,
+    )
+}
+
+pub(super) fn finish_temporal_instant_difference_smallest_unit(
+    runtime: &mut Runtime,
+    state: &TemporalInstantDifferenceContinuation,
+    value: StoredValue,
+) -> Result<NativeDispatch, NativeFailure> {
+    let source = operator_primitive_to_string(value, state.realm, &state.origin)?;
+    let smallest_unit = temporal_round_unit(&source, state.realm, &state.origin)?;
+    complete_temporal_instant_difference(
+        runtime,
+        state.receiver,
+        state.other,
+        state.largest_unit,
+        state.rounding_increment,
+        state.rounding_mode,
+        Some(smallest_unit),
+        state.since,
+        state.realm,
+        &state.origin,
+    )
+}
+
+#[allow(
+    clippy::too_many_arguments,
+    reason = "the completed JavaScript options record is passed explicitly to the shared temporal kernel"
+)]
+fn complete_temporal_instant_difference(
+    runtime: &mut Runtime,
+    receiver: Instant,
+    other: Instant,
+    largest_unit: Option<Unit>,
+    rounding_increment: RoundingIncrement,
+    rounding_mode: RoundingMode,
+    smallest_unit: Option<Unit>,
+    since: bool,
+    realm: RealmId,
+    origin: &JsStackFrame,
+) -> Result<NativeDispatch, NativeFailure> {
+    let mut settings = DifferenceSettings::default();
+    settings.largest_unit = largest_unit;
+    settings.smallest_unit = smallest_unit;
+    settings.rounding_mode = Some(rounding_mode);
+    settings.increment = Some(rounding_increment);
+    let duration = if since {
+        receiver.since(&other, settings)
+    } else {
+        receiver.until(&other, settings)
+    };
+    let duration = match duration {
+        Ok(duration) => duration,
+        Err(error) => {
+            return Err(NativeFailure::Abrupt(temporal_exception_from_error(
+                realm, origin, error,
+            )?));
+        }
+    };
+    allocate_temporal_duration_result(runtime, realm, duration)
 }
 
 fn temporal_range_exception_from_error(

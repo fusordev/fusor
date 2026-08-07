@@ -752,6 +752,7 @@ enum NativeContinuation {
     TemporalDurationRoundOptions(Box<TemporalDurationRoundContinuation>),
     TemporalDurationTotalOptions(Box<TemporalDurationTotalContinuation>),
     TemporalInstantRoundOptions(Box<TemporalInstantRoundContinuation>),
+    TemporalInstantDifferenceOptions(Box<TemporalInstantDifferenceContinuation>),
     IntrinsicGet(IntrinsicGetContinuation),
     AggregateError(AggregateErrorContinuation),
     FromEntries(Box<FromEntriesContinuation>),
@@ -856,6 +857,9 @@ impl NativeContinuation {
             }
             Self::TemporalInstantRoundOptions(_) => {
                 TemporalInstantRoundContinuation::retained_values()
+            }
+            Self::TemporalInstantDifferenceOptions(_) => {
+                TemporalInstantDifferenceContinuation::retained_values()
             }
             Self::IntrinsicGet(state) => state.retained_values(),
             Self::AggregateError(state) => state.retained_values(),
@@ -1879,22 +1883,35 @@ impl InstanceOfContinuation {
 
 enum TemporalInstantLikeTarget {
     Allocate,
-    CompareFirst { second: StoredValue },
-    CompareSecond { first_epoch_nanoseconds: i128 },
-    Equals { receiver_epoch_nanoseconds: i128 },
+    CompareFirst {
+        second: StoredValue,
+    },
+    CompareSecond {
+        first_epoch_nanoseconds: i128,
+    },
+    Equals {
+        receiver_epoch_nanoseconds: i128,
+    },
+    Difference {
+        receiver: temporal_rs::Instant,
+        options: StoredValue,
+        since: bool,
+    },
 }
 
 impl TemporalInstantLikeTarget {
     const fn retained_values(&self) -> u64 {
         match self {
-            Self::CompareFirst { .. } => 1,
+            Self::CompareFirst { .. } | Self::Difference { .. } => 1,
             Self::Allocate | Self::CompareSecond { .. } | Self::Equals { .. } => 0,
         }
     }
 
     fn trace_roots(&self, mark: &mut dyn FnMut(CollectionRoot)) {
-        if let Self::CompareFirst { second } = self {
-            trace_stored_value_root(second, mark);
+        match self {
+            Self::CompareFirst { second } => trace_stored_value_root(second, mark),
+            Self::Difference { options, .. } => trace_stored_value_root(options, mark),
+            Self::Allocate | Self::CompareSecond { .. } | Self::Equals { .. } => {}
         }
     }
 }
@@ -1954,6 +1971,10 @@ enum OperatorPrimitiveTarget {
     TemporalInstantRoundRoundingIncrement(Box<TemporalInstantRoundContinuation>),
     TemporalInstantRoundRoundingMode(Box<TemporalInstantRoundContinuation>),
     TemporalInstantRoundSmallestUnit(Box<TemporalInstantRoundContinuation>),
+    TemporalInstantDifferenceLargestUnit(Box<TemporalInstantDifferenceContinuation>),
+    TemporalInstantDifferenceRoundingIncrement(Box<TemporalInstantDifferenceContinuation>),
+    TemporalInstantDifferenceRoundingMode(Box<TemporalInstantDifferenceContinuation>),
+    TemporalInstantDifferenceSmallestUnit(Box<TemporalInstantDifferenceContinuation>),
     NumberToString {
         number: JsNumber,
     },
@@ -2073,6 +2094,10 @@ enum OperatorPrimitiveTarget {
 }
 
 impl OperatorPrimitiveTarget {
+    #[allow(
+        clippy::too_many_lines,
+        reason = "each resumable primitive target owns an explicit retained-value contract"
+    )]
     fn retained_values(&self) -> u64 {
         match self {
             // A `BigInt` payload is not a frame value, so the BigInt targets
@@ -2131,6 +2156,12 @@ impl OperatorPrimitiveTarget {
             | Self::TemporalInstantRoundRoundingMode(_state)
             | Self::TemporalInstantRoundSmallestUnit(_state) => {
                 TemporalInstantRoundContinuation::retained_values()
+            }
+            Self::TemporalInstantDifferenceLargestUnit(_state)
+            | Self::TemporalInstantDifferenceRoundingIncrement(_state)
+            | Self::TemporalInstantDifferenceRoundingMode(_state)
+            | Self::TemporalInstantDifferenceSmallestUnit(_state) => {
+                TemporalInstantDifferenceContinuation::retained_values()
             }
             Self::DateSetter(state) => state.retained_values(),
             Self::DateToJson(_) => DateToJsonContinuation::retained_values(),
@@ -2384,6 +2415,12 @@ fn trace_operator_primitive_target_roots(
         | OperatorPrimitiveTarget::TemporalInstantRoundSmallestUnit(state) => {
             state.trace_roots(mark);
         }
+        OperatorPrimitiveTarget::TemporalInstantDifferenceLargestUnit(state)
+        | OperatorPrimitiveTarget::TemporalInstantDifferenceRoundingIncrement(state)
+        | OperatorPrimitiveTarget::TemporalInstantDifferenceRoundingMode(state)
+        | OperatorPrimitiveTarget::TemporalInstantDifferenceSmallestUnit(state) => {
+            state.trace_roots(mark);
+        }
         OperatorPrimitiveTarget::DateSetter(state) => state.trace_roots(mark),
         OperatorPrimitiveTarget::DateToJson(state) => state.trace_roots(mark),
         OperatorPrimitiveTarget::TemporalInstantString(state) => state.trace_roots(mark),
@@ -2563,6 +2600,7 @@ fn trace_native_continuation_roots(
         NativeContinuation::TemporalDurationRoundOptions(state) => state.trace_roots(mark),
         NativeContinuation::TemporalDurationTotalOptions(state) => state.trace_roots(mark),
         NativeContinuation::TemporalInstantRoundOptions(state) => state.trace_roots(mark),
+        NativeContinuation::TemporalInstantDifferenceOptions(state) => state.trace_roots(mark),
         NativeContinuation::IntrinsicGet(state) => match state {
             IntrinsicGetContinuation::BooleanConstructor { new_target, .. }
             | IntrinsicGetContinuation::NumberConstructor { new_target, .. }
