@@ -4484,8 +4484,16 @@ pub(super) fn dispatch_temporal_plain_date_time_prototype(
                 execution_budget,
             )
         }
-        TemporalPlainDateTimePrototypeMethod::ToString
-        | TemporalPlainDateTimePrototypeMethod::ToJson
+        TemporalPlainDateTimePrototypeMethod::ToString => begin_temporal_plain_date_time_to_string(
+            runtime,
+            date_time,
+            arguments.take_first_or_undefined(),
+            realm,
+            return_to,
+            origin.clone(),
+            execution_budget,
+        ),
+        TemporalPlainDateTimePrototypeMethod::ToJson
         | TemporalPlainDateTimePrototypeMethod::ToLocaleString => {
             render_temporal_plain_date_time(&date_time, realm, origin)
         }
@@ -5529,6 +5537,38 @@ pub(super) struct TemporalPlainDateTimeRoundContinuation {
 }
 
 impl TemporalPlainDateTimeRoundContinuation {
+    pub(super) const fn retained_values() -> u64 {
+        1
+    }
+
+    pub(super) fn trace_roots(&self, mark: &mut dyn FnMut(CollectionRoot)) {
+        trace_stored_value_root(&self.options, mark);
+    }
+}
+
+#[derive(Clone, Copy)]
+enum TemporalPlainDateTimeToStringStage {
+    CalendarName,
+    FractionalSecondDigits,
+    RoundingMode,
+    SmallestUnit,
+}
+
+/// Resumable options state for `Temporal.PlainDateTime.prototype.toString`.
+/// Every Get and primitive conversion may invoke JavaScript.
+pub(super) struct TemporalPlainDateTimeToStringContinuation {
+    date_time: PlainDateTime,
+    options: StoredValue,
+    display_calendar: DisplayCalendar,
+    precision: Precision,
+    rounding_mode: RoundingMode,
+    smallest_unit: Option<Unit>,
+    stage: TemporalPlainDateTimeToStringStage,
+    realm: RealmId,
+    origin: JsStackFrame,
+}
+
+impl TemporalPlainDateTimeToStringContinuation {
     pub(super) const fn retained_values() -> u64 {
         1
     }
@@ -9846,6 +9886,386 @@ fn complete_temporal_duration_to_string(
         rounding_mode: Some(rounding_mode),
     };
     let rendered = match duration.as_temporal_string(options) {
+        Ok(rendered) => rendered,
+        Err(error) => {
+            return Err(NativeFailure::Abrupt(temporal_exception_from_error(
+                realm, origin, error,
+            )?));
+        }
+    };
+    Ok(NativeDispatch::Immediate(StoredValue::String(
+        JsString::from_utf8(&rendered)?,
+    )))
+}
+
+#[allow(
+    clippy::too_many_arguments,
+    reason = "the ordered PlainDateTime formatting reader owns its resumable native call context"
+)]
+fn begin_temporal_plain_date_time_to_string(
+    runtime: &mut Runtime,
+    date_time: PlainDateTime,
+    options: StoredValue,
+    realm: RealmId,
+    return_to: Option<CallReturn>,
+    origin: JsStackFrame,
+    execution_budget: &mut ExecutionBudget,
+) -> Result<NativeDispatch, NativeFailure> {
+    if matches!(options, StoredValue::Undefined) {
+        return complete_temporal_plain_date_time_to_string(
+            &date_time,
+            DisplayCalendar::Auto,
+            Precision::Auto,
+            RoundingMode::Trunc,
+            None,
+            realm,
+            &origin,
+        );
+    }
+    if options.heap_reference().is_none() {
+        return temporal_type_error(
+            realm,
+            &origin,
+            "Temporal.PlainDateTime.prototype.toString options must be an object",
+        );
+    }
+    begin_temporal_plain_date_time_to_string_get(
+        runtime,
+        TemporalPlainDateTimeToStringContinuation {
+            date_time,
+            options,
+            display_calendar: DisplayCalendar::Auto,
+            precision: Precision::Auto,
+            rounding_mode: RoundingMode::Trunc,
+            smallest_unit: None,
+            stage: TemporalPlainDateTimeToStringStage::CalendarName,
+            realm,
+            origin,
+        },
+        "calendarName",
+        TemporalPlainDateTimeToStringStage::CalendarName,
+        return_to,
+        execution_budget,
+    )
+}
+
+#[allow(
+    clippy::too_many_arguments,
+    reason = "each observable PlainDateTime formatting option Get retains native call state"
+)]
+fn begin_temporal_plain_date_time_to_string_get(
+    runtime: &mut Runtime,
+    mut state: TemporalPlainDateTimeToStringContinuation,
+    name: &str,
+    next_stage: TemporalPlainDateTimeToStringStage,
+    return_to: Option<CallReturn>,
+    execution_budget: &mut ExecutionBudget,
+) -> Result<NativeDispatch, NativeFailure> {
+    state.stage = next_stage;
+    charge_heap_property_lookup(runtime, &state.options, execution_budget)?;
+    let name = JsString::from_utf8(name)?;
+    let key = runtime.property_key_from_string(&name)?;
+    let realm = state.realm;
+    let origin = state.origin.clone();
+    let dispatch = begin_value_get(
+        runtime,
+        &state.options,
+        key,
+        Some(&name),
+        realm,
+        return_to,
+        origin,
+        execution_budget,
+    )?;
+    match continue_get_state_after(
+        dispatch,
+        state,
+        temporal_plain_date_time_to_string_continuation,
+        "Temporal.PlainDateTime toString option Get produced a structured result",
+    )? {
+        GetContinuationDispatch::Ready { state, value } => {
+            advance_temporal_plain_date_time_to_string_options(
+                runtime,
+                state,
+                value,
+                return_to,
+                execution_budget,
+            )
+        }
+        GetContinuationDispatch::Suspended(dispatch) => Ok(dispatch),
+    }
+}
+
+fn temporal_plain_date_time_to_string_continuation(
+    state: TemporalPlainDateTimeToStringContinuation,
+) -> NativeContinuation {
+    NativeContinuation::TemporalPlainDateTimeToStringOptions(Box::new(state))
+}
+
+#[allow(
+    clippy::too_many_arguments,
+    clippy::too_many_lines,
+    reason = "one ordered state table preserves PlainDateTime formatting option reads and coercions"
+)]
+pub(super) fn advance_temporal_plain_date_time_to_string_options(
+    runtime: &mut Runtime,
+    mut state: TemporalPlainDateTimeToStringContinuation,
+    value: StoredValue,
+    return_to: Option<CallReturn>,
+    execution_budget: &mut ExecutionBudget,
+) -> Result<NativeDispatch, NativeFailure> {
+    match state.stage {
+        TemporalPlainDateTimeToStringStage::CalendarName => {
+            if matches!(value, StoredValue::Undefined) {
+                return begin_temporal_plain_date_time_to_string_get(
+                    runtime,
+                    state,
+                    "fractionalSecondDigits",
+                    TemporalPlainDateTimeToStringStage::FractionalSecondDigits,
+                    return_to,
+                    execution_budget,
+                );
+            }
+            let realm = state.realm;
+            let origin = state.origin.clone();
+            begin_operator_primitive_conversion(
+                runtime,
+                value,
+                OperatorPrimitiveHint::String,
+                OperatorPrimitiveTarget::TemporalPlainDateTimeToStringCalendarName(Box::new(state)),
+                realm,
+                return_to,
+                origin,
+                execution_budget,
+            )
+        }
+        TemporalPlainDateTimeToStringStage::FractionalSecondDigits => match value {
+            StoredValue::Undefined => begin_temporal_plain_date_time_to_string_get(
+                runtime,
+                state,
+                "roundingMode",
+                TemporalPlainDateTimeToStringStage::RoundingMode,
+                return_to,
+                execution_budget,
+            ),
+            StoredValue::Number(number) => {
+                state.precision =
+                    temporal_fractional_second_digits(number, state.realm, &state.origin)?;
+                begin_temporal_plain_date_time_to_string_get(
+                    runtime,
+                    state,
+                    "roundingMode",
+                    TemporalPlainDateTimeToStringStage::RoundingMode,
+                    return_to,
+                    execution_budget,
+                )
+            }
+            value => {
+                let realm = state.realm;
+                let origin = state.origin.clone();
+                begin_operator_primitive_conversion(
+                    runtime,
+                    value,
+                    OperatorPrimitiveHint::String,
+                    OperatorPrimitiveTarget::TemporalPlainDateTimeToStringFractionalSecondDigits(
+                        Box::new(state),
+                    ),
+                    realm,
+                    return_to,
+                    origin,
+                    execution_budget,
+                )
+            }
+        },
+        TemporalPlainDateTimeToStringStage::RoundingMode => {
+            if matches!(value, StoredValue::Undefined) {
+                return begin_temporal_plain_date_time_to_string_get(
+                    runtime,
+                    state,
+                    "smallestUnit",
+                    TemporalPlainDateTimeToStringStage::SmallestUnit,
+                    return_to,
+                    execution_budget,
+                );
+            }
+            let realm = state.realm;
+            let origin = state.origin.clone();
+            begin_operator_primitive_conversion(
+                runtime,
+                value,
+                OperatorPrimitiveHint::String,
+                OperatorPrimitiveTarget::TemporalPlainDateTimeToStringRoundingMode(Box::new(state)),
+                realm,
+                return_to,
+                origin,
+                execution_budget,
+            )
+        }
+        TemporalPlainDateTimeToStringStage::SmallestUnit => {
+            if matches!(value, StoredValue::Undefined) {
+                return complete_temporal_plain_date_time_to_string(
+                    &state.date_time,
+                    state.display_calendar,
+                    state.precision,
+                    state.rounding_mode,
+                    state.smallest_unit,
+                    state.realm,
+                    &state.origin,
+                );
+            }
+            let realm = state.realm;
+            let origin = state.origin.clone();
+            begin_operator_primitive_conversion(
+                runtime,
+                value,
+                OperatorPrimitiveHint::String,
+                OperatorPrimitiveTarget::TemporalPlainDateTimeToStringSmallestUnit(Box::new(state)),
+                realm,
+                return_to,
+                origin,
+                execution_budget,
+            )
+        }
+    }
+}
+
+#[allow(
+    clippy::too_many_arguments,
+    reason = "the post-coercion continuation retains the native formatting call context"
+)]
+pub(super) fn finish_temporal_plain_date_time_to_string_calendar_name(
+    runtime: &mut Runtime,
+    mut state: TemporalPlainDateTimeToStringContinuation,
+    value: StoredValue,
+    return_to: Option<CallReturn>,
+    execution_budget: &mut ExecutionBudget,
+) -> Result<NativeDispatch, NativeFailure> {
+    let source = operator_primitive_to_string(value, state.realm, &state.origin)?;
+    state.display_calendar = temporal_display_calendar(&source, state.realm, &state.origin)?;
+    begin_temporal_plain_date_time_to_string_get(
+        runtime,
+        state,
+        "fractionalSecondDigits",
+        TemporalPlainDateTimeToStringStage::FractionalSecondDigits,
+        return_to,
+        execution_budget,
+    )
+}
+
+#[allow(
+    clippy::too_many_arguments,
+    reason = "the post-coercion continuation retains the native formatting call context"
+)]
+pub(super) fn finish_temporal_plain_date_time_to_string_fractional_second_digits(
+    runtime: &mut Runtime,
+    mut state: TemporalPlainDateTimeToStringContinuation,
+    value: StoredValue,
+    return_to: Option<CallReturn>,
+    execution_budget: &mut ExecutionBudget,
+) -> Result<NativeDispatch, NativeFailure> {
+    let source = operator_primitive_to_string(value, state.realm, &state.origin)?;
+    if source.to_utf8_lossy()?.as_str() != "auto" {
+        return temporal_range_error(
+            state.realm,
+            &state.origin,
+            "fractionalSecondDigits must be a Number or the string auto",
+        );
+    }
+    state.precision = Precision::Auto;
+    begin_temporal_plain_date_time_to_string_get(
+        runtime,
+        state,
+        "roundingMode",
+        TemporalPlainDateTimeToStringStage::RoundingMode,
+        return_to,
+        execution_budget,
+    )
+}
+
+#[allow(
+    clippy::too_many_arguments,
+    reason = "the post-coercion continuation retains the native formatting call context"
+)]
+pub(super) fn finish_temporal_plain_date_time_to_string_rounding_mode(
+    runtime: &mut Runtime,
+    mut state: TemporalPlainDateTimeToStringContinuation,
+    value: StoredValue,
+    return_to: Option<CallReturn>,
+    execution_budget: &mut ExecutionBudget,
+) -> Result<NativeDispatch, NativeFailure> {
+    let source = operator_primitive_to_string(value, state.realm, &state.origin)?;
+    state.rounding_mode = temporal_rounding_mode(&source, state.realm, &state.origin)?;
+    begin_temporal_plain_date_time_to_string_get(
+        runtime,
+        state,
+        "smallestUnit",
+        TemporalPlainDateTimeToStringStage::SmallestUnit,
+        return_to,
+        execution_budget,
+    )
+}
+
+pub(super) fn finish_temporal_plain_date_time_to_string_smallest_unit(
+    state: &TemporalPlainDateTimeToStringContinuation,
+    value: StoredValue,
+) -> Result<NativeDispatch, NativeFailure> {
+    let source = operator_primitive_to_string(value, state.realm, &state.origin)?;
+    let smallest_unit = temporal_round_unit(&source, state.realm, &state.origin)?;
+    complete_temporal_plain_date_time_to_string(
+        &state.date_time,
+        state.display_calendar,
+        state.precision,
+        state.rounding_mode,
+        Some(smallest_unit),
+        state.realm,
+        &state.origin,
+    )
+}
+
+fn temporal_display_calendar(
+    source: &JsString,
+    realm: RealmId,
+    origin: &JsStackFrame,
+) -> Result<DisplayCalendar, NativeFailure> {
+    match source.to_utf8_lossy()?.parse::<DisplayCalendar>() {
+        Ok(display_calendar) => Ok(display_calendar),
+        Err(_) => Err(NativeFailure::Abrupt(temporal_pending_exception(
+            realm,
+            origin,
+            ExceptionKind::RangeError,
+            "invalid Temporal calendarName",
+        )?)),
+    }
+}
+
+fn complete_temporal_plain_date_time_to_string(
+    date_time: &PlainDateTime,
+    display_calendar: DisplayCalendar,
+    precision: Precision,
+    rounding_mode: RoundingMode,
+    smallest_unit: Option<Unit>,
+    realm: RealmId,
+    origin: &JsStackFrame,
+) -> Result<NativeDispatch, NativeFailure> {
+    match smallest_unit {
+        None
+        | Some(
+            Unit::Minute | Unit::Second | Unit::Millisecond | Unit::Microsecond | Unit::Nanosecond,
+        ) => {}
+        Some(Unit::Auto | Unit::Hour | Unit::Day | Unit::Week | Unit::Month | Unit::Year) => {
+            return temporal_range_error(
+                realm,
+                origin,
+                "smallestUnit must be minute, second, millisecond, microsecond, or nanosecond",
+            );
+        }
+    }
+    let options = ToStringRoundingOptions {
+        precision,
+        smallest_unit,
+        rounding_mode: Some(rounding_mode),
+    };
+    let rendered = match date_time.to_ixdtf_string(options, display_calendar) {
         Ok(rendered) => rendered,
         Err(error) => {
             return Err(NativeFailure::Abrupt(temporal_exception_from_error(

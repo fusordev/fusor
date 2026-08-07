@@ -176,6 +176,48 @@ fn plain_date_time_constructor_accessors_and_iso_formatting_are_spec_shaped() {
 }
 
 #[test]
+fn plain_date_time_to_string_formats_with_resumable_options() {
+    assert_eq!(
+        rendered(
+            "var dateTime=new Temporal.PlainDateTime(2020,12,24,12,34,56,987,654,321);
+             return [dateTime.toString({calendarName:'always'}),
+               dateTime.toString({fractionalSecondDigits:2}),
+               dateTime.toString({smallestUnit:'minute',fractionalSecondDigits:5}),
+               dateTime.toString({smallestUnit:'second',roundingMode:'ceil'}),
+               dateTime.toJSON()].join('|');"
+        ),
+        "2020-12-24T12:34:56.987654321[u-ca=iso8601]|2020-12-24T12:34:56.98|2020-12-24T12:34|2020-12-24T12:34:57|2020-12-24T12:34:56.987654321"
+    );
+    assert_eq!(
+        rendered(
+            "var log=[];
+             function string(name,value){return {toString:function(){log.push(name+' string');return value}}}
+             var options={
+               get calendarName(){log.push('calendarName');return string('calendarName','auto')},
+               get fractionalSecondDigits(){log.push('fractionalSecondDigits');return string('fractionalSecondDigits','auto')},
+               get roundingMode(){log.push('roundingMode');return string('roundingMode','halfExpand')},
+               get smallestUnit(){log.push('smallestUnit');return string('smallestUnit','millisecond')}
+             };
+             var result=new Temporal.PlainDateTime(2020,12,24,12,34,56,987,654,321).toString(options);
+             return [result,log.join(',')].join('|');"
+        ),
+        "2020-12-24T12:34:56.988|calendarName,calendarName string,fractionalSecondDigits,fractionalSecondDigits string,roundingMode,roundingMode string,smallestUnit,smallestUnit string"
+    );
+    assert_eq!(
+        thrown("return new Temporal.PlainDateTime(2020,1,1).toString({calendarName:'invalid'});"),
+        ExceptionKind::RangeError
+    );
+    assert_eq!(
+        thrown("return new Temporal.PlainDateTime(2020,1,1).toString({smallestUnit:'hour'});"),
+        ExceptionKind::RangeError
+    );
+    assert_eq!(
+        thrown("return new Temporal.PlainDateTime(2020,1,1).toString(1);"),
+        ExceptionKind::TypeError
+    );
+}
+
+#[test]
 fn plain_time_constructor_conversion_and_accessors_are_spec_shaped() {
     assert_eq!(
         rendered(

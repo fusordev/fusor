@@ -2342,6 +2342,36 @@ fn finish_operator_primitive_target(
         OperatorPrimitiveTarget::TemporalPlainTimeRoundSmallestUnit(state) => {
             finish_temporal_plain_time_round_smallest_unit(runtime, state.as_ref(), value)
         }
+        OperatorPrimitiveTarget::TemporalPlainDateTimeToStringCalendarName(state) => {
+            finish_temporal_plain_date_time_to_string_calendar_name(
+                runtime,
+                *state,
+                value,
+                return_to,
+                execution_budget,
+            )
+        }
+        OperatorPrimitiveTarget::TemporalPlainDateTimeToStringFractionalSecondDigits(state) => {
+            finish_temporal_plain_date_time_to_string_fractional_second_digits(
+                runtime,
+                *state,
+                value,
+                return_to,
+                execution_budget,
+            )
+        }
+        OperatorPrimitiveTarget::TemporalPlainDateTimeToStringRoundingMode(state) => {
+            finish_temporal_plain_date_time_to_string_rounding_mode(
+                runtime,
+                *state,
+                value,
+                return_to,
+                execution_budget,
+            )
+        }
+        OperatorPrimitiveTarget::TemporalPlainDateTimeToStringSmallestUnit(state) => {
+            finish_temporal_plain_date_time_to_string_smallest_unit(state.as_ref(), value)
+        }
         OperatorPrimitiveTarget::TemporalDurationBag(state) => {
             advance_temporal_duration_property_bag(
                 runtime,
