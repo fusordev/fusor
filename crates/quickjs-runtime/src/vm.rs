@@ -2001,6 +2001,8 @@ enum OperatorPrimitiveTarget {
     TypedArrayPrototypeIndexOfFromIndex(Box<TypedArrayPrototypeIndexOfState>),
     /// `%TypedArray%.prototype.lastIndexOf`'s optional relative start index.
     TypedArrayPrototypeLastIndexOfFromIndex(Box<TypedArrayPrototypeLastIndexOfState>),
+    /// `%TypedArray%.prototype.fill` across its value and range conversions.
+    TypedArrayPrototypeFill(Box<TypedArrayPrototypeFillState>),
     /// `DataView.prototype.get*` after `ToIndex(byteOffset)`.
     DataViewGetIndex(Box<DataViewGetState>),
     /// `DataView.prototype.set*` after `ToIndex(byteOffset)`.
@@ -2276,6 +2278,9 @@ impl OperatorPrimitiveTarget {
             }
             Self::TypedArrayPrototypeLastIndexOfFromIndex(_state) => {
                 TypedArrayPrototypeLastIndexOfState::retained_values()
+            }
+            Self::TypedArrayPrototypeFill(_state) => {
+                TypedArrayPrototypeFillState::retained_values()
             }
             Self::DataViewGetIndex(_) => DataViewGetState::retained_values(),
             Self::DataViewSetOffset(_) => DataViewSetOffsetState::retained_values(),
@@ -2634,6 +2639,7 @@ fn trace_operator_primitive_target_roots(
         OperatorPrimitiveTarget::TypedArrayPrototypeLastIndexOfFromIndex(state) => {
             state.trace_roots(mark);
         }
+        OperatorPrimitiveTarget::TypedArrayPrototypeFill(state) => state.trace_roots(mark),
         OperatorPrimitiveTarget::DataViewGetIndex(state) => state.trace_roots(mark),
         OperatorPrimitiveTarget::DataViewSetOffset(state) => state.trace_roots(mark),
         OperatorPrimitiveTarget::DataViewSetValue(state) => state.trace_roots(mark),

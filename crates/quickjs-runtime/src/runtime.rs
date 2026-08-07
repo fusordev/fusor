@@ -1788,11 +1788,12 @@ pub(crate) enum TypedArrayPrototypeMethod {
     Includes,
     IndexOf,
     LastIndexOf,
+    Fill,
     Reverse,
 }
 
 impl TypedArrayPrototypeMethod {
-    pub(crate) const ALL: [Self; 12] = [
+    pub(crate) const ALL: [Self; 13] = [
         Self::Buffer,
         Self::ByteLength,
         Self::ByteOffset,
@@ -1804,6 +1805,7 @@ impl TypedArrayPrototypeMethod {
         Self::Includes,
         Self::IndexOf,
         Self::LastIndexOf,
+        Self::Fill,
         Self::Reverse,
     ];
 
@@ -1821,6 +1823,7 @@ impl TypedArrayPrototypeMethod {
             Self::Includes => "includes",
             Self::IndexOf => "indexOf",
             Self::LastIndexOf => "lastIndexOf",
+            Self::Fill => "fill",
             Self::Reverse => "reverse",
         }
     }
@@ -1839,6 +1842,7 @@ impl TypedArrayPrototypeMethod {
             Self::Includes => "includes",
             Self::IndexOf => "indexOf",
             Self::LastIndexOf => "lastIndexOf",
+            Self::Fill => "fill",
             Self::Reverse => "reverse",
         }
     }
@@ -1853,6 +1857,7 @@ impl TypedArrayPrototypeMethod {
                 | Self::Includes
                 | Self::IndexOf
                 | Self::LastIndexOf
+                | Self::Fill
                 | Self::Reverse
         )
     }
@@ -1860,7 +1865,12 @@ impl TypedArrayPrototypeMethod {
     #[must_use]
     pub(crate) const fn arity(self) -> i32 {
         match self {
-            Self::Set | Self::At | Self::Includes | Self::IndexOf | Self::LastIndexOf => 1,
+            Self::Set
+            | Self::At
+            | Self::Includes
+            | Self::IndexOf
+            | Self::LastIndexOf
+            | Self::Fill => 1,
             Self::Subarray => 2,
             Self::Reverse
             | Self::Buffer

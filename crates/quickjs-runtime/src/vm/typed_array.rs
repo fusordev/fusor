@@ -218,6 +218,33 @@ pub(super) struct TypedArrayPrototypeLastIndexOfState {
     origin: JsStackFrame,
 }
 
+#[allow(
+    clippy::enum_variant_names,
+    reason = "each name identifies the observable conversion boundary being awaited"
+)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum TypedArrayPrototypeFillStage {
+    AwaitValue,
+    AwaitStart,
+    AwaitEnd,
+}
+
+/// Resumable `%TypedArray%.prototype.fill` across the value, start, and end
+/// conversions. The raw range operands remain rooted until their prescribed
+/// conversion turn, while the converted element value is reused for every
+/// store after the final resizable-view witness.
+pub(super) struct TypedArrayPrototypeFillState {
+    object: ObjectId,
+    length: usize,
+    value: StoredValue,
+    start: StoredValue,
+    end: StoredValue,
+    start_index: usize,
+    realm: RealmId,
+    stage: TypedArrayPrototypeFillStage,
+    origin: JsStackFrame,
+}
+
 impl TypedArrayConstructorLengthState {
     pub(super) const fn retained_values() -> u64 {
         1
@@ -363,6 +390,19 @@ impl TypedArrayPrototypeLastIndexOfState {
     pub(super) fn trace_roots(&self, mark: &mut dyn FnMut(CollectionRoot)) {
         mark(CollectionRoot::Heap(HeapReference::Object(self.object)));
         trace_stored_value_root(&self.needle, mark);
+    }
+}
+
+impl TypedArrayPrototypeFillState {
+    pub(super) const fn retained_values() -> u64 {
+        4
+    }
+
+    pub(super) fn trace_roots(&self, mark: &mut dyn FnMut(CollectionRoot)) {
+        mark(CollectionRoot::Heap(HeapReference::Object(self.object)));
+        trace_stored_value_root(&self.value, mark);
+        trace_stored_value_root(&self.start, mark);
+        trace_stored_value_root(&self.end, mark);
     }
 }
 
@@ -1473,6 +1513,7 @@ pub(super) fn dispatch_typed_array_prototype(
             | TypedArrayPrototypeMethod::Includes
             | TypedArrayPrototypeMethod::IndexOf
             | TypedArrayPrototypeMethod::LastIndexOf
+            | TypedArrayPrototypeMethod::Fill
             | TypedArrayPrototypeMethod::Reverse
     ) && !matches!(view, TypedArrayView::InBounds { .. })
     {
@@ -1571,6 +1612,19 @@ pub(super) fn dispatch_typed_array_prototype(
                 *object,
                 arguments.take_first_or_undefined(),
                 arguments.take_first(),
+                realm,
+                return_to,
+                origin,
+                execution_budget,
+            );
+        }
+        TypedArrayPrototypeMethod::Fill => {
+            return begin_typed_array_prototype_fill(
+                runtime,
+                *object,
+                arguments.take_first_or_undefined(),
+                arguments.take_first_or_undefined(),
+                arguments.take_first_or_undefined(),
                 realm,
                 return_to,
                 origin,
@@ -1883,6 +1937,169 @@ fn typed_array_last_index_of_start(relative: f64, length: usize) -> Option<usize
         return None;
     }
     Some(length - magnitude)
+}
+
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the native entry point preserves value, start, and end until their mandated conversion turns"
+)]
+fn begin_typed_array_prototype_fill(
+    runtime: &mut Runtime,
+    object: ObjectId,
+    value: StoredValue,
+    start: StoredValue,
+    end: StoredValue,
+    realm: RealmId,
+    return_to: Option<CallReturn>,
+    origin: JsStackFrame,
+    execution_budget: &mut ExecutionBudget,
+) -> Result<NativeDispatch, NativeFailure> {
+    let (_, length) = typed_array_require_in_bounds(runtime, object, realm, &origin)?;
+    begin_operator_primitive_conversion(
+        runtime,
+        value,
+        OperatorPrimitiveHint::Number,
+        OperatorPrimitiveTarget::TypedArrayPrototypeFill(Box::new(TypedArrayPrototypeFillState {
+            object,
+            length,
+            value: StoredValue::Undefined,
+            start,
+            end,
+            start_index: 0,
+            realm,
+            stage: TypedArrayPrototypeFillStage::AwaitValue,
+            origin: origin.clone(),
+        })),
+        realm,
+        return_to,
+        origin,
+        execution_budget,
+    )
+}
+
+#[allow(
+    clippy::needless_pass_by_value,
+    reason = "the primitive-conversion target transfers its owned continuation state"
+)]
+pub(super) fn finish_typed_array_prototype_fill(
+    runtime: &mut Runtime,
+    mut state: TypedArrayPrototypeFillState,
+    value: StoredValue,
+    return_to: Option<CallReturn>,
+    execution_budget: &mut ExecutionBudget,
+) -> Result<NativeDispatch, NativeFailure> {
+    match state.stage {
+        TypedArrayPrototypeFillStage::AwaitValue => {
+            let element = runtime
+                .typed_array_state(state.object)?
+                .copied()
+                .ok_or(EngineFault::RuntimeInvariant {
+                    message: "TypedArray.prototype.fill receiver lost its internal slots",
+                })?
+                .element();
+            state.value = if element.is_bigint() {
+                StoredValue::BigInt(to_bigint_from_primitive(
+                    &value,
+                    state.realm,
+                    &state.origin,
+                )?)
+            } else {
+                StoredValue::Number(operator_to_number(value, state.realm, &state.origin)?)
+            };
+            state.stage = TypedArrayPrototypeFillStage::AwaitStart;
+            let start = std::mem::replace(&mut state.start, StoredValue::Undefined);
+            let realm = state.realm;
+            let origin = state.origin.clone();
+            begin_operator_primitive_conversion(
+                runtime,
+                start,
+                OperatorPrimitiveHint::Number,
+                OperatorPrimitiveTarget::TypedArrayPrototypeFill(Box::new(state)),
+                realm,
+                return_to,
+                origin,
+                execution_budget,
+            )
+        }
+        TypedArrayPrototypeFillStage::AwaitStart => {
+            let relative = number_to_integer_or_infinity(operator_to_number(
+                value,
+                state.realm,
+                &state.origin,
+            )?);
+            state.start_index = typed_array_relative_bound(relative, state.length);
+            state.stage = TypedArrayPrototypeFillStage::AwaitEnd;
+            let end = std::mem::replace(&mut state.end, StoredValue::Undefined);
+            if matches!(end, StoredValue::Undefined) {
+                return typed_array_prototype_fill_stored(
+                    runtime,
+                    &state,
+                    state.length,
+                    execution_budget,
+                );
+            }
+            let realm = state.realm;
+            let origin = state.origin.clone();
+            begin_operator_primitive_conversion(
+                runtime,
+                end,
+                OperatorPrimitiveHint::Number,
+                OperatorPrimitiveTarget::TypedArrayPrototypeFill(Box::new(state)),
+                realm,
+                return_to,
+                origin,
+                execution_budget,
+            )
+        }
+        TypedArrayPrototypeFillStage::AwaitEnd => {
+            let relative = number_to_integer_or_infinity(operator_to_number(
+                value,
+                state.realm,
+                &state.origin,
+            )?);
+            let end_index = typed_array_relative_bound(relative, state.length);
+            typed_array_prototype_fill_stored(runtime, &state, end_index, execution_budget)
+        }
+    }
+}
+
+fn typed_array_prototype_fill_stored(
+    runtime: &mut Runtime,
+    state: &TypedArrayPrototypeFillState,
+    end_index: usize,
+    execution_budget: &mut ExecutionBudget,
+) -> Result<NativeDispatch, NativeFailure> {
+    let (target, final_length) =
+        typed_array_require_in_bounds(runtime, state.object, state.realm, &state.origin)?;
+    let end_index = end_index.min(final_length);
+    for index in state.start_index..end_index {
+        execution_budget.charge_instructions(1)?;
+        let outcome = match (&state.value, target.element().is_bigint()) {
+            (StoredValue::Number(value), false) => runtime.typed_array_store_index(
+                state.object,
+                index,
+                TypedArrayElementValue::Number(*value),
+            )?,
+            (StoredValue::BigInt(value), true) => runtime.typed_array_store_index(
+                state.object,
+                index,
+                TypedArrayElementValue::BigInt(value.as_ref()),
+            )?,
+            _ => {
+                return Err(EngineFault::RuntimeInvariant {
+                    message: "TypedArray.prototype.fill converted the wrong content type",
+                }
+                .into());
+            }
+        };
+        if outcome != TypedArrayStoreOutcome::Stored {
+            return Err(EngineFault::RuntimeInvariant {
+                message: "TypedArray.prototype.fill lost a validated destination element",
+            }
+            .into());
+        }
+    }
+    Ok(NativeDispatch::Immediate(StoredValue::Object(state.object)))
 }
 
 fn begin_typed_array_prototype_at(

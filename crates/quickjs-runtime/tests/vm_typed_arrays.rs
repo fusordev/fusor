@@ -352,6 +352,46 @@ fn typed_array_last_index_of_preserves_an_absent_from_index_and_uses_strict_equa
 }
 
 #[test]
+fn typed_array_fill_converts_value_before_range_and_revalidates_resizable_views() {
+    assert_eq!(
+        rendered(
+            "var values=new Uint8Array([1,2,3,4]),bigints=new BigInt64Array([1n,2n,3n]);\
+             var returned=values.fill(258,1,-1);bigints.fill(-2n,1);\
+             return [Uint8Array.prototype.fill.length,Uint8Array.prototype.fill.name,returned===values,\
+               values[0],values[1],values[2],values[3],String(bigints[0]),String(bigints[1]),String(bigints[2])].join('|');"
+        ),
+        "1|fill|true|1|2|2|4|1|-2|-2"
+    );
+    assert_eq!(
+        rendered(
+            "var log=[],value={valueOf(){log.push('value');return 9}},\
+             start={valueOf(){log.push('start');return 1}},end={valueOf(){log.push('end');return 2}};\
+             new Uint8Array(3).fill(value,start,end);return log.join('|');"
+        ),
+        "value|start|end"
+    );
+    assert_eq!(
+        rendered(
+            "var buffer=new ArrayBuffer(4,{maxByteLength:4}),values=new Uint8Array(buffer);\
+             values.fill({valueOf(){buffer.resize(2);return 7}},1,4);\
+             return [values.length,values[0],values[1]].join('|');"
+        ),
+        "2|0|7"
+    );
+    assert_eq!(
+        thrown(
+            "var buffer=new ArrayBuffer(4,{maxByteLength:4}),values=new Uint8Array(buffer,2,2);\
+             values.fill(7,{valueOf(){buffer.resize(1);return 0}});"
+        ),
+        ExceptionKind::TypeError
+    );
+    assert_eq!(
+        thrown("return new BigInt64Array(1).fill(1);"),
+        ExceptionKind::TypeError
+    );
+}
+
+#[test]
 fn typed_array_reverse_mutates_in_place_for_number_and_bigint_content() {
     assert_eq!(
         rendered(
