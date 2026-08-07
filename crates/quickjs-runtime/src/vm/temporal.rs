@@ -88,9 +88,14 @@ impl TemporalPlainDateLikeTarget {
     }
 }
 
-enum TemporalPlainDateFromTarget {
-    Date(PlainDate),
-    Partial(PartialDate),
+enum TemporalPlainDateOverflowTarget {
+    FromDate(PlainDate),
+    FromPartial(PartialDate),
+    Arithmetic {
+        receiver: PlainDate,
+        duration: Duration,
+        subtract: bool,
+    },
 }
 
 #[derive(Clone, Copy)]
@@ -102,7 +107,7 @@ enum TemporalPlainDateOptionsStage {
 
 /// Shared `GetOptionsObject` / overflow state for `Temporal.PlainDate.from`.
 pub(super) struct TemporalPlainDateOptionsContinuation {
-    target: TemporalPlainDateFromTarget,
+    target: TemporalPlainDateOverflowTarget,
     options: StoredValue,
     stage: TemporalPlainDateOptionsStage,
     realm: RealmId,
@@ -584,7 +589,7 @@ fn continue_temporal_plain_date_like(
     match target {
         TemporalPlainDateLikeTarget::From { options } => begin_temporal_plain_date_from_options(
             runtime,
-            TemporalPlainDateFromTarget::Date(date),
+            TemporalPlainDateOverflowTarget::FromDate(date),
             options,
             realm,
             return_to,
@@ -633,7 +638,7 @@ fn temporal_plain_date_from_string(
 )]
 fn begin_temporal_plain_date_from_options(
     runtime: &mut Runtime,
-    target: TemporalPlainDateFromTarget,
+    target: TemporalPlainDateOverflowTarget,
     options: StoredValue,
     realm: RealmId,
     return_to: Option<CallReturn>,
@@ -782,15 +787,34 @@ fn temporal_plain_date_options_continuation(
 
 fn finish_temporal_plain_date_from_options(
     runtime: &mut Runtime,
-    target: TemporalPlainDateFromTarget,
+    target: TemporalPlainDateOverflowTarget,
     overflow: Overflow,
     realm: RealmId,
     origin: &JsStackFrame,
 ) -> Result<NativeDispatch, NativeFailure> {
     let date = match target {
-        TemporalPlainDateFromTarget::Date(date) => date,
-        TemporalPlainDateFromTarget::Partial(partial) => {
+        TemporalPlainDateOverflowTarget::FromDate(date) => date,
+        TemporalPlainDateOverflowTarget::FromPartial(partial) => {
             match PlainDate::from_partial(partial, Some(overflow)) {
+                Ok(date) => date,
+                Err(error) => {
+                    return Err(NativeFailure::Abrupt(temporal_exception_from_error(
+                        realm, origin, error,
+                    )?));
+                }
+            }
+        }
+        TemporalPlainDateOverflowTarget::Arithmetic {
+            receiver,
+            duration,
+            subtract,
+        } => {
+            let result = if subtract {
+                receiver.subtract(&duration, Some(overflow))
+            } else {
+                receiver.add(&duration, Some(overflow))
+            };
+            match result {
                 Ok(date) => date,
                 Err(error) => {
                     return Err(NativeFailure::Abrupt(temporal_exception_from_error(
@@ -825,7 +849,7 @@ pub(super) fn advance_temporal_plain_date_property_bag(
                         TemporalPlainDateLikeTarget::From { options } => {
                             begin_temporal_plain_date_from_options(
                                 runtime,
-                                TemporalPlainDateFromTarget::Partial(partial),
+                                TemporalPlainDateOverflowTarget::FromPartial(partial),
                                 options,
                                 state.realm,
                                 return_to,
@@ -1130,6 +1154,23 @@ pub(super) fn dispatch_temporal_plain_date_prototype(
             Some(value) => number(i64::from(value)),
             None => NativeDispatch::Immediate(StoredValue::Undefined),
         }),
+        TemporalPlainDatePrototypeMethod::Add | TemporalPlainDatePrototypeMethod::Subtract => {
+            let duration = arguments.take_first_or_undefined();
+            let options = arguments.take_first_or_undefined();
+            begin_temporal_duration_like(
+                runtime,
+                duration,
+                TemporalDurationLikeTarget::PlainDateArithmetic {
+                    receiver: date,
+                    subtract: matches!(method, TemporalPlainDatePrototypeMethod::Subtract),
+                    options,
+                },
+                realm,
+                return_to,
+                origin.clone(),
+                execution_budget,
+            )
+        }
         TemporalPlainDatePrototypeMethod::Equals => begin_temporal_plain_date_equals(
             runtime,
             date,
@@ -1268,6 +1309,11 @@ enum TemporalDurationLikeTarget {
         receiver: Instant,
         subtract: bool,
     },
+    PlainDateArithmetic {
+        receiver: PlainDate,
+        subtract: bool,
+        options: StoredValue,
+    },
 }
 
 impl TemporalDurationLikeTarget {
@@ -1275,7 +1321,7 @@ impl TemporalDurationLikeTarget {
         match self {
             Self::Allocate | Self::Arithmetic { .. } | Self::InstantArithmetic { .. } => 0,
             Self::CompareFirst { .. } => 2,
-            Self::CompareSecond { .. } => 1,
+            Self::CompareSecond { .. } | Self::PlainDateArithmetic { .. } => 1,
         }
     }
 
@@ -1286,7 +1332,9 @@ impl TemporalDurationLikeTarget {
                 trace_stored_value_root(second, mark);
                 trace_stored_value_root(options, mark);
             }
-            Self::CompareSecond { options, .. } => trace_stored_value_root(options, mark),
+            Self::CompareSecond { options, .. } | Self::PlainDateArithmetic { options, .. } => {
+                trace_stored_value_root(options, mark);
+            }
         }
     }
 }
@@ -2861,6 +2909,23 @@ fn continue_temporal_duration_like(
             };
             allocate_temporal_instant_result(runtime, realm, result)
         }
+        TemporalDurationLikeTarget::PlainDateArithmetic {
+            receiver,
+            subtract,
+            options,
+        } => begin_temporal_plain_date_from_options(
+            runtime,
+            TemporalPlainDateOverflowTarget::Arithmetic {
+                receiver,
+                duration,
+                subtract,
+            },
+            options,
+            realm,
+            return_to,
+            origin.clone(),
+            execution_budget,
+        ),
     }
 }
 

@@ -234,6 +234,42 @@ fn plain_date_compare_reuses_resumable_property_bag_conversion_for_both_operands
 }
 
 #[test]
+fn plain_date_add_and_subtract_reuse_duration_bags_then_read_overflow() {
+    assert_eq!(
+        rendered(
+            "var log=[];
+             var duration={
+               get years(){log.push('years');return undefined},
+               get months(){log.push('months');return {valueOf:function(){log.push('months number');return 1}}},
+               get weeks(){log.push('weeks');return undefined},
+               get days(){log.push('days');return undefined},
+               get hours(){log.push('hours');return undefined},
+               get minutes(){log.push('minutes');return undefined},
+               get seconds(){log.push('seconds');return undefined},
+               get milliseconds(){log.push('milliseconds');return undefined},
+               get microseconds(){log.push('microseconds');return undefined},
+               get nanoseconds(){log.push('nanoseconds');return undefined}
+             };
+             var options={get overflow(){log.push('overflow');return {toString:function(){log.push('overflow string');return 'constrain'}}}};
+             var start=new Temporal.PlainDate(2020,1,31);
+             var added=start.add(duration,options);
+             var subtracted=added.subtract('P1M');
+             return [Temporal.PlainDate.prototype.add.length,Temporal.PlainDate.prototype.subtract.length,
+               added.toString(),subtracted.toString(),log.join(',')].join('|');"
+        ),
+        "1|1|2020-02-29|2020-01-29|days,hours,microseconds,milliseconds,minutes,months,months number,nanoseconds,seconds,weeks,years,overflow,overflow string"
+    );
+    assert_eq!(
+        thrown("return new Temporal.PlainDate(2021,1,31).add({months:1},{overflow:'reject'});"),
+        ExceptionKind::RangeError
+    );
+    assert_eq!(
+        thrown("return Temporal.PlainDate.prototype.add.call({}, {days:1});"),
+        ExceptionKind::TypeError
+    );
+}
+
+#[test]
 fn plain_date_rejects_unbranded_receivers_invalid_components_and_call_without_new() {
     assert_eq!(
         thrown("return Temporal.PlainDate(2020,1,1);"),
