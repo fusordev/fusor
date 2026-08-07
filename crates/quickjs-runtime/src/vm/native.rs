@@ -683,6 +683,15 @@ pub(super) fn resume_native_continuations(
                     execution_budget,
                 )?
             }
+            NativeContinuation::TemporalPlainTimeToStringOptions(state) => {
+                advance_temporal_plain_time_to_string_options(
+                    runtime,
+                    *state,
+                    value,
+                    return_to,
+                    execution_budget,
+                )?
+            }
             NativeContinuation::TemporalInstantRoundOptions(state) => {
                 advance_temporal_instant_round_options(
                     runtime,

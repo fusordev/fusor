@@ -4580,8 +4580,16 @@ pub(super) fn dispatch_temporal_plain_time_prototype(
             origin.clone(),
             execution_budget,
         ),
-        TemporalPlainTimePrototypeMethod::ToString
-        | TemporalPlainTimePrototypeMethod::ToJson
+        TemporalPlainTimePrototypeMethod::ToString => begin_temporal_plain_time_to_string(
+            runtime,
+            time,
+            arguments.take_first_or_undefined(),
+            realm,
+            return_to,
+            origin.clone(),
+            execution_budget,
+        ),
+        TemporalPlainTimePrototypeMethod::ToJson
         | TemporalPlainTimePrototypeMethod::ToLocaleString => {
             let text = match time.to_ixdtf_string(ToStringRoundingOptions::default()) {
                 Ok(text) => text,
@@ -5707,6 +5715,36 @@ pub(super) struct TemporalDurationToStringContinuation {
 }
 
 impl TemporalDurationToStringContinuation {
+    pub(super) const fn retained_values() -> u64 {
+        1
+    }
+
+    pub(super) fn trace_roots(&self, mark: &mut dyn FnMut(CollectionRoot)) {
+        trace_stored_value_root(&self.options, mark);
+    }
+}
+
+#[derive(Clone, Copy)]
+enum TemporalPlainTimeToStringStage {
+    FractionalSecondDigits,
+    RoundingMode,
+    SmallestUnit,
+}
+
+/// Resumable options state for `Temporal.PlainTime.prototype.toString`.
+/// Every Get and primitive conversion may invoke JavaScript.
+pub(super) struct TemporalPlainTimeToStringContinuation {
+    time: PlainTime,
+    options: StoredValue,
+    precision: Precision,
+    rounding_mode: RoundingMode,
+    smallest_unit: Option<Unit>,
+    stage: TemporalPlainTimeToStringStage,
+    realm: RealmId,
+    origin: JsStackFrame,
+}
+
+impl TemporalPlainTimeToStringContinuation {
     pub(super) const fn retained_values() -> u64 {
         1
     }
@@ -9808,6 +9846,317 @@ fn complete_temporal_duration_to_string(
         rounding_mode: Some(rounding_mode),
     };
     let rendered = match duration.as_temporal_string(options) {
+        Ok(rendered) => rendered,
+        Err(error) => {
+            return Err(NativeFailure::Abrupt(temporal_exception_from_error(
+                realm, origin, error,
+            )?));
+        }
+    };
+    Ok(NativeDispatch::Immediate(StoredValue::String(
+        JsString::from_utf8(&rendered)?,
+    )))
+}
+
+#[allow(
+    clippy::too_many_arguments,
+    reason = "the ordered PlainTime formatting reader owns its resumable native call context"
+)]
+fn begin_temporal_plain_time_to_string(
+    runtime: &mut Runtime,
+    time: PlainTime,
+    options: StoredValue,
+    realm: RealmId,
+    return_to: Option<CallReturn>,
+    origin: JsStackFrame,
+    execution_budget: &mut ExecutionBudget,
+) -> Result<NativeDispatch, NativeFailure> {
+    if matches!(options, StoredValue::Undefined) {
+        return complete_temporal_plain_time_to_string(
+            time,
+            Precision::Auto,
+            RoundingMode::Trunc,
+            None,
+            realm,
+            &origin,
+        );
+    }
+    if options.heap_reference().is_none() {
+        return temporal_type_error(
+            realm,
+            &origin,
+            "Temporal.PlainTime.prototype.toString options must be an object",
+        );
+    }
+    begin_temporal_plain_time_to_string_get(
+        runtime,
+        TemporalPlainTimeToStringContinuation {
+            time,
+            options,
+            precision: Precision::Auto,
+            rounding_mode: RoundingMode::Trunc,
+            smallest_unit: None,
+            stage: TemporalPlainTimeToStringStage::FractionalSecondDigits,
+            realm,
+            origin,
+        },
+        "fractionalSecondDigits",
+        TemporalPlainTimeToStringStage::FractionalSecondDigits,
+        return_to,
+        execution_budget,
+    )
+}
+
+#[allow(
+    clippy::too_many_arguments,
+    reason = "each observable PlainTime formatting option Get retains native call state"
+)]
+fn begin_temporal_plain_time_to_string_get(
+    runtime: &mut Runtime,
+    mut state: TemporalPlainTimeToStringContinuation,
+    name: &str,
+    next_stage: TemporalPlainTimeToStringStage,
+    return_to: Option<CallReturn>,
+    execution_budget: &mut ExecutionBudget,
+) -> Result<NativeDispatch, NativeFailure> {
+    state.stage = next_stage;
+    charge_heap_property_lookup(runtime, &state.options, execution_budget)?;
+    let name = JsString::from_utf8(name)?;
+    let key = runtime.property_key_from_string(&name)?;
+    let realm = state.realm;
+    let origin = state.origin.clone();
+    let dispatch = begin_value_get(
+        runtime,
+        &state.options,
+        key,
+        Some(&name),
+        realm,
+        return_to,
+        origin,
+        execution_budget,
+    )?;
+    match continue_get_state_after(
+        dispatch,
+        state,
+        temporal_plain_time_to_string_continuation,
+        "Temporal.PlainTime toString option Get produced a structured result",
+    )? {
+        GetContinuationDispatch::Ready { state, value } => {
+            advance_temporal_plain_time_to_string_options(
+                runtime,
+                state,
+                value,
+                return_to,
+                execution_budget,
+            )
+        }
+        GetContinuationDispatch::Suspended(dispatch) => Ok(dispatch),
+    }
+}
+
+fn temporal_plain_time_to_string_continuation(
+    state: TemporalPlainTimeToStringContinuation,
+) -> NativeContinuation {
+    NativeContinuation::TemporalPlainTimeToStringOptions(Box::new(state))
+}
+
+#[allow(
+    clippy::too_many_arguments,
+    reason = "one ordered state table preserves PlainTime formatting option reads and coercions"
+)]
+pub(super) fn advance_temporal_plain_time_to_string_options(
+    runtime: &mut Runtime,
+    mut state: TemporalPlainTimeToStringContinuation,
+    value: StoredValue,
+    return_to: Option<CallReturn>,
+    execution_budget: &mut ExecutionBudget,
+) -> Result<NativeDispatch, NativeFailure> {
+    match state.stage {
+        TemporalPlainTimeToStringStage::FractionalSecondDigits => match value {
+            StoredValue::Undefined => begin_temporal_plain_time_to_string_get(
+                runtime,
+                state,
+                "roundingMode",
+                TemporalPlainTimeToStringStage::RoundingMode,
+                return_to,
+                execution_budget,
+            ),
+            StoredValue::Number(number) => {
+                state.precision =
+                    temporal_fractional_second_digits(number, state.realm, &state.origin)?;
+                begin_temporal_plain_time_to_string_get(
+                    runtime,
+                    state,
+                    "roundingMode",
+                    TemporalPlainTimeToStringStage::RoundingMode,
+                    return_to,
+                    execution_budget,
+                )
+            }
+            value => {
+                let realm = state.realm;
+                let origin = state.origin.clone();
+                begin_operator_primitive_conversion(
+                    runtime,
+                    value,
+                    OperatorPrimitiveHint::String,
+                    OperatorPrimitiveTarget::TemporalPlainTimeToStringFractionalSecondDigits(
+                        Box::new(state),
+                    ),
+                    realm,
+                    return_to,
+                    origin,
+                    execution_budget,
+                )
+            }
+        },
+        TemporalPlainTimeToStringStage::RoundingMode => {
+            if matches!(value, StoredValue::Undefined) {
+                return begin_temporal_plain_time_to_string_get(
+                    runtime,
+                    state,
+                    "smallestUnit",
+                    TemporalPlainTimeToStringStage::SmallestUnit,
+                    return_to,
+                    execution_budget,
+                );
+            }
+            let realm = state.realm;
+            let origin = state.origin.clone();
+            begin_operator_primitive_conversion(
+                runtime,
+                value,
+                OperatorPrimitiveHint::String,
+                OperatorPrimitiveTarget::TemporalPlainTimeToStringRoundingMode(Box::new(state)),
+                realm,
+                return_to,
+                origin,
+                execution_budget,
+            )
+        }
+        TemporalPlainTimeToStringStage::SmallestUnit => {
+            if matches!(value, StoredValue::Undefined) {
+                return complete_temporal_plain_time_to_string(
+                    state.time,
+                    state.precision,
+                    state.rounding_mode,
+                    state.smallest_unit,
+                    state.realm,
+                    &state.origin,
+                );
+            }
+            let realm = state.realm;
+            let origin = state.origin.clone();
+            begin_operator_primitive_conversion(
+                runtime,
+                value,
+                OperatorPrimitiveHint::String,
+                OperatorPrimitiveTarget::TemporalPlainTimeToStringSmallestUnit(Box::new(state)),
+                realm,
+                return_to,
+                origin,
+                execution_budget,
+            )
+        }
+    }
+}
+
+#[allow(
+    clippy::too_many_arguments,
+    reason = "the post-coercion continuation retains the native formatting call context"
+)]
+pub(super) fn finish_temporal_plain_time_to_string_fractional_second_digits(
+    runtime: &mut Runtime,
+    mut state: TemporalPlainTimeToStringContinuation,
+    value: StoredValue,
+    return_to: Option<CallReturn>,
+    execution_budget: &mut ExecutionBudget,
+) -> Result<NativeDispatch, NativeFailure> {
+    let source = operator_primitive_to_string(value, state.realm, &state.origin)?;
+    if source.to_utf8_lossy()?.as_str() != "auto" {
+        return temporal_range_error(
+            state.realm,
+            &state.origin,
+            "fractionalSecondDigits must be a Number or the string auto",
+        );
+    }
+    state.precision = Precision::Auto;
+    begin_temporal_plain_time_to_string_get(
+        runtime,
+        state,
+        "roundingMode",
+        TemporalPlainTimeToStringStage::RoundingMode,
+        return_to,
+        execution_budget,
+    )
+}
+
+#[allow(
+    clippy::too_many_arguments,
+    reason = "the post-coercion continuation retains the native formatting call context"
+)]
+pub(super) fn finish_temporal_plain_time_to_string_rounding_mode(
+    runtime: &mut Runtime,
+    mut state: TemporalPlainTimeToStringContinuation,
+    value: StoredValue,
+    return_to: Option<CallReturn>,
+    execution_budget: &mut ExecutionBudget,
+) -> Result<NativeDispatch, NativeFailure> {
+    let source = operator_primitive_to_string(value, state.realm, &state.origin)?;
+    state.rounding_mode = temporal_rounding_mode(&source, state.realm, &state.origin)?;
+    begin_temporal_plain_time_to_string_get(
+        runtime,
+        state,
+        "smallestUnit",
+        TemporalPlainTimeToStringStage::SmallestUnit,
+        return_to,
+        execution_budget,
+    )
+}
+
+pub(super) fn finish_temporal_plain_time_to_string_smallest_unit(
+    state: &TemporalPlainTimeToStringContinuation,
+    value: StoredValue,
+) -> Result<NativeDispatch, NativeFailure> {
+    let source = operator_primitive_to_string(value, state.realm, &state.origin)?;
+    let smallest_unit = temporal_round_unit(&source, state.realm, &state.origin)?;
+    complete_temporal_plain_time_to_string(
+        state.time,
+        state.precision,
+        state.rounding_mode,
+        Some(smallest_unit),
+        state.realm,
+        &state.origin,
+    )
+}
+
+fn complete_temporal_plain_time_to_string(
+    time: PlainTime,
+    precision: Precision,
+    rounding_mode: RoundingMode,
+    smallest_unit: Option<Unit>,
+    realm: RealmId,
+    origin: &JsStackFrame,
+) -> Result<NativeDispatch, NativeFailure> {
+    match smallest_unit {
+        None
+        | Some(
+            Unit::Minute | Unit::Second | Unit::Millisecond | Unit::Microsecond | Unit::Nanosecond,
+        ) => {}
+        Some(Unit::Auto | Unit::Hour | Unit::Day | Unit::Week | Unit::Month | Unit::Year) => {
+            return temporal_range_error(
+                realm,
+                origin,
+                "smallestUnit must be minute, second, millisecond, microsecond, or nanosecond",
+            );
+        }
+    }
+    let options = ToStringRoundingOptions {
+        precision,
+        smallest_unit,
+        rounding_mode: Some(rounding_mode),
+    };
+    let rendered = match time.to_ixdtf_string(options) {
         Ok(rendered) => rendered,
         Err(error) => {
             return Err(NativeFailure::Abrupt(temporal_exception_from_error(

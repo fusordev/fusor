@@ -787,6 +787,7 @@ enum NativeContinuation {
     TemporalDurationRoundOptions(Box<TemporalDurationRoundContinuation>),
     TemporalDurationTotalOptions(Box<TemporalDurationTotalContinuation>),
     TemporalDurationToStringOptions(Box<TemporalDurationToStringContinuation>),
+    TemporalPlainTimeToStringOptions(Box<TemporalPlainTimeToStringContinuation>),
     TemporalInstantRoundOptions(Box<TemporalInstantRoundContinuation>),
     TemporalInstantDifferenceOptions(Box<TemporalInstantDifferenceContinuation>),
     TemporalInstantToStringOptions(Box<TemporalInstantToStringContinuation>),
@@ -940,6 +941,9 @@ impl NativeContinuation {
             }
             Self::TemporalDurationToStringOptions(_) => {
                 TemporalDurationToStringContinuation::retained_values()
+            }
+            Self::TemporalPlainTimeToStringOptions(_) => {
+                TemporalPlainTimeToStringContinuation::retained_values()
             }
             Self::TemporalInstantRoundOptions(_) => {
                 TemporalInstantRoundContinuation::retained_values()
@@ -2194,6 +2198,9 @@ enum OperatorPrimitiveTarget {
     TemporalDurationToStringFractionalSecondDigits(Box<TemporalDurationToStringContinuation>),
     TemporalDurationToStringRoundingMode(Box<TemporalDurationToStringContinuation>),
     TemporalDurationToStringSmallestUnit(Box<TemporalDurationToStringContinuation>),
+    TemporalPlainTimeToStringFractionalSecondDigits(Box<TemporalPlainTimeToStringContinuation>),
+    TemporalPlainTimeToStringRoundingMode(Box<TemporalPlainTimeToStringContinuation>),
+    TemporalPlainTimeToStringSmallestUnit(Box<TemporalPlainTimeToStringContinuation>),
     TemporalInstantRoundRoundingIncrement(Box<TemporalInstantRoundContinuation>),
     TemporalInstantRoundRoundingMode(Box<TemporalInstantRoundContinuation>),
     TemporalInstantRoundSmallestUnit(Box<TemporalInstantRoundContinuation>),
@@ -2504,6 +2511,11 @@ impl OperatorPrimitiveTarget {
             | Self::TemporalDurationToStringSmallestUnit(_state) => {
                 TemporalDurationToStringContinuation::retained_values()
             }
+            Self::TemporalPlainTimeToStringFractionalSecondDigits(_state)
+            | Self::TemporalPlainTimeToStringRoundingMode(_state)
+            | Self::TemporalPlainTimeToStringSmallestUnit(_state) => {
+                TemporalPlainTimeToStringContinuation::retained_values()
+            }
             Self::TemporalInstantRoundRoundingIncrement(_state)
             | Self::TemporalInstantRoundRoundingMode(_state)
             | Self::TemporalInstantRoundSmallestUnit(_state) => {
@@ -2812,6 +2824,11 @@ fn trace_operator_primitive_target_roots(
         | OperatorPrimitiveTarget::TemporalDurationToStringSmallestUnit(state) => {
             state.trace_roots(mark);
         }
+        OperatorPrimitiveTarget::TemporalPlainTimeToStringFractionalSecondDigits(state)
+        | OperatorPrimitiveTarget::TemporalPlainTimeToStringRoundingMode(state)
+        | OperatorPrimitiveTarget::TemporalPlainTimeToStringSmallestUnit(state) => {
+            state.trace_roots(mark);
+        }
         OperatorPrimitiveTarget::TemporalInstantRoundRoundingIncrement(state)
         | OperatorPrimitiveTarget::TemporalInstantRoundRoundingMode(state)
         | OperatorPrimitiveTarget::TemporalInstantRoundSmallestUnit(state) => {
@@ -3071,6 +3088,7 @@ fn trace_native_continuation_roots(
         NativeContinuation::TemporalDurationRoundOptions(state) => state.trace_roots(mark),
         NativeContinuation::TemporalDurationTotalOptions(state) => state.trace_roots(mark),
         NativeContinuation::TemporalDurationToStringOptions(state) => state.trace_roots(mark),
+        NativeContinuation::TemporalPlainTimeToStringOptions(state) => state.trace_roots(mark),
         NativeContinuation::TemporalInstantRoundOptions(state) => state.trace_roots(mark),
         NativeContinuation::TemporalInstantDifferenceOptions(state) => state.trace_roots(mark),
         NativeContinuation::TemporalInstantToStringOptions(state) => state.trace_roots(mark),

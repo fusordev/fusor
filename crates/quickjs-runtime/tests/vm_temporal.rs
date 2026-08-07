@@ -457,6 +457,42 @@ fn plain_time_round_uses_time_only_options_in_observable_order() {
 }
 
 #[test]
+fn plain_time_to_string_formats_with_resumable_options() {
+    assert_eq!(
+        rendered(
+            "var time=new Temporal.PlainTime(12,34,56,987,654,321);
+             return [time.toString({fractionalSecondDigits:2}),
+               time.toString({smallestUnit:'minute',fractionalSecondDigits:5}),
+               time.toString({smallestUnit:'second',roundingMode:'ceil'}),
+               time.toJSON()].join('|');"
+        ),
+        "12:34:56.98|12:34|12:34:57|12:34:56.987654321"
+    );
+    assert_eq!(
+        rendered(
+            "var log=[];
+             function string(name,value){return {toString:function(){log.push(name+' string');return value}}}
+             var options={
+               get fractionalSecondDigits(){log.push('fractionalSecondDigits');return string('fractionalSecondDigits','auto')},
+               get roundingMode(){log.push('roundingMode');return string('roundingMode','halfExpand')},
+               get smallestUnit(){log.push('smallestUnit');return string('smallestUnit','millisecond')}
+             };
+             var result=new Temporal.PlainTime(12,34,56,987,654,321).toString(options);
+             return [result,log.join(',')].join('|');"
+        ),
+        "12:34:56.988|fractionalSecondDigits,fractionalSecondDigits string,roundingMode,roundingMode string,smallestUnit,smallestUnit string"
+    );
+    assert_eq!(
+        thrown("return new Temporal.PlainTime().toString({smallestUnit:'hour'});"),
+        ExceptionKind::RangeError
+    );
+    assert_eq!(
+        thrown("return new Temporal.PlainTime().toString(1);"),
+        ExceptionKind::TypeError
+    );
+}
+
+#[test]
 fn plain_date_time_constructor_preserves_order_defaults_and_branding() {
     assert_eq!(
         rendered(
