@@ -179,6 +179,15 @@ pub(super) struct TypedArrayPrototypeSubarrayState {
     origin: JsStackFrame,
 }
 
+/// `%TypedArray%.prototype.at` after the initial validated length and before
+/// `ToIntegerOrInfinity(index)` has completed.
+pub(super) struct TypedArrayPrototypeAtState {
+    object: ObjectId,
+    length: usize,
+    realm: RealmId,
+    origin: JsStackFrame,
+}
+
 impl TypedArrayConstructorLengthState {
     pub(super) const fn retained_values() -> u64 {
         1
@@ -281,6 +290,16 @@ impl TypedArrayPrototypeSubarrayState {
         mark(CollectionRoot::Heap(HeapReference::Object(self.source)));
         mark(CollectionRoot::Heap(HeapReference::Object(self.buffer)));
         trace_stored_value_root(&self.end, mark);
+    }
+}
+
+impl TypedArrayPrototypeAtState {
+    pub(super) const fn retained_values() -> u64 {
+        1
+    }
+
+    pub(super) fn trace_roots(&self, mark: &mut dyn FnMut(CollectionRoot)) {
+        mark(CollectionRoot::Heap(HeapReference::Object(self.object)));
     }
 }
 
@@ -1384,7 +1403,9 @@ pub(super) fn dispatch_typed_array_prototype(
     let view = runtime.typed_array_view(*object)?;
     if matches!(
         method,
-        TypedArrayPrototypeMethod::Set | TypedArrayPrototypeMethod::Subarray
+        TypedArrayPrototypeMethod::Set
+            | TypedArrayPrototypeMethod::Subarray
+            | TypedArrayPrototypeMethod::At
     ) && !matches!(view, TypedArrayView::InBounds { .. })
     {
         return typed_array_type_error(realm, &origin, "TypedArray is out of bounds");
@@ -1441,8 +1462,67 @@ pub(super) fn dispatch_typed_array_prototype(
                 execution_budget,
             );
         }
+        TypedArrayPrototypeMethod::At => {
+            return begin_typed_array_prototype_at(
+                runtime,
+                *object,
+                arguments.take_first_or_undefined(),
+                realm,
+                return_to,
+                origin,
+                execution_budget,
+            );
+        }
     };
     Ok(NativeDispatch::Immediate(value))
+}
+
+fn begin_typed_array_prototype_at(
+    runtime: &mut Runtime,
+    object: ObjectId,
+    index: StoredValue,
+    realm: RealmId,
+    return_to: Option<CallReturn>,
+    origin: JsStackFrame,
+    execution_budget: &mut ExecutionBudget,
+) -> Result<NativeDispatch, NativeFailure> {
+    let (_, length) = typed_array_require_in_bounds(runtime, object, realm, &origin)?;
+    begin_operator_primitive_conversion(
+        runtime,
+        index,
+        OperatorPrimitiveHint::Number,
+        OperatorPrimitiveTarget::TypedArrayPrototypeAtIndex(Box::new(TypedArrayPrototypeAtState {
+            object,
+            length,
+            realm,
+            origin: origin.clone(),
+        })),
+        realm,
+        return_to,
+        origin,
+        execution_budget,
+    )
+}
+
+#[allow(
+    clippy::needless_pass_by_value,
+    reason = "the primitive-conversion target transfers its owned continuation state"
+)]
+pub(super) fn finish_typed_array_prototype_at_index(
+    runtime: &Runtime,
+    state: TypedArrayPrototypeAtState,
+    value: StoredValue,
+) -> Result<NativeDispatch, NativeFailure> {
+    let relative =
+        number_to_integer_or_infinity(operator_to_number(value, state.realm, &state.origin)?);
+    let Some(index) = typed_array_at_index(relative, state.length) else {
+        return Ok(NativeDispatch::Immediate(StoredValue::Undefined));
+    };
+    Ok(NativeDispatch::Immediate(
+        runtime
+            .typed_array_read_index(state.object, index)?
+            .unwrap_or(StoredValue::Undefined),
+    ))
 }
 
 #[expect(
@@ -1779,13 +1859,42 @@ fn typed_array_relative_bound(value: f64, length: usize) -> usize {
     usize::try_from(value).map_or(length, |value| value.min(length))
 }
 
+fn typed_array_at_index(relative: f64, length: usize) -> Option<usize> {
+    let length_number = typed_array_usize_f64(length);
+    if relative >= 0.0 {
+        if relative >= length_number {
+            return None;
+        }
+        #[expect(
+            clippy::cast_possible_truncation,
+            clippy::cast_sign_loss,
+            reason = "the finite non-negative index is strictly below the implementation-sized length"
+        )]
+        return Some(relative as usize);
+    }
+    if relative < -length_number {
+        return None;
+    }
+    #[expect(
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss,
+        reason = "the finite negative index has been bounded by the implementation-sized length"
+    )]
+    let magnitude = (-relative) as usize;
+    Some(length.saturating_sub(magnitude))
+}
+
 fn typed_array_usize_number(value: usize) -> StoredValue {
+    StoredValue::Number(JsNumber::from_f64(typed_array_usize_f64(value)))
+}
+
+fn typed_array_usize_f64(value: usize) -> f64 {
     #[expect(
         clippy::cast_precision_loss,
         reason = "TypedArray element lengths and byte offsets are bounded by ToIndex"
     )]
     let value = value as f64;
-    StoredValue::Number(JsNumber::from_f64(value))
+    value
 }
 
 #[expect(

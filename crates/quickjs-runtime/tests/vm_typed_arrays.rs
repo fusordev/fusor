@@ -265,3 +265,21 @@ fn typed_array_subarray_uses_relative_bounds_shared_storage_and_species() {
         ExceptionKind::RangeError
     );
 }
+
+#[test]
+fn typed_array_at_uses_the_initial_length_but_a_fresh_element_witness() {
+    assert_eq!(
+        rendered(
+            "var values=new Int16Array([3,4,5]);\
+             return [values.at(0),values.at(-1),values.at(3),values.at(-4)].join('|');"
+        ),
+        "3|5||"
+    );
+    assert_eq!(
+        rendered(
+            "var buffer=new ArrayBuffer(4,{maxByteLength:4}),values=new Uint8Array(buffer);\
+             values[1]=7;return String(values.at({valueOf(){buffer.resize(1);return 1}}));"
+        ),
+        "undefined"
+    );
+}
