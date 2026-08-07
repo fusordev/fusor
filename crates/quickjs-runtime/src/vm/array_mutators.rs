@@ -1373,8 +1373,20 @@ enum ArraySpliceStage {
     AwaitStart,
     /// Awaiting `ToIntegerOrInfinity` of the delete-count argument.
     AwaitDeleteCount,
+    /// Chooses the `ArraySpeciesCreate` result for the removed elements.
+    SelectSpecies,
+    /// Awaiting the source Array's `constructor` property.
+    AwaitConstructor,
+    /// Awaiting the source constructor's `@@species` property.
+    AwaitSpecies,
+    /// Awaiting a custom species construction.
+    AwaitSpeciesConstruct,
     /// Ready to extract the next removed element.
     NextExtract,
+    /// Sets the removed-elements result's final `length` with `Set`.
+    FinishRemoved,
+    /// Awaits a custom removed-elements `length` setter or Proxy trap.
+    AwaitRemovedLengthWrite,
     /// Awaiting `HasProperty` for the next removed element.
     AwaitExtractPresence,
     /// Awaiting an extracted element's read.
@@ -1415,8 +1427,8 @@ pub(crate) struct ArraySpliceContinuation {
     pending: Option<StoredValue>,
     /// Whether the current step's source was absent.
     pending_absent: bool,
-    /// The array of removed elements.
-    destination: ObjectId,
+    /// The `ArraySpeciesCreate` result holding removed elements.
+    destination: Option<StoredValue>,
     /// The next index to write in the destination.
     written: u64,
     /// The length to write back once the shift finishes.
@@ -1437,9 +1449,9 @@ impl ArraySpliceContinuation {
     /// Reports the traced roots this continuation retains.
     pub(crate) fn trace_roots(&self, mark: &mut dyn FnMut(CollectionRoot)) {
         trace_stored_value_root(&self.target, mark);
-        mark(CollectionRoot::Heap(HeapReference::Object(
-            self.destination,
-        )));
+        if let Some(destination) = &self.destination {
+            trace_stored_value_root(destination, mark);
+        }
         if let Some(pending) = &self.pending {
             trace_stored_value_root(pending, mark);
         }
@@ -1489,7 +1501,6 @@ pub(super) fn begin_array_splice(
             })?;
         collected.push(value);
     }
-    let destination = runtime.allocate_array(realm, Vec::new())?;
     let state = ArraySpliceContinuation {
         target: receiver,
         arguments: collected,
@@ -1501,7 +1512,7 @@ pub(super) fn begin_array_splice(
         next_move: 0,
         pending: None,
         pending_absent: false,
-        destination,
+        destination: None,
         written: 0,
         final_length: 0,
         planned: false,
@@ -1554,6 +1565,126 @@ pub(super) fn advance_array_splice(
                     execution_budget,
                 ));
             }
+            ArraySpliceStage::SelectSpecies => {
+                if !proxy_aware_is_array(
+                    runtime,
+                    state.target.duplicate(),
+                    state.realm,
+                    state.origin.clone(),
+                )? {
+                    allocate_splice_destination(runtime, &mut state)?;
+                    state.stage = ArraySpliceStage::NextExtract;
+                    continue;
+                }
+                let key = runtime.predefined_property_key(PredefinedAtom::Constructor);
+                charge_splice_lookup(runtime, &state.target, execution_budget)?;
+                state.stage = ArraySpliceStage::AwaitConstructor;
+                let dispatch = begin_value_get(
+                    runtime,
+                    &state.target,
+                    key,
+                    None,
+                    state.realm,
+                    return_to,
+                    state.origin.clone(),
+                    execution_budget,
+                )?;
+                await_get!(continue_get_state_after(
+                    dispatch,
+                    state,
+                    array_splice_continuation,
+                    "Array splice constructor Get produced a structured result",
+                ));
+            }
+            ArraySpliceStage::AwaitConstructor => {
+                let constructor = take_completion(&mut completion)?;
+                if let StoredValue::Function(function) = constructor
+                    && function_is_constructor(runtime, function)?
+                {
+                    let constructor_realm = runtime.function_realm(function)?;
+                    if constructor_realm != state.realm
+                        && function == runtime.realm_array_constructor(constructor_realm)?
+                    {
+                        allocate_splice_destination(runtime, &mut state)?;
+                        state.stage = ArraySpliceStage::NextExtract;
+                        continue;
+                    }
+                }
+                if matches!(
+                    constructor,
+                    StoredValue::Function(_) | StoredValue::Object(_)
+                ) {
+                    let key = runtime.predefined_symbol_property_key(PredefinedAtom::SymbolSpecies);
+                    charge_splice_lookup(runtime, &constructor, execution_budget)?;
+                    state.stage = ArraySpliceStage::AwaitSpecies;
+                    let dispatch = begin_value_get(
+                        runtime,
+                        &constructor,
+                        key,
+                        None,
+                        state.realm,
+                        return_to,
+                        state.origin.clone(),
+                        execution_budget,
+                    )?;
+                    await_get!(continue_get_state_after(
+                        dispatch,
+                        state,
+                        array_splice_continuation,
+                        "Array splice species Get produced a structured result",
+                    ));
+                } else if matches!(constructor, StoredValue::Undefined) {
+                    allocate_splice_destination(runtime, &mut state)?;
+                    state.stage = ArraySpliceStage::NextExtract;
+                } else {
+                    return Err(NativeFailure::Abrupt(splice_error(
+                        &state,
+                        ExceptionKind::TypeError,
+                        "not a constructor",
+                    )?));
+                }
+            }
+            ArraySpliceStage::AwaitSpecies => {
+                let species = take_completion(&mut completion)?;
+                if matches!(species, StoredValue::Undefined | StoredValue::Null) {
+                    allocate_splice_destination(runtime, &mut state)?;
+                    state.stage = ArraySpliceStage::NextExtract;
+                    continue;
+                }
+                let StoredValue::Function(constructor) = species else {
+                    return Err(NativeFailure::Abrupt(splice_error(
+                        &state,
+                        ExceptionKind::TypeError,
+                        "not a constructor",
+                    )?));
+                };
+                if !function_is_constructor(runtime, constructor)? {
+                    return Err(NativeFailure::Abrupt(splice_error(
+                        &state,
+                        ExceptionKind::TypeError,
+                        "not a constructor",
+                    )?));
+                }
+                state.stage = ArraySpliceStage::AwaitSpeciesConstruct;
+                let removed = state.removed;
+                return suspend_construct_splice(
+                    state,
+                    constructor,
+                    StoredValue::Number(JsNumber::from_f64(length_as_f64(removed))),
+                    return_to,
+                );
+            }
+            ArraySpliceStage::AwaitSpeciesConstruct => {
+                let destination = take_completion(&mut completion)?;
+                if destination.heap_reference().is_none() {
+                    return Err(EngineFault::RuntimeInvariant {
+                        message: "ArraySpeciesCreate constructor returned a primitive",
+                    }
+                    .into());
+                }
+                state.destination = Some(destination);
+                state.stage = ArraySpliceStage::NextExtract;
+            }
             ArraySpliceStage::AwaitLengthConversion => {
                 let value = take_completion(&mut completion)?;
                 if needs_conversion(&value) {
@@ -1603,7 +1734,7 @@ pub(super) fn advance_array_splice(
                         state.start = 0;
                         state.removed = 0;
                         plan_splice(&mut state)?;
-                        state.stage = ArraySpliceStage::NextExtract;
+                        state.stage = ArraySpliceStage::SelectSpecies;
                     }
                 }
             }
@@ -1614,7 +1745,7 @@ pub(super) fn advance_array_splice(
                     let available = state.length.saturating_sub(state.start);
                     state.removed = clamp_count(requested, available);
                     plan_splice(&mut state)?;
-                    state.stage = ArraySpliceStage::NextExtract;
+                    state.stage = ArraySpliceStage::SelectSpecies;
                     continue;
                 }
                 match state.arguments.get(1) {
@@ -1639,7 +1770,7 @@ pub(super) fn advance_array_splice(
                         // is why `[1,2,3].splice(1)` leaves `[1]`.
                         state.removed = state.length.saturating_sub(state.start);
                         plan_splice(&mut state)?;
-                        state.stage = ArraySpliceStage::NextExtract;
+                        state.stage = ArraySpliceStage::SelectSpecies;
                     }
                 }
             }
@@ -1648,8 +1779,7 @@ pub(super) fn advance_array_splice(
                 // getter cannot observe a half-shifted array.
                 if state.next_extract >= state.removed {
                     state.written = state.removed;
-                    finish_removed(runtime, &state)?;
-                    state.stage = ArraySpliceStage::NextStep;
+                    state.stage = ArraySpliceStage::FinishRemoved;
                     continue;
                 }
                 execution_budget.charge_instructions(1)?;
@@ -1698,21 +1828,114 @@ pub(super) fn advance_array_splice(
                 let value = take_completion(&mut completion)?;
                 let index = state.next_extract.saturating_sub(1);
                 let key = element_key(runtime, index)?;
-                match runtime.define_array_data_property(
-                    state.destination,
-                    key,
-                    PropertyLayout::data(true, true, true),
-                    value,
-                )? {
-                    ArrayDefineOutcome::Complete => {}
-                    ArrayDefineOutcome::ReadOnlyLength | ArrayDefineOutcome::NonExtensible => {
+                let destination =
+                    state
+                        .destination
+                        .as_ref()
+                        .ok_or(EngineFault::RuntimeInvariant {
+                            message: "Array splice lost its ArraySpeciesCreate result",
+                        })?;
+                match define_static_property(runtime, destination, key, value, execution_budget)? {
+                    PropertyWriteOutcome::Complete => {}
+                    PropertyWriteOutcome::Failed(failure) => {
+                        return Err(splice_failure(&state, failure));
+                    }
+                    PropertyWriteOutcome::Setter { .. } => {
                         return Err(EngineFault::RuntimeInvariant {
-                            message: "a freshly allocated splice result refused an element",
+                            message: "splice CreateDataPropertyOrThrow attempted to call a setter",
                         }
                         .into());
                     }
                 }
                 state.stage = ArraySpliceStage::NextExtract;
+            }
+            ArraySpliceStage::FinishRemoved => {
+                let destination = state
+                    .destination
+                    .as_ref()
+                    .ok_or(EngineFault::RuntimeInvariant {
+                        message: "Array splice lost its ArraySpeciesCreate result",
+                    })?
+                    .duplicate();
+                if let StoredValue::Object(destination_object) = &destination
+                    && runtime.array_length(*destination_object)?.is_some()
+                {
+                    let Ok(length) = u32::try_from(state.removed) else {
+                        return Err(NativeFailure::Abrupt(splice_error(
+                            &state,
+                            ExceptionKind::RangeError,
+                            "invalid array length",
+                        )?));
+                    };
+                    match runtime.set_array_length(*destination_object, length)? {
+                        ArrayLengthWriteOutcome::Complete
+                        | ArrayLengthWriteOutcome::BlockedByNonConfigurable { .. } => {
+                            state.stage = ArraySpliceStage::NextStep;
+                            continue;
+                        }
+                        ArrayLengthWriteOutcome::ReadOnly => {
+                            return Err(EngineFault::RuntimeInvariant {
+                                message: "a splice species result refused its length",
+                            }
+                            .into());
+                        }
+                    }
+                }
+                let key = runtime.predefined_property_key(PredefinedAtom::Length);
+                let value = StoredValue::Number(JsNumber::from_f64(length_as_f64(state.removed)));
+                charge_splice_lookup(runtime, &destination, execution_budget)?;
+                state.stage = ArraySpliceStage::AwaitRemovedLengthWrite;
+                if let Some(reference) = destination.heap_reference()
+                    && runtime.proxy_state(reference)?.is_some()
+                {
+                    let dispatch = begin_internal_set(
+                        runtime,
+                        reference,
+                        key,
+                        JsString::from_utf8("length")?,
+                        value,
+                        destination.duplicate(),
+                        true,
+                        false,
+                        state.realm,
+                        return_to,
+                        state.origin.clone(),
+                        execution_budget,
+                    )?;
+                    await_get!(continue_get_state_after(
+                        dispatch,
+                        state,
+                        array_splice_continuation,
+                        "Array splice result Proxy length write produced a structured result",
+                    ));
+                }
+                match write_static_property(
+                    runtime,
+                    state.realm,
+                    &destination,
+                    key,
+                    value,
+                    true,
+                    execution_budget,
+                )? {
+                    PropertyWriteOutcome::Complete => {
+                        state.stage = ArraySpliceStage::NextStep;
+                    }
+                    PropertyWriteOutcome::Setter {
+                        function,
+                        receiver,
+                        value,
+                    } => {
+                        return suspend_splice(state, function, receiver, Some(value), return_to);
+                    }
+                    PropertyWriteOutcome::Failed(failure) => {
+                        return Err(splice_failure(&state, failure));
+                    }
+                }
+            }
+            ArraySpliceStage::AwaitRemovedLengthWrite => {
+                let _ = take_completion(&mut completion)?;
+                state.stage = ArraySpliceStage::NextStep;
             }
             ArraySpliceStage::NextStep => {
                 let Some(step) = state.moves.get(state.next_move).copied() else {
@@ -1974,9 +2197,14 @@ pub(super) fn advance_array_splice(
                 }
             }
             ArraySpliceStage::Done => {
-                return Ok(NativeDispatch::Immediate(StoredValue::Object(
-                    state.destination,
-                )));
+                let destination =
+                    state
+                        .destination
+                        .as_ref()
+                        .ok_or(EngineFault::RuntimeInvariant {
+                            message: "Array splice completed without an ArraySpeciesCreate result",
+                        })?;
+                return Ok(NativeDispatch::Immediate(destination.duplicate()));
             }
         }
     }
@@ -2035,6 +2263,13 @@ fn plan_splice(state: &mut ArraySpliceContinuation) -> Result<(), NativeFailure>
         .length
         .saturating_sub(state.removed)
         .saturating_add(inserted);
+    if final_length > MAX_ARRAY_LENGTH {
+        return Err(NativeFailure::Abrupt(splice_error(
+            state,
+            ExceptionKind::TypeError,
+            "invalid array length",
+        )?));
+    }
     state.final_length = final_length;
 
     let tail_count = usize::try_from(tail_length).map_err(|_| EngineFault::RuntimeInvariant {
@@ -2047,16 +2282,19 @@ fn plan_splice(state: &mut ArraySpliceContinuation) -> Result<(), NativeFailure>
     let drop_count = usize::try_from(shrink).map_err(|_| EngineFault::RuntimeInvariant {
         message: "a splice shrink exceeded the addressable step plan",
     })?;
+    let planned_step_count = match inserted.cmp(&state.removed) {
+        std::cmp::Ordering::Greater => tail_count.saturating_add(insert_count),
+        std::cmp::Ordering::Less => tail_count
+            .saturating_add(drop_count)
+            .saturating_add(insert_count),
+        std::cmp::Ordering::Equal => insert_count,
+    };
     state
         .moves
-        .try_reserve_exact(
-            tail_count
-                .saturating_add(insert_count)
-                .saturating_add(drop_count),
-        )
+        .try_reserve_exact(planned_step_count)
         .map_err(|_| ExecutionError::AllocationFailed {
             resource: RuntimeResource::Frames,
-            additional: tail_count,
+            additional: planned_step_count,
         })?;
 
     if inserted > state.removed {
@@ -2094,22 +2332,23 @@ fn plan_splice(state: &mut ArraySpliceContinuation) -> Result<(), NativeFailure>
     Ok(())
 }
 
-/// Sets the removed-elements array's length.
-fn finish_removed(
+/// Allocates the ordinary `ArraySpeciesCreate` result for removed elements.
+fn allocate_splice_destination(
     runtime: &mut Runtime,
-    state: &ArraySpliceContinuation,
+    state: &mut ArraySpliceContinuation,
 ) -> Result<(), NativeFailure> {
-    let length = u32::try_from(state.removed).map_err(|_| EngineFault::RuntimeInvariant {
-        message: "a splice removed more elements than the array-index domain allows",
-    })?;
-    match runtime.set_array_length(state.destination, length)? {
-        ArrayLengthWriteOutcome::Complete
-        | ArrayLengthWriteOutcome::BlockedByNonConfigurable { .. } => Ok(()),
-        ArrayLengthWriteOutcome::ReadOnly => Err(EngineFault::RuntimeInvariant {
-            message: "a freshly allocated splice result refused its length",
-        }
-        .into()),
-    }
+    let Ok(length) = u32::try_from(state.removed) else {
+        return Err(NativeFailure::Abrupt(splice_error(
+            state,
+            ExceptionKind::RangeError,
+            "invalid array length",
+        )?));
+    };
+    let prototype = runtime.realm_array_prototype(state.realm)?;
+    let destination =
+        runtime.allocate_sparse_array_with_prototype(HeapReference::Object(prototype), length)?;
+    state.destination = Some(StoredValue::Object(destination));
+    Ok(())
 }
 
 /// Resolves `splice`'s relative start index.
@@ -2197,12 +2436,57 @@ fn suspend_splice(
     }))
 }
 
+/// Suspends into an `ArraySpeciesCreate` constructor that resumes this splice.
+fn suspend_construct_splice(
+    state: ArraySpliceContinuation,
+    constructor: FunctionId,
+    argument: StoredValue,
+    return_to: Option<CallReturn>,
+) -> Result<NativeDispatch, NativeFailure> {
+    let origin = state.origin.clone();
+    let mut continuations = Vec::new();
+    continuations
+        .try_reserve_exact(1)
+        .map_err(|_| ExecutionError::AllocationFailed {
+            resource: RuntimeResource::Frames,
+            additional: 1,
+        })?;
+    continuations.push(NativeContinuation::ArraySplice(Box::new(state)));
+    Ok(NativeDispatch::Call(NativeCall {
+        function: constructor,
+        receiver: StoredValue::Undefined,
+        arguments: CallArguments::from_values(vec![argument]),
+        return_to,
+        origin,
+        continuations,
+        pre_call: None,
+        new_target: Some(constructor),
+        native_caller: None,
+    }))
+}
+
 /// Builds the exception a failed property operation reports.
 fn splice_failure(state: &ArraySpliceContinuation, failure: PropertyFailure) -> NativeFailure {
     match property_exception_at(state.realm, state.origin.clone(), None, failure) {
         Ok(exception) => NativeFailure::Abrupt(exception),
         Err(error) => error.into(),
     }
+}
+
+/// Builds a direct `splice` exception at the current source location.
+fn splice_error(
+    state: &ArraySpliceContinuation,
+    kind: ExceptionKind,
+    message: &str,
+) -> Result<PendingException, ExecutionError> {
+    Ok(PendingException {
+        realm: state.realm,
+        payload: PendingExceptionPayload::EngineError {
+            kind,
+            message: JsString::from_utf8(message)?,
+        },
+        origin: state.origin.clone(),
+    })
 }
 
 /// Charges one property lookup, tolerating a primitive receiver.
