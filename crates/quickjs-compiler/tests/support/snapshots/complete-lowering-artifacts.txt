@@ -1,7 +1,7 @@
 tree representative
 root: ExecutableId(1)
 source: "function outer({seed = 1}, ...items) {let total = seed;const [head = 0, ...tail] = items;for (const value of tail) {try {if (value) { total += value; } else { continue; }} finally { total += 1; }}function inner(delta = head) { return total + delta; }return inner;}"
-function graph: root=FunctionTemplateId(0) depth=2 usage=FunctionGraphUsage { functions: 2, bytecode_bytes: 188, instructions: 100, constants: 1, atoms: 14, string_payload_bytes: 70, closure_variables: 2, closure_edge_evaluations: 2, transfer_evaluations: 100 }
+function graph: root=FunctionTemplateId(0) depth=2 usage=FunctionGraphUsage { functions: 2, bytecode_bytes: 188, instructions: 100, constants: 1, atoms: 14, string_payload_bytes: 70, closure_variables: 2, closure_edge_evaluations: 2, transfer_evaluations: 98 }
 execution requirements: [
     CoreValues,
     Numbers,
@@ -1134,7 +1134,7 @@ source instructions: [
         },
     },
 ]
-bytecode: [94, 0, 0, 94, 1, 0, 207, 111, 62, 0, 0, 0, 0, 17, 6, 169, 232, 3, 14, 180, 199, 14, 13, 1, 0, 200, 94, 4, 0, 94, 3, 0, 94, 2, 0, 94, 6, 0, 190, 0, 193, 6, 95, 0, 0, 201, 95, 1, 0, 123, 126, 0, 14, 17, 6, 169, 232, 3, 14, 179, 202, 38, 0, 0, 179, 126, 2, 232, 3, 234, 5, 78, 141, 234, 247, 14, 14, 193, 4, 130, 94, 5, 0, 95, 4, 0, 123, 94, 5, 0, 126, 0, 232, 4, 14, 234, 66, 193, 5, 107, 42, 0, 0, 0, 95, 5, 0, 232, 14, 95, 2, 0, 95, 5, 0, 155, 97, 2, 0, 14, 234, 11, 14, 6, 108, 23, 0, 0, 0, 14, 234, 212, 14, 6, 108, 13, 0, 0, 0, 14, 234, 17, 108, 5, 0, 0, 0, 48, 95, 2, 0, 180, 155, 97, 2, 0, 14, 109, 234, 1, 234, 182, 130, 192, 6, 40]
+bytecode: [94, 0, 0, 94, 1, 0, 207, 111, 62, 0, 0, 0, 0, 17, 6, 169, 232, 3, 14, 180, 199, 14, 13, 1, 0, 200, 94, 4, 0, 94, 3, 0, 94, 2, 0, 94, 6, 0, 190, 0, 193, 6, 95, 0, 0, 201, 95, 1, 0, 123, 126, 0, 14, 17, 6, 169, 232, 3, 14, 179, 202, 38, 0, 0, 179, 126, 2, 232, 3, 234, 5, 78, 141, 234, 247, 14, 14, 193, 4, 130, 94, 5, 0, 95, 4, 0, 123, 94, 5, 0, 126, 0, 232, 4, 14, 234, 66, 193, 5, 107, 42, 0, 0, 0, 95, 5, 0, 232, 14, 95, 2, 0, 95, 5, 0, 155, 97, 2, 0, 14, 234, 11, 14, 6, 108, 23, 0, 0, 0, 14, 234, 212, 14, 6, 108, 13, 0, 0, 0, 14, 234, 202, 108, 5, 0, 0, 0, 48, 95, 2, 0, 180, 155, 97, 2, 0, 14, 109, 234, 184, 234, 182, 130, 192, 6, 40]
 instructions: [
     VerifiedInstruction {
         decoded: DecodedInstruction {
@@ -2998,7 +2998,7 @@ instructions: [
             instruction: Instruction {
                 opcode: Goto8,
                 operands: Label8(
-                    17,
+                    -54,
                 ),
             },
             next_pc: BytecodePc(
@@ -3011,7 +3011,7 @@ instructions: [
         successors: VerifiedSuccessors(
             Jump(
                 InstructionIndex(
-                    82,
+                    49,
                 ),
             ),
         ),
@@ -3217,20 +3217,18 @@ instructions: [
             instruction: Instruction {
                 opcode: Goto8,
                 operands: Label8(
-                    1,
+                    -72,
                 ),
             },
             next_pc: BytecodePc(
                 160,
             ),
         },
-        entry_stack_depth: Some(
-            3,
-        ),
+        entry_stack_depth: None,
         successors: VerifiedSuccessors(
             Jump(
                 InstructionIndex(
-                    83,
+                    49,
                 ),
             ),
         ),
@@ -3250,9 +3248,7 @@ instructions: [
                 162,
             ),
         },
-        entry_stack_depth: Some(
-            3,
-        ),
+        entry_stack_depth: None,
         successors: VerifiedSuccessors(
             Jump(
                 InstructionIndex(
@@ -3332,7 +3328,7 @@ instructions: [
         ),
     },
 ]
-control-flow summary: max_stack=7 transfers=87 domains=FunctionIndexDomains { atom_pool_len: 9, constant_pool_len: 1, argument_count: 1, local_count: 7, closure_var_count: 0 } header=VerifiedFunctionHeader { flags: FunctionHeaderFlags(1601), mode: FunctionMode(0), kind: Normal, defined_argument_count: 1, variable_reference_count: 2 }
+control-flow summary: max_stack=7 transfers=85 domains=FunctionIndexDomains { atom_pool_len: 9, constant_pool_len: 1, argument_count: 1, local_count: 7, closure_var_count: 0 } header=VerifiedFunctionHeader { flags: FunctionHeaderFlags(1601), mode: FunctionMode(0), kind: Normal, defined_argument_count: 1, variable_reference_count: 2 }
 capture layout: Some(
     CompilerCaptureLayout {
         bindings: [
@@ -4369,7 +4365,7 @@ pc=0x00000084 opcode=drop operands=none stack={pops=1,pushes=0}
 pc=0x00000085 opcode=undefined operands=none stack={pops=0,pushes=1}
 pc=0x00000086 opcode=gosub operands=label(displacement=+13) stack={pops=0,pushes=0}
 pc=0x0000008b opcode=drop operands=none stack={pops=1,pushes=0}
-pc=0x0000008c opcode=goto8 operands=label8(displacement=+17) stack={pops=0,pushes=0}
+pc=0x0000008c opcode=goto8 operands=label8(displacement=-54) stack={pops=0,pushes=0}
 pc=0x0000008e opcode=gosub operands=label(displacement=+5) stack={pops=0,pushes=0}
 pc=0x00000093 opcode=throw operands=none stack={pops=1,pushes=0}
 pc=0x00000094 opcode=get_loc_check operands=loc(index=2) stack={pops=0,pushes=1}
@@ -4378,7 +4374,7 @@ pc=0x00000098 opcode=add operands=none stack={pops=2,pushes=1}
 pc=0x00000099 opcode=set_loc_check operands=loc(index=2) stack={pops=1,pushes=1}
 pc=0x0000009c opcode=drop operands=none stack={pops=1,pushes=0}
 pc=0x0000009d opcode=ret operands=none stack={pops=1,pushes=0}
-pc=0x0000009e opcode=goto8 operands=label8(displacement=+1) stack={pops=0,pushes=0}
+pc=0x0000009e opcode=goto8 operands=label8(displacement=-72) stack={pops=0,pushes=0}
 pc=0x000000a0 opcode=goto8 operands=label8(displacement=-74) stack={pops=0,pushes=0}
 pc=0x000000a2 opcode=iterator_close operands=none stack={pops=3,pushes=0}
 pc=0x000000a3 opcode=get_loc8 operands=loc8(index=6) stack={pops=0,pushes=1}

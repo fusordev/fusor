@@ -83,6 +83,14 @@ enum AssemblyItem {
     Branch { kind: BranchKind, label_index: u32 },
 }
 
+#[derive(Clone, Copy)]
+enum BranchTargetState {
+    Unknown,
+    Resolving,
+    Terminal(u32),
+    Cycle,
+}
+
 impl AssemblyItem {
     fn minimum_size(self) -> u8 {
         match self {
@@ -572,8 +580,9 @@ impl BytecodeAssembler {
     /// Rejects missing/invalid targets, configured instruction or relaxation
     /// limits, unrepresentable layout or displacement, configured byte
     /// limits, final encoding failures, and allocation failure.
-    pub fn finish(self) -> Result<AssembledBytecode, AssemblerError> {
+    pub fn finish(mut self) -> Result<AssembledBytecode, AssemblerError> {
         self.validate_bound_labels()?;
+        self.thread_redundant_goto_targets()?;
         let (widths, positions) = self.relaxed_layout()?;
         let encoded_bytes = *positions
             .last()
@@ -707,6 +716,106 @@ impl BytecodeAssembler {
             }
         }
         Ok(())
+    }
+
+    /// Canonicalizes ordinary branch destinations before branch relaxation.
+    ///
+    /// A label whose first instruction is an unconditional `goto` has no
+    /// observable effect of its own. Conditional and unconditional branches
+    /// may therefore target the final destination directly. This preserves
+    /// every planned instruction (and consequently compiler source mappings
+    /// and statement-stack anchors) while avoiding redundant VM transfers in
+    /// branch-only basic blocks. Exception-handler and finally-subroutine
+    /// entries deliberately retain their exact targets.
+    fn thread_redundant_goto_targets(&mut self) -> Result<(), AssemblerError> {
+        let label_count = self.label_bindings.len();
+        let requested = usize_to_u64(label_count);
+        let mut states = Vec::new();
+        states
+            .try_reserve_exact(label_count)
+            .map_err(|_| AssemblerError::AllocationFailed {
+                resource: "branch target state",
+                requested,
+            })?;
+        states.resize(label_count, BranchTargetState::Unknown);
+
+        let mut path = Vec::new();
+        path.try_reserve_exact(label_count)
+            .map_err(|_| AssemblerError::AllocationFailed {
+                resource: "branch target path",
+                requested,
+            })?;
+
+        for start in 0..label_count {
+            if !matches!(states[start], BranchTargetState::Unknown) {
+                continue;
+            }
+            let mut current = start;
+            loop {
+                match states[current] {
+                    BranchTargetState::Unknown => {
+                        states[current] = BranchTargetState::Resolving;
+                        path.push(current);
+                        let Some(next) = self.label_goto_target(current) else {
+                            let terminal = u32::try_from(current)
+                                .map_err(|_| AssemblerError::TooManyLabels)?;
+                            for label in path.drain(..) {
+                                states[label] = BranchTargetState::Terminal(terminal);
+                            }
+                            break;
+                        };
+                        current = next as usize;
+                    }
+                    BranchTargetState::Resolving | BranchTargetState::Cycle => {
+                        for label in path.drain(..) {
+                            states[label] = BranchTargetState::Cycle;
+                        }
+                        break;
+                    }
+                    BranchTargetState::Terminal(terminal) => {
+                        for label in path.drain(..) {
+                            states[label] = BranchTargetState::Terminal(terminal);
+                        }
+                        break;
+                    }
+                }
+            }
+        }
+
+        for instruction_index in 0..self.items.len() {
+            let AssemblyItem::Branch { kind, label_index } = self.items[instruction_index] else {
+                continue;
+            };
+            if !matches!(
+                kind,
+                BranchKind::IfFalse | BranchKind::IfTrue | BranchKind::Goto
+            ) {
+                continue;
+            }
+
+            let BranchTargetState::Terminal(target) = states[label_index as usize] else {
+                continue;
+            };
+            if target != label_index {
+                self.items[instruction_index] = AssemblyItem::Branch {
+                    kind,
+                    label_index: target,
+                };
+            }
+        }
+        Ok(())
+    }
+
+    fn label_goto_target(&self, label_index: usize) -> Option<u32> {
+        let position = self.label_bindings.get(label_index).copied().flatten()?;
+        let AssemblyItem::Branch {
+            kind: BranchKind::Goto,
+            label_index: target,
+        } = self.items.get(position)?
+        else {
+            return None;
+        };
+        Some(*target)
     }
 
     fn target_position(&self, label_index: u32) -> Result<usize, AssemblerError> {
