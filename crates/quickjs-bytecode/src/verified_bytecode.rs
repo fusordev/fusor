@@ -4873,8 +4873,13 @@ fn private_instance_method_name_pair(
     let child_metadata = usize::try_from(child.get())
         .ok()
         .and_then(|index| metadata.get(index))?;
-    (child_metadata.executable_kind == CompilerExecutableKind::OrdinaryMethod
-        && child_metadata.function_name.is_none())
+    (matches!(
+        child_metadata.executable_kind,
+        CompilerExecutableKind::OrdinaryMethod
+            | CompilerExecutableKind::GeneratorMethod
+            | CompilerExecutableKind::AsyncMethod
+            | CompilerExecutableKind::AsyncGeneratorMethod
+    ) && child_metadata.function_name.is_none())
     .then_some(*child)
 }
 
@@ -4959,8 +4964,13 @@ fn private_static_method_name_pair(
     let child_metadata = usize::try_from(child.get())
         .ok()
         .and_then(|index| metadata.get(index))?;
-    (child_metadata.executable_kind == CompilerExecutableKind::OrdinaryMethod
-        && child_metadata.function_name.is_none())
+    (matches!(
+        child_metadata.executable_kind,
+        CompilerExecutableKind::OrdinaryMethod
+            | CompilerExecutableKind::GeneratorMethod
+            | CompilerExecutableKind::AsyncMethod
+            | CompilerExecutableKind::AsyncGeneratorMethod
+    ) && child_metadata.function_name.is_none())
     .then_some(*child)
 }
 

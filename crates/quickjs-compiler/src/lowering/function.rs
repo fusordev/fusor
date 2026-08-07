@@ -179,9 +179,7 @@ impl CompilationContext<'_, '_, '_> {
                         MethodDefinitionKind::Method
                             | MethodDefinitionKind::Get
                             | MethodDefinitionKind::Set
-                    ) || method.value.generator
-                        || method.value.r#async
-                        || !method.decorators.is_empty()
+                    ) || !method.decorators.is_empty()
                     {
                         return unsupported(
                             UnsupportedLeafFeature::UnsupportedDeclaration,

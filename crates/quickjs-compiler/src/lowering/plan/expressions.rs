@@ -1041,8 +1041,6 @@ impl<'compiler, 'unit, 'arena, 'scope> ExpressionPlanner<'compiler, 'unit, 'aren
                     | MethodDefinitionKind::Get
                     | MethodDefinitionKind::Set
             ) || method.computed
-                || (method.kind == MethodDefinitionKind::Method
-                    && (method.value.generator || method.value.r#async))
             {
                 return unsupported(UnsupportedLeafFeature::UnsupportedDeclaration, method.span);
             }

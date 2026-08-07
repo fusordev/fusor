@@ -2604,9 +2604,7 @@ impl<'unit, 'arena, 'scope> Planner<'unit, 'arena, 'scope> {
                             MethodDefinitionKind::Method
                                 | MethodDefinitionKind::Get
                                 | MethodDefinitionKind::Set
-                        ) && !method.value.generator
-                            && !method.value.r#async
-                            && matches!(method.key, PropertyKey::PrivateIdentifier(_)) =>
+                        ) && matches!(method.key, PropertyKey::PrivateIdentifier(_)) =>
                     {
                         let PropertyKey::PrivateIdentifier(identifier) = &method.key else {
                             unreachable!("private method key was matched")
@@ -2697,9 +2695,7 @@ impl<'unit, 'arena, 'scope> Planner<'unit, 'arena, 'scope> {
                     MethodDefinitionKind::Method
                         | MethodDefinitionKind::Get
                         | MethodDefinitionKind::Set
-                ) || method.value.generator
-                    || method.value.r#async
-                {
+                ) {
                     continue;
                 }
                 let PropertyKey::PrivateIdentifier(identifier) = &method.key else {

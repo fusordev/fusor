@@ -164,6 +164,42 @@ fn private_instance_methods_keep_distinct_names_shared_closures_and_home_objects
 }
 
 #[test]
+fn private_async_and_generator_methods_keep_typed_method_templates() {
+    let tree = compile(
+        "function make(){class Box{*#values(){yield 1;}async #asyncValue(){return 2;}async *#asyncValues(){yield 3;}static *#staticValues(){yield 4;}}return Box;}",
+        "make",
+    );
+    let private_method_definitions = tree
+        .functions()
+        .iter()
+        .flat_map(|function| function.control_flow().instructions())
+        .filter(|instruction| {
+            matches!(
+                (
+                    instruction.decoded().instruction().opcode(),
+                    instruction.decoded().instruction().operands(),
+                ),
+                (
+                    FinalOpcode::DefinePrivateField,
+                    quickjs_bytecode::Operands::U8(1)
+                )
+            )
+        })
+        .count();
+
+    assert_eq!(private_method_definitions, 4);
+    assert!(tree.verified_bytecode().functions().any(|function| {
+        function.metadata().executable_kind() == CompilerExecutableKind::GeneratorMethod
+    }));
+    assert!(tree.verified_bytecode().functions().any(|function| {
+        function.metadata().executable_kind() == CompilerExecutableKind::AsyncMethod
+    }));
+    assert!(tree.verified_bytecode().functions().any(|function| {
+        function.metadata().executable_kind() == CompilerExecutableKind::AsyncGeneratorMethod
+    }));
+}
+
+#[test]
 fn a_base_class_without_a_constructor_uses_a_synthesized_typed_template() {
     let tree = compile(
         "function make(){class Box{static answer(){return 7;}}return Box;}",
