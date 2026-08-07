@@ -215,6 +215,7 @@ define_opcode_tables! {
         ScopeDeleteVar => ("scope_delete_var", 7, 0, 1, AtomU16),
         ScopeMakeRef => ("scope_make_ref", 11, 0, 2, AtomLabelU16),
         ScopeGetRef => ("scope_get_ref", 7, 0, 2, AtomU16),
+        ScopePutVarInit => ("scope_put_var_init", 7, 0, 2, AtomU16),
         ScopeGetVarCheckThis => ("scope_get_var_checkthis", 7, 0, 1, AtomU16),
         ScopeGetPrivateField => ("scope_get_private_field", 7, 1, 1, AtomU16),
         ScopeGetPrivateField2 => ("scope_get_private_field2", 7, 1, 2, AtomU16),

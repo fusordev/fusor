@@ -848,13 +848,14 @@ pub fn run_test262(options: &Test262Options) -> Result<bool, String> {
         write_report(path, &report)?;
     }
     println!(
-        "test262: revision={} files={} admitted-cases={} skipped-cases={} passed={} failed={}{}",
+        "test262: revision={} files={} admitted-cases={} skipped-cases={} passed={} failed={} pass-rate={}{}",
         PINNED_TEST262_REVISION,
         inventory.plans.len(),
         inventory.admitted_cases(),
         inventory.skipped_cases(),
         execution.passed,
         execution.failed,
+        test262_pass_rate(execution.passed, execution.failed),
         if options.inventory_only {
             " inventory-only"
         } else {
@@ -874,6 +875,19 @@ pub fn run_test262(options: &Test262Options) -> Result<bool, String> {
         );
     }
     Ok(options.inventory_only || execution.failed == 0)
+}
+
+fn test262_pass_rate(passed: usize, failed: usize) -> String {
+    let executed = passed.saturating_add(failed);
+    if executed == 0 {
+        return "n/a".to_owned();
+    }
+    let hundredths = ((passed as u128) * 10_000) / (executed as u128);
+    format!(
+        "{passed}/{executed} ({}.{:02}%)",
+        hundredths / 100,
+        hundredths % 100
+    )
 }
 
 fn execute_inventory(
@@ -1223,6 +1237,13 @@ mod tests {
                 instruction_fuel: 5_000,
             })
         );
+    }
+
+    #[test]
+    fn test262_pass_rate_is_stable_for_empty_partial_and_complete_runs() {
+        assert_eq!(test262_pass_rate(0, 0), "n/a");
+        assert_eq!(test262_pass_rate(1, 2), "1/3 (33.33%)");
+        assert_eq!(test262_pass_rate(100, 0), "100/100 (100.00%)");
     }
 
     #[test]

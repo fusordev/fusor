@@ -3317,7 +3317,10 @@ pub(super) fn execute_one(
                 }
                 .into());
             };
-            let Some(home_object) = runtime.bytecode_function(function_id).and_then(|f| f.home_object) else {
+            let Some(home_object) = runtime
+                .bytecode_function(function_id)
+                .and_then(|f| f.home_object)
+            else {
                 let realm = code(runtime, frame.code)?.realm;
                 let origin = instruction_location(runtime, frame, source_pc)?;
                 return Ok(Step::Abrupt(PendingException {
@@ -3329,8 +3332,12 @@ pub(super) fn execute_one(
                     origin,
                 }));
             };
-            let brand_key = PropertyKey::from_private_atom(runtime.predefined_atom(PredefinedAtom::PrivateBrand));
-            let Some(_brand_present) = runtime.private_own_data_property(home_object, &brand_key)? else {
+            let brand_key = PropertyKey::from_private_atom(
+                runtime.predefined_atom(PredefinedAtom::PrivateBrand),
+            );
+            let Some(_brand_present) =
+                runtime.private_own_data_property(home_object, &brand_key)?
+            else {
                 let realm = code(runtime, frame.code)?.realm;
                 let origin = instruction_location(runtime, frame, source_pc)?;
                 return Ok(Step::Abrupt(PendingException {
@@ -3354,7 +3361,9 @@ pub(super) fn execute_one(
                     origin,
                 }));
             };
-            let has_brand = runtime.private_own_data_property(reference, &brand_key)?.is_some();
+            let has_brand = runtime
+                .private_own_data_property(reference, &brand_key)?
+                .is_some();
             if !has_brand {
                 let realm = code(runtime, frame.code)?.realm;
                 let origin = instruction_location(runtime, frame, source_pc)?;
@@ -3383,8 +3392,13 @@ pub(super) fn execute_one(
                 push(frame, home_object);
                 return Ok(Step::Continue);
             };
-            let brand_key = PropertyKey::from_private_atom(runtime.predefined_atom(PredefinedAtom::PrivateBrand));
-            if runtime.private_own_data_property(home_ref, &brand_key)?.is_none() {
+            let brand_key = PropertyKey::from_private_atom(
+                runtime.predefined_atom(PredefinedAtom::PrivateBrand),
+            );
+            if runtime
+                .private_own_data_property(home_ref, &brand_key)?
+                .is_none()
+            {
                 runtime.append_data_property(
                     home_ref,
                     brand_key.clone(),
@@ -3392,7 +3406,10 @@ pub(super) fn execute_one(
                     StoredValue::Undefined,
                 )?;
             }
-            if runtime.private_own_data_property(obj_ref, &brand_key)?.is_some() {
+            if runtime
+                .private_own_data_property(obj_ref, &brand_key)?
+                .is_some()
+            {
                 let realm = code(runtime, frame.code)?.realm;
                 let origin = instruction_location(runtime, frame, source_pc)?;
                 return Ok(Step::Abrupt(PendingException {

@@ -6,11 +6,6 @@ on:
   schedule:
     - cron: "23 3 * * *"
   workflow_dispatch:
-    inputs:
-      full_test262:
-        description: Run the full configured Test262 suite instead of the PR smoke cohort
-        required: false
-        type: boolean
 
 permissions:
   contents: read
@@ -48,7 +43,7 @@ jobs:
   test262:
     name: Test262 (pinned baseline)
     runs-on: ubuntu-latest
-    timeout-minutes: 120
+    timeout-minutes: 360
     steps:
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
@@ -61,11 +56,7 @@ jobs:
           git -C "$test262_dir" checkout --detach 5c8206929d81b2d3d727ca6aac56c18358c8d790
           git -C "$test262_dir" apply --whitespace=nowarn "$GITHUB_WORKSPACE/tests/test262/upstream/test262.patch"
           echo "TEST262_PATH=$test262_dir" >> "$GITHUB_ENV"
-      - name: Run Test262 smoke cohort
-        if: github.event_name != 'schedule' && github.event.inputs.full_test262 != 'true'
-        run: cargo xtask test262 --suite "$TEST262_PATH" --filter language/literals --limit 50 --report target/test262/report.json
-      - name: Run configured full Test262 suite
-        if: github.event_name == 'schedule' || github.event.inputs.full_test262 == 'true'
+      - name: Run full configured Test262 suite
         run: cargo xtask test262 --suite "$TEST262_PATH" --report target/test262/report.json
       - name: Upload Test262 report
         if: always()

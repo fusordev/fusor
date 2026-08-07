@@ -51,7 +51,7 @@ Finish frontend/diagnostics and language/compiler/execution before broad Test262
 
 - [ ] Module linking/evaluation, cycles, resolver semantics, dynamic `import`, and top-level `await`. Parsing a Module is not execution.
 - [ ] Embedding API, ESM REPL, `qjs`, Rust-native `qjsc`, bytecode viewer, CDP adapter, and portable `std`/`os` modules.
-- [x] `cargo xtask test262` and GitHub Actions pin Test262 `5c8206929d81b2d3d727ca6aac56c18358c8d790`, apply the exact QuickJS baseline patch, run a bounded PR smoke cohort plus scheduled/manual full suite, and upload the deterministic JSON report.
+- [x] `cargo xtask test262` and GitHub Actions pin Test262 `5c8206929d81b2d3d727ca6aac56c18358c8d790`, apply the exact QuickJS baseline patch, run the full configured suite on every trigger, print its pass rate, and upload the deterministic JSON report.
 - [ ] After the preceding language/compiler/module gates close, run Test262 by feature cohort; investigate every admitted failure against ECMA-262 and QuickJS/Node; remove temporary skips; then run the full configured suite.
 - [ ] Establish startup/memory/interpreter/compile benchmarks and finish release, resource, cancellation, dependency, and public-API audits.
 
