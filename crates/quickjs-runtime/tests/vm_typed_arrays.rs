@@ -305,6 +305,27 @@ fn typed_array_includes_uses_same_value_zero_without_coercing_the_search_value()
 }
 
 #[test]
+fn typed_array_index_of_uses_strict_equality_with_fresh_element_witnesses() {
+    assert_eq!(
+        rendered(
+            "var floats=new Float32Array([NaN,-0,4]),bigints=new BigInt64Array([1n]);\
+             return [Uint8Array.prototype.indexOf.length,Uint8Array.prototype.indexOf.name,\
+               floats.indexOf(NaN),floats.indexOf(0),floats.indexOf(4,3),\
+               floats.indexOf(4,-1),bigints.indexOf(1n),bigints.indexOf(1),\
+               new Uint8Array(0).indexOf(0,{valueOf(){throw new Error('unexpected')}})].join('|');"
+        ),
+        "1|indexOf|-1|1|-1|2|0|-1|-1"
+    );
+    assert_eq!(
+        rendered(
+            "var buffer=new ArrayBuffer(4,{maxByteLength:4}),values=new Uint8Array(buffer);\
+             values[1]=7;return String(values.indexOf(7,{valueOf(){buffer.resize(1);return 0}}));"
+        ),
+        "-1"
+    );
+}
+
+#[test]
 fn typed_array_reverse_mutates_in_place_for_number_and_bigint_content() {
     assert_eq!(
         rendered(

@@ -1951,6 +1951,14 @@ fn finish_operator_primitive_target(
                 execution_budget,
             )
         }
+        OperatorPrimitiveTarget::TypedArrayPrototypeIndexOfFromIndex(state) => {
+            finish_typed_array_prototype_index_of_from_index(
+                runtime,
+                *state,
+                value,
+                execution_budget,
+            )
+        }
         OperatorPrimitiveTarget::DataViewGetIndex(state) => {
             finish_data_view_get_index(runtime, state.as_ref(), value)
         }

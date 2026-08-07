@@ -1997,6 +1997,8 @@ enum OperatorPrimitiveTarget {
     TypedArrayPrototypeAtIndex(Box<TypedArrayPrototypeAtState>),
     /// `%TypedArray%.prototype.includes`'s optional relative start index.
     TypedArrayPrototypeIncludesFromIndex(Box<TypedArrayPrototypeIncludesState>),
+    /// `%TypedArray%.prototype.indexOf`'s optional relative start index.
+    TypedArrayPrototypeIndexOfFromIndex(Box<TypedArrayPrototypeIndexOfState>),
     /// `DataView.prototype.get*` after `ToIndex(byteOffset)`.
     DataViewGetIndex(Box<DataViewGetState>),
     /// `DataView.prototype.set*` after `ToIndex(byteOffset)`.
@@ -2266,6 +2268,9 @@ impl OperatorPrimitiveTarget {
             }
             Self::TypedArrayPrototypeIncludesFromIndex(_state) => {
                 TypedArrayPrototypeIncludesState::retained_values()
+            }
+            Self::TypedArrayPrototypeIndexOfFromIndex(_state) => {
+                TypedArrayPrototypeIndexOfState::retained_values()
             }
             Self::DataViewGetIndex(_) => DataViewGetState::retained_values(),
             Self::DataViewSetOffset(_) => DataViewSetOffsetState::retained_values(),
@@ -2616,6 +2621,9 @@ fn trace_operator_primitive_target_roots(
         | OperatorPrimitiveTarget::TypedArrayPrototypeSubarrayEnd(state) => state.trace_roots(mark),
         OperatorPrimitiveTarget::TypedArrayPrototypeAtIndex(state) => state.trace_roots(mark),
         OperatorPrimitiveTarget::TypedArrayPrototypeIncludesFromIndex(state) => {
+            state.trace_roots(mark);
+        }
+        OperatorPrimitiveTarget::TypedArrayPrototypeIndexOfFromIndex(state) => {
             state.trace_roots(mark);
         }
         OperatorPrimitiveTarget::DataViewGetIndex(state) => state.trace_roots(mark),

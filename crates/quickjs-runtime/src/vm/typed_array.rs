@@ -198,6 +198,16 @@ pub(super) struct TypedArrayPrototypeIncludesState {
     origin: JsStackFrame,
 }
 
+/// `%TypedArray%.prototype.indexOf` after its validated internal length and
+/// before `ToIntegerOrInfinity(fromIndex)` has completed.
+pub(super) struct TypedArrayPrototypeIndexOfState {
+    object: ObjectId,
+    length: usize,
+    needle: StoredValue,
+    realm: RealmId,
+    origin: JsStackFrame,
+}
+
 impl TypedArrayConstructorLengthState {
     pub(super) const fn retained_values() -> u64 {
         1
@@ -314,6 +324,17 @@ impl TypedArrayPrototypeAtState {
 }
 
 impl TypedArrayPrototypeIncludesState {
+    pub(super) const fn retained_values() -> u64 {
+        2
+    }
+
+    pub(super) fn trace_roots(&self, mark: &mut dyn FnMut(CollectionRoot)) {
+        mark(CollectionRoot::Heap(HeapReference::Object(self.object)));
+        trace_stored_value_root(&self.needle, mark);
+    }
+}
+
+impl TypedArrayPrototypeIndexOfState {
     pub(super) const fn retained_values() -> u64 {
         2
     }
@@ -1429,6 +1450,7 @@ pub(super) fn dispatch_typed_array_prototype(
             | TypedArrayPrototypeMethod::Subarray
             | TypedArrayPrototypeMethod::At
             | TypedArrayPrototypeMethod::Includes
+            | TypedArrayPrototypeMethod::IndexOf
             | TypedArrayPrototypeMethod::Reverse
     ) && !matches!(view, TypedArrayView::InBounds { .. })
     {
@@ -1499,6 +1521,18 @@ pub(super) fn dispatch_typed_array_prototype(
         }
         TypedArrayPrototypeMethod::Includes => {
             return begin_typed_array_prototype_includes(
+                runtime,
+                *object,
+                arguments.take_first_or_undefined(),
+                arguments.take_first_or_undefined(),
+                realm,
+                return_to,
+                origin,
+                execution_budget,
+            );
+        }
+        TypedArrayPrototypeMethod::IndexOf => {
+            return begin_typed_array_prototype_index_of(
                 runtime,
                 *object,
                 arguments.take_first_or_undefined(),
@@ -1643,6 +1677,73 @@ pub(super) fn finish_typed_array_prototype_includes_from_index(
         }
     }
     Ok(NativeDispatch::Immediate(StoredValue::Boolean(false)))
+}
+
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the native entry point preserves the uncoerced search value and fromIndex across conversion"
+)]
+fn begin_typed_array_prototype_index_of(
+    runtime: &mut Runtime,
+    object: ObjectId,
+    needle: StoredValue,
+    from_index: StoredValue,
+    realm: RealmId,
+    return_to: Option<CallReturn>,
+    origin: JsStackFrame,
+    execution_budget: &mut ExecutionBudget,
+) -> Result<NativeDispatch, NativeFailure> {
+    let (_, length) = typed_array_require_in_bounds(runtime, object, realm, &origin)?;
+    if length == 0 {
+        return Ok(NativeDispatch::Immediate(StoredValue::Number(
+            JsNumber::from_i32(-1),
+        )));
+    }
+    begin_operator_primitive_conversion(
+        runtime,
+        from_index,
+        OperatorPrimitiveHint::Number,
+        OperatorPrimitiveTarget::TypedArrayPrototypeIndexOfFromIndex(Box::new(
+            TypedArrayPrototypeIndexOfState {
+                object,
+                length,
+                needle,
+                realm,
+                origin: origin.clone(),
+            },
+        )),
+        realm,
+        return_to,
+        origin,
+        execution_budget,
+    )
+}
+
+#[allow(
+    clippy::needless_pass_by_value,
+    reason = "the primitive-conversion target transfers its owned continuation state"
+)]
+pub(super) fn finish_typed_array_prototype_index_of_from_index(
+    runtime: &mut Runtime,
+    state: TypedArrayPrototypeIndexOfState,
+    value: StoredValue,
+    execution_budget: &mut ExecutionBudget,
+) -> Result<NativeDispatch, NativeFailure> {
+    let relative =
+        number_to_integer_or_infinity(operator_to_number(value, state.realm, &state.origin)?);
+    let start = typed_array_relative_bound(relative, state.length);
+    for index in start..state.length {
+        execution_budget.charge_instructions(1)?;
+        if runtime
+            .typed_array_read_index(state.object, index)?
+            .is_some_and(|element| state.needle.strict_equals(&element))
+        {
+            return Ok(NativeDispatch::Immediate(typed_array_usize_number(index)));
+        }
+    }
+    Ok(NativeDispatch::Immediate(StoredValue::Number(
+        JsNumber::from_i32(-1),
+    )))
 }
 
 fn begin_typed_array_prototype_at(
