@@ -490,6 +490,40 @@ fn zoned_date_time_transition_accepts_string_and_resumable_options_forms() {
 }
 
 #[test]
+fn zoned_date_time_with_plain_time_uses_shared_temporal_time_conversion() {
+    assert_eq!(
+        rendered(
+            "var log=[],fields={};
+             function field(name,value){Object.defineProperty(fields,name,{get:function(){
+               log.push('get '+name);return {valueOf:function(){log.push('number '+name);return value;}};
+             }});}
+             field('hour',2);field('minute',30);field('second',6);field('millisecond',5);
+             field('microsecond',4);field('nanosecond',3);
+             var value=new Temporal.ZonedDateTime(1000000000000000000n,'UTC');
+             var bag=value.withPlainTime(fields);
+             var string=value.withPlainTime('12:34:56.987654321');
+             var defaulted=value.withPlainTime();
+             var source=new Temporal.ZonedDateTime(3661001001001n,'-00:02');
+             var local=new Temporal.ZonedDateTime(86400000000000n,'UTC').withPlainTime(source);
+             var method=Object.getOwnPropertyDescriptor(Temporal.ZonedDateTime.prototype,'withPlainTime');
+             return [bag.toPlainTime().toString(),string.toPlainTime().toString(),
+               defaulted.toPlainTime().toString(),local.hour,local.minute,method.value.length,
+               method.value.name,method.enumerable,method.writable,method.configurable,
+               log.join(',')].join('|');"
+        ),
+        "02:30:06.005004003|12:34:56.987654321|00:00:00|0|59|0|withPlainTime|false|true|true|get hour,number hour,get microsecond,number microsecond,get millisecond,number millisecond,get minute,number minute,get nanosecond,number nanosecond,get second,number second"
+    );
+    assert_eq!(
+        thrown("return new Temporal.ZonedDateTime(0n,'UTC').withPlainTime({});"),
+        ExceptionKind::TypeError
+    );
+    assert_eq!(
+        thrown("return new Temporal.ZonedDateTime(0n,'UTC').withPlainTime(1);"),
+        ExceptionKind::TypeError
+    );
+}
+
+#[test]
 fn plain_date_time_constructor_accessors_and_iso_formatting_are_spec_shaped() {
     assert_eq!(
         rendered(

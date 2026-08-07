@@ -536,6 +536,9 @@ enum TemporalPlainTimeLikeTarget {
     Equals {
         receiver: PlainTime,
     },
+    ZonedDateTimeWithPlainTime {
+        receiver: ZonedDateTime,
+    },
 }
 
 impl TemporalPlainTimeLikeTarget {
@@ -547,7 +550,9 @@ impl TemporalPlainTimeLikeTarget {
             | Self::Difference { options, .. } => {
                 trace_stored_value_root(options, mark);
             }
-            Self::CompareSecond { .. } | Self::Equals { .. } => {}
+            Self::CompareSecond { .. }
+            | Self::Equals { .. }
+            | Self::ZonedDateTimeWithPlainTime { .. } => {}
         }
     }
 }
@@ -2303,6 +2308,17 @@ pub(super) fn dispatch_temporal_zoned_date_time_prototype(
                 execution_budget,
             )
         }
+        TemporalZonedDateTimePrototypeMethod::WithPlainTime => {
+            begin_temporal_zoned_date_time_with_plain_time(
+                runtime,
+                date_time,
+                arguments.take_first_or_undefined(),
+                realm,
+                return_to,
+                origin.clone(),
+                execution_budget,
+            )
+        }
         TemporalZonedDateTimePrototypeMethod::WithTimeZone => {
             let value = arguments.take_first_or_undefined();
             let StoredValue::String(value) = value else {
@@ -2353,6 +2369,35 @@ pub(super) fn dispatch_temporal_zoned_date_time_prototype(
             "Temporal.ZonedDateTime cannot be converted to a primitive value",
         ),
     }
+}
+
+#[allow(
+    clippy::too_many_arguments,
+    reason = "the shared ToTemporalTime conversion retains the ZonedDateTime call context"
+)]
+fn begin_temporal_zoned_date_time_with_plain_time(
+    runtime: &mut Runtime,
+    receiver: ZonedDateTime,
+    value: StoredValue,
+    realm: RealmId,
+    return_to: Option<CallReturn>,
+    origin: JsStackFrame,
+    execution_budget: &mut ExecutionBudget,
+) -> Result<NativeDispatch, NativeFailure> {
+    if matches!(value, StoredValue::Undefined) {
+        return finish_temporal_zoned_date_time_with_plain_time(
+            runtime, &receiver, None, realm, &origin,
+        );
+    }
+    begin_temporal_plain_time_like(
+        runtime,
+        value,
+        TemporalPlainTimeLikeTarget::ZonedDateTimeWithPlainTime { receiver },
+        realm,
+        return_to,
+        origin,
+        execution_budget,
+    )
 }
 
 #[allow(
@@ -3503,6 +3548,17 @@ fn begin_temporal_plain_time_like(
                 execution_budget,
             );
         }
+        if let Some(date_time) = runtime.temporal_zoned_date_time(object)? {
+            return continue_temporal_plain_time_like(
+                runtime,
+                date_time.to_plain_time(),
+                target,
+                realm,
+                return_to,
+                origin,
+                execution_budget,
+            );
+        }
     }
     if let StoredValue::String(value) = value {
         let source = value.to_utf8_lossy()?;
@@ -3616,7 +3672,34 @@ fn continue_temporal_plain_time_like(
         TemporalPlainTimeLikeTarget::Equals { receiver } => Ok(NativeDispatch::Immediate(
             StoredValue::Boolean(receiver == time),
         )),
+        TemporalPlainTimeLikeTarget::ZonedDateTimeWithPlainTime { receiver } => {
+            finish_temporal_zoned_date_time_with_plain_time(
+                runtime,
+                &receiver,
+                Some(time),
+                realm,
+                &origin,
+            )
+        }
     }
+}
+
+fn finish_temporal_zoned_date_time_with_plain_time(
+    runtime: &mut Runtime,
+    receiver: &ZonedDateTime,
+    time: Option<PlainTime>,
+    realm: RealmId,
+    origin: &JsStackFrame,
+) -> Result<NativeDispatch, NativeFailure> {
+    let result = match receiver.with_plain_time(time) {
+        Ok(result) => result,
+        Err(error) => {
+            return Err(NativeFailure::Abrupt(temporal_exception_from_error(
+                realm, origin, error,
+            )?));
+        }
+    };
+    allocate_temporal_zoned_date_time_result(runtime, realm, result)
 }
 
 #[allow(
