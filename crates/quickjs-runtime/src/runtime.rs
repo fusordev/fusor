@@ -2357,6 +2357,7 @@ pub(crate) enum TemporalZonedDateTimePrototypeMethod {
     ToPlainDateTime,
     StartOfDay,
     Equals,
+    ToString,
     ToJson,
     ToLocaleString,
     ValueOf,
@@ -2824,7 +2825,7 @@ impl TemporalZonedDateTimeStaticMethod {
 }
 
 impl TemporalZonedDateTimePrototypeMethod {
-    pub(crate) const ALL: [Self; 37] = [
+    pub(crate) const ALL: [Self; 38] = [
         Self::CalendarId,
         Self::TimeZoneId,
         Self::Year,
@@ -2859,6 +2860,7 @@ impl TemporalZonedDateTimePrototypeMethod {
         Self::ToPlainDateTime,
         Self::StartOfDay,
         Self::Equals,
+        Self::ToString,
         Self::ToJson,
         Self::ToLocaleString,
         Self::ValueOf,
@@ -2900,6 +2902,7 @@ impl TemporalZonedDateTimePrototypeMethod {
             Self::ToPlainDateTime => "toPlainDateTime",
             Self::StartOfDay => "startOfDay",
             Self::Equals => "equals",
+            Self::ToString => "toString",
             Self::ToJson => "toJSON",
             Self::ToLocaleString => "toLocaleString",
             Self::ValueOf => "valueOf",
@@ -2949,6 +2952,7 @@ impl TemporalZonedDateTimePrototypeMethod {
                 | Self::ToPlainDateTime
                 | Self::StartOfDay
                 | Self::Equals
+                | Self::ToString
                 | Self::ToJson
                 | Self::ToLocaleString
                 | Self::ValueOf

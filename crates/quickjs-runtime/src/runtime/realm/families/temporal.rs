@@ -386,6 +386,9 @@ pub(super) fn visit_functions(visit: FunctionSink<'_>) {
     }
     for method in TemporalZonedDateTimePrototypeMethod::ALL {
         let name = match method {
+            TemporalZonedDateTimePrototypeMethod::ToString => {
+                IntrinsicNameSpec::Predefined(PredefinedAtom::ToString)
+            }
             TemporalZonedDateTimePrototypeMethod::ToJson => {
                 IntrinsicNameSpec::Predefined(PredefinedAtom::ToJson)
             }
@@ -1009,6 +1012,9 @@ pub(super) fn visit_properties(visit: PropertySink<'_>) {
     }
     for method_id in TemporalZonedDateTimePrototypeMethod::ALL {
         let key = match method_id {
+            TemporalZonedDateTimePrototypeMethod::ToString => {
+                IntrinsicKeySpec::PredefinedString(PredefinedAtom::ToString)
+            }
             TemporalZonedDateTimePrototypeMethod::ToJson => {
                 IntrinsicKeySpec::PredefinedString(PredefinedAtom::ToJson)
             }

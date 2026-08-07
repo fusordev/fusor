@@ -2144,9 +2144,9 @@ pub(super) fn dispatch_temporal_zoned_date_time_prototype(
     realm: RealmId,
     receiver: &StoredValue,
     mut arguments: CallArguments,
-    _return_to: Option<CallReturn>,
+    return_to: Option<CallReturn>,
     origin: &JsStackFrame,
-    _execution_budget: &mut ExecutionBudget,
+    execution_budget: &mut ExecutionBudget,
 ) -> Result<NativeDispatch, NativeFailure> {
     let date_time = require_temporal_zoned_date_time(runtime, receiver, realm, origin)?;
     let number = |value| NativeDispatch::Immediate(StoredValue::Number(JsNumber::from_i64(value)));
@@ -2291,6 +2291,15 @@ pub(super) fn dispatch_temporal_zoned_date_time_prototype(
             };
             Ok(NativeDispatch::Immediate(StoredValue::Boolean(equals)))
         }
+        TemporalZonedDateTimePrototypeMethod::ToString => begin_temporal_zoned_date_time_to_string(
+            runtime,
+            date_time,
+            arguments.take_first_or_undefined(),
+            realm,
+            return_to,
+            origin.clone(),
+            execution_budget,
+        ),
         TemporalZonedDateTimePrototypeMethod::ToJson
         | TemporalZonedDateTimePrototypeMethod::ToLocaleString => {
             render_temporal_zoned_date_time(&date_time, realm, origin)
@@ -2324,6 +2333,334 @@ fn render_temporal_zoned_date_time(
     Ok(NativeDispatch::Immediate(StoredValue::String(
         JsString::from_utf8(&rendered)?,
     )))
+}
+
+#[allow(
+    clippy::too_many_arguments,
+    reason = "the ordered ZonedDateTime formatting reader owns its resumable native call context"
+)]
+fn begin_temporal_zoned_date_time_to_string(
+    runtime: &mut Runtime,
+    date_time: ZonedDateTime,
+    options: StoredValue,
+    realm: RealmId,
+    return_to: Option<CallReturn>,
+    origin: JsStackFrame,
+    execution_budget: &mut ExecutionBudget,
+) -> Result<NativeDispatch, NativeFailure> {
+    if matches!(options, StoredValue::Undefined) {
+        return render_temporal_zoned_date_time(&date_time, realm, &origin);
+    }
+    if options.heap_reference().is_none() {
+        return temporal_type_error(
+            realm,
+            &origin,
+            "Temporal.ZonedDateTime.prototype.toString options must be an object",
+        );
+    }
+    begin_temporal_zoned_date_time_to_string_get(
+        runtime,
+        TemporalZonedDateTimeToStringContinuation {
+            date_time,
+            options,
+            calendar_name: None,
+            fractional_second_digits: None,
+            offset: None,
+            rounding_mode: None,
+            smallest_unit: None,
+            time_zone_name: None,
+            stage: TemporalZonedDateTimeToStringStage::CalendarName,
+            realm,
+            origin,
+        },
+        "calendarName",
+        TemporalZonedDateTimeToStringStage::CalendarName,
+        return_to,
+        execution_budget,
+    )
+}
+
+#[allow(
+    clippy::too_many_arguments,
+    reason = "each observable ZonedDateTime formatting option Get retains native call state"
+)]
+fn begin_temporal_zoned_date_time_to_string_get(
+    runtime: &mut Runtime,
+    mut state: TemporalZonedDateTimeToStringContinuation,
+    name: &str,
+    next_stage: TemporalZonedDateTimeToStringStage,
+    return_to: Option<CallReturn>,
+    execution_budget: &mut ExecutionBudget,
+) -> Result<NativeDispatch, NativeFailure> {
+    state.stage = next_stage;
+    charge_heap_property_lookup(runtime, &state.options, execution_budget)?;
+    let name = JsString::from_utf8(name)?;
+    let key = runtime.property_key_from_string(&name)?;
+    let realm = state.realm;
+    let origin = state.origin.clone();
+    let dispatch = begin_value_get(
+        runtime,
+        &state.options,
+        key,
+        Some(&name),
+        realm,
+        return_to,
+        origin,
+        execution_budget,
+    )?;
+    match continue_get_state_after(
+        dispatch,
+        state,
+        temporal_zoned_date_time_to_string_continuation,
+        "Temporal.ZonedDateTime toString option Get produced a structured result",
+    )? {
+        GetContinuationDispatch::Ready { state, value } => {
+            advance_temporal_zoned_date_time_to_string_options(
+                runtime,
+                state,
+                value,
+                return_to,
+                execution_budget,
+            )
+        }
+        GetContinuationDispatch::Suspended(dispatch) => Ok(dispatch),
+    }
+}
+
+fn temporal_zoned_date_time_to_string_continuation(
+    state: TemporalZonedDateTimeToStringContinuation,
+) -> NativeContinuation {
+    NativeContinuation::TemporalZonedDateTimeToStringOptions(Box::new(state))
+}
+
+#[allow(
+    clippy::too_many_arguments,
+    reason = "one ordered state table preserves ZonedDateTime formatting option reads and coercions"
+)]
+pub(super) fn advance_temporal_zoned_date_time_to_string_options(
+    runtime: &mut Runtime,
+    mut state: TemporalZonedDateTimeToStringContinuation,
+    value: StoredValue,
+    return_to: Option<CallReturn>,
+    execution_budget: &mut ExecutionBudget,
+) -> Result<NativeDispatch, NativeFailure> {
+    if matches!(value, StoredValue::Undefined) {
+        return continue_temporal_zoned_date_time_to_string_options(
+            runtime,
+            state,
+            return_to,
+            execution_budget,
+        );
+    }
+    let value = match (state.stage, value) {
+        (
+            TemporalZonedDateTimeToStringStage::FractionalSecondDigits,
+            StoredValue::Number(value),
+        ) => {
+            state.fractional_second_digits =
+                Some(TemporalZonedDateTimeFractionalSecondDigits::Number(value));
+            return continue_temporal_zoned_date_time_to_string_options(
+                runtime,
+                state,
+                return_to,
+                execution_budget,
+            );
+        }
+        (_, value) => value,
+    };
+    let realm = state.realm;
+    let origin = state.origin.clone();
+    begin_operator_primitive_conversion(
+        runtime,
+        value,
+        OperatorPrimitiveHint::String,
+        OperatorPrimitiveTarget::TemporalZonedDateTimeToString(Box::new(state)),
+        realm,
+        return_to,
+        origin,
+        execution_budget,
+    )
+}
+
+#[allow(
+    clippy::too_many_arguments,
+    reason = "the post-coercion continuation retains the native formatting call context"
+)]
+pub(super) fn finish_temporal_zoned_date_time_to_string_option(
+    runtime: &mut Runtime,
+    mut state: TemporalZonedDateTimeToStringContinuation,
+    value: StoredValue,
+    return_to: Option<CallReturn>,
+    execution_budget: &mut ExecutionBudget,
+) -> Result<NativeDispatch, NativeFailure> {
+    let source = operator_primitive_to_string(value, state.realm, &state.origin)?;
+    match state.stage {
+        TemporalZonedDateTimeToStringStage::CalendarName => state.calendar_name = Some(source),
+        TemporalZonedDateTimeToStringStage::FractionalSecondDigits => {
+            state.fractional_second_digits =
+                Some(TemporalZonedDateTimeFractionalSecondDigits::String(source));
+        }
+        TemporalZonedDateTimeToStringStage::Offset => state.offset = Some(source),
+        TemporalZonedDateTimeToStringStage::RoundingMode => state.rounding_mode = Some(source),
+        TemporalZonedDateTimeToStringStage::SmallestUnit => state.smallest_unit = Some(source),
+        TemporalZonedDateTimeToStringStage::TimeZoneName => state.time_zone_name = Some(source),
+    }
+    continue_temporal_zoned_date_time_to_string_options(runtime, state, return_to, execution_budget)
+}
+
+#[allow(
+    clippy::too_many_arguments,
+    reason = "the next observable ZonedDateTime formatting option is selected explicitly"
+)]
+fn continue_temporal_zoned_date_time_to_string_options(
+    runtime: &mut Runtime,
+    state: TemporalZonedDateTimeToStringContinuation,
+    return_to: Option<CallReturn>,
+    execution_budget: &mut ExecutionBudget,
+) -> Result<NativeDispatch, NativeFailure> {
+    let (name, next_stage) = match state.stage {
+        TemporalZonedDateTimeToStringStage::CalendarName => (
+            "fractionalSecondDigits",
+            TemporalZonedDateTimeToStringStage::FractionalSecondDigits,
+        ),
+        TemporalZonedDateTimeToStringStage::FractionalSecondDigits => {
+            ("offset", TemporalZonedDateTimeToStringStage::Offset)
+        }
+        TemporalZonedDateTimeToStringStage::Offset => (
+            "roundingMode",
+            TemporalZonedDateTimeToStringStage::RoundingMode,
+        ),
+        TemporalZonedDateTimeToStringStage::RoundingMode => (
+            "smallestUnit",
+            TemporalZonedDateTimeToStringStage::SmallestUnit,
+        ),
+        TemporalZonedDateTimeToStringStage::SmallestUnit => (
+            "timeZoneName",
+            TemporalZonedDateTimeToStringStage::TimeZoneName,
+        ),
+        TemporalZonedDateTimeToStringStage::TimeZoneName => {
+            return complete_temporal_zoned_date_time_to_string(&state);
+        }
+    };
+    begin_temporal_zoned_date_time_to_string_get(
+        runtime,
+        state,
+        name,
+        next_stage,
+        return_to,
+        execution_budget,
+    )
+}
+
+fn complete_temporal_zoned_date_time_to_string(
+    state: &TemporalZonedDateTimeToStringContinuation,
+) -> Result<NativeDispatch, NativeFailure> {
+    let display_calendar = match state.calendar_name.as_ref() {
+        Some(source) => temporal_display_calendar(source, state.realm, &state.origin)?,
+        None => DisplayCalendar::Auto,
+    };
+    let precision = match state.fractional_second_digits.as_ref() {
+        None => Precision::Auto,
+        Some(TemporalZonedDateTimeFractionalSecondDigits::Number(value)) => {
+            temporal_fractional_second_digits(*value, state.realm, &state.origin)?
+        }
+        Some(TemporalZonedDateTimeFractionalSecondDigits::String(source))
+            if source.to_utf8_lossy()?.as_str() == "auto" =>
+        {
+            Precision::Auto
+        }
+        Some(TemporalZonedDateTimeFractionalSecondDigits::String(_)) => {
+            return temporal_range_error(
+                state.realm,
+                &state.origin,
+                "fractionalSecondDigits must be a Number or the string auto",
+            );
+        }
+    };
+    let display_offset = match state.offset.as_ref() {
+        Some(source) => temporal_display_offset(source, state.realm, &state.origin)?,
+        None => DisplayOffset::Auto,
+    };
+    let rounding_mode = match state.rounding_mode.as_ref() {
+        Some(source) => temporal_rounding_mode(source, state.realm, &state.origin)?,
+        None => RoundingMode::Trunc,
+    };
+    let smallest_unit = match state.smallest_unit.as_ref() {
+        Some(source) => Some(temporal_round_unit(source, state.realm, &state.origin)?),
+        None => None,
+    };
+    let display_time_zone = match state.time_zone_name.as_ref() {
+        Some(source) => temporal_display_time_zone(source, state.realm, &state.origin)?,
+        None => DisplayTimeZone::Auto,
+    };
+    match smallest_unit {
+        None
+        | Some(
+            Unit::Minute | Unit::Second | Unit::Millisecond | Unit::Microsecond | Unit::Nanosecond,
+        ) => {}
+        Some(Unit::Auto | Unit::Hour | Unit::Day | Unit::Week | Unit::Month | Unit::Year) => {
+            return temporal_range_error(
+                state.realm,
+                &state.origin,
+                "smallestUnit must be minute, second, millisecond, microsecond, or nanosecond",
+            );
+        }
+    }
+    let options = ToStringRoundingOptions {
+        precision,
+        smallest_unit,
+        rounding_mode: Some(rounding_mode),
+    };
+    let rendered = match state.date_time.to_ixdtf_string(
+        display_offset,
+        display_time_zone,
+        display_calendar,
+        options,
+    ) {
+        Ok(rendered) => rendered,
+        Err(error) => {
+            return Err(NativeFailure::Abrupt(temporal_exception_from_error(
+                state.realm,
+                &state.origin,
+                error,
+            )?));
+        }
+    };
+    Ok(NativeDispatch::Immediate(StoredValue::String(
+        JsString::from_utf8(&rendered)?,
+    )))
+}
+
+fn temporal_display_offset(
+    source: &JsString,
+    realm: RealmId,
+    origin: &JsStackFrame,
+) -> Result<DisplayOffset, NativeFailure> {
+    match source.to_utf8_lossy()?.parse::<DisplayOffset>() {
+        Ok(display_offset) => Ok(display_offset),
+        Err(_) => Err(NativeFailure::Abrupt(temporal_pending_exception(
+            realm,
+            origin,
+            ExceptionKind::RangeError,
+            "invalid Temporal offset",
+        )?)),
+    }
+}
+
+fn temporal_display_time_zone(
+    source: &JsString,
+    realm: RealmId,
+    origin: &JsStackFrame,
+) -> Result<DisplayTimeZone, NativeFailure> {
+    match source.to_utf8_lossy()?.parse::<DisplayTimeZone>() {
+        Ok(display_time_zone) => Ok(display_time_zone),
+        Err(_) => Err(NativeFailure::Abrupt(temporal_pending_exception(
+            realm,
+            origin,
+            ExceptionKind::RangeError,
+            "invalid Temporal timeZoneName",
+        )?)),
+    }
 }
 
 #[allow(
@@ -10075,6 +10412,48 @@ pub(super) struct TemporalPlainDateTimeToStringContinuation {
 }
 
 impl TemporalPlainDateTimeToStringContinuation {
+    pub(super) const fn retained_values() -> u64 {
+        1
+    }
+
+    pub(super) fn trace_roots(&self, mark: &mut dyn FnMut(CollectionRoot)) {
+        trace_stored_value_root(&self.options, mark);
+    }
+}
+
+#[derive(Clone, Copy)]
+enum TemporalZonedDateTimeToStringStage {
+    CalendarName,
+    FractionalSecondDigits,
+    Offset,
+    RoundingMode,
+    SmallestUnit,
+    TimeZoneName,
+}
+
+enum TemporalZonedDateTimeFractionalSecondDigits {
+    Number(JsNumber),
+    String(JsString),
+}
+
+/// Resumable options state for `Temporal.ZonedDateTime.prototype.toString`.
+/// The specification requires all option Gets and primitive coercions before
+/// formatting validation, so the complete call state stays rooted here.
+pub(super) struct TemporalZonedDateTimeToStringContinuation {
+    date_time: ZonedDateTime,
+    options: StoredValue,
+    calendar_name: Option<JsString>,
+    fractional_second_digits: Option<TemporalZonedDateTimeFractionalSecondDigits>,
+    offset: Option<JsString>,
+    rounding_mode: Option<JsString>,
+    smallest_unit: Option<JsString>,
+    time_zone_name: Option<JsString>,
+    stage: TemporalZonedDateTimeToStringStage,
+    realm: RealmId,
+    origin: JsStackFrame,
+}
+
+impl TemporalZonedDateTimeToStringContinuation {
     pub(super) const fn retained_values() -> u64 {
         1
     }

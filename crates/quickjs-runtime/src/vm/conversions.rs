@@ -2522,6 +2522,15 @@ fn finish_operator_primitive_target(
         OperatorPrimitiveTarget::TemporalPlainDateTimeToStringSmallestUnit(state) => {
             finish_temporal_plain_date_time_to_string_smallest_unit(state.as_ref(), value)
         }
+        OperatorPrimitiveTarget::TemporalZonedDateTimeToString(state) => {
+            finish_temporal_zoned_date_time_to_string_option(
+                runtime,
+                *state,
+                value,
+                return_to,
+                execution_budget,
+            )
+        }
         OperatorPrimitiveTarget::TemporalDurationBag(state) => {
             advance_temporal_duration_property_bag(
                 runtime,

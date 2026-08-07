@@ -405,6 +405,30 @@ fn zoned_date_time_json_and_non_intl_locale_rendering_are_ixdtf() {
 }
 
 #[test]
+fn zoned_date_time_to_string_reads_all_options_before_formatting() {
+    assert_eq!(
+        rendered(
+            "var log=[],options={};
+             function option(name,value){Object.defineProperty(options,name,{get:function(){
+               log.push('get '+name);return {toString:function(){log.push('string '+name);return value;}};
+             }});}
+             option('calendarName','always');option('fractionalSecondDigits','auto');
+             option('offset','never');option('roundingMode','halfExpand');
+             option('smallestUnit','millisecond');option('timeZoneName','critical');
+             var value=new Temporal.ZonedDateTime(3661987654321n,'UTC');
+             var descriptor=Object.getOwnPropertyDescriptor(Temporal.ZonedDateTime.prototype,'toString');
+             return [value.toString(options),descriptor.value.length,descriptor.value.name,
+               descriptor.enumerable,descriptor.writable,descriptor.configurable,log.join(',')].join('|');"
+        ),
+        "1970-01-01T01:01:01.988[!UTC][u-ca=iso8601]|0|toString|false|true|true|get calendarName,string calendarName,get fractionalSecondDigits,string fractionalSecondDigits,get offset,string offset,get roundingMode,string roundingMode,get smallestUnit,string smallestUnit,get timeZoneName,string timeZoneName"
+    );
+    assert_eq!(
+        thrown("return new Temporal.ZonedDateTime(0n,'UTC').toString({smallestUnit:'hour'});"),
+        ExceptionKind::RangeError
+    );
+}
+
+#[test]
 fn plain_date_time_constructor_accessors_and_iso_formatting_are_spec_shaped() {
     assert_eq!(
         rendered(
