@@ -36,8 +36,8 @@ use super::{
 };
 
 const REALM_OBJECT_SLOTS: u64 = 64;
-const REALM_PROPERTY_SLOTS: u64 = 1_980;
-const REALM_FUNCTION_SLOTS: u64 = 584;
+const REALM_PROPERTY_SLOTS: u64 = 1_986;
+const REALM_FUNCTION_SLOTS: u64 = 586;
 
 #[test]
 fn finalization_job_limit_failure_does_not_clear_weak_targets() {

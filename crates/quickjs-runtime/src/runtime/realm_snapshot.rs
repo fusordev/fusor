@@ -499,9 +499,9 @@ mod tests {
 
     use crate::runtime::{RealmIntrinsics, RuntimeLimits, RuntimeUsage};
 
-    const REALM_NODES: usize = 648;
-    const REALM_PROPERTIES: u64 = 1_980;
-    const REALM_SNAPSHOT_FINGERPRINT: u64 = 8_525_247_759_735_206_393;
+    const REALM_NODES: usize = 650;
+    const REALM_PROPERTIES: u64 = 1_986;
+    const REALM_SNAPSHOT_FINGERPRINT: u64 = 3_937_793_910_482_079_375;
 
     #[test]
     fn complete_realm_snapshot_pins_the_installed_intrinsic_graph() {

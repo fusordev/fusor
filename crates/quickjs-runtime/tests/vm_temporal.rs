@@ -516,6 +516,68 @@ fn plain_date_time_with_prepares_all_fields_before_reading_overflow() {
 }
 
 #[test]
+fn plain_date_time_differences_convert_before_options_and_normalize_duration_fields() {
+    assert_eq!(
+        rendered(
+            "var log=[];
+             var other={
+               get calendar(){log.push('calendar');return 'iso8601'},
+               get day(){log.push('day');return 2},
+               get hour(){log.push('hour');return 1},
+               get microsecond(){log.push('microsecond');return 5},
+               get millisecond(){log.push('millisecond');return 4},
+               get minute(){log.push('minute');return 2},
+               get month(){log.push('month');return 1},
+               get monthCode(){log.push('monthCode');return undefined},
+               get nanosecond(){log.push('nanosecond');return 6},
+               get second(){log.push('second');return 3},
+               get year(){log.push('year');return 2020}
+             };
+             var options={};
+             Object.defineProperties(options,{
+               largestUnit:{get:function(){log.push('largestUnit');return {toString:function(){log.push('largestUnit string');return 'day'}}}},
+               roundingIncrement:{get:function(){log.push('roundingIncrement');return undefined}},
+               roundingMode:{get:function(){log.push('roundingMode');return {toString:function(){log.push('roundingMode string');return 'trunc'}}}},
+               smallestUnit:{get:function(){log.push('smallestUnit');return undefined}}
+             });
+             var start=new Temporal.PlainDateTime(2020,1,1);
+             var until=start.until(other,options);
+             var since=Temporal.PlainDateTime.from(other).since(start);
+             return [Temporal.PlainDateTime.prototype.until.length,
+               Temporal.PlainDateTime.prototype.since.length,until.toString(),
+               since.toString(),log.join(',')].join('|');"
+        ),
+        "1|1|P1DT1H2M3.004005006S|P1DT1H2M3.004005006S|calendar,day,hour,microsecond,millisecond,minute,month,monthCode,nanosecond,second,year,largestUnit,largestUnit string,roundingIncrement,roundingMode,roundingMode string,smallestUnit,calendar,day,hour,microsecond,millisecond,minute,month,monthCode,nanosecond,second,year"
+    );
+    assert_eq!(
+        rendered(
+            "var start=new Temporal.PlainDateTime(1970,1,1);
+             var end=new Temporal.PlainDateTime(2554,7,21,23,34,33,709,551,616);
+             var diff=start.until(end,{largestUnit:'microseconds'});
+             var half=new Temporal.PlainDateTime(2019,1,1).until(
+               new Temporal.PlainDateTime(2020,7,2));
+             return [diff.microseconds===18446744073709552,diff.toString(),half.total({unit:'years',relativeTo:
+               new Temporal.PlainDateTime(2019,1,1)})].join('|');"
+        ),
+        "true|PT18446744073.709552616S|1.5"
+    );
+    assert_eq!(
+        thrown("return Temporal.PlainDateTime.prototype.until.call({}, '2020-01-01T00:00');"),
+        ExceptionKind::TypeError
+    );
+    assert_eq!(
+        thrown("return new Temporal.PlainDateTime(2020,1,1).since(1);"),
+        ExceptionKind::TypeError
+    );
+    assert_eq!(
+        thrown(
+            "return new Temporal.PlainDateTime(2020,1,1).until('2020-01-02',{largestUnit:'invalid'});"
+        ),
+        ExceptionKind::RangeError
+    );
+}
+
+#[test]
 fn plain_date_with_prepares_partial_fields_before_reading_overflow() {
     assert_eq!(
         rendered(

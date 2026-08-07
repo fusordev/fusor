@@ -590,6 +590,15 @@ pub(super) fn resume_native_continuations(
                     execution_budget,
                 )?
             }
+            NativeContinuation::TemporalPlainDateTimeDifferenceOptions(state) => {
+                advance_temporal_plain_date_time_difference_options(
+                    runtime,
+                    *state,
+                    value,
+                    return_to,
+                    execution_budget,
+                )?
+            }
             NativeContinuation::TemporalDurationBag(state) => {
                 advance_temporal_duration_property_bag(
                     runtime,
