@@ -2557,6 +2557,36 @@ pub(super) fn dispatch_native_call_with_frames(
                 execution_budget,
             )
         }
+        NativeFunctionKind::TemporalPlainDateConstructor => begin_temporal_plain_date_constructor(
+            runtime,
+            native.realm,
+            inputs,
+            return_to,
+            origin.unwrap_or_else(native_function_host_origin),
+            execution_budget,
+        ),
+        NativeFunctionKind::TemporalPlainDateStatic(method) => begin_temporal_plain_date_static(
+            runtime,
+            method,
+            native.realm,
+            inputs.arguments,
+            return_to,
+            origin.unwrap_or_else(native_function_host_origin),
+            execution_budget,
+        ),
+        NativeFunctionKind::TemporalPlainDatePrototype(method) => {
+            let origin = origin.unwrap_or_else(native_function_host_origin);
+            dispatch_temporal_plain_date_prototype(
+                runtime,
+                method,
+                native.realm,
+                &inputs.receiver,
+                inputs.arguments,
+                return_to,
+                &origin,
+                execution_budget,
+            )
+        }
         NativeFunctionKind::ObjectPrototypeToString => begin_object_prototype_to_string(
             runtime,
             native.realm,

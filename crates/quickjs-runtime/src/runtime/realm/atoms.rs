@@ -6,7 +6,7 @@ use crate::{
         ArrayBufferPrototypeMethod, AtomicsMethod, DataViewPrototypeMethod, DatePrototypeMethod,
         DateStaticMethod, SharedArrayBufferPrototypeMethod, TemporalDurationPrototypeMethod,
         TemporalDurationStaticMethod, TemporalInstantPrototypeMethod, TemporalInstantStaticMethod,
-        TypedArrayPrototypeMethod,
+        TemporalPlainDatePrototypeMethod, TemporalPlainDateStaticMethod, TypedArrayPrototypeMethod,
     },
 };
 
@@ -278,6 +278,7 @@ fn visit_realm_name_order(
     visit(RealmNameId::Temporal)?;
     visit(RealmNameId::Duration)?;
     visit(RealmNameId::Instant)?;
+    visit(RealmNameId::PlainDate)?;
     for method in TemporalDurationStaticMethod::ALL {
         visit(RealmNameId::TemporalDurationStatic(method))?;
     }
@@ -298,6 +299,12 @@ fn visit_realm_name_order(
         TemporalInstantPrototypeMethod::Equals,
     ] {
         visit(RealmNameId::TemporalInstantPrototype(method))?;
+    }
+    for method in TemporalPlainDateStaticMethod::ALL {
+        visit(RealmNameId::TemporalPlainDateStatic(method))?;
+    }
+    for method in TemporalPlainDatePrototypeMethod::ALL {
+        visit(RealmNameId::TemporalPlainDatePrototype(method))?;
     }
     visit(RealmNameId::RegExpEscape)?;
     visit(RealmNameId::RegExpCompile)?;
@@ -505,10 +512,13 @@ fn realm_name_description(id: RealmNameId) -> &'static str {
         RealmNameId::Temporal => "Temporal",
         RealmNameId::Duration => "Duration",
         RealmNameId::Instant => "Instant",
+        RealmNameId::PlainDate => "PlainDate",
         RealmNameId::TemporalDurationStatic(method) => method.name(),
         RealmNameId::TemporalDurationPrototype(method) => method.name(),
         RealmNameId::TemporalInstantStatic(method) => method.name(),
         RealmNameId::TemporalInstantPrototype(method) => method.name(),
+        RealmNameId::TemporalPlainDateStatic(method) => method.name(),
+        RealmNameId::TemporalPlainDatePrototype(method) => method.name(),
         RealmNameId::RegExpEscape => "escape",
         RealmNameId::RegExpCompile => "compile",
         RealmNameId::RegExpTest => "test",

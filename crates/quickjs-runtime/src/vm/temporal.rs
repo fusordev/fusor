@@ -1,11 +1,12 @@
 //! Initial `Temporal.Instant` JavaScript boundary over `temporal_rs`.
 
+use core::str::FromStr;
 use temporal_rs::{
-    Duration, Instant, Sign, TimeZone,
+    Calendar, Duration, Instant, PlainDate, Sign, TimeZone,
     error::ErrorKind as TemporalErrorKind,
     options::{
-        DifferenceSettings, RelativeTo, RoundingIncrement, RoundingMode, RoundingOptions,
-        ToStringRoundingOptions, Unit,
+        DifferenceSettings, DisplayCalendar, RelativeTo, RoundingIncrement, RoundingMode,
+        RoundingOptions, ToStringRoundingOptions, Unit,
     },
     parsers::Precision,
 };
@@ -22,6 +23,30 @@ pub(super) struct TemporalDurationConstructorContinuation {
     new_target: FunctionId,
 }
 
+/// The `Temporal.PlainDate` constructor converts its ISO components in
+/// source order, then converts the calendar identifier.  Keeping all values
+/// here makes each user-defined primitive conversion resumable and GC-safe.
+pub(super) struct TemporalPlainDateConstructorContinuation {
+    arguments: Vec<StoredValue>,
+    converted: Vec<JsNumber>,
+    new_target: FunctionId,
+}
+
+impl TemporalPlainDateConstructorContinuation {
+    pub(super) fn retained_values(&self) -> u64 {
+        usize_to_u64(self.arguments.len()).saturating_add(1)
+    }
+
+    pub(super) fn trace_roots(&self, mark: &mut dyn FnMut(CollectionRoot)) {
+        for argument in &self.arguments {
+            trace_stored_value_root(argument, mark);
+        }
+        mark(CollectionRoot::Heap(HeapReference::Function(
+            self.new_target,
+        )));
+    }
+}
+
 impl TemporalDurationConstructorContinuation {
     pub(super) fn retained_values(&self) -> u64 {
         usize_to_u64(self.arguments.len()).saturating_add(1)
@@ -35,6 +60,578 @@ impl TemporalDurationConstructorContinuation {
             self.new_target,
         )));
     }
+}
+
+#[allow(
+    clippy::needless_pass_by_value,
+    clippy::too_many_arguments,
+    reason = "Temporal component conversion is resumable across user-defined primitive conversion"
+)]
+pub(super) fn begin_temporal_plain_date_constructor(
+    runtime: &mut Runtime,
+    realm: RealmId,
+    inputs: CallInputs,
+    return_to: Option<CallReturn>,
+    origin: JsStackFrame,
+    execution_budget: &mut ExecutionBudget,
+) -> Result<NativeDispatch, NativeFailure> {
+    let Some(new_target) = inputs.new_target else {
+        return temporal_type_error(realm, &origin, "Temporal.PlainDate is not callable");
+    };
+    let mut arguments = inputs.arguments.into_remaining_values();
+    arguments.truncate(4);
+    arguments
+        .try_reserve(4_usize.saturating_sub(arguments.len()))
+        .map_err(|_| ExecutionError::AllocationFailed {
+            resource: RuntimeResource::FrameValues,
+            additional: 4_usize.saturating_sub(arguments.len()),
+        })?;
+    while arguments.len() < 4 {
+        arguments.push(StoredValue::Undefined);
+    }
+    let mut converted = Vec::new();
+    converted
+        .try_reserve_exact(3)
+        .map_err(|_| ExecutionError::AllocationFailed {
+            resource: RuntimeResource::FrameValues,
+            additional: 3,
+        })?;
+    advance_temporal_plain_date_constructor(
+        runtime,
+        TemporalPlainDateConstructorContinuation {
+            arguments,
+            converted,
+            new_target,
+        },
+        None,
+        realm,
+        return_to,
+        &origin,
+        execution_budget,
+    )
+}
+
+#[allow(
+    clippy::needless_pass_by_value,
+    clippy::too_many_arguments,
+    reason = "Temporal component conversion is resumable across user-defined primitive conversion"
+)]
+pub(super) fn advance_temporal_plain_date_constructor(
+    runtime: &mut Runtime,
+    mut state: TemporalPlainDateConstructorContinuation,
+    completion: Option<JsNumber>,
+    realm: RealmId,
+    return_to: Option<CallReturn>,
+    origin: &JsStackFrame,
+    execution_budget: &mut ExecutionBudget,
+) -> Result<NativeDispatch, NativeFailure> {
+    if let Some(value) = completion {
+        state.converted.push(value);
+    }
+    if state.converted.len() < 3 {
+        let index = state.converted.len();
+        let argument = std::mem::replace(&mut state.arguments[index], StoredValue::Undefined);
+        return begin_operator_primitive_conversion(
+            runtime,
+            argument,
+            OperatorPrimitiveHint::Number,
+            OperatorPrimitiveTarget::TemporalPlainDateConstructor(Box::new(state)),
+            realm,
+            return_to,
+            origin.clone(),
+            execution_budget,
+        );
+    }
+
+    let calendar = std::mem::replace(&mut state.arguments[3], StoredValue::Undefined);
+    if matches!(calendar, StoredValue::Undefined) {
+        return complete_temporal_plain_date_constructor(
+            runtime,
+            &state,
+            Calendar::default(),
+            realm,
+            return_to,
+            origin,
+            execution_budget,
+        );
+    }
+    begin_operator_primitive_conversion(
+        runtime,
+        calendar,
+        OperatorPrimitiveHint::String,
+        OperatorPrimitiveTarget::TemporalPlainDateCalendar(Box::new(state)),
+        realm,
+        return_to,
+        origin.clone(),
+        execution_budget,
+    )
+}
+
+#[allow(
+    clippy::too_many_arguments,
+    reason = "a calendar conversion resumes the same constructor wrapper state"
+)]
+pub(super) fn finish_temporal_plain_date_calendar(
+    runtime: &mut Runtime,
+    state: &TemporalPlainDateConstructorContinuation,
+    value: StoredValue,
+    realm: RealmId,
+    return_to: Option<CallReturn>,
+    origin: &JsStackFrame,
+    execution_budget: &mut ExecutionBudget,
+) -> Result<NativeDispatch, NativeFailure> {
+    let StoredValue::String(value) = value else {
+        return temporal_type_error(
+            realm,
+            origin,
+            "Temporal.PlainDate calendar must be a string",
+        );
+    };
+    let calendar = match Calendar::from_str(&value.to_utf8_lossy()?) {
+        Ok(calendar) => calendar,
+        Err(error) => {
+            return Err(NativeFailure::Abrupt(temporal_exception_from_error(
+                realm, origin, error,
+            )?));
+        }
+    };
+    complete_temporal_plain_date_constructor(
+        runtime,
+        state,
+        calendar,
+        realm,
+        return_to,
+        origin,
+        execution_budget,
+    )
+}
+
+#[allow(
+    clippy::too_many_arguments,
+    reason = "the completed constructor must still observe newTarget.prototype"
+)]
+fn complete_temporal_plain_date_constructor(
+    runtime: &mut Runtime,
+    state: &TemporalPlainDateConstructorContinuation,
+    calendar: Calendar,
+    realm: RealmId,
+    return_to: Option<CallReturn>,
+    origin: &JsStackFrame,
+    execution_budget: &mut ExecutionBudget,
+) -> Result<NativeDispatch, NativeFailure> {
+    let [year, month, day] = state.converted.as_slice() else {
+        return Err(EngineFault::RuntimeInvariant {
+            message: "Temporal.PlainDate constructor completed before all components converted",
+        }
+        .into());
+    };
+    let year = temporal_plain_date_integer(*year, "year", realm, origin)?;
+    let month = temporal_plain_date_integer(*month, "month", realm, origin)?;
+    let day = temporal_plain_date_integer(*day, "day", realm, origin)?;
+    let Ok(year) = i32::try_from(year) else {
+        return temporal_range_error(
+            realm,
+            origin,
+            "Temporal.PlainDate year is outside the supported range",
+        );
+    };
+    let Ok(month) = u8::try_from(month) else {
+        return temporal_range_error(
+            realm,
+            origin,
+            "Temporal.PlainDate month is outside the supported range",
+        );
+    };
+    let Ok(day) = u8::try_from(day) else {
+        return temporal_range_error(
+            realm,
+            origin,
+            "Temporal.PlainDate day is outside the supported range",
+        );
+    };
+    let date = match PlainDate::try_new(year, month, day, calendar) {
+        Ok(date) => date,
+        Err(error) => {
+            return Err(NativeFailure::Abrupt(temporal_exception_from_error(
+                realm, origin, error,
+            )?));
+        }
+    };
+    begin_temporal_plain_date_wrapper(
+        runtime,
+        realm,
+        state.new_target,
+        date,
+        return_to,
+        origin.clone(),
+        execution_budget,
+    )
+}
+
+#[allow(
+    clippy::cast_possible_truncation,
+    clippy::cast_precision_loss,
+    reason = "ECMA-262 ToIntegerWithTruncation is defined on binary64 values before their bounded Temporal fields are checked"
+)]
+fn temporal_plain_date_integer(
+    value: JsNumber,
+    _field: &str,
+    realm: RealmId,
+    origin: &JsStackFrame,
+) -> Result<i64, NativeFailure> {
+    let value = value.as_f64();
+    if !value.is_finite() {
+        return Err(NativeFailure::Abrupt(temporal_pending_exception(
+            realm,
+            origin,
+            ExceptionKind::RangeError,
+            "Temporal.PlainDate fields must be finite Numbers",
+        )?));
+    }
+    let value = value.trunc();
+    if value < i64::MIN as f64 || value > i64::MAX as f64 {
+        return Err(NativeFailure::Abrupt(temporal_pending_exception(
+            realm,
+            origin,
+            ExceptionKind::RangeError,
+            "Temporal.PlainDate fields are outside the supported range",
+        )?));
+    }
+    Ok(value as i64)
+}
+
+#[allow(
+    clippy::needless_pass_by_value,
+    clippy::too_many_arguments,
+    reason = "newTarget prototype lookup is a resumable native operation"
+)]
+fn begin_temporal_plain_date_wrapper(
+    runtime: &mut Runtime,
+    realm: RealmId,
+    new_target: FunctionId,
+    date: PlainDate,
+    return_to: Option<CallReturn>,
+    origin: JsStackFrame,
+    execution_budget: &mut ExecutionBudget,
+) -> Result<NativeDispatch, NativeFailure> {
+    let prototype_key = runtime.predefined_property_key(PredefinedAtom::Prototype);
+    begin_intrinsic_get(
+        runtime,
+        realm,
+        HeapReference::Function(new_target),
+        StoredValue::Function(new_target),
+        &prototype_key,
+        IntrinsicGetContinuation::TemporalPlainDateConstructor { new_target, date },
+        return_to,
+        Some(origin),
+        execution_budget,
+    )
+}
+
+pub(super) fn finish_temporal_plain_date_constructor_wrapper(
+    runtime: &mut Runtime,
+    new_target: FunctionId,
+    date: PlainDate,
+    requested: &StoredValue,
+) -> Result<NativeDispatch, NativeFailure> {
+    let prototype = match requested {
+        StoredValue::Function(function) => HeapReference::Function(*function),
+        StoredValue::Object(object) => HeapReference::Object(*object),
+        _ => {
+            let realm = runtime.function_realm(new_target)?;
+            HeapReference::Object(runtime.realm_temporal_plain_date_prototype(realm)?)
+        }
+    };
+    let object = runtime.allocate_temporal_plain_date(prototype, date)?;
+    Ok(NativeDispatch::Immediate(StoredValue::Object(object)))
+}
+
+#[allow(
+    clippy::needless_pass_by_value,
+    clippy::too_many_arguments,
+    reason = "Temporal.PlainDate.from preserves conversion and allocation context"
+)]
+pub(super) fn begin_temporal_plain_date_static(
+    runtime: &mut Runtime,
+    method: TemporalPlainDateStaticMethod,
+    realm: RealmId,
+    mut arguments: CallArguments,
+    return_to: Option<CallReturn>,
+    origin: JsStackFrame,
+    execution_budget: &mut ExecutionBudget,
+) -> Result<NativeDispatch, NativeFailure> {
+    match method {
+        TemporalPlainDateStaticMethod::From => begin_temporal_plain_date_from(
+            runtime,
+            arguments.take_first_or_undefined(),
+            realm,
+            return_to,
+            origin,
+            execution_budget,
+        ),
+        TemporalPlainDateStaticMethod::Compare => {
+            let first = arguments.take_first_or_undefined();
+            let second = arguments.take_first_or_undefined();
+            let first = temporal_plain_date_from_direct_value(runtime, first, realm, &origin)?;
+            let second = temporal_plain_date_from_direct_value(runtime, second, realm, &origin)?;
+            let result = match first.compare_iso(&second) {
+                std::cmp::Ordering::Less => -1,
+                std::cmp::Ordering::Equal => 0,
+                std::cmp::Ordering::Greater => 1,
+            };
+            Ok(NativeDispatch::Immediate(StoredValue::Number(
+                JsNumber::from_i32(result),
+            )))
+        }
+    }
+}
+
+#[allow(
+    clippy::needless_pass_by_value,
+    clippy::too_many_arguments,
+    reason = "Temporal.PlainDate.from retains the standard native call shape"
+)]
+fn begin_temporal_plain_date_from(
+    runtime: &mut Runtime,
+    value: StoredValue,
+    realm: RealmId,
+    _return_to: Option<CallReturn>,
+    origin: JsStackFrame,
+    _execution_budget: &mut ExecutionBudget,
+) -> Result<NativeDispatch, NativeFailure> {
+    if let StoredValue::Object(object) = value
+        && let Some(date) = runtime.temporal_plain_date(object)?
+    {
+        return allocate_temporal_plain_date_result(runtime, realm, date);
+    }
+    if let StoredValue::String(value) = value {
+        return allocate_temporal_plain_date_from_string(runtime, realm, &value, &origin);
+    }
+    temporal_type_error(
+        realm,
+        &origin,
+        "Temporal.PlainDate.from requires a PlainDate or ISO string",
+    )
+}
+
+fn allocate_temporal_plain_date_from_string(
+    runtime: &mut Runtime,
+    realm: RealmId,
+    value: &JsString,
+    origin: &JsStackFrame,
+) -> Result<NativeDispatch, NativeFailure> {
+    let source = value.to_utf8_lossy()?;
+    let date = match PlainDate::from_utf8(source.as_bytes()) {
+        Ok(date) => date,
+        Err(error) => {
+            return Err(NativeFailure::Abrupt(temporal_exception_from_error(
+                realm, origin, error,
+            )?));
+        }
+    };
+    allocate_temporal_plain_date_result(runtime, realm, date)
+}
+
+fn temporal_plain_date_from_direct_value(
+    runtime: &Runtime,
+    value: StoredValue,
+    realm: RealmId,
+    origin: &JsStackFrame,
+) -> Result<PlainDate, NativeFailure> {
+    if let StoredValue::Object(object) = value
+        && let Some(date) = runtime.temporal_plain_date(object)?
+    {
+        return Ok(date);
+    }
+    let StoredValue::String(value) = value else {
+        return Err(NativeFailure::Abrupt(temporal_pending_exception(
+            realm,
+            origin,
+            ExceptionKind::TypeError,
+            "Temporal.PlainDate requires a PlainDate or ISO string",
+        )?));
+    };
+    let source = value.to_utf8_lossy()?;
+    match PlainDate::from_utf8(source.as_bytes()) {
+        Ok(date) => Ok(date),
+        Err(error) => Err(NativeFailure::Abrupt(temporal_exception_from_error(
+            realm, origin, error,
+        )?)),
+    }
+}
+
+fn allocate_temporal_plain_date_result(
+    runtime: &mut Runtime,
+    realm: RealmId,
+    date: PlainDate,
+) -> Result<NativeDispatch, NativeFailure> {
+    let prototype = HeapReference::Object(runtime.realm_temporal_plain_date_prototype(realm)?);
+    let object = runtime.allocate_temporal_plain_date(prototype, date)?;
+    Ok(NativeDispatch::Immediate(StoredValue::Object(object)))
+}
+
+#[allow(
+    clippy::too_many_arguments,
+    reason = "the shared dispatcher carries the native call context explicitly"
+)]
+pub(super) fn dispatch_temporal_plain_date_prototype(
+    runtime: &mut Runtime,
+    method: TemporalPlainDatePrototypeMethod,
+    realm: RealmId,
+    receiver: &StoredValue,
+    mut arguments: CallArguments,
+    return_to: Option<CallReturn>,
+    origin: &JsStackFrame,
+    execution_budget: &mut ExecutionBudget,
+) -> Result<NativeDispatch, NativeFailure> {
+    let date = require_temporal_plain_date(runtime, receiver, realm, origin)?;
+    let number = |value| NativeDispatch::Immediate(StoredValue::Number(JsNumber::from_i64(value)));
+    match method {
+        TemporalPlainDatePrototypeMethod::CalendarId => Ok(NativeDispatch::Immediate(
+            StoredValue::String(JsString::from_utf8(date.calendar().identifier())?),
+        )),
+        TemporalPlainDatePrototypeMethod::Year => Ok(number(i64::from(date.year()))),
+        TemporalPlainDatePrototypeMethod::Month => Ok(number(i64::from(date.month()))),
+        TemporalPlainDatePrototypeMethod::MonthCode => Ok(NativeDispatch::Immediate(
+            StoredValue::String(JsString::from_utf8(date.month_code().as_str())?),
+        )),
+        TemporalPlainDatePrototypeMethod::Day => Ok(number(i64::from(date.day()))),
+        TemporalPlainDatePrototypeMethod::DayOfWeek => Ok(number(i64::from(date.day_of_week()))),
+        TemporalPlainDatePrototypeMethod::DayOfYear => Ok(number(i64::from(date.day_of_year()))),
+        TemporalPlainDatePrototypeMethod::WeekOfYear => Ok(match date.week_of_year() {
+            Some(value) => number(i64::from(value)),
+            None => NativeDispatch::Immediate(StoredValue::Undefined),
+        }),
+        TemporalPlainDatePrototypeMethod::YearOfWeek => Ok(match date.year_of_week() {
+            Some(value) => number(i64::from(value)),
+            None => NativeDispatch::Immediate(StoredValue::Undefined),
+        }),
+        TemporalPlainDatePrototypeMethod::DaysInWeek => Ok(number(i64::from(date.days_in_week()))),
+        TemporalPlainDatePrototypeMethod::DaysInMonth => {
+            Ok(number(i64::from(date.days_in_month())))
+        }
+        TemporalPlainDatePrototypeMethod::DaysInYear => Ok(number(i64::from(date.days_in_year()))),
+        TemporalPlainDatePrototypeMethod::MonthsInYear => {
+            Ok(number(i64::from(date.months_in_year())))
+        }
+        TemporalPlainDatePrototypeMethod::InLeapYear => Ok(NativeDispatch::Immediate(
+            StoredValue::Boolean(date.in_leap_year()),
+        )),
+        TemporalPlainDatePrototypeMethod::Era => Ok(match date.era() {
+            Some(value) => {
+                NativeDispatch::Immediate(StoredValue::String(JsString::from_utf8(value.as_str())?))
+            }
+            None => NativeDispatch::Immediate(StoredValue::Undefined),
+        }),
+        TemporalPlainDatePrototypeMethod::EraYear => Ok(match date.era_year() {
+            Some(value) => number(i64::from(value)),
+            None => NativeDispatch::Immediate(StoredValue::Undefined),
+        }),
+        TemporalPlainDatePrototypeMethod::Equals => begin_temporal_plain_date_equals(
+            runtime,
+            date,
+            arguments.take_first_or_undefined(),
+            realm,
+            return_to,
+            origin.clone(),
+            execution_budget,
+        ),
+        TemporalPlainDatePrototypeMethod::ToString
+        | TemporalPlainDatePrototypeMethod::ToJson
+        | TemporalPlainDatePrototypeMethod::ToLocaleString => {
+            Ok(NativeDispatch::Immediate(StoredValue::String(
+                JsString::from_utf8(&date.to_ixdtf_string(DisplayCalendar::Auto))?,
+            )))
+        }
+        TemporalPlainDatePrototypeMethod::ValueOf => temporal_type_error(
+            realm,
+            origin,
+            "Temporal.PlainDate cannot be converted to a primitive value",
+        ),
+    }
+}
+
+#[allow(
+    clippy::needless_pass_by_value,
+    clippy::too_many_arguments,
+    reason = "equals uses ordinary primitive conversion for non-Temporal inputs"
+)]
+fn begin_temporal_plain_date_equals(
+    runtime: &mut Runtime,
+    receiver: PlainDate,
+    value: StoredValue,
+    realm: RealmId,
+    return_to: Option<CallReturn>,
+    origin: JsStackFrame,
+    execution_budget: &mut ExecutionBudget,
+) -> Result<NativeDispatch, NativeFailure> {
+    if let StoredValue::Object(object) = value
+        && let Some(other) = runtime.temporal_plain_date(object)?
+    {
+        return Ok(NativeDispatch::Immediate(StoredValue::Boolean(
+            receiver == other,
+        )));
+    }
+    if let StoredValue::String(value) = value {
+        return finish_temporal_plain_date_equals(
+            &receiver,
+            StoredValue::String(value),
+            realm,
+            &origin,
+        );
+    }
+    begin_operator_primitive_conversion(
+        runtime,
+        value,
+        OperatorPrimitiveHint::String,
+        OperatorPrimitiveTarget::TemporalPlainDateEquals(Box::new(receiver)),
+        realm,
+        return_to,
+        origin,
+        execution_budget,
+    )
+}
+
+pub(super) fn finish_temporal_plain_date_equals(
+    receiver: &PlainDate,
+    value: StoredValue,
+    realm: RealmId,
+    origin: &JsStackFrame,
+) -> Result<NativeDispatch, NativeFailure> {
+    let StoredValue::String(value) = value else {
+        return temporal_type_error(realm, origin, "Temporal.PlainDate.equals requires a string");
+    };
+    let source = value.to_utf8_lossy()?;
+    let other = match PlainDate::from_utf8(source.as_bytes()) {
+        Ok(date) => date,
+        Err(error) => {
+            return Err(NativeFailure::Abrupt(temporal_exception_from_error(
+                realm, origin, error,
+            )?));
+        }
+    };
+    Ok(NativeDispatch::Immediate(StoredValue::Boolean(
+        *receiver == other,
+    )))
+}
+
+fn require_temporal_plain_date(
+    runtime: &Runtime,
+    receiver: &StoredValue,
+    realm: RealmId,
+    origin: &JsStackFrame,
+) -> Result<PlainDate, NativeFailure> {
+    if let StoredValue::Object(object) = receiver
+        && let Some(date) = runtime.temporal_plain_date(*object)?
+    {
+        return Ok(date);
+    }
+    Err(NativeFailure::Abrupt(temporal_pending_exception(
+        realm,
+        origin,
+        ExceptionKind::TypeError,
+        "not a Temporal.PlainDate object",
+    )?))
 }
 
 const TEMPORAL_DURATION_BAG_FIELDS: [(&str, usize); 10] = [

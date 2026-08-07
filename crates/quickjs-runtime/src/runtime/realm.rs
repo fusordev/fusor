@@ -691,6 +691,8 @@ impl RealmBuildTransaction<'_> {
                 duration_constructor: function(NativeFunctionKind::TemporalDurationConstructor),
                 instant_prototype: object(IntrinsicObjectId::TemporalInstantPrototype),
                 instant_constructor: function(NativeFunctionKind::TemporalInstantConstructor),
+                plain_date_prototype: object(IntrinsicObjectId::TemporalPlainDatePrototype),
+                plain_date_constructor: function(NativeFunctionKind::TemporalPlainDateConstructor),
             },
             map: MapIntrinsics {
                 prototype: object(IntrinsicObjectId::MapPrototype),

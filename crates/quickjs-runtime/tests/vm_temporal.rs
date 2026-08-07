@@ -123,6 +123,83 @@ fn duration_intrinsic_has_the_exact_initial_topology() {
 }
 
 #[test]
+fn plain_date_intrinsic_constructor_accessors_and_iso_formatting_are_spec_shaped() {
+    assert_eq!(
+        rendered(
+            "var d=new Temporal.PlainDate(2020,12,24,'iso8601');
+             var year=Object.getOwnPropertyDescriptor(Temporal.PlainDate.prototype,'year');
+             return [Temporal.PlainDate.length,Temporal.PlainDate.name,
+               Object.getPrototypeOf(d)===Temporal.PlainDate.prototype,
+               Object.prototype.toString.call(d),year.enumerable,year.get.name,
+               d.calendarId,d.year,d.month,d.monthCode,d.day,d.dayOfWeek,d.dayOfYear,
+               d.weekOfYear,d.yearOfWeek,d.daysInWeek,d.daysInMonth,d.daysInYear,
+               d.monthsInYear,d.inLeapYear,d.era,d.eraYear,d.toString(),d.toJSON(),
+               d.toLocaleString()].join('|');"
+        ),
+        "3|PlainDate|true|[object Temporal.PlainDate]|false|get year|iso8601|2020|12|M12|24|4|359|52|2020|7|31|366|12|true|||2020-12-24|2020-12-24|2020-12-24"
+    );
+}
+
+#[test]
+fn plain_date_constructor_observes_component_and_calendar_conversion_order() {
+    assert_eq!(
+        rendered(
+            "var log=[];
+             function number(name,value){return {valueOf:function(){log.push(name);return value}}}
+             var calendar={toString:function(){log.push('calendar');return 'iso8601'}};
+             var d=new Temporal.PlainDate(number('year',2020.9),number('month',2.8),number('day',29.6),calendar);
+             return [d.toString(),log.join(',')].join('|');"
+        ),
+        "2020-02-29|year,month,day,calendar"
+    );
+}
+
+#[test]
+fn plain_date_from_equals_and_new_target_prototype_preserve_branding() {
+    assert_eq!(
+        rendered(
+            "function F(){};var p={marker:true};F.prototype=p;
+             var d=Reflect.construct(Temporal.PlainDate,[2019,3,15],F);
+             var from=Temporal.PlainDate.from('2019-03-15');
+             return [Object.getPrototypeOf(d)===p,from.toString(),
+               from.equals(d),from.equals('2019-03-15'),from.equals('2019-03-16'),
+               Temporal.PlainDate.compare.length,Temporal.PlainDate.compare(from,d),
+               Temporal.PlainDate.compare('2019-03-14',from),
+               Temporal.PlainDate.compare(from,'2019-03-16')].join('|');"
+        ),
+        "true|2019-03-15|true|true|false|2|0|-1|-1"
+    );
+}
+
+#[test]
+fn plain_date_rejects_unbranded_receivers_invalid_components_and_call_without_new() {
+    assert_eq!(
+        thrown("return Temporal.PlainDate(2020,1,1);"),
+        ExceptionKind::TypeError
+    );
+    assert_eq!(
+        thrown("return Temporal.PlainDate.prototype.year.call({});"),
+        ExceptionKind::TypeError
+    );
+    assert_eq!(
+        thrown("return new Temporal.PlainDate(2020,2,30);"),
+        ExceptionKind::RangeError
+    );
+    assert_eq!(
+        thrown("return new Temporal.PlainDate(Infinity,1,1);"),
+        ExceptionKind::RangeError
+    );
+    assert_eq!(
+        thrown("return new Temporal.PlainDate(2020,1,1,'invalid-calendar');"),
+        ExceptionKind::RangeError
+    );
+    assert_eq!(
+        thrown("return new Temporal.PlainDate(2020,1,1).valueOf();"),
+        ExceptionKind::TypeError
+    );
+}
+
+#[test]
 fn duration_constructor_and_accessors_preserve_all_ten_fields() {
     assert_eq!(
         rendered(

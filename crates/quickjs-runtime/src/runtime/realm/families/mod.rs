@@ -138,12 +138,12 @@ impl RealmIntrinsicSchema {
             FamilyCardinality {
                 family: "Realm intrinsic objects",
                 actual: self.objects.len(),
-                expected: 62,
+                expected: 63,
             },
             FamilyCardinality {
                 family: "Realm native functions",
                 actual: self.specs.len(),
-                expected: 522,
+                expected: 546,
             },
         ];
         validate_intrinsic_schema(IntrinsicSchema {
@@ -176,6 +176,7 @@ pub(super) const fn is_declarative_object(id: IntrinsicObjectId) -> bool {
             | IntrinsicObjectId::Temporal
             | IntrinsicObjectId::TemporalDurationPrototype
             | IntrinsicObjectId::TemporalInstantPrototype
+            | IntrinsicObjectId::TemporalPlainDatePrototype
             | IntrinsicObjectId::RegExpPrototype
             | IntrinsicObjectId::IteratorPrototype
             | IntrinsicObjectId::AsyncIteratorPrototype
@@ -322,6 +323,9 @@ pub(super) const fn is_declarative_function(id: IntrinsicFunctionId) -> bool {
             | NativeFunctionKind::TemporalInstantConstructor
             | NativeFunctionKind::TemporalInstantStatic(_)
             | NativeFunctionKind::TemporalInstantPrototype(_)
+            | NativeFunctionKind::TemporalPlainDateConstructor
+            | NativeFunctionKind::TemporalPlainDateStatic(_)
+            | NativeFunctionKind::TemporalPlainDatePrototype(_)
             | NativeFunctionKind::PromiseConstructor
             | NativeFunctionKind::PromiseResolve
             | NativeFunctionKind::PromiseReject
@@ -1148,8 +1152,8 @@ mod tests {
     #[test]
     fn complete_function_schema_has_characterized_cardinality_and_unique_ids() {
         let schema = RealmIntrinsicSchema::try_new().expect("function schema");
-        assert_eq!(schema.specs().len(), 488);
-        assert_eq!(schema.constructor_prototypes.len(), 45);
+        assert_eq!(schema.specs().len(), 546);
+        assert_eq!(schema.constructor_prototypes.len(), 48);
         for (index, spec) in schema.specs().iter().enumerate() {
             assert!(
                 schema.specs()[..index]

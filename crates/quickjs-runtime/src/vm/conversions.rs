@@ -503,6 +503,10 @@ pub(super) fn intrinsic_getter_call_with_reserved_continuation(
     })
 }
 
+#[allow(
+    clippy::too_many_lines,
+    reason = "one exhaustive continuation dispatcher keeps every intrinsic wrapper auditable"
+)]
 pub(super) fn finish_intrinsic_get(
     runtime: &mut Runtime,
     continuation: IntrinsicGetContinuation,
@@ -556,6 +560,9 @@ pub(super) fn finish_intrinsic_get(
             new_target,
             duration,
         } => finish_temporal_duration_constructor_wrapper(runtime, new_target, duration, &value),
+        IntrinsicGetContinuation::TemporalPlainDateConstructor { new_target, date } => {
+            finish_temporal_plain_date_constructor_wrapper(runtime, new_target, date, &value)
+        }
         IntrinsicGetContinuation::StringConstructor {
             new_target,
             value: string_value,
@@ -2102,6 +2109,32 @@ fn finish_operator_primitive_target(
                 origin,
                 execution_budget,
             )
+        }
+        OperatorPrimitiveTarget::TemporalPlainDateConstructor(state) => {
+            let number = operator_to_number(value, realm, origin)?;
+            advance_temporal_plain_date_constructor(
+                runtime,
+                *state,
+                Some(number),
+                realm,
+                return_to,
+                origin,
+                execution_budget,
+            )
+        }
+        OperatorPrimitiveTarget::TemporalPlainDateCalendar(state) => {
+            finish_temporal_plain_date_calendar(
+                runtime,
+                state.as_ref(),
+                value,
+                realm,
+                return_to,
+                origin,
+                execution_budget,
+            )
+        }
+        OperatorPrimitiveTarget::TemporalPlainDateEquals(receiver) => {
+            finish_temporal_plain_date_equals(receiver.as_ref(), value, realm, origin)
         }
         OperatorPrimitiveTarget::TemporalDurationBag(state) => {
             advance_temporal_duration_property_bag(
