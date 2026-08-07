@@ -1016,6 +1016,23 @@ fn plain_date_time_to_plain_date_allocates_a_branded_calendar_preserving_copy() 
 }
 
 #[test]
+fn plain_date_time_to_plain_time_allocates_a_branded_time_copy() {
+    assert_eq!(
+        rendered(
+            "var value=new Temporal.PlainDateTime(2020,2,29,12,34,56,7,8,9);
+             var time=value.toPlainTime();
+             return [Temporal.PlainDateTime.prototype.toPlainTime.length,time.toString(),
+               time===value,Object.getPrototypeOf(time)===Temporal.PlainTime.prototype].join('|');"
+        ),
+        "0|12:34:56.007008009|false|true"
+    );
+    assert_eq!(
+        thrown("return Temporal.PlainDateTime.prototype.toPlainTime.call({});"),
+        ExceptionKind::TypeError
+    );
+}
+
+#[test]
 fn plain_date_time_with_calendar_accepts_identifiers_and_temporal_fast_paths_only() {
     assert_eq!(
         rendered(
