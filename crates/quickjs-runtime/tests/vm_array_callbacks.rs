@@ -372,6 +372,40 @@ fn callback_methods_read_and_convert_length_before_rejecting_a_bad_callback() {
     ]);
 }
 
+/// `map` and `filter` create their result through `ArraySpeciesCreate` only
+/// after they have captured the source length and validated the callback.
+#[test]
+fn map_and_filter_use_the_array_species_constructor() {
+    assert_all(&[
+        (
+            "(function(){\
+                let calls=0;\
+                const target=[];\
+                function Ctor(length){calls++;return target;}\
+                const source=[1,2];\
+                source.constructor={};\
+                source.constructor[Symbol.species]=Ctor;\
+                const result=source.map(function(value){return value*2;});\
+                return (result===target)+'|'+calls+'|'+target.join();\
+            })()",
+            "true|1|2,4",
+        ),
+        (
+            "(function(){\
+                let argument=-1;\
+                const target={};\
+                function Ctor(length){argument=length;return target;}\
+                const source=[1,2,3];\
+                source.constructor={};\
+                source.constructor[Symbol.species]=Ctor;\
+                const result=source.filter(function(value){return value%2;});\
+                return (result===target)+'|'+argument+'|'+target[0]+'|'+target[1];\
+            })()",
+            "true|0|1|3",
+        ),
+    ]);
+}
+
 /// Generic callback methods observe a Proxy's `get` and `has` traps in the
 /// order required by `LengthOfArrayLike` and the indexed iteration.
 #[test]

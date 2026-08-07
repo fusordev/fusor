@@ -63,6 +63,14 @@ enum ArrayCallbackStage {
     AwaitLength,
     /// Awaiting `ToLength` of the length value.
     AwaitLengthConversion,
+    /// Chooses the `ArraySpeciesCreate` result for `map` or `filter`.
+    SelectSpecies,
+    /// Awaiting the source Array's `constructor` property.
+    AwaitConstructor,
+    /// Awaiting the source constructor's `@@species` property.
+    AwaitSpecies,
+    /// Awaiting a custom species construction.
+    AwaitSpeciesConstruct,
     /// Ready to visit the next index.
     NextElement,
     /// Awaiting `HasProperty` for a hole-skipping method.
@@ -99,8 +107,8 @@ pub(crate) struct ArrayCallbackContinuation {
     current: u64,
     /// The element currently being visited, retained for `filter` and `find`.
     element: Option<StoredValue>,
-    /// The destination array, present for `map` and `filter`.
-    destination: Option<ObjectId>,
+    /// The `ArraySpeciesCreate` destination, present for `map` and `filter`.
+    destination: Option<StoredValue>,
     /// The next index to write in the destination.
     written: u64,
     /// The value this method returns.
@@ -125,8 +133,8 @@ impl ArrayCallbackContinuation {
         if let Some(element) = &self.element {
             trace_stored_value_root(element, mark);
         }
-        if let Some(destination) = self.destination {
-            mark(CollectionRoot::Heap(HeapReference::Object(destination)));
+        if let Some(destination) = &self.destination {
+            trace_stored_value_root(destination, mark);
         }
     }
 }
@@ -318,14 +326,123 @@ pub(super) fn advance_array_callback(
                         origin: state.origin.clone(),
                     }));
                 };
-                if state.method.builds_array() {
-                    state.destination = Some(runtime.allocate_array(state.realm, Vec::new())?);
-                }
                 state.next = if state.method.is_backward() {
                     state.length.saturating_sub(1)
                 } else {
                     0
                 };
+                state.stage = if state.method.builds_array() {
+                    ArrayCallbackStage::SelectSpecies
+                } else {
+                    ArrayCallbackStage::NextElement
+                };
+            }
+            ArrayCallbackStage::SelectSpecies => {
+                if !proxy_aware_is_array(
+                    runtime,
+                    state.target.duplicate(),
+                    state.realm,
+                    state.origin.clone(),
+                )? {
+                    allocate_callback_destination(runtime, &mut state)?;
+                    state.stage = ArrayCallbackStage::NextElement;
+                    continue;
+                }
+                let key = runtime.predefined_property_key(PredefinedAtom::Constructor);
+                charge_callback_lookup(runtime, &state.target, execution_budget)?;
+                state.stage = ArrayCallbackStage::AwaitConstructor;
+                let dispatch = begin_value_get(
+                    runtime,
+                    &state.target,
+                    key,
+                    None,
+                    state.realm,
+                    return_to,
+                    state.origin.clone(),
+                    execution_budget,
+                )?;
+                await_get!(continue_get_state_after(
+                    dispatch,
+                    state,
+                    array_callback_continuation,
+                    "Array callback constructor Get produced a structured result",
+                ));
+            }
+            ArrayCallbackStage::AwaitConstructor => {
+                let constructor = take_completion(&mut completion)?;
+                if let StoredValue::Function(function) = constructor
+                    && function_is_constructor(runtime, function)?
+                {
+                    let constructor_realm = runtime.function_realm(function)?;
+                    if constructor_realm != state.realm
+                        && function == runtime.realm_array_constructor(constructor_realm)?
+                    {
+                        allocate_callback_destination(runtime, &mut state)?;
+                        state.stage = ArrayCallbackStage::NextElement;
+                        continue;
+                    }
+                }
+                if matches!(
+                    constructor,
+                    StoredValue::Function(_) | StoredValue::Object(_)
+                ) {
+                    let key = runtime.predefined_symbol_property_key(PredefinedAtom::SymbolSpecies);
+                    charge_callback_lookup(runtime, &constructor, execution_budget)?;
+                    state.stage = ArrayCallbackStage::AwaitSpecies;
+                    let dispatch = begin_value_get(
+                        runtime,
+                        &constructor,
+                        key,
+                        None,
+                        state.realm,
+                        return_to,
+                        state.origin.clone(),
+                        execution_budget,
+                    )?;
+                    await_get!(continue_get_state_after(
+                        dispatch,
+                        state,
+                        array_callback_continuation,
+                        "Array callback species Get produced a structured result",
+                    ));
+                } else if matches!(constructor, StoredValue::Undefined) {
+                    allocate_callback_destination(runtime, &mut state)?;
+                    state.stage = ArrayCallbackStage::NextElement;
+                } else {
+                    return callback_type_error(&state, "not a constructor");
+                }
+            }
+            ArrayCallbackStage::AwaitSpecies => {
+                let species = take_completion(&mut completion)?;
+                if matches!(species, StoredValue::Undefined | StoredValue::Null) {
+                    allocate_callback_destination(runtime, &mut state)?;
+                    state.stage = ArrayCallbackStage::NextElement;
+                    continue;
+                }
+                let StoredValue::Function(constructor) = species else {
+                    return callback_type_error(&state, "not a constructor");
+                };
+                if !function_is_constructor(runtime, constructor)? {
+                    return callback_type_error(&state, "not a constructor");
+                }
+                state.stage = ArrayCallbackStage::AwaitSpeciesConstruct;
+                let length = if matches!(state.method, ArrayCallback::Map) {
+                    state.length
+                } else {
+                    0
+                };
+                let argument = StoredValue::Number(JsNumber::from_f64(index_as_f64(length)));
+                return suspend_construct_callback(state, constructor, argument, return_to);
+            }
+            ArrayCallbackStage::AwaitSpeciesConstruct => {
+                let destination = take_completion(&mut completion)?;
+                if destination.heap_reference().is_none() {
+                    return Err(EngineFault::RuntimeInvariant {
+                        message: "ArraySpeciesCreate constructor returned a primitive",
+                    }
+                    .into());
+                }
+                state.destination = Some(destination);
                 state.stage = ArrayCallbackStage::NextElement;
             }
             ArrayCallbackStage::NextElement => {
@@ -416,14 +533,14 @@ pub(super) fn advance_array_callback(
                 match state.method {
                     ArrayCallback::ForEach => {}
                     ArrayCallback::Map => {
-                        append_element(runtime, &mut state, answer)?;
+                        append_element(runtime, &mut state, answer, execution_budget)?;
                     }
                     ArrayCallback::Filter => {
                         if truthy {
                             let element = element.ok_or(EngineFault::RuntimeInvariant {
                                 message: "array filter lost the element it was testing",
                             })?;
-                            append_element(runtime, &mut state, element)?;
+                            append_element(runtime, &mut state, element, execution_budget)?;
                         }
                     }
                     ArrayCallback::Every => {
@@ -461,10 +578,7 @@ pub(super) fn advance_array_callback(
             }
             ArrayCallbackStage::Done => {
                 return Ok(NativeDispatch::Immediate(match state.destination {
-                    Some(destination) => {
-                        finish_destination(runtime, &state, destination)?;
-                        StoredValue::Object(destination)
-                    }
+                    Some(destination) => destination,
                     None => state.result,
                 }));
             }
@@ -510,55 +624,94 @@ fn default_result(method: ArrayCallback) -> StoredValue {
     }
 }
 
-/// Appends one element to the destination array.
+/// Creates one result property with `CreateDataPropertyOrThrow`.
 fn append_element(
     runtime: &mut Runtime,
     state: &mut ArrayCallbackContinuation,
     value: StoredValue,
+    execution_budget: &mut ExecutionBudget,
 ) -> Result<(), NativeFailure> {
-    let Some(destination) = state.destination else {
+    let Some(destination) = state.destination.as_ref() else {
         return Err(EngineFault::RuntimeInvariant {
             message: "an array callback appended an element with no destination",
         }
         .into());
     };
     let key = element_key(state.written)?;
-    state.written = state.written.saturating_add(1);
-    match runtime.define_array_data_property(
-        destination,
-        key,
-        PropertyLayout::data(true, true, true),
-        value,
-    )? {
-        ArrayDefineOutcome::Complete => Ok(()),
-        ArrayDefineOutcome::ReadOnlyLength | ArrayDefineOutcome::NonExtensible => {
-            Err(EngineFault::RuntimeInvariant {
-                message: "a freshly allocated destination array refused an element",
-            }
-            .into())
+    match define_static_property(runtime, destination, key, value, execution_budget)? {
+        PropertyWriteOutcome::Complete => {
+            state.written = state.written.saturating_add(1);
+            Ok(())
         }
+        PropertyWriteOutcome::Failed(failure) => Err(callback_property_failure(state, failure)),
+        PropertyWriteOutcome::Setter { .. } => Err(EngineFault::RuntimeInvariant {
+            message: "Array callback CreateDataPropertyOrThrow attempted to call a setter",
+        }
+        .into()),
     }
 }
 
-/// Sets the destination's final length.
-///
-/// `map` writes one slot per source index, including the holes it skipped, so
-/// its result keeps the source's shape. `filter` writes only what it kept.
-fn finish_destination(
+/// Allocates the default `ArraySpeciesCreate` result when the source has no
+/// usable custom species.
+fn allocate_callback_destination(
     runtime: &mut Runtime,
-    state: &ArrayCallbackContinuation,
-    destination: ObjectId,
+    state: &mut ArrayCallbackContinuation,
 ) -> Result<(), NativeFailure> {
-    let length = u32::try_from(state.written).map_err(|_| EngineFault::RuntimeInvariant {
-        message: "an array callback produced a length outside the array-index domain",
-    })?;
-    match runtime.set_array_length(destination, length)? {
-        ArrayLengthWriteOutcome::Complete
-        | ArrayLengthWriteOutcome::BlockedByNonConfigurable { .. } => Ok(()),
-        ArrayLengthWriteOutcome::ReadOnly => Err(EngineFault::RuntimeInvariant {
-            message: "a freshly allocated destination array refused its length",
+    let destination = runtime.allocate_array(state.realm, Vec::new())?;
+    if matches!(state.method, ArrayCallback::Map) {
+        let length = u32::try_from(state.length)
+            .map_err(|_| callback_range_error(state, "invalid array length"))?;
+        match runtime.set_array_length(destination, length)? {
+            ArrayLengthWriteOutcome::Complete
+            | ArrayLengthWriteOutcome::BlockedByNonConfigurable { .. } => {}
+            ArrayLengthWriteOutcome::ReadOnly => {
+                return Err(EngineFault::RuntimeInvariant {
+                    message: "a fresh ArraySpeciesCreate result had a read-only length",
+                }
+                .into());
+            }
         }
-        .into()),
+    }
+    state.destination = Some(StoredValue::Object(destination));
+    Ok(())
+}
+
+fn callback_property_failure(
+    state: &ArrayCallbackContinuation,
+    failure: PropertyFailure,
+) -> NativeFailure {
+    match property_exception_at(state.realm, state.origin.clone(), None, failure) {
+        Ok(exception) => NativeFailure::Abrupt(exception),
+        Err(error) => error.into(),
+    }
+}
+
+fn callback_type_error(
+    state: &ArrayCallbackContinuation,
+    message: &str,
+) -> Result<NativeDispatch, NativeFailure> {
+    let message = JsString::from_utf8(message)?;
+    Err(NativeFailure::Abrupt(PendingException {
+        realm: state.realm,
+        payload: PendingExceptionPayload::EngineError {
+            kind: ExceptionKind::TypeError,
+            message,
+        },
+        origin: state.origin.clone(),
+    }))
+}
+
+fn callback_range_error(state: &ArrayCallbackContinuation, message: &str) -> NativeFailure {
+    match JsString::from_utf8(message) {
+        Ok(message) => NativeFailure::Abrupt(PendingException {
+            realm: state.realm,
+            payload: PendingExceptionPayload::EngineError {
+                kind: ExceptionKind::RangeError,
+                message,
+            },
+            origin: state.origin.clone(),
+        }),
+        Err(error) => error.into(),
     }
 }
 
@@ -588,6 +741,35 @@ fn suspend(
         continuations,
         pre_call: None,
         new_target: None,
+        native_caller: None,
+    }))
+}
+
+/// Suspends into a species constructor that resumes this callback method.
+fn suspend_construct_callback(
+    state: ArrayCallbackContinuation,
+    constructor: FunctionId,
+    argument: StoredValue,
+    return_to: Option<CallReturn>,
+) -> Result<NativeDispatch, NativeFailure> {
+    let origin = state.origin.clone();
+    let mut continuations = Vec::new();
+    continuations
+        .try_reserve_exact(1)
+        .map_err(|_| ExecutionError::AllocationFailed {
+            resource: RuntimeResource::Frames,
+            additional: 1,
+        })?;
+    continuations.push(NativeContinuation::ArrayCallback(Box::new(state)));
+    Ok(NativeDispatch::Call(NativeCall {
+        function: constructor,
+        receiver: StoredValue::Undefined,
+        arguments: CallArguments::from_values(vec![argument]),
+        return_to,
+        origin,
+        continuations,
+        pre_call: None,
+        new_target: Some(constructor),
         native_caller: None,
     }))
 }
