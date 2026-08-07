@@ -265,6 +265,8 @@ pub(super) fn begin_object_prototype_to_string(
                 ObjectPrototypeTag::Symbol
             } else if runtime.date_value(*object)?.is_some() {
                 ObjectPrototypeTag::Date
+            } else if runtime.array_buffer_state(*object)?.is_some() {
+                ObjectPrototypeTag::ArrayBuffer
             } else if runtime
                 .objects
                 .get(*object)

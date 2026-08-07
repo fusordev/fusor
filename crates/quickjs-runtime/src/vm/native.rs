@@ -470,6 +470,18 @@ pub(super) fn resume_native_continuations(
                     Err(error) => return Err(error),
                 }
             }
+            NativeContinuation::ArrayBufferConstructor(state) => {
+                advance_array_buffer_constructor_max(
+                    runtime,
+                    *state,
+                    value,
+                    return_to,
+                    execution_budget,
+                )?
+            }
+            NativeContinuation::ArrayBufferSlice(state) => {
+                advance_array_buffer_slice(runtime, *state, value, return_to, execution_budget)?
+            }
             NativeContinuation::DateToJson(state) => {
                 finish_date_to_json_call(state, value, return_to)?
             }
@@ -2369,6 +2381,25 @@ pub(super) fn dispatch_native_call_with_frames(
             origin.unwrap_or_else(native_function_host_origin),
             execution_budget,
         ),
+        NativeFunctionKind::ArrayBufferConstructor => begin_array_buffer_constructor(
+            runtime,
+            native.realm,
+            inputs,
+            return_to,
+            origin.unwrap_or_else(native_function_host_origin),
+            execution_budget,
+        ),
+        NativeFunctionKind::ArrayBufferIsView => Ok(array_buffer_is_view(inputs.arguments)),
+        NativeFunctionKind::ArrayBufferPrototype(method) => dispatch_array_buffer_prototype(
+            runtime,
+            method,
+            native.realm,
+            &inputs.receiver,
+            inputs.arguments,
+            return_to,
+            origin.unwrap_or_else(native_function_host_origin),
+            execution_budget,
+        ),
         NativeFunctionKind::DateStatic(method) => begin_date_static(
             runtime,
             method,
@@ -3098,6 +3129,7 @@ pub(super) fn dispatch_native_call_with_frames(
             )
         }
         NativeFunctionKind::ArraySpeciesGetter
+        | NativeFunctionKind::ArrayBufferSpeciesGetter
         | NativeFunctionKind::PromiseSpeciesGetter
         | NativeFunctionKind::MapSpeciesGetter
         | NativeFunctionKind::SetSpeciesGetter

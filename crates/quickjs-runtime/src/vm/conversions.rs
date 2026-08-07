@@ -523,6 +523,17 @@ pub(super) fn finish_intrinsic_get(
             new_target,
             value: date_value,
         } => finish_date_constructor_wrapper(runtime, new_target, date_value, &value),
+        IntrinsicGetContinuation::ArrayBufferConstructor {
+            new_target,
+            byte_length,
+            max_byte_length,
+        } => finish_array_buffer_constructor_wrapper(
+            runtime,
+            new_target,
+            byte_length,
+            max_byte_length,
+            &value,
+        ),
         IntrinsicGetContinuation::TemporalInstantConstructor {
             new_target,
             epoch_nanoseconds,
@@ -1799,6 +1810,48 @@ fn finish_operator_primitive_target(
                 origin,
                 execution_budget,
             )
+        }
+        OperatorPrimitiveTarget::ArrayBufferConstructorLength(state) => {
+            finish_array_buffer_constructor_length(
+                runtime,
+                *state,
+                value,
+                return_to,
+                execution_budget,
+            )
+        }
+        OperatorPrimitiveTarget::ArrayBufferConstructorMax {
+            new_target,
+            byte_length,
+        } => finish_array_buffer_constructor_max(
+            runtime,
+            new_target,
+            byte_length,
+            value,
+            realm,
+            return_to,
+            origin,
+            execution_budget,
+        ),
+        OperatorPrimitiveTarget::ArrayBufferResize { object } => {
+            finish_array_buffer_resize(runtime, object, value, realm, origin)
+        }
+        OperatorPrimitiveTarget::ArrayBufferTransfer {
+            object,
+            preserve_resizability,
+        } => finish_array_buffer_transfer(
+            runtime,
+            object,
+            preserve_resizability,
+            value,
+            realm,
+            origin,
+        ),
+        OperatorPrimitiveTarget::ArrayBufferSliceStart(state) => {
+            finish_array_buffer_slice_start(runtime, *state, value, return_to, execution_budget)
+        }
+        OperatorPrimitiveTarget::ArrayBufferSliceEnd(state) => {
+            finish_array_buffer_slice_end(runtime, *state, value, return_to, execution_budget)
         }
         OperatorPrimitiveTarget::DateParse => finish_date_parse(value, realm, origin),
         OperatorPrimitiveTarget::DateUtc(state) => {

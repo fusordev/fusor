@@ -35,21 +35,22 @@ mod transaction;
 mod validation;
 
 use super::{
-    Arc, Arena, ArrayCallback, ArrayCopier, ArrayFlatten, ArrayIntrinsics, ArrayMutator,
-    ArrayReduction, ArraySearch, ArraySort, ArrayState, ArrayStatic, AsyncFunctionIntrinsics,
-    AsyncGeneratorIntrinsics, AtomError, AtomTable, BigIntIntrinsics, BooleanIntrinsics, Context,
-    DateIntrinsics, ErrorIntrinsic, ErrorIntrinsicKind, ErrorIntrinsics,
-    FinalizationRegistryIntrinsics, FunctionId, FunctionImplementation, GeneratorIntrinsics,
-    GlobalNumericFunction, HandleError, HandleKind, HashMap, HeapFunction, HeapObject,
-    HeapReference, InterruptState, IteratorIntrinsics, JsNumber, JsString, LocaleStringMethod,
-    MapIntrinsics, MapMethod, MathMethod, NativeFunction, NativeFunctionKind, NumberFormat,
-    NumberIntrinsics, NumberPredicate, ObjectId, ObjectRecord, PredefinedAtom, PromiseIntrinsics,
-    PromiseRejectionState, PromiseStatic, PropertyKey, PropertyLayout, Rc, Realm, RealmHandle,
-    RealmId, RealmIntrinsics, RealmState, RefCell, ReflectMethod, RegExpIntrinsics, ReleaseMailbox,
-    Runtime, RuntimeError, RuntimeIdentity, RuntimeLimits, RuntimeResource, SetIntrinsics,
-    SetMethod, ShapeInterner, StoredValue, StringHtmlMethod, StringIntrinsics, StringMethod,
-    SymbolIntrinsics, TemporalIntrinsics, UriFunction, VecDeque, WeakMapIntrinsics,
-    WeakRefIntrinsics, WeakSetIntrinsics, check_limit, predefined_string, usize_to_u64,
+    Arc, Arena, ArrayBufferIntrinsics, ArrayCallback, ArrayCopier, ArrayFlatten, ArrayIntrinsics,
+    ArrayMutator, ArrayReduction, ArraySearch, ArraySort, ArrayState, ArrayStatic,
+    AsyncFunctionIntrinsics, AsyncGeneratorIntrinsics, AtomError, AtomTable, BigIntIntrinsics,
+    BooleanIntrinsics, Context, DateIntrinsics, ErrorIntrinsic, ErrorIntrinsicKind,
+    ErrorIntrinsics, FinalizationRegistryIntrinsics, FunctionId, FunctionImplementation,
+    GeneratorIntrinsics, GlobalNumericFunction, HandleError, HandleKind, HashMap, HeapFunction,
+    HeapObject, HeapReference, InterruptState, IteratorIntrinsics, JsNumber, JsString,
+    LocaleStringMethod, MapIntrinsics, MapMethod, MathMethod, NativeFunction, NativeFunctionKind,
+    NumberFormat, NumberIntrinsics, NumberPredicate, ObjectId, ObjectRecord, PredefinedAtom,
+    PromiseIntrinsics, PromiseRejectionState, PromiseStatic, PropertyKey, PropertyLayout, Rc,
+    Realm, RealmHandle, RealmId, RealmIntrinsics, RealmState, RefCell, ReflectMethod,
+    RegExpIntrinsics, ReleaseMailbox, Runtime, RuntimeError, RuntimeIdentity, RuntimeLimits,
+    RuntimeResource, SetIntrinsics, SetMethod, ShapeInterner, StoredValue, StringHtmlMethod,
+    StringIntrinsics, StringMethod, SymbolIntrinsics, TemporalIntrinsics, UriFunction, VecDeque,
+    WeakMapIntrinsics, WeakRefIntrinsics, WeakSetIntrinsics, check_limit, predefined_string,
+    usize_to_u64,
 };
 
 use allocation::IntrinsicRecords;
@@ -554,6 +555,7 @@ impl Runtime {
             installed_atoms: 0,
             installed_constants: 0,
             object_properties: 0,
+            array_buffer_bytes: 0,
             for_in_entries: 0,
             collection_entries: 0,
             public_roots: 0,
@@ -710,6 +712,10 @@ impl RealmBuildTransaction<'_> {
             array: ArrayIntrinsics {
                 prototype: object(IntrinsicObjectId::ArrayPrototype),
                 constructor: function(NativeFunctionKind::ArrayConstructor),
+            },
+            array_buffer: ArrayBufferIntrinsics {
+                prototype: object(IntrinsicObjectId::ArrayBufferPrototype),
+                constructor: function(NativeFunctionKind::ArrayBufferConstructor),
             },
             date: DateIntrinsics {
                 prototype: object(IntrinsicObjectId::DatePrototype),

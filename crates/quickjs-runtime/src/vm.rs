@@ -56,10 +56,10 @@ use crate::{
     number::decimal::{DecimalDigits, exact_fixed, exact_significant},
     object::{ForInSnapshot, IntegrityLevel, KeyPhases, OwnProperty, PropertyDeletion},
     runtime::{
-        ArrayCallback, ArrayCopier, ArrayDefineOutcome, ArrayFlatten, ArrayLengthWriteOutcome,
-        ArrayMutator, ArrayReduction, ArraySearch, ArraySort, ArrayStatic, BindingCell,
-        BoundFunction, BytecodeFunction, CollectionRoot, DatePrototypeMethod, DateStaticMethod,
-        EnvironmentBinding, FinalizationRegistryMethod, FrameBindingAddress,
+        ArrayBufferPrototypeMethod, ArrayCallback, ArrayCopier, ArrayDefineOutcome, ArrayFlatten,
+        ArrayLengthWriteOutcome, ArrayMutator, ArrayReduction, ArraySearch, ArraySort, ArrayStatic,
+        BindingCell, BoundFunction, BytecodeFunction, CollectionRoot, DatePrototypeMethod,
+        DateStaticMethod, EnvironmentBinding, FinalizationRegistryMethod, FrameBindingAddress,
         FunctionImplementation, GlobalNumericFunction, HeapFunction, InstalledCode,
         InstalledConstant, InstalledRoot, InstalledTemplate, LocaleStringMethod, MapMethod,
         MathMethod, NativeFunction, NativeFunctionKind, NumberFormat, NumberPredicate,
@@ -77,6 +77,7 @@ use crate::{
 };
 
 mod aggregate_error;
+mod array_buffer;
 mod array_callbacks;
 mod array_copiers;
 mod array_flatten;
@@ -138,7 +139,7 @@ use async_function::{begin_async_await, suspend_async_function};
     reason = "private VM sibling modules share one interpreter implementation namespace"
 )]
 use {
-    aggregate_error::*, array_callbacks::*, array_copiers::*, array_flatten::*,
+    aggregate_error::*, array_buffer::*, array_callbacks::*, array_copiers::*, array_flatten::*,
     array_from_async::*, array_join::*, array_mutators::*, array_search::*, array_sort::*,
     array_statics::*, async_from_sync::*, async_generator::*, bigint_intrinsics::*, bindings::*,
     conversions::*, date::*, define_property_intrinsics::*, dynamic::*, error_stack::*, errors::*,
@@ -746,6 +747,8 @@ enum NativeContinuation {
     FunctionBind(FunctionBindContinuation),
     PropertyKey(PropertyKeyContinuation),
     OperatorPrimitive(OperatorPrimitiveContinuation),
+    ArrayBufferConstructor(Box<ArrayBufferConstructorContinuation>),
+    ArrayBufferSlice(Box<ArrayBufferSliceContinuation>),
     DateToJson(DateToJsonContinuation),
     TemporalDurationBag(Box<TemporalDurationBagContinuation>),
     TemporalDurationCompareOptions(TemporalDurationCompareOptionsContinuation),
@@ -850,6 +853,10 @@ impl NativeContinuation {
             Self::FunctionBind(state) => state.retained_values(),
             Self::PropertyKey(state) => state.retained_values(),
             Self::OperatorPrimitive(state) => state.retained_values(),
+            Self::ArrayBufferConstructor(_) => {
+                ArrayBufferConstructorContinuation::retained_values()
+            }
+            Self::ArrayBufferSlice(_) => ArrayBufferSliceContinuation::retained_values(),
             Self::DateToJson(_) => DateToJsonContinuation::retained_values(),
             Self::TemporalDurationBag(state) => state.retained_values(),
             Self::TemporalDurationCompareOptions(_) => {
@@ -1193,6 +1200,11 @@ enum IntrinsicGetContinuation {
         new_target: FunctionId,
         value: JsNumber,
     },
+    ArrayBufferConstructor {
+        new_target: FunctionId,
+        byte_length: usize,
+        max_byte_length: Option<usize>,
+    },
     TemporalInstantConstructor {
         new_target: FunctionId,
         epoch_nanoseconds: i128,
@@ -1252,6 +1264,7 @@ impl IntrinsicGetContinuation {
             Self::BooleanConstructor { .. }
             | Self::NumberConstructor { .. }
             | Self::DateConstructor { .. }
+            | Self::ArrayBufferConstructor { .. }
             | Self::TemporalInstantConstructor { .. }
             | Self::TemporalDurationConstructor { .. }
             | Self::StringConstructor { .. } => 1,
@@ -1272,6 +1285,7 @@ impl IntrinsicGetContinuation {
 
 #[derive(Clone, Copy)]
 enum ObjectPrototypeTag {
+    ArrayBuffer,
     Arguments,
     Array,
     BigInt,
@@ -1289,6 +1303,7 @@ enum ObjectPrototypeTag {
 impl ObjectPrototypeTag {
     const fn name(self) -> &'static str {
         match self {
+            Self::ArrayBuffer => "ArrayBuffer",
             Self::Arguments => "Arguments",
             Self::Array => "Array",
             Self::BigInt => "BigInt",
@@ -1952,6 +1967,29 @@ enum OperatorPrimitiveTarget {
     DateConstructor {
         new_target: FunctionId,
     },
+    /// `%ArrayBuffer%`'s initial `byteLength`, awaiting `ToIndex`.
+    ArrayBufferConstructorLength(Box<ArrayBufferConstructorLengthContinuation>),
+    /// `%ArrayBuffer%`'s optional `maxByteLength`, awaiting `ToIndex`.
+    ArrayBufferConstructorMax {
+        new_target: FunctionId,
+        byte_length: usize,
+    },
+    /// `ArrayBuffer.prototype.resize`'s new length, after the brand checks.
+    ArrayBufferResize {
+        object: ObjectId,
+    },
+    /// `ArrayBuffer.prototype.transfer` or `transferToFixedLength` after
+    /// `ToIndex(newLength)`.
+    ArrayBufferTransfer {
+        object: ObjectId,
+        preserve_resizability: bool,
+    },
+    /// `ArrayBuffer.prototype.slice`'s start argument, awaiting
+    /// `ToClampedIndex`'s `ToNumber` component.
+    ArrayBufferSliceStart(Box<ArrayBufferSliceContinuation>),
+    /// `ArrayBuffer.prototype.slice`'s end argument, awaiting
+    /// `ToClampedIndex`'s `ToNumber` component.
+    ArrayBufferSliceEnd(Box<ArrayBufferSliceContinuation>),
     /// `Date.parse`, after `ToString`.
     DateParse,
     /// One supplied `Date.UTC` component, after `ToNumber`.
@@ -2123,6 +2161,7 @@ impl OperatorPrimitiveTarget {
             Self::Unary { .. }
             | Self::NumberIntrinsic { new_target: None }
             | Self::DateParse
+            | Self::ArrayBufferResize { .. }
             | Self::DateSetTime { .. }
             | Self::DateToPrimitive
             | Self::TemporalInstantNanoseconds { new_target: None }
@@ -2148,6 +2187,8 @@ impl OperatorPrimitiveTarget {
                 new_target: Some(_),
             }
             | Self::DateConstructor { .. }
+            | Self::ArrayBufferConstructorMax { .. }
+            | Self::ArrayBufferTransfer { .. }
             | Self::TemporalInstantNanoseconds {
                 new_target: Some(_),
             }
@@ -2159,6 +2200,12 @@ impl OperatorPrimitiveTarget {
             | Self::ArrayFromAsyncLength { .. } => 1,
             Self::DateUtc(state) => state.retained_values(),
             Self::DateConstructorComponents(state) => state.retained_values(),
+            Self::ArrayBufferConstructorLength(_) => {
+                ArrayBufferConstructorLengthContinuation::retained_values()
+            }
+            Self::ArrayBufferSliceStart(_) | Self::ArrayBufferSliceEnd(_) => {
+                ArrayBufferSliceContinuation::retained_values()
+            }
             Self::TemporalDurationConstructor(state) => state.retained_values(),
             Self::TemporalDurationBag(state) => state.retained_values(),
             Self::TemporalDurationRoundLargestUnit(_state)
@@ -2418,10 +2465,13 @@ fn trace_operator_primitive_target_roots(
         | OperatorPrimitiveTarget::BigIntTruncationValue { .. }
         // The converted left Number carries no heap edge.
         | OperatorPrimitiveTarget::MathBinaryFinish { .. } => {}
-        OperatorPrimitiveTarget::DateSetTime { object } => {
+        OperatorPrimitiveTarget::DateSetTime { object }
+        | OperatorPrimitiveTarget::ArrayBufferResize { object }
+        | OperatorPrimitiveTarget::ArrayBufferTransfer { object, .. } => {
             mark(CollectionRoot::Heap(HeapReference::Object(*object)));
         }
-        OperatorPrimitiveTarget::DateConstructor { new_target } => {
+        OperatorPrimitiveTarget::DateConstructor { new_target }
+        | OperatorPrimitiveTarget::ArrayBufferConstructorMax { new_target, .. } => {
             mark(CollectionRoot::Heap(HeapReference::Function(*new_target)));
         }
         OperatorPrimitiveTarget::TemporalInstantNanoseconds {
@@ -2490,6 +2540,9 @@ fn trace_operator_primitive_target_roots(
                 mark(CollectionRoot::Heap(HeapReference::Function(*new_target)));
             }
         }
+        OperatorPrimitiveTarget::ArrayBufferConstructorLength(state) => state.trace_roots(mark),
+        OperatorPrimitiveTarget::ArrayBufferSliceStart(state)
+        | OperatorPrimitiveTarget::ArrayBufferSliceEnd(state) => state.trace_roots(mark),
         OperatorPrimitiveTarget::ErrorConstructorMessage(state) => state.trace_roots(mark),
         OperatorPrimitiveTarget::ErrorToStringName(state)
         | OperatorPrimitiveTarget::ErrorToStringMessage(state) => state.trace_roots(mark),
@@ -2632,6 +2685,8 @@ fn trace_native_continuation_roots(
             trace_stored_value_root(&state.receiver, mark);
             trace_operator_primitive_target_roots(&state.target, mark);
         }
+        NativeContinuation::ArrayBufferConstructor(state) => state.trace_roots(mark),
+        NativeContinuation::ArrayBufferSlice(state) => state.trace_roots(mark),
         NativeContinuation::DateToJson(state) => state.trace_roots(mark),
         NativeContinuation::TemporalDurationBag(state) => state.trace_roots(mark),
         NativeContinuation::TemporalDurationCompareOptions(state) => state.trace_roots(mark),
@@ -2645,6 +2700,7 @@ fn trace_native_continuation_roots(
             IntrinsicGetContinuation::BooleanConstructor { new_target, .. }
             | IntrinsicGetContinuation::NumberConstructor { new_target, .. }
             | IntrinsicGetContinuation::DateConstructor { new_target, .. }
+            | IntrinsicGetContinuation::ArrayBufferConstructor { new_target, .. }
             | IntrinsicGetContinuation::TemporalInstantConstructor { new_target, .. }
             | IntrinsicGetContinuation::TemporalDurationConstructor { new_target, .. }
             | IntrinsicGetContinuation::StringConstructor { new_target, .. } => {

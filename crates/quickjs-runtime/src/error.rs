@@ -139,6 +139,8 @@ pub enum RuntimeResource {
     HeapFunctions,
     /// Runtime ordinary objects.
     HeapObjects,
+    /// Bytes retained by live `ArrayBuffer` backing data blocks.
+    ArrayBufferBytes,
     /// Own property slots across ordinary objects and functions.
     ObjectProperties,
     /// Property-key snapshots and visited-key entries retained by `for-in` iterators.
@@ -185,6 +187,7 @@ impl fmt::Display for RuntimeResource {
             Self::InstalledConstants => "installed constants",
             Self::HeapFunctions => "heap functions",
             Self::HeapObjects => "heap objects",
+            Self::ArrayBufferBytes => "ArrayBuffer bytes",
             Self::ObjectProperties => "object properties",
             Self::ForInEntries => "for-in iterator entries",
             Self::CollectionEntries => "keyed collection entries",

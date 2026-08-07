@@ -12,8 +12,9 @@ use super::{
     PropertyLayout, ReflectMethod, SetMethod, StringMethod, UriFunction,
 };
 use crate::runtime::{
-    DatePrototypeMethod, DateStaticMethod, TemporalDurationPrototypeMethod,
-    TemporalDurationStaticMethod, TemporalInstantPrototypeMethod, TemporalInstantStaticMethod,
+    ArrayBufferPrototypeMethod, DatePrototypeMethod, DateStaticMethod,
+    TemporalDurationPrototypeMethod, TemporalDurationStaticMethod, TemporalInstantPrototypeMethod,
+    TemporalInstantStaticMethod,
 };
 
 /// Stable identity of an object allocated by Realm bootstrap.
@@ -30,6 +31,7 @@ pub(in crate::runtime) enum IntrinsicObjectId {
     BigIntPrototype,
     StringPrototype,
     ArrayPrototype,
+    ArrayBufferPrototype,
     DatePrototype,
     Temporal,
     TemporalDurationPrototype,
@@ -62,7 +64,7 @@ pub(in crate::runtime) enum IntrinsicObjectId {
 }
 
 impl IntrinsicObjectId {
-    pub(in crate::runtime) const ALL: [Self; 45] = [
+    pub(in crate::runtime) const ALL: [Self; 46] = [
         Self::ObjectPrototype,
         Self::GlobalObject,
         Self::ErrorPrototype(ErrorIntrinsicKind::Error),
@@ -79,6 +81,7 @@ impl IntrinsicObjectId {
         Self::BigIntPrototype,
         Self::StringPrototype,
         Self::ArrayPrototype,
+        Self::ArrayBufferPrototype,
         Self::DatePrototype,
         Self::Temporal,
         Self::TemporalDurationPrototype,
@@ -154,6 +157,8 @@ pub(in crate::runtime) enum RealmNameId {
     ArraySplice,
     ArrayIsArray,
     ArrayFromAsync,
+    ArrayBufferIsView,
+    ArrayBufferPrototype(ArrayBufferPrototypeMethod),
     DateStatic(DateStaticMethod),
     DatePrototype(DatePrototypeMethod),
     Temporal,

@@ -198,6 +198,7 @@ impl Runtime {
             installed_constants: self.installed_constants,
             heap_functions: usize_to_u64(self.functions.len()),
             heap_objects: usize_to_u64(self.objects.len()),
+            array_buffer_bytes: self.array_buffer_bytes,
             object_properties: self.object_properties,
             for_in_entries: self.for_in_entries,
             collection_entries: self.collection_entries,
@@ -339,6 +340,7 @@ impl Runtime {
                 bigint,
                 string,
                 array,
+                array_buffer,
                 map,
                 set,
                 weak_map,
@@ -482,6 +484,17 @@ impl Runtime {
                     &mut marked_objects,
                     &mut work,
                 );
+                for reference in [
+                    HeapReference::Object(array_buffer.prototype),
+                    HeapReference::Function(array_buffer.constructor),
+                ] {
+                    mark_heap_reference(
+                        reference,
+                        &mut marked_functions,
+                        &mut marked_objects,
+                        &mut work,
+                    );
+                }
                 for reference in [
                     HeapReference::Object(map.prototype),
                     HeapReference::Object(map.iterator_prototype),
@@ -1466,6 +1479,11 @@ impl Runtime {
                 self.object_properties = self
                     .object_properties
                     .saturating_sub(usize_to_u64(object.property_count()));
+                self.array_buffer_bytes = self.array_buffer_bytes.saturating_sub(usize_to_u64(
+                    object
+                        .array_buffer_state()
+                        .map_or(0, crate::object::ArrayBufferState::byte_length),
+                ));
                 self.for_in_entries = self
                     .for_in_entries
                     .saturating_sub(usize_to_u64(object.for_in_entry_count()));

@@ -47,14 +47,15 @@ use crate::{
     ids::{BindingCellId, FunctionId, InstalledCodeId, ObjectId, RealmGlobalBindingId, RealmId},
     interrupt::InterruptState,
     object::{
-        ArrayIterator, ArrayIteratorKind, ArrayState, BoxedPrimitive, DateState, ForInIterator,
-        ForInSnapshot, HeapObject, KeyPhases, ObjectRecord, OwnProperty, PromiseCapability,
-        PromiseReaction, PropertyDeletion, ProxyState, RegExpState, RegExpStringIterator,
-        ShapeInterner, StringIterator,
+        ArrayBufferState, ArrayIterator, ArrayIteratorKind, ArrayState, BoxedPrimitive, DateState,
+        ForInIterator, ForInSnapshot, HeapObject, KeyPhases, ObjectRecord, OwnProperty,
+        PromiseCapability, PromiseReaction, PropertyDeletion, ProxyState, RegExpState,
+        RegExpStringIterator, ShapeInterner, StringIterator,
     },
     value::{HeapReference, PrimitiveValue, ReleaseMailbox, RootTarget, SlotValue, StoredValue},
 };
 
+mod array_buffers;
 mod async_functions;
 mod dates;
 mod iterators;
@@ -98,6 +99,7 @@ enum RealmIntrinsics {
         bigint: BigIntIntrinsics,
         string: StringIntrinsics,
         array: ArrayIntrinsics,
+        array_buffer: ArrayBufferIntrinsics,
         date: DateIntrinsics,
         temporal: TemporalIntrinsics,
         map: MapIntrinsics,
@@ -247,6 +249,12 @@ struct StringIntrinsics {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 struct ArrayIntrinsics {
+    prototype: ObjectId,
+    constructor: FunctionId,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct ArrayBufferIntrinsics {
     prototype: ObjectId,
     constructor: FunctionId,
 }
@@ -1245,6 +1253,10 @@ pub(crate) enum NativeFunctionKind {
     JsonStringify,
     /// One method on the ordinary `%Math%` object.
     Math(MathMethod),
+    ArrayBufferConstructor,
+    ArrayBufferIsView,
+    ArrayBufferSpeciesGetter,
+    ArrayBufferPrototype(ArrayBufferPrototypeMethod),
     DateConstructor,
     DateStatic(DateStaticMethod),
     DatePrototype(DatePrototypeMethod),
@@ -1598,6 +1610,60 @@ impl DatePrototypeMethod {
             | Self::GetUtcDay
             | Self::ToTemporalInstant => 0,
         }
+    }
+}
+
+/// Methods and accessors published on `%ArrayBuffer.prototype%`.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum ArrayBufferPrototypeMethod {
+    ByteLength,
+    Detached,
+    MaxByteLength,
+    Resizable,
+    Resize,
+    Slice,
+    Transfer,
+    TransferToFixedLength,
+}
+
+impl ArrayBufferPrototypeMethod {
+    pub(crate) const ALL: [Self; 8] = [
+        Self::ByteLength,
+        Self::Detached,
+        Self::MaxByteLength,
+        Self::Resizable,
+        Self::Resize,
+        Self::Slice,
+        Self::Transfer,
+        Self::TransferToFixedLength,
+    ];
+
+    pub(crate) const fn name(self) -> &'static str {
+        match self {
+            Self::ByteLength => "byteLength",
+            Self::Detached => "detached",
+            Self::MaxByteLength => "maxByteLength",
+            Self::Resizable => "resizable",
+            Self::Resize => "resize",
+            Self::Slice => "slice",
+            Self::Transfer => "transfer",
+            Self::TransferToFixedLength => "transferToFixedLength",
+        }
+    }
+
+    pub(crate) const fn length(self) -> i32 {
+        match self {
+            Self::Resize | Self::Transfer | Self::TransferToFixedLength => 1,
+            Self::Slice => 2,
+            Self::ByteLength | Self::Detached | Self::MaxByteLength | Self::Resizable => 0,
+        }
+    }
+
+    pub(crate) const fn is_accessor(self) -> bool {
+        matches!(
+            self,
+            Self::ByteLength | Self::Detached | Self::MaxByteLength | Self::Resizable
+        )
     }
 }
 
@@ -2319,6 +2385,7 @@ impl NativeFunctionKind {
                 | Self::NumberConstructor
                 | Self::StringConstructor
                 | Self::ArrayConstructor
+                | Self::ArrayBufferConstructor
                 | Self::DateConstructor
                 | Self::TemporalDurationConstructor
                 | Self::TemporalInstantConstructor
@@ -2946,6 +3013,7 @@ pub struct Runtime {
     installed_atoms: u64,
     installed_constants: u64,
     pub(crate) object_properties: u64,
+    pub(crate) array_buffer_bytes: u64,
     pub(crate) for_in_entries: u64,
     pub(crate) collection_entries: u64,
     public_roots: u64,

@@ -34,6 +34,7 @@ const DEFAULT_MAX_INSTALLED_ATOMS: u64 = 1_048_576;
 const DEFAULT_MAX_INSTALLED_CONSTANTS: u64 = 1_048_576;
 const DEFAULT_MAX_HEAP_FUNCTIONS: u64 = 1_048_576;
 const DEFAULT_MAX_HEAP_OBJECTS: u64 = 1_048_576;
+const DEFAULT_MAX_ARRAY_BUFFER_BYTES: u64 = 1_073_741_824;
 const DEFAULT_MAX_OBJECT_PROPERTIES: u64 = 16_777_216;
 const DEFAULT_MAX_FOR_IN_ENTRIES: u64 = 16_777_216;
 const DEFAULT_MAX_COLLECTION_ENTRIES: u64 = 16_777_216;
@@ -61,6 +62,7 @@ pub struct RuntimeLimits {
     pub(super) max_installed_constants: u64,
     pub(crate) max_heap_functions: u64,
     pub(crate) max_heap_objects: u64,
+    pub(crate) max_array_buffer_bytes: u64,
     pub(crate) max_object_properties: u64,
     pub(crate) max_for_in_entries: u64,
     pub(crate) max_collection_entries: u64,
@@ -128,6 +130,13 @@ impl RuntimeLimits {
     #[must_use]
     pub const fn with_max_heap_objects(mut self, maximum: u64) -> Self {
         self.max_heap_objects = maximum;
+        self
+    }
+
+    /// Replaces the maximum bytes retained by `ArrayBuffer` backing data blocks.
+    #[must_use]
+    pub const fn with_max_array_buffer_bytes(mut self, maximum: u64) -> Self {
+        self.max_array_buffer_bytes = maximum;
         self
     }
 
@@ -222,6 +231,7 @@ impl Default for RuntimeLimits {
             max_installed_constants: DEFAULT_MAX_INSTALLED_CONSTANTS,
             max_heap_functions: DEFAULT_MAX_HEAP_FUNCTIONS,
             max_heap_objects: DEFAULT_MAX_HEAP_OBJECTS,
+            max_array_buffer_bytes: DEFAULT_MAX_ARRAY_BUFFER_BYTES,
             max_object_properties: DEFAULT_MAX_OBJECT_PROPERTIES,
             max_for_in_entries: DEFAULT_MAX_FOR_IN_ENTRIES,
             max_collection_entries: DEFAULT_MAX_COLLECTION_ENTRIES,
@@ -250,6 +260,7 @@ pub struct RuntimeUsage {
     pub(super) installed_constants: u64,
     pub(super) heap_functions: u64,
     pub(super) heap_objects: u64,
+    pub(super) array_buffer_bytes: u64,
     pub(super) object_properties: u64,
     pub(super) for_in_entries: u64,
     pub(super) collection_entries: u64,
@@ -303,6 +314,12 @@ impl RuntimeUsage {
     #[must_use]
     pub const fn heap_objects(self) -> u64 {
         self.heap_objects
+    }
+
+    /// Returns bytes retained by live `ArrayBuffer` backing data blocks.
+    #[must_use]
+    pub const fn array_buffer_bytes(self) -> u64 {
+        self.array_buffer_bytes
     }
 
     /// Returns the aggregate own-property slot count.

@@ -2127,6 +2127,66 @@ impl DateState {
     }
 }
 
+/// The specification-level slots of an ECMAScript `ArrayBuffer` object.
+///
+/// A detached buffer has no backing block. A fixed-length buffer has no
+/// `[[ArrayBufferMaxByteLength]]`, while a resizable buffer retains the
+/// inclusive maximum supplied at construction.
+pub(crate) struct ArrayBufferState {
+    data: Option<Vec<u8>>,
+    max_byte_length: Option<usize>,
+}
+
+impl ArrayBufferState {
+    pub(crate) const fn new(data: Vec<u8>, max_byte_length: Option<usize>) -> Self {
+        Self {
+            data: Some(data),
+            max_byte_length,
+        }
+    }
+
+    #[must_use]
+    pub(crate) const fn is_detached(&self) -> bool {
+        self.data.is_none()
+    }
+
+    #[must_use]
+    pub(crate) const fn is_resizable(&self) -> bool {
+        self.max_byte_length.is_some()
+    }
+
+    #[must_use]
+    pub(crate) fn byte_length(&self) -> usize {
+        self.data.as_ref().map_or(0, Vec::len)
+    }
+
+    #[must_use]
+    pub(crate) fn max_byte_length(&self) -> usize {
+        self.max_byte_length.unwrap_or_else(|| self.byte_length())
+    }
+
+    #[must_use]
+    pub(crate) const fn resizable_max_byte_length(&self) -> Option<usize> {
+        self.max_byte_length
+    }
+
+    pub(crate) fn replace_data(&mut self, data: Vec<u8>) -> Option<Vec<u8>> {
+        self.data.replace(data)
+    }
+
+    pub(crate) fn detach(&mut self) -> Option<Vec<u8>> {
+        self.data.take()
+    }
+
+    pub(crate) fn data(&self) -> Option<&[u8]> {
+        self.data.as_deref()
+    }
+
+    pub(crate) fn data_mut(&mut self) -> Option<&mut [u8]> {
+        self.data.as_deref_mut()
+    }
+}
+
 pub(crate) enum HeapObjectKind {
     Ordinary,
     /// A non-callable Proxy exotic object. Callable proxies live in the
@@ -2149,6 +2209,8 @@ pub(crate) enum HeapObjectKind {
     RegExp(RegExpState),
     /// An ECMAScript Date object with a `[[DateValue]]` Number.
     Date(DateState),
+    /// An ECMAScript `ArrayBuffer` object with its byte-data block slots.
+    ArrayBuffer(ArrayBufferState),
     /// An ECMAScript `Temporal.Instant` with an `[[EpochNanoseconds]]` slot.
     TemporalInstant(Instant),
     /// An ECMAScript `Temporal.Duration` with its ten duration fields.
@@ -2290,6 +2352,7 @@ impl HeapObjectKind {
             | Self::RegExpStringIterator(_)
             | Self::RegExp(_)
             | Self::Date(_)
+            | Self::ArrayBuffer(_)
             | Self::TemporalInstant(_)
             | Self::TemporalDuration(_)
             | Self::Map(_)
@@ -2320,6 +2383,7 @@ impl HeapObjectKind {
             | Self::RegExpStringIterator(_)
             | Self::RegExp(_)
             | Self::Date(_)
+            | Self::ArrayBuffer(_)
             | Self::TemporalInstant(_)
             | Self::TemporalDuration(_)
             | Self::Map(_)
@@ -2349,6 +2413,7 @@ impl HeapObjectKind {
             | Self::RegExpStringIterator(_)
             | Self::RegExp(_)
             | Self::Date(_)
+            | Self::ArrayBuffer(_)
             | Self::TemporalInstant(_)
             | Self::TemporalDuration(_)
             | Self::Map(_)
@@ -2378,6 +2443,7 @@ impl HeapObjectKind {
             | Self::RegExpStringIterator(_)
             | Self::RegExp(_)
             | Self::Date(_)
+            | Self::ArrayBuffer(_)
             | Self::TemporalInstant(_)
             | Self::TemporalDuration(_)
             | Self::Map(_)
@@ -2407,6 +2473,7 @@ impl HeapObjectKind {
             | Self::RegExpStringIterator(_)
             | Self::RegExp(_)
             | Self::Date(_)
+            | Self::ArrayBuffer(_)
             | Self::TemporalInstant(_)
             | Self::TemporalDuration(_)
             | Self::Map(_)
@@ -2436,6 +2503,7 @@ impl HeapObjectKind {
             | Self::RegExpStringIterator(_)
             | Self::RegExp(_)
             | Self::Date(_)
+            | Self::ArrayBuffer(_)
             | Self::TemporalInstant(_)
             | Self::TemporalDuration(_)
             | Self::Map(_)
@@ -2465,6 +2533,7 @@ impl HeapObjectKind {
             | Self::RegExpStringIterator(_)
             | Self::RegExp(_)
             | Self::Date(_)
+            | Self::ArrayBuffer(_)
             | Self::TemporalInstant(_)
             | Self::TemporalDuration(_)
             | Self::Map(_)
@@ -2494,6 +2563,7 @@ impl HeapObjectKind {
             | Self::RegExpStringIterator(_)
             | Self::RegExp(_)
             | Self::Date(_)
+            | Self::ArrayBuffer(_)
             | Self::TemporalInstant(_)
             | Self::TemporalDuration(_)
             | Self::Map(_)
@@ -2523,6 +2593,7 @@ impl HeapObjectKind {
             | Self::RegExpStringIterator(_)
             | Self::RegExp(_)
             | Self::Date(_)
+            | Self::ArrayBuffer(_)
             | Self::TemporalInstant(_)
             | Self::TemporalDuration(_)
             | Self::Map(_)
@@ -2828,6 +2899,15 @@ impl HeapObject {
     }
 
     #[must_use]
+    pub(crate) fn array_buffer(record: ObjectRecord, state: ArrayBufferState) -> Self {
+        Self {
+            kind: HeapObjectKind::ArrayBuffer(state),
+            record,
+            public_roots: 0,
+        }
+    }
+
+    #[must_use]
     pub(crate) const fn temporal_instant(record: ObjectRecord, instant: Instant) -> Self {
         Self {
             kind: HeapObjectKind::TemporalInstant(instant),
@@ -2989,6 +3069,20 @@ impl HeapObject {
         }
     }
 
+    pub(crate) const fn array_buffer_state(&self) -> Option<&ArrayBufferState> {
+        match &self.kind {
+            HeapObjectKind::ArrayBuffer(state) => Some(state),
+            _ => None,
+        }
+    }
+
+    pub(crate) const fn array_buffer_state_mut(&mut self) -> Option<&mut ArrayBufferState> {
+        match &mut self.kind {
+            HeapObjectKind::ArrayBuffer(state) => Some(state),
+            _ => None,
+        }
+    }
+
     pub(crate) const fn temporal_instant_value(&self) -> Option<Instant> {
         match &self.kind {
             HeapObjectKind::TemporalInstant(instant) => Some(*instant),
@@ -3024,6 +3118,7 @@ impl HeapObject {
             | HeapObjectKind::RegExpStringIterator(_)
             | HeapObjectKind::RegExp(_)
             | HeapObjectKind::Date(_)
+            | HeapObjectKind::ArrayBuffer(_)
             | HeapObjectKind::TemporalInstant(_)
             | HeapObjectKind::TemporalDuration(_)
             | HeapObjectKind::Map(_)
@@ -3053,6 +3148,7 @@ impl HeapObject {
             | HeapObjectKind::RegExpStringIterator(_)
             | HeapObjectKind::RegExp(_)
             | HeapObjectKind::Date(_)
+            | HeapObjectKind::ArrayBuffer(_)
             | HeapObjectKind::TemporalInstant(_)
             | HeapObjectKind::TemporalDuration(_)
             | HeapObjectKind::Map(_)
@@ -3084,6 +3180,7 @@ impl HeapObject {
             | HeapObjectKind::RegExpStringIterator(_)
             | HeapObjectKind::RegExp(_)
             | HeapObjectKind::Date(_)
+            | HeapObjectKind::ArrayBuffer(_)
             | HeapObjectKind::TemporalInstant(_)
             | HeapObjectKind::TemporalDuration(_)
             | HeapObjectKind::Map(_)
