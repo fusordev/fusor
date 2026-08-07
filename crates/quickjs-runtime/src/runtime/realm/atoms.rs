@@ -3,8 +3,8 @@
 use crate::{
     Atom,
     runtime::{
-        ArrayBufferPrototypeMethod, DataViewPrototypeMethod, DatePrototypeMethod, DateStaticMethod,
-        SharedArrayBufferPrototypeMethod, TemporalDurationPrototypeMethod,
+        ArrayBufferPrototypeMethod, AtomicsMethod, DataViewPrototypeMethod, DatePrototypeMethod,
+        DateStaticMethod, SharedArrayBufferPrototypeMethod, TemporalDurationPrototypeMethod,
         TemporalDurationStaticMethod, TemporalInstantPrototypeMethod, TemporalInstantStaticMethod,
         TypedArrayPrototypeMethod,
     },
@@ -354,6 +354,10 @@ fn visit_realm_name_order(
     for method in MathMethod::ALL {
         visit(RealmNameId::MathMethod(method))?;
     }
+    visit(RealmNameId::Atomics)?;
+    for method in AtomicsMethod::ALL {
+        visit(RealmNameId::AtomicsMethod(method))?;
+    }
     for (name, _) in MATH_CONSTANTS {
         visit(RealmNameId::MathConstant(name))?;
     }
@@ -514,6 +518,8 @@ fn realm_name_description(id: RealmNameId) -> &'static str {
         RealmNameId::ArraySort(method) => method.name(),
         RealmNameId::ArrayFlatten(method) => method.name(),
         RealmNameId::MathMethod(method) => method.name(),
+        RealmNameId::Atomics => "Atomics",
+        RealmNameId::AtomicsMethod(method) => method.name(),
     }
 }
 

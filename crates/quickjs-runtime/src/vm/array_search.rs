@@ -118,17 +118,12 @@ pub(super) fn begin_array_search(
     execution_budget: &mut ExecutionBudget,
 ) -> Result<NativeDispatch, NativeFailure> {
     // The search begins with `ToObject(this)`, so a nullish receiver throws
-    // before the length is read.
-    if matches!(receiver, StoredValue::Undefined | StoredValue::Null) {
-        return Err(NativeFailure::Abrupt(PendingException {
-            realm,
-            payload: PendingExceptionPayload::EngineError {
-                kind: ExceptionKind::TypeError,
-                message: JsString::from_utf8("cannot convert to object")?,
-            },
-            origin,
-        }));
-    }
+    // before the length is read and a primitive receiver's indexed properties
+    // are observed through its realm-owned wrapper.
+    let receiver = match to_object_value(runtime, realm, receiver, origin.clone())? {
+        Ok(receiver) => receiver,
+        Err(exception) => return Err(NativeFailure::Abrupt(exception)),
+    };
     let state = ArraySearchContinuation {
         search,
         target: receiver,
@@ -200,6 +195,20 @@ pub(super) fn advance_array_search(
                 // The length is read once, before any element, and every later
                 // index derives from it.
                 let value = take_completion(&mut completion)?;
+                if matches!(value, StoredValue::Function(_) | StoredValue::Object(_)) {
+                    let realm = state.realm;
+                    let origin = state.origin.clone();
+                    return begin_operator_primitive_conversion(
+                        runtime,
+                        value,
+                        OperatorPrimitiveHint::Number,
+                        OperatorPrimitiveTarget::ArraySearchPosition(Box::new(state)),
+                        realm,
+                        return_to,
+                        origin,
+                        execution_budget,
+                    );
+                }
                 let number = operator_to_number(value, state.realm, &state.origin)?;
                 state.length = number_to_length(number);
                 state.stage = ArraySearchStage::AwaitPosition;

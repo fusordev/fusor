@@ -121,6 +121,61 @@ fn private_instance_fields_have_fresh_class_identities_and_bypass_public_propert
 }
 
 #[test]
+fn private_field_compound_logical_and_update_writes_preserve_values_and_order() {
+    run_with(
+        "function run(){class Box{#value=1;compound(){return this.#value+=2;}or(){let calls=0;let value=this.#value||=(calls=calls+1);return value===3&&calls===0;}and(){let calls=0;let value=this.#value&&=(calls=calls+1);return value===1&&calls===1;}nullish(){this.#value=null;let calls=0;let value=this.#value??=(calls=calls+2);return value===2&&calls===2;}pre(){return ++this.#value;}post(){return this.#value++;}value(){return this.#value;}}let box=new Box;return box.compound()===3&&box.or()&&box.and()&&box.nullish()&&box.pre()===3&&box.post()===3&&box.value()===4;}",
+        |result| {
+            let value = result.expect("private compound and update execution");
+            assert_eq!(value.as_boolean().expect("live Boolean"), Some(true));
+        },
+    );
+}
+
+#[test]
+fn static_private_fields_are_class_owned_and_captured_by_static_methods() {
+    run_with(
+        "function run(){class First{static #value=1;static #named=function(){};static read(){return this.#value;}static write(next){return this.#value=next;}static has(candidate){return #value in candidate;}static name(){return this.#named.name;}}class Second{static #value=2;}let invisible=First.hasOwnProperty('#value')===false;let values=First.read()===1&&First.write(4)===4&&First.read()===4&&First.name()==='#named';let rejected=false;try{First.read.call(Second);}catch(error){rejected=error.name==='TypeError';}return invisible&&values&&First.has(First)&&!First.has(Second)&&!First.has({})&&rejected;}",
+        |result| {
+            let value = result.expect("static private field execution");
+            assert_eq!(value.as_boolean().expect("live Boolean"), Some(true));
+        },
+    );
+}
+
+#[test]
+fn static_private_methods_are_class_owned_immutable_and_use_the_static_home_object() {
+    run_with(
+        "function run(){class Base{static value(){return 'base';}}class First extends Base{static #method(){return super.value()+':private';}static call(){return this.#method();}static get(){return this.#method;}static has(candidate){return #method in candidate;}static assign(){this.#method=0;}}class Second{}let rejected=false;let immutable=false;try{First.call.call(Second);}catch(error){rejected=error.name==='TypeError';}try{First.assign();}catch(error){immutable=error.name==='TypeError';}return First.call()==='base:private'&&First.get().name==='#method'&&First.has(First)&&!First.has(Second)&&rejected&&immutable;}",
+        |result| {
+            let value = result.expect("static private method execution");
+            assert_eq!(value.as_boolean().expect("live Boolean"), Some(true));
+        },
+    );
+}
+
+#[test]
+fn private_accessors_merge_by_name_and_preserve_instance_static_and_super_receivers() {
+    run_with(
+        "function run(){class Base{value(){return 'base';}static value(){return 'static';}}class Box extends Base{#seen=0;get #value(){return super.value()+':'+this.#seen;}set #value(next){this.#seen=next;}read(){return this.#value;}write(next){this.#value=next;return this.#value;}static has(candidate){return #value in candidate;}}class First extends Base{static #seen=0;static get #value(){return super.value()+':'+this.#seen;}static set #value(next){this.#seen=next;}static read(){return this.#value;}static write(next){this.#value=next;return this.#value;}static has(candidate){return #value in candidate;}}class Readonly{get #value(){return 1;}write(){this.#value=2;}}class Writeonly{set #value(next){}read(){return this.#value;}}let box=new Box;let receiverRejected=false;let setterRejected=false;let getterRejected=false;try{Box.prototype.read.call({});}catch(error){receiverRejected=error.name==='TypeError';}try{new Readonly().write();}catch(error){setterRejected=error.name==='TypeError';}try{new Writeonly().read();}catch(error){getterRejected=error.name==='TypeError';}return box.read()==='base:0'&&box.write(4)==='base:4'&&Box.has(box)&&!Box.has({})&&First.read()==='static:0'&&First.write(7)==='static:7'&&First.has(First)&&!First.has(Box)&&receiverRejected&&setterRejected&&getterRejected;}",
+        |result| {
+            let value = result.expect("private accessor execution");
+            assert_eq!(value.as_boolean().expect("live Boolean"), Some(true));
+        },
+    );
+}
+
+#[test]
+fn nested_instance_field_classes_keep_private_accessor_names_lexically_distinct() {
+    run_with(
+        "function run(){class Outer{get #value(){}Inner=class{set #value(next){}read(){return this.#value;}};}class Other{set #value(next){}Inner=class{get #value(){}};read(){return this.#value;}}let innerRejected=false;let outerRejected=false;try{new (new Outer().Inner)().read();}catch(error){innerRejected=error.name==='TypeError';}try{new Other().read();}catch(error){outerRejected=error.name==='TypeError';}return innerRejected&&outerRejected;}",
+        |result| {
+            let value = result.expect("nested private accessor execution");
+            assert_eq!(value.as_boolean().expect("live Boolean"), Some(true));
+        },
+    );
+}
+
+#[test]
 fn private_instance_methods_share_a_closure_and_preserve_the_super_home_object() {
     run_with(
         "function run(){class Base{value(){return 40;}}class Box extends Base{#method(){return super.value()+2;}call(){return this.#method();}same(other){return this.#method===other.#method;}name(){return this.#method.name;}static has(candidate){return #method in candidate;}}let first=new Box;let second=new Box;let rejected=false;try{Box.prototype.call.call({});}catch(error){rejected=error.name==='TypeError';}return first.call()===42&&first.same(second)&&first.name()==='#method'&&Box.has(first)&&!Box.has({})&&rejected;}",

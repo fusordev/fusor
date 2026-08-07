@@ -90,7 +90,7 @@ impl<'plan> RealmGlobalLayoutBuilder<'plan> {
                 DeclarationKind::Function,
                 InitializationPolicy::FunctionAtInstantiation
             ) | (
-                DeclarationKind::Let | DeclarationKind::Const,
+                DeclarationKind::Let | DeclarationKind::Const | DeclarationKind::Class,
                 InitializationPolicy::AtDeclaration
             )
         );

@@ -1156,6 +1156,16 @@ pub(super) fn execute_one(
             push(frame, first);
             push(frame, third);
         }
+        FinalOpcode::Perm4 => {
+            let fourth = pop(frame)?;
+            let third = pop(frame)?;
+            let second = pop(frame)?;
+            let first = pop(frame)?;
+            push(frame, third);
+            push(frame, first);
+            push(frame, second);
+            push(frame, fourth);
+        }
         FinalOpcode::Perm5 => {
             let fifth = pop(frame)?;
             let fourth = pop(frame)?;
@@ -1984,15 +1994,47 @@ pub(super) fn execute_one(
                     "private field access requires an object receiver",
                 )?));
             };
-            let Some(value) = runtime.private_own_data_property(reference, &key)? else {
-                return Ok(Step::Abrupt(private_field_exception(
-                    runtime,
-                    frame,
-                    source_pc,
-                    "private field is not present on this object",
-                )?));
-            };
-            push(frame, value);
+            match runtime.private_own_property(reference, &key)? {
+                Some(OwnProperty::Data { value, .. }) => push(frame, value),
+                Some(OwnProperty::Accessor {
+                    getter: Some(function),
+                    ..
+                }) => {
+                    let return_to =
+                        CallReturn::push(verified_instruction.successors().fallthrough().ok_or(
+                            EngineFault::InvalidSuccessor {
+                                function: frame.template,
+                                pc: source_pc,
+                            },
+                        )?);
+                    return Ok(Step::Call {
+                        function,
+                        inputs: CallInputSource::Prepared(CallInputs {
+                            receiver: base,
+                            arguments: CallArguments::empty(),
+                            new_target: None,
+                        }),
+                        return_to,
+                        source_pc,
+                    });
+                }
+                Some(OwnProperty::Accessor { getter: None, .. }) => {
+                    return Ok(Step::Abrupt(private_field_exception(
+                        runtime,
+                        frame,
+                        source_pc,
+                        "private accessor has no getter",
+                    )?));
+                }
+                None => {
+                    return Ok(Step::Abrupt(private_field_exception(
+                        runtime,
+                        frame,
+                        source_pc,
+                        "private field is not present on this object",
+                    )?));
+                }
+            }
         }
         FinalOpcode::PrivateIn => {
             let base = pop(frame)?;
@@ -2015,11 +2057,7 @@ pub(super) fn execute_one(
             };
             push(
                 frame,
-                StoredValue::Boolean(
-                    runtime
-                        .private_own_data_property(reference, &key)?
-                        .is_some(),
-                ),
+                StoredValue::Boolean(runtime.private_own_property(reference, &key)?.is_some()),
             );
         }
         FinalOpcode::PutField => {
@@ -2178,13 +2216,73 @@ pub(super) fn execute_one(
                     "private field access requires an object receiver",
                 )?));
             };
-            if !runtime.replace_private_own_data_property(reference, &key, value)? {
-                return Ok(Step::Abrupt(private_field_exception(
-                    runtime,
-                    frame,
-                    source_pc,
-                    "private field is not present on this object",
-                )?));
+            match runtime.private_own_property(reference, &key)? {
+                Some(OwnProperty::Data { .. }) => {
+                    match runtime.replace_private_own_data_property(reference, &key, value)? {
+                        Some(true) => {}
+                        Some(false) => {
+                            return Ok(Step::Abrupt(private_field_exception(
+                                runtime,
+                                frame,
+                                source_pc,
+                                "private method is not writable",
+                            )?));
+                        }
+                        None => {
+                            return Err(EngineFault::RuntimeInvariant {
+                                message: "checked private data slot disappeared during write",
+                            }
+                            .into());
+                        }
+                    }
+                }
+                Some(OwnProperty::Accessor {
+                    setter: Some(function),
+                    ..
+                }) => {
+                    let mut arguments = Vec::new();
+                    arguments.try_reserve_exact(1).map_err(|_| {
+                        ExecutionError::AllocationFailed {
+                            resource: RuntimeResource::FrameValues,
+                            additional: 1,
+                        }
+                    })?;
+                    arguments.push(value);
+                    let return_to = CallReturn::discard(
+                        verified_instruction.successors().fallthrough().ok_or(
+                            EngineFault::InvalidSuccessor {
+                                function: frame.template,
+                                pc: source_pc,
+                            },
+                        )?,
+                    );
+                    return Ok(Step::Call {
+                        function,
+                        inputs: CallInputSource::Prepared(CallInputs {
+                            receiver: base,
+                            arguments: CallArguments::from_values(arguments),
+                            new_target: None,
+                        }),
+                        return_to,
+                        source_pc,
+                    });
+                }
+                Some(OwnProperty::Accessor { setter: None, .. }) => {
+                    return Ok(Step::Abrupt(private_field_exception(
+                        runtime,
+                        frame,
+                        source_pc,
+                        "private accessor has no setter",
+                    )?));
+                }
+                None => {
+                    return Ok(Step::Abrupt(private_field_exception(
+                        runtime,
+                        frame,
+                        source_pc,
+                        "private field is not present on this object",
+                    )?));
+                }
             }
         }
         FinalOpcode::DefineField => {
@@ -2204,6 +2302,12 @@ pub(super) fn execute_one(
             }
         }
         FinalOpcode::DefinePrivateField => {
+            let Operands::U8(private_element_kind @ 0..=3) = operands else {
+                return Err(EngineFault::RuntimeInvariant {
+                    message: "verified private element definition kind is invalid",
+                }
+                .into());
+            };
             let value = pop(frame)?;
             let private_name = pop(frame)?;
             let base = peek(frame)?.duplicate();
@@ -2223,23 +2327,46 @@ pub(super) fn execute_one(
                     "private field initialization requires an object receiver",
                 )?));
             };
-            if runtime
-                .private_own_data_property(reference, &key)?
-                .is_some()
-            {
-                return Ok(Step::Abrupt(private_field_exception(
-                    runtime,
-                    frame,
-                    source_pc,
-                    "private field is already initialized on this object",
-                )?));
+            match private_element_kind {
+                0 | 1 => {
+                    if runtime.private_own_property(reference, &key)?.is_some() {
+                        return Ok(Step::Abrupt(private_field_exception(
+                            runtime,
+                            frame,
+                            source_pc,
+                            "private field is already initialized on this object",
+                        )?));
+                    }
+                    runtime.append_data_property(
+                        reference,
+                        key,
+                        PropertyLayout::data(private_element_kind == 0, false, false),
+                        value,
+                    )?;
+                }
+                2 | 3 => {
+                    let StoredValue::Function(function) = value else {
+                        return Err(EngineFault::RuntimeInvariant {
+                            message: "verified private accessor definition did not receive a closure",
+                        }
+                        .into());
+                    };
+                    if !runtime.define_private_accessor_property(
+                        reference,
+                        key,
+                        function,
+                        private_element_kind == 2,
+                    )? {
+                        return Ok(Step::Abrupt(private_field_exception(
+                            runtime,
+                            frame,
+                            source_pc,
+                            "private field is already initialized on this object",
+                        )?));
+                    }
+                }
+                _ => unreachable!("verified private element kind is bounded"),
             }
-            runtime.append_data_property(
-                reference,
-                key,
-                PropertyLayout::data(true, false, false),
-                value,
-            )?;
         }
         FinalOpcode::DefineMethod => {
             let method = define_method_operand(runtime, frame, operands)?;
@@ -3359,8 +3486,7 @@ pub(super) fn execute_one(
             let brand_key = PropertyKey::from_private_atom(
                 runtime.predefined_atom(PredefinedAtom::PrivateBrand),
             );
-            let Some(_brand_present) =
-                runtime.private_own_data_property(home_object, &brand_key)?
+            let Some(_brand_present) = runtime.private_own_property(home_object, &brand_key)?
             else {
                 let realm = code(runtime, frame.code)?.realm;
                 let origin = instruction_location(runtime, frame, source_pc)?;
@@ -3386,7 +3512,7 @@ pub(super) fn execute_one(
                 }));
             };
             let has_brand = runtime
-                .private_own_data_property(reference, &brand_key)?
+                .private_own_property(reference, &brand_key)?
                 .is_some();
             if !has_brand {
                 let realm = code(runtime, frame.code)?.realm;
@@ -3420,7 +3546,7 @@ pub(super) fn execute_one(
                 runtime.predefined_atom(PredefinedAtom::PrivateBrand),
             );
             if runtime
-                .private_own_data_property(home_ref, &brand_key)?
+                .private_own_property(home_ref, &brand_key)?
                 .is_none()
             {
                 runtime.append_data_property(
@@ -3430,10 +3556,7 @@ pub(super) fn execute_one(
                     StoredValue::Undefined,
                 )?;
             }
-            if runtime
-                .private_own_data_property(obj_ref, &brand_key)?
-                .is_some()
-            {
+            if runtime.private_own_property(obj_ref, &brand_key)?.is_some() {
                 let realm = code(runtime, frame.code)?.realm;
                 let origin = instruction_location(runtime, frame, source_pc)?;
                 return Ok(Step::Abrupt(PendingException {

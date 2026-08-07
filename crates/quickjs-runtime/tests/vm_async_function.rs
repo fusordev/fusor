@@ -91,6 +91,28 @@ fn async_class_methods_preserve_the_super_home_object_across_await() {
 }
 
 #[test]
+fn static_private_async_methods_preserve_the_home_object_across_await() {
+    assert_eq!(
+        start_and_read(
+            "function start(){\
+                let state={result:''};\
+                class Base{static value(){return 2;}}\
+                class Derived extends Base{\
+                    static async #value(){let increment=await 1;return super.value()+increment;}\
+                    static read(){return this.#value();}\
+                    static privateName(){return this.#value.name;}\
+                }\
+                Derived.read().then(function(result){\
+                    state.result=result+':'+Derived.privateName();\
+                });\
+                return state;\
+            }"
+        ),
+        "3:#value"
+    );
+}
+
+#[test]
 fn await_always_resumes_as_a_fifo_promise_job() {
     assert_eq!(
         start_and_read(

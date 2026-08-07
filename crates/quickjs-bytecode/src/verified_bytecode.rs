@@ -2365,7 +2365,7 @@ fn verify_function_metadata(
         &metadata.closures,
     )?;
     verify_source(id, flow, metadata)?;
-    verify_supported_opcodes(id, flow, metadata, authority_kind)?;
+    verify_supported_opcodes(id, flow, metadata)?;
     let mut internal_stack = verify_internal_operand_stack(id, function, limits, usage)?;
     let realm_global_initializer_prefix = verify_realm_global_function_initializers(
         id,
@@ -4597,15 +4597,17 @@ fn verify_method_definitions(
                     definition_index,
                 )
             });
-            let private_method = index.checked_add(4).and_then(|set_name_index| {
-                private_method_name_pair(
-                    parent,
-                    metadata,
-                    instructions,
-                    &predecessor_counts,
-                    internal_stack,
-                    set_name_index,
-                )
+            let private_method = [4_usize, 10].into_iter().find_map(|offset| {
+                index.checked_add(offset).and_then(|set_name_index| {
+                    private_method_name_pair(
+                        parent,
+                        metadata,
+                        instructions,
+                        &predecessor_counts,
+                        internal_stack,
+                        set_name_index,
+                    )
+                })
             });
             if pair.map(|(defined, _)| defined) != Some(*child) && private_method != Some(*child) {
                 return Err(BytecodeVerificationError::function(
@@ -4797,7 +4799,7 @@ fn verify_inferred_function_names(
 /// definition evaluation. The method name is set only on a fresh anonymous
 /// method template, after the surrounding class prototype has become its home
 /// object, and the function is immediately retained in a class-local cell.
-fn private_method_name_pair(
+fn private_instance_method_name_pair(
     parent: &VerifiedCompilerFunction,
     metadata: &[VerifiedFunctionMetadata],
     instructions: &[VerifiedInstruction],
@@ -4871,9 +4873,133 @@ fn private_method_name_pair(
     let child_metadata = usize::try_from(child.get())
         .ok()
         .and_then(|index| metadata.get(index))?;
-    (child_metadata.executable_kind == CompilerExecutableKind::OrdinaryMethod
-        && child_metadata.function_name.is_none())
+    (matches!(
+        child_metadata.executable_kind,
+        CompilerExecutableKind::OrdinaryMethod
+            | CompilerExecutableKind::GeneratorMethod
+            | CompilerExecutableKind::AsyncMethod
+            | CompilerExecutableKind::AsyncGeneratorMethod
+    ) && child_metadata.function_name.is_none())
     .then_some(*child)
+}
+
+/// Certifies one private static method closure created during class definition
+/// evaluation. Its home object is the fresh constructor, and the closure is
+/// retained in its class-local cell before that same constructor receives the
+/// private method element.
+fn private_static_method_name_pair(
+    parent: &VerifiedCompilerFunction,
+    metadata: &[VerifiedFunctionMetadata],
+    instructions: &[VerifiedInstruction],
+    predecessor_counts: &[u32],
+    internal_stack: &InternalStackCertificate,
+    set_name_index: usize,
+) -> Option<FunctionTemplateId> {
+    let set_name = instructions.get(set_name_index)?.decoded().instruction();
+    if !matches!(
+        (set_name.opcode(), set_name.operands()),
+        (FinalOpcode::SetName, Operands::Atom(_))
+    ) || predecessor_counts.get(set_name_index) != Some(&1)
+    {
+        return None;
+    }
+    let closure_index = set_name_index.checked_sub(10)?;
+    if !matches!(
+        instructions
+            .get(closure_index)?
+            .decoded()
+            .instruction()
+            .opcode(),
+        FinalOpcode::FClosure | FinalOpcode::FClosure8
+    ) {
+        return None;
+    }
+    let expected = [
+        (closure_index.checked_add(1)?, FinalOpcode::Swap),
+        (closure_index.checked_add(2)?, FinalOpcode::Perm3),
+        (closure_index.checked_add(3)?, FinalOpcode::Swap),
+        (closure_index.checked_add(4)?, FinalOpcode::Perm3),
+        (closure_index.checked_add(5)?, FinalOpcode::SetHomeObject),
+        (closure_index.checked_add(6)?, FinalOpcode::Perm3),
+        (closure_index.checked_add(7)?, FinalOpcode::Swap),
+        (closure_index.checked_add(8)?, FinalOpcode::Perm3),
+        (closure_index.checked_add(9)?, FinalOpcode::Swap),
+    ];
+    for (index, opcode) in expected {
+        if instructions.get(index)?.decoded().instruction().opcode() != opcode {
+            return None;
+        }
+    }
+    let store_index = set_name_index.checked_add(1)?;
+    if !matches!(
+        instructions
+            .get(store_index)?
+            .decoded()
+            .instruction()
+            .opcode(),
+        FinalOpcode::PutLoc
+            | FinalOpcode::PutLoc8
+            | FinalOpcode::PutLoc0
+            | FinalOpcode::PutLoc1
+            | FinalOpcode::PutLoc2
+            | FinalOpcode::PutLoc3
+    ) {
+        return None;
+    }
+    for from in closure_index..store_index {
+        if !internal_stack.has_effective_successor(
+            instructions,
+            from,
+            usize_to_u32(from.checked_add(1)?),
+        ) {
+            return None;
+        }
+    }
+    let closure = instructions.get(closure_index)?.decoded().instruction();
+    let constant = closure_constant(closure.opcode(), closure.operands())?;
+    let crate::CompilerConstant::Function(child) = parent.constants().get(constant as usize)?
+    else {
+        return None;
+    };
+    let child_metadata = usize::try_from(child.get())
+        .ok()
+        .and_then(|index| metadata.get(index))?;
+    (matches!(
+        child_metadata.executable_kind,
+        CompilerExecutableKind::OrdinaryMethod
+            | CompilerExecutableKind::GeneratorMethod
+            | CompilerExecutableKind::AsyncMethod
+            | CompilerExecutableKind::AsyncGeneratorMethod
+    ) && child_metadata.function_name.is_none())
+    .then_some(*child)
+}
+
+fn private_method_name_pair(
+    parent: &VerifiedCompilerFunction,
+    metadata: &[VerifiedFunctionMetadata],
+    instructions: &[VerifiedInstruction],
+    predecessor_counts: &[u32],
+    internal_stack: &InternalStackCertificate,
+    set_name_index: usize,
+) -> Option<FunctionTemplateId> {
+    private_instance_method_name_pair(
+        parent,
+        metadata,
+        instructions,
+        predecessor_counts,
+        internal_stack,
+        set_name_index,
+    )
+    .or_else(|| {
+        private_static_method_name_pair(
+            parent,
+            metadata,
+            instructions,
+            predecessor_counts,
+            internal_stack,
+            set_name_index,
+        )
+    })
 }
 
 fn private_method_home_object_pair(
@@ -4884,10 +5010,10 @@ fn private_method_home_object_pair(
     internal_stack: &InternalStackCertificate,
     home_object_index: usize,
 ) -> bool {
-    home_object_index
+    let instance = home_object_index
         .checked_add(2)
         .and_then(|set_name_index| {
-            private_method_name_pair(
+            private_instance_method_name_pair(
                 parent,
                 metadata,
                 instructions,
@@ -4896,7 +5022,21 @@ fn private_method_home_object_pair(
                 set_name_index,
             )
         })
-        .is_some()
+        .is_some();
+    let r#static = home_object_index
+        .checked_add(5)
+        .and_then(|set_name_index| {
+            private_static_method_name_pair(
+                parent,
+                metadata,
+                instructions,
+                predecessor_counts,
+                internal_stack,
+                set_name_index,
+            )
+        })
+        .is_some();
+    instance || r#static
 }
 
 fn inferred_function_name_pair(
@@ -5505,7 +5645,10 @@ fn derived_default_constructor_pair(
             [push_this, private_name, .., define, drop]
                 if push_this.decoded().instruction().opcode() == FinalOpcode::PushThis
                     && private_name.decoded().instruction().opcode() == FinalOpcode::GetVarRefCheck
-                    && define.decoded().instruction().opcode() == FinalOpcode::DefinePrivateField
+                    && matches!(
+                        (define.decoded().instruction().opcode(), define.decoded().instruction().operands()),
+                        (FinalOpcode::DefinePrivateField, Operands::U8(0..=3))
+                    )
                     && drop.decoded().instruction().opcode() == FinalOpcode::Drop
         );
         if !static_field_region && !computed_field_region && !private_field_region {
@@ -5821,6 +5964,17 @@ fn verify_object_definition_provenance(
                     return Err(append_stack_error(id, decoded.pc(), opcode));
                 }
             }
+            FinalOpcode::DefinePrivateField
+                if !matches!(
+                    state.get(state.len().saturating_sub(3)),
+                    Some(
+                        ObjectDefinitionProvenance::ClassConstructor(_)
+                            | ObjectDefinitionProvenance::ClassFieldReceiver(_)
+                    )
+                ) =>
+            {
+                return Err(object_definition_error(id, decoded.pc()));
+            }
             FinalOpcode::Append if append_pair_for_append(&state).is_none() => {
                 return Err(append_stack_error(id, decoded.pc(), opcode));
             }
@@ -6111,7 +6265,10 @@ fn transfer_object_definition_provenance(
                 state.push(key);
             }
         }
-        FinalOpcode::DefineMethodComputed => {
+        // A computed method definition and private element definition each
+        // preserve their base below key/name and value. Private elements have
+        // already been restricted to a certified class target above.
+        FinalOpcode::DefinePrivateField | FinalOpcode::DefineMethodComputed => {
             let base = retained_object_definition_provenance(state[state.len() - 3]);
             state.truncate(state.len() - 3);
             state.push(base);
@@ -6774,7 +6931,6 @@ fn verify_supported_opcodes(
     id: FunctionTemplateId,
     flow: &VerifiedControlFlow,
     metadata: &UnverifiedFunctionMetadata,
-    authority_kind: CompilerExecutableKind,
 ) -> Result<(), BytecodeVerificationError> {
     let executable_kind = metadata.executable_kind;
     let mut arguments_object_count = 0_u8;
@@ -6798,15 +6954,6 @@ fn verify_supported_opcodes(
         CompilerExecutableKind::AsyncGeneratorFunction
             | CompilerExecutableKind::AsyncGeneratorMethod
     );
-    let method = matches!(
-        executable_kind,
-        CompilerExecutableKind::OrdinaryMethod
-            | CompilerExecutableKind::ClassConstructor
-            | CompilerExecutableKind::GeneratorMethod
-            | CompilerExecutableKind::AsyncMethod
-            | CompilerExecutableKind::AsyncGeneratorMethod
-    );
-    let lexical_this = executable_kind == CompilerExecutableKind::OrdinaryArrow;
     let static_field_super = metadata
         .variables
         .iter()
@@ -6889,11 +7036,6 @@ fn verify_supported_opcodes(
             ) && !generator)
             || (matches!(opcode, FinalOpcode::Return | FinalOpcode::ReturnUndef)
                 && (generator || asynchronous))
-            || (opcode == FinalOpcode::PushThis
-                && !flow.function_header().mode().is_strict()
-                && !method
-                && !lexical_this
-                && !is_script_authority_kind(authority_kind))
             || (opcode == FinalOpcode::CheckCtorReturn
                 && !(executable_kind == CompilerExecutableKind::ClassConstructor
                     && flow
@@ -7091,6 +7233,7 @@ const fn supported_compiler_opcode(opcode: FinalOpcode) -> bool {
             | FinalOpcode::GetSuperValue
             | FinalOpcode::PutSuperValue
             | FinalOpcode::Perm3
+            | FinalOpcode::Perm4
             | FinalOpcode::Perm5
             | FinalOpcode::Return
             | FinalOpcode::ReturnUndef

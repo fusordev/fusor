@@ -761,6 +761,13 @@ fn secondary_operand_domains_are_rejected_before_stack_or_capability_checks() {
             3,
         ),
         (
+            FinalOpcode::DefinePrivateField,
+            Operands::U8(4),
+            FunctionIndexDomains::default(),
+            SecondaryOperandField::DefinePrivateFieldKind,
+            4,
+        ),
+        (
             FinalOpcode::DefineClass,
             Operands::AtomU8 {
                 atom: AtomPoolIndex::new(0),

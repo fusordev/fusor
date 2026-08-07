@@ -54,6 +54,16 @@ fn generator_class_methods_preserve_the_super_home_object() {
     );
 }
 
+#[test]
+fn private_generator_class_methods_share_a_method_cell_and_preserve_the_home_object() {
+    assert_eq!(
+        run(
+            "function run(){class Base{value(){return 40;}}class Box extends Base{*#values(){yield super.value()+2;}values(){return this.#values();}same(other){return this.#values===other.#values;}name(){return this.#values.name;}static has(candidate){return #values in candidate;}}let first=new Box;let second=new Box;let result=first.values().next();let rejected=false;try{Box.prototype.values.call({});}catch(error){rejected=error.name==='TypeError';}return result.value+':'+result.done+'|'+first.same(second)+'|'+first.name()+'|'+Box.has(first)+'|'+Box.has({})+'|'+rejected;}"
+        ),
+        "42:false|true|#values|true|false|true"
+    );
+}
+
 struct GeneratorAllocationCase {
     runtime: Runtime,
     realm: Realm,

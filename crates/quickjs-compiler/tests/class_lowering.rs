@@ -94,6 +94,21 @@ fn public_private_instance_fields_receive_fresh_class_scope_names() {
 
     assert!(opcodes.contains(&FinalOpcode::PrivateSymbol));
     assert!(opcodes.contains(&FinalOpcode::DefinePrivateField));
+    assert!(
+        tree.functions()
+            .iter()
+            .flat_map(|function| function.control_flow().instructions())
+            .any(|instruction| matches!(
+                (
+                    instruction.decoded().instruction().opcode(),
+                    instruction.decoded().instruction().operands(),
+                ),
+                (
+                    FinalOpcode::DefinePrivateField,
+                    quickjs_bytecode::Operands::U8(0)
+                )
+            ))
+    );
     assert!(opcodes.contains(&FinalOpcode::GetPrivateField));
     assert!(opcodes.contains(&FinalOpcode::PutPrivateField));
     assert!(opcodes.contains(&FinalOpcode::PrivateIn));
@@ -103,6 +118,27 @@ fn public_private_instance_fields_receive_fresh_class_scope_names() {
             .iter()
             .any(|closure| closure.policy().kind() == DeclarationKind::ClassPrivateName)
     }));
+}
+
+#[test]
+fn private_member_writes_lower_as_single_receiver_name_references() {
+    let tree = compile(
+        "function make(){class Box{#value=1;compound(next){return this.#value+=next;}or(next){return this.#value||=next;}and(next){return this.#value&&=next;}nullish(next){return this.#value??=next;}pre(){return ++this.#value;}post(){return this.#value--;}}return Box;}",
+        "make",
+    );
+    let opcodes = tree
+        .functions()
+        .iter()
+        .flat_map(|function| function.control_flow().instructions())
+        .map(|instruction| instruction.decoded().instruction().opcode())
+        .collect::<Vec<_>>();
+
+    assert!(opcodes.contains(&FinalOpcode::GetPrivateField));
+    assert!(opcodes.contains(&FinalOpcode::PutPrivateField));
+    assert!(opcodes.contains(&FinalOpcode::Dup2));
+    assert!(opcodes.contains(&FinalOpcode::Insert3));
+    assert!(opcodes.contains(&FinalOpcode::Perm4));
+    assert!(opcodes.contains(&FinalOpcode::PostDec));
 }
 
 #[test]
@@ -120,6 +156,21 @@ fn private_instance_methods_keep_distinct_names_shared_closures_and_home_objects
 
     assert!(opcodes.contains(&FinalOpcode::PrivateSymbol));
     assert!(opcodes.contains(&FinalOpcode::DefinePrivateField));
+    assert!(
+        tree.functions()
+            .iter()
+            .flat_map(|function| function.control_flow().instructions())
+            .any(|instruction| matches!(
+                (
+                    instruction.decoded().instruction().opcode(),
+                    instruction.decoded().instruction().operands(),
+                ),
+                (
+                    FinalOpcode::DefinePrivateField,
+                    quickjs_bytecode::Operands::U8(1)
+                )
+            ))
+    );
     assert!(opcodes.contains(&FinalOpcode::GetPrivateField));
     assert!(opcodes.contains(&FinalOpcode::SetHomeObject));
     assert!(opcodes.contains(&FinalOpcode::CallMethod));
@@ -130,6 +181,42 @@ fn private_instance_methods_keep_distinct_names_shared_closures_and_home_objects
             .filter(|closure| closure.policy().kind() == DeclarationKind::ClassPrivateName)
             .count()
             >= 2
+    }));
+}
+
+#[test]
+fn private_async_and_generator_methods_keep_typed_method_templates() {
+    let tree = compile(
+        "function make(){class Box{*#values(){yield 1;}async #asyncValue(){return 2;}async *#asyncValues(){yield 3;}static *#staticValues(){yield 4;}}return Box;}",
+        "make",
+    );
+    let private_method_definitions = tree
+        .functions()
+        .iter()
+        .flat_map(|function| function.control_flow().instructions())
+        .filter(|instruction| {
+            matches!(
+                (
+                    instruction.decoded().instruction().opcode(),
+                    instruction.decoded().instruction().operands(),
+                ),
+                (
+                    FinalOpcode::DefinePrivateField,
+                    quickjs_bytecode::Operands::U8(1)
+                )
+            )
+        })
+        .count();
+
+    assert_eq!(private_method_definitions, 4);
+    assert!(tree.verified_bytecode().functions().any(|function| {
+        function.metadata().executable_kind() == CompilerExecutableKind::GeneratorMethod
+    }));
+    assert!(tree.verified_bytecode().functions().any(|function| {
+        function.metadata().executable_kind() == CompilerExecutableKind::AsyncMethod
+    }));
+    assert!(tree.verified_bytecode().functions().any(|function| {
+        function.metadata().executable_kind() == CompilerExecutableKind::AsyncGeneratorMethod
     }));
 }
 
@@ -830,6 +917,34 @@ fn derived_super_spread_uses_the_typed_constructor_apply_form() {
                     && instruction.operands() == quickjs_bytecode::Operands::U16(2)
             })
     );
+}
+
+#[test]
+fn private_accessors_share_one_name_and_lower_to_accessor_kinds() {
+    let tree = compile(
+        "function make(){class Box{get #value(){return 1;}set #value(next){}read(){return this.#value;}write(next){this.#value=next;}}return Box;}",
+        "make",
+    );
+    let instructions = tree
+        .functions()
+        .iter()
+        .flat_map(|function| function.control_flow().instructions())
+        .map(|instruction| instruction.decoded().instruction())
+        .collect::<Vec<_>>();
+
+    assert_eq!(
+        instructions
+            .iter()
+            .filter(|instruction| instruction.opcode() == FinalOpcode::PrivateSymbol)
+            .count(),
+        1
+    );
+    for kind in [2, 3] {
+        assert!(instructions.iter().any(|instruction| matches!(
+            (instruction.opcode(), instruction.operands()),
+            (FinalOpcode::DefinePrivateField, quickjs_bytecode::Operands::U8(value)) if value == kind
+        )));
+    }
 }
 
 #[test]

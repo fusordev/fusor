@@ -127,6 +127,29 @@ fn compound_member_assignments_preserve_the_member_reference_for_the_write() {
 }
 
 #[test]
+fn member_updates_preserve_the_reference_and_prefix_or_postfix_completion() {
+    let source = "function run(){\
+        let baseCalls=0;let keyCalls=0;let object={staticValue:1,computedValue:1};\
+        function base(){baseCalls++;return object;}function key(){keyCalls++;return 'computedValue';}\
+        let staticPrefix=++base().staticValue;let staticPostfix=base().staticValue++;\
+        let computedPrefix=++base()[key()];let computedPostfix=base()[key()]++;\
+        return staticPrefix===2&&staticPostfix===2&&object.staticValue===3&&\
+            computedPrefix===2&&computedPostfix===2&&object.computedValue===3&&\
+            baseCalls===4&&keyCalls===2;\
+    }";
+    let authority = compile(source, "run");
+    let mut runtime = Runtime::try_new(RuntimeLimits::default()).expect("runtime");
+    let realm = runtime.create_realm().expect("realm");
+    let mut context = runtime.context(&realm).expect("context");
+    let run = context.instantiate(authority).expect("run");
+
+    let completion = context
+        .call(&run, &[], ExecutionLimits::default())
+        .expect("member updates");
+    assert_boolean(&completion, true);
+}
+
+#[test]
 fn computed_data_definition_coerces_before_evaluating_its_value() {
     let source = "function run(){\
         let rhsRan=false;\

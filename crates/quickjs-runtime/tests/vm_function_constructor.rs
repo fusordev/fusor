@@ -497,6 +497,24 @@ fn function_prototype_call_lets_the_target_normalize_a_sloppy_nullish_receiver()
 }
 
 #[test]
+fn function_prototype_call_boxes_a_sloppy_symbol_receiver() {
+    let mut runtime = Runtime::try_new(RuntimeLimits::default()).expect("runtime");
+    let realm = runtime.create_realm().expect("realm");
+    let mut context = runtime.context(&realm).expect("context");
+    let run = dynamic_function(
+        &mut context,
+        &[],
+        "return Function('return typeof this===\"object\"&&typeof this.valueOf()===\"symbol\";').call(Symbol('s'));",
+    );
+
+    let result = context
+        .call_with_dynamic_function_compiler(&run, &[], ExecutionLimits::default(), &compiler())
+        .expect("sloppy symbol receiver");
+
+    assert_eq!(result.as_boolean().expect("live value"), Some(true));
+}
+
+#[test]
 fn new_function_uses_constructor_dispatch_and_returns_a_callable() {
     let mut runtime = Runtime::try_new(RuntimeLimits::default()).expect("runtime");
     let realm = runtime.create_realm().expect("realm");

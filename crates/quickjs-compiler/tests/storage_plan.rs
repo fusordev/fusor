@@ -85,6 +85,26 @@ fn ordinary_script_root_retains_synchronous_sloppy_metadata_after_arena_drop() {
 }
 
 #[test]
+fn global_class_declaration_uses_a_mutable_lexical_binding() {
+    let plan = script("class Counter {}");
+    let binding = plan
+        .bindings()
+        .iter()
+        .find(|binding| {
+            binding.name() == "Counter" && binding.placement() == StoragePlacement::GlobalLexical
+        })
+        .expect("global Counter binding");
+
+    assert_eq!(binding.policy().kind(), DeclarationKind::Class);
+    assert_eq!(
+        binding.policy().initialization(),
+        InitializationPolicy::AtDeclaration
+    );
+    assert_eq!(binding.policy().writes(), WritePolicy::Mutable);
+    assert!(binding.policy().has_temporal_dead_zone());
+}
+
+#[test]
 fn async_script_root_retains_asynchronous_sloppy_metadata_after_arena_drop() {
     let plan = script_with_goal(
         "await 0;",

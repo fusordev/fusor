@@ -248,6 +248,49 @@ fn concat_uses_is_concat_spreadable_then_is_array() {
     ]);
 }
 
+/// `concat` obtains its `ArraySpeciesCreate` destination before observing the
+/// first source's `@@isConcatSpreadable` property.
+#[test]
+fn concat_honors_species_construction_before_spreadability() {
+    assert_all(&[
+        (
+            "(function(){\
+                let order='';\
+                const source=[];\
+                Object.defineProperty(source,'constructor',{get:function(){\
+                    order+='constructor|';return Array;}});\
+                Object.defineProperty(source,Symbol.isConcatSpreadable,{get:function(){\
+                    order+='spread|';return true;}});\
+                source.concat();return order;\
+            })()",
+            "constructor|spread|",
+        ),
+        (
+            "(function(){\
+                let calls='';\
+                function Species(length){calls+='ctor:'+length+'|';}\
+                const source=[];\
+                source.constructor={};\
+                source.constructor[Symbol.species]=Species;\
+                const result=source.concat(1);\
+                return calls+(result instanceof Species)+'|'+result.length+'|'+result[0];\
+            })()",
+            "ctor:0|true|1|1",
+        ),
+    ]);
+
+    let (kind, _) = thrown(
+        "(function(){\
+            function Species(){Object.preventExtensions(this);}\
+            const source=[];\
+            source.constructor={};\
+            source.constructor[Symbol.species]=Species;\
+            return source.concat(1);\
+        })()",
+    );
+    assert_eq!(kind, ExceptionKind::TypeError);
+}
+
 /// Holes survive into the copied result.
 ///
 /// An absent source index is skipped rather than written, so the destination

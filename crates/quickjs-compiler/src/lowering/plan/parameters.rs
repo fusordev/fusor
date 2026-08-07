@@ -612,14 +612,16 @@ impl<'arena> CompilationContext<'_, 'arena, '_> {
                 matches!(
                     (storage.policy().kind(), storage.policy().initialization()),
                     (
-                        DeclarationKind::Let | DeclarationKind::Const,
+                        DeclarationKind::Let | DeclarationKind::Const | DeclarationKind::Class,
                         InitializationPolicy::AtDeclaration
                     )
                 ) && storage.policy().has_temporal_dead_zone()
                     && matches!(
                         (storage.policy().kind(), storage.policy().writes()),
-                        (DeclarationKind::Let, WritePolicy::Mutable)
-                            | (DeclarationKind::Const, WritePolicy::Immutable)
+                        (
+                            DeclarationKind::Let | DeclarationKind::Class,
+                            WritePolicy::Mutable
+                        ) | (DeclarationKind::Const, WritePolicy::Immutable)
                     )
             }
             StoragePlacement::Argument { .. }

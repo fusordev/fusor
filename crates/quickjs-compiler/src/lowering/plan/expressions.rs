@@ -13,11 +13,12 @@ use super::super::{
     StatementCompletion, StatementControlStack, StatementPlanningState, StatementWork,
     StaticMemberExpression, StoragePlacement, UnaryExpression, UnaryOperator,
     UnsupportedLeafFeature, UpdateExpression, UpdateOperator, compiled_static_property_key,
-    object_method_or_accessor_span, plan_put_slot, unsupported,
+    plan_put_slot, unsupported,
 };
 use super::abrupt::{AbruptMarker, AbruptMarkerKind};
 use super::calls::MemberCallee;
 use oxc_ast::ast::StaticBlock;
+use std::collections::HashSet;
 
 pub(in crate::lowering) fn anonymous_named_evaluation_span(
     mut expression: &Expression<'_>,
@@ -199,7 +200,7 @@ pub(in crate::lowering) const fn binary_opcode(operator: BinaryOperator) -> Fina
     }
 }
 
-const fn super_member_update_opcode(update: &UpdateExpression<'_>) -> FinalOpcode {
+const fn update_opcode(update: &UpdateExpression<'_>) -> FinalOpcode {
     match (update.operator, update.prefix) {
         (UpdateOperator::Increment, true) => FinalOpcode::Inc,
         (UpdateOperator::Decrement, true) => FinalOpcode::Dec,
@@ -824,9 +825,10 @@ impl<'compiler, 'unit, 'arena, 'scope> ExpressionPlanner<'compiler, 'unit, 'aren
         assignment: &'expression AssignmentExpression<'arena>,
         member: &'expression PrivateFieldExpression<'arena>,
         layout: &FrameLayout,
+        flow: &mut PlannedControlFlow,
         work: &mut Vec<ExpressionWork<'expression, 'arena>>,
     ) -> Result<(), LeafCompilationError> {
-        if assignment.operator != AssignmentOperator::Assign || member.optional {
+        if member.optional {
             return unsupported(
                 UnsupportedLeafFeature::UnsupportedExpression,
                 assignment.left.span(),
@@ -838,21 +840,36 @@ impl<'compiler, 'unit, 'arena, 'scope> ExpressionPlanner<'compiler, 'unit, 'aren
             member.span,
             layout,
         )?;
-        if self
-            .planned
-            .identities
-            .class_private_method_bindings
-            .values()
-            .any(|method_binding| *method_binding == binding)
-        {
-            return unsupported(
-                UnsupportedLeafFeature::UnsupportedExpression,
-                assignment.left.span(),
-            );
+        match assignment.operator {
+            AssignmentOperator::Assign => {
+                self.plan_private_simple_assignment(assignment, member, binding, slot, work)?;
+            }
+            AssignmentOperator::LogicalOr
+            | AssignmentOperator::LogicalAnd
+            | AssignmentOperator::LogicalNullish => {
+                self.plan_private_logical_assignment(
+                    assignment, member, binding, slot, flow, work,
+                )?;
+            }
+            operator => {
+                self.plan_private_compound_assignment(
+                    assignment, member, binding, slot, operator, work,
+                )?;
+            }
         }
-        // As with computed-member assignment, preserve the RHS as the
-        // assignment completion below the receiver/name/value triple consumed
-        // by `put_private_field`.
+        Ok(())
+    }
+
+    fn plan_private_simple_assignment<'expression>(
+        &self,
+        assignment: &'expression AssignmentExpression<'arena>,
+        member: &'expression PrivateFieldExpression<'arena>,
+        binding: BindingId,
+        slot: FrameSlot,
+        work: &mut Vec<ExpressionWork<'expression, 'arena>>,
+    ) -> Result<(), LeafCompilationError> {
+        // Preserve the RHS as the assignment completion below the
+        // receiver/name/value triple consumed by `put_private_field`.
         work.push(ExpressionWork::Emit(PlannedInstruction::new(
             FinalOpcode::PutPrivateField,
             Operands::None,
@@ -864,6 +881,226 @@ impl<'compiler, 'unit, 'arena, 'scope> ExpressionPlanner<'compiler, 'unit, 'aren
             assignment.span,
         )));
         work.push(ExpressionWork::Visit(&assignment.right));
+        work.push(ExpressionWork::Emit(self.plan_read_slot(
+            binding,
+            slot,
+            member.field.span,
+        )?));
+        work.push(ExpressionWork::Visit(&member.object));
+        Ok(())
+    }
+
+    fn plan_private_logical_assignment<'expression>(
+        &self,
+        assignment: &'expression AssignmentExpression<'arena>,
+        member: &'expression PrivateFieldExpression<'arena>,
+        binding: BindingId,
+        slot: FrameSlot,
+        flow: &mut PlannedControlFlow,
+        work: &mut Vec<ExpressionWork<'expression, 'arena>>,
+    ) -> Result<(), LeafCompilationError> {
+        let short_circuit = flow.new_label(assignment.span)?;
+        let done = flow.new_label(assignment.span)?;
+        let branch_kind = if assignment.operator == AssignmentOperator::LogicalOr {
+            BranchKind::IfTrue
+        } else {
+            BranchKind::IfFalse
+        };
+
+        // `dup2; get_private_field` retains the receiver/name pair. A
+        // short-circuit removes it and returns `old`; the write path drops
+        // `old`, evaluates the RHS, then returns the stored RHS.
+        work.push(ExpressionWork::Bind(done.clone()));
+        for opcode in [
+            FinalOpcode::Drop,
+            FinalOpcode::Swap,
+            FinalOpcode::Drop,
+            FinalOpcode::Swap,
+        ] {
+            work.push(ExpressionWork::Emit(PlannedInstruction::new(
+                opcode,
+                Operands::None,
+                member.span,
+            )));
+        }
+        work.push(ExpressionWork::Bind(short_circuit.clone()));
+        work.push(ExpressionWork::Branch {
+            kind: BranchKind::Goto,
+            target: done,
+            span: assignment.span,
+        });
+        Self::plan_private_write_after_value(assignment, member, work);
+        work.push(ExpressionWork::Emit(PlannedInstruction::new(
+            FinalOpcode::Drop,
+            Operands::None,
+            member.span,
+        )));
+        work.push(ExpressionWork::Branch {
+            kind: branch_kind,
+            target: short_circuit,
+            span: assignment.span,
+        });
+        if assignment.operator == AssignmentOperator::LogicalNullish {
+            work.push(ExpressionWork::Emit(PlannedInstruction::new(
+                FinalOpcode::IsUndefinedOrNull,
+                Operands::None,
+                member.span,
+            )));
+        }
+        work.push(ExpressionWork::Emit(PlannedInstruction::new(
+            FinalOpcode::Dup,
+            Operands::None,
+            member.span,
+        )));
+        self.plan_private_read_reference(member, binding, slot, work)?;
+        Ok(())
+    }
+
+    fn plan_private_compound_assignment<'expression>(
+        &self,
+        assignment: &'expression AssignmentExpression<'arena>,
+        member: &'expression PrivateFieldExpression<'arena>,
+        binding: BindingId,
+        slot: FrameSlot,
+        operator: AssignmentOperator,
+        work: &mut Vec<ExpressionWork<'expression, 'arena>>,
+    ) -> Result<(), LeafCompilationError> {
+        let binary =
+            operator
+                .to_binary_operator()
+                .ok_or(LeafCompilationError::SemanticInvariant {
+                    invariant: "nonlogical private assignment has a binary operator",
+                    span: Some(assignment.span),
+                })?;
+        Self::plan_private_compound_write_after_value(
+            assignment,
+            member,
+            binary_opcode(binary),
+            work,
+        );
+        self.plan_private_read_reference(member, binding, slot, work)
+    }
+
+    fn plan_private_compound_write_after_value<'expression>(
+        assignment: &'expression AssignmentExpression<'arena>,
+        member: &'expression PrivateFieldExpression<'arena>,
+        binary: FinalOpcode,
+        work: &mut Vec<ExpressionWork<'expression, 'arena>>,
+    ) {
+        work.push(ExpressionWork::Emit(PlannedInstruction::new(
+            FinalOpcode::PutPrivateField,
+            Operands::None,
+            member.span,
+        )));
+        work.push(ExpressionWork::Emit(PlannedInstruction::new(
+            FinalOpcode::Insert3,
+            Operands::None,
+            assignment.span,
+        )));
+        work.push(ExpressionWork::Emit(PlannedInstruction::new(
+            binary,
+            Operands::None,
+            assignment.span,
+        )));
+        work.push(ExpressionWork::Visit(&assignment.right));
+    }
+
+    fn plan_private_write_after_value<'expression>(
+        assignment: &'expression AssignmentExpression<'arena>,
+        member: &'expression PrivateFieldExpression<'arena>,
+        work: &mut Vec<ExpressionWork<'expression, 'arena>>,
+    ) {
+        work.push(ExpressionWork::Emit(PlannedInstruction::new(
+            FinalOpcode::PutPrivateField,
+            Operands::None,
+            member.span,
+        )));
+        work.push(ExpressionWork::Emit(PlannedInstruction::new(
+            FinalOpcode::Insert3,
+            Operands::None,
+            assignment.span,
+        )));
+        work.push(ExpressionWork::Visit(&assignment.right));
+    }
+
+    fn plan_private_read_reference<'expression>(
+        &self,
+        member: &'expression PrivateFieldExpression<'arena>,
+        binding: BindingId,
+        slot: FrameSlot,
+        work: &mut Vec<ExpressionWork<'expression, 'arena>>,
+    ) -> Result<(), LeafCompilationError> {
+        work.push(ExpressionWork::Emit(PlannedInstruction::new(
+            FinalOpcode::GetPrivateField,
+            Operands::None,
+            member.span,
+        )));
+        work.push(ExpressionWork::Emit(PlannedInstruction::new(
+            FinalOpcode::Dup2,
+            Operands::None,
+            member.span,
+        )));
+        work.push(ExpressionWork::Emit(self.plan_read_slot(
+            binding,
+            slot,
+            member.field.span,
+        )?));
+        work.push(ExpressionWork::Visit(&member.object));
+        Ok(())
+    }
+
+    fn plan_private_member_update<'expression>(
+        &self,
+        update: &'expression UpdateExpression<'arena>,
+        member: &'expression PrivateFieldExpression<'arena>,
+        layout: &FrameLayout,
+        work: &mut Vec<ExpressionWork<'expression, 'arena>>,
+    ) -> Result<(), LeafCompilationError> {
+        if member.optional {
+            return unsupported(
+                UnsupportedLeafFeature::UnsupportedExpression,
+                update.argument.span(),
+            );
+        }
+        let (binding, slot) = self.private_name_binding_for_access(
+            member.node_id.get(),
+            member.field.name.as_str(),
+            member.span,
+            layout,
+        )?;
+        // `dup2; get_private_field` preserves `[receiver, name]`. A prefix
+        // update duplicates the new value before the private store; a postfix
+        // update leaves `old, new`, and `perm4` changes
+        // `[receiver, name, old, new]` into `[old, receiver, name, new]`.
+        work.push(ExpressionWork::Emit(PlannedInstruction::new(
+            FinalOpcode::PutPrivateField,
+            Operands::None,
+            member.span,
+        )));
+        work.push(ExpressionWork::Emit(PlannedInstruction::new(
+            if update.prefix {
+                FinalOpcode::Insert3
+            } else {
+                FinalOpcode::Perm4
+            },
+            Operands::None,
+            update.span,
+        )));
+        work.push(ExpressionWork::Emit(PlannedInstruction::new(
+            update_opcode(update),
+            Operands::None,
+            update.span,
+        )));
+        work.push(ExpressionWork::Emit(PlannedInstruction::new(
+            FinalOpcode::GetPrivateField,
+            Operands::None,
+            member.span,
+        )));
+        work.push(ExpressionWork::Emit(PlannedInstruction::new(
+            FinalOpcode::Dup2,
+            Operands::None,
+            member.span,
+        )));
         work.push(ExpressionWork::Emit(self.plan_read_slot(
             binding,
             slot,
@@ -1046,11 +1283,12 @@ impl<'compiler, 'unit, 'arena, 'scope> ExpressionPlanner<'compiler, 'unit, 'aren
             return Ok(());
         }
         if matches!(method.key, OxcPropertyKey::PrivateIdentifier(_)) {
-            if method.r#static
-                || method.kind != MethodDefinitionKind::Method
-                || method.computed
-                || method.value.generator
-                || method.value.r#async
+            if !matches!(
+                method.kind,
+                MethodDefinitionKind::Method
+                    | MethodDefinitionKind::Get
+                    | MethodDefinitionKind::Set
+            ) || method.computed
             {
                 return unsupported(UnsupportedLeafFeature::UnsupportedDeclaration, method.span);
             }
@@ -1080,10 +1318,10 @@ impl<'compiler, 'unit, 'arena, 'scope> ExpressionPlanner<'compiler, 'unit, 'aren
         if !field.decorators.is_empty() {
             return unsupported(UnsupportedLeafFeature::UnsupportedDeclaration, field.span);
         }
+        if matches!(field.key, OxcPropertyKey::PrivateIdentifier(_)) {
+            return Ok(());
+        }
         if !field.r#static {
-            if matches!(field.key, OxcPropertyKey::PrivateIdentifier(_)) {
-                return Ok(());
-            }
             if field.computed {
                 field
                     .key
@@ -1126,6 +1364,7 @@ impl<'compiler, 'unit, 'arena, 'scope> ExpressionPlanner<'compiler, 'unit, 'aren
         constants: &CompiledConstantPool,
         flow: &mut PlannedControlFlow,
     ) -> Result<(), LeafCompilationError> {
+        let mut initialized = HashSet::new();
         for element in &class.body.body {
             let (node_id, identifier) = match element {
                 ClassElement::PropertyDefinition(field) => {
@@ -1152,6 +1391,9 @@ impl<'compiler, 'unit, 'arena, 'scope> ExpressionPlanner<'compiler, 'unit, 'aren
                     invariant: "private element has a class-scope name binding",
                     span: Some(identifier.span),
                 })?;
+            if !initialized.insert(binding) {
+                continue;
+            }
             let storage = self.planned.plan.binding(binding).ok_or(
                 LeafCompilationError::SemanticInvariant {
                     invariant: "private element name binding exists",
@@ -1209,11 +1451,19 @@ impl<'compiler, 'unit, 'arena, 'scope> ExpressionPlanner<'compiler, 'unit, 'aren
         }
         let is_private_method = matches!(method.key, OxcPropertyKey::PrivateIdentifier(_));
         if is_private_method {
+            if method.r#static {
+                return self.plan_base_class_static_private_method(
+                    method,
+                    layout,
+                    tree_layout,
+                    constants,
+                    flow,
+                );
+            }
             let OxcPropertyKey::PrivateIdentifier(identifier) = &method.key else {
                 unreachable!("private method key is PrivateIdentifier");
             };
-            let (_, function_slot) =
-                self.private_instance_method_function_binding(method, layout)?;
+            let (_, function_slot) = self.private_class_method_function_binding(method, layout)?;
             let FrameSlot::Local(_) = function_slot else {
                 return Err(LeafCompilationError::SemanticInvariant {
                     invariant: "private method closure is stored in its class local frame",
@@ -1331,6 +1581,94 @@ impl<'compiler, 'unit, 'arena, 'scope> ExpressionPlanner<'compiler, 'unit, 'aren
         Ok(())
     }
 
+    fn plan_base_class_static_private_method(
+        &self,
+        method: &MethodDefinition<'arena>,
+        layout: &FrameLayout,
+        tree_layout: &FunctionTreeLayout,
+        constants: &CompiledConstantPool,
+        flow: &mut PlannedControlFlow,
+    ) -> Result<(), LeafCompilationError> {
+        if !method.r#static
+            || !matches!(
+                method.kind,
+                MethodDefinitionKind::Method
+                    | MethodDefinitionKind::Get
+                    | MethodDefinitionKind::Set
+            )
+            || !matches!(method.key, OxcPropertyKey::PrivateIdentifier(_))
+        {
+            return Err(LeafCompilationError::SemanticInvariant {
+                invariant: "static private-method planner receives a static private method",
+                span: Some(method.span),
+            });
+        }
+        let OxcPropertyKey::PrivateIdentifier(identifier) = &method.key else {
+            unreachable!("static private method key is PrivateIdentifier");
+        };
+        let (name_binding, name_slot) = self.private_class_method_name_binding(method, layout)?;
+        let (function_binding, function_slot) =
+            self.private_class_method_function_binding(method, layout)?;
+        let (FrameSlot::Local(_), FrameSlot::Local(_)) = (name_slot, function_slot) else {
+            return Err(LeafCompilationError::SemanticInvariant {
+                invariant: "static private method name and closure use class local storage",
+                span: Some(method.span),
+            });
+        };
+        flow.emit(self.plan_function_closure(
+            &method.value,
+            layout.executable,
+            tree_layout,
+            constants,
+        )?)?;
+        // Reorder `[constructor, prototype, function]` into
+        // `[prototype, function, constructor]` so `set_home_object` records
+        // the constructor (the static method home object), then restore the
+        // canonical class-definition stack before storing the closure.
+        for opcode in [
+            FinalOpcode::Swap,
+            FinalOpcode::Perm3,
+            FinalOpcode::Swap,
+            FinalOpcode::Perm3,
+            FinalOpcode::SetHomeObject,
+            FinalOpcode::Perm3,
+            FinalOpcode::Swap,
+            FinalOpcode::Perm3,
+            FinalOpcode::Swap,
+        ] {
+            flow.emit(PlannedInstruction::new(opcode, Operands::None, method.span))?;
+        }
+        flow.emit(PlannedInstruction::new(
+            FinalOpcode::SetName,
+            Operands::Atom(constants.property_atom_index(identifier.span)?),
+            method.span,
+        ))?;
+        flow.emit(plan_put_slot(function_slot, identifier.span))?;
+        flow.emit(PlannedInstruction::new(
+            FinalOpcode::Swap,
+            Operands::None,
+            method.span,
+        ))?;
+        flow.emit(self.plan_read_slot(name_binding, name_slot, method.key.span())?)?;
+        flow.emit(self.plan_read_slot(function_binding, function_slot, method.key.span())?)?;
+        let private_element_kind = match method.kind {
+            MethodDefinitionKind::Method => 1,
+            MethodDefinitionKind::Get => 2,
+            MethodDefinitionKind::Set => 3,
+            MethodDefinitionKind::Constructor => unreachable!("constructors were skipped"),
+        };
+        flow.emit(PlannedInstruction::new(
+            FinalOpcode::DefinePrivateField,
+            Operands::U8(private_element_kind),
+            method.span,
+        ))?;
+        flow.emit(PlannedInstruction::new(
+            FinalOpcode::Swap,
+            Operands::None,
+            method.span,
+        ))
+    }
+
     fn plan_base_class_static_field(
         &self,
         field: &PropertyDefinition<'arena>,
@@ -1339,6 +1677,15 @@ impl<'compiler, 'unit, 'arena, 'scope> ExpressionPlanner<'compiler, 'unit, 'aren
         constants: &CompiledConstantPool,
         flow: &mut PlannedControlFlow,
     ) -> Result<(), LeafCompilationError> {
+        if matches!(field.key, OxcPropertyKey::PrivateIdentifier(_)) {
+            return self.plan_base_class_static_private_field(
+                field,
+                layout,
+                tree_layout,
+                constants,
+                flow,
+            );
+        }
         if field.computed {
             return self.plan_base_class_computed_static_field(
                 field,
@@ -1377,6 +1724,61 @@ impl<'compiler, 'unit, 'arena, 'scope> ExpressionPlanner<'compiler, 'unit, 'aren
         flow.emit(PlannedInstruction::new(
             FinalOpcode::DefineField,
             Operands::Atom(constants.property_atom_index(key.span)?),
+            field.span,
+        ))?;
+        flow.emit(PlannedInstruction::new(
+            FinalOpcode::Swap,
+            Operands::None,
+            field.span,
+        ))
+    }
+
+    fn plan_base_class_static_private_field(
+        &self,
+        field: &PropertyDefinition<'arena>,
+        layout: &FrameLayout,
+        tree_layout: &FunctionTreeLayout,
+        constants: &CompiledConstantPool,
+        flow: &mut PlannedControlFlow,
+    ) -> Result<(), LeafCompilationError> {
+        if !field.r#static || !matches!(field.key, OxcPropertyKey::PrivateIdentifier(_)) {
+            return Err(LeafCompilationError::SemanticInvariant {
+                invariant: "static private-field planner receives a static private field",
+                span: Some(field.span),
+            });
+        }
+        let (binding, slot) = self.private_class_field_name_binding(field, layout)?;
+        let FrameSlot::Local(_) = slot else {
+            return Err(LeafCompilationError::SemanticInvariant {
+                invariant: "static private field name is stored in its class local frame",
+                span: Some(field.key.span()),
+            });
+        };
+        flow.emit(PlannedInstruction::new(
+            FinalOpcode::Swap,
+            Operands::None,
+            field.span,
+        ))?;
+        flow.emit(self.plan_read_slot(binding, slot, field.key.span())?)?;
+        if let Some(value) = &field.value {
+            let inferred_name = Self::plan_inferred_static_property_name_for_initializer(
+                value,
+                constants.property_atom_index(field.key.span())?,
+            )?;
+            self.plan_expression(value, layout, tree_layout, constants, &[], flow)?;
+            if let Some(inferred_name) = inferred_name {
+                flow.emit(inferred_name)?;
+            }
+        } else {
+            flow.emit(PlannedInstruction::new(
+                FinalOpcode::Undefined,
+                Operands::None,
+                field.span,
+            ))?;
+        }
+        flow.emit(PlannedInstruction::new(
+            FinalOpcode::DefinePrivateField,
+            Operands::U8(0),
             field.span,
         ))?;
         flow.emit(PlannedInstruction::new(
@@ -1706,7 +2108,7 @@ impl<'compiler, 'unit, 'arena, 'scope> ExpressionPlanner<'compiler, 'unit, 'aren
         }
         flow.emit(PlannedInstruction::new(
             FinalOpcode::DefinePrivateField,
-            Operands::None,
+            Operands::U8(0),
             field.span,
         ))?;
         flow.emit(PlannedInstruction::new(
@@ -1731,10 +2133,9 @@ impl<'compiler, 'unit, 'arena, 'scope> ExpressionPlanner<'compiler, 'unit, 'aren
         synthesized_default: bool,
         flow: &mut PlannedControlFlow,
     ) -> Result<(), LeafCompilationError> {
-        let (name_binding, name_slot) =
-            self.private_instance_method_name_binding(method, layout)?;
+        let (name_binding, name_slot) = self.private_class_method_name_binding(method, layout)?;
         let (function_binding, function_slot) =
-            self.private_instance_method_function_binding(method, layout)?;
+            self.private_class_method_function_binding(method, layout)?;
         let (FrameSlot::Capture(_), FrameSlot::Capture(_)) = (name_slot, function_slot) else {
             return Err(LeafCompilationError::SemanticInvariant {
                 invariant: "instance constructor captures private method name and function",
@@ -1755,9 +2156,15 @@ impl<'compiler, 'unit, 'arena, 'scope> ExpressionPlanner<'compiler, 'unit, 'aren
         ))?;
         flow.emit(self.plan_read_slot(name_binding, name_slot, method.key.span())?)?;
         flow.emit(self.plan_read_slot(function_binding, function_slot, method.key.span())?)?;
+        let private_element_kind = match method.kind {
+            MethodDefinitionKind::Method => 1,
+            MethodDefinitionKind::Get => 2,
+            MethodDefinitionKind::Set => 3,
+            MethodDefinitionKind::Constructor => unreachable!("constructors were skipped"),
+        };
         flow.emit(PlannedInstruction::new(
             FinalOpcode::DefinePrivateField,
-            Operands::None,
+            Operands::U8(private_element_kind),
             method.span,
         ))?;
         flow.emit(PlannedInstruction::new(
@@ -1899,6 +2306,20 @@ impl<'compiler, 'unit, 'arena, 'scope> ExpressionPlanner<'compiler, 'unit, 'aren
                 span: Some(field.span),
             });
         }
+        self.private_class_field_name_binding(field, layout)
+    }
+
+    fn private_class_field_name_binding(
+        &self,
+        field: &PropertyDefinition<'arena>,
+        layout: &FrameLayout,
+    ) -> Result<(BindingId, FrameSlot), LeafCompilationError> {
+        if !matches!(field.key, OxcPropertyKey::PrivateIdentifier(_)) {
+            return Err(LeafCompilationError::SemanticInvariant {
+                invariant: "private field name binding belongs to a private class field",
+                span: Some(field.span),
+            });
+        }
         let binding = self
             .planned
             .identities
@@ -1906,7 +2327,7 @@ impl<'compiler, 'unit, 'arena, 'scope> ExpressionPlanner<'compiler, 'unit, 'aren
             .get(&field.node_id.get())
             .copied()
             .ok_or(LeafCompilationError::SemanticInvariant {
-                invariant: "private instance field has a class-scope name binding",
+                invariant: "private class field has a class-scope name binding",
                 span: Some(field.key.span()),
             })?;
         let storage =
@@ -1914,37 +2335,38 @@ impl<'compiler, 'unit, 'arena, 'scope> ExpressionPlanner<'compiler, 'unit, 'aren
                 .plan
                 .binding(binding)
                 .ok_or(LeafCompilationError::SemanticInvariant {
-                    invariant: "private instance field name binding exists",
+                    invariant: "private class field name binding exists",
                     span: Some(field.key.span()),
                 })?;
         if storage.policy().kind() != DeclarationKind::ClassPrivateName
             || storage.placement() != StoragePlacement::Local
         {
             return Err(LeafCompilationError::SemanticInvariant {
-                invariant: "private instance field name is immutable local storage",
+                invariant: "private class field name is immutable local storage",
                 span: Some(field.key.span()),
             });
         }
         let slot = layout
             .slot(binding)
             .ok_or(LeafCompilationError::SemanticInvariant {
-                invariant: "private instance field name binding has a frame slot",
+                invariant: "private class field name binding has a frame slot",
                 span: Some(field.key.span()),
             })?;
         Ok((binding, slot))
     }
 
-    fn private_instance_method_name_binding(
+    fn private_class_method_name_binding(
         &self,
         method: &MethodDefinition<'arena>,
         layout: &FrameLayout,
     ) -> Result<(BindingId, FrameSlot), LeafCompilationError> {
-        if method.r#static
-            || method.kind != MethodDefinitionKind::Method
-            || !matches!(method.key, OxcPropertyKey::PrivateIdentifier(_))
+        if !matches!(
+            method.kind,
+            MethodDefinitionKind::Method | MethodDefinitionKind::Get | MethodDefinitionKind::Set
+        ) || !matches!(method.key, OxcPropertyKey::PrivateIdentifier(_))
         {
             return Err(LeafCompilationError::SemanticInvariant {
-                invariant: "private method name binding belongs to a private instance method",
+                invariant: "private method name binding belongs to a supported private method",
                 span: Some(method.span),
             });
         }
@@ -1955,7 +2377,7 @@ impl<'compiler, 'unit, 'arena, 'scope> ExpressionPlanner<'compiler, 'unit, 'aren
             .get(&method.node_id.get())
             .copied()
             .ok_or(LeafCompilationError::SemanticInvariant {
-                invariant: "private instance method has a class-scope name binding",
+                invariant: "private method has a class-scope name binding",
                 span: Some(method.key.span()),
             })?;
         let storage =
@@ -1963,37 +2385,38 @@ impl<'compiler, 'unit, 'arena, 'scope> ExpressionPlanner<'compiler, 'unit, 'aren
                 .plan
                 .binding(binding)
                 .ok_or(LeafCompilationError::SemanticInvariant {
-                    invariant: "private instance method name binding exists",
+                    invariant: "private method name binding exists",
                     span: Some(method.key.span()),
                 })?;
         if storage.policy().kind() != DeclarationKind::ClassPrivateName
             || storage.placement() != StoragePlacement::Local
         {
             return Err(LeafCompilationError::SemanticInvariant {
-                invariant: "private instance method name is immutable local storage",
+                invariant: "private method name is immutable local storage",
                 span: Some(method.key.span()),
             });
         }
         let slot = layout
             .slot(binding)
             .ok_or(LeafCompilationError::SemanticInvariant {
-                invariant: "private instance method name binding has a frame slot",
+                invariant: "private method name binding has a frame slot",
                 span: Some(method.key.span()),
             })?;
         Ok((binding, slot))
     }
 
-    fn private_instance_method_function_binding(
+    fn private_class_method_function_binding(
         &self,
         method: &MethodDefinition<'arena>,
         layout: &FrameLayout,
     ) -> Result<(BindingId, FrameSlot), LeafCompilationError> {
-        if method.r#static
-            || method.kind != MethodDefinitionKind::Method
-            || !matches!(method.key, OxcPropertyKey::PrivateIdentifier(_))
+        if !matches!(
+            method.kind,
+            MethodDefinitionKind::Method | MethodDefinitionKind::Get | MethodDefinitionKind::Set
+        ) || !matches!(method.key, OxcPropertyKey::PrivateIdentifier(_))
         {
             return Err(LeafCompilationError::SemanticInvariant {
-                invariant: "private method function binding belongs to a private instance method",
+                invariant: "private method function binding belongs to a supported private method",
                 span: Some(method.span),
             });
         }
@@ -2004,7 +2427,7 @@ impl<'compiler, 'unit, 'arena, 'scope> ExpressionPlanner<'compiler, 'unit, 'aren
             .get(&method.node_id.get())
             .copied()
             .ok_or(LeafCompilationError::SemanticInvariant {
-                invariant: "private instance method has a class-scope function binding",
+                invariant: "private method has a class-scope function binding",
                 span: Some(method.key.span()),
             })?;
         let storage =
@@ -2012,21 +2435,21 @@ impl<'compiler, 'unit, 'arena, 'scope> ExpressionPlanner<'compiler, 'unit, 'aren
                 .plan
                 .binding(binding)
                 .ok_or(LeafCompilationError::SemanticInvariant {
-                    invariant: "private instance method function binding exists",
+                    invariant: "private method function binding exists",
                     span: Some(method.key.span()),
                 })?;
         if storage.policy().kind() != DeclarationKind::ClassPrivateName
             || storage.placement() != StoragePlacement::Local
         {
             return Err(LeafCompilationError::SemanticInvariant {
-                invariant: "private instance method function is immutable local storage",
+                invariant: "private method function is immutable local storage",
                 span: Some(method.key.span()),
             });
         }
         let slot = layout
             .slot(binding)
             .ok_or(LeafCompilationError::SemanticInvariant {
-                invariant: "private instance method function binding has a frame slot",
+                invariant: "private method function binding has a frame slot",
                 span: Some(method.key.span()),
             })?;
         Ok((binding, slot))
@@ -2867,23 +3290,6 @@ impl<'compiler, 'unit, 'arena, 'scope> ExpressionPlanner<'compiler, 'unit, 'aren
         if let Some(receiver) = self.static_class_receiver_read(span, layout)? {
             return Ok(receiver);
         }
-        let executable = self.planned.plan.executable(layout.executable).ok_or(
-            LeafCompilationError::InvalidExecutable {
-                executable: layout.executable,
-            },
-        )?;
-        let is_script_authority = crate::is_supported_script_root_goal(self.unit.goal());
-        let is_object_method = self
-            .planned
-            .identities
-            .node_by_executable
-            .get(layout.executable.index())
-            .copied()
-            .and_then(|node_id| object_method_or_accessor_span(self.unit, node_id))
-            .is_some();
-        if !executable.is_strict() && !is_script_authority && !is_object_method {
-            return unsupported(UnsupportedLeafFeature::UnsupportedExpression, span);
-        }
         Ok(PlannedInstruction::new(
             FinalOpcode::PushThis,
             Operands::None,
@@ -3389,9 +3795,6 @@ impl<'compiler, 'unit, 'arena, 'scope> ExpressionPlanner<'compiler, 'unit, 'aren
                     property.span(),
                 );
             };
-            if property.shorthand {
-                return unsupported(UnsupportedLeafFeature::UnsupportedExpression, property.span);
-            }
             let method_kind = match (property.method, property.kind) {
                 (true, PropertyKind::Init) => Some(ObjectMethodKind::Method),
                 (false, PropertyKind::Get) => Some(ObjectMethodKind::Getter),
@@ -3677,7 +4080,7 @@ impl<'compiler, 'unit, 'arena, 'scope> ExpressionPlanner<'compiler, 'unit, 'aren
         work: &mut Vec<ExpressionWork<'expression, 'arena>>,
     ) -> Result<(), LeafCompilationError> {
         if let AssignmentTarget::PrivateFieldExpression(member) = &assignment.left {
-            return self.plan_private_member_assignment(assignment, member, layout, work);
+            return self.plan_private_member_assignment(assignment, member, layout, flow, work);
         }
         if let AssignmentTarget::StaticMemberExpression(member) = &assignment.left {
             if matches!(
@@ -4156,7 +4559,7 @@ impl<'compiler, 'unit, 'arena, 'scope> ExpressionPlanner<'compiler, 'unit, 'aren
             update.span,
         )));
         work.push(ExpressionWork::Emit(PlannedInstruction::new(
-            super_member_update_opcode(update),
+            update_opcode(update),
             Operands::None,
             update.span,
         )));
@@ -4204,7 +4607,7 @@ impl<'compiler, 'unit, 'arena, 'scope> ExpressionPlanner<'compiler, 'unit, 'aren
             update.span,
         )));
         work.push(ExpressionWork::Emit(PlannedInstruction::new(
-            super_member_update_opcode(update),
+            update_opcode(update),
             Operands::None,
             update.span,
         )));
@@ -4692,6 +5095,109 @@ impl<'compiler, 'unit, 'arena, 'scope> ExpressionPlanner<'compiler, 'unit, 'aren
         )
     }
 
+    fn plan_static_member_update<'expression>(
+        update: &'expression UpdateExpression<'arena>,
+        member: &'expression StaticMemberExpression<'arena>,
+        constants: &CompiledConstantPool,
+        work: &mut Vec<ExpressionWork<'expression, 'arena>>,
+    ) -> Result<(), LeafCompilationError> {
+        if matches!(&member.object, Expression::Super(_)) {
+            return Self::plan_static_super_member_update(update, member, constants, work);
+        }
+        if member.optional {
+            return unsupported(
+                UnsupportedLeafFeature::UnsupportedExpression,
+                update.argument.span(),
+            );
+        }
+        // `dup; get_field` preserves the base for the write. A prefix update
+        // duplicates the new value before `put_field`; a postfix update leaves
+        // `old, new`, and `perm3` changes `[base, old, new]` into
+        // `[old, base, new]` so the original value remains as the completion.
+        work.push(ExpressionWork::Emit(PlannedInstruction::new(
+            FinalOpcode::PutField,
+            Operands::Atom(constants.property_atom_index(member.property.span)?),
+            member.span,
+        )));
+        work.push(ExpressionWork::Emit(PlannedInstruction::new(
+            if update.prefix {
+                FinalOpcode::Insert2
+            } else {
+                FinalOpcode::Perm3
+            },
+            Operands::None,
+            update.span,
+        )));
+        work.push(ExpressionWork::Emit(PlannedInstruction::new(
+            update_opcode(update),
+            Operands::None,
+            update.span,
+        )));
+        work.push(ExpressionWork::Emit(PlannedInstruction::new(
+            FinalOpcode::GetField,
+            Operands::Atom(constants.property_atom_index(member.property.span)?),
+            member.span,
+        )));
+        work.push(ExpressionWork::Emit(PlannedInstruction::new(
+            FinalOpcode::Dup,
+            Operands::None,
+            member.span,
+        )));
+        work.push(ExpressionWork::Visit(&member.object));
+        Ok(())
+    }
+
+    fn plan_computed_member_update<'expression>(
+        update: &'expression UpdateExpression<'arena>,
+        member: &'expression ComputedMemberExpression<'arena>,
+        work: &mut Vec<ExpressionWork<'expression, 'arena>>,
+    ) -> Result<(), LeafCompilationError> {
+        if matches!(&member.object, Expression::Super(_)) {
+            return Self::plan_computed_super_member_update(update, member, work);
+        }
+        if member.optional {
+            return unsupported(
+                UnsupportedLeafFeature::UnsupportedExpression,
+                update.argument.span(),
+            );
+        }
+        // `dup2; get_array_el` preserves the base and raw key for the write.
+        // A prefix update keeps its new value as the completion; a postfix
+        // update moves the old value below the saved reference triple.
+        work.push(ExpressionWork::Emit(PlannedInstruction::new(
+            FinalOpcode::PutArrayEl,
+            Operands::None,
+            member.span,
+        )));
+        work.push(ExpressionWork::Emit(PlannedInstruction::new(
+            if update.prefix {
+                FinalOpcode::Insert3
+            } else {
+                FinalOpcode::Perm4
+            },
+            Operands::None,
+            update.span,
+        )));
+        work.push(ExpressionWork::Emit(PlannedInstruction::new(
+            update_opcode(update),
+            Operands::None,
+            update.span,
+        )));
+        work.push(ExpressionWork::Emit(PlannedInstruction::new(
+            FinalOpcode::GetArrayEl,
+            Operands::None,
+            member.span,
+        )));
+        work.push(ExpressionWork::Emit(PlannedInstruction::new(
+            FinalOpcode::Dup2,
+            Operands::None,
+            member.span,
+        )));
+        work.push(ExpressionWork::Visit(&member.expression));
+        work.push(ExpressionWork::Visit(&member.object));
+        Ok(())
+    }
+
     fn plan_update_expression<'expression>(
         &self,
         update: &'expression UpdateExpression<'arena>,
@@ -4700,16 +5206,15 @@ impl<'compiler, 'unit, 'arena, 'scope> ExpressionPlanner<'compiler, 'unit, 'aren
         constants: &CompiledConstantPool,
         work: &mut Vec<ExpressionWork<'expression, 'arena>>,
     ) -> Result<(), LeafCompilationError> {
+        if let SimpleAssignmentTarget::PrivateFieldExpression(member) = &update.argument {
+            return self.plan_private_member_update(update, member, layout, work);
+        }
         let identifier = match &update.argument {
-            SimpleAssignmentTarget::StaticMemberExpression(member)
-                if matches!(&member.object, Expression::Super(_)) =>
-            {
-                return Self::plan_static_super_member_update(update, member, constants, work);
+            SimpleAssignmentTarget::StaticMemberExpression(member) => {
+                return Self::plan_static_member_update(update, member, constants, work);
             }
-            SimpleAssignmentTarget::ComputedMemberExpression(member)
-                if matches!(&member.object, Expression::Super(_)) =>
-            {
-                return Self::plan_computed_super_member_update(update, member, work);
+            SimpleAssignmentTarget::ComputedMemberExpression(member) => {
+                return Self::plan_computed_member_update(update, member, work);
             }
             SimpleAssignmentTarget::AssignmentTargetIdentifier(identifier) => identifier,
             _ => {
@@ -4742,12 +5247,7 @@ impl<'compiler, 'unit, 'arena, 'scope> ExpressionPlanner<'compiler, 'unit, 'aren
                     )));
                 }
                 work.push(ExpressionWork::Emit(PlannedInstruction::new(
-                    match (update.operator, update.prefix) {
-                        (UpdateOperator::Increment, true) => FinalOpcode::Inc,
-                        (UpdateOperator::Decrement, true) => FinalOpcode::Dec,
-                        (UpdateOperator::Increment, false) => FinalOpcode::PostInc,
-                        (UpdateOperator::Decrement, false) => FinalOpcode::PostDec,
-                    },
+                    update_opcode(update),
                     Operands::None,
                     update.span,
                 )));
@@ -4762,12 +5262,7 @@ impl<'compiler, 'unit, 'arena, 'scope> ExpressionPlanner<'compiler, 'unit, 'aren
 
         self.push_slot_write(binding, frame_slot, update.prefix, identifier.span, work)?;
         work.push(ExpressionWork::Emit(PlannedInstruction::new(
-            match (update.operator, update.prefix) {
-                (UpdateOperator::Increment, true) => FinalOpcode::Inc,
-                (UpdateOperator::Decrement, true) => FinalOpcode::Dec,
-                (UpdateOperator::Increment, false) => FinalOpcode::PostInc,
-                (UpdateOperator::Decrement, false) => FinalOpcode::PostDec,
-            },
+            update_opcode(update),
             Operands::None,
             update.span,
         )));

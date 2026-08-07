@@ -1207,6 +1207,8 @@ pub(crate) enum NativeFunctionKind {
     JsonStringify,
     /// One method on the ordinary `%Math%` object.
     Math(MathMethod),
+    /// One method on the ordinary `%Atomics%` object.
+    Atomics(AtomicsMethod),
     ArrayBufferConstructor,
     ArrayBufferIsView,
     ArrayBufferSpeciesGetter,
@@ -1356,6 +1358,106 @@ pub(crate) enum NativeFunctionKind {
     PromisePrototypeThen,
     PromisePrototypeCatch,
     PromisePrototypeFinally,
+}
+
+/// Synchronous operations exposed by the `%Atomics%` namespace.
+///
+/// `waitAsync` is deliberately absent from this enumeration until the runtime
+/// owns a spec-ordered waiter and Promise-job scheduler. `wait` and `notify`
+/// provide the single-agent synchronous semantics; multi-agent wakeups remain
+/// a host-agent capability rather than Tokio-scheduled JavaScript jobs.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum AtomicsMethod {
+    Add,
+    And,
+    CompareExchange,
+    Exchange,
+    IsLockFree,
+    Load,
+    Notify,
+    Or,
+    Store,
+    Sub,
+    Wait,
+    Xor,
+    Pause,
+}
+
+impl AtomicsMethod {
+    pub(crate) const ALL: [Self; 13] = [
+        Self::Add,
+        Self::And,
+        Self::CompareExchange,
+        Self::Exchange,
+        Self::IsLockFree,
+        Self::Load,
+        Self::Notify,
+        Self::Or,
+        Self::Store,
+        Self::Sub,
+        Self::Wait,
+        Self::Xor,
+        Self::Pause,
+    ];
+
+    pub(crate) const fn name(self) -> &'static str {
+        match self {
+            Self::Add => "add",
+            Self::And => "and",
+            Self::CompareExchange => "compareExchange",
+            Self::Exchange => "exchange",
+            Self::IsLockFree => "isLockFree",
+            Self::Load => "load",
+            Self::Notify => "notify",
+            Self::Or => "or",
+            Self::Store => "store",
+            Self::Sub => "sub",
+            Self::Wait => "wait",
+            Self::Xor => "xor",
+            Self::Pause => "pause",
+        }
+    }
+
+    pub(crate) const fn length(self) -> i32 {
+        match self {
+            Self::CompareExchange | Self::Wait => 4,
+            Self::Add
+            | Self::And
+            | Self::Exchange
+            | Self::Notify
+            | Self::Or
+            | Self::Store
+            | Self::Sub
+            | Self::Xor => 3,
+            Self::IsLockFree => 1,
+            Self::Load => 2,
+            Self::Pause => 0,
+        }
+    }
+
+    pub(crate) const fn requires_value(self) -> bool {
+        matches!(
+            self,
+            Self::Add
+                | Self::And
+                | Self::CompareExchange
+                | Self::Exchange
+                | Self::Or
+                | Self::Store
+                | Self::Sub
+                | Self::Wait
+                | Self::Xor
+                | Self::Notify
+        )
+    }
+
+    pub(crate) const fn requires_waitable_element(self) -> bool {
+        matches!(self, Self::Notify | Self::Wait)
+    }
+
+    pub(crate) const fn requires_shared_buffer(self) -> bool {
+        matches!(self, Self::Wait)
+    }
 }
 
 /// Static methods on `%Date%` in pinned `QuickJS` publication order.
@@ -3750,6 +3852,7 @@ const fn is_supported_opcode(opcode: FinalOpcode) -> bool {
             | FinalOpcode::GetSuperValue
             | FinalOpcode::PutSuperValue
             | FinalOpcode::Perm3
+            | FinalOpcode::Perm4
             | FinalOpcode::Perm5
             | FinalOpcode::Throw
             | FinalOpcode::Return

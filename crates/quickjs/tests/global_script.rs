@@ -94,6 +94,31 @@ fn global_lexical_bindings_persist_and_are_captured_by_nested_functions() {
 }
 
 #[test]
+fn global_class_declarations_use_realm_lexical_bindings() {
+    let mut runtime = Runtime::try_new(RuntimeLimits::default()).expect("runtime");
+    let realm = runtime.create_realm().expect("realm");
+    let mut context = runtime.context(&realm).expect("context");
+
+    let value = evaluate_script(
+        &mut context,
+        "class Counter {} Counter.length;",
+        "global-class.js",
+        ScriptLimits::default(),
+    )
+    .expect("global class Script");
+    assert!(number(&value).strict_equals(JsNumber::from_i32(0)));
+
+    let value = evaluate_script(
+        &mut context,
+        "new Counter() instanceof Counter;",
+        "global-class-followup.js",
+        ScriptLimits::default(),
+    )
+    .expect("global class binding persists");
+    assert_eq!(value.as_boolean(), Ok(Some(true)));
+}
+
+#[test]
 fn global_lexical_access_preserves_tdz_and_immutable_assignment_errors() {
     let mut runtime = Runtime::try_new(RuntimeLimits::default()).expect("runtime");
     let realm = runtime.create_realm().expect("realm");

@@ -50,6 +50,8 @@ pub enum SecondaryOperandField {
     ThrowErrorKind,
     /// `define_method` kind and flags.
     DefineMethodFlags,
+    /// `define_private_field` private element kind.
+    DefinePrivateFieldKind,
     /// `define_class` flags.
     DefineClassFlags,
     /// `with_*`'s `is_with` byte.
@@ -718,6 +720,7 @@ impl fmt::Display for SecondaryOperandField {
             Self::ApplyMagic => "apply magic",
             Self::ThrowErrorKind => "throw-error kind",
             Self::DefineMethodFlags => "define-method flags",
+            Self::DefinePrivateFieldKind => "define-private-field kind",
             Self::DefineClassFlags => "define-class flags",
             Self::IsWith => "is-with flag",
             Self::IteratorCallFlags => "iterator-call flags",

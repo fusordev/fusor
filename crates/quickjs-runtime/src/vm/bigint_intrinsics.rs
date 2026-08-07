@@ -156,23 +156,43 @@ fn engine_type_error(
 /// The coercion mirrors `JS_ToBigIntCtorFree` (`quickjs.c:55955-56002`): a
 /// Number must be an exact integer, a String uses the literal grammar, and
 /// `null`, `undefined`, and a Symbol are rejected.
-pub(super) fn bigint_constructor(
+pub(super) fn begin_bigint_constructor(
+    runtime: &mut Runtime,
     realm: RealmId,
     argument: Option<StoredValue>,
     new_target: Option<FunctionId>,
-    origin: &JsStackFrame,
+    return_to: Option<CallReturn>,
+    origin: JsStackFrame,
+    execution_budget: &mut ExecutionBudget,
 ) -> Result<NativeDispatch, NativeFailure> {
     if new_target.is_some() {
         return Err(NativeFailure::Abrupt(engine_type_error(
             realm,
-            origin,
+            &origin,
             "BigInt is not a constructor",
         )?));
     }
     let value = argument.unwrap_or(StoredValue::Undefined);
+    begin_operator_primitive_conversion(
+        runtime,
+        value,
+        OperatorPrimitiveHint::Number,
+        OperatorPrimitiveTarget::BigIntConstructor,
+        realm,
+        return_to,
+        origin,
+        execution_budget,
+    )
+}
+
+pub(super) fn finish_bigint_constructor(
+    value: &StoredValue,
+    realm: RealmId,
+    origin: &JsStackFrame,
+) -> Result<NativeDispatch, NativeFailure> {
     // A Number converts when it is an exact integer, which is the one place
     // `ToBigInt` and the constructor's coercion differ.
-    if let StoredValue::Number(number) = &value {
+    if let StoredValue::Number(number) = value {
         let converted = match JsBigInt::from_f64(number.as_f64()) {
             Ok(converted) => converted,
             Err(error) => {
@@ -183,7 +203,7 @@ pub(super) fn bigint_constructor(
         };
         return Ok(NativeDispatch::Immediate(bigint_value(converted)));
     }
-    let converted = to_bigint_from_primitive(&value, realm, origin)?;
+    let converted = to_bigint_from_primitive(value, realm, origin)?;
     Ok(NativeDispatch::Immediate(StoredValue::BigInt(converted)))
 }
 

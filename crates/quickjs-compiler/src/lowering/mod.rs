@@ -94,7 +94,7 @@ use plan::{
     compact_get_argument, compact_get_local, compact_put_local, exact_i32, exact_negated_i32,
     plan_push_integer, plan_put_slot,
 };
-use validation::{OrdinaryFunctionForm, object_method_or_accessor_span};
+use validation::OrdinaryFunctionForm;
 
 impl<'arena> CompilationContext<'_, 'arena, '_> {
     fn compile_subtree_with_all_limits(
@@ -110,7 +110,13 @@ impl<'arena> CompilationContext<'_, 'arena, '_> {
         for executable in subtree.iter().rev().copied() {
             functions.push(self.compile_function(executable, &tree_layout, limits)?);
         }
-        functions.reverse();
+        // Children are compiled first so parent closure metadata can refer to
+        // complete descendants. The AST inventory does not guarantee that a
+        // nested class created from an instance-field initializer receives a
+        // contiguous preorder executable id, though. The immutable graph and
+        // `CompiledFunctionTree::function` both require stable executable-id
+        // order, so normalize it before final graph verification.
+        functions.sort_unstable_by_key(CompiledFunction::executable);
         let functions: Arc<[CompiledFunction]> = functions.into();
         let function_graph = Arc::new(verify_compiled_function_graph(
             root,

@@ -163,25 +163,20 @@ fn a_quoted_proto_literal_key_defines_an_own_property() {
     );
 }
 
-/// Oracle: `shorthand proto forin => [__proto__]`. The shorthand form is an
-/// ordinary own property, not a prototype mutation.
-///
-/// Shorthand object properties are not yet lowered, so this asserts the
-/// equivalent guarantee through the computed form, which the oracle also
-/// reports as an own property (`computed proto is own => __proto__`).
+/// A shorthand `__proto__` is an ordinary own data property, never an object
+/// literal prototype mutation.
 #[test]
-fn a_computed_proto_key_stays_an_own_property() {
+fn a_shorthand_proto_key_stays_an_own_property() {
     assert_eq!(
         text(
             "function run(){\
-                let key=\"__proto__\";\
-                let base={m:1};\
-                let o={[key]:base};\
+                let __proto__=7;\
+                let o={__proto__};\
                 let keys=\"\";\
                 for(let k in o){keys+=k;}\
-                return keys;\
+                return o.__proto__+\":\"+keys;\
             }"
         ),
-        "__proto__"
+        "7:__proto__"
     );
 }
