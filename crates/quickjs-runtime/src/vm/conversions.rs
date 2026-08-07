@@ -1942,6 +1942,33 @@ fn finish_operator_primitive_target(
         OperatorPrimitiveTarget::TemporalInstantDifferenceSmallestUnit(state) => {
             finish_temporal_instant_difference_smallest_unit(runtime, &state, value)
         }
+        OperatorPrimitiveTarget::TemporalInstantToStringFractionalSecondDigits(state) => {
+            finish_temporal_instant_to_string_fractional_second_digits(
+                runtime,
+                *state,
+                value,
+                return_to,
+                execution_budget,
+            )
+        }
+        OperatorPrimitiveTarget::TemporalInstantToStringRoundingMode(state) => {
+            finish_temporal_instant_to_string_rounding_mode(
+                runtime,
+                *state,
+                value,
+                return_to,
+                execution_budget,
+            )
+        }
+        OperatorPrimitiveTarget::TemporalInstantToStringSmallestUnit(state) => {
+            finish_temporal_instant_to_string_smallest_unit(
+                runtime,
+                *state,
+                value,
+                return_to,
+                execution_budget,
+            )
+        }
         OperatorPrimitiveTarget::DateSetTime { object } => {
             finish_date_set_time(runtime, object, value, realm, origin)
         }

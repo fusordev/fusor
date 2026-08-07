@@ -753,6 +753,7 @@ enum NativeContinuation {
     TemporalDurationTotalOptions(Box<TemporalDurationTotalContinuation>),
     TemporalInstantRoundOptions(Box<TemporalInstantRoundContinuation>),
     TemporalInstantDifferenceOptions(Box<TemporalInstantDifferenceContinuation>),
+    TemporalInstantToStringOptions(Box<TemporalInstantToStringContinuation>),
     IntrinsicGet(IntrinsicGetContinuation),
     AggregateError(AggregateErrorContinuation),
     FromEntries(Box<FromEntriesContinuation>),
@@ -860,6 +861,9 @@ impl NativeContinuation {
             }
             Self::TemporalInstantDifferenceOptions(_) => {
                 TemporalInstantDifferenceContinuation::retained_values()
+            }
+            Self::TemporalInstantToStringOptions(_) => {
+                TemporalInstantToStringContinuation::retained_values()
             }
             Self::IntrinsicGet(state) => state.retained_values(),
             Self::AggregateError(state) => state.retained_values(),
@@ -1975,6 +1979,9 @@ enum OperatorPrimitiveTarget {
     TemporalInstantDifferenceRoundingIncrement(Box<TemporalInstantDifferenceContinuation>),
     TemporalInstantDifferenceRoundingMode(Box<TemporalInstantDifferenceContinuation>),
     TemporalInstantDifferenceSmallestUnit(Box<TemporalInstantDifferenceContinuation>),
+    TemporalInstantToStringFractionalSecondDigits(Box<TemporalInstantToStringContinuation>),
+    TemporalInstantToStringRoundingMode(Box<TemporalInstantToStringContinuation>),
+    TemporalInstantToStringSmallestUnit(Box<TemporalInstantToStringContinuation>),
     NumberToString {
         number: JsNumber,
     },
@@ -2162,6 +2169,11 @@ impl OperatorPrimitiveTarget {
             | Self::TemporalInstantDifferenceRoundingMode(_state)
             | Self::TemporalInstantDifferenceSmallestUnit(_state) => {
                 TemporalInstantDifferenceContinuation::retained_values()
+            }
+            Self::TemporalInstantToStringFractionalSecondDigits(_state)
+            | Self::TemporalInstantToStringRoundingMode(_state)
+            | Self::TemporalInstantToStringSmallestUnit(_state) => {
+                TemporalInstantToStringContinuation::retained_values()
             }
             Self::DateSetter(state) => state.retained_values(),
             Self::DateToJson(_) => DateToJsonContinuation::retained_values(),
@@ -2421,6 +2433,11 @@ fn trace_operator_primitive_target_roots(
         | OperatorPrimitiveTarget::TemporalInstantDifferenceSmallestUnit(state) => {
             state.trace_roots(mark);
         }
+        OperatorPrimitiveTarget::TemporalInstantToStringFractionalSecondDigits(state)
+        | OperatorPrimitiveTarget::TemporalInstantToStringRoundingMode(state)
+        | OperatorPrimitiveTarget::TemporalInstantToStringSmallestUnit(state) => {
+            state.trace_roots(mark);
+        }
         OperatorPrimitiveTarget::DateSetter(state) => state.trace_roots(mark),
         OperatorPrimitiveTarget::DateToJson(state) => state.trace_roots(mark),
         OperatorPrimitiveTarget::TemporalInstantString(state) => state.trace_roots(mark),
@@ -2601,6 +2618,7 @@ fn trace_native_continuation_roots(
         NativeContinuation::TemporalDurationTotalOptions(state) => state.trace_roots(mark),
         NativeContinuation::TemporalInstantRoundOptions(state) => state.trace_roots(mark),
         NativeContinuation::TemporalInstantDifferenceOptions(state) => state.trace_roots(mark),
+        NativeContinuation::TemporalInstantToStringOptions(state) => state.trace_roots(mark),
         NativeContinuation::IntrinsicGet(state) => match state {
             IntrinsicGetContinuation::BooleanConstructor { new_target, .. }
             | IntrinsicGetContinuation::NumberConstructor { new_target, .. }

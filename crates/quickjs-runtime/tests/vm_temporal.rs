@@ -518,6 +518,71 @@ fn instant_difference_rejects_invalid_receivers_options_and_units_after_reading_
 }
 
 #[test]
+fn instant_to_string_formats_fractional_precision_rounding_and_time_zones() {
+    assert_eq!(
+        rendered(
+            "var instant=Temporal.Instant.from('2020-01-02T03:04:05.678901234Z');
+             return [instant.toString(),instant.toString({fractionalSecondDigits:0}),
+               instant.toString({fractionalSecondDigits:3}),
+               instant.toString({roundingMode:'ceil',smallestUnit:'second'}),
+               instant.toString({smallestUnit:'minute'}),
+               instant.toString({timeZone:'UTC'}),instant.toString({timeZone:'+05:30'}),
+               instant.toString({timeZone:'America/New_York'})].join('|');"
+        ),
+        "2020-01-02T03:04:05.678901234Z|2020-01-02T03:04:05Z|2020-01-02T03:04:05.678Z|2020-01-02T03:04:06Z|2020-01-02T03:04Z|2020-01-02T03:04:05.678901234+00:00|2020-01-02T08:34:05.678901234+05:30|2020-01-01T22:04:05.678901234-05:00"
+    );
+}
+
+#[test]
+fn instant_to_string_observes_options_and_coercions_in_specified_order() {
+    assert_eq!(
+        rendered(
+            "var log=[],options={};
+             Object.defineProperties(options,{
+               fractionalSecondDigits:{get:function(){log.push('digits');return {toString:function(){log.push('digits string');return 'auto';}}}},
+               roundingMode:{get:function(){log.push('mode');return {toString:function(){log.push('mode string');return 'trunc';}}}},
+               smallestUnit:{get:function(){log.push('unit');return {toString:function(){log.push('unit string');return 'millisecond';}}}},
+               timeZone:{get:function(){log.push('zone');return 'UTC';}}
+             });
+             return Temporal.Instant.from('2020-01-02T03:04:05.678901234Z').toString(options)+'|'+log.join(',');"
+        ),
+        "2020-01-02T03:04:05.678+00:00|digits,digits string,mode,mode string,unit,unit string,zone"
+    );
+}
+
+#[test]
+fn instant_to_string_rejects_invalid_options_and_validates_units_before_time_zone_type() {
+    assert_eq!(
+        thrown("return new Temporal.Instant(0n).toString(1);"),
+        ExceptionKind::TypeError
+    );
+    assert_eq!(
+        thrown("return new Temporal.Instant(0n).toString({fractionalSecondDigits:'invalid'});"),
+        ExceptionKind::RangeError
+    );
+    assert_eq!(
+        rendered(
+            "var log=[],options={};
+             Object.defineProperties(options,{
+               smallestUnit:{get:function(){log.push('unit');return 'hour';}},
+               timeZone:{get:function(){log.push('zone');return {toString:function(){log.push('coerce');return 'UTC';}}}}
+             });
+             try { new Temporal.Instant(0n).toString(options); }
+             catch (error) { return error.name+'|'+log.join(','); }"
+        ),
+        "RangeError|unit,zone"
+    );
+    assert_eq!(
+        rendered(
+            "var called=false;
+             try { new Temporal.Instant(0n).toString({timeZone:{toString:function(){called=true;return 'UTC';}}}); }
+             catch (error) { return error.name+'|'+called; }"
+        ),
+        "TypeError|false"
+    );
+}
+
+#[test]
 fn duration_with_merges_defined_fields_in_normative_order() {
     assert_eq!(
         rendered(
