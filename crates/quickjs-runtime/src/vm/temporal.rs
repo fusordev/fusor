@@ -4304,6 +4304,20 @@ pub(super) fn dispatch_temporal_plain_time_prototype(
         TemporalPlainTimePrototypeMethod::Millisecond => Ok(number(i64::from(time.millisecond()))),
         TemporalPlainTimePrototypeMethod::Microsecond => Ok(number(i64::from(time.microsecond()))),
         TemporalPlainTimePrototypeMethod::Nanosecond => Ok(number(i64::from(time.nanosecond()))),
+        TemporalPlainTimePrototypeMethod::Add | TemporalPlainTimePrototypeMethod::Subtract => {
+            begin_temporal_duration_like(
+                runtime,
+                arguments.take_first_or_undefined(),
+                TemporalDurationLikeTarget::PlainTimeArithmetic {
+                    receiver: time,
+                    subtract: matches!(method, TemporalPlainTimePrototypeMethod::Subtract),
+                },
+                realm,
+                return_to,
+                origin.clone(),
+                execution_budget,
+            )
+        }
         TemporalPlainTimePrototypeMethod::Equals => begin_temporal_plain_time_like(
             runtime,
             arguments.take_first_or_undefined(),
@@ -4766,6 +4780,10 @@ enum TemporalDurationLikeTarget {
         receiver: Instant,
         subtract: bool,
     },
+    PlainTimeArithmetic {
+        receiver: PlainTime,
+        subtract: bool,
+    },
     PlainDateArithmetic {
         receiver: PlainDate,
         subtract: bool,
@@ -4781,7 +4799,10 @@ enum TemporalDurationLikeTarget {
 impl TemporalDurationLikeTarget {
     fn retained_values(&self) -> u64 {
         match self {
-            Self::Allocate | Self::Arithmetic { .. } | Self::InstantArithmetic { .. } => 0,
+            Self::Allocate
+            | Self::Arithmetic { .. }
+            | Self::InstantArithmetic { .. }
+            | Self::PlainTimeArithmetic { .. } => 0,
             Self::CompareFirst { .. } => 2,
             Self::CompareSecond { .. }
             | Self::PlainDateArithmetic { .. }
@@ -4791,7 +4812,10 @@ impl TemporalDurationLikeTarget {
 
     fn trace_roots(&self, mark: &mut dyn FnMut(CollectionRoot)) {
         match self {
-            Self::Allocate | Self::Arithmetic { .. } | Self::InstantArithmetic { .. } => {}
+            Self::Allocate
+            | Self::Arithmetic { .. }
+            | Self::InstantArithmetic { .. }
+            | Self::PlainTimeArithmetic { .. } => {}
             Self::CompareFirst { second, options } => {
                 trace_stored_value_root(second, mark);
                 trace_stored_value_root(options, mark);
@@ -6433,7 +6457,8 @@ fn temporal_duration_i64_field(value: i128) -> Result<i64, NativeFailure> {
 
 #[allow(
     clippy::too_many_arguments,
-    reason = "each conversion target resumes with explicit realm, return, source, and fuel context"
+    clippy::too_many_lines,
+    reason = "one exhaustive conversion dispatcher preserves target-specific completion and native suspension context"
 )]
 fn continue_temporal_duration_like(
     runtime: &mut Runtime,
@@ -6505,6 +6530,22 @@ fn continue_temporal_duration_like(
                 }
             };
             allocate_temporal_instant_result(runtime, realm, result)
+        }
+        TemporalDurationLikeTarget::PlainTimeArithmetic { receiver, subtract } => {
+            let result = if subtract {
+                receiver.subtract(&duration)
+            } else {
+                receiver.add(&duration)
+            };
+            let result = match result {
+                Ok(result) => result,
+                Err(error) => {
+                    return Err(NativeFailure::Abrupt(temporal_exception_from_error(
+                        realm, origin, error,
+                    )?));
+                }
+            };
+            allocate_temporal_plain_time_result(runtime, realm, result)
         }
         TemporalDurationLikeTarget::PlainDateArithmetic {
             receiver,

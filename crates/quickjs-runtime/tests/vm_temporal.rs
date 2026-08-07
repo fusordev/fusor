@@ -241,6 +241,50 @@ fn plain_time_constructor_conversion_and_accessors_are_spec_shaped() {
 }
 
 #[test]
+fn plain_time_add_and_subtract_convert_duration_like_and_ignore_date_units() {
+    assert_eq!(
+        rendered(
+            "var log=[];
+             var duration={
+               get years(){log.push('years');return undefined},
+               get months(){log.push('months');return undefined},
+               get weeks(){log.push('weeks');return undefined},
+               get days(){log.push('days');return 1},
+               get hours(){log.push('hours');return {valueOf:function(){log.push('hours number');return 2}}},
+               get minutes(){log.push('minutes');return 35},
+               get seconds(){log.push('seconds');return undefined},
+               get milliseconds(){log.push('milliseconds');return undefined},
+               get microseconds(){log.push('microseconds');return undefined},
+               get nanoseconds(){log.push('nanoseconds');return undefined}
+             };
+             var start=new Temporal.PlainTime(23,30);
+             var added=start.add(duration);
+             var subtracted=added.subtract('PT2H35M');
+             return [Temporal.PlainTime.prototype.add.length,
+               Temporal.PlainTime.prototype.subtract.length,start.toString(),added.toString(),
+               subtracted.toString(),added===start,log.join(',')].join('|');"
+        ),
+        "1|1|23:30:00|02:05:00|23:30:00|false|days,hours,hours number,microseconds,milliseconds,minutes,months,nanoseconds,seconds,weeks,years"
+    );
+    assert_eq!(
+        rendered(
+            "var time=new Temporal.PlainTime(12,34,56,7,8,9);
+             return [time.add(new Temporal.Duration(2,3,4,5,6,7,8,9,10,11)).toString(),
+               time.subtract({days:1}).toString()].join('|');"
+        ),
+        "18:42:04.01601802|12:34:56.007008009"
+    );
+    assert_eq!(
+        thrown("return Temporal.PlainTime.prototype.add.call({}, {hours:1});"),
+        ExceptionKind::TypeError
+    );
+    assert_eq!(
+        thrown("return new Temporal.PlainTime().subtract({});"),
+        ExceptionKind::TypeError
+    );
+}
+
+#[test]
 fn plain_date_time_constructor_preserves_order_defaults_and_branding() {
     assert_eq!(
         rendered(

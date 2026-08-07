@@ -2367,6 +2367,8 @@ pub(crate) enum TemporalPlainTimePrototypeMethod {
     Millisecond,
     Microsecond,
     Nanosecond,
+    Add,
+    Subtract,
     Equals,
     ToString,
     ToJson,
@@ -2650,13 +2652,15 @@ impl TemporalPlainTimeStaticMethod {
 }
 
 impl TemporalPlainTimePrototypeMethod {
-    pub(crate) const ALL: [Self; 11] = [
+    pub(crate) const ALL: [Self; 13] = [
         Self::Hour,
         Self::Minute,
         Self::Second,
         Self::Millisecond,
         Self::Microsecond,
         Self::Nanosecond,
+        Self::Add,
+        Self::Subtract,
         Self::Equals,
         Self::ToString,
         Self::ToJson,
@@ -2672,6 +2676,8 @@ impl TemporalPlainTimePrototypeMethod {
             Self::Millisecond => "millisecond",
             Self::Microsecond => "microsecond",
             Self::Nanosecond => "nanosecond",
+            Self::Add => "add",
+            Self::Subtract => "subtract",
             Self::Equals => "equals",
             Self::ToString => "toString",
             Self::ToJson => "toJSON",
@@ -2688,6 +2694,8 @@ impl TemporalPlainTimePrototypeMethod {
             Self::Millisecond => "get millisecond",
             Self::Microsecond => "get microsecond",
             Self::Nanosecond => "get nanosecond",
+            Self::Add => "add",
+            Self::Subtract => "subtract",
             Self::Equals => "equals",
             Self::ToString => "toString",
             Self::ToJson => "toJSON",
@@ -2710,7 +2718,7 @@ impl TemporalPlainTimePrototypeMethod {
 
     pub(crate) const fn length(self) -> i32 {
         match self {
-            Self::Equals => 1,
+            Self::Add | Self::Subtract | Self::Equals => 1,
             _ => 0,
         }
     }
