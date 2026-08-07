@@ -4545,6 +4545,15 @@ pub(super) fn dispatch_temporal_plain_time_prototype(
             origin.clone(),
             execution_budget,
         ),
+        TemporalPlainTimePrototypeMethod::Round => begin_temporal_plain_time_round(
+            runtime,
+            time,
+            arguments.take_first_or_undefined(),
+            realm,
+            return_to,
+            origin.clone(),
+            execution_budget,
+        ),
         TemporalPlainTimePrototypeMethod::Until | TemporalPlainTimePrototypeMethod::Since => {
             let other = arguments.take_first_or_undefined();
             let options = arguments.take_first_or_undefined();
@@ -4954,6 +4963,295 @@ fn complete_temporal_plain_date_time_round(
     allocate_temporal_plain_date_time_result(runtime, realm, rounded)
 }
 
+#[allow(
+    clippy::too_many_arguments,
+    reason = "the ordered PlainTime options reader retains native call context across user code"
+)]
+fn begin_temporal_plain_time_round(
+    runtime: &mut Runtime,
+    time: PlainTime,
+    round_to: StoredValue,
+    realm: RealmId,
+    return_to: Option<CallReturn>,
+    origin: JsStackFrame,
+    execution_budget: &mut ExecutionBudget,
+) -> Result<NativeDispatch, NativeFailure> {
+    match round_to {
+        StoredValue::Undefined => temporal_type_error(
+            realm,
+            &origin,
+            "Temporal.PlainTime.prototype.round requires an options object or smallest-unit string",
+        ),
+        StoredValue::String(source) => {
+            let smallest_unit = temporal_round_unit(&source, realm, &origin)?;
+            complete_temporal_plain_time_round(
+                runtime,
+                &time,
+                RoundingIncrement::ONE,
+                RoundingMode::HalfExpand,
+                Some(smallest_unit),
+                realm,
+                &origin,
+            )
+        }
+        options if options.heap_reference().is_some() => begin_temporal_plain_time_round_get(
+            runtime,
+            TemporalPlainTimeRoundContinuation {
+                time,
+                options,
+                rounding_increment: RoundingIncrement::ONE,
+                rounding_mode: RoundingMode::HalfExpand,
+                stage: TemporalPlainTimeRoundStage::RoundingIncrement,
+                realm,
+                origin,
+            },
+            "roundingIncrement",
+            TemporalPlainTimeRoundStage::RoundingIncrement,
+            return_to,
+            execution_budget,
+        ),
+        _ => temporal_type_error(
+            realm,
+            &origin,
+            "Temporal.PlainTime.prototype.round requires an options object or smallest-unit string",
+        ),
+    }
+}
+
+#[allow(
+    clippy::too_many_arguments,
+    reason = "each observable PlainTime round Get retains the complete native continuation state"
+)]
+fn begin_temporal_plain_time_round_get(
+    runtime: &mut Runtime,
+    mut state: TemporalPlainTimeRoundContinuation,
+    name: &str,
+    next_stage: TemporalPlainTimeRoundStage,
+    return_to: Option<CallReturn>,
+    execution_budget: &mut ExecutionBudget,
+) -> Result<NativeDispatch, NativeFailure> {
+    state.stage = next_stage;
+    charge_heap_property_lookup(runtime, &state.options, execution_budget)?;
+    let name = JsString::from_utf8(name)?;
+    let key = runtime.property_key_from_string(&name)?;
+    let realm = state.realm;
+    let origin = state.origin.clone();
+    let dispatch = begin_value_get(
+        runtime,
+        &state.options,
+        key,
+        Some(&name),
+        realm,
+        return_to,
+        origin,
+        execution_budget,
+    )?;
+    match continue_get_state_after(
+        dispatch,
+        state,
+        temporal_plain_time_round_continuation,
+        "Temporal.PlainTime round option Get produced a structured result",
+    )? {
+        GetContinuationDispatch::Ready { state, value } => {
+            advance_temporal_plain_time_round_options(
+                runtime,
+                state,
+                value,
+                return_to,
+                execution_budget,
+            )
+        }
+        GetContinuationDispatch::Suspended(dispatch) => Ok(dispatch),
+    }
+}
+
+fn temporal_plain_time_round_continuation(
+    state: TemporalPlainTimeRoundContinuation,
+) -> NativeContinuation {
+    NativeContinuation::TemporalPlainTimeRoundOptions(Box::new(state))
+}
+
+#[allow(
+    clippy::too_many_arguments,
+    reason = "one ordered state table preserves PlainTime round options and coercions across suspension"
+)]
+pub(super) fn advance_temporal_plain_time_round_options(
+    runtime: &mut Runtime,
+    state: TemporalPlainTimeRoundContinuation,
+    value: StoredValue,
+    return_to: Option<CallReturn>,
+    execution_budget: &mut ExecutionBudget,
+) -> Result<NativeDispatch, NativeFailure> {
+    match state.stage {
+        TemporalPlainTimeRoundStage::RoundingIncrement => {
+            if matches!(value, StoredValue::Undefined) {
+                return begin_temporal_plain_time_round_get(
+                    runtime,
+                    state,
+                    "roundingMode",
+                    TemporalPlainTimeRoundStage::RoundingMode,
+                    return_to,
+                    execution_budget,
+                );
+            }
+            let realm = state.realm;
+            let origin = state.origin.clone();
+            begin_operator_primitive_conversion(
+                runtime,
+                value,
+                OperatorPrimitiveHint::Number,
+                OperatorPrimitiveTarget::TemporalPlainTimeRoundRoundingIncrement(Box::new(state)),
+                realm,
+                return_to,
+                origin,
+                execution_budget,
+            )
+        }
+        TemporalPlainTimeRoundStage::RoundingMode => {
+            if matches!(value, StoredValue::Undefined) {
+                return begin_temporal_plain_time_round_get(
+                    runtime,
+                    state,
+                    "smallestUnit",
+                    TemporalPlainTimeRoundStage::SmallestUnit,
+                    return_to,
+                    execution_budget,
+                );
+            }
+            let realm = state.realm;
+            let origin = state.origin.clone();
+            begin_operator_primitive_conversion(
+                runtime,
+                value,
+                OperatorPrimitiveHint::String,
+                OperatorPrimitiveTarget::TemporalPlainTimeRoundRoundingMode(Box::new(state)),
+                realm,
+                return_to,
+                origin,
+                execution_budget,
+            )
+        }
+        TemporalPlainTimeRoundStage::SmallestUnit => {
+            if matches!(value, StoredValue::Undefined) {
+                return complete_temporal_plain_time_round(
+                    runtime,
+                    &state.time,
+                    state.rounding_increment,
+                    state.rounding_mode,
+                    None,
+                    state.realm,
+                    &state.origin,
+                );
+            }
+            let realm = state.realm;
+            let origin = state.origin.clone();
+            begin_operator_primitive_conversion(
+                runtime,
+                value,
+                OperatorPrimitiveHint::String,
+                OperatorPrimitiveTarget::TemporalPlainTimeRoundSmallestUnit(Box::new(state)),
+                realm,
+                return_to,
+                origin,
+                execution_budget,
+            )
+        }
+    }
+}
+
+pub(super) fn finish_temporal_plain_time_round_rounding_increment(
+    runtime: &mut Runtime,
+    mut state: TemporalPlainTimeRoundContinuation,
+    value: StoredValue,
+    return_to: Option<CallReturn>,
+    execution_budget: &mut ExecutionBudget,
+) -> Result<NativeDispatch, NativeFailure> {
+    let value = operator_to_number(value, state.realm, &state.origin)?.as_f64();
+    state.rounding_increment = match RoundingIncrement::try_from(value) {
+        Ok(increment) => increment,
+        Err(error) => {
+            return Err(NativeFailure::Abrupt(temporal_exception_from_error(
+                state.realm,
+                &state.origin,
+                error,
+            )?));
+        }
+    };
+    begin_temporal_plain_time_round_get(
+        runtime,
+        state,
+        "roundingMode",
+        TemporalPlainTimeRoundStage::RoundingMode,
+        return_to,
+        execution_budget,
+    )
+}
+
+pub(super) fn finish_temporal_plain_time_round_rounding_mode(
+    runtime: &mut Runtime,
+    mut state: TemporalPlainTimeRoundContinuation,
+    value: StoredValue,
+    return_to: Option<CallReturn>,
+    execution_budget: &mut ExecutionBudget,
+) -> Result<NativeDispatch, NativeFailure> {
+    let source = operator_primitive_to_string(value, state.realm, &state.origin)?;
+    state.rounding_mode = temporal_rounding_mode(&source, state.realm, &state.origin)?;
+    begin_temporal_plain_time_round_get(
+        runtime,
+        state,
+        "smallestUnit",
+        TemporalPlainTimeRoundStage::SmallestUnit,
+        return_to,
+        execution_budget,
+    )
+}
+
+pub(super) fn finish_temporal_plain_time_round_smallest_unit(
+    runtime: &mut Runtime,
+    state: &TemporalPlainTimeRoundContinuation,
+    value: StoredValue,
+) -> Result<NativeDispatch, NativeFailure> {
+    let source = operator_primitive_to_string(value, state.realm, &state.origin)?;
+    let smallest_unit = temporal_round_unit(&source, state.realm, &state.origin)?;
+    complete_temporal_plain_time_round(
+        runtime,
+        &state.time,
+        state.rounding_increment,
+        state.rounding_mode,
+        Some(smallest_unit),
+        state.realm,
+        &state.origin,
+    )
+}
+
+#[allow(
+    clippy::too_many_arguments,
+    reason = "the completed PlainTime option record is passed explicitly to the shared temporal kernel"
+)]
+fn complete_temporal_plain_time_round(
+    runtime: &mut Runtime,
+    time: &PlainTime,
+    rounding_increment: RoundingIncrement,
+    rounding_mode: RoundingMode,
+    smallest_unit: Option<Unit>,
+    realm: RealmId,
+    origin: &JsStackFrame,
+) -> Result<NativeDispatch, NativeFailure> {
+    let mut options = RoundingOptions::default();
+    options.smallest_unit = smallest_unit;
+    options.rounding_mode = Some(rounding_mode);
+    options.increment = Some(rounding_increment);
+    let rounded = match time.round(options) {
+        Ok(rounded) => rounded,
+        Err(error) => {
+            return Err(NativeFailure::Abrupt(temporal_exception_from_error(
+                realm, origin, error,
+            )?));
+        }
+    };
+    allocate_temporal_plain_time_result(runtime, realm, rounded)
+}
+
 fn render_temporal_plain_date_time(
     date_time: &PlainDateTime,
     realm: RealmId,
@@ -5223,6 +5521,35 @@ pub(super) struct TemporalPlainDateTimeRoundContinuation {
 }
 
 impl TemporalPlainDateTimeRoundContinuation {
+    pub(super) const fn retained_values() -> u64 {
+        1
+    }
+
+    pub(super) fn trace_roots(&self, mark: &mut dyn FnMut(CollectionRoot)) {
+        trace_stored_value_root(&self.options, mark);
+    }
+}
+
+#[derive(Clone, Copy)]
+enum TemporalPlainTimeRoundStage {
+    RoundingIncrement,
+    RoundingMode,
+    SmallestUnit,
+}
+
+/// Resumable options state for `Temporal.PlainTime.prototype.round`.
+/// Every Get and primitive conversion may invoke JavaScript.
+pub(super) struct TemporalPlainTimeRoundContinuation {
+    time: PlainTime,
+    options: StoredValue,
+    rounding_increment: RoundingIncrement,
+    rounding_mode: RoundingMode,
+    stage: TemporalPlainTimeRoundStage,
+    realm: RealmId,
+    origin: JsStackFrame,
+}
+
+impl TemporalPlainTimeRoundContinuation {
     pub(super) const fn retained_values() -> u64 {
         1
     }

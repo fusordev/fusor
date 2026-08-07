@@ -2370,6 +2370,7 @@ pub(crate) enum TemporalPlainTimePrototypeMethod {
     Add,
     Subtract,
     With,
+    Round,
     Until,
     Since,
     Equals,
@@ -2655,7 +2656,7 @@ impl TemporalPlainTimeStaticMethod {
 }
 
 impl TemporalPlainTimePrototypeMethod {
-    pub(crate) const ALL: [Self; 16] = [
+    pub(crate) const ALL: [Self; 17] = [
         Self::Hour,
         Self::Minute,
         Self::Second,
@@ -2665,6 +2666,7 @@ impl TemporalPlainTimePrototypeMethod {
         Self::Add,
         Self::Subtract,
         Self::With,
+        Self::Round,
         Self::Until,
         Self::Since,
         Self::Equals,
@@ -2685,6 +2687,7 @@ impl TemporalPlainTimePrototypeMethod {
             Self::Add => "add",
             Self::Subtract => "subtract",
             Self::With => "with",
+            Self::Round => "round",
             Self::Until => "until",
             Self::Since => "since",
             Self::Equals => "equals",
@@ -2706,6 +2709,7 @@ impl TemporalPlainTimePrototypeMethod {
             Self::Add => "add",
             Self::Subtract => "subtract",
             Self::With => "with",
+            Self::Round => "round",
             Self::Until => "until",
             Self::Since => "since",
             Self::Equals => "equals",
@@ -2730,7 +2734,13 @@ impl TemporalPlainTimePrototypeMethod {
 
     pub(crate) const fn length(self) -> i32 {
         match self {
-            Self::Add | Self::Subtract | Self::With | Self::Until | Self::Since | Self::Equals => 1,
+            Self::Add
+            | Self::Subtract
+            | Self::With
+            | Self::Round
+            | Self::Until
+            | Self::Since
+            | Self::Equals => 1,
             _ => 0,
         }
     }

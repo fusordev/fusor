@@ -416,6 +416,47 @@ fn plain_time_until_and_since_preserve_time_only_difference_semantics() {
 }
 
 #[test]
+fn plain_time_round_uses_time_only_options_in_observable_order() {
+    assert_eq!(
+        rendered(
+            "var time=new Temporal.PlainTime(23,59,59,900);
+             return [Temporal.PlainTime.prototype.round.name,
+               Temporal.PlainTime.prototype.round.length,
+               time.round('second').toString(),
+               time.round({smallestUnit:'minute',roundingIncrement:15}).toString()].join('|');"
+        ),
+        "round|1|00:00:00|00:00:00"
+    );
+    assert_eq!(
+        rendered(
+            "var log=[];
+             function number(name,value){return {valueOf:function(){log.push(name+' number');return value}}}
+             function string(name,value){return {toString:function(){log.push(name+' string');return value}}}
+             var options={
+               get roundingIncrement(){log.push('roundingIncrement');return number('roundingIncrement',15)},
+               get roundingMode(){log.push('roundingMode');return string('roundingMode','halfExpand')},
+               get smallestUnit(){log.push('smallestUnit');return string('smallestUnit','minute')}
+             };
+             var result=new Temporal.PlainTime(12,37,30).round(options);
+             return [result.toString(),log.join(',')].join('|');"
+        ),
+        "12:45:00|roundingIncrement,roundingIncrement number,roundingMode,roundingMode string,smallestUnit,smallestUnit string"
+    );
+    assert_eq!(
+        thrown("return new Temporal.PlainTime().round('day');"),
+        ExceptionKind::RangeError
+    );
+    assert_eq!(
+        thrown("return new Temporal.PlainTime().round();"),
+        ExceptionKind::TypeError
+    );
+    assert_eq!(
+        thrown("return Temporal.PlainTime.prototype.round.call({}, 'minute');"),
+        ExceptionKind::TypeError
+    );
+}
+
+#[test]
 fn plain_date_time_constructor_preserves_order_defaults_and_branding() {
     assert_eq!(
         rendered(
