@@ -211,6 +211,29 @@ fn plain_date_from_property_bags_observe_field_and_overflow_conversion_order() {
 }
 
 #[test]
+fn plain_date_compare_reuses_resumable_property_bag_conversion_for_both_operands() {
+    assert_eq!(
+        rendered(
+            "var log=[];
+             function bag(label,year,month,day){return {
+               get calendar(){log.push(label+'.calendar');return 'iso8601'},
+               get day(){log.push(label+'.day');return day},
+               get month(){log.push(label+'.month');return month},
+               get monthCode(){log.push(label+'.monthCode');return undefined},
+               get year(){log.push(label+'.year');return year}
+             }}
+             var result=Temporal.PlainDate.compare(bag('first',2021,2,3),bag('second',2021,2,4));
+             return [result,log.join(',')].join('|');"
+        ),
+        "-1|first.calendar,first.day,first.month,first.monthCode,first.year,second.calendar,second.day,second.month,second.monthCode,second.year"
+    );
+    assert_eq!(
+        thrown("return Temporal.PlainDate.compare({year:2021,month:2,day:3},{year:2021,day:4});"),
+        ExceptionKind::TypeError
+    );
+}
+
+#[test]
 fn plain_date_rejects_unbranded_receivers_invalid_components_and_call_without_new() {
     assert_eq!(
         thrown("return Temporal.PlainDate(2020,1,1);"),
