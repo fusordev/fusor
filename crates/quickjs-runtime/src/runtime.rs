@@ -823,63 +823,6 @@ pub(crate) enum StringArgument {
 
 /// One `String.prototype` method's identity and argument shape.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum StringHtmlMethod {
-    Anchor,
-    Big,
-    Blink,
-    Bold,
-    Fixed,
-    FontColor,
-    FontSize,
-    Italics,
-    Link,
-    Small,
-    Strike,
-    Sub,
-    Sup,
-}
-
-impl StringHtmlMethod {
-    /// Returns the HTML element name passed to the specification's
-    /// `CreateHTML` abstract operation.
-    pub(crate) const fn tag_name(self) -> &'static str {
-        match self {
-            Self::Anchor | Self::Link => "a",
-            Self::Big => "big",
-            Self::Blink => "blink",
-            Self::Bold => "b",
-            Self::Fixed => "tt",
-            Self::FontColor | Self::FontSize => "font",
-            Self::Italics => "i",
-            Self::Small => "small",
-            Self::Strike => "strike",
-            Self::Sub => "sub",
-            Self::Sup => "sup",
-        }
-    }
-
-    /// Returns the optional attribute name passed to `CreateHTML`.
-    pub(crate) const fn attribute_name(self) -> Option<&'static str> {
-        match self {
-            Self::Anchor => Some("name"),
-            Self::FontColor => Some("color"),
-            Self::FontSize => Some("size"),
-            Self::Link => Some("href"),
-            Self::Big
-            | Self::Blink
-            | Self::Bold
-            | Self::Fixed
-            | Self::Italics
-            | Self::Small
-            | Self::Strike
-            | Self::Sub
-            | Self::Sup => None,
-        }
-    }
-}
-
-/// One `String.prototype` method's identity and argument shape.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum StringMethod {
     At,
     CharAt,
@@ -913,7 +856,6 @@ pub(crate) enum StringMethod {
     Split,
     Slice,
     StartsWith,
-    Substr,
     Substring,
     Trim,
     TrimEnd,
@@ -926,8 +868,6 @@ pub(crate) enum StringMethod {
     ToLocaleUpperCase,
     ToLowerCase,
     ToUpperCase,
-    /// One Annex B HTML wrapper implemented through `CreateHTML`.
-    Html(StringHtmlMethod),
     /// `String.fromCharCode`, which is a static rather than a prototype method.
     FromCharCode,
     /// `String.fromCodePoint`, likewise a static.
@@ -961,13 +901,6 @@ impl StringMethod {
             | Self::Split
             | Self::FromCharCode
             | Self::FromCodePoint => &[],
-            Self::Html(method) => {
-                if method.attribute_name().is_some() {
-                    &[StringArgument::String]
-                } else {
-                    &[]
-                }
-            }
             Self::At | Self::CharAt | Self::CharCodeAt | Self::CodePointAt => {
                 &[StringArgument::Integer]
             }
@@ -982,9 +915,7 @@ impl StringMethod {
                 &[StringArgument::Integer, StringArgument::OptionalString]
             }
             Self::Repeat => &[StringArgument::Integer],
-            // `substr`'s second argument is a length rather than an end index,
-            // but it is coerced identically; the difference is in the body.
-            Self::Slice | Self::Substring | Self::Substr => {
+            Self::Slice | Self::Substring => {
                 &[StringArgument::Integer, StringArgument::OptionalInteger]
             }
             Self::LocaleCompare => &[StringArgument::String],
@@ -1231,12 +1162,6 @@ pub(crate) enum NativeFunctionKind {
     ObjectPrototypeHasOwnProperty,
     ObjectPrototypeIsPrototypeOf,
     ObjectPrototypePropertyIsEnumerable,
-    ObjectPrototypeProtoGetter,
-    ObjectPrototypeProtoSetter,
-    ObjectPrototypeDefineGetter,
-    ObjectPrototypeDefineSetter,
-    ObjectPrototypeLookupGetter,
-    ObjectPrototypeLookupSetter,
     /// One method on the ordinary `%Reflect%` object.
     Reflect(ReflectMethod),
     /// The `%Proxy%` constructor.

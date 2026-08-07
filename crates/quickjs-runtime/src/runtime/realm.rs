@@ -47,10 +47,9 @@ use super::{
     PromiseIntrinsics, PromiseRejectionState, PromiseStatic, PropertyKey, PropertyLayout, Rc,
     Realm, RealmHandle, RealmId, RealmIntrinsics, RealmState, RefCell, ReflectMethod,
     RegExpIntrinsics, ReleaseMailbox, Runtime, RuntimeError, RuntimeIdentity, RuntimeLimits,
-    RuntimeResource, SetIntrinsics, SetMethod, ShapeInterner, StoredValue, StringHtmlMethod,
-    StringIntrinsics, StringMethod, SymbolIntrinsics, TemporalIntrinsics, UriFunction, VecDeque,
-    WeakMapIntrinsics, WeakRefIntrinsics, WeakSetIntrinsics, check_limit, predefined_string,
-    usize_to_u64,
+    RuntimeResource, SetIntrinsics, SetMethod, ShapeInterner, StoredValue, StringIntrinsics,
+    StringMethod, SymbolIntrinsics, TemporalIntrinsics, UriFunction, VecDeque, WeakMapIntrinsics,
+    WeakRefIntrinsics, WeakSetIntrinsics, check_limit, predefined_string, usize_to_u64,
 };
 
 use allocation::IntrinsicRecords;
@@ -72,9 +71,8 @@ const BIGINT_INTERNED_STATICS: [&str; 2] = ["asIntN", "asUintN"];
 /// `QuickJS` own-key order.
 ///
 /// Each `length` matches the pinned oracle, which reports `1` for most methods
-/// and `2` for `replace`, `replaceAll`, `split`, `slice`, `substr`, and
-/// `substring`.
-const STRING_PROTOTYPE_METHODS: [StringPrototypeMethod; 46] = [
+/// and `2` for `replace`, `replaceAll`, `split`, `slice`, and `substring`.
+const STRING_PROTOTYPE_METHODS: [StringPrototypeMethod; 32] = [
     StringPrototypeMethod::interned("at", StringMethod::At, 1),
     StringPrototypeMethod::interned("charCodeAt", StringMethod::CharCodeAt, 1),
     StringPrototypeMethod::interned("charAt", StringMethod::CharAt, 1),
@@ -92,7 +90,6 @@ const STRING_PROTOTYPE_METHODS: [StringPrototypeMethod; 46] = [
     StringPrototypeMethod::interned("search", StringMethod::Search, 1),
     StringPrototypeMethod::interned("split", StringMethod::Split, 2),
     StringPrototypeMethod::interned("substring", StringMethod::Substring, 2),
-    StringPrototypeMethod::interned("substr", StringMethod::Substr, 2),
     StringPrototypeMethod::interned("slice", StringMethod::Slice, 2),
     StringPrototypeMethod::interned("repeat", StringMethod::Repeat, 1),
     StringPrototypeMethod::interned("replace", StringMethod::Replace, 2),
@@ -106,27 +103,6 @@ const STRING_PROTOTYPE_METHODS: [StringPrototypeMethod; 46] = [
     StringPrototypeMethod::interned("toUpperCase", StringMethod::ToUpperCase, 0),
     StringPrototypeMethod::interned("toLocaleLowerCase", StringMethod::ToLocaleLowerCase, 0),
     StringPrototypeMethod::interned("toLocaleUpperCase", StringMethod::ToLocaleUpperCase, 0),
-    StringPrototypeMethod::interned("anchor", StringMethod::Html(StringHtmlMethod::Anchor), 1),
-    StringPrototypeMethod::interned("big", StringMethod::Html(StringHtmlMethod::Big), 0),
-    StringPrototypeMethod::interned("blink", StringMethod::Html(StringHtmlMethod::Blink), 0),
-    StringPrototypeMethod::interned("bold", StringMethod::Html(StringHtmlMethod::Bold), 0),
-    StringPrototypeMethod::interned("fixed", StringMethod::Html(StringHtmlMethod::Fixed), 0),
-    StringPrototypeMethod::interned(
-        "fontcolor",
-        StringMethod::Html(StringHtmlMethod::FontColor),
-        1,
-    ),
-    StringPrototypeMethod::interned(
-        "fontsize",
-        StringMethod::Html(StringHtmlMethod::FontSize),
-        1,
-    ),
-    StringPrototypeMethod::interned("italics", StringMethod::Html(StringHtmlMethod::Italics), 0),
-    StringPrototypeMethod::interned("link", StringMethod::Html(StringHtmlMethod::Link), 1),
-    StringPrototypeMethod::interned("small", StringMethod::Html(StringHtmlMethod::Small), 0),
-    StringPrototypeMethod::interned("strike", StringMethod::Html(StringHtmlMethod::Strike), 0),
-    StringPrototypeMethod::interned("sub", StringMethod::Html(StringHtmlMethod::Sub), 0),
-    StringPrototypeMethod::interned("sup", StringMethod::Html(StringHtmlMethod::Sup), 0),
     StringPrototypeMethod::interned("normalize", StringMethod::Normalize, 0),
     StringPrototypeMethod::interned("localeCompare", StringMethod::LocaleCompare, 1),
 ];
@@ -334,35 +310,6 @@ const OBJECT_PROTOTYPE_REFLECTION: [(&str, NativeFunctionKind, i32); 3] = [
     (
         "propertyIsEnumerable",
         NativeFunctionKind::ObjectPrototypePropertyIsEnumerable,
-        1,
-    ),
-];
-
-/// The legacy `Object.prototype` accessor-definition and lookup methods.
-///
-/// These names are not predefined atoms in the pinned release, so Realm
-/// construction interns them in the same typed namespace as the ordinary
-/// reflection methods. Their order and arities follow the pinned property
-/// table and ECMA-262 legacy built-in definitions.
-const OBJECT_PROTOTYPE_LEGACY_ACCESSORS: [(&str, NativeFunctionKind, i32); 4] = [
-    (
-        "__defineGetter__",
-        NativeFunctionKind::ObjectPrototypeDefineGetter,
-        2,
-    ),
-    (
-        "__defineSetter__",
-        NativeFunctionKind::ObjectPrototypeDefineSetter,
-        2,
-    ),
-    (
-        "__lookupGetter__",
-        NativeFunctionKind::ObjectPrototypeLookupGetter,
-        1,
-    ),
-    (
-        "__lookupSetter__",
-        NativeFunctionKind::ObjectPrototypeLookupSetter,
         1,
     ),
 ];

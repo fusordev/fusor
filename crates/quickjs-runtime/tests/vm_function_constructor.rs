@@ -400,7 +400,7 @@ fn generated_function_infers_static_data_property_names() {
         "let f=Function('const object={handler:function(){},1:function(){},\
             \"__proto__\":function(){}};\
             return object.handler.name===\"handler\"&&object[1].name===\"1\"&&\
-                Object.getPrototypeOf(object).name===\"\";');\
+                object.__proto__.name===\"__proto__\";');\
             return f();",
     );
 

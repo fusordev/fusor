@@ -35,7 +35,6 @@ use quickjs_bytecode::{
 
 #[cfg(test)]
 use crate::runtime::ForInAdvance;
-use crate::runtime::StringHtmlMethod;
 use crate::{
     ArrayIndex, BigIntError, Context, DynamicFunctionCompileFailure, DynamicFunctionFamily,
     EngineFault, ExceptionKind, ExecutionError, Function, HandleError, HandleKind, JsBigInt,
@@ -694,11 +693,6 @@ struct ProxyOwnKeysContinuation {
     stage: ProxyOwnKeysStage,
 }
 
-enum ObjectMetaCompletion {
-    Target(StoredValue),
-    Undefined,
-}
-
 #[derive(Clone, Copy)]
 enum ObjectMetaFailure {
     NonExtensible,
@@ -706,7 +700,7 @@ enum ObjectMetaFailure {
 }
 
 struct ObjectMetaContinuation {
-    completion: ObjectMetaCompletion,
+    completion: StoredValue,
     failure: ObjectMetaFailure,
     realm: RealmId,
     origin: JsStackFrame,
@@ -723,11 +717,8 @@ struct OwnDescriptorQueryContinuation {
 }
 
 impl ObjectMetaContinuation {
-    const fn retained_values(&self) -> u64 {
-        match self.completion {
-            ObjectMetaCompletion::Target(_) => 1,
-            ObjectMetaCompletion::Undefined => 0,
-        }
+    const fn retained_values() -> u64 {
+        1
     }
 }
 
@@ -819,7 +810,6 @@ enum NativeContinuation {
     ProxyDefine(Box<ProxyDefineContinuation>),
     ProxyOwnKeys(Box<ProxyOwnKeysContinuation>),
     IntegrityLevel(Box<IntegrityLevelContinuation>),
-    LegacyAccessorLookup(Box<LegacyAccessorLookupContinuation>),
     IsPrototypeOf(Box<IsPrototypeOfContinuation>),
     ObjectMeta(ObjectMetaContinuation),
     OwnDescriptorQuery(OwnDescriptorQueryContinuation),
@@ -941,9 +931,8 @@ impl NativeContinuation {
             Self::ProxyDefine(state) => state.retained_values(),
             Self::ProxyOwnKeys(state) => state.retained_values(),
             Self::IntegrityLevel(state) => state.retained_values(),
-            Self::LegacyAccessorLookup(_) => LegacyAccessorLookupContinuation::retained_values(),
             Self::IsPrototypeOf(_) => IsPrototypeOfContinuation::retained_values(),
-            Self::ObjectMeta(state) => state.retained_values(),
+            Self::ObjectMeta(_) => ObjectMetaContinuation::retained_values(),
             Self::OwnDescriptorQuery(_)
             | Self::AsyncAwait { .. }
             | Self::ReflectSet
@@ -1651,12 +1640,6 @@ impl PropertyKeyContinuation {
     }
 }
 
-#[derive(Clone, Copy)]
-enum LegacyAccessorKind {
-    Getter,
-    Setter,
-}
-
 enum PropertyKeyTarget {
     ToKey,
     Read {
@@ -1696,21 +1679,6 @@ enum PropertyKeyTarget {
     /// `Object.prototype.propertyIsEnumerable`'s key, awaiting `ToPropertyKey`.
     PropertyIsEnumerable {
         target: StoredValue,
-        realm: RealmId,
-    },
-    /// `__defineGetter__` or `__defineSetter__`, after target coercion and
-    /// accessor callability validation but before the observable key coercion.
-    LegacyDefineAccessor {
-        target: StoredValue,
-        accessor: StoredValue,
-        kind: LegacyAccessorKind,
-        realm: RealmId,
-    },
-    /// `__lookupGetter__` or `__lookupSetter__`, after target coercion and
-    /// before the observable key coercion.
-    LegacyLookupAccessor {
-        target: StoredValue,
-        kind: LegacyAccessorKind,
         realm: RealmId,
     },
     /// The `delete` operator's key, awaiting `ToPropertyKey`.
@@ -1758,14 +1726,12 @@ impl PropertyKeyTarget {
             | Self::OwnPropertyDescriptor { .. }
             | Self::HasOwnProperty { .. }
             | Self::PropertyIsEnumerable { .. }
-            | Self::LegacyLookupAccessor { .. }
             | Self::ReflectOwnPropertyDescriptor { .. }
             | Self::ReflectHas { .. }
             | Self::In { .. } => 1,
             Self::Write { .. }
             | Self::DefineMethod { .. }
             | Self::DefineProperty { .. }
-            | Self::LegacyDefineAccessor { .. }
             | Self::ReflectGet { .. }
             | Self::ReflectDefineProperty { .. } => 2,
             Self::ReflectSet { .. } => 3,
@@ -2389,7 +2355,6 @@ fn trace_property_key_target_roots(
         | PropertyKeyTarget::OwnPropertyDescriptor { target: base, .. }
         | PropertyKeyTarget::HasOwnProperty { target: base, .. }
         | PropertyKeyTarget::PropertyIsEnumerable { target: base, .. }
-        | PropertyKeyTarget::LegacyLookupAccessor { target: base, .. }
         | PropertyKeyTarget::ReflectOwnPropertyDescriptor { target: base, .. }
         | PropertyKeyTarget::ReflectHas { target: base, .. }
         | PropertyKeyTarget::In { target: base, .. } => {
@@ -2400,11 +2365,6 @@ fn trace_property_key_target_roots(
         }
         | PropertyKeyTarget::ReflectDefineProperty {
             target, descriptor, ..
-        }
-        | PropertyKeyTarget::LegacyDefineAccessor {
-            target,
-            accessor: descriptor,
-            ..
         } => {
             trace_stored_value_root(target, mark);
             trace_stored_value_root(descriptor, mark);
@@ -2989,13 +2949,8 @@ fn trace_native_continuation_roots(
             }
         }
         NativeContinuation::IntegrityLevel(state) => state.trace_roots(mark),
-        NativeContinuation::LegacyAccessorLookup(state) => state.trace_roots(mark),
         NativeContinuation::IsPrototypeOf(state) => state.trace_roots(mark),
-        NativeContinuation::ObjectMeta(state) => {
-            if let ObjectMetaCompletion::Target(target) = &state.completion {
-                trace_stored_value_root(target, mark);
-            }
-        }
+        NativeContinuation::ObjectMeta(state) => trace_stored_value_root(&state.completion, mark),
         NativeContinuation::AsyncGeneratorReturnAwait { completion, .. } => {
             trace_stored_value_root(completion, mark);
         }

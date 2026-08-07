@@ -404,7 +404,7 @@ fn get_own_property_descriptor_reports_only_own_properties() {
     );
     assert_eq!(
         text(
-            "var base={x:1};var o={__proto__:base};\
+            "var base={x:1};var o={};Object.setPrototypeOf(o,base);\
              return typeof Object.getOwnPropertyDescriptor(o,'x');"
         ),
         "undefined"

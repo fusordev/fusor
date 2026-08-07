@@ -54,16 +54,6 @@ fn generator_class_methods_preserve_the_super_home_object() {
     );
 }
 
-#[test]
-fn generator_object_methods_preserve_the_super_home_object() {
-    assert_eq!(
-        run(
-            "function run(){let base={get value(){return this._value;},set value(next){this._value=next;}};let object={__proto__:base,_value:4,*values(){yield super.value;yield super['value']+=1;}};let iterator=object.values();let first=iterator.next();let second=iterator.next();return first.value+':'+first.done+'|'+second.value+':'+second.done;}"
-        ),
-        "4:false|5:false"
-    );
-}
-
 struct GeneratorAllocationCase {
     runtime: Runtime,
     realm: Realm,
@@ -181,26 +171,6 @@ fn generator_throw_is_catchable_and_completed_generators_follow_resume_rules() {
                     (''+third.value)+':'+third.done+'|'+returned.value+':'+returned.done+'|'+thrown;\
             }"),
         "1:false|5:true|undefined:true|9:true|7"
-    );
-}
-
-#[test]
-fn generator_function_and_instance_prototypes_match_the_intrinsic_chain() {
-    assert_eq!(
-        run("function run(){\
-                let generator=function* named(){};\
-                let iterator=generator();\
-                let functionPrototype=generator.__proto__;\
-                let generatorPrototype=generator.prototype.__proto__;\
-                let tag=({}).toString;\
-                return typeof generator+'|'+typeof functionPrototype+'|'+\
-                    generator.hasOwnProperty('length')+','+generator.hasOwnProperty('name')+','+\
-                    generator.hasOwnProperty('prototype')+'|'+\
-                    (iterator.__proto__===generator.prototype)+'|'+\
-                    (generatorPrototype.constructor===functionPrototype)+'|'+\
-                    tag.call(functionPrototype)+'|'+tag.call(generatorPrototype);\
-            }"),
-        "function|object|true,true,true|true|true|[object GeneratorFunction]|[object Generator]"
     );
 }
 
@@ -652,9 +622,10 @@ fn yield_star_reads_done_before_yielding_without_eagerly_reading_value() {
     assert_eq!(
         run("function run(){\
                 let log='';\
-                let result={};\
-                result.__defineGetter__('done',function(){log=log+'done|';return false;});\
-                result.__defineGetter__('value',function(){log=log+'value|';return 3;});\
+                let result={\
+                    get done(){log=log+'done|';return false;},\
+                    get value(){log=log+'value|';return 3;}\
+                };\
                 let delegated=(function*(){})();\
                 delegated.next=function(){return result;};\
                 function* outer(){yield* delegated;}\

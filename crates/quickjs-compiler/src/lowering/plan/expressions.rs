@@ -3448,24 +3448,6 @@ impl<'compiler, 'unit, 'arena, 'scope> ExpressionPlanner<'compiler, 'unit, 'aren
                 )?));
                 continue;
             }
-            // `__proto__: value` in an object literal is a prototype
-            // mutation, not an own property. Only an object or `null` takes
-            // effect; every other value is silently ignored, which the pinned
-            // `OP_set_proto` handler enforces (`quickjs.c:19330-19341`).
-            // Shorthand and computed forms are ordinary own properties and are
-            // handled by their own planners.
-            if key.value.code_units().eq("__proto__".encode_utf16())
-                && !property.shorthand
-                && property.kind == PropertyKind::Init
-            {
-                work.push(ExpressionWork::Emit(PlannedInstruction::new(
-                    FinalOpcode::SetProto,
-                    Operands::None,
-                    property.span,
-                )));
-                work.push(ExpressionWork::Visit(&property.value));
-                continue;
-            }
             let inferred_name = Self::plan_inferred_static_property_name_for_initializer(
                 &property.value,
                 constants.property_atom_index(key.span)?,

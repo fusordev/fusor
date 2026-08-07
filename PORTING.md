@@ -2,7 +2,7 @@
 
 ## Target and boundaries
 
-Port the observable JavaScript and host behavior of [QuickJS 2026-06-04](UPSTREAM.md) to safe, pure Rust: ES2025 Script/Module, Annex B, and explicitly admitted later ECMA-262 features. ECMA-262 is normative; pinned QuickJS is the compatibility/diagnostic target; Oxc is parsing and semantic analysis only. QuickJS and Node are differential oracles, never runtime dependencies.
+Port the observable JavaScript and host behavior of [QuickJS 2026-06-04](UPSTREAM.md) to safe, pure Rust: ES2025 Script/Module and explicitly admitted later ECMA-262 features, deliberately excluding Annex B compatibility. ECMA-262 is normative; pinned QuickJS is the compatibility/diagnostic target; Oxc is parsing and semantic analysis only. QuickJS and Node are differential oracles, never runtime dependencies.
 
 This is a source-level port, not a C API or byte-layout clone. The core links neither C nor C++. Unsupported source semantics reject before execution, and only whole-graph [`VerifiedBytecode`](BYTECODE_VERIFIER.md) executes. Focused tests prove only their named behavior.
 
@@ -36,13 +36,14 @@ Finish frontend/diagnostics and language/compiler/execution before broad Test262
 - [~] Classes: named base/derived declarations and expressions; inheritance (including `extends null`); explicit/synthesized constructors; `super(...)` including spread; public static/instance fields and methods/accessors; computed field keys; static initialization blocks; and direct/computed `super` reads, calls, simple/compound/logical writes, and updates. Field/static-block lexical `this`, `super`, `new.target`, arrows, source order, and derived receiver timing have focused coverage.
 - [~] Private **instance data fields** and ordinary private methods have fresh opaque names and VM-only own slots. A private method closure is created once per class evaluation, receives `#name` and the class prototype as its home object, and is installed on each instance; direct calls, `super`, bad-receiver `TypeError`, and `#name in object` are covered. Slots are non-enumerable/non-configurable, invisible to string reflection, do not walk prototypes, and do not invoke Proxy traps.
 - [ ] Close classes: private accessors and static private elements; compound/logical/update private writes; decorators; and the remaining private-function naming/diagnostic audit. Arrow-contained `super()` is supported. Parsing is not execution support.
-- [ ] Implement direct/indirect `eval`, `with`, Annex B block functions, remaining opcode families, and complete debug/source tables. `eval` and unverified bytecode remain fail closed.
+- [ ] Implement direct/indirect `eval`, `with`, remaining opcode families, and complete debug/source tables. `eval` and unverified bytecode remain fail closed; Annex B block-function forms remain rejected.
 
 ### Values, objects, and built-ins
 
 - [x] UTF-16 strings; binary64/BigInt/Symbol; canonical keys/conversions; ordinary descriptors/prototypes/integrity; functions/bound construction; arrays/holes; iterator close; global lexical environments; Proxy invariants; reflection; shape/transition interning; and dense indexed storage.
 - [ ] Audit remaining exotic and reflection/diagnostic paths as compiler operands become reachable.
 - [x] Globals; Object/Reflect; Error families; Boolean/Number/BigInt/Symbol; Array; JSON/Math; String; RegExp; Map/Set/weak collections; Promise; sync and async generators; and a runtime-owned FIFO job queue with resumable continuations.
+- [x] Annex B is intentionally absent: no legacy Object.prototype accessors, String HTML/`substr`/trim aliases, object-literal `__proto__` mutation, HTML comments, or legacy octal literals/escapes. A static `__proto__` key is an ordinary own property; use `Object.setPrototypeOf` for prototype mutation.
 - [x] Date: TimeClip, normative ISO/local parsing, UTC/local getters and setters, primitive/JSON behavior, and non-Intl locale fallback over the shared `temporal_rs = 0.2.5` kernel.
 - [~] Temporal: `%Temporal.Instant%`, `%Temporal.Duration%`, `Date.prototype.toTemporalInstant`, Instant arithmetic/difference/rounding/string formatting, and Duration rounding/string formatting share `temporal_rs = 0.2.5`. Instant difference converts `other` before object-only options and preserves `largestUnit` → `roundingIncrement` → `roundingMode` → `smallestUnit`; Instant and Duration stringification preserve `fractionalSecondDigits` → `roundingMode` → `smallestUnit`, and Instant then reads `timeZone` for compiled IANA/fixed-offset formatting. Next: Zoned operations, remaining Temporal types, binary data/typed arrays, and Atomics.
 - [ ] ECMA-402 / `quickjs-intl` is deliberately low priority. If resumed, isolate it behind direct ICU4X rather than mixing locale behavior into the runtime core.
@@ -51,7 +52,7 @@ Finish frontend/diagnostics and language/compiler/execution before broad Test262
 
 - [ ] Module linking/evaluation, cycles, resolver semantics, dynamic `import`, and top-level `await`. Parsing a Module is not execution.
 - [ ] Embedding API, ESM REPL, `qjs`, Rust-native `qjsc`, bytecode viewer, CDP adapter, and portable `std`/`os` modules.
-- [x] `cargo xtask test262` and GitHub Actions pin Test262 `5c8206929d81b2d3d727ca6aac56c18358c8d790`, apply the exact QuickJS baseline patch, run the full configured suite on every trigger, print its pass rate, and upload the deterministic JSON report.
+- [x] `cargo xtask test262` and the manual-dispatch GitHub Actions workflow pin Test262 `5c8206929d81b2d3d727ca6aac56c18358c8d790`, apply the exact QuickJS baseline patch, run the full configured non-Annex-B suite (including Temporal), print its pass rate, and upload the deterministic JSON report.
 - [ ] After the preceding language/compiler/module gates close, run Test262 by feature cohort; investigate every admitted failure against ECMA-262 and QuickJS/Node; remove temporary skips; then run the full configured suite.
 - [ ] Establish startup/memory/interpreter/compile benchmarks and finish release, resource, cancellation, dependency, and public-API audits.
 

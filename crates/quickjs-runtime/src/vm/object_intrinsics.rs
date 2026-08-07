@@ -217,8 +217,8 @@ pub(super) fn object_constructor(
     Ok(NativeDispatch::Immediate(object))
 }
 
-/// Applies `ToObject` for legacy `Object.prototype` entry points.
-fn legacy_to_object(
+/// Applies `ToObject` for standard `Object.prototype` entry points.
+fn object_prototype_to_object(
     runtime: &mut Runtime,
     realm: RealmId,
     value: StoredValue,
@@ -269,10 +269,7 @@ pub(super) fn advance_object_meta(
             },
         )?));
     }
-    Ok(NativeDispatch::Immediate(match state.completion {
-        ObjectMetaCompletion::Target(target) => target,
-        ObjectMetaCompletion::Undefined => StoredValue::Undefined,
-    }))
+    Ok(NativeDispatch::Immediate(state.completion))
 }
 
 fn continue_object_meta_after(
@@ -298,395 +295,6 @@ fn continue_object_meta_after(
             message: "object meta internal method produced a structured result",
         }
         .into()),
-    }
-}
-
-/// `get Object.prototype.__proto__`.
-pub(super) fn object_prototype_proto_getter(
-    runtime: &mut Runtime,
-    realm: RealmId,
-    receiver: StoredValue,
-    return_to: Option<CallReturn>,
-    origin: JsStackFrame,
-    execution_budget: &mut ExecutionBudget,
-) -> Result<NativeDispatch, NativeFailure> {
-    let object = legacy_to_object(runtime, realm, receiver, &origin)?;
-    let reference = object
-        .heap_reference()
-        .ok_or(EngineFault::RuntimeInvariant {
-            message: "Object.prototype.__proto__ getter lost its boxed receiver",
-        })?;
-    begin_internal_get_prototype_of(
-        runtime,
-        reference,
-        realm,
-        return_to,
-        origin,
-        execution_budget,
-    )
-}
-
-/// `set Object.prototype.__proto__`.
-pub(super) fn object_prototype_proto_setter(
-    runtime: &mut Runtime,
-    realm: RealmId,
-    receiver: &StoredValue,
-    requested: &StoredValue,
-    return_to: Option<CallReturn>,
-    origin: JsStackFrame,
-    execution_budget: &mut ExecutionBudget,
-) -> Result<NativeDispatch, NativeFailure> {
-    // RequireObjectCoercible precedes validation of the requested prototype.
-    if matches!(receiver, StoredValue::Undefined | StoredValue::Null) {
-        return Err(NativeFailure::Abrupt(type_error(
-            realm,
-            Some(&origin),
-            "__proto__",
-            "not an object",
-        )?));
-    }
-    let prototype = match requested {
-        StoredValue::Null => None,
-        StoredValue::Function(function) => Some(HeapReference::Function(*function)),
-        StoredValue::Object(object) => Some(HeapReference::Object(*object)),
-        StoredValue::Undefined
-        | StoredValue::Boolean(_)
-        | StoredValue::Number(_)
-        | StoredValue::BigInt(_)
-        | StoredValue::String(_)
-        | StoredValue::Symbol(_) => {
-            return Ok(NativeDispatch::Immediate(StoredValue::Undefined));
-        }
-    };
-    let Some(reference) = receiver.heap_reference() else {
-        return Ok(NativeDispatch::Immediate(StoredValue::Undefined));
-    };
-    let dispatch = begin_internal_set_prototype_of(
-        runtime,
-        reference,
-        prototype,
-        realm,
-        return_to,
-        origin.clone(),
-        execution_budget,
-    )?;
-    continue_object_meta_after(
-        dispatch,
-        ObjectMetaContinuation {
-            completion: ObjectMetaCompletion::Undefined,
-            failure: ObjectMetaFailure::NonExtensible,
-            realm,
-            origin,
-        },
-    )
-}
-
-/// Starts `__defineGetter__` or `__defineSetter__` in specification order.
-pub(super) fn begin_legacy_define_accessor(
-    runtime: &mut Runtime,
-    realm: RealmId,
-    inputs: CallInputs,
-    kind: LegacyAccessorKind,
-    return_to: Option<CallReturn>,
-    origin: JsStackFrame,
-    execution_budget: &mut ExecutionBudget,
-) -> Result<NativeDispatch, NativeFailure> {
-    let CallInputs {
-        receiver,
-        mut arguments,
-        ..
-    } = inputs;
-    let target = legacy_to_object(runtime, realm, receiver, &origin)?;
-    let key = arguments.take_first_or_undefined();
-    let accessor = arguments.take_first_or_undefined();
-    if !matches!(accessor, StoredValue::Function(_)) {
-        return Err(NativeFailure::Abrupt(type_error(
-            realm,
-            Some(&origin),
-            "legacy accessor definition",
-            "not a function",
-        )?));
-    }
-    begin_property_key_conversion(
-        runtime,
-        key,
-        PropertyKeyTarget::LegacyDefineAccessor {
-            target,
-            accessor,
-            kind,
-            realm,
-        },
-        realm,
-        return_to,
-        origin,
-        execution_budget,
-    )
-}
-
-/// Starts `__lookupGetter__` or `__lookupSetter__` in specification order.
-pub(super) fn begin_legacy_lookup_accessor(
-    runtime: &mut Runtime,
-    realm: RealmId,
-    inputs: CallInputs,
-    kind: LegacyAccessorKind,
-    return_to: Option<CallReturn>,
-    origin: JsStackFrame,
-    execution_budget: &mut ExecutionBudget,
-) -> Result<NativeDispatch, NativeFailure> {
-    let CallInputs {
-        receiver,
-        mut arguments,
-        ..
-    } = inputs;
-    let target = legacy_to_object(runtime, realm, receiver, &origin)?;
-    let key = arguments.take_first_or_undefined();
-    begin_property_key_conversion(
-        runtime,
-        key,
-        PropertyKeyTarget::LegacyLookupAccessor {
-            target,
-            kind,
-            realm,
-        },
-        realm,
-        return_to,
-        origin,
-        execution_budget,
-    )
-}
-
-pub(super) struct LegacyAccessorDefinition {
-    pub(super) target: StoredValue,
-    pub(super) accessor: StoredValue,
-    pub(super) kind: LegacyAccessorKind,
-    pub(super) realm: RealmId,
-    pub(super) key: PropertyKey,
-    pub(super) name: JsString,
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum LegacyAccessorLookupStage {
-    Descriptor,
-    Prototype,
-}
-
-pub(super) struct LegacyAccessorLookupContinuation {
-    current: HeapReference,
-    key: PropertyKey,
-    kind: LegacyAccessorKind,
-    realm: RealmId,
-    origin: JsStackFrame,
-    stage: LegacyAccessorLookupStage,
-}
-
-impl LegacyAccessorLookupContinuation {
-    pub(super) const fn retained_values() -> u64 {
-        1
-    }
-
-    pub(super) fn trace_roots(&self, mark: &mut dyn FnMut(CollectionRoot)) {
-        mark(CollectionRoot::Heap(self.current));
-    }
-}
-
-enum LegacyAccessorLookupDispatch {
-    Resume(LegacyAccessorLookupContinuation, StoredValue),
-    Suspend(Box<NativeDispatch>),
-}
-
-fn continue_legacy_accessor_lookup_after(
-    dispatch: NativeDispatch,
-    state: LegacyAccessorLookupContinuation,
-) -> Result<LegacyAccessorLookupDispatch, NativeFailure> {
-    match dispatch {
-        NativeDispatch::Immediate(value) => Ok(LegacyAccessorLookupDispatch::Resume(state, value)),
-        NativeDispatch::Call(mut call) => {
-            prepend_native_continuations(
-                &mut call,
-                vec![NativeContinuation::LegacyAccessorLookup(Box::new(state))],
-            )?;
-            Ok(LegacyAccessorLookupDispatch::Suspend(Box::new(
-                NativeDispatch::Call(call),
-            )))
-        }
-        NativeDispatch::Frame(mut frame) => {
-            attach_native_continuations(
-                &mut frame,
-                vec![NativeContinuation::LegacyAccessorLookup(Box::new(state))],
-            )?;
-            Ok(LegacyAccessorLookupDispatch::Suspend(Box::new(
-                NativeDispatch::Frame(frame),
-            )))
-        }
-        NativeDispatch::Pair(_, _)
-        | NativeDispatch::ForOfRecord { .. }
-        | NativeDispatch::ForOfStep { .. }
-        | NativeDispatch::ForOfClosed
-        | NativeDispatch::CopyDataPropertiesDone
-        | NativeDispatch::AsyncAwait { .. } => Err(EngineFault::RuntimeInvariant {
-            message: "legacy accessor lookup produced a structured result",
-        }
-        .into()),
-    }
-}
-
-/// Completes a legacy accessor definition after `ToPropertyKey`.
-pub(super) fn finish_legacy_define_accessor(
-    runtime: &mut Runtime,
-    definition: LegacyAccessorDefinition,
-    origin: &JsStackFrame,
-    execution_budget: &mut ExecutionBudget,
-) -> Result<NativeDispatch, NativeFailure> {
-    let StoredValue::Function(accessor) = definition.accessor else {
-        return Err(EngineFault::RuntimeInvariant {
-            message: "legacy accessor definition lost its validated function",
-        }
-        .into());
-    };
-    let property_definition = match definition.kind {
-        LegacyAccessorKind::Getter => {
-            PropertyDefinition::accessor(Requested::Present(Some(accessor)), Requested::Absent)
-        }
-        LegacyAccessorKind::Setter => {
-            PropertyDefinition::accessor(Requested::Absent, Requested::Present(Some(accessor)))
-        }
-    }
-    .with_enumerable(Requested::Present(true))
-    .with_configurable(Requested::Present(true));
-    match define_own_property(
-        runtime,
-        &definition.target,
-        definition.key,
-        &property_definition,
-        execution_budget,
-    )? {
-        PropertyDefinitionOutcome::Complete => {
-            Ok(NativeDispatch::Immediate(StoredValue::Undefined))
-        }
-        PropertyDefinitionOutcome::Failed(failure) => {
-            Err(NativeFailure::Abrupt(property_exception_at(
-                definition.realm,
-                origin.clone(),
-                Some(&definition.name),
-                failure,
-            )?))
-        }
-    }
-}
-
-/// Continues a legacy accessor lookup through Proxy-aware internal methods.
-pub(super) fn advance_legacy_accessor_lookup(
-    runtime: &mut Runtime,
-    mut state: LegacyAccessorLookupContinuation,
-    mut completion: StoredValue,
-    return_to: Option<CallReturn>,
-    execution_budget: &mut ExecutionBudget,
-) -> Result<NativeDispatch, NativeFailure> {
-    loop {
-        let next = match state.stage {
-            LegacyAccessorLookupStage::Descriptor => {
-                if let Some(property) = internal_complete_own_property(runtime, &completion)? {
-                    let function = match property {
-                        OwnProperty::Accessor { getter, setter, .. } => match state.kind {
-                            LegacyAccessorKind::Getter => getter,
-                            LegacyAccessorKind::Setter => setter,
-                        },
-                        OwnProperty::Data { .. } => None,
-                    };
-                    return Ok(NativeDispatch::Immediate(
-                        function.map_or(StoredValue::Undefined, StoredValue::Function),
-                    ));
-                }
-                state.stage = LegacyAccessorLookupStage::Prototype;
-                execution_budget.charge_instructions(1)?;
-                let dispatch = begin_internal_get_prototype_of(
-                    runtime,
-                    state.current,
-                    state.realm,
-                    return_to,
-                    state.origin.clone(),
-                    execution_budget,
-                )?;
-                continue_legacy_accessor_lookup_after(dispatch, state)?
-            }
-            LegacyAccessorLookupStage::Prototype => {
-                let Some(prototype) = completion.heap_reference() else {
-                    if matches!(completion, StoredValue::Null) {
-                        return Ok(NativeDispatch::Immediate(StoredValue::Undefined));
-                    }
-                    return Err(EngineFault::RuntimeInvariant {
-                        message: "[[GetPrototypeOf]] returned neither object nor null",
-                    }
-                    .into());
-                };
-                state.current = prototype;
-                state.stage = LegacyAccessorLookupStage::Descriptor;
-                execution_budget.charge_instructions(1)?;
-                let dispatch = begin_internal_get_own_property(
-                    runtime,
-                    prototype,
-                    state.key.clone(),
-                    state.realm,
-                    return_to,
-                    state.origin.clone(),
-                    execution_budget,
-                )?;
-                continue_legacy_accessor_lookup_after(dispatch, state)?
-            }
-        };
-        match next {
-            LegacyAccessorLookupDispatch::Resume(next_state, next_completion) => {
-                state = next_state;
-                completion = next_completion;
-            }
-            LegacyAccessorLookupDispatch::Suspend(dispatch) => return Ok(*dispatch),
-        }
-    }
-}
-
-/// Starts a legacy accessor lookup after `ToPropertyKey`.
-#[allow(
-    clippy::too_many_arguments,
-    reason = "the post-ToPropertyKey legacy lookup carries the internal-method operands and the standard resume authority"
-)]
-pub(super) fn finish_legacy_lookup_accessor(
-    runtime: &mut Runtime,
-    target: &StoredValue,
-    kind: LegacyAccessorKind,
-    key: PropertyKey,
-    realm: RealmId,
-    return_to: Option<CallReturn>,
-    origin: JsStackFrame,
-    execution_budget: &mut ExecutionBudget,
-) -> Result<NativeDispatch, NativeFailure> {
-    let current = target
-        .heap_reference()
-        .ok_or(EngineFault::RuntimeInvariant {
-            message: "legacy accessor lookup lost its boxed receiver",
-        })?;
-    let state = LegacyAccessorLookupContinuation {
-        current,
-        key: key.clone(),
-        kind,
-        realm,
-        origin: origin.clone(),
-        stage: LegacyAccessorLookupStage::Descriptor,
-    };
-    execution_budget.charge_instructions(1)?;
-    let dispatch = begin_internal_get_own_property(
-        runtime,
-        current,
-        key,
-        realm,
-        return_to,
-        origin,
-        execution_budget,
-    )?;
-    match continue_legacy_accessor_lookup_after(dispatch, state)? {
-        LegacyAccessorLookupDispatch::Resume(state, completion) => {
-            advance_legacy_accessor_lookup(runtime, state, completion, return_to, execution_budget)
-        }
-        LegacyAccessorLookupDispatch::Suspend(dispatch) => Ok(*dispatch),
     }
 }
 
@@ -887,7 +495,7 @@ pub(super) fn object_prototype_is_prototype_of(
     let Some(start) = candidate.heap_reference() else {
         return Ok(NativeDispatch::Immediate(StoredValue::Boolean(false)));
     };
-    let target = legacy_to_object(runtime, realm, receiver, &origin)?
+    let target = object_prototype_to_object(runtime, realm, receiver, &origin)?
         .heap_reference()
         .ok_or(EngineFault::RuntimeInvariant {
             message: "isPrototypeOf lost its boxed receiver",
@@ -1005,7 +613,7 @@ pub(super) fn set_prototype_of(
     continue_object_meta_after(
         dispatch,
         ObjectMetaContinuation {
-            completion: ObjectMetaCompletion::Target(target),
+            completion: target,
             failure: ObjectMetaFailure::NonExtensible,
             realm,
             origin,
@@ -1471,7 +1079,7 @@ pub(super) fn prevent_extensions(
     continue_object_meta_after(
         dispatch,
         ObjectMetaContinuation {
-            completion: ObjectMetaCompletion::Target(target),
+            completion: target,
             failure: ObjectMetaFailure::ProxyTrap,
             realm,
             origin,

@@ -12,7 +12,7 @@ use std::{collections::HashMap, error::Error, fmt};
 pub use oxc_allocator::Allocator;
 pub use oxc_ast::ast::Program;
 use oxc_ast::{
-    AstKind, Comment,
+    AstKind,
     ast::{
         Argument, Directive, ImportPhase, ModuleExportName, Statement, VariableDeclarationKind,
         WithClauseKeyword,
@@ -1743,8 +1743,6 @@ pub enum FrontendDiagnosticCode {
     AsyncScriptAwaitIdentifier,
     /// `import.meta` appeared in an asynchronous global Script.
     AsyncScriptImportMeta,
-    /// Preparing a Script-compatible asynchronous parse source could not allocate.
-    AsyncScriptPreparationFailed,
     /// An Oxc lexer or parser diagnostic.
     OxcParser,
     /// An Oxc semantic/early-error diagnostic.
@@ -1767,6 +1765,10 @@ pub enum FrontendDiagnosticCode {
     UnsupportedDecorator,
     /// A class `accessor` declaration.
     UnsupportedClassAccessor,
+    /// An Annex B HTML-style source comment.
+    UnsupportedAnnexBHtmlComment,
+    /// An Annex B legacy octal numeric literal or string escape.
+    UnsupportedAnnexBLegacyOctal,
     /// A legacy `assert` import clause.
     UnsupportedLegacyImportAssertion,
     /// A string-literal imported name in a named re-export.
@@ -1800,9 +1802,6 @@ impl FrontendDiagnosticCode {
             }
             Self::AsyncScriptAwaitIdentifier => "quickjs::frontend::async_script::await_identifier",
             Self::AsyncScriptImportMeta => "quickjs::frontend::async_script::import_meta",
-            Self::AsyncScriptPreparationFailed => {
-                "quickjs::frontend::limit::async_script_preparation"
-            }
             Self::OxcParser => "quickjs::frontend::oxc::parser",
             Self::OxcSemantic => "quickjs::frontend::oxc::semantic",
             Self::InvalidRegExpLiteral => "quickjs::frontend::regexp::invalid_literal",
@@ -1818,6 +1817,12 @@ impl FrontendDiagnosticCode {
             Self::UnsupportedImportDefer => "quickjs::frontend::profile::import_defer",
             Self::UnsupportedDecorator => "quickjs::frontend::profile::decorator",
             Self::UnsupportedClassAccessor => "quickjs::frontend::profile::class_accessor",
+            Self::UnsupportedAnnexBHtmlComment => {
+                "quickjs::frontend::profile::annex_b_html_comment"
+            }
+            Self::UnsupportedAnnexBLegacyOctal => {
+                "quickjs::frontend::profile::annex_b_legacy_octal"
+            }
             Self::UnsupportedLegacyImportAssertion => {
                 "quickjs::frontend::profile::legacy_import_assertion"
             }
@@ -1842,7 +1847,6 @@ impl FrontendDiagnosticCode {
             | Self::AsyncScriptModuleDeclaration
             | Self::AsyncScriptAwaitIdentifier
             | Self::AsyncScriptImportMeta
-            | Self::AsyncScriptPreparationFailed
             | Self::OxcParser
             | Self::OxcSemantic
             | Self::InvalidRegExpLiteral
@@ -1857,6 +1861,8 @@ impl FrontendDiagnosticCode {
             | Self::UnsupportedImportDefer
             | Self::UnsupportedDecorator
             | Self::UnsupportedClassAccessor
+            | Self::UnsupportedAnnexBHtmlComment
+            | Self::UnsupportedAnnexBLegacyOctal
             | Self::UnsupportedLegacyImportAssertion
             | Self::UnsupportedStringNamedReExport
             | Self::UnsupportedStringNamespaceExport => {
@@ -1986,11 +1992,6 @@ pub enum FrontendLimitError {
         /// Number of bytes or entries requested.
         requested: usize,
     },
-    /// Preparing a Script-compatible source for asynchronous parsing failed.
-    AsyncScriptAllocationFailed {
-        /// Number of UTF-8 bytes requested.
-        requested: usize,
-    },
 }
 
 impl fmt::Display for FrontendLimitError {
@@ -2018,10 +2019,6 @@ impl fmt::Display for FrontendLimitError {
             } => write!(
                 formatter,
                 "could not reserve {requested} units for dynamic-function {resource}"
-            ),
-            Self::AsyncScriptAllocationFailed { requested } => write!(
-                formatter,
-                "could not reserve {requested} bytes for asynchronous Script preparation"
             ),
         }
     }
@@ -2058,9 +2055,6 @@ impl FrontendError {
             FrontendLimitError::DynamicFunctionSizeOverflow { .. }
             | FrontendLimitError::DynamicFunctionAllocationFailed { .. } => {
                 FrontendDiagnosticCode::DynamicFunctionPreparationFailed
-            }
-            FrontendLimitError::AsyncScriptAllocationFailed { .. } => {
-                FrontendDiagnosticCode::AsyncScriptPreparationFailed
             }
         };
         Self {
@@ -2186,6 +2180,23 @@ impl FrontendError {
                 labels: vec![DiagnosticLabel {
                     span,
                     message: Some("this RegExp literal is not syntactically valid".to_owned()),
+                }],
+            }],
+            parser_panicked: false,
+            unsupported_goal: None,
+            limit_error: None,
+        }
+    }
+
+    fn unsupported_annex_b_html_comment(span: Span) -> Self {
+        Self {
+            stage: DiagnosticStage::Profile,
+            diagnostics: vec![FrontendDiagnostic {
+                code: FrontendDiagnosticCode::UnsupportedAnnexBHtmlComment,
+                message: "Annex B HTML comments are not supported".to_owned(),
+                labels: vec![DiagnosticLabel {
+                    span,
+                    message: Some("rewrite this as an ECMAScript comment".to_owned()),
                 }],
             }],
             parser_panicked: false,
@@ -2472,6 +2483,10 @@ struct ProfileViolation {
     message: &'static str,
 }
 
+#[allow(
+    clippy::too_many_lines,
+    reason = "profile validation remains a single exhaustive AST decision table"
+)]
 fn quickjs_profile_diagnostics(nodes: &AstNodes<'_>) -> Vec<FrontendDiagnostic> {
     let mut violations = Vec::new();
 
@@ -2528,6 +2543,22 @@ fn quickjs_profile_diagnostics(nodes: &AstNodes<'_>) -> Vec<FrontendDiagnostic> 
                 code: FrontendDiagnosticCode::UnsupportedClassAccessor,
                 message: "QuickJS 2026-06-04 does not support class `accessor` declarations",
             }),
+            AstKind::NumericLiteral(literal)
+                if is_annex_b_legacy_octal_numeric_literal(literal) =>
+            {
+                violations.push(ProfileViolation {
+                    span: literal.span,
+                    code: FrontendDiagnosticCode::UnsupportedAnnexBLegacyOctal,
+                    message: "Annex B legacy octal literals are not supported",
+                });
+            }
+            AstKind::StringLiteral(literal) if is_annex_b_legacy_octal_escape(literal) => {
+                violations.push(ProfileViolation {
+                    span: literal.span,
+                    code: FrontendDiagnosticCode::UnsupportedAnnexBLegacyOctal,
+                    message: "Annex B legacy octal escapes are not supported",
+                });
+            }
             AstKind::WithClause(clause) if clause.keyword == WithClauseKeyword::Assert => {
                 violations.push(ProfileViolation {
                     span: clause.span,
@@ -2563,6 +2594,43 @@ fn quickjs_profile_diagnostics(nodes: &AstNodes<'_>) -> Vec<FrontendDiagnostic> 
             }],
         })
         .collect()
+}
+
+fn is_annex_b_legacy_octal_numeric_literal(literal: &oxc_ast::ast::NumericLiteral<'_>) -> bool {
+    let Some(raw) = literal.raw.as_ref().map(oxc_ast::ast::Str::as_str) else {
+        return false;
+    };
+    let bytes = raw.as_bytes();
+    bytes.len() > 1 && bytes[0] == b'0' && bytes[1].is_ascii_digit()
+}
+
+fn is_annex_b_legacy_octal_escape(literal: &oxc_ast::ast::StringLiteral<'_>) -> bool {
+    let Some(raw) = literal.raw.as_ref().map(oxc_ast::ast::Str::as_str) else {
+        return false;
+    };
+    let bytes = raw.as_bytes();
+    let mut index = 1;
+    while index + 1 < bytes.len() {
+        if bytes[index] != b'\\' {
+            index += 1;
+            continue;
+        }
+        let mut slash_count = 1;
+        index += 1;
+        while index < bytes.len() && bytes[index] == b'\\' {
+            slash_count += 1;
+            index += 1;
+        }
+        if slash_count % 2 == 1
+            && index < bytes.len()
+            && (matches!(bytes[index], b'1'..=b'9')
+                || (bytes[index] == b'0' && bytes.get(index + 1).is_some_and(u8::is_ascii_digit)))
+        {
+            return true;
+        }
+        index += 1;
+    }
+    false
 }
 
 fn push_call_argument_prefix_violation(
@@ -2929,7 +2997,7 @@ fn parse_in_mode<'arena, 'scope>(
         | CompilationGoal::DynamicFunction(_) => (false, false),
     };
     let mut parsed = if allow_top_level_await {
-        parse_async_global_script(allocator, source_text, mode)?
+        parse_async_global_script(allocator, source_text, mode)
     } else {
         Parser::new(allocator, source_text, mode.source_type())
             .with_options(OxcParseOptions::default())
@@ -2942,6 +3010,16 @@ fn parse_in_mode<'arena, 'scope>(
             FrontendDiagnosticCode::OxcParser,
             parsed.diagnostics,
             parsed.panicked,
+        ));
+    }
+    if let Some(comment) = parsed
+        .program
+        .comments
+        .iter()
+        .find(|comment| is_script_html_comment(source_text, comment.span))
+    {
+        return Err(FrontendError::unsupported_annex_b_html_comment(
+            comment.span,
         ));
     }
     if allow_top_level_await {
@@ -3033,12 +3111,12 @@ fn parse_async_global_script<'arena>(
     allocator: &'arena Allocator,
     source_text: &'arena str,
     mode: ParseMode,
-) -> Result<ParserReturn<'arena>, FrontendError> {
+) -> ParserReturn<'arena> {
     let module = Parser::new(allocator, source_text, ParseMode::Module.source_type())
         .with_options(OxcParseOptions::default())
         .parse();
     if !module.panicked && module.diagnostics.is_empty() {
-        return Ok(module);
+        return module;
     }
 
     let fallback = Parser::new(
@@ -3049,83 +3127,10 @@ fn parse_async_global_script<'arena>(
     .with_options(OxcParseOptions::default())
     .parse();
     if !fallback.panicked && fallback.diagnostics.is_empty() {
-        return Ok(fallback);
+        return fallback;
     }
 
-    let Some(sanitized_source) =
-        sanitize_script_html_comments(source_text, &fallback.program.comments)?
-    else {
-        return Ok(module);
-    };
-    let sanitized_source = allocator.alloc_str(&sanitized_source);
-    let mut sanitized = Parser::new(allocator, sanitized_source, ParseMode::Module.source_type())
-        .with_options(OxcParseOptions::default())
-        .parse();
-    if sanitized.panicked || !sanitized.diagnostics.is_empty() {
-        return Ok(module);
-    }
-
-    sanitized.program.source_text = source_text;
-    for comment in fallback
-        .program
-        .comments
-        .iter()
-        .filter(|comment| is_script_html_comment(source_text, comment.span))
-        .copied()
-    {
-        let insertion = sanitized
-            .program
-            .comments
-            .partition_point(|existing| existing.span.start < comment.span.start);
-        sanitized.program.comments.insert(insertion, comment);
-    }
-    Ok(sanitized)
-}
-
-fn sanitize_script_html_comments(
-    source_text: &str,
-    comments: &[Comment],
-) -> Result<Option<String>, FrontendError> {
-    let contains_html_comment = comments
-        .iter()
-        .any(|comment| is_script_html_comment(source_text, comment.span));
-    if !contains_html_comment {
-        return Ok(None);
-    }
-
-    let mut sanitized = String::new();
-    sanitized
-        .try_reserve_exact(source_text.len())
-        .map_err(|_| {
-            FrontendError::from_limit(FrontendLimitError::AsyncScriptAllocationFailed {
-                requested: source_text.len(),
-            })
-        })?;
-    let mut copied_until = 0;
-    for comment in comments {
-        if !is_script_html_comment(source_text, comment.span) {
-            continue;
-        }
-        let start = comment.span.start as usize;
-        let end = comment.span.end as usize;
-        if start < copied_until || end > source_text.len() {
-            continue;
-        }
-        sanitized.push_str(&source_text[copied_until..start]);
-        for character in source_text[start..end].chars() {
-            if matches!(character, '\r' | '\n' | '\u{2028}' | '\u{2029}') {
-                sanitized.push(character);
-            } else {
-                for _ in 0..character.len_utf8() {
-                    sanitized.push(' ');
-                }
-            }
-        }
-        copied_until = end;
-    }
-    sanitized.push_str(&source_text[copied_until..]);
-    debug_assert_eq!(sanitized.len(), source_text.len());
-    Ok(Some(sanitized))
+    module
 }
 
 fn is_script_html_comment(source_text: &str, span: Span) -> bool {

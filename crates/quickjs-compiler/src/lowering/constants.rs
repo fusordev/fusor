@@ -800,12 +800,6 @@ impl<'arena> CompilationContext<'_, 'arena, '_> {
                 span: property.key.span(),
             },
         )?;
-        if key.value.code_units().eq("__proto__".encode_utf16()) {
-            return super::unsupported(
-                super::UnsupportedLeafFeature::InferredFunctionName,
-                class.span,
-            );
-        }
         Ok((key.value, key.span))
     }
 

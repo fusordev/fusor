@@ -35,8 +35,6 @@
 //! slice(-3,-1) => "ll"   slice(3,1) => ""     slice(-99,99) => "hello"
 //! substring(1,3) => "el" substring(3,1) => "el"
 //! substring(-1,99) => "hello"      substring(NaN,2) => "he"
-//! substr(1,2) => "el"    substr(-3,2) => "ll" substr(1) => "ello"
-//! substr(1,-1) => ""     substr(-99,2) => "he"
 //! concat(" ","world",1,null) => "hello world1null"
 //! "ab".repeat(3) => "ababab"       "ab".repeat(0) => ""
 //! "ab".repeat(1.9) => "ab"
@@ -53,7 +51,7 @@
 //! String.prototype.charAt.call(null,0) !! TypeError: null or undefined are forbidden
 //! String.prototype.charAt.call(12345,2) => "3"
 //! slice(1,undefined) => "ello"     substring(1,undefined) => "ello"
-//! substr(1,undefined) => "ello"    lastIndexOf("l",undefined) => 3
+//! lastIndexOf("l",undefined) => 3
 //! padStart(8,undefined) => "   hello"
 //! "ab".repeat(undefined) => ""     concat(undefined) => "helloundefined"
 //! at(undefined) => "h"             charAt(undefined) => "h"
@@ -282,11 +280,10 @@ fn the_search_methods_match_the_oracle() {
     ]);
 }
 
-/// `slice`, `substring`, and `substr` resolve their endpoints differently.
+/// `slice` and `substring` resolve their endpoints differently.
 ///
 /// `slice` accepts negative endpoints and yields the empty string when they
-/// cross; `substring` clamps and then swaps them; the Annex B `substr` takes a
-/// length rather than an end index.
+/// cross; `substring` clamps and then swaps them.
 #[test]
 fn the_extraction_methods_resolve_endpoints_differently() {
     assert_all(&[
@@ -304,13 +301,6 @@ fn the_extraction_methods_resolve_endpoints_differently() {
         ("'hello'.substring(-1, 99)", "hello"),
         ("'hello'.substring(NaN, 2)", "he"),
         ("'hello'.substring(1, undefined)", "ello"),
-        ("'hello'.substr(1, 2)", "el"),
-        ("'hello'.substr(-3, 2)", "ll"),
-        ("'hello'.substr(1)", "ello"),
-        // A negative length yields the empty string.
-        ("'hello'.substr(1, -1)", ""),
-        ("'hello'.substr(-99, 2)", "he"),
-        ("'hello'.substr(1, undefined)", "ello"),
     ]);
 }
 
@@ -813,9 +803,8 @@ fn the_installed_methods_have_the_pinned_shape() {
     assert_all(&[
         ("String.prototype.charAt.name", "charAt"),
         ("String.prototype.charAt.length", "1"),
-        // `slice`, `substr`, and `substring` are the arity-2 methods.
+        // `slice` and `substring` are the arity-2 extraction methods.
         ("String.prototype.slice.length", "2"),
-        ("String.prototype.substr.length", "2"),
         ("String.prototype.substring.length", "2"),
         ("String.prototype.replace.length", "2"),
         ("String.prototype.replace.name", "replace"),
@@ -855,40 +844,14 @@ fn the_installed_methods_have_the_pinned_shape() {
 }
 
 #[test]
-fn annex_b_html_methods_cover_the_complete_create_html_surface() {
-    assert_eq!(
-        rendered(
-            "(function(){let s='x';return [s.anchor('a\\\"b'),s.big(),s.blink(),s.bold(),\
-             s.fixed(),s.fontcolor('r\\\"d'),s.fontsize(3),s.italics(),s.link('u\\\"v'),\
-             s.small(),s.strike(),s.sub(),s.sup()].join('|');})()"
-        ),
-        "<a name=\"a&quot;b\">x</a>|<big>x</big>|<blink>x</blink>|<b>x</b>|\
-         <tt>x</tt>|<font color=\"r&quot;d\">x</font>|<font size=\"3\">x</font>|\
-         <i>x</i>|<a href=\"u&quot;v\">x</a>|<small>x</small>|<strike>x</strike>|\
-         <sub>x</sub>|<sup>x</sup>"
-    );
-}
-
-#[test]
-fn annex_b_html_conversion_order_and_trim_aliases_follow_the_specification() {
-    assert_eq!(
-        rendered(
-            "(function(){\
-                let log='';\
-                let receiver={toString(){log+='receiver|';return 'x';}};\
-                let attribute={toString(){log+='attribute';return 'v\\\"q';}};\
-                let html=String.prototype.anchor.call(receiver,attribute);\
-                let nullish=false;\
-                try{String.prototype.link.call(null,{toString(){log+='bad';return 'u';}});}\
-                catch(error){nullish=error.name==='TypeError';}\
-                return html+'#'+log+'#'+nullish+'#'+\
-                    (String.prototype.trimEnd===String.prototype.trimRight)+'#'+\
-                    (String.prototype.trimStart===String.prototype.trimLeft)+'#'+\
-                    String.prototype.trimRight.name+'#'+String.prototype.trimLeft.name;\
-            })()"
-        ),
-        "<a name=\"v&quot;q\">x</a>#receiver|attribute#true#true#true#trimEnd#trimStart"
-    );
+fn annex_b_string_extensions_are_absent() {
+    assert_all(&[
+        ("typeof String.prototype.substr", "undefined"),
+        ("typeof String.prototype.anchor", "undefined"),
+        ("typeof String.prototype.fontcolor", "undefined"),
+        ("typeof String.prototype.trimRight", "undefined"),
+        ("typeof String.prototype.trimLeft", "undefined"),
+    ]);
 }
 
 #[test]
@@ -896,32 +859,11 @@ fn supported_string_prototype_names_preserve_the_pinned_quickjs_order() {
     assert_eq!(
         rendered("Object.getOwnPropertyNames(String.prototype).join('|')"),
         "length|at|charCodeAt|charAt|concat|codePointAt|isWellFormed|toWellFormed|\
-         indexOf|lastIndexOf|includes|endsWith|startsWith|match|matchAll|search|split|substring|substr|slice|repeat|\
-         replace|replaceAll|padEnd|padStart|trim|trimEnd|trimRight|trimStart|trimLeft|toString|\
-         valueOf|toLowerCase|toUpperCase|toLocaleLowerCase|toLocaleUpperCase|anchor|big|\
-         blink|bold|fixed|fontcolor|fontsize|italics|link|small|strike|sub|sup|\
+         indexOf|lastIndexOf|includes|endsWith|startsWith|match|matchAll|search|split|substring|slice|repeat|\
+         replace|replaceAll|padEnd|padStart|trim|trimEnd|trimStart|toString|\
+         valueOf|toLowerCase|toUpperCase|toLocaleLowerCase|toLocaleUpperCase|\
          constructor|normalize|localeCompare"
     );
-    assert_all(&[
-        ("String.prototype.anchor.length", "1"),
-        ("String.prototype.anchor.name", "anchor"),
-        ("String.prototype.big.length", "0"),
-        ("String.prototype.fontcolor.length", "1"),
-        ("String.prototype.fontsize.length", "1"),
-        ("String.prototype.link.length", "1"),
-        (
-            "Object.getOwnPropertyDescriptor(String.prototype,'anchor').enumerable",
-            "false",
-        ),
-        (
-            "Object.getOwnPropertyDescriptor(String.prototype,'anchor').writable",
-            "true",
-        ),
-        (
-            "Object.getOwnPropertyDescriptor(String.prototype,'anchor').configurable",
-            "true",
-        ),
-    ]);
 }
 
 #[test]

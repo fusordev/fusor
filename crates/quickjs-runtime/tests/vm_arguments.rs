@@ -437,11 +437,11 @@ fn static_anonymous_function_data_properties_receive_canonical_names() {
             };\
             const descriptor=Object.getOwnPropertyDescriptor(object.identifier,'name');\
             return object.identifier.name+':'+object.quoted.name+':'+object[1].name+':'+\
-                (Object.getPrototypeOf(object).name==='')+':'+\
+                object.__proto__.name+':'+\
                 descriptor.writable+descriptor.enumerable+descriptor.configurable;}\
          return inspect();",
     );
-    assert_eq!(result, "identifier:quoted:1:true:falsefalsetrue");
+    assert_eq!(result, "identifier:quoted:1:__proto__:falsefalsetrue");
 }
 
 #[test]

@@ -143,7 +143,6 @@ pub(in crate::runtime) enum RealmNameId {
     ObjectStatic(NativeFunctionKind),
     BigIntStatic(NativeFunctionKind),
     StringMethod(StringMethod),
-    StringAlias(&'static str),
     NumberValue(&'static str),
     NumberPredicate(NumberPredicate),
     StringStatic(StringMethod),

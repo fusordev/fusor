@@ -515,25 +515,6 @@ fn finish_string_method(
             };
             StoredValue::String(subject.slice(start..end)?)
         }
-        StringMethod::Substr => {
-            // The Annex B `substr` takes a length rather than an end index, and
-            // a negative start counts from the end.
-            let start = relative_bound(argument(0)?.integer()?, length);
-            let count = match argument(1)? {
-                ConvertedArgument::Absent => f64::from(length - start),
-                converted => converted.integer()?,
-            };
-            let available = f64::from(length - start);
-            let count = count.clamp(0.0, available);
-            // The clamp proves the value is a non-negative integer below 2^32.
-            #[expect(
-                clippy::cast_possible_truncation,
-                clippy::cast_sign_loss,
-                reason = "the preceding clamp bounds the count by the remaining length"
-            )]
-            let count = count as u32;
-            StoredValue::String(subject.slice(start..start + count)?)
-        }
         StringMethod::Repeat => {
             let count = argument(0)?.integer()?;
             // A negative or infinite count is a `RangeError`, which the oracle
@@ -591,14 +572,6 @@ fn finish_string_method(
                 }
             }
             StoredValue::String(subject.slice(start..end)?)
-        }
-        StringMethod::Html(method) => {
-            let attribute = if method.attribute_name().is_some() {
-                Some(argument(0)?.text()?)
-            } else {
-                None
-            };
-            StoredValue::String(create_html(subject, method, attribute, execution_budget)?)
         }
         // The two `String` statics ignore `subject` and build their result from
         // the converted arguments alone. They differ in coercion and range:
@@ -718,80 +691,6 @@ fn finish_string_method(
         }
     };
     Ok(NativeDispatch::Immediate(value))
-}
-
-/// Implements Annex B's `CreateHTML` abstract operation over exact UTF-16 code
-/// units. Only quotation marks in an attribute value are escaped; lone
-/// surrogates and every other code unit remain unchanged.
-fn create_html(
-    subject: &JsString,
-    method: StringHtmlMethod,
-    attribute: Option<&JsString>,
-    execution_budget: &mut ExecutionBudget,
-) -> Result<JsString, NativeFailure> {
-    const QUOTE_ESCAPE: &str = "&quot;";
-
-    let tag = method.tag_name();
-    let attribute_name = method.attribute_name();
-    let escaped_attribute_len = attribute.map_or(0_u64, |value| {
-        value.code_units().fold(0_u64, |length, unit| {
-            length.saturating_add(if unit == u16::from(b'\"') { 6 } else { 1 })
-        })
-    });
-    let requested = u64::from(subject.len())
-        .saturating_add(usize_to_u64(tag.len()).saturating_mul(2))
-        .saturating_add(5)
-        .saturating_add(attribute_name.map_or(0_u64, |name| {
-            usize_to_u64(name.len())
-                .saturating_add(4)
-                .saturating_add(escaped_attribute_len)
-        }));
-    if requested > u64::from(MAX_STRING_CODE_UNITS) {
-        return Err(JsStringError::TooLong {
-            requested,
-            maximum: MAX_STRING_CODE_UNITS,
-        }
-        .into());
-    }
-    execution_budget.charge_instructions(
-        u64::from(subject.len())
-            .saturating_add(attribute.map_or(0, |value| u64::from(value.len())))
-            .saturating_add(requested)
-            .saturating_add(1),
-    )?;
-
-    let capacity = usize::try_from(requested).map_err(|_| JsStringError::TooLong {
-        requested,
-        maximum: MAX_STRING_CODE_UNITS,
-    })?;
-    let mut output = Vec::new();
-    output
-        .try_reserve_exact(capacity)
-        .map_err(|_| JsStringError::AllocationFailed {
-            additional: capacity,
-        })?;
-    output.push(u16::from(b'<'));
-    output.extend(tag.bytes().map(u16::from));
-    if let (Some(name), Some(value)) = (attribute_name, attribute) {
-        output.push(u16::from(b' '));
-        output.extend(name.bytes().map(u16::from));
-        output.extend([u16::from(b'='), u16::from(b'\"')]);
-        for unit in value.code_units() {
-            if unit == u16::from(b'\"') {
-                output.extend(QUOTE_ESCAPE.bytes().map(u16::from));
-            } else {
-                output.push(unit);
-            }
-        }
-        output.push(u16::from(b'\"'));
-    }
-    output.push(u16::from(b'>'));
-    output.extend(subject.code_units());
-    output.extend([u16::from(b'<'), u16::from(b'/')]);
-    output.extend(tag.bytes().map(u16::from));
-    output.push(u16::from(b'>'));
-    debug_assert_eq!(output.len(), capacity);
-    Ok(JsString::from_code_units(output)?)
 }
 
 /// One of the four normalization forms admitted by ECMA-262.
@@ -997,7 +896,7 @@ fn clamp_to_length(value: f64, length: u32) -> u32 {
     clamped
 }
 
-/// Resolves a relative endpoint, as `slice` and `substr` define it.
+/// Resolves a relative endpoint for `slice`.
 fn relative_bound(value: f64, length: u32) -> u32 {
     let resolved = if value < 0.0 {
         f64::from(length) + value

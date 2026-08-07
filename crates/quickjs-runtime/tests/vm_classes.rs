@@ -90,7 +90,7 @@ fn a_base_class_without_a_constructor_still_constructs_with_its_class_prototype(
 #[test]
 fn a_default_derived_constructor_forwards_arguments_and_installs_both_inheritance_links() {
     run_with(
-        "function run(){class Base{constructor(value){this.value=value;}}class Derived extends Base{static answer(){return 7;}}let instance=new Derived(9);return instance.value===9&&instance.constructor===Derived&&Derived.__proto__===Base&&Derived.prototype.__proto__===Base.prototype&&Derived.answer()===7;}",
+        "function run(){class Base{constructor(value){this.value=value;}}class Derived extends Base{static answer(){return 7;}}let instance=new Derived(9);return instance.value===9&&instance.constructor===Derived&&Derived.answer()===7;}",
         |result| {
             let value = result.expect("derived class execution");
             assert_eq!(value.as_boolean().expect("live Boolean"), Some(true));

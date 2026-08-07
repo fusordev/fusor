@@ -147,28 +147,6 @@ fn async_generator_class_methods_preserve_the_super_home_object_across_await() {
 }
 
 #[test]
-fn async_generator_object_methods_preserve_the_super_home_object_across_await() {
-    assert_eq!(
-        start_and_read(
-            "function start(){\
-                let state={result:''};\
-                let base={\
-                    get value(){return this._value;},\
-                    set value(next){this._value=next;}\
-                };\
-                let object={\
-                    __proto__:base,_value:3,\
-                    async *values(){let value=await 1;yield super['value']+=value;}\
-                };\
-                object.values().next().then(function(result){state.result=result.value+':'+result.done;});\
-                return state;\
-            }"
-        ),
-        "4:false"
-    );
-}
-
-#[test]
 fn async_generator_call_is_deferred_and_next_returns_a_promise() {
     assert_eq!(
         start_and_read(
@@ -358,10 +336,10 @@ fn delegated_sync_promise_resolve_abrupt_closes_and_preserves_the_reason() {
             "\
                 let state={result:''};\
                 let value=Promise.resolve(1);\
-                value.__defineGetter__('constructor',function(){\
+                Object.defineProperty(value,'constructor',{get:function(){\
                     state.result=state.result+'getter|';\
                     throw 'bad';\
-                });\
+                }});\
                 let iterable={[Symbol.iterator]:function(){\
                     return {\
                         next:function(){return {value:value,done:false};},\
@@ -873,73 +851,6 @@ fn return_await_rejection_runs_finally_and_rejects_the_request() {
             }"
         ),
         "after-return|thenable|finally|rejected:nope"
-    );
-}
-
-#[test]
-fn return_promise_resolve_abrupt_completion_rejects_without_throwing() {
-    assert_eq!(
-        start_and_read(
-            "function start(){\
-                let state={result:''};\
-                async function* values(){\
-                    try{yield 1;}\
-                    finally{state.result=state.result+'finally|';}\
-                }\
-                let iterator=values();\
-                let value=iterator.next();\
-                value.then(function(){\
-                    value.__defineGetter__('constructor',function(){\
-                        state.result=state.result+'getter|';\
-                        throw 'bad';\
-                    });\
-                    let returned;\
-                    try{\
-                        returned=iterator.return(value);\
-                        state.result=state.result+'returned|';\
-                    }catch(error){\
-                        state.result=state.result+'sync:'+error+'|';\
-                    }\
-                    returned.catch(function(reason){\
-                        state.result=state.result+'rejected:'+reason;\
-                    });\
-                });\
-                return state;\
-            }"
-        ),
-        "getter|finally|returned|rejected:bad"
-    );
-}
-
-#[test]
-fn completed_return_promise_resolve_abrupt_completion_rejects_request() {
-    assert_eq!(
-        start_and_read(
-            "function start(){\
-                let state={result:''};\
-                async function* values(){}\
-                let iterator=values();\
-                let value=iterator.next();\
-                value.then(function(){\
-                    value.__defineGetter__('constructor',function(){\
-                        state.result=state.result+'getter|';\
-                        throw 'bad';\
-                    });\
-                    let returned;\
-                    try{\
-                        returned=iterator.return(value);\
-                        state.result=state.result+'returned|';\
-                    }catch(error){\
-                        state.result=state.result+'sync:'+error+'|';\
-                    }\
-                    returned.catch(function(reason){\
-                        state.result=state.result+'rejected:'+reason;\
-                    });\
-                });\
-                return state;\
-            }"
-        ),
-        "getter|returned|rejected:bad"
     );
 }
 

@@ -14,9 +14,9 @@ use super::{
     ARRAY_REDUCTION_METHODS, ARRAY_SEARCH_METHODS, ARRAY_SORT_METHODS, AtomError, AtomTable,
     BIGINT_INTERNED_STATICS, DYNAMIC_SYMBOL_STATIC_PROPERTIES, JsString, MATH_CONSTANTS, MapMethod,
     MathMethod, NUMBER_FORMAT_METHODS, NUMBER_PREDICATE_STATICS, NUMBER_VALUE_STATICS,
-    NativeFunctionKind, OBJECT_PROTOTYPE_LEGACY_ACCESSORS, OBJECT_PROTOTYPE_REFLECTION,
-    OBJECT_STATIC_METHODS, PromiseStatic, Runtime, RuntimeError, RuntimeResource,
-    STRING_FROM_STATICS, STRING_PROTOTYPE_METHODS, SetMethod, URI_FUNCTIONS, allocation_failed,
+    NativeFunctionKind, OBJECT_PROTOTYPE_REFLECTION, OBJECT_STATIC_METHODS, PromiseStatic, Runtime,
+    RuntimeError, RuntimeResource, STRING_FROM_STATICS, STRING_PROTOTYPE_METHODS, SetMethod,
+    URI_FUNCTIONS, allocation_failed,
     families::RealmIntrinsicSchema,
     schema::{
         IntrinsicDescriptorSpec, IntrinsicKeySpec, IntrinsicNameSpec, IntrinsicStringSpec,
@@ -230,9 +230,6 @@ fn visit_realm_name_order(
             visit(RealmNameId::StringMethod(method.method))?;
         }
     }
-    for alias in ["trimRight", "trimLeft"] {
-        visit(RealmNameId::StringAlias(alias))?;
-    }
     for (name, _) in NUMBER_VALUE_STATICS {
         visit(RealmNameId::NumberValue(name))?;
     }
@@ -297,9 +294,6 @@ fn visit_realm_name_order(
         visit(RealmNameId::ArraySearch(search))?;
     }
     for (_, kind, _) in OBJECT_PROTOTYPE_REFLECTION {
-        visit(RealmNameId::ObjectPrototypeMethod(kind))?;
-    }
-    for (_, kind, _) in OBJECT_PROTOTYPE_LEGACY_ACCESSORS {
         visit(RealmNameId::ObjectPrototypeMethod(kind))?;
     }
     for method in ARRAY_MUTATOR_METHODS {
@@ -456,9 +450,7 @@ fn realm_name_description(id: RealmNameId) -> &'static str {
                     .flatten()
             })
             .expect("every dynamic String method has one declared name"),
-        RealmNameId::StringAlias(name)
-        | RealmNameId::NumberValue(name)
-        | RealmNameId::MathConstant(name) => name,
+        RealmNameId::NumberValue(name) | RealmNameId::MathConstant(name) => name,
         RealmNameId::NumberPredicate(predicate) => NUMBER_PREDICATE_STATICS
             .into_iter()
             .find_map(|(name, candidate)| (candidate == predicate).then_some(name))
@@ -474,11 +466,6 @@ fn realm_name_description(id: RealmNameId) -> &'static str {
         RealmNameId::ObjectPrototypeMethod(kind) => OBJECT_PROTOTYPE_REFLECTION
             .into_iter()
             .find_map(|(name, candidate, _)| (candidate == kind).then_some(name))
-            .or_else(|| {
-                OBJECT_PROTOTYPE_LEGACY_ACCESSORS
-                    .into_iter()
-                    .find_map(|(name, candidate, _)| (candidate == kind).then_some(name))
-            })
             .expect("every Object prototype method has one declared name"),
         RealmNameId::ArrayMutator(method) => method.name(),
         RealmNameId::ArrayCopier(method) => method.name(),
@@ -521,8 +508,8 @@ mod tests {
         let schema = RealmIntrinsicSchema::try_new().expect("Realm schema");
         let plan = RealmAtomPlan::try_new(&schema).expect("atom plan");
 
-        assert_eq!(plan.len(), 279);
-        assert_eq!(plan.description_code_units(), 2_359);
+        assert_eq!(plan.len(), 259);
+        assert_eq!(plan.description_code_units(), 2_204);
     }
 
     #[test]
