@@ -5821,6 +5821,17 @@ fn verify_object_definition_provenance(
                     return Err(append_stack_error(id, decoded.pc(), opcode));
                 }
             }
+            FinalOpcode::DefinePrivateField
+                if !matches!(
+                    state.get(state.len().saturating_sub(3)),
+                    Some(
+                        ObjectDefinitionProvenance::ClassConstructor(_)
+                            | ObjectDefinitionProvenance::ClassFieldReceiver(_)
+                    )
+                ) =>
+            {
+                return Err(object_definition_error(id, decoded.pc()));
+            }
             FinalOpcode::Append if append_pair_for_append(&state).is_none() => {
                 return Err(append_stack_error(id, decoded.pc(), opcode));
             }
@@ -6111,7 +6122,10 @@ fn transfer_object_definition_provenance(
                 state.push(key);
             }
         }
-        FinalOpcode::DefineMethodComputed => {
+        // A computed method definition and a private data-field definition
+        // each preserve their base below key/name and value. The latter has
+        // already been restricted to a certified class target above.
+        FinalOpcode::DefinePrivateField | FinalOpcode::DefineMethodComputed => {
             let base = retained_object_definition_provenance(state[state.len() - 3]);
             state.truncate(state.len() - 3);
             state.push(base);

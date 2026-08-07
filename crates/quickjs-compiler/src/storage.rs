@@ -607,8 +607,8 @@ pub(crate) struct OxcIdentityMap {
     /// re-evaluates an observable key expression.
     pub(crate) class_field_key_bindings: HashMap<NodeId, BindingId>,
     /// The immutable class-scope private-name cell for each supported private
-    /// instance element. Constructors and member closures capture the cell so
-    /// each evaluation of a class expression receives a fresh identity.
+    /// field or instance method. Constructors and member closures capture the
+    /// cell when they need the fresh identity from a class evaluation.
     pub(crate) class_private_name_bindings: HashMap<NodeId, BindingId>,
     /// The immutable class-scope method cell for every supported private
     /// instance method. Constructors capture it so every branded instance
@@ -1384,8 +1384,7 @@ impl<'unit, 'arena, 'scope> Planner<'unit, 'arena, 'scope> {
             let nodes = self.unit.semantic().nodes();
             let span = match nodes.kind(node_id) {
                 AstKind::PropertyDefinition(field)
-                    if !field.r#static
-                        && matches!(field.key, PropertyKey::PrivateIdentifier(_)) =>
+                    if matches!(field.key, PropertyKey::PrivateIdentifier(_)) =>
                 {
                     field.span
                 }
@@ -1398,7 +1397,7 @@ impl<'unit, 'arena, 'scope> Planner<'unit, 'arena, 'scope> {
                 }
                 _ => {
                     return Err(CompilerError::SemanticInvariant {
-                        invariant: "private-name binding belongs to a supported private instance element",
+                        invariant: "private-name binding belongs to a supported private element",
                         span: None,
                     });
                 }
@@ -2563,8 +2562,8 @@ impl<'unit, 'arena, 'scope> Planner<'unit, 'arena, 'scope> {
         Ok(requests)
     }
 
-    /// Creates one immutable class-scope cell for every supported private
-    /// instance element. `private_symbol` fills the cell once during
+    /// Creates one immutable class-scope cell for every supported private data
+    /// field or instance method. `private_symbol` fills the cell once during
     /// `ClassDefinitionEvaluation`; no source-visible binding carries the
     /// identity.
     fn add_class_private_name_bindings(
@@ -2580,8 +2579,7 @@ impl<'unit, 'arena, 'scope> Planner<'unit, 'arena, 'scope> {
             for element in &class.body.body {
                 let (element_node, identifier) = match element {
                     ClassElement::PropertyDefinition(field)
-                        if !field.r#static
-                            && matches!(field.key, PropertyKey::PrivateIdentifier(_)) =>
+                        if matches!(field.key, PropertyKey::PrivateIdentifier(_)) =>
                     {
                         let PropertyKey::PrivateIdentifier(identifier) = &field.key else {
                             unreachable!("private property key was matched")
@@ -2696,27 +2694,29 @@ impl<'unit, 'arena, 'scope> Planner<'unit, 'arena, 'scope> {
         let mut requests = Vec::new();
 
         for (&element_node, &binding) in class_private_name_bindings {
-            let element_span = match nodes.kind(element_node) {
+            let (element_span, capture_in_constructor) = match nodes.kind(element_node) {
                 AstKind::PropertyDefinition(field)
-                    if !field.r#static
-                        && matches!(field.key, PropertyKey::PrivateIdentifier(_)) =>
+                    if matches!(field.key, PropertyKey::PrivateIdentifier(_)) =>
                 {
-                    field.span
+                    (field.span, !field.r#static)
                 }
                 AstKind::MethodDefinition(method)
                     if !method.r#static
                         && method.kind == MethodDefinitionKind::Method
                         && matches!(method.key, PropertyKey::PrivateIdentifier(_)) =>
                 {
-                    method.span
+                    (method.span, true)
                 }
                 _ => {
                     return Err(CompilerError::SemanticInvariant {
-                        invariant: "private-name binding belongs to a supported private instance element",
+                        invariant: "private-name binding belongs to a supported private element",
                         span: None,
                     });
                 }
             };
+            if !capture_in_constructor {
+                continue;
+            }
             let AstKind::ClassBody(body) = nodes.parent_kind(element_node) else {
                 return Err(CompilerError::SemanticInvariant {
                     invariant: "private instance element belongs to a class body",
