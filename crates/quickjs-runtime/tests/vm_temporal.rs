@@ -225,6 +225,89 @@ fn plain_date_time_constructor_preserves_order_defaults_and_branding() {
 }
 
 #[test]
+fn plain_date_time_from_compare_and_equals_preserve_conversion_order() {
+    assert_eq!(
+        rendered(
+            "var source=new Temporal.PlainDateTime(2021,2,3,4,5,6,7,8,9);
+             var cloned=Temporal.PlainDateTime.from(source);
+             var date=Temporal.PlainDateTime.from(new Temporal.PlainDate(2021,2,3));
+             var parsed=Temporal.PlainDateTime.from('2021-02-03T04:05:06.007008009');
+             return [Temporal.PlainDateTime.from.name,Temporal.PlainDateTime.from.length,
+               Temporal.PlainDateTime.compare.name,Temporal.PlainDateTime.compare.length,
+               Temporal.PlainDateTime.prototype.equals.name,Temporal.PlainDateTime.prototype.equals.length,
+               cloned.toString(),date.toString(),parsed.toString(),
+               Temporal.PlainDateTime.compare(date,source),
+               Temporal.PlainDateTime.compare(source,'2021-02-03T04:05:06.007008009'),
+               source.equals('2021-02-03T04:05:06.007008009'),
+               source.equals({year:2021,month:2,day:3,hour:4,minute:5,second:6,millisecond:7,microsecond:8,nanosecond:8})].join('|');"
+        ),
+        "from|1|compare|2|equals|1|2021-02-03T04:05:06.007008009|2021-02-03T00:00:00|2021-02-03T04:05:06.007008009|-1|0|true|false"
+    );
+    assert_eq!(
+        rendered(
+            "var log=[];
+             function number(name,value){return {valueOf:function(){log.push(name+' number');return value}}}
+             var fields={
+               get calendar(){log.push('calendar');return 'iso8601'},
+               get day(){log.push('day');return number('day',31.8)},
+               get hour(){log.push('hour');return number('hour',23.8)},
+               get microsecond(){log.push('microsecond');return number('microsecond',8.8)},
+               get millisecond(){log.push('millisecond');return number('millisecond',7.8)},
+               get minute(){log.push('minute');return number('minute',59.8)},
+               get month(){log.push('month');return number('month',2.8)},
+               get monthCode(){log.push('monthCode');return {toString:function(){log.push('monthCode string');return 'M02'}}},
+               get nanosecond(){log.push('nanosecond');return number('nanosecond',9.8)},
+               get second(){log.push('second');return number('second',58.8)},
+               get year(){log.push('year');return number('year',2020.8)}
+             };
+             var options={get overflow(){log.push('overflow');return {toString:function(){log.push('overflow string');return 'constrain'}}}};
+             var result=Temporal.PlainDateTime.from(fields,options);
+             return [result.toString(),log.join(',')].join('|');"
+        ),
+        "2020-02-29T23:59:58.007008009|calendar,day,day number,hour,hour number,microsecond,microsecond number,millisecond,millisecond number,minute,minute number,month,month number,monthCode,monthCode string,nanosecond,nanosecond number,second,second number,year,year number,overflow,overflow string"
+    );
+    assert_eq!(
+        thrown(
+            "return Temporal.PlainDateTime.from({year:2021,month:2,day:30},{overflow:'reject'});"
+        ),
+        ExceptionKind::RangeError
+    );
+    assert_eq!(
+        thrown("return new Temporal.PlainDateTime(2021,1,1).equals(0);"),
+        ExceptionKind::TypeError
+    );
+    assert_eq!(
+        thrown(
+            "return Temporal.PlainDateTime.from(new Temporal.PlainDateTime(2021,1,1),{overflow:Symbol()});"
+        ),
+        ExceptionKind::TypeError
+    );
+    assert_eq!(
+        rendered(
+            "var log=[];
+             var overflow={
+               get valueOf(){log.push('get valueOf');return function(){log.push('call valueOf');return 'wrong'}},
+               get toString(){log.push('get toString');return function(){log.push('call toString');return 'constrain'}}
+             };
+             var result=Temporal.PlainDateTime.from(new Temporal.PlainDateTime(2021,1,1),{overflow:overflow});
+             return [result.toString(),log.join(',')].join('|');"
+        ),
+        "2021-01-01T00:00:00|get toString,call toString"
+    );
+    assert_eq!(
+        rendered(
+            "function kind(overflow){
+               try{Temporal.PlainDateTime.from(new Temporal.PlainDateTime(2021,1,1),{overflow:overflow})}
+               catch(error){return error instanceof TypeError?'type':error instanceof RangeError?'range':'other'}
+               return 'normal'
+             }
+             return [kind(null),kind(true),kind(false),kind(Symbol()),kind(2),kind(2n),kind({})].join('|');"
+        ),
+        "range|range|range|type|range|range|range"
+    );
+}
+
+#[test]
 fn plain_date_constructor_observes_component_and_calendar_conversion_order() {
     assert_eq!(
         rendered(

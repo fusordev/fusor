@@ -556,6 +556,15 @@ pub(super) fn resume_native_continuations(
                     execution_budget,
                 )?
             }
+            NativeContinuation::TemporalPlainDateTimeBag(state) => {
+                advance_temporal_plain_date_time_property_bag(
+                    runtime,
+                    *state,
+                    Some(value),
+                    return_to,
+                    execution_budget,
+                )?
+            }
             NativeContinuation::TemporalPlainDateOptions(state) => {
                 advance_temporal_plain_date_from_options(
                     runtime,
@@ -2626,6 +2635,17 @@ pub(super) fn dispatch_native_call_with_frames(
                 runtime,
                 native.realm,
                 inputs,
+                return_to,
+                origin.unwrap_or_else(native_function_host_origin),
+                execution_budget,
+            )
+        }
+        NativeFunctionKind::TemporalPlainDateTimeStatic(method) => {
+            begin_temporal_plain_date_time_static(
+                runtime,
+                method,
+                native.realm,
+                inputs.arguments,
                 return_to,
                 origin.unwrap_or_else(native_function_host_origin),
                 execution_budget,

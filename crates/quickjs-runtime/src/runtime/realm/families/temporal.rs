@@ -16,7 +16,7 @@ use crate::runtime::realm::{
 use crate::runtime::{
     TemporalDurationPrototypeMethod, TemporalDurationStaticMethod, TemporalInstantPrototypeMethod,
     TemporalInstantStaticMethod, TemporalPlainDatePrototypeMethod, TemporalPlainDateStaticMethod,
-    TemporalPlainDateTimePrototypeMethod,
+    TemporalPlainDateTimePrototypeMethod, TemporalPlainDateTimeStaticMethod,
 };
 
 pub(super) fn visit_objects(visit: ObjectSink<'_>) {
@@ -183,6 +183,21 @@ pub(super) fn visit_functions(visit: FunctionSink<'_>) {
         IntrinsicNameSpec::Literal("PlainDateTime"),
         3,
     ));
+    for method in TemporalPlainDateTimeStaticMethod::ALL {
+        let name = match method {
+            TemporalPlainDateTimeStaticMethod::From => {
+                IntrinsicNameSpec::Predefined(PredefinedAtom::From)
+            }
+            TemporalPlainDateTimeStaticMethod::Compare => {
+                IntrinsicNameSpec::RealmName(RealmNameId::TemporalPlainDateTimeStatic(method))
+            }
+        };
+        visit(ordinary(
+            NativeFunctionKind::TemporalPlainDateTimeStatic(method),
+            name,
+            method.length(),
+        ));
+    }
     for method in TemporalPlainDateTimePrototypeMethod::ALL {
         let name = match method {
             TemporalPlainDateTimePrototypeMethod::ToString => {
@@ -205,7 +220,7 @@ pub(super) fn visit_functions(visit: FunctionSink<'_>) {
         visit(ordinary(
             NativeFunctionKind::TemporalPlainDateTimePrototype(method),
             name,
-            TemporalPlainDateTimePrototypeMethod::length(),
+            method.length(),
         ));
     }
 }
@@ -482,6 +497,21 @@ pub(super) fn visit_properties(visit: PropertySink<'_>) {
         IntrinsicKeySpec::PredefinedString(PredefinedAtom::Constructor),
         NativeFunctionKind::TemporalPlainDateTimeConstructor,
     ));
+    for method_id in TemporalPlainDateTimeStaticMethod::ALL {
+        let key = match method_id {
+            TemporalPlainDateTimeStaticMethod::From => {
+                IntrinsicKeySpec::PredefinedString(PredefinedAtom::From)
+            }
+            TemporalPlainDateTimeStaticMethod::Compare => IntrinsicKeySpec::InternedString(
+                RealmNameId::TemporalPlainDateTimeStatic(method_id),
+            ),
+        };
+        visit(method(
+            plain_date_time_constructor,
+            key,
+            NativeFunctionKind::TemporalPlainDateTimeStatic(method_id),
+        ));
+    }
     for method_id in TemporalPlainDateTimePrototypeMethod::ALL {
         let key = match method_id {
             TemporalPlainDateTimePrototypeMethod::ToString => {

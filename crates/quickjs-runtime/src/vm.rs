@@ -81,9 +81,10 @@ use crate::{
         StringArgument, StringMethod, TemporalDurationPrototypeMethod,
         TemporalDurationStaticMethod, TemporalInstantPrototypeMethod, TemporalInstantStaticMethod,
         TemporalPlainDatePrototypeMethod, TemporalPlainDateStaticMethod,
-        TemporalPlainDateTimePrototypeMethod, TypedArrayElementValue, TypedArrayOwnProperty,
-        TypedArrayPropertyKey, TypedArrayPrototypeMethod, TypedArrayStoreOutcome, TypedArrayView,
-        UriFunction, WeakMapMethod, WeakSetMethod, array_length_from_number, check_execution_limit,
+        TemporalPlainDateTimePrototypeMethod, TemporalPlainDateTimeStaticMethod,
+        TypedArrayElementValue, TypedArrayOwnProperty, TypedArrayPropertyKey,
+        TypedArrayPrototypeMethod, TypedArrayStoreOutcome, TypedArrayView, UriFunction,
+        WeakMapMethod, WeakSetMethod, array_length_from_number, check_execution_limit,
         global_declaration_error, usize_to_u64,
     },
     value::{HeapReference, SlotValue, StoredValue},
@@ -771,6 +772,7 @@ enum NativeContinuation {
     TypedArrayPrototypeFilter(Box<TypedArrayPrototypeFilterState>),
     DateToJson(DateToJsonContinuation),
     TemporalPlainDateBag(Box<TemporalPlainDateBagContinuation>),
+    TemporalPlainDateTimeBag(Box<TemporalPlainDateTimeBagContinuation>),
     TemporalPlainDateOptions(Box<TemporalPlainDateOptionsContinuation>),
     TemporalPlainDateWith(Box<TemporalPlainDateWithContinuation>),
     TemporalPlainDateDifferenceOptions(Box<TemporalPlainDateDifferenceContinuation>),
@@ -894,6 +896,9 @@ impl NativeContinuation {
             Self::TypedArrayPrototypeFilter(state) => state.retained_values(),
             Self::DateToJson(_) => DateToJsonContinuation::retained_values(),
             Self::TemporalPlainDateBag(_) => TemporalPlainDateBagContinuation::retained_values(),
+            Self::TemporalPlainDateTimeBag(_) => {
+                TemporalPlainDateTimeBagContinuation::retained_values()
+            }
             Self::TemporalPlainDateOptions(_) => {
                 TemporalPlainDateOptionsContinuation::retained_values()
             }
@@ -2127,6 +2132,7 @@ enum OperatorPrimitiveTarget {
     TemporalPlainDateTimeConstructor(Box<TemporalPlainDateTimeConstructorContinuation>),
     TemporalPlainDateEquals(Box<temporal_rs::PlainDate>),
     TemporalPlainDateBag(Box<TemporalPlainDateBagContinuation>),
+    TemporalPlainDateTimeBag(Box<TemporalPlainDateTimeBagContinuation>),
     TemporalPlainDateOptions(Box<TemporalPlainDateOptionsContinuation>),
     TemporalPlainDateWith(Box<TemporalPlainDateWithContinuation>),
     TemporalPlainDateDifferenceLargestUnit(Box<TemporalPlainDateDifferenceContinuation>),
@@ -2397,6 +2403,9 @@ impl OperatorPrimitiveTarget {
             Self::TemporalPlainDateConstructor(state) => state.retained_values(),
             Self::TemporalPlainDateTimeConstructor(state) => state.retained_values(),
             Self::TemporalPlainDateBag(_) => TemporalPlainDateBagContinuation::retained_values(),
+            Self::TemporalPlainDateTimeBag(_) => {
+                TemporalPlainDateTimeBagContinuation::retained_values()
+            }
             Self::TemporalPlainDateOptions(_) => {
                 TemporalPlainDateOptionsContinuation::retained_values()
             }
@@ -2683,6 +2692,7 @@ fn trace_operator_primitive_target_roots(
         OperatorPrimitiveTarget::TemporalPlainDateConstructor(state) => state.trace_roots(mark),
         OperatorPrimitiveTarget::TemporalPlainDateTimeConstructor(state) => state.trace_roots(mark),
         OperatorPrimitiveTarget::TemporalPlainDateBag(state) => state.trace_roots(mark),
+        OperatorPrimitiveTarget::TemporalPlainDateTimeBag(state) => state.trace_roots(mark),
         OperatorPrimitiveTarget::TemporalPlainDateOptions(state) => state.trace_roots(mark),
         OperatorPrimitiveTarget::TemporalPlainDateWith(state) => state.trace_roots(mark),
         OperatorPrimitiveTarget::TemporalPlainDateDifferenceLargestUnit(state)
@@ -2946,6 +2956,7 @@ fn trace_native_continuation_roots(
         NativeContinuation::TypedArrayPrototypeFilter(state) => state.trace_roots(mark),
         NativeContinuation::DateToJson(state) => state.trace_roots(mark),
         NativeContinuation::TemporalPlainDateBag(state) => state.trace_roots(mark),
+        NativeContinuation::TemporalPlainDateTimeBag(state) => state.trace_roots(mark),
         NativeContinuation::TemporalPlainDateOptions(state) => state.trace_roots(mark),
         NativeContinuation::TemporalPlainDateWith(state) => state.trace_roots(mark),
         NativeContinuation::TemporalPlainDateDifferenceOptions(state) => state.trace_roots(mark),

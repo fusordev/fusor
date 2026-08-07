@@ -2,17 +2,18 @@
 
 use core::str::FromStr;
 use temporal_rs::{
-    Calendar, Duration, Instant, MonthCode, PlainDate, PlainDateTime, Sign, TimeZone,
+    Calendar, Duration, Instant, MonthCode, PlainDate, PlainDateTime, PlainTime, Sign, TimeZone,
     error::ErrorKind as TemporalErrorKind,
-    fields::CalendarFields,
+    fields::{CalendarFields, DateTimeFields},
     options::{
         DifferenceSettings, DisplayCalendar, Overflow, RelativeTo, RoundingIncrement, RoundingMode,
         RoundingOptions, ToStringRoundingOptions, Unit,
     },
     parsers::Precision,
-    partial::PartialDate,
+    partial::{PartialDate, PartialDateTime, PartialTime},
 };
 
+use super::conversions::operator_primitive_to_string;
 #[allow(
     clippy::wildcard_imports,
     reason = "this private VM sibling participates in the shared interpreter implementation namespace"
@@ -44,6 +45,19 @@ pub(super) struct TemporalPlainDateTimeConstructorContinuation {
 }
 
 const TEMPORAL_PLAIN_DATE_BAG_FIELDS: [&str; 5] = ["calendar", "day", "month", "monthCode", "year"];
+const TEMPORAL_PLAIN_DATE_TIME_BAG_FIELDS: [&str; 11] = [
+    "calendar",
+    "day",
+    "hour",
+    "microsecond",
+    "millisecond",
+    "minute",
+    "month",
+    "monthCode",
+    "nanosecond",
+    "second",
+    "year",
+];
 const TEMPORAL_PLAIN_DATE_WITH_FIELDS: [&str; 6] =
     ["calendar", "timeZone", "day", "month", "monthCode", "year"];
 
@@ -73,6 +87,50 @@ pub(super) struct TemporalPlainDateBagContinuation {
 }
 
 impl TemporalPlainDateBagContinuation {
+    pub(super) const fn retained_values() -> u64 {
+        2
+    }
+
+    pub(super) fn trace_roots(&self, mark: &mut dyn FnMut(CollectionRoot)) {
+        trace_stored_value_root(&self.base, mark);
+        self.target.trace_roots(mark);
+    }
+}
+
+#[derive(Clone, Copy)]
+enum TemporalPlainDateTimeBagStage {
+    ReadField,
+    AwaitField,
+    AwaitConversion,
+}
+
+/// Resumable `ToTemporalDateTime` conversion for ordinary property bags.
+///
+/// The field order is the Temporal `PrepareTemporalFields` order. Both
+/// property access and primitive conversion may execute JavaScript, so the
+/// complete bag is retained by the continuation until a final calendar/time
+/// record is ready for `temporal_rs`.
+pub(super) struct TemporalPlainDateTimeBagContinuation {
+    base: StoredValue,
+    calendar: Option<Calendar>,
+    day: Option<JsNumber>,
+    hour: Option<JsNumber>,
+    microsecond: Option<JsNumber>,
+    millisecond: Option<JsNumber>,
+    minute: Option<JsNumber>,
+    month: Option<JsNumber>,
+    month_code: Option<MonthCode>,
+    nanosecond: Option<JsNumber>,
+    second: Option<JsNumber>,
+    year: Option<JsNumber>,
+    next: usize,
+    stage: TemporalPlainDateTimeBagStage,
+    target: TemporalPlainDateTimeLikeTarget,
+    realm: RealmId,
+    origin: JsStackFrame,
+}
+
+impl TemporalPlainDateTimeBagContinuation {
     pub(super) const fn retained_values() -> u64 {
         2
     }
@@ -134,6 +192,24 @@ enum TemporalPlainDateLikeTarget {
     },
 }
 
+enum TemporalPlainDateTimeLikeTarget {
+    From { options: StoredValue },
+    CompareFirst { second: StoredValue },
+    CompareSecond { first: PlainDateTime },
+    Equals { receiver: PlainDateTime },
+}
+
+impl TemporalPlainDateTimeLikeTarget {
+    fn trace_roots(&self, mark: &mut dyn FnMut(CollectionRoot)) {
+        match self {
+            Self::From { options } | Self::CompareFirst { second: options } => {
+                trace_stored_value_root(options, mark);
+            }
+            Self::CompareSecond { .. } | Self::Equals { .. } => {}
+        }
+    }
+}
+
 impl TemporalPlainDateLikeTarget {
     fn trace_roots(&self, mark: &mut dyn FnMut(CollectionRoot)) {
         match self {
@@ -150,6 +226,8 @@ impl TemporalPlainDateLikeTarget {
 enum TemporalPlainDateOverflowTarget {
     FromDate(PlainDate),
     FromPartial(PartialDate),
+    FromDateTime(PlainDateTime),
+    FromPartialDateTime(PartialDateTime),
     Arithmetic {
         receiver: PlainDate,
         duration: Duration,
@@ -791,6 +869,558 @@ pub(super) fn finish_temporal_plain_date_time_constructor_wrapper(
 #[allow(
     clippy::needless_pass_by_value,
     clippy::too_many_arguments,
+    reason = "Temporal.PlainDateTime static conversion retains the native call context"
+)]
+pub(super) fn begin_temporal_plain_date_time_static(
+    runtime: &mut Runtime,
+    method: TemporalPlainDateTimeStaticMethod,
+    realm: RealmId,
+    mut arguments: CallArguments,
+    return_to: Option<CallReturn>,
+    origin: JsStackFrame,
+    execution_budget: &mut ExecutionBudget,
+) -> Result<NativeDispatch, NativeFailure> {
+    match method {
+        TemporalPlainDateTimeStaticMethod::From => {
+            let value = arguments.take_first_or_undefined();
+            let options = arguments.take_first_or_undefined();
+            begin_temporal_plain_date_time_like(
+                runtime,
+                value,
+                TemporalPlainDateTimeLikeTarget::From { options },
+                realm,
+                return_to,
+                origin,
+                execution_budget,
+            )
+        }
+        TemporalPlainDateTimeStaticMethod::Compare => {
+            let first = arguments.take_first_or_undefined();
+            let second = arguments.take_first_or_undefined();
+            begin_temporal_plain_date_time_like(
+                runtime,
+                first,
+                TemporalPlainDateTimeLikeTarget::CompareFirst { second },
+                realm,
+                return_to,
+                origin,
+                execution_budget,
+            )
+        }
+    }
+}
+
+#[allow(
+    clippy::too_many_arguments,
+    reason = "all accepted Temporal.PlainDateTime inputs share a resumable conversion boundary"
+)]
+fn begin_temporal_plain_date_time_like(
+    runtime: &mut Runtime,
+    value: StoredValue,
+    target: TemporalPlainDateTimeLikeTarget,
+    realm: RealmId,
+    return_to: Option<CallReturn>,
+    origin: JsStackFrame,
+    execution_budget: &mut ExecutionBudget,
+) -> Result<NativeDispatch, NativeFailure> {
+    if let StoredValue::Object(object) = value {
+        if let Some(date_time) = runtime.temporal_plain_date_time(object)? {
+            return continue_temporal_plain_date_time_like(
+                runtime,
+                date_time,
+                target,
+                realm,
+                return_to,
+                origin,
+                execution_budget,
+            );
+        }
+        if let Some(date) = runtime.temporal_plain_date(object)? {
+            let date_time = match PlainDateTime::from_date_and_time(date, PlainTime::default()) {
+                Ok(date_time) => date_time,
+                Err(error) => {
+                    return Err(NativeFailure::Abrupt(temporal_exception_from_error(
+                        realm, &origin, error,
+                    )?));
+                }
+            };
+            return continue_temporal_plain_date_time_like(
+                runtime,
+                date_time,
+                target,
+                realm,
+                return_to,
+                origin,
+                execution_budget,
+            );
+        }
+    }
+    if let StoredValue::String(value) = value {
+        let date_time = temporal_plain_date_time_from_string(realm, &value, &origin)?;
+        return continue_temporal_plain_date_time_like(
+            runtime,
+            date_time,
+            target,
+            realm,
+            return_to,
+            origin,
+            execution_budget,
+        );
+    }
+    if value.heap_reference().is_some() {
+        return advance_temporal_plain_date_time_property_bag(
+            runtime,
+            TemporalPlainDateTimeBagContinuation {
+                base: value,
+                calendar: None,
+                day: None,
+                hour: None,
+                microsecond: None,
+                millisecond: None,
+                minute: None,
+                month: None,
+                month_code: None,
+                nanosecond: None,
+                second: None,
+                year: None,
+                next: 0,
+                stage: TemporalPlainDateTimeBagStage::ReadField,
+                target,
+                realm,
+                origin,
+            },
+            None,
+            return_to,
+            execution_budget,
+        );
+    }
+    temporal_type_error(
+        realm,
+        &origin,
+        "Temporal.PlainDateTime requires a PlainDateTime, PlainDate, ISO string, or property bag",
+    )
+}
+
+#[allow(
+    clippy::too_many_arguments,
+    reason = "the target selects either overflow options or the second compare conversion"
+)]
+fn continue_temporal_plain_date_time_like(
+    runtime: &mut Runtime,
+    date_time: PlainDateTime,
+    target: TemporalPlainDateTimeLikeTarget,
+    realm: RealmId,
+    return_to: Option<CallReturn>,
+    origin: JsStackFrame,
+    execution_budget: &mut ExecutionBudget,
+) -> Result<NativeDispatch, NativeFailure> {
+    match target {
+        TemporalPlainDateTimeLikeTarget::From { options } => {
+            begin_temporal_plain_date_from_options(
+                runtime,
+                TemporalPlainDateOverflowTarget::FromDateTime(date_time),
+                options,
+                realm,
+                return_to,
+                origin,
+                execution_budget,
+            )
+        }
+        TemporalPlainDateTimeLikeTarget::CompareFirst { second } => {
+            begin_temporal_plain_date_time_like(
+                runtime,
+                second,
+                TemporalPlainDateTimeLikeTarget::CompareSecond { first: date_time },
+                realm,
+                return_to,
+                origin,
+                execution_budget,
+            )
+        }
+        TemporalPlainDateTimeLikeTarget::CompareSecond { first } => {
+            let result = match first.compare_iso(&date_time) {
+                std::cmp::Ordering::Less => -1,
+                std::cmp::Ordering::Equal => 0,
+                std::cmp::Ordering::Greater => 1,
+            };
+            Ok(NativeDispatch::Immediate(StoredValue::Number(
+                JsNumber::from_i32(result),
+            )))
+        }
+        TemporalPlainDateTimeLikeTarget::Equals { receiver } => Ok(NativeDispatch::Immediate(
+            StoredValue::Boolean(receiver == date_time),
+        )),
+    }
+}
+
+fn temporal_plain_date_time_from_string(
+    realm: RealmId,
+    value: &JsString,
+    origin: &JsStackFrame,
+) -> Result<PlainDateTime, NativeFailure> {
+    let source = value.to_utf8_lossy()?;
+    match PlainDateTime::from_utf8(source.as_bytes()) {
+        Ok(date_time) => Ok(date_time),
+        Err(error) => Err(NativeFailure::Abrupt(temporal_exception_from_error(
+            realm, origin, error,
+        )?)),
+    }
+}
+
+#[allow(
+    clippy::too_many_arguments,
+    clippy::too_many_lines,
+    reason = "the explicit state machine preserves property access and conversion order"
+)]
+pub(super) fn advance_temporal_plain_date_time_property_bag(
+    runtime: &mut Runtime,
+    mut state: TemporalPlainDateTimeBagContinuation,
+    completion: Option<StoredValue>,
+    return_to: Option<CallReturn>,
+    execution_budget: &mut ExecutionBudget,
+) -> Result<NativeDispatch, NativeFailure> {
+    let mut completion = completion;
+    loop {
+        match state.stage {
+            TemporalPlainDateTimeBagStage::ReadField => {
+                if state.next == TEMPORAL_PLAIN_DATE_TIME_BAG_FIELDS.len() {
+                    let partial = temporal_plain_date_time_partial_from_bag(&state)?;
+                    return match state.target {
+                        TemporalPlainDateTimeLikeTarget::From { options } => {
+                            begin_temporal_plain_date_from_options(
+                                runtime,
+                                TemporalPlainDateOverflowTarget::FromPartialDateTime(partial),
+                                options,
+                                state.realm,
+                                return_to,
+                                state.origin,
+                                execution_budget,
+                            )
+                        }
+                        target => {
+                            let date_time = match PlainDateTime::from_partial(
+                                partial,
+                                Some(Overflow::Constrain),
+                            ) {
+                                Ok(date_time) => date_time,
+                                Err(error) => {
+                                    return Err(NativeFailure::Abrupt(
+                                        temporal_exception_from_error(
+                                            state.realm,
+                                            &state.origin,
+                                            error,
+                                        )?,
+                                    ));
+                                }
+                            };
+                            continue_temporal_plain_date_time_like(
+                                runtime,
+                                date_time,
+                                target,
+                                state.realm,
+                                return_to,
+                                state.origin,
+                                execution_budget,
+                            )
+                        }
+                    };
+                }
+                charge_heap_property_lookup(runtime, &state.base, execution_budget)?;
+                let name = JsString::from_utf8(TEMPORAL_PLAIN_DATE_TIME_BAG_FIELDS[state.next])?;
+                let key = runtime.property_key_from_string(&name)?;
+                state.stage = TemporalPlainDateTimeBagStage::AwaitField;
+                let dispatch = begin_value_get(
+                    runtime,
+                    &state.base,
+                    key,
+                    Some(&name),
+                    state.realm,
+                    return_to,
+                    state.origin.clone(),
+                    execution_budget,
+                )?;
+                match continue_get_state_after(
+                    dispatch,
+                    state,
+                    temporal_plain_date_time_bag_continuation,
+                    "Temporal.PlainDateTime property bag Get produced a structured result",
+                )? {
+                    GetContinuationDispatch::Ready {
+                        state: resumed,
+                        value,
+                    } => {
+                        state = resumed;
+                        completion = Some(value);
+                    }
+                    GetContinuationDispatch::Suspended(dispatch) => return Ok(dispatch),
+                }
+            }
+            TemporalPlainDateTimeBagStage::AwaitField => {
+                let value = completion.take().ok_or(EngineFault::RuntimeInvariant {
+                    message: "Temporal.PlainDateTime property bag Get resumed without a value",
+                })?;
+                let field = TEMPORAL_PLAIN_DATE_TIME_BAG_FIELDS[state.next];
+                if matches!(value, StoredValue::Undefined) {
+                    if field == "calendar" {
+                        state.calendar = Some(Calendar::default());
+                    }
+                    state.next = state.next.saturating_add(1);
+                    state.stage = TemporalPlainDateTimeBagStage::ReadField;
+                    continue;
+                }
+                if field == "calendar" {
+                    let StoredValue::String(value) = value else {
+                        return temporal_type_error(
+                            state.realm,
+                            &state.origin,
+                            "Temporal.PlainDateTime calendar must be a string",
+                        );
+                    };
+                    let calendar = match Calendar::from_str(&value.to_utf8_lossy()?) {
+                        Ok(calendar) => calendar,
+                        Err(error) => {
+                            return Err(NativeFailure::Abrupt(temporal_exception_from_error(
+                                state.realm,
+                                &state.origin,
+                                error,
+                            )?));
+                        }
+                    };
+                    state.calendar = Some(calendar);
+                    state.next = state.next.saturating_add(1);
+                    state.stage = TemporalPlainDateTimeBagStage::ReadField;
+                    continue;
+                }
+                state.stage = TemporalPlainDateTimeBagStage::AwaitConversion;
+                let hint = match field {
+                    "monthCode" => OperatorPrimitiveHint::String,
+                    "day" | "hour" | "microsecond" | "millisecond" | "minute" | "month"
+                    | "nanosecond" | "second" | "year" => OperatorPrimitiveHint::Number,
+                    _ => {
+                        return Err(EngineFault::RuntimeInvariant {
+                            message: "unknown Temporal.PlainDateTime property bag field",
+                        }
+                        .into());
+                    }
+                };
+                let realm = state.realm;
+                let origin = state.origin.clone();
+                return begin_operator_primitive_conversion(
+                    runtime,
+                    value,
+                    hint,
+                    OperatorPrimitiveTarget::TemporalPlainDateTimeBag(Box::new(state)),
+                    realm,
+                    return_to,
+                    origin,
+                    execution_budget,
+                );
+            }
+            TemporalPlainDateTimeBagStage::AwaitConversion => {
+                let value = completion.take().ok_or(EngineFault::RuntimeInvariant {
+                    message: "Temporal.PlainDateTime property bag conversion resumed without a value",
+                })?;
+                match TEMPORAL_PLAIN_DATE_TIME_BAG_FIELDS[state.next] {
+                    "monthCode" => {
+                        let StoredValue::String(value) = value else {
+                            return temporal_type_error(
+                                state.realm,
+                                &state.origin,
+                                "Temporal.PlainDateTime monthCode must be a string",
+                            );
+                        };
+                        let month_code = match MonthCode::from_str(&value.to_utf8_lossy()?) {
+                            Ok(month_code) => month_code,
+                            Err(error) => {
+                                return Err(NativeFailure::Abrupt(temporal_exception_from_error(
+                                    state.realm,
+                                    &state.origin,
+                                    error,
+                                )?));
+                            }
+                        };
+                        state.month_code = Some(month_code);
+                    }
+                    "day" => {
+                        state.day = Some(operator_to_number(value, state.realm, &state.origin)?);
+                    }
+                    "hour" => {
+                        state.hour = Some(operator_to_number(value, state.realm, &state.origin)?);
+                    }
+                    "microsecond" => {
+                        state.microsecond =
+                            Some(operator_to_number(value, state.realm, &state.origin)?);
+                    }
+                    "millisecond" => {
+                        state.millisecond =
+                            Some(operator_to_number(value, state.realm, &state.origin)?);
+                    }
+                    "minute" => {
+                        state.minute = Some(operator_to_number(value, state.realm, &state.origin)?);
+                    }
+                    "month" => {
+                        state.month = Some(operator_to_number(value, state.realm, &state.origin)?);
+                    }
+                    "nanosecond" => {
+                        state.nanosecond =
+                            Some(operator_to_number(value, state.realm, &state.origin)?);
+                    }
+                    "second" => {
+                        state.second = Some(operator_to_number(value, state.realm, &state.origin)?);
+                    }
+                    "year" => {
+                        state.year = Some(operator_to_number(value, state.realm, &state.origin)?);
+                    }
+                    _ => {
+                        return Err(EngineFault::RuntimeInvariant {
+                            message: "unknown Temporal.PlainDateTime property bag field",
+                        }
+                        .into());
+                    }
+                }
+                state.next = state.next.saturating_add(1);
+                state.stage = TemporalPlainDateTimeBagStage::ReadField;
+            }
+        }
+    }
+}
+
+fn temporal_plain_date_time_bag_continuation(
+    state: TemporalPlainDateTimeBagContinuation,
+) -> NativeContinuation {
+    NativeContinuation::TemporalPlainDateTimeBag(Box::new(state))
+}
+
+fn temporal_plain_date_time_partial_from_bag(
+    state: &TemporalPlainDateTimeBagContinuation,
+) -> Result<PartialDateTime, NativeFailure> {
+    let year = temporal_plain_date_time_required_field(state.year, state.realm, &state.origin)?;
+    let day = temporal_plain_date_time_required_field(state.day, state.realm, &state.origin)?;
+    let year = temporal_plain_date_time_i32(year, state.realm, &state.origin)?;
+    let day = temporal_plain_date_time_u8(day, state.realm, &state.origin)?;
+    let month = temporal_plain_date_time_optional_u8(state.month, state.realm, &state.origin)?;
+    let hour = temporal_plain_date_time_optional_u8(state.hour, state.realm, &state.origin)?;
+    let minute = temporal_plain_date_time_optional_u8(state.minute, state.realm, &state.origin)?;
+    let second = temporal_plain_date_time_optional_u8(state.second, state.realm, &state.origin)?;
+    let millisecond =
+        temporal_plain_date_time_optional_u16(state.millisecond, state.realm, &state.origin)?;
+    let microsecond =
+        temporal_plain_date_time_optional_u16(state.microsecond, state.realm, &state.origin)?;
+    let nanosecond =
+        temporal_plain_date_time_optional_u16(state.nanosecond, state.realm, &state.origin)?;
+    let calendar_fields = CalendarFields::new()
+        .with_year(year)
+        .with_optional_month(month)
+        .with_optional_month_code(state.month_code)
+        .with_day(day);
+    let time = PartialTime::new()
+        .with_hour(hour)
+        .with_minute(minute)
+        .with_second(second)
+        .with_millisecond(millisecond)
+        .with_microsecond(microsecond)
+        .with_nanosecond(nanosecond);
+    Ok(PartialDateTime {
+        fields: DateTimeFields::new()
+            .with_partial_date(calendar_fields)
+            .with_partial_time(time),
+        calendar: state.calendar.clone().unwrap_or_default(),
+    })
+}
+
+fn temporal_plain_date_time_required_field(
+    value: Option<JsNumber>,
+    realm: RealmId,
+    origin: &JsStackFrame,
+) -> Result<i64, NativeFailure> {
+    let Some(value) = value else {
+        return Err(NativeFailure::Abrupt(temporal_pending_exception(
+            realm,
+            origin,
+            ExceptionKind::TypeError,
+            "Temporal.PlainDateTime property bag is missing a required field",
+        )?));
+    };
+    temporal_plain_date_time_integer(value, realm, origin)
+}
+
+fn temporal_plain_date_time_optional_u8(
+    value: Option<JsNumber>,
+    realm: RealmId,
+    origin: &JsStackFrame,
+) -> Result<Option<u8>, NativeFailure> {
+    value
+        .map(|value| {
+            temporal_plain_date_time_integer(value, realm, origin)
+                .and_then(|value| temporal_plain_date_time_u8(value, realm, origin))
+        })
+        .transpose()
+}
+
+fn temporal_plain_date_time_optional_u16(
+    value: Option<JsNumber>,
+    realm: RealmId,
+    origin: &JsStackFrame,
+) -> Result<Option<u16>, NativeFailure> {
+    value
+        .map(|value| {
+            temporal_plain_date_time_integer(value, realm, origin)
+                .and_then(|value| temporal_plain_date_time_u16(value, realm, origin))
+        })
+        .transpose()
+}
+
+fn temporal_plain_date_time_i32(
+    value: i64,
+    realm: RealmId,
+    origin: &JsStackFrame,
+) -> Result<i32, NativeFailure> {
+    let Ok(value) = i32::try_from(value) else {
+        return Err(NativeFailure::Abrupt(temporal_pending_exception(
+            realm,
+            origin,
+            ExceptionKind::RangeError,
+            "Temporal.PlainDateTime field is outside the supported range",
+        )?));
+    };
+    Ok(value)
+}
+
+fn temporal_plain_date_time_u8(
+    value: i64,
+    realm: RealmId,
+    origin: &JsStackFrame,
+) -> Result<u8, NativeFailure> {
+    let Ok(value) = u8::try_from(value) else {
+        return Err(NativeFailure::Abrupt(temporal_pending_exception(
+            realm,
+            origin,
+            ExceptionKind::RangeError,
+            "Temporal.PlainDateTime field is outside the supported range",
+        )?));
+    };
+    Ok(value)
+}
+
+fn temporal_plain_date_time_u16(
+    value: i64,
+    realm: RealmId,
+    origin: &JsStackFrame,
+) -> Result<u16, NativeFailure> {
+    let Ok(value) = u16::try_from(value) else {
+        return Err(NativeFailure::Abrupt(temporal_pending_exception(
+            realm,
+            origin,
+            ExceptionKind::RangeError,
+            "Temporal.PlainDateTime field is outside the supported range",
+        )?));
+    };
+    Ok(value)
+}
+
+#[allow(
+    clippy::needless_pass_by_value,
+    clippy::too_many_arguments,
     reason = "Temporal.PlainDate.from preserves conversion and allocation context"
 )]
 pub(super) fn begin_temporal_plain_date_static(
@@ -1118,13 +1748,7 @@ pub(super) fn advance_temporal_plain_date_from_options(
                 let value = completion.take().ok_or(EngineFault::RuntimeInvariant {
                     message: "Temporal.PlainDate.from overflow conversion resumed without a value",
                 })?;
-                let StoredValue::String(value) = value else {
-                    return temporal_type_error(
-                        state.realm,
-                        &state.origin,
-                        "Temporal.PlainDate.from overflow must be a string",
-                    );
-                };
+                let value = operator_primitive_to_string(value, state.realm, &state.origin)?;
                 let Ok(overflow) = Overflow::from_str(&value.to_utf8_lossy()?) else {
                     return temporal_range_error(
                         state.realm,
@@ -1157,6 +1781,23 @@ fn finish_temporal_plain_date_from_options(
     realm: RealmId,
     origin: &JsStackFrame,
 ) -> Result<NativeDispatch, NativeFailure> {
+    match target {
+        TemporalPlainDateOverflowTarget::FromDateTime(date_time) => {
+            return allocate_temporal_plain_date_time_result(runtime, realm, date_time);
+        }
+        TemporalPlainDateOverflowTarget::FromPartialDateTime(partial) => {
+            let date_time = match PlainDateTime::from_partial(partial, Some(overflow)) {
+                Ok(date_time) => date_time,
+                Err(error) => {
+                    return Err(NativeFailure::Abrupt(temporal_exception_from_error(
+                        realm, origin, error,
+                    )?));
+                }
+            };
+            return allocate_temporal_plain_date_time_result(runtime, realm, date_time);
+        }
+        _ => {}
+    }
     let date = match target {
         TemporalPlainDateOverflowTarget::FromDate(date) => date,
         TemporalPlainDateOverflowTarget::FromPartial(partial) => {
@@ -1197,6 +1838,10 @@ fn finish_temporal_plain_date_from_options(
                     )?));
                 }
             }
+        }
+        TemporalPlainDateOverflowTarget::FromDateTime(_)
+        | TemporalPlainDateOverflowTarget::FromPartialDateTime(_) => {
+            unreachable!("Temporal PlainDateTime overflow targets return above")
         }
     };
     allocate_temporal_plain_date_result(runtime, realm, date)
@@ -1472,6 +2117,16 @@ fn allocate_temporal_plain_date_result(
 ) -> Result<NativeDispatch, NativeFailure> {
     let prototype = HeapReference::Object(runtime.realm_temporal_plain_date_prototype(realm)?);
     let object = runtime.allocate_temporal_plain_date(prototype, date)?;
+    Ok(NativeDispatch::Immediate(StoredValue::Object(object)))
+}
+
+fn allocate_temporal_plain_date_time_result(
+    runtime: &mut Runtime,
+    realm: RealmId,
+    date_time: PlainDateTime,
+) -> Result<NativeDispatch, NativeFailure> {
+    let prototype = HeapReference::Object(runtime.realm_temporal_plain_date_time_prototype(realm)?);
+    let object = runtime.allocate_temporal_plain_date_time(prototype, date_time)?;
     Ok(NativeDispatch::Immediate(StoredValue::Object(object)))
 }
 
@@ -1932,10 +2587,10 @@ pub(super) fn dispatch_temporal_plain_date_time_prototype(
     method: TemporalPlainDateTimePrototypeMethod,
     realm: RealmId,
     receiver: &StoredValue,
-    _arguments: CallArguments,
-    _return_to: Option<CallReturn>,
+    mut arguments: CallArguments,
+    return_to: Option<CallReturn>,
     origin: &JsStackFrame,
-    _execution_budget: &mut ExecutionBudget,
+    execution_budget: &mut ExecutionBudget,
 ) -> Result<NativeDispatch, NativeFailure> {
     let date_time = require_temporal_plain_date_time(runtime, receiver, realm, origin)?;
     let number = |value| NativeDispatch::Immediate(StoredValue::Number(JsNumber::from_i64(value)));
@@ -2000,6 +2655,17 @@ pub(super) fn dispatch_temporal_plain_date_time_prototype(
             Some(value) => number(i64::from(value)),
             None => NativeDispatch::Immediate(StoredValue::Undefined),
         }),
+        TemporalPlainDateTimePrototypeMethod::Equals => begin_temporal_plain_date_time_like(
+            runtime,
+            arguments.take_first_or_undefined(),
+            TemporalPlainDateTimeLikeTarget::Equals {
+                receiver: date_time,
+            },
+            realm,
+            return_to,
+            origin.clone(),
+            execution_budget,
+        ),
         TemporalPlainDateTimePrototypeMethod::ToString
         | TemporalPlainDateTimePrototypeMethod::ToJson
         | TemporalPlainDateTimePrototypeMethod::ToLocaleString => {

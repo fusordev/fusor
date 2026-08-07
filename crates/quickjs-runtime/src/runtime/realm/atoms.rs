@@ -7,7 +7,8 @@ use crate::{
         DateStaticMethod, SharedArrayBufferPrototypeMethod, TemporalDurationPrototypeMethod,
         TemporalDurationStaticMethod, TemporalInstantPrototypeMethod, TemporalInstantStaticMethod,
         TemporalPlainDatePrototypeMethod, TemporalPlainDateStaticMethod,
-        TemporalPlainDateTimePrototypeMethod, TypedArrayPrototypeMethod,
+        TemporalPlainDateTimePrototypeMethod, TemporalPlainDateTimeStaticMethod,
+        TypedArrayPrototypeMethod,
     },
 };
 
@@ -308,6 +309,9 @@ fn visit_realm_name_order(
     for method in TemporalPlainDatePrototypeMethod::ALL {
         visit(RealmNameId::TemporalPlainDatePrototype(method))?;
     }
+    for method in TemporalPlainDateTimeStaticMethod::ALL {
+        visit(RealmNameId::TemporalPlainDateTimeStatic(method))?;
+    }
     for method in TemporalPlainDateTimePrototypeMethod::ALL {
         visit(RealmNameId::TemporalPlainDateTimePrototype(method))?;
     }
@@ -529,6 +533,7 @@ fn realm_name_description(id: RealmNameId) -> &'static str {
         RealmNameId::TemporalInstantPrototype(method) => method.name(),
         RealmNameId::TemporalPlainDateStatic(method) => method.name(),
         RealmNameId::TemporalPlainDatePrototype(method) => method.name(),
+        RealmNameId::TemporalPlainDateTimeStatic(method) => method.name(),
         RealmNameId::TemporalPlainDateTimePrototype(method) => method.name(),
         RealmNameId::RegExpEscape => "escape",
         RealmNameId::RegExpCompile => "compile",

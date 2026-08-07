@@ -2152,6 +2152,15 @@ fn finish_operator_primitive_target(
                 execution_budget,
             )
         }
+        OperatorPrimitiveTarget::TemporalPlainDateTimeBag(state) => {
+            advance_temporal_plain_date_time_property_bag(
+                runtime,
+                *state,
+                Some(value),
+                return_to,
+                execution_budget,
+            )
+        }
         OperatorPrimitiveTarget::TemporalPlainDateOptions(state) => {
             advance_temporal_plain_date_from_options(
                 runtime,
