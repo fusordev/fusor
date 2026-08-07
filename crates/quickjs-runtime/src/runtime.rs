@@ -1798,10 +1798,17 @@ pub(crate) enum TypedArrayPrototypeMethod {
     Join,
     ToReversed,
     With,
+    Every,
+    Find,
+    FindIndex,
+    FindLast,
+    FindLastIndex,
+    ForEach,
+    Some,
 }
 
 impl TypedArrayPrototypeMethod {
-    pub(crate) const ALL: [Self; 21] = [
+    pub(crate) const ALL: [Self; 28] = [
         Self::Buffer,
         Self::ByteLength,
         Self::ByteOffset,
@@ -1823,6 +1830,13 @@ impl TypedArrayPrototypeMethod {
         Self::Join,
         Self::ToReversed,
         Self::With,
+        Self::Every,
+        Self::Find,
+        Self::FindIndex,
+        Self::FindLast,
+        Self::FindLastIndex,
+        Self::ForEach,
+        Self::Some,
     ];
 
     #[must_use]
@@ -1849,6 +1863,13 @@ impl TypedArrayPrototypeMethod {
             Self::Join => "join",
             Self::ToReversed => "toReversed",
             Self::With => "with",
+            Self::Every => "every",
+            Self::Find => "find",
+            Self::FindIndex => "findIndex",
+            Self::FindLast => "findLast",
+            Self::FindLastIndex => "findLastIndex",
+            Self::ForEach => "forEach",
+            Self::Some => "some",
         }
     }
 
@@ -1876,6 +1897,13 @@ impl TypedArrayPrototypeMethod {
             Self::Join => "join",
             Self::ToReversed => "toReversed",
             Self::With => "with",
+            Self::Every => "every",
+            Self::Find => "find",
+            Self::FindIndex => "findIndex",
+            Self::FindLast => "findLast",
+            Self::FindLastIndex => "findLastIndex",
+            Self::ForEach => "forEach",
+            Self::Some => "some",
         }
     }
 
@@ -1899,6 +1927,13 @@ impl TypedArrayPrototypeMethod {
                 | Self::Join
                 | Self::ToReversed
                 | Self::With
+                | Self::Every
+                | Self::Find
+                | Self::FindIndex
+                | Self::FindLast
+                | Self::FindLastIndex
+                | Self::ForEach
+                | Self::Some
         )
     }
 
@@ -1911,7 +1946,14 @@ impl TypedArrayPrototypeMethod {
             | Self::IndexOf
             | Self::LastIndexOf
             | Self::Fill
-            | Self::Join => 1,
+            | Self::Join
+            | Self::Every
+            | Self::Find
+            | Self::FindIndex
+            | Self::FindLast
+            | Self::FindLastIndex
+            | Self::ForEach
+            | Self::Some => 1,
             Self::CopyWithin | Self::Subarray | Self::Slice | Self::With => 2,
             Self::Reverse
             | Self::Entries

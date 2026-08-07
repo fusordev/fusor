@@ -82,6 +82,12 @@ pub(crate) struct ArrayCallbackContinuation {
     target: StoredValue,
     /// The callback, already verified to be callable.
     callback: FunctionId,
+    /// Whether this traversal tests `HasProperty` before reading an index.
+    ///
+    /// Ordinary array callbacks skip holes for most methods. Typed arrays have
+    /// no holes, and—critically for resizable buffers—must still `Get` every
+    /// index in the captured range after a later shrink.
+    skip_holes: bool,
     /// The `thisArg` the callback receives.
     this_argument: StoredValue,
     /// The element count from the single `ToLength` length read.
@@ -173,6 +179,7 @@ pub(super) fn begin_array_callback(
         method,
         target: receiver,
         callback,
+        skip_holes: method.skips_holes(),
         this_argument,
         length: 0,
         next: 0,
@@ -184,6 +191,65 @@ pub(super) fn begin_array_callback(
         result: default_result(method),
         realm,
         stage: ArrayCallbackStage::AwaitLength,
+        origin,
+    };
+    advance_array_callback(runtime, state, None, return_to, execution_budget)
+}
+
+/// Starts a non-allocating `%TypedArray%.prototype` callback method.
+///
+/// The caller has already performed `ValidateTypedArray` and captured the
+/// initial `TypedArrayLength`. That ordering deliberately differs from the
+/// generic Array entry point: `TypedArray` callbacks validate and capture their
+/// length before testing whether the predicate is callable.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the typed-array entry carries the same native call context as the shared array callback loop"
+)]
+pub(super) fn begin_typed_array_callback(
+    runtime: &mut Runtime,
+    method: ArrayCallback,
+    realm: RealmId,
+    receiver: StoredValue,
+    length: u64,
+    mut arguments: CallArguments,
+    return_to: Option<CallReturn>,
+    origin: JsStackFrame,
+    execution_budget: &mut ExecutionBudget,
+) -> Result<NativeDispatch, NativeFailure> {
+    debug_assert!(
+        !method.builds_array(),
+        "typed map and filter need their own species-aware destination path"
+    );
+    let StoredValue::Function(callback) = arguments.take_first_or_undefined() else {
+        return Err(NativeFailure::Abrupt(PendingException {
+            realm,
+            payload: PendingExceptionPayload::EngineError {
+                kind: ExceptionKind::TypeError,
+                message: JsString::from_utf8("not a function")?,
+            },
+            origin,
+        }));
+    };
+    let state = ArrayCallbackContinuation {
+        method,
+        target: receiver,
+        callback,
+        skip_holes: false,
+        this_argument: arguments.take_first_or_undefined(),
+        length,
+        next: if method.is_backward() {
+            length.saturating_sub(1)
+        } else {
+            0
+        },
+        current: 0,
+        element: None,
+        destination: None,
+        written: 0,
+        result: default_result(method),
+        realm,
+        stage: ArrayCallbackStage::NextElement,
         origin,
     };
     advance_array_callback(runtime, state, None, return_to, execution_budget)
@@ -267,7 +333,7 @@ pub(super) fn advance_array_callback(
                 let key = element_key(index)?;
                 // Most methods skip a missing index; the `find` family visits it
                 // and sees `undefined`.
-                if state.method.skips_holes() {
+                if state.skip_holes {
                     charge_callback_lookup(runtime, &state.target, execution_budget)?;
                     state.stage = ArrayCallbackStage::AwaitPresence;
                     let dispatch = begin_value_has(

@@ -1639,6 +1639,13 @@ pub(super) fn dispatch_typed_array_prototype(
             | TypedArrayPrototypeMethod::Join
             | TypedArrayPrototypeMethod::ToReversed
             | TypedArrayPrototypeMethod::With
+            | TypedArrayPrototypeMethod::Every
+            | TypedArrayPrototypeMethod::Find
+            | TypedArrayPrototypeMethod::FindIndex
+            | TypedArrayPrototypeMethod::FindLast
+            | TypedArrayPrototypeMethod::FindLastIndex
+            | TypedArrayPrototypeMethod::ForEach
+            | TypedArrayPrototypeMethod::Some
     ) && !matches!(view, TypedArrayView::InBounds { .. })
     {
         return typed_array_type_error(realm, &origin, "TypedArray is out of bounds");
@@ -1655,6 +1662,29 @@ pub(super) fn dispatch_typed_array_prototype(
         ),
         TypedArrayView::Detached | TypedArrayView::OutOfBounds => (0, 0, 0),
     };
+    let callback_method = match method {
+        TypedArrayPrototypeMethod::Every => Some(ArrayCallback::Every),
+        TypedArrayPrototypeMethod::Find => Some(ArrayCallback::Find),
+        TypedArrayPrototypeMethod::FindIndex => Some(ArrayCallback::FindIndex),
+        TypedArrayPrototypeMethod::FindLast => Some(ArrayCallback::FindLast),
+        TypedArrayPrototypeMethod::FindLastIndex => Some(ArrayCallback::FindLastIndex),
+        TypedArrayPrototypeMethod::ForEach => Some(ArrayCallback::ForEach),
+        TypedArrayPrototypeMethod::Some => Some(ArrayCallback::Some),
+        _ => None,
+    };
+    if let Some(callback_method) = callback_method {
+        return begin_typed_array_callback(
+            runtime,
+            callback_method,
+            realm,
+            StoredValue::Object(*object),
+            usize_to_u64(length),
+            arguments,
+            return_to,
+            origin,
+            execution_budget,
+        );
+    }
     let number = |value: usize| {
         #[expect(
             clippy::cast_precision_loss,
@@ -1848,6 +1878,15 @@ pub(super) fn dispatch_typed_array_prototype(
                 origin,
                 execution_budget,
             );
+        }
+        TypedArrayPrototypeMethod::Every
+        | TypedArrayPrototypeMethod::Find
+        | TypedArrayPrototypeMethod::FindIndex
+        | TypedArrayPrototypeMethod::FindLast
+        | TypedArrayPrototypeMethod::FindLastIndex
+        | TypedArrayPrototypeMethod::ForEach
+        | TypedArrayPrototypeMethod::Some => {
+            unreachable!("typed-array callback methods returned from their dedicated dispatch")
         }
     };
     Ok(NativeDispatch::Immediate(value))

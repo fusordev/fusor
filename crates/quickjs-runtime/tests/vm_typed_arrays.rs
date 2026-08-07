@@ -625,3 +625,44 @@ fn typed_array_with_converts_index_then_value_before_its_final_witness() {
         ExceptionKind::TypeError
     );
 }
+
+#[test]
+fn typed_array_callbacks_capture_the_initial_view_and_visit_later_missing_indices() {
+    assert_eq!(
+        rendered(
+            "var values=new Uint8Array([1,2,3]),seen=[],context={tag:'e'};\
+             var every=values.every(function(value,index,array){seen.push(this.tag+value+index+(array===values));return value<4},context);\
+             var some=values.some(function(value){return value===2});\
+             var each=values.forEach(function(value,index){seen.push('f'+value+index)});\
+             var found=values.find(function(value){return value>1}),foundIndex=values.findIndex(function(value){return value>1});\
+             var last=values.findLast(function(value){return value>1}),lastIndex=values.findLastIndex(function(value){return value>1});\
+             return [Uint8Array.prototype.every.length,Uint8Array.prototype.every.name,\
+               Uint8Array.prototype.some.length,Uint8Array.prototype.some.name,\
+               Uint8Array.prototype.forEach.length,Uint8Array.prototype.forEach.name,\
+               Uint8Array.prototype.find.length,Uint8Array.prototype.find.name,\
+               Uint8Array.prototype.findIndex.length,Uint8Array.prototype.findIndex.name,\
+               Uint8Array.prototype.findLast.length,Uint8Array.prototype.findLast.name,\
+               Uint8Array.prototype.findLastIndex.length,Uint8Array.prototype.findLastIndex.name,\
+               every,some,each===undefined,found,foundIndex,last,lastIndex,seen.join(',')].join('|');"
+        ),
+        "1|every|1|some|1|forEach|1|find|1|findIndex|1|findLast|1|findLastIndex|true|true|true|2|1|3|2|e10true,e21true,e32true,f10,f21,f32"
+    );
+    assert_eq!(
+        rendered(
+            "var buffer=new ArrayBuffer(4,{maxByteLength:4}),values=new Uint8Array(buffer),seen=[];\
+             values[0]=7;values[1]=8;\
+             var every=values.every(function(value,index){seen.push(value===undefined?'u'+index:String(value));if(index===0)buffer.resize(1);return true});\
+             var reverseBuffer=new ArrayBuffer(4,{maxByteLength:4}),reverse=new Uint8Array(reverseBuffer),back=[];\
+             reverse[0]=9;reverse[3]=4;\
+             var last=reverse.findLast(function(value,index){back.push(value===undefined?'u'+index:String(value));if(index===3)reverseBuffer.resize(1);return index===0});\
+             return [every,seen.join(','),last,back.join(',')].join('|');"
+        ),
+        "true|7,u1,u2,u3|9|4,u2,u1,9"
+    );
+    assert_eq!(
+        thrown(
+            "var buffer=new ArrayBuffer(4,{maxByteLength:4}),values=new Uint8Array(buffer,2,2);buffer.resize(1);values.find(function(){return true});"
+        ),
+        ExceptionKind::TypeError
+    );
+}
