@@ -6,19 +6,24 @@ use quickjs_runtime::{
     Context, ExceptionKind, ExecutionError, ExecutionLimits, GlobalScriptError, JsException,
     Runtime, RuntimeLimits,
 };
+use rayon::ThreadPoolBuilder;
 use serde_json::{Value as JsonValue, json};
 use serde_yaml_ng::Value as YamlValue;
 use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::OsString;
 use std::fs;
+use std::io::Write;
 use std::path::{Component, Path, PathBuf};
 use std::process::Command;
 use std::sync::Arc;
 use std::thread;
+use tokio::{runtime::Builder as TokioRuntimeBuilder, sync::mpsc};
 
 const DEFAULT_BASELINE: &str = "tests/test262/upstream";
 const DEFAULT_INSTRUCTION_FUEL: u64 = 10_000_000;
 const STRICT_PREFIX: &str = "\"use strict\";\n";
+const TEST262_WORKER_STACK_SIZE: usize = 64 * 1024 * 1024;
+const TEST262_PROGRESS_CHANNEL_PER_WORKER: usize = 2;
 
 #[derive(Debug, Eq, PartialEq)]
 pub struct Test262Options {
@@ -779,6 +784,7 @@ pub fn run_test262(options: &Test262Options) -> Result<bool, String> {
         for (reason, count) in &inventory.skip_counts {
             println!("test262: skipped {count} cases ({reason})");
         }
+        flush_verbose_output();
     }
     let execution = if options.inventory_only {
         ExecutionSummary::default()
@@ -868,32 +874,20 @@ fn execute_inventory(
             });
         }
     }
-    let results = execute_cases_parallel(&cases, &harness, instruction_fuel, jobs)?;
-    let mut summary = ExecutionSummary::default();
-    for (case, result) in cases.iter().zip(results) {
-        match result? {
-            None => {
-                summary.passed += 1;
-                if verbose {
-                    println!(
-                        "test262: pass test/{} [{}]",
-                        case.plan.relative,
-                        case.mode.name()
-                    );
-                }
+    let mut completed = 0_usize;
+    let results =
+        execute_cases_parallel(&cases, &harness, instruction_fuel, jobs, |index, result| {
+            if verbose {
+                completed += 1;
+                print_verbose_completion(completed, cases.len(), &cases[index], result);
             }
+        })?;
+    let mut summary = ExecutionSummary::default();
+    for result in results {
+        match result? {
+            None => summary.passed += 1,
             Some(failure) => {
                 summary.failed += 1;
-                if verbose {
-                    println!(
-                        "test262: fail test/{} [{}]: expected {}; got {}: {}",
-                        failure.path,
-                        failure.mode,
-                        failure.expected,
-                        failure.actual,
-                        failure.detail,
-                    );
-                }
                 summary.failures.push(failure);
             }
         }
@@ -908,54 +902,84 @@ struct ExecutionCase {
     source: Arc<str>,
 }
 
+fn print_verbose_completion(
+    completed: usize,
+    total: usize,
+    case: &ExecutionCase,
+    result: &Result<Option<FailureRecord>, String>,
+) {
+    match result {
+        Ok(None) => println!(
+            "test262: complete {completed}/{total} pass test/{} [{}]",
+            case.plan.relative,
+            case.mode.name(),
+        ),
+        Ok(Some(failure)) => println!(
+            "test262: complete {completed}/{total} fail test/{} [{}]: expected {}; got {}: {}",
+            failure.path, failure.mode, failure.expected, failure.actual, failure.detail,
+        ),
+        Err(error) => println!(
+            "test262: complete {completed}/{total} runner-error test/{} [{}]: {error}",
+            case.plan.relative,
+            case.mode.name(),
+        ),
+    }
+    flush_verbose_output();
+}
+
+fn flush_verbose_output() {
+    let _ = std::io::stdout().flush();
+}
+
 fn execute_cases_parallel(
     cases: &[ExecutionCase],
     harness: &HarnessSources,
     instruction_fuel: u64,
     jobs: usize,
+    mut on_completion: impl FnMut(usize, &Result<Option<FailureRecord>, String>) + Send,
 ) -> Result<Vec<Result<Option<FailureRecord>, String>>, String> {
-    let worker_count = jobs.min(cases.len()).max(1);
-    if worker_count == 1 {
-        return Ok(cases
-            .iter()
-            .map(|case| {
-                execute_case(
-                    &case.plan,
-                    case.mode,
-                    &case.source,
-                    harness,
-                    instruction_fuel,
-                )
-            })
-            .collect());
+    if cases.is_empty() {
+        return Ok(Vec::new());
     }
-    let mut ordered = thread::scope(|scope| {
-        let mut handles = Vec::new();
+    let worker_count = jobs.min(cases.len()).max(1);
+    let pool = ThreadPoolBuilder::new()
+        .num_threads(worker_count)
+        .stack_size(TEST262_WORKER_STACK_SIZE)
+        .thread_name(|index| format!("test262-worker-{index}"))
+        .build()
+        .map_err(|error| format!("could not build Test262 Rayon worker pool: {error}"))?;
+    let progress_runtime = TokioRuntimeBuilder::new_current_thread()
+        .build()
+        .map_err(|error| format!("could not build Test262 progress runtime: {error}"))?;
+    let channel_capacity = worker_count.saturating_mul(TEST262_PROGRESS_CHANNEL_PER_WORKER);
+    let (sender, mut receiver) = mpsc::channel(channel_capacity);
+    let mut ordered = pool.scope(move |scope| {
         for worker in 0..worker_count {
-            handles.push(scope.spawn(move || {
-                let mut results = Vec::new();
+            let sender = sender.clone();
+            scope.spawn(move |_| {
                 for index in (worker..cases.len()).step_by(worker_count) {
                     let case = &cases[index];
-                    results.push((
-                        index,
-                        execute_case(
-                            &case.plan,
-                            case.mode,
-                            &case.source,
-                            harness,
-                            instruction_fuel,
-                        ),
-                    ));
+                    let result = execute_case(
+                        &case.plan,
+                        case.mode,
+                        &case.source,
+                        harness,
+                        instruction_fuel,
+                    );
+                    if sender.blocking_send((index, result)).is_err() {
+                        return;
+                    }
                 }
-                results
-            }));
+            });
         }
         let mut results = Vec::with_capacity(cases.len());
-        for handle in handles {
-            let mut worker_results = handle
-                .join()
-                .map_err(|_| "a Test262 worker thread panicked".to_owned())?;
-            results.append(&mut worker_results);
+        drop(sender);
+        for _ in 0..cases.len() {
+            let (index, result) = progress_runtime
+                .block_on(receiver.recv())
+                .ok_or_else(|| "a Test262 worker stopped before reporting every case".to_owned())?;
+            on_completion(index, &result);
+            results.push((index, result));
         }
         Ok::<_, String>(results)
     })?;
@@ -1312,9 +1336,15 @@ mod tests {
             sta: String::new(),
             root: PathBuf::from("unused-harness"),
         };
-        let outcomes = execute_cases_parallel(&cases, &harness, DEFAULT_INSTRUCTION_FUEL, 2)
+        let mut completed = Vec::new();
+        let outcomes =
+            execute_cases_parallel(&cases, &harness, DEFAULT_INSTRUCTION_FUEL, 2, |index, _| {
+                completed.push(index);
+            })
             .expect("parallel execution");
         assert_eq!(outcomes.len(), cases.len());
+        completed.sort_unstable();
+        assert_eq!(completed, vec![0, 1, 2, 3]);
         assert!(
             outcomes
                 .into_iter()

@@ -10,8 +10,10 @@ publish = false
 quickjs = { path = "../crates/quickjs" }
 quickjs-frontend = { path = "../crates/quickjs-frontend" }
 quickjs-runtime = { path = "../crates/quickjs-runtime" }
+rayon.workspace = true
 serde_json.workspace = true
 serde_yaml_ng.workspace = true
+tokio.workspace = true
 
 [lints]
 workspace = true
