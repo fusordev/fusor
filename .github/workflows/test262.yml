@@ -26,7 +26,7 @@ jobs:
         shell: bash
         run: |
           ulimit -s 65520
-          cargo xtask test262 --suite "$TEST262_PATH" --baseline tests/test262/upstream --instruction-fuel 50000000 --report target/test262/report.json
+          cargo xtask test262 --suite "$TEST262_PATH" --baseline tests/test262/upstream --instruction-fuel 50000000 --verbose --report target/test262/report.json
       - name: Upload Test262 report
         if: always()
         uses: actions/upload-artifact@v4

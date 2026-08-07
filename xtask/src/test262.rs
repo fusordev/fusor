@@ -31,6 +31,7 @@ pub struct Test262Options {
     pub inventory_only: bool,
     pub instruction_fuel: u64,
     pub jobs: usize,
+    pub verbose: bool,
 }
 
 pub fn parse_options(
@@ -45,6 +46,7 @@ pub fn parse_options(
     let mut inventory_only = false;
     let mut instruction_fuel = DEFAULT_INSTRUCTION_FUEL;
     let mut jobs = default_jobs();
+    let mut verbose = false;
 
     while let Some(option) = arguments.next() {
         match option.to_string_lossy().as_ref() {
@@ -76,6 +78,7 @@ pub fn parse_options(
                 instruction_fuel = required_positive_u64(&mut arguments, "--instruction-fuel")?;
             }
             "--jobs" => jobs = required_positive_usize(&mut arguments, "--jobs")?,
+            "--verbose" | "-v" => verbose = true,
             unknown => return Err(format!("unknown test262 option `{unknown}`")),
         }
     }
@@ -90,6 +93,7 @@ pub fn parse_options(
         inventory_only,
         instruction_fuel,
         jobs,
+        verbose,
     })
 }
 
@@ -758,6 +762,24 @@ pub fn run_test262(options: &Test262Options) -> Result<bool, String> {
     if inventory.plans.is_empty() {
         return Err("Test262 selection contains no runnable test source files".to_owned());
     }
+    if options.verbose {
+        println!(
+            "test262: selection filter={} files={} admitted-cases={} skipped-cases={} workers={} fuel={}",
+            options.filter.as_deref().unwrap_or("test"),
+            inventory.plans.len(),
+            inventory.admitted_cases(),
+            inventory.skipped_cases(),
+            if options.inventory_only {
+                0
+            } else {
+                options.jobs.min(inventory.admitted_cases())
+            },
+            options.instruction_fuel,
+        );
+        for (reason, count) in &inventory.skip_counts {
+            println!("test262: skipped {count} cases ({reason})");
+        }
+    }
     let execution = if options.inventory_only {
         ExecutionSummary::default()
     } else {
@@ -766,6 +788,7 @@ pub fn run_test262(options: &Test262Options) -> Result<bool, String> {
             &inventory,
             options.instruction_fuel,
             options.jobs,
+            options.verbose,
         )?
     };
     let report = build_report(options, &suite, &baseline, &inventory, &execution);
@@ -825,6 +848,7 @@ fn execute_inventory(
     inventory: &Inventory,
     instruction_fuel: u64,
     jobs: usize,
+    verbose: bool,
 ) -> Result<ExecutionSummary, String> {
     let harness = HarnessSources::load(suite)?;
     let mut cases = Vec::new();
@@ -846,11 +870,30 @@ fn execute_inventory(
     }
     let results = execute_cases_parallel(&cases, &harness, instruction_fuel, jobs)?;
     let mut summary = ExecutionSummary::default();
-    for result in results {
+    for (case, result) in cases.iter().zip(results) {
         match result? {
-            None => summary.passed += 1,
+            None => {
+                summary.passed += 1;
+                if verbose {
+                    println!(
+                        "test262: pass test/{} [{}]",
+                        case.plan.relative,
+                        case.mode.name()
+                    );
+                }
+            }
             Some(failure) => {
                 summary.failed += 1;
+                if verbose {
+                    println!(
+                        "test262: fail test/{} [{}]: expected {}; got {}: {}",
+                        failure.path,
+                        failure.mode,
+                        failure.expected,
+                        failure.actual,
+                        failure.detail,
+                    );
+                }
                 summary.failures.push(failure);
             }
         }
@@ -1148,6 +1191,7 @@ fn build_report(
             "limit": options.limit,
             "instruction_fuel": options.instruction_fuel,
             "jobs": options.jobs,
+            "verbose": options.verbose,
         },
         "inventory": {
             "test_files": inventory.plans.len(),
@@ -1218,6 +1262,7 @@ mod tests {
             "5000",
             "--jobs",
             "3",
+            "--verbose",
             "--inventory-only",
         ]
         .into_iter()
@@ -1234,6 +1279,7 @@ mod tests {
                 inventory_only: true,
                 instruction_fuel: 5_000,
                 jobs: 3,
+                verbose: true,
             })
         );
     }
