@@ -19,11 +19,13 @@ pub(super) struct TypedArrayElementSetState {
     origin: JsStackFrame,
 }
 
-#[derive(Clone, Copy)]
 pub(super) enum TypedArraySetCompletion {
     LanguageWrite,
     ReflectSet,
     Define(DefinePropertyResult),
+    /// Resume `%TypedArray%.prototype.map` after its mapped value's indexed
+    /// write has completed its own observable numeric conversion.
+    Map(Box<TypedArrayPrototypeMapState>),
 }
 
 /// The non-observable prefix of typed-array `[[DefineOwnProperty]]`.
@@ -206,6 +208,39 @@ pub(super) struct TypedArrayPrototypeSliceState {
     element: TypedArrayElementType,
     realm: RealmId,
     stage: TypedArrayPrototypeSliceStage,
+    origin: JsStackFrame,
+}
+
+#[allow(
+    clippy::enum_variant_names,
+    reason = "each name identifies the observable species, read, callback, or write boundary being awaited"
+)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum TypedArrayPrototypeMapStage {
+    AwaitConstructor,
+    AwaitSpecies,
+    AwaitConstruct,
+    NextElement,
+    AwaitElement,
+    AwaitCallback,
+}
+
+/// Resumable `%TypedArray%.prototype.map`.
+///
+/// `map` constructs its species result before it observes any source element.
+/// Source element reads remain fresh during traversal, while each result write
+/// uses `TypedArraySetElement` so a mapped value's own coercion can resize the
+/// destination before its final integer-index witness.
+pub(super) struct TypedArrayPrototypeMapState {
+    source: ObjectId,
+    source_length: usize,
+    source_element: TypedArrayElementType,
+    target: Option<ObjectId>,
+    callback: FunctionId,
+    this_argument: StoredValue,
+    index: usize,
+    realm: RealmId,
+    stage: TypedArrayPrototypeMapStage,
     origin: JsStackFrame,
 }
 
@@ -442,6 +477,21 @@ impl TypedArrayPrototypeSliceState {
     }
 }
 
+impl TypedArrayPrototypeMapState {
+    pub(super) const fn retained_values() -> u64 {
+        4
+    }
+
+    pub(super) fn trace_roots(&self, mark: &mut dyn FnMut(CollectionRoot)) {
+        mark(CollectionRoot::Heap(HeapReference::Object(self.source)));
+        mark(CollectionRoot::Heap(HeapReference::Function(self.callback)));
+        trace_stored_value_root(&self.this_argument, mark);
+        if let Some(target) = self.target {
+            mark(CollectionRoot::Heap(HeapReference::Object(target)));
+        }
+    }
+}
+
 impl TypedArrayPrototypeWithState {
     pub(super) const fn retained_values() -> u64 {
         2
@@ -523,12 +573,20 @@ impl TypedArrayPrototypeCopyWithinState {
 }
 
 impl TypedArrayElementSetState {
-    pub(super) const fn retained_values() -> u64 {
-        1
+    pub(super) fn retained_values(&self) -> u64 {
+        1_u64.saturating_add(match &self.completion {
+            TypedArraySetCompletion::Map(_) => TypedArrayPrototypeMapState::retained_values(),
+            TypedArraySetCompletion::LanguageWrite
+            | TypedArraySetCompletion::ReflectSet
+            | TypedArraySetCompletion::Define(_) => 0,
+        })
     }
 
     pub(super) fn trace_roots(&self, mark: &mut dyn FnMut(CollectionRoot)) {
         mark(CollectionRoot::Heap(HeapReference::Object(self.object)));
+        if let TypedArraySetCompletion::Map(state) = &self.completion {
+            state.trace_roots(mark);
+        }
     }
 }
 
@@ -1645,6 +1703,7 @@ pub(super) fn dispatch_typed_array_prototype(
             | TypedArrayPrototypeMethod::FindLast
             | TypedArrayPrototypeMethod::FindLastIndex
             | TypedArrayPrototypeMethod::ForEach
+            | TypedArrayPrototypeMethod::Map
             | TypedArrayPrototypeMethod::Some
     ) && !matches!(view, TypedArrayView::InBounds { .. })
     {
@@ -1873,6 +1932,19 @@ pub(super) fn dispatch_typed_array_prototype(
                 *object,
                 arguments.take_first_or_undefined(),
                 arguments.take_first_or_undefined(),
+                realm,
+                return_to,
+                origin,
+                execution_budget,
+            );
+        }
+        TypedArrayPrototypeMethod::Map => {
+            return begin_typed_array_prototype_map(
+                runtime,
+                *object,
+                length,
+                state.element(),
+                arguments,
                 realm,
                 return_to,
                 origin,
@@ -3446,6 +3518,348 @@ fn typed_array_prototype_slice_continuation(
     NativeContinuation::TypedArrayPrototypeSlice(Box::new(state))
 }
 
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the native entry preserves the fixed source witness, callback arguments, and standard call context"
+)]
+fn begin_typed_array_prototype_map(
+    runtime: &mut Runtime,
+    source: ObjectId,
+    source_length: usize,
+    source_element: TypedArrayElementType,
+    mut arguments: CallArguments,
+    realm: RealmId,
+    return_to: Option<CallReturn>,
+    origin: JsStackFrame,
+    execution_budget: &mut ExecutionBudget,
+) -> Result<NativeDispatch, NativeFailure> {
+    let StoredValue::Function(callback) = arguments.take_first_or_undefined() else {
+        return typed_array_type_error(realm, &origin, "not a function");
+    };
+    begin_typed_array_map_constructor_get(
+        runtime,
+        TypedArrayPrototypeMapState {
+            source,
+            source_length,
+            source_element,
+            target: None,
+            callback,
+            this_argument: arguments.take_first_or_undefined(),
+            index: 0,
+            realm,
+            stage: TypedArrayPrototypeMapStage::AwaitConstructor,
+            origin,
+        },
+        return_to,
+        execution_budget,
+    )
+}
+
+#[expect(
+    clippy::too_many_lines,
+    reason = "the species protocol, callback loop, and conversion-resuming indexed writes are one ordered map state machine"
+)]
+pub(super) fn advance_typed_array_prototype_map(
+    runtime: &mut Runtime,
+    mut state: TypedArrayPrototypeMapState,
+    value: StoredValue,
+    return_to: Option<CallReturn>,
+    execution_budget: &mut ExecutionBudget,
+) -> Result<NativeDispatch, NativeFailure> {
+    match state.stage {
+        TypedArrayPrototypeMapStage::AwaitConstructor => {
+            if let StoredValue::Function(function) = value
+                && function_is_constructor(runtime, function)?
+            {
+                let function_realm = runtime.function_realm(function)?;
+                if function_realm != state.realm
+                    && function
+                        == runtime
+                            .realm_typed_array_constructor(function_realm, state.source_element)?
+                {
+                    let constructor =
+                        runtime.realm_typed_array_constructor(state.realm, state.source_element)?;
+                    return begin_typed_array_map_construct(state, constructor, return_to);
+                }
+            }
+            if matches!(value, StoredValue::Undefined) {
+                let constructor =
+                    runtime.realm_typed_array_constructor(state.realm, state.source_element)?;
+                return begin_typed_array_map_construct(state, constructor, return_to);
+            }
+            if !matches!(value, StoredValue::Object(_) | StoredValue::Function(_)) {
+                return typed_array_type_error(state.realm, &state.origin, "not a constructor");
+            }
+            state.stage = TypedArrayPrototypeMapStage::AwaitSpecies;
+            begin_typed_array_map_species_get(runtime, state, &value, return_to, execution_budget)
+        }
+        TypedArrayPrototypeMapStage::AwaitSpecies => {
+            let constructor = if matches!(value, StoredValue::Undefined | StoredValue::Null) {
+                runtime.realm_typed_array_constructor(state.realm, state.source_element)?
+            } else if let StoredValue::Function(function) = value {
+                if !function_is_constructor(runtime, function)? {
+                    return typed_array_type_error(state.realm, &state.origin, "not a constructor");
+                }
+                function
+            } else {
+                return typed_array_type_error(state.realm, &state.origin, "not a constructor");
+            };
+            begin_typed_array_map_construct(state, constructor, return_to)
+        }
+        TypedArrayPrototypeMapStage::AwaitConstruct => {
+            let StoredValue::Object(target) = value else {
+                return typed_array_type_error(
+                    state.realm,
+                    &state.origin,
+                    "TypedArray species constructor returned a non-TypedArray",
+                );
+            };
+            let (target_state, target_length) =
+                typed_array_require_in_bounds(runtime, target, state.realm, &state.origin)?;
+            if target_length < state.source_length {
+                return typed_array_type_error(
+                    state.realm,
+                    &state.origin,
+                    "TypedArray species constructor returned a too-short TypedArray",
+                );
+            }
+            if target_state.element().is_bigint() != state.source_element.is_bigint() {
+                return typed_array_type_error(
+                    state.realm,
+                    &state.origin,
+                    "TypedArray species constructor returned a different content type",
+                );
+            }
+            state.target = Some(target);
+            state.stage = TypedArrayPrototypeMapStage::NextElement;
+            advance_typed_array_prototype_map(
+                runtime,
+                state,
+                StoredValue::Undefined,
+                return_to,
+                execution_budget,
+            )
+        }
+        TypedArrayPrototypeMapStage::NextElement => {
+            if state.index >= state.source_length {
+                let target = state.target.ok_or(EngineFault::RuntimeInvariant {
+                    message: "TypedArray.prototype.map lost its constructed target",
+                })?;
+                return Ok(NativeDispatch::Immediate(StoredValue::Object(target)));
+            }
+            execution_budget.charge_instructions(1)?;
+            let key = array_static_index_key(runtime, usize_to_u64(state.index))?;
+            let source = StoredValue::Object(state.source);
+            charge_heap_property_lookup(runtime, &source, execution_budget)?;
+            state.stage = TypedArrayPrototypeMapStage::AwaitElement;
+            let dispatch = begin_value_get(
+                runtime,
+                &source,
+                key,
+                None,
+                state.realm,
+                return_to,
+                state.origin.clone(),
+                execution_budget,
+            )?;
+            continue_get_after(
+                dispatch,
+                state,
+                typed_array_prototype_map_continuation,
+                |state, value| {
+                    advance_typed_array_prototype_map(
+                        runtime,
+                        state,
+                        value,
+                        return_to,
+                        execution_budget,
+                    )
+                },
+                "TypedArray.prototype.map source Get produced a structured result",
+            )
+        }
+        TypedArrayPrototypeMapStage::AwaitElement => {
+            let mut callback_arguments = Vec::new();
+            callback_arguments.try_reserve_exact(3).map_err(|_| {
+                ExecutionError::AllocationFailed {
+                    resource: RuntimeResource::Frames,
+                    additional: 3,
+                }
+            })?;
+            callback_arguments.push(value);
+            callback_arguments.push(typed_array_usize_number(state.index));
+            callback_arguments.push(StoredValue::Object(state.source));
+            state.stage = TypedArrayPrototypeMapStage::AwaitCallback;
+            let callback = state.callback;
+            let receiver = state.this_argument.duplicate();
+            suspend_typed_array_map(state, callback, receiver, callback_arguments, return_to)
+        }
+        TypedArrayPrototypeMapStage::AwaitCallback => {
+            let target = state.target.ok_or(EngineFault::RuntimeInvariant {
+                message: "TypedArray.prototype.map lost its constructed target",
+            })?;
+            let realm = state.realm;
+            let origin = state.origin.clone();
+            begin_typed_array_element_set(
+                runtime,
+                target,
+                TypedArrayPropertyKey::Index(state.index),
+                value,
+                TypedArraySetCompletion::Map(Box::new(state)),
+                realm,
+                return_to,
+                origin,
+                execution_budget,
+            )
+        }
+    }
+}
+
+pub(super) fn resume_typed_array_prototype_map_after_store(
+    runtime: &mut Runtime,
+    mut state: TypedArrayPrototypeMapState,
+    return_to: Option<CallReturn>,
+    execution_budget: &mut ExecutionBudget,
+) -> Result<NativeDispatch, NativeFailure> {
+    state.index = state
+        .index
+        .checked_add(1)
+        .ok_or(EngineFault::RuntimeInvariant {
+            message: "TypedArray.prototype.map index overflowed within its captured length",
+        })?;
+    state.stage = TypedArrayPrototypeMapStage::NextElement;
+    advance_typed_array_prototype_map(
+        runtime,
+        state,
+        StoredValue::Undefined,
+        return_to,
+        execution_budget,
+    )
+}
+
+fn begin_typed_array_map_constructor_get(
+    runtime: &mut Runtime,
+    mut state: TypedArrayPrototypeMapState,
+    return_to: Option<CallReturn>,
+    execution_budget: &mut ExecutionBudget,
+) -> Result<NativeDispatch, NativeFailure> {
+    state.stage = TypedArrayPrototypeMapStage::AwaitConstructor;
+    let source = StoredValue::Object(state.source);
+    charge_heap_property_lookup(runtime, &source, execution_budget)?;
+    let dispatch = begin_value_get(
+        runtime,
+        &source,
+        runtime.predefined_property_key(PredefinedAtom::Constructor),
+        None,
+        state.realm,
+        return_to,
+        state.origin.clone(),
+        execution_budget,
+    )?;
+    continue_get_after(
+        dispatch,
+        state,
+        typed_array_prototype_map_continuation,
+        |state, value| {
+            advance_typed_array_prototype_map(runtime, state, value, return_to, execution_budget)
+        },
+        "TypedArray.prototype.map constructor Get produced a structured result",
+    )
+}
+
+fn begin_typed_array_map_species_get(
+    runtime: &mut Runtime,
+    state: TypedArrayPrototypeMapState,
+    constructor: &StoredValue,
+    return_to: Option<CallReturn>,
+    execution_budget: &mut ExecutionBudget,
+) -> Result<NativeDispatch, NativeFailure> {
+    charge_heap_property_lookup(runtime, constructor, execution_budget)?;
+    let dispatch = begin_value_get(
+        runtime,
+        constructor,
+        runtime.predefined_symbol_property_key(PredefinedAtom::SymbolSpecies),
+        None,
+        state.realm,
+        return_to,
+        state.origin.clone(),
+        execution_budget,
+    )?;
+    continue_get_after(
+        dispatch,
+        state,
+        typed_array_prototype_map_continuation,
+        |state, value| {
+            advance_typed_array_prototype_map(runtime, state, value, return_to, execution_budget)
+        },
+        "TypedArray.prototype.map species Get produced a structured result",
+    )
+}
+
+fn begin_typed_array_map_construct(
+    mut state: TypedArrayPrototypeMapState,
+    constructor: FunctionId,
+    return_to: Option<CallReturn>,
+) -> Result<NativeDispatch, NativeFailure> {
+    state.stage = TypedArrayPrototypeMapStage::AwaitConstruct;
+    let origin = state.origin.clone();
+    let source_length = state.source_length;
+    let mut continuations = Vec::new();
+    continuations
+        .try_reserve_exact(1)
+        .map_err(|_| ExecutionError::AllocationFailed {
+            resource: RuntimeResource::Frames,
+            additional: 1,
+        })?;
+    continuations.push(typed_array_prototype_map_continuation(state));
+    Ok(NativeDispatch::Call(NativeCall {
+        function: constructor,
+        receiver: StoredValue::Undefined,
+        arguments: CallArguments::from_values(vec![typed_array_usize_number(source_length)]),
+        return_to,
+        origin,
+        continuations,
+        pre_call: None,
+        new_target: Some(constructor),
+        native_caller: None,
+    }))
+}
+
+fn typed_array_prototype_map_continuation(
+    state: TypedArrayPrototypeMapState,
+) -> NativeContinuation {
+    NativeContinuation::TypedArrayPrototypeMap(Box::new(state))
+}
+
+fn suspend_typed_array_map(
+    state: TypedArrayPrototypeMapState,
+    function: FunctionId,
+    receiver: StoredValue,
+    arguments: Vec<StoredValue>,
+    return_to: Option<CallReturn>,
+) -> Result<NativeDispatch, NativeFailure> {
+    let origin = state.origin.clone();
+    let mut continuations = Vec::new();
+    continuations
+        .try_reserve_exact(1)
+        .map_err(|_| ExecutionError::AllocationFailed {
+            resource: RuntimeResource::Frames,
+            additional: 1,
+        })?;
+    continuations.push(typed_array_prototype_map_continuation(state));
+    Ok(NativeDispatch::Call(NativeCall {
+        function,
+        receiver,
+        arguments: CallArguments::from_values(arguments),
+        return_to,
+        origin,
+        continuations,
+        pre_call: None,
+        new_target: None,
+        native_caller: None,
+    }))
+}
+
 fn typed_array_relative_bound(value: f64, length: usize) -> usize {
     if value < 0.0 {
         if value == f64::NEG_INFINITY {
@@ -4075,6 +4489,8 @@ pub(super) fn finish_typed_array_element_set(
     runtime: &mut Runtime,
     state: TypedArrayElementSetState,
     value: StoredValue,
+    return_to: Option<CallReturn>,
+    execution_budget: &mut ExecutionBudget,
 ) -> Result<NativeDispatch, NativeFailure> {
     let element = runtime
         .typed_array_state(state.object)?
@@ -4112,7 +4528,7 @@ pub(super) fn finish_typed_array_element_set(
         }
         .into());
     }
-    Ok(NativeDispatch::Immediate(match state.completion {
+    let completion = match state.completion {
         TypedArraySetCompletion::LanguageWrite => StoredValue::Undefined,
         TypedArraySetCompletion::ReflectSet => StoredValue::Boolean(true),
         TypedArraySetCompletion::Define(DefinePropertyResult::Target) => {
@@ -4121,5 +4537,14 @@ pub(super) fn finish_typed_array_element_set(
         TypedArraySetCompletion::Define(DefinePropertyResult::Boolean) => {
             StoredValue::Boolean(true)
         }
-    }))
+        TypedArraySetCompletion::Map(state) => {
+            return resume_typed_array_prototype_map_after_store(
+                runtime,
+                *state,
+                return_to,
+                execution_budget,
+            );
+        }
+    };
+    Ok(NativeDispatch::Immediate(completion))
 }

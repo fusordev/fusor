@@ -666,3 +666,40 @@ fn typed_array_callbacks_capture_the_initial_view_and_visit_later_missing_indice
         ExceptionKind::TypeError
     );
 }
+
+#[test]
+fn typed_array_map_constructs_species_before_callbacks_and_uses_fresh_writes() {
+    assert_eq!(
+        rendered(
+            "var source=new Uint8Array([1,2,3]),log=[];source.constructor={[Symbol.species]:Uint16Array};\
+             var out=source.map(function(value,index,array){log.push(value+':'+index+':'+(array===source));return value*257});\
+             return [Uint8Array.prototype.map.length,Uint8Array.prototype.map.name,\
+               out.constructor===Uint16Array,out.length,out[0],out[1],out[2],log.join(',')].join('|');"
+        ),
+        "1|map|true|3|257|514|771|1:0:true,2:1:true,3:2:true"
+    );
+    assert_eq!(
+        rendered(
+            "var buffer=new ArrayBuffer(4,{maxByteLength:4}),source=new Uint8Array(buffer),order=[];\
+             source[0]=7;source[1]=8;source.constructor={[Symbol.species]:function C(length){order.push('species'+length);return new Uint8Array(length)}};\
+             var out=source.map(function(value,index){order.push(value===undefined?'u'+index:String(value));if(index===0)buffer.resize(1);return index+1});\
+             return [out.length,out[0],out[1],out[2],out[3],order.join(',')].join('|');"
+        ),
+        "4|1|2|3|4|species4,7,u1,u2,u3"
+    );
+    assert_eq!(
+        rendered(
+            "var source=new Uint8Array([1,2,3,4]),buffer=new ArrayBuffer(4,{maxByteLength:4}),target;\
+             source.constructor={[Symbol.species]:function C(length){target=new Uint8Array(buffer);return target}};\
+             var out=source.map(function(value,index){return {valueOf(){if(index===0)buffer.resize(1);return value+1}}});\
+             return [out===target,out.length,out[0]].join('|');"
+        ),
+        "true|1|2"
+    );
+    assert_eq!(
+        thrown(
+            "var source=new Uint8Array(2);source.constructor={[Symbol.species]:BigInt64Array};source.map(function(value){return value});"
+        ),
+        ExceptionKind::TypeError
+    );
+}

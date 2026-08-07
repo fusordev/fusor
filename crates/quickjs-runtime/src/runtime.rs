@@ -1804,11 +1804,12 @@ pub(crate) enum TypedArrayPrototypeMethod {
     FindLast,
     FindLastIndex,
     ForEach,
+    Map,
     Some,
 }
 
 impl TypedArrayPrototypeMethod {
-    pub(crate) const ALL: [Self; 28] = [
+    pub(crate) const ALL: [Self; 29] = [
         Self::Buffer,
         Self::ByteLength,
         Self::ByteOffset,
@@ -1836,6 +1837,7 @@ impl TypedArrayPrototypeMethod {
         Self::FindLast,
         Self::FindLastIndex,
         Self::ForEach,
+        Self::Map,
         Self::Some,
     ];
 
@@ -1869,6 +1871,7 @@ impl TypedArrayPrototypeMethod {
             Self::FindLast => "findLast",
             Self::FindLastIndex => "findLastIndex",
             Self::ForEach => "forEach",
+            Self::Map => "map",
             Self::Some => "some",
         }
     }
@@ -1903,6 +1906,7 @@ impl TypedArrayPrototypeMethod {
             Self::FindLast => "findLast",
             Self::FindLastIndex => "findLastIndex",
             Self::ForEach => "forEach",
+            Self::Map => "map",
             Self::Some => "some",
         }
     }
@@ -1933,6 +1937,7 @@ impl TypedArrayPrototypeMethod {
                 | Self::FindLast
                 | Self::FindLastIndex
                 | Self::ForEach
+                | Self::Map
                 | Self::Some
         )
     }
@@ -1953,6 +1958,7 @@ impl TypedArrayPrototypeMethod {
             | Self::FindLast
             | Self::FindLastIndex
             | Self::ForEach
+            | Self::Map
             | Self::Some => 1,
             Self::CopyWithin | Self::Subarray | Self::Slice | Self::With => 2,
             Self::Reverse

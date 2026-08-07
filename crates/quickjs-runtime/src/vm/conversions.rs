@@ -2019,7 +2019,7 @@ fn finish_operator_primitive_target(
             finish_data_view_set_value(runtime, state.as_ref(), value)
         }
         OperatorPrimitiveTarget::TypedArrayElementSet(state) => {
-            finish_typed_array_element_set(runtime, *state, value)
+            finish_typed_array_element_set(runtime, *state, value, return_to, execution_budget)
         }
         OperatorPrimitiveTarget::ArrayBufferResize { object } => {
             finish_array_buffer_resize(runtime, object, value, realm, origin)

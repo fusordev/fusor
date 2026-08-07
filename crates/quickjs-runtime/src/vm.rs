@@ -753,6 +753,7 @@ enum NativeContinuation {
     TypedArrayPrototypeSet(Box<TypedArrayPrototypeSetState>),
     TypedArrayPrototypeSubarray(Box<TypedArrayPrototypeSubarrayState>),
     TypedArrayPrototypeSlice(Box<TypedArrayPrototypeSliceState>),
+    TypedArrayPrototypeMap(Box<TypedArrayPrototypeMapState>),
     DateToJson(DateToJsonContinuation),
     TemporalDurationBag(Box<TemporalDurationBagContinuation>),
     TemporalDurationCompareOptions(TemporalDurationCompareOptionsContinuation),
@@ -870,6 +871,7 @@ impl NativeContinuation {
                 TypedArrayPrototypeSubarrayState::retained_values()
             }
             Self::TypedArrayPrototypeSlice(_) => TypedArrayPrototypeSliceState::retained_values(),
+            Self::TypedArrayPrototypeMap(_) => TypedArrayPrototypeMapState::retained_values(),
             Self::DateToJson(_) => DateToJsonContinuation::retained_values(),
             Self::TemporalDurationBag(state) => state.retained_values(),
             Self::TemporalDurationCompareOptions(_) => {
@@ -2308,7 +2310,7 @@ impl OperatorPrimitiveTarget {
             Self::DataViewGetIndex(_) => DataViewGetState::retained_values(),
             Self::DataViewSetOffset(_) => DataViewSetOffsetState::retained_values(),
             Self::DataViewSetValue(_) => DataViewSetValueState::retained_values(),
-            Self::TypedArrayElementSet(_) => TypedArrayElementSetState::retained_values(),
+            Self::TypedArrayElementSet(state) => state.retained_values(),
             Self::TemporalDurationConstructor(state) => state.retained_values(),
             Self::TemporalDurationBag(state) => state.retained_values(),
             Self::TemporalDurationRoundLargestUnit(_state)
@@ -2822,6 +2824,7 @@ fn trace_native_continuation_roots(
         NativeContinuation::TypedArrayPrototypeSet(state) => state.trace_roots(mark),
         NativeContinuation::TypedArrayPrototypeSubarray(state) => state.trace_roots(mark),
         NativeContinuation::TypedArrayPrototypeSlice(state) => state.trace_roots(mark),
+        NativeContinuation::TypedArrayPrototypeMap(state) => state.trace_roots(mark),
         NativeContinuation::DateToJson(state) => state.trace_roots(mark),
         NativeContinuation::TemporalDurationBag(state) => state.trace_roots(mark),
         NativeContinuation::TemporalDurationCompareOptions(state) => state.trace_roots(mark),

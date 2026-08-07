@@ -525,6 +525,13 @@ pub(super) fn resume_native_continuations(
                     execution_budget,
                 )?
             }
+            NativeContinuation::TypedArrayPrototypeMap(state) => advance_typed_array_prototype_map(
+                runtime,
+                *state,
+                value,
+                return_to,
+                execution_budget,
+            )?,
             NativeContinuation::ArrayBufferSlice(state) => {
                 advance_array_buffer_slice(runtime, *state, value, return_to, execution_budget)?
             }
