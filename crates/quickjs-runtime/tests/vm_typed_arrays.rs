@@ -205,6 +205,27 @@ fn typed_array_constructors_expose_the_shared_species_getter() {
 }
 
 #[test]
+fn typed_array_constructors_inherit_from_the_hidden_abstract_constructor() {
+    assert_eq!(
+        rendered(
+            "var TypedArray=Object.getPrototypeOf(Int8Array),descriptor=Object.getOwnPropertyDescriptor(TypedArray,'prototype');\
+             return [TypedArray.name,TypedArray.length,TypedArray.prototype.constructor===TypedArray,\
+               Object.getPrototypeOf(Int8Array)===TypedArray,Object.getPrototypeOf(BigInt64Array)===TypedArray,\
+               descriptor.writable,descriptor.enumerable,descriptor.configurable].join('|');"
+        ),
+        "TypedArray|0|true|true|true|false|false|false"
+    );
+    assert_eq!(
+        thrown("var TypedArray=Object.getPrototypeOf(Int8Array);TypedArray();"),
+        ExceptionKind::TypeError
+    );
+    assert_eq!(
+        thrown("var TypedArray=Object.getPrototypeOf(Int8Array);new TypedArray();"),
+        ExceptionKind::TypeError
+    );
+}
+
+#[test]
 fn typed_array_set_copies_typed_and_array_like_sources_with_fresh_target_indices() {
     assert_eq!(
         rendered(
@@ -823,5 +844,36 @@ fn typed_array_sort_and_to_sorted_use_numeric_collections_before_comparisons() {
     assert_eq!(
         thrown("return new Uint8Array(1).toSorted(1);"),
         ExceptionKind::TypeError
+    );
+}
+
+#[test]
+fn typed_array_sort_resumes_large_comparator_collections_without_growing_the_host_stack() {
+    let reverse = (0..128)
+        .rev()
+        .map(|value| value.to_string())
+        .collect::<Vec<_>>()
+        .join(",");
+    assert_eq!(
+        rendered(&format!(
+            "var values=new Int32Array([{reverse}]),calls=0;\
+             values.sort(function(left,right){{calls+=1;return(left/4|0)-(right/4|0)}});\
+             return [values[0]===3,values[3]===0,values[124]===127,values[127]===124,calls>0].join('|');"
+        )),
+        "true|true|true|true|true"
+    );
+}
+
+#[test]
+fn typed_array_constructor_consumes_large_array_literals_without_growing_the_host_stack() {
+    let values = (0..128)
+        .map(|value| value.to_string())
+        .collect::<Vec<_>>()
+        .join(",");
+    assert_eq!(
+        rendered(&format!(
+            "return String(new Int32Array([{values}]).length);"
+        )),
+        "128"
     );
 }

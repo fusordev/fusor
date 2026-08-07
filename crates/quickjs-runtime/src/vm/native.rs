@@ -2425,6 +2425,11 @@ pub(super) fn dispatch_native_call_with_frames(
             origin.unwrap_or_else(native_function_host_origin),
             execution_budget,
         ),
+        NativeFunctionKind::TypedArrayBaseConstructor => typed_array_type_error(
+            native.realm,
+            &origin.unwrap_or_else(native_function_host_origin),
+            "abstract TypedArray constructor is not directly constructable",
+        ),
         NativeFunctionKind::TypedArrayConstructor(element) => begin_typed_array_constructor(
             runtime,
             element,

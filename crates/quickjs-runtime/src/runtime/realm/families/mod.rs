@@ -141,7 +141,7 @@ impl RealmIntrinsicSchema {
             FamilyCardinality {
                 family: "Realm native functions",
                 actual: self.specs.len(),
-                expected: 501,
+                expected: 502,
             },
         ];
         validate_intrinsic_schema(IntrinsicSchema {
@@ -242,6 +242,7 @@ pub(super) const fn is_declarative_function(id: IntrinsicFunctionId) -> bool {
             | NativeFunctionKind::ArrayBufferPrototype(_)
             | NativeFunctionKind::DataViewConstructor
             | NativeFunctionKind::DataViewPrototype(_)
+            | NativeFunctionKind::TypedArrayBaseConstructor
             | NativeFunctionKind::TypedArrayConstructor(_)
             | NativeFunctionKind::TypedArraySpeciesGetter
             | NativeFunctionKind::TypedArrayPrototype(_)
@@ -815,6 +816,7 @@ const fn is_array_function(id: IntrinsicFunctionId) -> bool {
             | NativeFunctionKind::ArrayBufferPrototype(_)
             | NativeFunctionKind::DataViewConstructor
             | NativeFunctionKind::DataViewPrototype(_)
+            | NativeFunctionKind::TypedArrayBaseConstructor
             | NativeFunctionKind::TypedArrayConstructor(_)
             | NativeFunctionKind::TypedArraySpeciesGetter
             | NativeFunctionKind::TypedArrayPrototype(_)

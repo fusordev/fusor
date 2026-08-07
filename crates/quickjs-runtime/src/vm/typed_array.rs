@@ -1098,31 +1098,7 @@ pub(super) fn finish_typed_array_constructor_element(
     return_to: Option<CallReturn>,
     execution_budget: &mut ExecutionBudget,
 ) -> Result<NativeDispatch, NativeFailure> {
-    let target = state.target.ok_or(EngineFault::RuntimeInvariant {
-        message: "TypedArray constructor element conversion lost its target",
-    })?;
-    let stored = if state.element.is_bigint() {
-        let value = to_bigint_from_primitive(&value, state.realm, &state.origin)?;
-        runtime.typed_array_store_index(
-            target,
-            state.index,
-            TypedArrayElementValue::BigInt(value.as_ref()),
-        )?
-    } else {
-        let value = operator_to_number(value, state.realm, &state.origin)?;
-        runtime.typed_array_store_index(
-            target,
-            state.index,
-            TypedArrayElementValue::Number(value),
-        )?
-    };
-    if stored != TypedArrayStoreOutcome::Stored {
-        return Err(EngineFault::RuntimeInvariant {
-            message: "TypedArray constructor destination lost its element slot",
-        }
-        .into());
-    }
-    state.index = state.index.saturating_add(1);
+    typed_array_sequence_store_element(runtime, &mut state, value)?;
     typed_array_sequence_begin_next_element(runtime, state, return_to, execution_budget)
 }
 
@@ -1165,43 +1141,79 @@ fn typed_array_sequence_begin_next_element(
     return_to: Option<CallReturn>,
     execution_budget: &mut ExecutionBudget,
 ) -> Result<NativeDispatch, NativeFailure> {
-    if state.index >= state.length {
-        let target = state.target.ok_or(EngineFault::RuntimeInvariant {
-            message: "TypedArray constructor completed without a target",
-        })?;
-        return Ok(NativeDispatch::Immediate(StoredValue::Object(target)));
-    }
-    match state.stage {
-        TypedArrayConstructorSequenceStage::AwaitIteratorValue => {
-            let value = state.values[state.index].duplicate();
-            typed_array_sequence_begin_element_conversion(
+    loop {
+        if state.index >= state.length {
+            let target = state.target.ok_or(EngineFault::RuntimeInvariant {
+                message: "TypedArray constructor completed without a target",
+            })?;
+            return Ok(NativeDispatch::Immediate(StoredValue::Object(target)));
+        }
+        let value = match state.stage {
+            TypedArrayConstructorSequenceStage::AwaitIteratorValue => {
+                state.values[state.index].duplicate()
+            }
+            TypedArrayConstructorSequenceStage::AwaitArrayLikeLengthConversion
+            | TypedArrayConstructorSequenceStage::AwaitArrayLikeElement => {
+                let index =
+                    u64::try_from(state.index).map_err(|_| EngineFault::RuntimeInvariant {
+                        message: "TypedArray array-like index does not fit u64",
+                    })?;
+                let key = array_static_index_key(runtime, index)?;
+                state.stage = TypedArrayConstructorSequenceStage::AwaitArrayLikeElement;
+                return typed_array_sequence_read(runtime, state, key, return_to, execution_budget);
+            }
+            _ => {
+                return Err(EngineFault::RuntimeInvariant {
+                    message:
+                        "TypedArray constructor attempted element initialization from an invalid stage",
+                }
+                .into());
+            }
+        };
+        if value.heap_reference().is_some() {
+            return typed_array_sequence_begin_element_conversion(
                 runtime,
                 state,
                 value,
                 return_to,
                 execution_budget,
-            )
+            );
         }
-        TypedArrayConstructorSequenceStage::AwaitArrayLikeLengthConversion
-        | TypedArrayConstructorSequenceStage::AwaitArrayLikeElement => {
-            let index = u64::try_from(state.index).map_err(|_| EngineFault::RuntimeInvariant {
-                message: "TypedArray array-like index does not fit u64",
-            })?;
-            let key = array_static_index_key(runtime, index)?;
-            state.stage = TypedArrayConstructorSequenceStage::AwaitArrayLikeElement;
-            typed_array_sequence_read(
-                runtime,
-                state,
-                key,
-                return_to,
-                execution_budget,
-            )
-        }
-        _ => Err(EngineFault::RuntimeInvariant {
-            message: "TypedArray constructor attempted element initialization from an invalid stage",
-        }
-        .into()),
+        typed_array_sequence_store_element(runtime, &mut state, value)?;
     }
+}
+
+fn typed_array_sequence_store_element(
+    runtime: &mut Runtime,
+    state: &mut TypedArrayConstructorSequenceState,
+    value: StoredValue,
+) -> Result<(), NativeFailure> {
+    let target = state.target.ok_or(EngineFault::RuntimeInvariant {
+        message: "TypedArray constructor element conversion lost its target",
+    })?;
+    let stored = if state.element.is_bigint() {
+        let value = to_bigint_from_primitive(&value, state.realm, &state.origin)?;
+        runtime.typed_array_store_index(
+            target,
+            state.index,
+            TypedArrayElementValue::BigInt(value.as_ref()),
+        )?
+    } else {
+        let value = operator_to_number(value, state.realm, &state.origin)?;
+        runtime.typed_array_store_index(
+            target,
+            state.index,
+            TypedArrayElementValue::Number(value),
+        )?
+    };
+    if stored != TypedArrayStoreOutcome::Stored {
+        return Err(EngineFault::RuntimeInvariant {
+            message: "TypedArray constructor destination lost its element slot",
+        }
+        .into());
+    }
+    state.index = state.index.saturating_add(1);
+    Ok(())
 }
 
 fn typed_array_sequence_begin_element_conversion(
@@ -4913,7 +4925,7 @@ fn typed_array_name(element: TypedArrayElementType) -> &'static str {
     }
 }
 
-fn typed_array_type_error<T>(
+pub(super) fn typed_array_type_error<T>(
     realm: RealmId,
     origin: &JsStackFrame,
     message: &str,

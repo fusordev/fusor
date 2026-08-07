@@ -23,7 +23,10 @@ jobs:
           git -C "$test262_dir" rev-parse HEAD
           echo "TEST262_PATH=$test262_dir" >> "$GITHUB_ENV"
       - name: Run complete configured Test262 suite and print passing rate
-        run: cargo xtask test262 --suite "$TEST262_PATH" --baseline tests/test262/upstream --report target/test262/report.json
+        shell: bash
+        run: |
+          ulimit -s 65520
+          cargo xtask test262 --suite "$TEST262_PATH" --baseline tests/test262/upstream --instruction-fuel 50000000 --report target/test262/report.json
       - name: Upload Test262 report
         if: always()
         uses: actions/upload-artifact@v4

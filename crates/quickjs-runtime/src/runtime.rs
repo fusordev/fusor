@@ -1206,6 +1206,10 @@ pub(crate) enum NativeFunctionKind {
     ArrayBufferPrototype(ArrayBufferPrototypeMethod),
     DataViewConstructor,
     DataViewPrototype(DataViewPrototypeMethod),
+    /// The hidden abstract `%TypedArray%` constructor shared by every
+    /// concrete typed-array constructor. It is reachable through
+    /// `Object.getPrototypeOf(Int8Array)`, but never installed globally.
+    TypedArrayBaseConstructor,
     TypedArrayConstructor(TypedArrayElementType),
     TypedArraySpeciesGetter,
     TypedArrayPrototype(TypedArrayPrototypeMethod),
