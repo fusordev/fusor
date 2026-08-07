@@ -4,7 +4,7 @@ use std::collections::HashMap;
 
 use crate::{
     Atom, AtomKind, JsBigInt, JsString, PredefinedAtom, PropertyKey, PropertyLayout,
-    object::{BoxedPrimitive, KeyPhases, ObjectRecord, OwnProperty},
+    object::{BoxedPrimitive, KeyPhases, ObjectRecord, OwnProperty, TypedArrayElementType},
 };
 
 use super::{
@@ -103,7 +103,9 @@ impl RealmSnapshot {
             string,
             array,
             array_buffer,
+            shared_array_buffer,
             data_view,
+            typed_array,
             date,
             temporal,
             map,
@@ -142,11 +144,24 @@ impl RealmSnapshot {
             (string.prototype, "%String.prototype%"),
             (array.prototype, "%Array.prototype%"),
             (array_buffer.prototype, "%ArrayBuffer.prototype%"),
+            (
+                shared_array_buffer.prototype,
+                "%SharedArrayBuffer.prototype%",
+            ),
             (data_view.prototype, "%DataView.prototype%"),
+            (typed_array.prototype, "%TypedArray.prototype%"),
             (date.prototype, "%Date.prototype%"),
             (temporal.namespace, "%Temporal%"),
             (temporal.duration_prototype, "%Temporal.Duration.prototype%"),
             (temporal.instant_prototype, "%Temporal.Instant.prototype%"),
+            (
+                temporal.plain_date_prototype,
+                "%Temporal.PlainDate.prototype%",
+            ),
+            (
+                temporal.plain_date_time_prototype,
+                "%Temporal.PlainDateTime.prototype%",
+            ),
             (map.prototype, "%Map.prototype%"),
             (map.iterator_prototype, "%MapIterator.prototype%"),
             (set.prototype, "%Set.prototype%"),
@@ -202,6 +217,16 @@ impl RealmSnapshot {
         ] {
             register_identity(HeapReference::Object(object), identity, &mut identities);
         }
+        for (element, prototype) in TypedArrayElementType::ALL
+            .into_iter()
+            .zip(typed_array.instance_prototypes)
+        {
+            register_identity(
+                HeapReference::Object(prototype),
+                format!("%{element:?}Array.prototype%"),
+                &mut identities,
+            );
+        }
         for kind in ErrorIntrinsicKind::ALL {
             let intrinsic = errors.intrinsic(kind);
             register_identity(
@@ -214,7 +239,7 @@ impl RealmSnapshot {
             .objects
             .get(state.global_object)
             .expect("snapshot global is live");
-        for name in ["Reflect", "JSON", "Math"] {
+        for name in ["Reflect", "JSON", "Math", "Atomics"] {
             register_identity(
                 HeapReference::Object(global_object_property(&global.record, name)),
                 format!("%{name}%"),
@@ -474,9 +499,9 @@ mod tests {
 
     use crate::runtime::{RealmIntrinsics, RuntimeLimits, RuntimeUsage};
 
-    const REALM_NODES: usize = 501;
-    const REALM_PROPERTIES: u64 = 1_518;
-    const REALM_SNAPSHOT_FINGERPRINT: u64 = 18_177_187_065_341_062_646;
+    const REALM_NODES: usize = 642;
+    const REALM_PROPERTIES: u64 = 1_962;
+    const REALM_SNAPSHOT_FINGERPRINT: u64 = 8_348_396_072_093_720_022;
 
     #[test]
     fn complete_realm_snapshot_pins_the_installed_intrinsic_graph() {
@@ -524,9 +549,9 @@ mod tests {
         assert_eq!(
             first_atoms,
             AtomUsage {
-                live_atoms: PREDEFINED_ATOM_COUNT + 255,
-                live_description_code_units: PREDEFINED_DESCRIPTION_CODE_UNITS + 2_189,
-                interner_slots: PREDEFINED_INTERNER_SLOTS + 255,
+                live_atoms: PREDEFINED_ATOM_COUNT + 320,
+                live_description_code_units: PREDEFINED_DESCRIPTION_CODE_UNITS + 2_723,
+                interner_slots: PREDEFINED_INTERNER_SLOTS + 320,
             }
         );
 

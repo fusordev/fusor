@@ -563,6 +563,12 @@ pub(super) fn finish_intrinsic_get(
         IntrinsicGetContinuation::TemporalPlainDateConstructor { new_target, date } => {
             finish_temporal_plain_date_constructor_wrapper(runtime, new_target, date, &value)
         }
+        IntrinsicGetContinuation::TemporalPlainDateTimeConstructor {
+            new_target,
+            date_time,
+        } => finish_temporal_plain_date_time_constructor_wrapper(
+            runtime, new_target, date_time, &value,
+        ),
         IntrinsicGetContinuation::StringConstructor {
             new_target,
             value: string_value,
@@ -2122,11 +2128,12 @@ fn finish_operator_primitive_target(
                 execution_budget,
             )
         }
-        OperatorPrimitiveTarget::TemporalPlainDateCalendar(state) => {
-            finish_temporal_plain_date_calendar(
+        OperatorPrimitiveTarget::TemporalPlainDateTimeConstructor(state) => {
+            let number = operator_to_number(value, realm, origin)?;
+            advance_temporal_plain_date_time_constructor(
                 runtime,
-                state.as_ref(),
-                value,
+                *state,
+                Some(number),
                 realm,
                 return_to,
                 origin,

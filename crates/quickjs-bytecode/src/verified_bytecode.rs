@@ -9311,6 +9311,41 @@ fn transfer_internal_operand_stack(
                     ret_finalizer: None,
                 });
             }
+            // A `for (const [value] of iterable)` head starts an inner
+            // iterator for the pattern. Dropping that iterator's done flag
+            // leaves the element value above its record. Preserve a distinct
+            // head value only when an enclosing complete for-of record proves
+            // that this nested iterator belongs to an iteration head. The
+            // following lexical store can then be certified as the permitted
+            // fresh initialization of a captured per-iteration binding.
+            if let Some(base) = state.len().checked_sub(5)
+                && let (
+                    InternalStackValue::ForOfIterator(iterator),
+                    InternalStackValue::ForOfNextMethod(next),
+                    InternalStackValue::ForOfCatch(catch),
+                    InternalStackValue::ForOfValue(value),
+                    InternalStackValue::ForOfDone(done),
+                ) = (
+                    state[base],
+                    state[base + 1],
+                    state[base + 2],
+                    state[base + 3],
+                    state[base + 4],
+                )
+                && iterator == next
+                && next == catch
+                && catch == value
+                && value == done
+                && has_enclosing_for_of_record(&state[..base])
+            {
+                state.truncate(base + 4);
+                state[base + 3] = InternalStackValue::ForOfHeadValue(value);
+                return Ok(InternalStackTransfer {
+                    normal_completion: true,
+                    iteration_branch_value: None,
+                    ret_finalizer: None,
+                });
+            }
             if state.is_empty() {
                 if effectively_reachable {
                     return Err(internal_stack_error(id, decoded.pc(), opcode, state));
@@ -9766,6 +9801,19 @@ fn transfer_internal_operand_stack(
         normal_completion: true,
         iteration_branch_value: None,
         ret_finalizer: None,
+    })
+}
+
+fn has_enclosing_for_of_record(state: &[InternalStackValue]) -> bool {
+    state.windows(3).any(|record| {
+        matches!(
+            record,
+            [
+                InternalStackValue::ForOfIterator(iterator),
+                InternalStackValue::ForOfNextMethod(next),
+                InternalStackValue::ForOfCatch(catch),
+            ] if iterator == next && next == catch
+        )
     })
 }
 

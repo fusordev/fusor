@@ -101,3 +101,24 @@ fn sloppy_delete_distinguishes_lexical_and_object_global_names() {
         }));
     }
 }
+
+#[test]
+fn global_script_certifies_const_for_of_destructuring_iteration_heads() {
+    let tree = compile(
+        "const entries = [[1, 2], [3, 4]];\
+         for (const [first] of entries) { (() => first)(); }",
+    );
+    let root = tree.verified_bytecode().root();
+    assert_eq!(
+        root.metadata().executable_kind(),
+        CompilerExecutableKind::GlobalScript
+    );
+    assert!(
+        root.function()
+            .control_flow()
+            .instructions()
+            .iter()
+            .any(|instruction| instruction.decoded().instruction().opcode()
+                == FinalOpcode::ForOfStart)
+    );
+}

@@ -35,9 +35,9 @@ use super::{
     is_supported_instruction, is_supported_opcode, usize_to_u64,
 };
 
-const REALM_OBJECT_SLOTS: u64 = 62;
-const REALM_PROPERTY_SLOTS: u64 = 1_788;
-const REALM_FUNCTION_SLOTS: u64 = 522;
+const REALM_OBJECT_SLOTS: u64 = 64;
+const REALM_PROPERTY_SLOTS: u64 = 1_962;
+const REALM_FUNCTION_SLOTS: u64 = 578;
 
 #[test]
 fn finalization_job_limit_failure_does_not_clear_weak_targets() {
@@ -2085,9 +2085,9 @@ fn realm_installs_the_exact_function_intrinsic_graph() {
     assert_eq!(
         runtime.atom_usage(),
         AtomUsage {
-            live_atoms: PREDEFINED_ATOM_COUNT + 296,
-            live_description_code_units: PREDEFINED_DESCRIPTION_CODE_UNITS + 2_521,
-            interner_slots: PREDEFINED_INTERNER_SLOTS + 296,
+            live_atoms: PREDEFINED_ATOM_COUNT + 320,
+            live_description_code_units: PREDEFINED_DESCRIPTION_CODE_UNITS + 2_723,
+            interner_slots: PREDEFINED_INTERNER_SLOTS + 320,
         }
     );
 
@@ -2741,9 +2741,9 @@ fn function_call_is_realm_owned_while_its_dynamic_atom_is_reused() {
     assert_eq!(
         runtime.atom_usage(),
         AtomUsage {
-            live_atoms: PREDEFINED_ATOM_COUNT + 255,
-            live_description_code_units: PREDEFINED_DESCRIPTION_CODE_UNITS + 2_189,
-            interner_slots: PREDEFINED_INTERNER_SLOTS + 255,
+            live_atoms: PREDEFINED_ATOM_COUNT + 320,
+            live_description_code_units: PREDEFINED_DESCRIPTION_CODE_UNITS + 2_723,
+            interner_slots: PREDEFINED_INTERNER_SLOTS + 320,
         }
     );
 }
@@ -2790,9 +2790,9 @@ fn function_apply_is_realm_owned_while_its_predefined_atom_is_reused() {
     assert_eq!(
         runtime.atom_usage(),
         AtomUsage {
-            live_atoms: PREDEFINED_ATOM_COUNT + 255,
-            live_description_code_units: PREDEFINED_DESCRIPTION_CODE_UNITS + 2_189,
-            interner_slots: PREDEFINED_INTERNER_SLOTS + 255,
+            live_atoms: PREDEFINED_ATOM_COUNT + 320,
+            live_description_code_units: PREDEFINED_DESCRIPTION_CODE_UNITS + 2_723,
+            interner_slots: PREDEFINED_INTERNER_SLOTS + 320,
         }
     );
 }

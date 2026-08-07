@@ -303,6 +303,8 @@ struct TemporalIntrinsics {
     instant_constructor: FunctionId,
     plain_date_prototype: ObjectId,
     plain_date_constructor: FunctionId,
+    plain_date_time_prototype: ObjectId,
+    plain_date_time_constructor: FunctionId,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -1239,6 +1241,8 @@ pub(crate) enum NativeFunctionKind {
     TemporalPlainDateConstructor,
     TemporalPlainDateStatic(TemporalPlainDateStaticMethod),
     TemporalPlainDatePrototype(TemporalPlainDatePrototypeMethod),
+    TemporalPlainDateTimeConstructor,
+    TemporalPlainDateTimePrototype(TemporalPlainDateTimePrototypeMethod),
     FunctionPrototypeToString,
     ErrorConstructor(ErrorIntrinsicKind),
     ErrorPrototypeToString,
@@ -2297,6 +2301,36 @@ pub(crate) enum TemporalPlainDatePrototypeMethod {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum TemporalPlainDateTimePrototypeMethod {
+    CalendarId,
+    Year,
+    Month,
+    MonthCode,
+    Day,
+    Hour,
+    Minute,
+    Second,
+    Millisecond,
+    Microsecond,
+    Nanosecond,
+    DayOfWeek,
+    DayOfYear,
+    WeekOfYear,
+    YearOfWeek,
+    DaysInWeek,
+    DaysInMonth,
+    DaysInYear,
+    MonthsInYear,
+    InLeapYear,
+    Era,
+    EraYear,
+    ToString,
+    ToJson,
+    ToLocaleString,
+    ValueOf,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum TemporalDurationPrototypeMethod {
     Years,
     Months,
@@ -2654,6 +2688,131 @@ impl TemporalPlainDatePrototypeMethod {
             Self::With | Self::Add | Self::Subtract | Self::Until | Self::Since | Self::Equals => 1,
             _ => 0,
         }
+    }
+}
+
+impl TemporalPlainDateTimePrototypeMethod {
+    pub(crate) const ALL: [Self; 26] = [
+        Self::CalendarId,
+        Self::Year,
+        Self::Month,
+        Self::MonthCode,
+        Self::Day,
+        Self::Hour,
+        Self::Minute,
+        Self::Second,
+        Self::Millisecond,
+        Self::Microsecond,
+        Self::Nanosecond,
+        Self::DayOfWeek,
+        Self::DayOfYear,
+        Self::WeekOfYear,
+        Self::YearOfWeek,
+        Self::DaysInWeek,
+        Self::DaysInMonth,
+        Self::DaysInYear,
+        Self::MonthsInYear,
+        Self::InLeapYear,
+        Self::Era,
+        Self::EraYear,
+        Self::ToString,
+        Self::ToJson,
+        Self::ToLocaleString,
+        Self::ValueOf,
+    ];
+
+    pub(crate) const fn name(self) -> &'static str {
+        match self {
+            Self::CalendarId => "calendarId",
+            Self::Year => "year",
+            Self::Month => "month",
+            Self::MonthCode => "monthCode",
+            Self::Day => "day",
+            Self::Hour => "hour",
+            Self::Minute => "minute",
+            Self::Second => "second",
+            Self::Millisecond => "millisecond",
+            Self::Microsecond => "microsecond",
+            Self::Nanosecond => "nanosecond",
+            Self::DayOfWeek => "dayOfWeek",
+            Self::DayOfYear => "dayOfYear",
+            Self::WeekOfYear => "weekOfYear",
+            Self::YearOfWeek => "yearOfWeek",
+            Self::DaysInWeek => "daysInWeek",
+            Self::DaysInMonth => "daysInMonth",
+            Self::DaysInYear => "daysInYear",
+            Self::MonthsInYear => "monthsInYear",
+            Self::InLeapYear => "inLeapYear",
+            Self::Era => "era",
+            Self::EraYear => "eraYear",
+            Self::ToString => "toString",
+            Self::ToJson => "toJSON",
+            Self::ToLocaleString => "toLocaleString",
+            Self::ValueOf => "valueOf",
+        }
+    }
+
+    pub(crate) const fn function_name(self) -> &'static str {
+        match self {
+            Self::CalendarId => "get calendarId",
+            Self::Year => "get year",
+            Self::Month => "get month",
+            Self::MonthCode => "get monthCode",
+            Self::Day => "get day",
+            Self::Hour => "get hour",
+            Self::Minute => "get minute",
+            Self::Second => "get second",
+            Self::Millisecond => "get millisecond",
+            Self::Microsecond => "get microsecond",
+            Self::Nanosecond => "get nanosecond",
+            Self::DayOfWeek => "get dayOfWeek",
+            Self::DayOfYear => "get dayOfYear",
+            Self::WeekOfYear => "get weekOfYear",
+            Self::YearOfWeek => "get yearOfWeek",
+            Self::DaysInWeek => "get daysInWeek",
+            Self::DaysInMonth => "get daysInMonth",
+            Self::DaysInYear => "get daysInYear",
+            Self::MonthsInYear => "get monthsInYear",
+            Self::InLeapYear => "get inLeapYear",
+            Self::Era => "get era",
+            Self::EraYear => "get eraYear",
+            Self::ToString => "toString",
+            Self::ToJson => "toJSON",
+            Self::ToLocaleString => "toLocaleString",
+            Self::ValueOf => "valueOf",
+        }
+    }
+
+    pub(crate) const fn is_accessor(self) -> bool {
+        matches!(
+            self,
+            Self::CalendarId
+                | Self::Year
+                | Self::Month
+                | Self::MonthCode
+                | Self::Day
+                | Self::Hour
+                | Self::Minute
+                | Self::Second
+                | Self::Millisecond
+                | Self::Microsecond
+                | Self::Nanosecond
+                | Self::DayOfWeek
+                | Self::DayOfYear
+                | Self::WeekOfYear
+                | Self::YearOfWeek
+                | Self::DaysInWeek
+                | Self::DaysInMonth
+                | Self::DaysInYear
+                | Self::MonthsInYear
+                | Self::InLeapYear
+                | Self::Era
+                | Self::EraYear
+        )
+    }
+
+    pub(crate) const fn length() -> i32 {
+        0
     }
 }
 
@@ -3114,6 +3273,7 @@ impl NativeFunctionKind {
                 | Self::TemporalDurationConstructor
                 | Self::TemporalInstantConstructor
                 | Self::TemporalPlainDateConstructor
+                | Self::TemporalPlainDateTimeConstructor
                 | Self::RegExpConstructor
                 | Self::GeneratorFunctionConstructor
                 | Self::AsyncFunctionConstructor

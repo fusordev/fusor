@@ -141,16 +141,99 @@ fn plain_date_intrinsic_constructor_accessors_and_iso_formatting_are_spec_shaped
 }
 
 #[test]
+fn plain_date_time_constructor_accessors_and_iso_formatting_are_spec_shaped() {
+    assert_eq!(
+        rendered(
+            "var d=new Temporal.PlainDateTime(2020,12,24,12,34,56,7,8,9,'iso8601');
+             return [d.calendarId,d.year,d.month,d.monthCode,d.day,d.hour,d.minute,d.second,
+               d.millisecond,d.microsecond,d.nanosecond,d.toString()].join('|');"
+        ),
+        "iso8601|2020|12|M12|24|12|34|56|7|8|9|2020-12-24T12:34:56.007008009"
+    );
+    assert_eq!(
+        rendered(
+            "var d=new Temporal.PlainDateTime(2020,12,24);
+             var hour=Object.getOwnPropertyDescriptor(Temporal.PlainDateTime.prototype,'hour');
+             return [Temporal.PlainDateTime.length,Temporal.PlainDateTime.name,
+               Object.getPrototypeOf(d)===Temporal.PlainDateTime.prototype,
+               Object.prototype.toString.call(d),hour.enumerable,hour.get.name].join('|');"
+        ),
+        "3|PlainDateTime|true|[object Temporal.PlainDateTime]|false|get hour"
+    );
+    assert_eq!(
+        rendered(
+            "var d=new Temporal.PlainDateTime(2020,12,24,12,34,56,7,8,9);
+             return [d.dayOfWeek,d.dayOfYear,d.weekOfYear,d.yearOfWeek,d.daysInWeek,
+               d.daysInMonth,d.daysInYear,d.monthsInYear,d.inLeapYear,d.era,d.eraYear,
+               d.toJSON(),d.toLocaleString()].join('|');"
+        ),
+        "4|359|52|2020|7|31|366|12|true|||2020-12-24T12:34:56.007008009|2020-12-24T12:34:56.007008009"
+    );
+    assert_eq!(
+        rendered("return new Temporal.PlainDateTime(2020,2,29).toString();"),
+        "2020-02-29T00:00:00"
+    );
+}
+
+#[test]
+fn plain_date_time_constructor_preserves_order_defaults_and_branding() {
+    assert_eq!(
+        rendered(
+            "var log=[];
+             function number(name,value){return {valueOf:function(){log.push(name);return value}}}
+             function F(){};var p={marker:true};F.prototype=p;
+             var d=Reflect.construct(Temporal.PlainDateTime,[
+               number('year',2020.9),number('month',2.8),number('day',29.6),
+               number('hour',23.9),number('minute',59.9),number('second',58.9),
+               number('millisecond',7.9),number('microsecond',8.9),number('nanosecond',9.9),'iso8601'
+             ],F);
+             return [Object.getPrototypeOf(d)===p,Temporal.PlainDateTime.prototype.toString.call(d),log.join(',')].join('|');"
+        ),
+        "true|2020-02-29T23:59:58.007008009|year,month,day,hour,minute,second,millisecond,microsecond,nanosecond"
+    );
+    assert_eq!(
+        thrown("return Temporal.PlainDateTime(2020,1,1);"),
+        ExceptionKind::TypeError
+    );
+    assert_eq!(
+        thrown("return Temporal.PlainDateTime.prototype.hour.call({});"),
+        ExceptionKind::TypeError
+    );
+    assert_eq!(
+        thrown("return new Temporal.PlainDateTime(2020,2,30);"),
+        ExceptionKind::RangeError
+    );
+    assert_eq!(
+        thrown("return new Temporal.PlainDateTime(2020,1,1,0,0,0,0,0,0,{});"),
+        ExceptionKind::TypeError
+    );
+    assert_eq!(
+        thrown("return new Temporal.PlainDateTime(2020,1,1).valueOf();"),
+        ExceptionKind::TypeError
+    );
+    assert_eq!(
+        rendered(
+            "var values=[[null,'null'],[1,'number'],[{},'object']];var output='';
+             for(const [calendar,label] of values){
+               var throws=(()=>{try{new Temporal.PlainDateTime(2020,1,1,0,0,0,0,0,0,calendar)}catch(error){return error instanceof TypeError}})();
+               output=output+(throws?label:'wrong');
+             }
+             return output;"
+        ),
+        "nullnumberobject"
+    );
+}
+
+#[test]
 fn plain_date_constructor_observes_component_and_calendar_conversion_order() {
     assert_eq!(
         rendered(
             "var log=[];
              function number(name,value){return {valueOf:function(){log.push(name);return value}}}
-             var calendar={toString:function(){log.push('calendar');return 'iso8601'}};
-             var d=new Temporal.PlainDate(number('year',2020.9),number('month',2.8),number('day',29.6),calendar);
+             var d=new Temporal.PlainDate(number('year',2020.9),number('month',2.8),number('day',29.6),'iso8601');
              return [d.toString(),log.join(',')].join('|');"
         ),
-        "2020-02-29|year,month,day,calendar"
+        "2020-02-29|year,month,day"
     );
 }
 
@@ -177,7 +260,7 @@ fn plain_date_from_property_bags_observe_field_and_overflow_conversion_order() {
         rendered(
             "var log=[];
              var fields={
-               get calendar(){log.push('calendar');return {toString:function(){log.push('calendar string');return 'iso8601'}}},
+               get calendar(){log.push('calendar');return 'iso8601'},
                get day(){log.push('day');return {valueOf:function(){log.push('day number');return 32.8}}},
                get month(){log.push('month');return {valueOf:function(){log.push('month number');return 1.9}}},
                get monthCode(){log.push('monthCode');return {toString:function(){log.push('monthCode string');return 'M01'}}},
@@ -187,7 +270,7 @@ fn plain_date_from_property_bags_observe_field_and_overflow_conversion_order() {
              var date=Temporal.PlainDate.from(fields,options);
              return [date.toString(),log.join(',')].join('|');"
         ),
-        "2021-01-31|calendar,calendar string,day,day number,month,month number,monthCode,monthCode string,year,year number,overflow,overflow string"
+        "2021-01-31|calendar,day,day number,month,month number,monthCode,monthCode string,year,year number,overflow,overflow string"
     );
     assert_eq!(
         rendered(
@@ -329,6 +412,14 @@ fn plain_date_rejects_unbranded_receivers_invalid_components_and_call_without_ne
     assert_eq!(
         thrown("return new Temporal.PlainDate(2020,1,1,'invalid-calendar');"),
         ExceptionKind::RangeError
+    );
+    assert_eq!(
+        thrown("return new Temporal.PlainDate(2020,1,1,{});"),
+        ExceptionKind::TypeError
+    );
+    assert_eq!(
+        thrown("return Temporal.PlainDate.from({year:2020,month:1,day:1,calendar:{}});"),
+        ExceptionKind::TypeError
     );
     assert_eq!(
         thrown("return new Temporal.PlainDate(2020,1,1).valueOf();"),

@@ -16,7 +16,8 @@ use crate::runtime::{
     ArrayBufferPrototypeMethod, AtomicsMethod, DataViewPrototypeMethod, DatePrototypeMethod,
     DateStaticMethod, SharedArrayBufferPrototypeMethod, TemporalDurationPrototypeMethod,
     TemporalDurationStaticMethod, TemporalInstantPrototypeMethod, TemporalInstantStaticMethod,
-    TemporalPlainDatePrototypeMethod, TemporalPlainDateStaticMethod, TypedArrayPrototypeMethod,
+    TemporalPlainDatePrototypeMethod, TemporalPlainDateStaticMethod,
+    TemporalPlainDateTimePrototypeMethod, TypedArrayPrototypeMethod,
 };
 
 /// Stable identity of an object allocated by Realm bootstrap.
@@ -43,6 +44,7 @@ pub(in crate::runtime) enum IntrinsicObjectId {
     TemporalDurationPrototype,
     TemporalInstantPrototype,
     TemporalPlainDatePrototype,
+    TemporalPlainDateTimePrototype,
     RegExpPrototype,
     IteratorPrototype,
     AsyncIteratorPrototype,
@@ -72,7 +74,7 @@ pub(in crate::runtime) enum IntrinsicObjectId {
 }
 
 impl IntrinsicObjectId {
-    pub(in crate::runtime) const ALL: [Self; 63] = [
+    pub(in crate::runtime) const ALL: [Self; 64] = [
         Self::ObjectPrototype,
         Self::GlobalObject,
         Self::ErrorPrototype(ErrorIntrinsicKind::Error),
@@ -110,6 +112,7 @@ impl IntrinsicObjectId {
         Self::TemporalDurationPrototype,
         Self::TemporalInstantPrototype,
         Self::TemporalPlainDatePrototype,
+        Self::TemporalPlainDateTimePrototype,
         Self::RegExpPrototype,
         Self::IteratorPrototype,
         Self::AsyncIteratorPrototype,
@@ -193,12 +196,14 @@ pub(in crate::runtime) enum RealmNameId {
     Duration,
     Instant,
     PlainDate,
+    PlainDateTime,
     TemporalDurationStatic(TemporalDurationStaticMethod),
     TemporalDurationPrototype(TemporalDurationPrototypeMethod),
     TemporalInstantStatic(TemporalInstantStaticMethod),
     TemporalInstantPrototype(TemporalInstantPrototypeMethod),
     TemporalPlainDateStatic(TemporalPlainDateStaticMethod),
     TemporalPlainDatePrototype(TemporalPlainDatePrototypeMethod),
+    TemporalPlainDateTimePrototype(TemporalPlainDateTimePrototypeMethod),
     RegExpEscape,
     RegExpCompile,
     RegExpTest,

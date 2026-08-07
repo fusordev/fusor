@@ -16,6 +16,7 @@ use crate::runtime::realm::{
 use crate::runtime::{
     TemporalDurationPrototypeMethod, TemporalDurationStaticMethod, TemporalInstantPrototypeMethod,
     TemporalInstantStaticMethod, TemporalPlainDatePrototypeMethod, TemporalPlainDateStaticMethod,
+    TemporalPlainDateTimePrototypeMethod,
 };
 
 pub(super) fn visit_objects(visit: ObjectSink<'_>) {
@@ -24,6 +25,7 @@ pub(super) fn visit_objects(visit: ObjectSink<'_>) {
         IntrinsicObjectId::TemporalDurationPrototype,
         IntrinsicObjectId::TemporalInstantPrototype,
         IntrinsicObjectId::TemporalPlainDatePrototype,
+        IntrinsicObjectId::TemporalPlainDateTimePrototype,
     ] {
         visit(object(
             id,
@@ -176,6 +178,36 @@ pub(super) fn visit_functions(visit: FunctionSink<'_>) {
             method.length(),
         ));
     }
+    visit(ordinary(
+        NativeFunctionKind::TemporalPlainDateTimeConstructor,
+        IntrinsicNameSpec::Literal("PlainDateTime"),
+        3,
+    ));
+    for method in TemporalPlainDateTimePrototypeMethod::ALL {
+        let name = match method {
+            TemporalPlainDateTimePrototypeMethod::ToString => {
+                IntrinsicNameSpec::Predefined(PredefinedAtom::ToString)
+            }
+            TemporalPlainDateTimePrototypeMethod::ToJson => {
+                IntrinsicNameSpec::Predefined(PredefinedAtom::ToJson)
+            }
+            TemporalPlainDateTimePrototypeMethod::ToLocaleString => {
+                IntrinsicNameSpec::Predefined(PredefinedAtom::ToLocaleString)
+            }
+            TemporalPlainDateTimePrototypeMethod::ValueOf => {
+                IntrinsicNameSpec::Predefined(PredefinedAtom::ValueOf)
+            }
+            method if method.is_accessor() => IntrinsicNameSpec::Literal(method.function_name()),
+            method => {
+                IntrinsicNameSpec::RealmName(RealmNameId::TemporalPlainDateTimePrototype(method))
+            }
+        };
+        visit(ordinary(
+            NativeFunctionKind::TemporalPlainDateTimePrototype(method),
+            name,
+            TemporalPlainDateTimePrototypeMethod::length(),
+        ));
+    }
 }
 
 #[allow(
@@ -197,6 +229,11 @@ pub(super) fn visit_properties(visit: PropertySink<'_>) {
         IntrinsicIdentity::Object(IntrinsicObjectId::TemporalPlainDatePrototype);
     let plain_date_constructor = IntrinsicIdentity::Function(IntrinsicFunctionId(
         NativeFunctionKind::TemporalPlainDateConstructor,
+    ));
+    let plain_date_time_prototype =
+        IntrinsicIdentity::Object(IntrinsicObjectId::TemporalPlainDateTimePrototype);
+    let plain_date_time_constructor = IntrinsicIdentity::Function(IntrinsicFunctionId(
+        NativeFunctionKind::TemporalPlainDateTimeConstructor,
     ));
 
     visit(data(
@@ -428,5 +465,63 @@ pub(super) fn visit_properties(visit: PropertySink<'_>) {
         IntrinsicKeySpec::WellKnownSymbol(PredefinedAtom::SymbolToStringTag),
         PropertyLayout::data(false, false, true),
         IntrinsicValueSpec::String(IntrinsicStringSpec::Literal("Temporal.PlainDate")),
+    ));
+    visit(method(
+        namespace,
+        IntrinsicKeySpec::InternedString(RealmNameId::PlainDateTime),
+        NativeFunctionKind::TemporalPlainDateTimeConstructor,
+    ));
+    visit(data(
+        plain_date_time_constructor,
+        IntrinsicKeySpec::PredefinedString(PredefinedAtom::Prototype),
+        CONSTRUCTOR_PROTOTYPE_PROPERTY,
+        IntrinsicValueSpec::Object(IntrinsicObjectId::TemporalPlainDateTimePrototype),
+    ));
+    visit(method(
+        plain_date_time_prototype,
+        IntrinsicKeySpec::PredefinedString(PredefinedAtom::Constructor),
+        NativeFunctionKind::TemporalPlainDateTimeConstructor,
+    ));
+    for method_id in TemporalPlainDateTimePrototypeMethod::ALL {
+        let key = match method_id {
+            TemporalPlainDateTimePrototypeMethod::ToString => {
+                IntrinsicKeySpec::PredefinedString(PredefinedAtom::ToString)
+            }
+            TemporalPlainDateTimePrototypeMethod::ToJson => {
+                IntrinsicKeySpec::PredefinedString(PredefinedAtom::ToJson)
+            }
+            TemporalPlainDateTimePrototypeMethod::ToLocaleString => {
+                IntrinsicKeySpec::PredefinedString(PredefinedAtom::ToLocaleString)
+            }
+            TemporalPlainDateTimePrototypeMethod::ValueOf => {
+                IntrinsicKeySpec::PredefinedString(PredefinedAtom::ValueOf)
+            }
+            method => IntrinsicKeySpec::InternedString(
+                RealmNameId::TemporalPlainDateTimePrototype(method),
+            ),
+        };
+        if method_id.is_accessor() {
+            visit(accessor(
+                plain_date_time_prototype,
+                key,
+                PropertyLayout::accessor(false, true),
+                Some(IntrinsicFunctionId(
+                    NativeFunctionKind::TemporalPlainDateTimePrototype(method_id),
+                )),
+                None,
+            ));
+        } else {
+            visit(method(
+                plain_date_time_prototype,
+                key,
+                NativeFunctionKind::TemporalPlainDateTimePrototype(method_id),
+            ));
+        }
+    }
+    visit(data(
+        plain_date_time_prototype,
+        IntrinsicKeySpec::WellKnownSymbol(PredefinedAtom::SymbolToStringTag),
+        PropertyLayout::data(false, false, true),
+        IntrinsicValueSpec::String(IntrinsicStringSpec::Literal("Temporal.PlainDateTime")),
     ));
 }

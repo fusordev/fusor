@@ -80,10 +80,11 @@ use crate::{
         ReflectMethod, RegExpFlag, RegExpSymbolMethod, SetMethod, SetPrototypeOutcome,
         StringArgument, StringMethod, TemporalDurationPrototypeMethod,
         TemporalDurationStaticMethod, TemporalInstantPrototypeMethod, TemporalInstantStaticMethod,
-        TemporalPlainDatePrototypeMethod, TemporalPlainDateStaticMethod, TypedArrayElementValue,
-        TypedArrayOwnProperty, TypedArrayPropertyKey, TypedArrayPrototypeMethod,
-        TypedArrayStoreOutcome, TypedArrayView, UriFunction, WeakMapMethod, WeakSetMethod,
-        array_length_from_number, check_execution_limit, global_declaration_error, usize_to_u64,
+        TemporalPlainDatePrototypeMethod, TemporalPlainDateStaticMethod,
+        TemporalPlainDateTimePrototypeMethod, TypedArrayElementValue, TypedArrayOwnProperty,
+        TypedArrayPropertyKey, TypedArrayPrototypeMethod, TypedArrayStoreOutcome, TypedArrayView,
+        UriFunction, WeakMapMethod, WeakSetMethod, array_length_from_number, check_execution_limit,
+        global_declaration_error, usize_to_u64,
     },
     value::{HeapReference, SlotValue, StoredValue},
 };
@@ -1265,6 +1266,10 @@ enum IntrinsicGetContinuation {
         new_target: FunctionId,
         date: temporal_rs::PlainDate,
     },
+    TemporalPlainDateTimeConstructor {
+        new_target: FunctionId,
+        date_time: temporal_rs::PlainDateTime,
+    },
     StringConstructor {
         new_target: FunctionId,
         value: JsString,
@@ -1321,6 +1326,7 @@ impl IntrinsicGetContinuation {
             | Self::TemporalInstantConstructor { .. }
             | Self::TemporalDurationConstructor { .. }
             | Self::TemporalPlainDateConstructor { .. }
+            | Self::TemporalPlainDateTimeConstructor { .. }
             | Self::StringConstructor { .. } => 1,
             Self::ArrayConstructor { arguments, .. } => {
                 1_u64.saturating_add(usize_to_u64(arguments.len()))
@@ -2118,7 +2124,7 @@ enum OperatorPrimitiveTarget {
     TemporalInstantString(Box<TemporalInstantLikeTarget>),
     TemporalDurationConstructor(Box<TemporalDurationConstructorContinuation>),
     TemporalPlainDateConstructor(Box<TemporalPlainDateConstructorContinuation>),
-    TemporalPlainDateCalendar(Box<TemporalPlainDateConstructorContinuation>),
+    TemporalPlainDateTimeConstructor(Box<TemporalPlainDateTimeConstructorContinuation>),
     TemporalPlainDateEquals(Box<temporal_rs::PlainDate>),
     TemporalPlainDateBag(Box<TemporalPlainDateBagContinuation>),
     TemporalPlainDateOptions(Box<TemporalPlainDateOptionsContinuation>),
@@ -2388,9 +2394,8 @@ impl OperatorPrimitiveTarget {
             | Self::AtomicsReplacement(state)
             | Self::AtomicsTimeout(state) => state.retained_values(),
             Self::TemporalDurationConstructor(state) => state.retained_values(),
-            Self::TemporalPlainDateConstructor(state) | Self::TemporalPlainDateCalendar(state) => {
-                state.retained_values()
-            }
+            Self::TemporalPlainDateConstructor(state) => state.retained_values(),
+            Self::TemporalPlainDateTimeConstructor(state) => state.retained_values(),
             Self::TemporalPlainDateBag(_) => TemporalPlainDateBagContinuation::retained_values(),
             Self::TemporalPlainDateOptions(_) => {
                 TemporalPlainDateOptionsContinuation::retained_values()
@@ -2675,8 +2680,8 @@ fn trace_operator_primitive_target_roots(
         OperatorPrimitiveTarget::DateUtc(state) => state.trace_roots(mark),
         OperatorPrimitiveTarget::DateConstructorComponents(state) => state.trace_roots(mark),
         OperatorPrimitiveTarget::TemporalDurationConstructor(state) => state.trace_roots(mark),
-        OperatorPrimitiveTarget::TemporalPlainDateConstructor(state)
-        | OperatorPrimitiveTarget::TemporalPlainDateCalendar(state) => state.trace_roots(mark),
+        OperatorPrimitiveTarget::TemporalPlainDateConstructor(state) => state.trace_roots(mark),
+        OperatorPrimitiveTarget::TemporalPlainDateTimeConstructor(state) => state.trace_roots(mark),
         OperatorPrimitiveTarget::TemporalPlainDateBag(state) => state.trace_roots(mark),
         OperatorPrimitiveTarget::TemporalPlainDateOptions(state) => state.trace_roots(mark),
         OperatorPrimitiveTarget::TemporalPlainDateWith(state) => state.trace_roots(mark),
@@ -2961,6 +2966,7 @@ fn trace_native_continuation_roots(
             | IntrinsicGetContinuation::TemporalInstantConstructor { new_target, .. }
             | IntrinsicGetContinuation::TemporalDurationConstructor { new_target, .. }
             | IntrinsicGetContinuation::TemporalPlainDateConstructor { new_target, .. }
+            | IntrinsicGetContinuation::TemporalPlainDateTimeConstructor { new_target, .. }
             | IntrinsicGetContinuation::StringConstructor { new_target, .. } => {
                 mark(CollectionRoot::Heap(HeapReference::Function(*new_target)));
             }
