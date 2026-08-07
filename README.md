@@ -1,4 +1,4 @@
-# QuickJS in pure Rust
+# Project Fusor
 
 A safe, source-level Rust port of [QuickJS](https://bellard.org/quickjs/),
 targeting the upstream **2026-06-04** release and its ES2025 semantics.
