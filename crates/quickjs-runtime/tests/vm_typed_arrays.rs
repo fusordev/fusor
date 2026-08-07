@@ -303,3 +303,16 @@ fn typed_array_includes_uses_same_value_zero_without_coercing_the_search_value()
         "false"
     );
 }
+
+#[test]
+fn typed_array_reverse_mutates_in_place_for_number_and_bigint_content() {
+    assert_eq!(
+        rendered(
+            "var numbers=new Int16Array([1,-2,3]),bigints=new BigInt64Array([1n,-2n]);\
+             var returned=numbers.reverse();bigints.reverse();\
+             return [returned===numbers,numbers[0],numbers[1],numbers[2],\
+               String(bigints[0]),String(bigints[1])].join('|');"
+        ),
+        "true|3|-2|1|-2|1"
+    );
+}

@@ -1403,6 +1403,7 @@ fn typed_array_constructor_sequence_continuation(
 
 #[allow(
     clippy::too_many_arguments,
+    clippy::too_many_lines,
     reason = "the native dispatch follows the shared receiver, argument, return, origin, and budget calling convention"
 )]
 pub(super) fn dispatch_typed_array_prototype(
@@ -1428,6 +1429,7 @@ pub(super) fn dispatch_typed_array_prototype(
             | TypedArrayPrototypeMethod::Subarray
             | TypedArrayPrototypeMethod::At
             | TypedArrayPrototypeMethod::Includes
+            | TypedArrayPrototypeMethod::Reverse
     ) && !matches!(view, TypedArrayView::InBounds { .. })
     {
         return typed_array_type_error(realm, &origin, "TypedArray is out of bounds");
@@ -1507,8 +1509,77 @@ pub(super) fn dispatch_typed_array_prototype(
                 execution_budget,
             );
         }
+        TypedArrayPrototypeMethod::Reverse => {
+            return typed_array_prototype_reverse(
+                runtime,
+                *object,
+                realm,
+                &origin,
+                execution_budget,
+            );
+        }
     };
     Ok(NativeDispatch::Immediate(value))
+}
+
+fn typed_array_prototype_reverse(
+    runtime: &mut Runtime,
+    object: ObjectId,
+    realm: RealmId,
+    origin: &JsStackFrame,
+    execution_budget: &mut ExecutionBudget,
+) -> Result<NativeDispatch, NativeFailure> {
+    let (state, length) = typed_array_require_in_bounds(runtime, object, realm, origin)?;
+    for left in 0..(length / 2) {
+        execution_budget.charge_instructions(1)?;
+        let right = length.saturating_sub(left + 1);
+        let left_value =
+            runtime
+                .typed_array_read_index(object, left)?
+                .ok_or(EngineFault::RuntimeInvariant {
+                    message: "TypedArray.prototype.reverse lost an in-bounds left element",
+                })?;
+        let right_value = runtime.typed_array_read_index(object, right)?.ok_or(
+            EngineFault::RuntimeInvariant {
+                message: "TypedArray.prototype.reverse lost an in-bounds right element",
+            },
+        )?;
+        typed_array_reverse_store(runtime, object, left, right_value, state.element())?;
+        typed_array_reverse_store(runtime, object, right, left_value, state.element())?;
+    }
+    Ok(NativeDispatch::Immediate(StoredValue::Object(object)))
+}
+
+fn typed_array_reverse_store(
+    runtime: &mut Runtime,
+    object: ObjectId,
+    index: usize,
+    value: StoredValue,
+    element: TypedArrayElementType,
+) -> Result<(), NativeFailure> {
+    let outcome = match value {
+        StoredValue::Number(value) if !element.is_bigint() => {
+            runtime.typed_array_store_index(object, index, TypedArrayElementValue::Number(value))?
+        }
+        StoredValue::BigInt(value) if element.is_bigint() => runtime.typed_array_store_index(
+            object,
+            index,
+            TypedArrayElementValue::BigInt(value.as_ref()),
+        )?,
+        _ => {
+            return Err(EngineFault::RuntimeInvariant {
+                message: "TypedArray.prototype.reverse read an element with the wrong content type",
+            }
+            .into());
+        }
+    };
+    if outcome != TypedArrayStoreOutcome::Stored {
+        return Err(EngineFault::RuntimeInvariant {
+            message: "TypedArray.prototype.reverse lost a validated destination element",
+        }
+        .into());
+    }
+    Ok(())
 }
 
 #[expect(

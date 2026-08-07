@@ -1786,10 +1786,11 @@ pub(crate) enum TypedArrayPrototypeMethod {
     Subarray,
     At,
     Includes,
+    Reverse,
 }
 
 impl TypedArrayPrototypeMethod {
-    pub(crate) const ALL: [Self; 9] = [
+    pub(crate) const ALL: [Self; 10] = [
         Self::Buffer,
         Self::ByteLength,
         Self::ByteOffset,
@@ -1799,6 +1800,7 @@ impl TypedArrayPrototypeMethod {
         Self::Subarray,
         Self::At,
         Self::Includes,
+        Self::Reverse,
     ];
 
     #[must_use]
@@ -1813,6 +1815,7 @@ impl TypedArrayPrototypeMethod {
             Self::Subarray => "subarray",
             Self::At => "at",
             Self::Includes => "includes",
+            Self::Reverse => "reverse",
         }
     }
 
@@ -1828,12 +1831,16 @@ impl TypedArrayPrototypeMethod {
             Self::Subarray => "subarray",
             Self::At => "at",
             Self::Includes => "includes",
+            Self::Reverse => "reverse",
         }
     }
 
     #[must_use]
     pub(crate) const fn is_accessor(self) -> bool {
-        !matches!(self, Self::Set | Self::Subarray | Self::At | Self::Includes)
+        !matches!(
+            self,
+            Self::Set | Self::Subarray | Self::At | Self::Includes | Self::Reverse
+        )
     }
 
     #[must_use]
@@ -1841,7 +1848,8 @@ impl TypedArrayPrototypeMethod {
         match self {
             Self::Set | Self::At | Self::Includes => 1,
             Self::Subarray => 2,
-            Self::Buffer
+            Self::Reverse
+            | Self::Buffer
             | Self::ByteLength
             | Self::ByteOffset
             | Self::Length
