@@ -707,6 +707,12 @@ impl RealmBuildTransaction<'_> {
                 plain_month_day_constructor: function(
                     NativeFunctionKind::TemporalPlainMonthDayConstructor,
                 ),
+                plain_year_month_prototype: object(
+                    IntrinsicObjectId::TemporalPlainYearMonthPrototype,
+                ),
+                plain_year_month_constructor: function(
+                    NativeFunctionKind::TemporalPlainYearMonthConstructor,
+                ),
             },
             map: MapIntrinsics {
                 prototype: object(IntrinsicObjectId::MapPrototype),

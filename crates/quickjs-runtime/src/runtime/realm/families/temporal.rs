@@ -19,6 +19,7 @@ use crate::runtime::{
     TemporalPlainDateTimePrototypeMethod, TemporalPlainDateTimeStaticMethod,
     TemporalPlainMonthDayPrototypeMethod, TemporalPlainMonthDayStaticMethod,
     TemporalPlainTimePrototypeMethod, TemporalPlainTimeStaticMethod,
+    TemporalPlainYearMonthPrototypeMethod, TemporalPlainYearMonthStaticMethod,
 };
 
 pub(super) fn visit_objects(visit: ObjectSink<'_>) {
@@ -30,6 +31,7 @@ pub(super) fn visit_objects(visit: ObjectSink<'_>) {
         IntrinsicObjectId::TemporalPlainDateTimePrototype,
         IntrinsicObjectId::TemporalPlainTimePrototype,
         IntrinsicObjectId::TemporalPlainMonthDayPrototype,
+        IntrinsicObjectId::TemporalPlainYearMonthPrototype,
     ] {
         visit(object(
             id,
@@ -315,6 +317,51 @@ pub(super) fn visit_functions(visit: FunctionSink<'_>) {
             method.length(),
         ));
     }
+    visit(ordinary(
+        NativeFunctionKind::TemporalPlainYearMonthConstructor,
+        IntrinsicNameSpec::RealmName(RealmNameId::PlainYearMonth),
+        2,
+    ));
+    for method in TemporalPlainYearMonthStaticMethod::ALL {
+        let name = match method {
+            TemporalPlainYearMonthStaticMethod::From => {
+                IntrinsicNameSpec::Predefined(PredefinedAtom::From)
+            }
+            TemporalPlainYearMonthStaticMethod::Compare => {
+                IntrinsicNameSpec::RealmName(RealmNameId::TemporalPlainYearMonthStatic(method))
+            }
+        };
+        visit(ordinary(
+            NativeFunctionKind::TemporalPlainYearMonthStatic(method),
+            name,
+            method.length(),
+        ));
+    }
+    for method in TemporalPlainYearMonthPrototypeMethod::ALL {
+        let name = match method {
+            TemporalPlainYearMonthPrototypeMethod::ToString => {
+                IntrinsicNameSpec::Predefined(PredefinedAtom::ToString)
+            }
+            TemporalPlainYearMonthPrototypeMethod::ToJson => {
+                IntrinsicNameSpec::Predefined(PredefinedAtom::ToJson)
+            }
+            TemporalPlainYearMonthPrototypeMethod::ToLocaleString => {
+                IntrinsicNameSpec::Predefined(PredefinedAtom::ToLocaleString)
+            }
+            TemporalPlainYearMonthPrototypeMethod::ValueOf => {
+                IntrinsicNameSpec::Predefined(PredefinedAtom::ValueOf)
+            }
+            method if method.is_accessor() => IntrinsicNameSpec::Literal(method.function_name()),
+            method => {
+                IntrinsicNameSpec::RealmName(RealmNameId::TemporalPlainYearMonthPrototype(method))
+            }
+        };
+        visit(ordinary(
+            NativeFunctionKind::TemporalPlainYearMonthPrototype(method),
+            name,
+            method.length(),
+        ));
+    }
 }
 
 #[allow(
@@ -351,6 +398,11 @@ pub(super) fn visit_properties(visit: PropertySink<'_>) {
         IntrinsicIdentity::Object(IntrinsicObjectId::TemporalPlainMonthDayPrototype);
     let plain_month_day_constructor = IntrinsicIdentity::Function(IntrinsicFunctionId(
         NativeFunctionKind::TemporalPlainMonthDayConstructor,
+    ));
+    let plain_year_month_prototype =
+        IntrinsicIdentity::Object(IntrinsicObjectId::TemporalPlainYearMonthPrototype);
+    let plain_year_month_constructor = IntrinsicIdentity::Function(IntrinsicFunctionId(
+        NativeFunctionKind::TemporalPlainYearMonthConstructor,
     ));
 
     visit(data(
@@ -801,5 +853,78 @@ pub(super) fn visit_properties(visit: PropertySink<'_>) {
         IntrinsicKeySpec::WellKnownSymbol(PredefinedAtom::SymbolToStringTag),
         PropertyLayout::data(false, false, true),
         IntrinsicValueSpec::String(IntrinsicStringSpec::Literal("Temporal.PlainMonthDay")),
+    ));
+    visit(method(
+        namespace,
+        IntrinsicKeySpec::InternedString(RealmNameId::PlainYearMonth),
+        NativeFunctionKind::TemporalPlainYearMonthConstructor,
+    ));
+    visit(data(
+        plain_year_month_constructor,
+        IntrinsicKeySpec::PredefinedString(PredefinedAtom::Prototype),
+        CONSTRUCTOR_PROTOTYPE_PROPERTY,
+        IntrinsicValueSpec::Object(IntrinsicObjectId::TemporalPlainYearMonthPrototype),
+    ));
+    visit(method(
+        plain_year_month_prototype,
+        IntrinsicKeySpec::PredefinedString(PredefinedAtom::Constructor),
+        NativeFunctionKind::TemporalPlainYearMonthConstructor,
+    ));
+    for method_id in TemporalPlainYearMonthStaticMethod::ALL {
+        let key = match method_id {
+            TemporalPlainYearMonthStaticMethod::From => {
+                IntrinsicKeySpec::PredefinedString(PredefinedAtom::From)
+            }
+            TemporalPlainYearMonthStaticMethod::Compare => IntrinsicKeySpec::InternedString(
+                RealmNameId::TemporalPlainYearMonthStatic(method_id),
+            ),
+        };
+        visit(method(
+            plain_year_month_constructor,
+            key,
+            NativeFunctionKind::TemporalPlainYearMonthStatic(method_id),
+        ));
+    }
+    for method_id in TemporalPlainYearMonthPrototypeMethod::ALL {
+        let key = match method_id {
+            TemporalPlainYearMonthPrototypeMethod::ToString => {
+                IntrinsicKeySpec::PredefinedString(PredefinedAtom::ToString)
+            }
+            TemporalPlainYearMonthPrototypeMethod::ToJson => {
+                IntrinsicKeySpec::PredefinedString(PredefinedAtom::ToJson)
+            }
+            TemporalPlainYearMonthPrototypeMethod::ToLocaleString => {
+                IntrinsicKeySpec::PredefinedString(PredefinedAtom::ToLocaleString)
+            }
+            TemporalPlainYearMonthPrototypeMethod::ValueOf => {
+                IntrinsicKeySpec::PredefinedString(PredefinedAtom::ValueOf)
+            }
+            method => IntrinsicKeySpec::InternedString(
+                RealmNameId::TemporalPlainYearMonthPrototype(method),
+            ),
+        };
+        if method_id.is_accessor() {
+            visit(accessor(
+                plain_year_month_prototype,
+                key,
+                PropertyLayout::accessor(false, true),
+                Some(IntrinsicFunctionId(
+                    NativeFunctionKind::TemporalPlainYearMonthPrototype(method_id),
+                )),
+                None,
+            ));
+        } else {
+            visit(method(
+                plain_year_month_prototype,
+                key,
+                NativeFunctionKind::TemporalPlainYearMonthPrototype(method_id),
+            ));
+        }
+    }
+    visit(data(
+        plain_year_month_prototype,
+        IntrinsicKeySpec::WellKnownSymbol(PredefinedAtom::SymbolToStringTag),
+        PropertyLayout::data(false, false, true),
+        IntrinsicValueSpec::String(IntrinsicStringSpec::Literal("Temporal.PlainYearMonth")),
     ));
 }

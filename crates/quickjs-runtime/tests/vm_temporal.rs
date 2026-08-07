@@ -218,6 +218,55 @@ fn plain_month_day_converts_property_bags_and_preserves_observable_boundaries() 
 }
 
 #[test]
+fn plain_year_month_converts_property_bags_and_preserves_observable_boundaries() {
+    assert_eq!(
+        rendered(
+            "var log=[];
+             function number(name,value){return {valueOf:function(){log.push(name);return value}}}
+             function string(name,value){return {toString:function(){log.push(name);return value}}}
+             var value=new Temporal.PlainYearMonth(2020,12);
+             var year=Object.getOwnPropertyDescriptor(Temporal.PlainYearMonth.prototype,'year');
+             var from=Temporal.PlainYearMonth.from({
+               get calendar(){log.push('calendar');return 'iso8601'},
+               get month(){log.push('month');return number('month number',13)},
+               get monthCode(){log.push('monthCode');return string('monthCode string','M12')},
+               get year(){log.push('year');return number('year number',2021)}
+             },{get overflow(){log.push('from overflow');return string('from overflow string','constrain')}});
+             var changed=value.with({
+               get calendar(){log.push('with calendar');return undefined},
+               get timeZone(){log.push('with timeZone');return undefined},
+               get month(){log.push('with month');return number('with month number',2)},
+               get monthCode(){log.push('with monthCode');return undefined},
+               get year(){log.push('with year');return undefined}
+             },{get overflow(){log.push('with overflow');return string('with overflow string','constrain')}});
+             var date=value.toPlainDate({day:number('day',29)});
+             var added=value.add({months:number('add months',2)});
+             var subtracted=value.subtract({years:1});
+             var until=value.until(new Temporal.PlainYearMonth(2022,3));
+             var since=value.since(new Temporal.PlainYearMonth(2022,3));
+             return [Temporal.PlainYearMonth.length,Temporal.PlainYearMonth.name,
+               Object.getPrototypeOf(value)===Temporal.PlainYearMonth.prototype,
+               Object.prototype.toString.call(value),year.enumerable,year.get.name,
+               value.calendarId,value.year,value.month,value.monthCode,value.daysInMonth,
+               value.daysInYear,value.monthsInYear,value.inLeapYear,value.era,value.eraYear,
+               value.toString({calendarName:'always'}),value.toJSON(),value.toLocaleString(),
+               from.toString(),changed.toString(),date.toString(),added.toString(),
+               subtracted.toString(),until.toString(),since.toString(),
+               Temporal.PlainYearMonth.compare(value,from),value.equals(from),log.join(',')].join('|');"
+        ),
+        "2|PlainYearMonth|true|[object Temporal.PlainYearMonth]|false|get year|iso8601|2020|12|M12|31|366|12|true|||2020-12-01[u-ca=iso8601]|2020-12|2020-12|2021-12|2020-02|2020-12-29|2021-02|2019-12|P1Y3M|-P1Y3M|-1|false|calendar,month,month number,monthCode,monthCode string,year,year number,from overflow,from overflow string,with calendar,with timeZone,with month,with month number,with monthCode,with year,with overflow,with overflow string,day,add months"
+    );
+    assert_eq!(
+        thrown("return new Temporal.PlainYearMonth(2020,12).with({calendar:'iso8601'});"),
+        ExceptionKind::TypeError
+    );
+    assert_eq!(
+        thrown("return new Temporal.PlainYearMonth(2020,12).toPlainDate({day:Infinity});"),
+        ExceptionKind::RangeError
+    );
+}
+
+#[test]
 fn plain_date_time_constructor_accessors_and_iso_formatting_are_spec_shaped() {
     assert_eq!(
         rendered(

@@ -31,7 +31,9 @@ use std::{
     rc::Rc,
     sync::{Arc, Weak},
 };
-use temporal_rs::{Duration, Instant, PlainDate, PlainDateTime, PlainMonthDay, PlainTime};
+use temporal_rs::{
+    Duration, Instant, PlainDate, PlainDateTime, PlainMonthDay, PlainTime, PlainYearMonth,
+};
 
 use crate::ids::ObjectId;
 use crate::{
@@ -2494,6 +2496,8 @@ pub(crate) enum HeapObjectKind {
     TemporalPlainTime(PlainTime),
     /// An ECMAScript `Temporal.PlainMonthDay` with ISO month/day and calendar slots.
     TemporalPlainMonthDay(PlainMonthDay),
+    /// An ECMAScript `Temporal.PlainYearMonth` with ISO date and calendar slots.
+    TemporalPlainYearMonth(PlainYearMonth),
     /// An ECMAScript Map object with ordered `[[MapData]]`.
     Map(MapState),
     MapIterator(MapIterator),
@@ -2640,6 +2644,7 @@ impl HeapObjectKind {
             | Self::TemporalPlainDateTime(_)
             | Self::TemporalPlainTime(_)
             | Self::TemporalPlainMonthDay(_)
+            | Self::TemporalPlainYearMonth(_)
             | Self::Map(_)
             | Self::MapIterator(_)
             | Self::Set(_)
@@ -2677,6 +2682,7 @@ impl HeapObjectKind {
             | Self::TemporalPlainDateTime(_)
             | Self::TemporalPlainTime(_)
             | Self::TemporalPlainMonthDay(_)
+            | Self::TemporalPlainYearMonth(_)
             | Self::Map(_)
             | Self::MapIterator(_)
             | Self::Set(_)
@@ -2713,6 +2719,7 @@ impl HeapObjectKind {
             | Self::TemporalPlainDateTime(_)
             | Self::TemporalPlainTime(_)
             | Self::TemporalPlainMonthDay(_)
+            | Self::TemporalPlainYearMonth(_)
             | Self::Map(_)
             | Self::MapIterator(_)
             | Self::Set(_)
@@ -2749,6 +2756,7 @@ impl HeapObjectKind {
             | Self::TemporalPlainDateTime(_)
             | Self::TemporalPlainTime(_)
             | Self::TemporalPlainMonthDay(_)
+            | Self::TemporalPlainYearMonth(_)
             | Self::Map(_)
             | Self::MapIterator(_)
             | Self::Set(_)
@@ -2785,6 +2793,7 @@ impl HeapObjectKind {
             | Self::TemporalPlainDateTime(_)
             | Self::TemporalPlainTime(_)
             | Self::TemporalPlainMonthDay(_)
+            | Self::TemporalPlainYearMonth(_)
             | Self::Map(_)
             | Self::MapIterator(_)
             | Self::Set(_)
@@ -2821,6 +2830,7 @@ impl HeapObjectKind {
             | Self::TemporalPlainDateTime(_)
             | Self::TemporalPlainTime(_)
             | Self::TemporalPlainMonthDay(_)
+            | Self::TemporalPlainYearMonth(_)
             | Self::Map(_)
             | Self::MapIterator(_)
             | Self::Set(_)
@@ -2857,6 +2867,7 @@ impl HeapObjectKind {
             | Self::TemporalPlainDateTime(_)
             | Self::TemporalPlainTime(_)
             | Self::TemporalPlainMonthDay(_)
+            | Self::TemporalPlainYearMonth(_)
             | Self::Map(_)
             | Self::MapIterator(_)
             | Self::Set(_)
@@ -2893,6 +2904,7 @@ impl HeapObjectKind {
             | Self::TemporalPlainDateTime(_)
             | Self::TemporalPlainTime(_)
             | Self::TemporalPlainMonthDay(_)
+            | Self::TemporalPlainYearMonth(_)
             | Self::Map(_)
             | Self::MapIterator(_)
             | Self::Set(_)
@@ -2929,6 +2941,7 @@ impl HeapObjectKind {
             | Self::TemporalPlainDateTime(_)
             | Self::TemporalPlainTime(_)
             | Self::TemporalPlainMonthDay(_)
+            | Self::TemporalPlainYearMonth(_)
             | Self::Map(_)
             | Self::MapIterator(_)
             | Self::Set(_)
@@ -3317,6 +3330,18 @@ impl HeapObject {
     }
 
     #[must_use]
+    pub(crate) fn temporal_plain_year_month(
+        record: ObjectRecord,
+        year_month: PlainYearMonth,
+    ) -> Self {
+        Self {
+            kind: HeapObjectKind::TemporalPlainYearMonth(year_month),
+            record,
+            public_roots: 0,
+        }
+    }
+
+    #[must_use]
     pub(crate) const fn map(record: ObjectRecord, state: MapState) -> Self {
         Self {
             kind: HeapObjectKind::Map(state),
@@ -3532,6 +3557,14 @@ impl HeapObject {
     }
 
     #[must_use]
+    pub(crate) fn temporal_plain_year_month_value(&self) -> Option<PlainYearMonth> {
+        match &self.kind {
+            HeapObjectKind::TemporalPlainYearMonth(year_month) => Some(year_month.clone()),
+            _ => None,
+        }
+    }
+
+    #[must_use]
     pub(crate) const fn is_arguments(&self) -> bool {
         matches!(self.kind, HeapObjectKind::Arguments(_))
     }
@@ -3561,6 +3594,7 @@ impl HeapObject {
             | HeapObjectKind::TemporalPlainDateTime(_)
             | HeapObjectKind::TemporalPlainTime(_)
             | HeapObjectKind::TemporalPlainMonthDay(_)
+            | HeapObjectKind::TemporalPlainYearMonth(_)
             | HeapObjectKind::Map(_)
             | HeapObjectKind::MapIterator(_)
             | HeapObjectKind::Set(_)
@@ -3597,6 +3631,7 @@ impl HeapObject {
             | HeapObjectKind::TemporalPlainDateTime(_)
             | HeapObjectKind::TemporalPlainTime(_)
             | HeapObjectKind::TemporalPlainMonthDay(_)
+            | HeapObjectKind::TemporalPlainYearMonth(_)
             | HeapObjectKind::Map(_)
             | HeapObjectKind::MapIterator(_)
             | HeapObjectKind::Set(_)
@@ -3635,6 +3670,7 @@ impl HeapObject {
             | HeapObjectKind::TemporalPlainDateTime(_)
             | HeapObjectKind::TemporalPlainTime(_)
             | HeapObjectKind::TemporalPlainMonthDay(_)
+            | HeapObjectKind::TemporalPlainYearMonth(_)
             | HeapObjectKind::Map(_)
             | HeapObjectKind::MapIterator(_)
             | HeapObjectKind::Set(_)

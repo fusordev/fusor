@@ -309,6 +309,8 @@ struct TemporalIntrinsics {
     plain_time_constructor: FunctionId,
     plain_month_day_prototype: ObjectId,
     plain_month_day_constructor: FunctionId,
+    plain_year_month_prototype: ObjectId,
+    plain_year_month_constructor: FunctionId,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -1254,6 +1256,9 @@ pub(crate) enum NativeFunctionKind {
     TemporalPlainMonthDayConstructor,
     TemporalPlainMonthDayStatic(TemporalPlainMonthDayStaticMethod),
     TemporalPlainMonthDayPrototype(TemporalPlainMonthDayPrototypeMethod),
+    TemporalPlainYearMonthConstructor,
+    TemporalPlainYearMonthStatic(TemporalPlainYearMonthStaticMethod),
+    TemporalPlainYearMonthPrototype(TemporalPlainYearMonthPrototypeMethod),
     FunctionPrototypeToString,
     ErrorConstructor(ErrorIntrinsicKind),
     ErrorPrototypeToString,
@@ -2300,6 +2305,12 @@ pub(crate) enum TemporalPlainMonthDayStaticMethod {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum TemporalPlainYearMonthStaticMethod {
+    From,
+    Compare,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum TemporalPlainDatePrototypeMethod {
     CalendarId,
     Year,
@@ -2398,6 +2409,31 @@ pub(crate) enum TemporalPlainMonthDayPrototypeMethod {
     MonthCode,
     Day,
     With,
+    Equals,
+    ToPlainDate,
+    ToString,
+    ToJson,
+    ToLocaleString,
+    ValueOf,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum TemporalPlainYearMonthPrototypeMethod {
+    CalendarId,
+    Era,
+    EraYear,
+    Year,
+    Month,
+    MonthCode,
+    DaysInYear,
+    DaysInMonth,
+    MonthsInYear,
+    InLeapYear,
+    With,
+    Add,
+    Subtract,
+    Until,
+    Since,
     Equals,
     ToPlainDate,
     ToString,
@@ -2699,6 +2735,24 @@ impl TemporalPlainMonthDayStaticMethod {
     }
 }
 
+impl TemporalPlainYearMonthStaticMethod {
+    pub(crate) const ALL: [Self; 2] = [Self::From, Self::Compare];
+
+    pub(crate) const fn name(self) -> &'static str {
+        match self {
+            Self::From => "from",
+            Self::Compare => "compare",
+        }
+    }
+
+    pub(crate) const fn length(self) -> i32 {
+        match self {
+            Self::From => 1,
+            Self::Compare => 2,
+        }
+    }
+}
+
 impl TemporalPlainTimePrototypeMethod {
     pub(crate) const ALL: [Self; 17] = [
         Self::Hour,
@@ -2835,6 +2889,103 @@ impl TemporalPlainMonthDayPrototypeMethod {
     pub(crate) const fn length(self) -> i32 {
         match self {
             Self::With | Self::Equals | Self::ToPlainDate => 1,
+            _ => 0,
+        }
+    }
+}
+
+impl TemporalPlainYearMonthPrototypeMethod {
+    pub(crate) const ALL: [Self; 21] = [
+        Self::CalendarId,
+        Self::Era,
+        Self::EraYear,
+        Self::Year,
+        Self::Month,
+        Self::MonthCode,
+        Self::DaysInYear,
+        Self::DaysInMonth,
+        Self::MonthsInYear,
+        Self::InLeapYear,
+        Self::With,
+        Self::Add,
+        Self::Subtract,
+        Self::Until,
+        Self::Since,
+        Self::Equals,
+        Self::ToPlainDate,
+        Self::ToString,
+        Self::ToJson,
+        Self::ToLocaleString,
+        Self::ValueOf,
+    ];
+
+    pub(crate) const fn name(self) -> &'static str {
+        match self {
+            Self::CalendarId => "calendarId",
+            Self::Era => "era",
+            Self::EraYear => "eraYear",
+            Self::Year => "year",
+            Self::Month => "month",
+            Self::MonthCode => "monthCode",
+            Self::DaysInYear => "daysInYear",
+            Self::DaysInMonth => "daysInMonth",
+            Self::MonthsInYear => "monthsInYear",
+            Self::InLeapYear => "inLeapYear",
+            Self::With => "with",
+            Self::Add => "add",
+            Self::Subtract => "subtract",
+            Self::Until => "until",
+            Self::Since => "since",
+            Self::Equals => "equals",
+            Self::ToPlainDate => "toPlainDate",
+            Self::ToString => "toString",
+            Self::ToJson => "toJSON",
+            Self::ToLocaleString => "toLocaleString",
+            Self::ValueOf => "valueOf",
+        }
+    }
+
+    pub(crate) const fn function_name(self) -> &'static str {
+        match self {
+            Self::CalendarId => "get calendarId",
+            Self::Era => "get era",
+            Self::EraYear => "get eraYear",
+            Self::Year => "get year",
+            Self::Month => "get month",
+            Self::MonthCode => "get monthCode",
+            Self::DaysInYear => "get daysInYear",
+            Self::DaysInMonth => "get daysInMonth",
+            Self::MonthsInYear => "get monthsInYear",
+            Self::InLeapYear => "get inLeapYear",
+            method => method.name(),
+        }
+    }
+
+    pub(crate) const fn is_accessor(self) -> bool {
+        matches!(
+            self,
+            Self::CalendarId
+                | Self::Era
+                | Self::EraYear
+                | Self::Year
+                | Self::Month
+                | Self::MonthCode
+                | Self::DaysInYear
+                | Self::DaysInMonth
+                | Self::MonthsInYear
+                | Self::InLeapYear
+        )
+    }
+
+    pub(crate) const fn length(self) -> i32 {
+        match self {
+            Self::With
+            | Self::Add
+            | Self::Subtract
+            | Self::Until
+            | Self::Since
+            | Self::Equals
+            | Self::ToPlainDate => 1,
             _ => 0,
         }
     }
@@ -3599,6 +3750,7 @@ impl NativeFunctionKind {
                 | Self::TemporalPlainDateTimeConstructor
                 | Self::TemporalPlainTimeConstructor
                 | Self::TemporalPlainMonthDayConstructor
+                | Self::TemporalPlainYearMonthConstructor
                 | Self::RegExpConstructor
                 | Self::GeneratorFunctionConstructor
                 | Self::AsyncFunctionConstructor

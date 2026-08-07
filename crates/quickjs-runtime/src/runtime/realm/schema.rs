@@ -19,7 +19,9 @@ use crate::runtime::{
     TemporalPlainDatePrototypeMethod, TemporalPlainDateStaticMethod,
     TemporalPlainDateTimePrototypeMethod, TemporalPlainDateTimeStaticMethod,
     TemporalPlainMonthDayPrototypeMethod, TemporalPlainMonthDayStaticMethod,
-    TemporalPlainTimePrototypeMethod, TemporalPlainTimeStaticMethod, TypedArrayPrototypeMethod,
+    TemporalPlainTimePrototypeMethod, TemporalPlainTimeStaticMethod,
+    TemporalPlainYearMonthPrototypeMethod, TemporalPlainYearMonthStaticMethod,
+    TypedArrayPrototypeMethod,
 };
 
 /// Stable identity of an object allocated by Realm bootstrap.
@@ -49,6 +51,7 @@ pub(in crate::runtime) enum IntrinsicObjectId {
     TemporalPlainDateTimePrototype,
     TemporalPlainTimePrototype,
     TemporalPlainMonthDayPrototype,
+    TemporalPlainYearMonthPrototype,
     RegExpPrototype,
     IteratorPrototype,
     AsyncIteratorPrototype,
@@ -78,7 +81,7 @@ pub(in crate::runtime) enum IntrinsicObjectId {
 }
 
 impl IntrinsicObjectId {
-    pub(in crate::runtime) const ALL: [Self; 66] = [
+    pub(in crate::runtime) const ALL: [Self; 67] = [
         Self::ObjectPrototype,
         Self::GlobalObject,
         Self::ErrorPrototype(ErrorIntrinsicKind::Error),
@@ -119,6 +122,7 @@ impl IntrinsicObjectId {
         Self::TemporalPlainDateTimePrototype,
         Self::TemporalPlainTimePrototype,
         Self::TemporalPlainMonthDayPrototype,
+        Self::TemporalPlainYearMonthPrototype,
         Self::RegExpPrototype,
         Self::IteratorPrototype,
         Self::AsyncIteratorPrototype,
@@ -205,6 +209,7 @@ pub(in crate::runtime) enum RealmNameId {
     PlainDateTime,
     PlainTime,
     PlainMonthDay,
+    PlainYearMonth,
     TemporalDurationStatic(TemporalDurationStaticMethod),
     TemporalDurationPrototype(TemporalDurationPrototypeMethod),
     TemporalInstantStatic(TemporalInstantStaticMethod),
@@ -217,6 +222,8 @@ pub(in crate::runtime) enum RealmNameId {
     TemporalPlainTimePrototype(TemporalPlainTimePrototypeMethod),
     TemporalPlainMonthDayStatic(TemporalPlainMonthDayStaticMethod),
     TemporalPlainMonthDayPrototype(TemporalPlainMonthDayPrototypeMethod),
+    TemporalPlainYearMonthStatic(TemporalPlainYearMonthStaticMethod),
+    TemporalPlainYearMonthPrototype(TemporalPlainYearMonthPrototypeMethod),
     RegExpEscape,
     RegExpCompile,
     RegExpTest,

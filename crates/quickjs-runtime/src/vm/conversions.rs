@@ -578,6 +578,12 @@ pub(super) fn finish_intrinsic_get(
         } => finish_temporal_plain_month_day_constructor_wrapper(
             runtime, new_target, month_day, &value,
         ),
+        IntrinsicGetContinuation::TemporalPlainYearMonthConstructor {
+            new_target,
+            year_month,
+        } => finish_temporal_plain_year_month_constructor_wrapper(
+            runtime, new_target, year_month, &value,
+        ),
         IntrinsicGetContinuation::StringConstructor {
             new_target,
             value: string_value,
@@ -2173,6 +2179,18 @@ fn finish_operator_primitive_target(
                 execution_budget,
             )
         }
+        OperatorPrimitiveTarget::TemporalPlainYearMonthConstructor(state) => {
+            let number = operator_to_number(value, realm, origin)?;
+            advance_temporal_plain_year_month_constructor(
+                runtime,
+                *state,
+                Some(number),
+                realm,
+                return_to,
+                origin,
+                execution_budget,
+            )
+        }
         OperatorPrimitiveTarget::TemporalPlainDateEquals(receiver) => {
             finish_temporal_plain_date_equals(receiver.as_ref(), value, realm, origin)
         }
@@ -2192,6 +2210,58 @@ fn finish_operator_primitive_target(
                 Some(value),
                 return_to,
                 execution_budget,
+            )
+        }
+        OperatorPrimitiveTarget::TemporalPlainYearMonthBag(state) => {
+            advance_temporal_plain_year_month_property_bag(
+                runtime,
+                *state,
+                Some(value),
+                return_to,
+                execution_budget,
+            )
+        }
+        OperatorPrimitiveTarget::TemporalPlainYearMonthWith(state) => {
+            advance_temporal_plain_year_month_with(
+                runtime,
+                *state,
+                Some(value),
+                return_to,
+                execution_budget,
+            )
+        }
+        OperatorPrimitiveTarget::TemporalPlainYearMonthDifferenceLargestUnit(state) => {
+            finish_temporal_plain_year_month_difference_largest_unit(
+                runtime,
+                *state,
+                value,
+                return_to,
+                execution_budget,
+            )
+        }
+        OperatorPrimitiveTarget::TemporalPlainYearMonthDifferenceRoundingIncrement(state) => {
+            finish_temporal_plain_year_month_difference_rounding_increment(
+                runtime,
+                *state,
+                value,
+                return_to,
+                execution_budget,
+            )
+        }
+        OperatorPrimitiveTarget::TemporalPlainYearMonthDifferenceRoundingMode(state) => {
+            finish_temporal_plain_year_month_difference_rounding_mode(
+                runtime,
+                *state,
+                value,
+                return_to,
+                execution_budget,
+            )
+        }
+        OperatorPrimitiveTarget::TemporalPlainYearMonthDifferenceSmallestUnit(state) => {
+            finish_temporal_plain_year_month_difference_smallest_unit(
+                runtime,
+                state.as_ref(),
+                value,
             )
         }
         OperatorPrimitiveTarget::TemporalPlainDateTimeBag(state) => {
@@ -2235,6 +2305,18 @@ fn finish_operator_primitive_target(
         }
         OperatorPrimitiveTarget::TemporalPlainMonthDayToStringCalendarName(state) => {
             finish_temporal_plain_month_day_to_string_calendar_name(state.as_ref(), value)
+        }
+        OperatorPrimitiveTarget::TemporalPlainYearMonthToStringCalendarName(state) => {
+            finish_temporal_plain_year_month_to_string_calendar_name(state.as_ref(), value)
+        }
+        OperatorPrimitiveTarget::TemporalPlainYearMonthToPlainDate(state) => {
+            advance_temporal_plain_year_month_to_plain_date(
+                runtime,
+                *state,
+                Some(value),
+                return_to,
+                execution_budget,
+            )
         }
         OperatorPrimitiveTarget::TemporalPlainMonthDayToPlainDate(state) => {
             advance_temporal_plain_month_day_to_plain_date(
