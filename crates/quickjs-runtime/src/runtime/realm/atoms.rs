@@ -271,6 +271,8 @@ fn visit_realm_name_order(
     for method in [
         TemporalInstantPrototypeMethod::EpochMilliseconds,
         TemporalInstantPrototypeMethod::EpochNanoseconds,
+        TemporalInstantPrototypeMethod::Add,
+        TemporalInstantPrototypeMethod::Subtract,
         TemporalInstantPrototypeMethod::Equals,
     ] {
         visit(RealmNameId::TemporalInstantPrototype(method))?;

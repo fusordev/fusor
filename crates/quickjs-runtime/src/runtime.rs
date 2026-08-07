@@ -1638,6 +1638,8 @@ impl TemporalInstantStaticMethod {
 pub(crate) enum TemporalInstantPrototypeMethod {
     EpochMilliseconds,
     EpochNanoseconds,
+    Add,
+    Subtract,
     Equals,
     ToString,
     ToJson,
@@ -1805,9 +1807,11 @@ impl TemporalDurationPrototypeMethod {
 }
 
 impl TemporalInstantPrototypeMethod {
-    pub(crate) const ALL: [Self; 6] = [
+    pub(crate) const ALL: [Self; 8] = [
         Self::EpochMilliseconds,
         Self::EpochNanoseconds,
+        Self::Add,
+        Self::Subtract,
         Self::Equals,
         Self::ToString,
         Self::ToJson,
@@ -1818,6 +1822,8 @@ impl TemporalInstantPrototypeMethod {
         match self {
             Self::EpochMilliseconds => "epochMilliseconds",
             Self::EpochNanoseconds => "epochNanoseconds",
+            Self::Add => "add",
+            Self::Subtract => "subtract",
             Self::Equals => "equals",
             Self::ToString => "toString",
             Self::ToJson => "toJSON",
@@ -1829,6 +1835,8 @@ impl TemporalInstantPrototypeMethod {
         match self {
             Self::EpochMilliseconds => "get epochMilliseconds",
             Self::EpochNanoseconds => "get epochNanoseconds",
+            Self::Add => "add",
+            Self::Subtract => "subtract",
             Self::Equals => "equals",
             Self::ToString => "toString",
             Self::ToJson => "toJSON",
@@ -1838,7 +1846,7 @@ impl TemporalInstantPrototypeMethod {
 
     pub(crate) const fn length(self) -> i32 {
         match self {
-            Self::Equals => 1,
+            Self::Add | Self::Subtract | Self::Equals => 1,
             Self::EpochMilliseconds
             | Self::EpochNanoseconds
             | Self::ToString

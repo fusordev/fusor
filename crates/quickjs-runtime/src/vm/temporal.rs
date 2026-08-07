@@ -62,12 +62,16 @@ enum TemporalDurationLikeTarget {
         receiver: Duration,
         subtract: bool,
     },
+    InstantArithmetic {
+        receiver: Instant,
+        subtract: bool,
+    },
 }
 
 impl TemporalDurationLikeTarget {
     fn retained_values(&self) -> u64 {
         match self {
-            Self::Allocate | Self::Arithmetic { .. } => 0,
+            Self::Allocate | Self::Arithmetic { .. } | Self::InstantArithmetic { .. } => 0,
             Self::CompareFirst { .. } => 2,
             Self::CompareSecond { .. } => 1,
         }
@@ -75,7 +79,7 @@ impl TemporalDurationLikeTarget {
 
     fn trace_roots(&self, mark: &mut dyn FnMut(CollectionRoot)) {
         match self {
-            Self::Allocate | Self::Arithmetic { .. } => {}
+            Self::Allocate | Self::Arithmetic { .. } | Self::InstantArithmetic { .. } => {}
             Self::CompareFirst { second, options } => {
                 trace_stored_value_root(second, mark);
                 trace_stored_value_root(options, mark);
@@ -1515,6 +1519,22 @@ fn continue_temporal_duration_like(
             };
             allocate_temporal_duration_result(runtime, realm, result)
         }
+        TemporalDurationLikeTarget::InstantArithmetic { receiver, subtract } => {
+            let result = if subtract {
+                receiver.subtract(&duration)
+            } else {
+                receiver.add(&duration)
+            };
+            let result = match result {
+                Ok(result) => result,
+                Err(error) => {
+                    return Err(NativeFailure::Abrupt(temporal_exception_from_error(
+                        realm, origin, error,
+                    )?));
+                }
+            };
+            allocate_temporal_instant_result(runtime, realm, result)
+        }
     }
 }
 
@@ -1998,6 +2018,20 @@ pub(super) fn dispatch_temporal_instant_prototype(
         TemporalInstantPrototypeMethod::EpochNanoseconds => Ok(NativeDispatch::Immediate(
             StoredValue::BigInt(Arc::new(JsBigInt::from_i128(instant.as_i128()))),
         )),
+        TemporalInstantPrototypeMethod::Add | TemporalInstantPrototypeMethod::Subtract => {
+            begin_temporal_duration_like(
+                runtime,
+                arguments.take_first_or_undefined(),
+                TemporalDurationLikeTarget::InstantArithmetic {
+                    receiver: instant,
+                    subtract: matches!(method, TemporalInstantPrototypeMethod::Subtract),
+                },
+                realm,
+                return_to,
+                origin.clone(),
+                execution_budget,
+            )
+        }
         TemporalInstantPrototypeMethod::Equals => begin_temporal_instant_like(
             runtime,
             arguments.take_first_or_undefined(),

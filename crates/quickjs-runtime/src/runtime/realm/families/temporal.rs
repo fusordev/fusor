@@ -109,7 +109,9 @@ pub(super) fn visit_functions(visit: FunctionSink<'_>) {
             TemporalInstantPrototypeMethod::ValueOf => {
                 IntrinsicNameSpec::Predefined(PredefinedAtom::ValueOf)
             }
-            TemporalInstantPrototypeMethod::Equals => {
+            TemporalInstantPrototypeMethod::Add
+            | TemporalInstantPrototypeMethod::Subtract
+            | TemporalInstantPrototypeMethod::Equals => {
                 IntrinsicNameSpec::RealmName(RealmNameId::TemporalInstantPrototype(method))
             }
             TemporalInstantPrototypeMethod::EpochMilliseconds
@@ -280,7 +282,9 @@ pub(super) fn visit_properties(visit: PropertySink<'_>) {
                 IntrinsicKeySpec::PredefinedString(PredefinedAtom::ValueOf),
                 NativeFunctionKind::TemporalInstantPrototype(method_id),
             )),
-            TemporalInstantPrototypeMethod::Equals => visit(method(
+            TemporalInstantPrototypeMethod::Add
+            | TemporalInstantPrototypeMethod::Subtract
+            | TemporalInstantPrototypeMethod::Equals => visit(method(
                 prototype,
                 IntrinsicKeySpec::InternedString(RealmNameId::TemporalInstantPrototype(method_id)),
                 NativeFunctionKind::TemporalInstantPrototype(method_id),

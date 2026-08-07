@@ -336,6 +336,59 @@ fn duration_arithmetic_enforces_brand_and_rejects_unanchored_calendar_units() {
 }
 
 #[test]
+fn instant_add_and_subtract_share_the_temporal_duration_conversion_boundary() {
+    assert_eq!(
+        rendered(
+            "var instant=Temporal.Instant.from('1970-01-01T00:00Z');
+             var result=instant.add('PT1H2M3.004005006S');
+             var difference=result.subtract({seconds:1,nanoseconds:1});
+             return [Temporal.Instant.prototype.add.length,
+               Temporal.Instant.prototype.subtract.length,instant.toString(),result.toString(),
+               difference.epochNanoseconds,result===instant].join('|');"
+        ),
+        "1|1|1970-01-01T00:00:00Z|1970-01-01T01:02:03.004005006Z|3722004005005|false"
+    );
+}
+
+#[test]
+fn instant_arithmetic_reads_duration_bags_before_rejecting_date_units() {
+    assert_eq!(
+        rendered(
+            "var log=[],bag={};
+             for(var name of ['days','hours','microseconds','milliseconds','minutes','months',
+                 'nanoseconds','seconds','weeks','years']){
+               (function(name){Object.defineProperty(bag,name,{get:function(){
+                 log.push(name);return name==='hours'?1:undefined;}})})(name);
+             }
+             var instant=new Temporal.Instant(0n);
+             var result=instant.add(bag);
+             return [result.toString(),log.join(',')].join('|');"
+        ),
+        "1970-01-01T01:00:00Z|days,hours,microseconds,milliseconds,minutes,months,nanoseconds,seconds,weeks,years"
+    );
+    assert_eq!(
+        thrown("return new Temporal.Instant(0n).add({days:1});"),
+        ExceptionKind::RangeError
+    );
+    assert_eq!(
+        thrown("return new Temporal.Instant(8640000000000000000000n).add({nanoseconds:1});"),
+        ExceptionKind::RangeError
+    );
+    assert_eq!(
+        thrown("return new Temporal.Instant(0n).subtract('P1D');"),
+        ExceptionKind::RangeError
+    );
+    assert_eq!(
+        thrown("return new Temporal.Instant(0n).add({});"),
+        ExceptionKind::TypeError
+    );
+    assert_eq!(
+        thrown("return Temporal.Instant.prototype.add.call({}, {hours:1});"),
+        ExceptionKind::TypeError
+    );
+}
+
+#[test]
 fn duration_with_merges_defined_fields_in_normative_order() {
     assert_eq!(
         rendered(
