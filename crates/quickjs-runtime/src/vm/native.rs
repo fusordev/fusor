@@ -2366,6 +2366,22 @@ pub(super) fn dispatch_native_call_with_frames(
             origin.unwrap_or_else(native_function_host_origin),
             execution_budget,
         ),
+        NativeFunctionKind::TypedArrayConstructor(element) => begin_typed_array_constructor(
+            runtime,
+            element,
+            native.realm,
+            inputs,
+            return_to,
+            origin.unwrap_or_else(native_function_host_origin),
+            execution_budget,
+        ),
+        NativeFunctionKind::TypedArrayPrototype(method) => dispatch_typed_array_prototype(
+            runtime,
+            method,
+            native.realm,
+            &inputs.receiver,
+            origin.unwrap_or_else(native_function_host_origin),
+        ),
         NativeFunctionKind::DateStatic(method) => begin_date_static(
             runtime,
             method,

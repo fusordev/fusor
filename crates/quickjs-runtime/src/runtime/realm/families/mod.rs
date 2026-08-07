@@ -23,6 +23,7 @@ mod set;
 mod string;
 mod symbol;
 mod temporal;
+mod typed_array;
 mod weak_collections;
 mod weak_references;
 
@@ -135,12 +136,12 @@ impl RealmIntrinsicSchema {
             FamilyCardinality {
                 family: "Realm intrinsic objects",
                 actual: self.objects.len(),
-                expected: 47,
+                expected: 60,
             },
             FamilyCardinality {
                 family: "Realm native functions",
                 actual: self.specs.len(),
-                expected: 454,
+                expected: 471,
             },
         ];
         validate_intrinsic_schema(IntrinsicSchema {
@@ -166,6 +167,8 @@ pub(super) const fn is_declarative_object(id: IntrinsicObjectId) -> bool {
             | IntrinsicObjectId::ArrayPrototype
             | IntrinsicObjectId::ArrayBufferPrototype
             | IntrinsicObjectId::DataViewPrototype
+            | IntrinsicObjectId::TypedArrayPrototype
+            | IntrinsicObjectId::TypedArrayInstancePrototype(_)
             | IntrinsicObjectId::DatePrototype
             | IntrinsicObjectId::Temporal
             | IntrinsicObjectId::TemporalDurationPrototype
@@ -239,6 +242,8 @@ pub(super) const fn is_declarative_function(id: IntrinsicFunctionId) -> bool {
             | NativeFunctionKind::ArrayBufferPrototype(_)
             | NativeFunctionKind::DataViewConstructor
             | NativeFunctionKind::DataViewPrototype(_)
+            | NativeFunctionKind::TypedArrayConstructor(_)
+            | NativeFunctionKind::TypedArrayPrototype(_)
             | NativeFunctionKind::ArrayPrototypeJoin
             | NativeFunctionKind::ArrayPrototypeToString
             | NativeFunctionKind::ArrayPrototypeSearch(_)
@@ -504,7 +509,8 @@ fn special_reference_batch(
         | NativeFunctionKind::StringConstructor => Some(DeclarativeBatch::PrimitiveGlobals),
         NativeFunctionKind::ArrayConstructor
         | NativeFunctionKind::ArrayBufferConstructor
-        | NativeFunctionKind::DataViewConstructor => Some(DeclarativeBatch::ArrayGlobals),
+        | NativeFunctionKind::DataViewConstructor
+        | NativeFunctionKind::TypedArrayConstructor(_) => Some(DeclarativeBatch::ArrayGlobals),
         NativeFunctionKind::DateConstructor => Some(DeclarativeBatch::DateGlobals),
         NativeFunctionKind::RegExpConstructor => Some(DeclarativeBatch::RegExpGlobals),
         NativeFunctionKind::SymbolConstructor => Some(DeclarativeBatch::SymbolGlobals),
@@ -567,7 +573,9 @@ const fn is_array_identity(id: IntrinsicIdentity) -> bool {
         IntrinsicIdentity::Object(
             IntrinsicObjectId::ArrayPrototype
             | IntrinsicObjectId::ArrayBufferPrototype
-            | IntrinsicObjectId::DataViewPrototype,
+            | IntrinsicObjectId::DataViewPrototype
+            | IntrinsicObjectId::TypedArrayPrototype
+            | IntrinsicObjectId::TypedArrayInstancePrototype(_),
         ) => true,
         IntrinsicIdentity::Function(id) => is_array_function(id),
         IntrinsicIdentity::Object(_) => false,
@@ -806,6 +814,8 @@ const fn is_array_function(id: IntrinsicFunctionId) -> bool {
             | NativeFunctionKind::ArrayBufferPrototype(_)
             | NativeFunctionKind::DataViewConstructor
             | NativeFunctionKind::DataViewPrototype(_)
+            | NativeFunctionKind::TypedArrayConstructor(_)
+            | NativeFunctionKind::TypedArrayPrototype(_)
             | NativeFunctionKind::ArrayPrototypeJoin
             | NativeFunctionKind::ArrayPrototypeToString
             | NativeFunctionKind::ArrayPrototypeSearch(_)
@@ -931,6 +941,7 @@ fn visit_object_specs(visit: ObjectSink<'_>) {
     array::visit_objects(visit);
     array_buffer::visit_objects(visit);
     data_view::visit_objects(visit);
+    typed_array::visit_objects(visit);
     date::visit_objects(visit);
     temporal::visit_objects(visit);
     regexp::visit_objects(visit);
@@ -958,6 +969,7 @@ fn visit_function_specs(visit: FunctionSink<'_>) {
     array::visit_kernel_functions(visit);
     array_buffer::visit_functions(visit);
     data_view::visit_functions(visit);
+    typed_array::visit_functions(visit);
     date::visit_functions(visit);
     temporal::visit_functions(visit);
     regexp::visit_functions(visit);
@@ -987,6 +999,7 @@ fn visit_property_specs(visit: PropertySink<'_>) {
     array::visit_properties(visit);
     array_buffer::visit_properties(visit);
     data_view::visit_properties(visit);
+    typed_array::visit_properties(visit);
     date::visit_properties(visit);
     temporal::visit_properties(visit);
     regexp::visit_properties(visit);
@@ -1111,8 +1124,8 @@ mod tests {
     #[test]
     fn complete_function_schema_has_characterized_cardinality_and_unique_ids() {
         let schema = RealmIntrinsicSchema::try_new().expect("function schema");
-        assert_eq!(schema.specs().len(), 454);
-        assert_eq!(schema.constructor_prototypes.len(), 33);
+        assert_eq!(schema.specs().len(), 471);
+        assert_eq!(schema.constructor_prototypes.len(), 45);
         for (index, spec) in schema.specs().iter().enumerate() {
             assert!(
                 schema.specs()[..index]

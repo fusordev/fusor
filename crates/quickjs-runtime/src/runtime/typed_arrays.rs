@@ -161,6 +161,35 @@ impl Runtime {
         ))
     }
 
+    pub(crate) fn realm_typed_array_prototype(
+        &self,
+        realm: super::RealmId,
+        element: TypedArrayElementType,
+    ) -> Result<ObjectId, crate::EngineFault> {
+        let state = self
+            .realms
+            .get(realm)
+            .ok_or(crate::EngineFault::StaleHeapEdge {
+                edge: "realm",
+                index: realm.index(),
+                generation: realm.generation(),
+            })?;
+        let super::RealmIntrinsics::Ready { typed_array, .. } = state.intrinsics else {
+            return Err(crate::EngineFault::RuntimeInvariant {
+                message: "realm typed-array intrinsics are not initialized",
+            });
+        };
+        let prototype = typed_array.instance_prototypes[element.index()];
+        if self.objects.get(prototype).is_none() {
+            return Err(crate::EngineFault::StaleHeapEdge {
+                edge: "typed-array prototype intrinsic",
+                index: prototype.index(),
+                generation: prototype.generation(),
+            });
+        }
+        Ok(prototype)
+    }
+
     /// Takes the current backing-buffer witness used by every typed-array
     /// indexed operation. A length-tracking view observes the largest complete
     /// element prefix after each resizable-buffer change; a fixed view becomes

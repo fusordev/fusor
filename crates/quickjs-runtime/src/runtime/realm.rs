@@ -48,10 +48,11 @@ use super::{
     PropertyLayout, Rc, Realm, RealmHandle, RealmId, RealmIntrinsics, RealmState, RefCell,
     ReflectMethod, RegExpIntrinsics, ReleaseMailbox, Runtime, RuntimeError, RuntimeIdentity,
     RuntimeLimits, RuntimeResource, SetIntrinsics, SetMethod, ShapeInterner, StoredValue,
-    StringIntrinsics, StringMethod, SymbolIntrinsics, TemporalIntrinsics, UriFunction, VecDeque,
-    WeakMapIntrinsics, WeakRefIntrinsics, WeakSetIntrinsics, check_limit, predefined_string,
-    usize_to_u64,
+    StringIntrinsics, StringMethod, SymbolIntrinsics, TemporalIntrinsics, TypedArrayIntrinsics,
+    UriFunction, VecDeque, WeakMapIntrinsics, WeakRefIntrinsics, WeakSetIntrinsics, check_limit,
+    predefined_string, usize_to_u64,
 };
+use crate::object::TypedArrayElementType;
 
 use allocation::IntrinsicRecords;
 use atoms::{RealmAtomBindings, RealmAtomPlan};
@@ -668,6 +669,11 @@ impl RealmBuildTransaction<'_> {
             data_view: DataViewIntrinsics {
                 prototype: object(IntrinsicObjectId::DataViewPrototype),
                 constructor: function(NativeFunctionKind::DataViewConstructor),
+            },
+            typed_array: TypedArrayIntrinsics {
+                prototype: object(IntrinsicObjectId::TypedArrayPrototype),
+                instance_prototypes: TypedArrayElementType::ALL
+                    .map(|element| object(IntrinsicObjectId::TypedArrayInstancePrototype(element))),
             },
             date: DateIntrinsics {
                 prototype: object(IntrinsicObjectId::DatePrototype),

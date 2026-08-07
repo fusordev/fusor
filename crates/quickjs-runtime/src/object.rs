@@ -2237,6 +2237,24 @@ impl TypedArrayElementType {
     pub(crate) const fn is_bigint(self) -> bool {
         matches!(self, Self::BigInt64 | Self::BigUint64)
     }
+
+    #[must_use]
+    pub(crate) const fn index(self) -> usize {
+        match self {
+            Self::Int8 => 0,
+            Self::Uint8 => 1,
+            Self::Uint8Clamped => 2,
+            Self::Int16 => 3,
+            Self::Uint16 => 4,
+            Self::Int32 => 5,
+            Self::Uint32 => 6,
+            Self::BigInt64 => 7,
+            Self::BigUint64 => 8,
+            Self::Float16 => 9,
+            Self::Float32 => 10,
+            Self::Float64 => 11,
+        }
+    }
 }
 
 /// A fixed-length or length-tracking typed-array view over a resizable

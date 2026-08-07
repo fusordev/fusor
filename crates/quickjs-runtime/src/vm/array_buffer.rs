@@ -333,7 +333,10 @@ pub(super) fn array_buffer_is_view(
 ) -> Result<NativeDispatch, NativeFailure> {
     let value = arguments.take_first_or_undefined();
     let is_view = match value {
-        StoredValue::Object(object) => runtime.data_view_state(object)?.is_some(),
+        StoredValue::Object(object) => {
+            runtime.data_view_state(object)?.is_some()
+                || runtime.typed_array_state(object)?.is_some()
+        }
         StoredValue::Undefined
         | StoredValue::Null
         | StoredValue::Boolean(_)

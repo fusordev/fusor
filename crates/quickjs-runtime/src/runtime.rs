@@ -51,7 +51,7 @@ use crate::{
         DataViewState, DateState, ForInIterator, ForInSnapshot, HeapObject, KeyPhases,
         ObjectRecord, OwnProperty, PromiseCapability, PromiseReaction, PropertyDeletion,
         ProxyState, RegExpState, RegExpStringIterator, ShapeInterner, StringIterator,
-        TypedArrayState,
+        TypedArrayElementType, TypedArrayState,
     },
     value::{HeapReference, PrimitiveValue, ReleaseMailbox, RootTarget, SlotValue, StoredValue},
 };
@@ -76,6 +76,7 @@ pub(crate) use iterators::PreparedIteratorResultPlan;
 pub use limits::{RuntimeLimits, RuntimeUsage};
 pub(crate) use typed_arrays::{
     TypedArrayElementValue, TypedArrayOwnProperty, TypedArrayPropertyKey, TypedArrayStoreOutcome,
+    TypedArrayView,
 };
 
 struct RealmState {
@@ -107,6 +108,7 @@ enum RealmIntrinsics {
         array: ArrayIntrinsics,
         array_buffer: ArrayBufferIntrinsics,
         data_view: DataViewIntrinsics,
+        typed_array: TypedArrayIntrinsics,
         date: DateIntrinsics,
         temporal: TemporalIntrinsics,
         map: MapIntrinsics,
@@ -270,6 +272,12 @@ struct ArrayBufferIntrinsics {
 struct DataViewIntrinsics {
     prototype: ObjectId,
     constructor: FunctionId,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct TypedArrayIntrinsics {
+    prototype: ObjectId,
+    instance_prototypes: [ObjectId; 12],
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -1197,6 +1205,8 @@ pub(crate) enum NativeFunctionKind {
     ArrayBufferPrototype(ArrayBufferPrototypeMethod),
     DataViewConstructor,
     DataViewPrototype(DataViewPrototypeMethod),
+    TypedArrayConstructor(TypedArrayElementType),
+    TypedArrayPrototype(TypedArrayPrototypeMethod),
     DateConstructor,
     DateStatic(DateStaticMethod),
     DatePrototype(DatePrototypeMethod),
@@ -1757,6 +1767,49 @@ impl DataViewPrototypeMethod {
             Self::GetUint8 | Self::SetUint8 => Some(DataViewElementType::Uint8),
             Self::GetUint16 | Self::SetUint16 => Some(DataViewElementType::Uint16),
             Self::GetUint32 | Self::SetUint32 => Some(DataViewElementType::Uint32),
+        }
+    }
+}
+
+/// Accessors shared by every concrete typed-array prototype through
+/// `%TypedArray%.prototype`.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum TypedArrayPrototypeMethod {
+    Buffer,
+    ByteLength,
+    ByteOffset,
+    Length,
+    ToStringTag,
+}
+
+impl TypedArrayPrototypeMethod {
+    pub(crate) const ALL: [Self; 5] = [
+        Self::Buffer,
+        Self::ByteLength,
+        Self::ByteOffset,
+        Self::Length,
+        Self::ToStringTag,
+    ];
+
+    #[must_use]
+    pub(crate) const fn name(self) -> &'static str {
+        match self {
+            Self::Buffer => "buffer",
+            Self::ByteLength => "byteLength",
+            Self::ByteOffset => "byteOffset",
+            Self::Length => "length",
+            Self::ToStringTag => "[Symbol.toStringTag]",
+        }
+    }
+
+    #[must_use]
+    pub(crate) const fn accessor_name(self) -> &'static str {
+        match self {
+            Self::Buffer => "get buffer",
+            Self::ByteLength => "get byteLength",
+            Self::ByteOffset => "get byteOffset",
+            Self::Length => "get length",
+            Self::ToStringTag => "get [Symbol.toStringTag]",
         }
     }
 }
@@ -2522,6 +2575,7 @@ impl NativeFunctionKind {
                 | Self::ArrayConstructor
                 | Self::ArrayBufferConstructor
                 | Self::DataViewConstructor
+                | Self::TypedArrayConstructor(_)
                 | Self::DateConstructor
                 | Self::TemporalDurationConstructor
                 | Self::TemporalInstantConstructor

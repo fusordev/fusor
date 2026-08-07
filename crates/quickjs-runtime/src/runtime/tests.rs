@@ -35,9 +35,9 @@ use super::{
     is_supported_instruction, is_supported_opcode, usize_to_u64,
 };
 
-const REALM_OBJECT_SLOTS: u64 = 47;
-const REALM_PROPERTY_SLOTS: u64 = 1_518;
-const REALM_FUNCTION_SLOTS: u64 = 454;
+const REALM_OBJECT_SLOTS: u64 = 60;
+const REALM_PROPERTY_SLOTS: u64 = 1_617;
+const REALM_FUNCTION_SLOTS: u64 = 471;
 
 #[test]
 fn finalization_job_limit_failure_does_not_clear_weak_targets() {
@@ -2070,6 +2070,7 @@ fn realm_installs_the_exact_function_intrinsic_graph() {
         temporal: _,
         array_buffer: _,
         data_view: _,
+        typed_array: _,
     } = state.intrinsics
     else {
         panic!("realm intrinsics remained uninitialized");
@@ -2083,9 +2084,9 @@ fn realm_installs_the_exact_function_intrinsic_graph() {
     assert_eq!(
         runtime.atom_usage(),
         AtomUsage {
-            live_atoms: PREDEFINED_ATOM_COUNT + 279,
-            live_description_code_units: PREDEFINED_DESCRIPTION_CODE_UNITS + 2_409,
-            interner_slots: PREDEFINED_INTERNER_SLOTS + 279,
+            live_atoms: PREDEFINED_ATOM_COUNT + 280,
+            live_description_code_units: PREDEFINED_DESCRIPTION_CODE_UNITS + 2_426,
+            interner_slots: PREDEFINED_INTERNER_SLOTS + 280,
         }
     );
 

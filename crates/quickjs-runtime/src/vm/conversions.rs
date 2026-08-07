@@ -534,6 +534,11 @@ pub(super) fn finish_intrinsic_get(
             max_byte_length,
             &value,
         ),
+        IntrinsicGetContinuation::TypedArrayConstructor {
+            new_target,
+            element,
+            length,
+        } => finish_typed_array_constructor_wrapper(runtime, new_target, element, length, &value),
         IntrinsicGetContinuation::TemporalInstantConstructor {
             new_target,
             epoch_nanoseconds,
@@ -1838,6 +1843,15 @@ fn finish_operator_primitive_target(
         }
         OperatorPrimitiveTarget::DataViewConstructorByteLength(state) => {
             finish_data_view_constructor_byte_length(
+                runtime,
+                *state,
+                value,
+                return_to,
+                execution_budget,
+            )
+        }
+        OperatorPrimitiveTarget::TypedArrayConstructorLength(state) => {
+            finish_typed_array_constructor_length(
                 runtime,
                 *state,
                 value,

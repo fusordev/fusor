@@ -342,6 +342,7 @@ impl Runtime {
                 array,
                 array_buffer,
                 data_view,
+                typed_array,
                 map,
                 set,
                 weak_map,
@@ -502,6 +503,20 @@ impl Runtime {
                 ] {
                     mark_heap_reference(
                         reference,
+                        &mut marked_functions,
+                        &mut marked_objects,
+                        &mut work,
+                    );
+                }
+                mark_heap_reference(
+                    HeapReference::Object(typed_array.prototype),
+                    &mut marked_functions,
+                    &mut marked_objects,
+                    &mut work,
+                );
+                for prototype in typed_array.instance_prototypes {
+                    mark_heap_reference(
+                        HeapReference::Object(prototype),
                         &mut marked_functions,
                         &mut marked_objects,
                         &mut work,

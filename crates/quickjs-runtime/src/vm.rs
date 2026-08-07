@@ -55,7 +55,7 @@ use crate::{
     number::decimal::{DecimalDigits, exact_fixed, exact_significant},
     object::{
         DataViewByteLength, DataViewState, ForInSnapshot, IntegrityLevel, KeyPhases, OwnProperty,
-        PropertyDeletion,
+        PropertyDeletion, TypedArrayElementType, TypedArrayLength, TypedArrayState,
     },
     runtime::{
         ArrayBufferPrototypeMethod, ArrayCallback, ArrayCopier, ArrayDefineOutcome, ArrayFlatten,
@@ -73,9 +73,9 @@ use crate::{
         RegExpSymbolMethod, SetMethod, SetPrototypeOutcome, StringArgument, StringMethod,
         TemporalDurationPrototypeMethod, TemporalDurationStaticMethod,
         TemporalInstantPrototypeMethod, TemporalInstantStaticMethod, TypedArrayElementValue,
-        TypedArrayOwnProperty, TypedArrayPropertyKey, TypedArrayStoreOutcome, UriFunction,
-        WeakMapMethod, WeakSetMethod, array_length_from_number, check_execution_limit,
-        global_declaration_error, usize_to_u64,
+        TypedArrayOwnProperty, TypedArrayPropertyKey, TypedArrayPrototypeMethod,
+        TypedArrayStoreOutcome, TypedArrayView, UriFunction, WeakMapMethod, WeakSetMethod,
+        array_length_from_number, check_execution_limit, global_declaration_error, usize_to_u64,
     },
     value::{HeapReference, SlotValue, StoredValue},
 };
@@ -1203,6 +1203,11 @@ enum IntrinsicGetContinuation {
         byte_length: usize,
         max_byte_length: Option<usize>,
     },
+    TypedArrayConstructor {
+        new_target: FunctionId,
+        element: TypedArrayElementType,
+        length: usize,
+    },
     TemporalInstantConstructor {
         new_target: FunctionId,
         epoch_nanoseconds: i128,
@@ -1263,6 +1268,7 @@ impl IntrinsicGetContinuation {
             | Self::NumberConstructor { .. }
             | Self::DateConstructor { .. }
             | Self::ArrayBufferConstructor { .. }
+            | Self::TypedArrayConstructor { .. }
             | Self::TemporalInstantConstructor { .. }
             | Self::TemporalDurationConstructor { .. }
             | Self::StringConstructor { .. } => 1,
@@ -1953,6 +1959,8 @@ enum OperatorPrimitiveTarget {
     DataViewConstructorOffset(Box<DataViewConstructorOffsetState>),
     /// `%DataView%`'s optional explicit `byteLength`, after `ToIndex`.
     DataViewConstructorByteLength(Box<DataViewConstructorByteLengthState>),
+    /// A concrete typed-array constructor's initial length after `ToIndex`.
+    TypedArrayConstructorLength(Box<TypedArrayConstructorLengthState>),
     /// `DataView.prototype.get*` after `ToIndex(byteOffset)`.
     DataViewGetIndex(Box<DataViewGetState>),
     /// `DataView.prototype.set*` after `ToIndex(byteOffset)`.
@@ -2196,6 +2204,9 @@ impl OperatorPrimitiveTarget {
             Self::DataViewConstructorOffset(_) => DataViewConstructorOffsetState::retained_values(),
             Self::DataViewConstructorByteLength(_) => {
                 DataViewConstructorByteLengthState::retained_values()
+            }
+            Self::TypedArrayConstructorLength(_) => {
+                TypedArrayConstructorLengthState::retained_values()
             }
             Self::DataViewGetIndex(_) => DataViewGetState::retained_values(),
             Self::DataViewSetOffset(_) => DataViewSetOffsetState::retained_values(),
@@ -2534,6 +2545,7 @@ fn trace_operator_primitive_target_roots(
         | OperatorPrimitiveTarget::ArrayBufferSliceEnd(state) => state.trace_roots(mark),
         OperatorPrimitiveTarget::DataViewConstructorOffset(state) => state.trace_roots(mark),
         OperatorPrimitiveTarget::DataViewConstructorByteLength(state) => state.trace_roots(mark),
+        OperatorPrimitiveTarget::TypedArrayConstructorLength(state) => state.trace_roots(mark),
         OperatorPrimitiveTarget::DataViewGetIndex(state) => state.trace_roots(mark),
         OperatorPrimitiveTarget::DataViewSetOffset(state) => state.trace_roots(mark),
         OperatorPrimitiveTarget::DataViewSetValue(state) => state.trace_roots(mark),
@@ -2697,6 +2709,7 @@ fn trace_native_continuation_roots(
             | IntrinsicGetContinuation::NumberConstructor { new_target, .. }
             | IntrinsicGetContinuation::DateConstructor { new_target, .. }
             | IntrinsicGetContinuation::ArrayBufferConstructor { new_target, .. }
+            | IntrinsicGetContinuation::TypedArrayConstructor { new_target, .. }
             | IntrinsicGetContinuation::TemporalInstantConstructor { new_target, .. }
             | IntrinsicGetContinuation::TemporalDurationConstructor { new_target, .. }
             | IntrinsicGetContinuation::StringConstructor { new_target, .. } => {

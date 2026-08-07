@@ -38,6 +38,26 @@ pub(super) enum TypedArrayDefineAction {
     Store(usize),
 }
 
+/// `%Int8Array%`-style construction after the initial `ToIndex(length)`.
+pub(super) struct TypedArrayConstructorLengthState {
+    new_target: FunctionId,
+    element: TypedArrayElementType,
+    realm: RealmId,
+    origin: JsStackFrame,
+}
+
+impl TypedArrayConstructorLengthState {
+    pub(super) const fn retained_values() -> u64 {
+        1
+    }
+
+    pub(super) fn trace_roots(&self, mark: &mut dyn FnMut(CollectionRoot)) {
+        mark(CollectionRoot::Heap(HeapReference::Function(
+            self.new_target,
+        )));
+    }
+}
+
 impl TypedArrayElementSetState {
     pub(super) const fn retained_values() -> u64 {
         1
@@ -93,6 +113,240 @@ pub(super) fn typed_array_define_own_property_action(
         TypedArrayDefineAction::Store(index)
     } else {
         TypedArrayDefineAction::Complete
+    }))
+}
+
+pub(super) fn begin_typed_array_constructor(
+    runtime: &mut Runtime,
+    element: TypedArrayElementType,
+    realm: RealmId,
+    inputs: CallInputs,
+    return_to: Option<CallReturn>,
+    origin: JsStackFrame,
+    execution_budget: &mut ExecutionBudget,
+) -> Result<NativeDispatch, NativeFailure> {
+    let Some(new_target) = inputs.new_target else {
+        return typed_array_type_error(realm, &origin, "TypedArray constructor requires 'new'");
+    };
+    let mut arguments = inputs.arguments;
+    let length = arguments.take_first_or_undefined();
+    if matches!(length, StoredValue::Object(_) | StoredValue::Function(_)) {
+        return typed_array_type_error(
+            realm,
+            &origin,
+            "TypedArray object, iterable, and ArrayBuffer initializers are not implemented",
+        );
+    }
+    begin_operator_primitive_conversion(
+        runtime,
+        length,
+        OperatorPrimitiveHint::Number,
+        OperatorPrimitiveTarget::TypedArrayConstructorLength(Box::new(
+            TypedArrayConstructorLengthState {
+                new_target,
+                element,
+                realm,
+                origin: origin.clone(),
+            },
+        )),
+        realm,
+        return_to,
+        origin,
+        execution_budget,
+    )
+}
+
+pub(super) fn finish_typed_array_constructor_length(
+    runtime: &mut Runtime,
+    state: TypedArrayConstructorLengthState,
+    value: StoredValue,
+    return_to: Option<CallReturn>,
+    execution_budget: &mut ExecutionBudget,
+) -> Result<NativeDispatch, NativeFailure> {
+    let length = typed_array_to_index(value, state.realm, &state.origin)?;
+    let Some(_byte_length) = length.checked_mul(state.element.byte_width()) else {
+        return typed_array_range_error(
+            state.realm,
+            &state.origin,
+            "TypedArray length exceeds implementation range",
+        );
+    };
+    let prototype_key = runtime.predefined_property_key(PredefinedAtom::Prototype);
+    begin_intrinsic_get(
+        runtime,
+        state.realm,
+        HeapReference::Function(state.new_target),
+        StoredValue::Function(state.new_target),
+        &prototype_key,
+        IntrinsicGetContinuation::TypedArrayConstructor {
+            new_target: state.new_target,
+            element: state.element,
+            length,
+        },
+        return_to,
+        Some(state.origin),
+        execution_budget,
+    )
+}
+
+pub(super) fn finish_typed_array_constructor_wrapper(
+    runtime: &mut Runtime,
+    new_target: FunctionId,
+    element: TypedArrayElementType,
+    length: usize,
+    requested: &StoredValue,
+) -> Result<NativeDispatch, NativeFailure> {
+    let realm = runtime.function_realm(new_target)?;
+    let prototype = match requested {
+        StoredValue::Function(function) => HeapReference::Function(*function),
+        StoredValue::Object(object) => HeapReference::Object(*object),
+        StoredValue::Undefined
+        | StoredValue::Null
+        | StoredValue::Boolean(_)
+        | StoredValue::Number(_)
+        | StoredValue::BigInt(_)
+        | StoredValue::String(_)
+        | StoredValue::Symbol(_) => {
+            HeapReference::Object(runtime.realm_typed_array_prototype(realm, element)?)
+        }
+    };
+    let byte_length =
+        length
+            .checked_mul(element.byte_width())
+            .ok_or(EngineFault::RuntimeInvariant {
+                message: "validated typed-array length overflowed its byte length",
+            })?;
+    let buffer = runtime
+        .allocate_array_buffer(
+            HeapReference::Object(runtime.realm_array_buffer_prototype(realm)?),
+            byte_length,
+            None,
+        )
+        .map_err(NativeFailure::Execution)?;
+    let object = runtime
+        .allocate_typed_array(
+            prototype,
+            TypedArrayState::new(buffer, 0, TypedArrayLength::Fixed(length), element),
+        )
+        .map_err(NativeFailure::Execution)?;
+    Ok(NativeDispatch::Immediate(StoredValue::Object(object)))
+}
+
+pub(super) fn dispatch_typed_array_prototype(
+    runtime: &Runtime,
+    method: TypedArrayPrototypeMethod,
+    realm: RealmId,
+    receiver: &StoredValue,
+    origin: JsStackFrame,
+) -> Result<NativeDispatch, NativeFailure> {
+    let StoredValue::Object(object) = receiver else {
+        return typed_array_type_error(realm, &origin, "not a TypedArray");
+    };
+    let state =
+        runtime
+            .typed_array_state(*object)?
+            .copied()
+            .ok_or(EngineFault::RuntimeInvariant {
+                message: "typed-array prototype receiver lost its internal slots",
+            })?;
+    let view = runtime.typed_array_view(*object)?;
+    let (byte_length, byte_offset, length) = match view {
+        TypedArrayView::InBounds {
+            byte_offset,
+            length,
+            ..
+        } => (
+            length.saturating_mul(state.element().byte_width()),
+            byte_offset,
+            length,
+        ),
+        TypedArrayView::Detached | TypedArrayView::OutOfBounds => (0, 0, 0),
+    };
+    let number = |value: usize| {
+        #[expect(
+            clippy::cast_precision_loss,
+            reason = "typed-array byte lengths and indices are bounded by ToIndex"
+        )]
+        let value = value as f64;
+        StoredValue::Number(JsNumber::from_f64(value))
+    };
+    Ok(NativeDispatch::Immediate(match method {
+        TypedArrayPrototypeMethod::Buffer => StoredValue::Object(state.buffer()),
+        TypedArrayPrototypeMethod::ByteLength => number(byte_length),
+        TypedArrayPrototypeMethod::ByteOffset => number(byte_offset),
+        TypedArrayPrototypeMethod::Length => number(length),
+        TypedArrayPrototypeMethod::ToStringTag => {
+            StoredValue::String(JsString::from_utf8(typed_array_name(state.element()))?)
+        }
+    }))
+}
+
+fn typed_array_to_index(
+    value: StoredValue,
+    realm: RealmId,
+    origin: &JsStackFrame,
+) -> Result<usize, NativeFailure> {
+    let number = operator_to_number(value, realm, origin)?;
+    let Some(index) = number_to_index(number) else {
+        return typed_array_range_error(realm, origin, "invalid TypedArray length");
+    };
+    usize::try_from(index).map_err(|_| {
+        NativeFailure::Abrupt(PendingException {
+            realm,
+            payload: PendingExceptionPayload::EngineError {
+                kind: ExceptionKind::RangeError,
+                message: JsString::from_utf8("TypedArray length exceeds implementation range")
+                    .expect("static TypedArray range message is valid UTF-8"),
+            },
+            origin: origin.clone(),
+        })
+    })
+}
+
+fn typed_array_name(element: TypedArrayElementType) -> &'static str {
+    match element {
+        TypedArrayElementType::Int8 => "Int8Array",
+        TypedArrayElementType::Uint8 => "Uint8Array",
+        TypedArrayElementType::Uint8Clamped => "Uint8ClampedArray",
+        TypedArrayElementType::Int16 => "Int16Array",
+        TypedArrayElementType::Uint16 => "Uint16Array",
+        TypedArrayElementType::Int32 => "Int32Array",
+        TypedArrayElementType::Uint32 => "Uint32Array",
+        TypedArrayElementType::BigInt64 => "BigInt64Array",
+        TypedArrayElementType::BigUint64 => "BigUint64Array",
+        TypedArrayElementType::Float16 => "Float16Array",
+        TypedArrayElementType::Float32 => "Float32Array",
+        TypedArrayElementType::Float64 => "Float64Array",
+    }
+}
+
+fn typed_array_type_error<T>(
+    realm: RealmId,
+    origin: &JsStackFrame,
+    message: &str,
+) -> Result<T, NativeFailure> {
+    Err(NativeFailure::Abrupt(PendingException {
+        realm,
+        payload: PendingExceptionPayload::EngineError {
+            kind: ExceptionKind::TypeError,
+            message: JsString::from_utf8(message)?,
+        },
+        origin: origin.clone(),
+    }))
+}
+
+fn typed_array_range_error<T>(
+    realm: RealmId,
+    origin: &JsStackFrame,
+    message: &str,
+) -> Result<T, NativeFailure> {
+    Err(NativeFailure::Abrupt(PendingException {
+        realm,
+        payload: PendingExceptionPayload::EngineError {
+            kind: ExceptionKind::RangeError,
+            message: JsString::from_utf8(message)?,
+        },
+        origin: origin.clone(),
     }))
 }
 

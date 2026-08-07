@@ -5,7 +5,7 @@ use crate::{
     runtime::{
         ArrayBufferPrototypeMethod, DataViewPrototypeMethod, DatePrototypeMethod, DateStaticMethod,
         TemporalDurationPrototypeMethod, TemporalDurationStaticMethod,
-        TemporalInstantPrototypeMethod, TemporalInstantStaticMethod,
+        TemporalInstantPrototypeMethod, TemporalInstantStaticMethod, TypedArrayPrototypeMethod,
     },
 };
 
@@ -247,6 +247,12 @@ fn visit_realm_name_order(
     for method in DataViewPrototypeMethod::ALL {
         visit(RealmNameId::DataViewPrototype(method))?;
     }
+    for method in TypedArrayPrototypeMethod::ALL {
+        if method != TypedArrayPrototypeMethod::ToStringTag {
+            visit(RealmNameId::TypedArrayPrototype(method))?;
+        }
+    }
+    visit(RealmNameId::TypedArrayBytesPerElement)?;
     for method in DateStaticMethod::ALL {
         visit(RealmNameId::DateStatic(method))?;
     }
@@ -481,6 +487,8 @@ fn realm_name_description(id: RealmNameId) -> &'static str {
         RealmNameId::ArrayBufferIsView => "isView",
         RealmNameId::ArrayBufferPrototype(method) => method.name(),
         RealmNameId::DataViewPrototype(method) => method.name(),
+        RealmNameId::TypedArrayPrototype(method) => method.name(),
+        RealmNameId::TypedArrayBytesPerElement => "BYTES_PER_ELEMENT",
         RealmNameId::DateStatic(method) => method.name(),
         RealmNameId::DatePrototype(method) => method.name(),
         RealmNameId::Temporal => "Temporal",
