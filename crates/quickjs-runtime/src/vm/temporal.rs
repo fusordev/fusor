@@ -2291,6 +2291,37 @@ pub(super) fn dispatch_temporal_zoned_date_time_prototype(
             };
             Ok(NativeDispatch::Immediate(StoredValue::Boolean(equals)))
         }
+        TemporalZonedDateTimePrototypeMethod::WithTimeZone => {
+            let value = arguments.take_first_or_undefined();
+            let StoredValue::String(value) = value else {
+                return temporal_type_error(
+                    realm,
+                    origin,
+                    "Temporal.ZonedDateTime.withTimeZone requires a time-zone string",
+                );
+            };
+            let time_zone = match TimeZone::try_from_str(&value.to_utf8_lossy()?) {
+                Ok(time_zone) => time_zone,
+                Err(error) => {
+                    return Err(NativeFailure::Abrupt(temporal_exception_from_error(
+                        realm, origin, error,
+                    )?));
+                }
+            };
+            let result = match ZonedDateTime::try_new(
+                date_time.epoch_nanoseconds().as_i128(),
+                time_zone,
+                date_time.calendar().clone(),
+            ) {
+                Ok(result) => result,
+                Err(error) => {
+                    return Err(NativeFailure::Abrupt(temporal_exception_from_error(
+                        realm, origin, error,
+                    )?));
+                }
+            };
+            allocate_temporal_zoned_date_time_result(runtime, realm, result)
+        }
         TemporalZonedDateTimePrototypeMethod::ToString => begin_temporal_zoned_date_time_to_string(
             runtime,
             date_time,

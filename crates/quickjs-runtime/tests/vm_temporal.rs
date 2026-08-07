@@ -429,6 +429,29 @@ fn zoned_date_time_to_string_reads_all_options_before_formatting() {
 }
 
 #[test]
+fn zoned_date_time_with_time_zone_preserves_the_instant() {
+    assert_eq!(
+        rendered(
+            "var value=new Temporal.ZonedDateTime(3661987654321n,'UTC');
+             var result=value.withTimeZone('+01:00');
+             var method=Object.getOwnPropertyDescriptor(Temporal.ZonedDateTime.prototype,'withTimeZone');
+             return [result.epochNanoseconds,result.timeZoneId,result.toPlainDateTime().toString(),
+               result===value,method.value.length,method.value.name,method.enumerable,
+               method.writable,method.configurable].join('|');"
+        ),
+        "3661987654321|+01:00|1970-01-01T02:01:01.987654321|false|1|withTimeZone|false|true|true"
+    );
+    assert_eq!(
+        thrown("return new Temporal.ZonedDateTime(0n,'UTC').withTimeZone('');"),
+        ExceptionKind::RangeError
+    );
+    assert_eq!(
+        thrown("return new Temporal.ZonedDateTime(0n,'UTC').withTimeZone({});"),
+        ExceptionKind::TypeError
+    );
+}
+
+#[test]
 fn plain_date_time_constructor_accessors_and_iso_formatting_are_spec_shaped() {
     assert_eq!(
         rendered(
