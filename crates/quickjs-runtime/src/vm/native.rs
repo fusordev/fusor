@@ -500,6 +500,13 @@ pub(super) fn resume_native_continuations(
                     execution_budget,
                 )?
             }
+            NativeContinuation::TypedArrayPrototypeSet(state) => advance_typed_array_prototype_set(
+                runtime,
+                *state,
+                Some(value),
+                return_to,
+                execution_budget,
+            )?,
             NativeContinuation::ArrayBufferSlice(state) => {
                 advance_array_buffer_slice(runtime, *state, value, return_to, execution_budget)?
             }
@@ -2398,7 +2405,10 @@ pub(super) fn dispatch_native_call_with_frames(
             method,
             native.realm,
             &inputs.receiver,
+            inputs.arguments,
+            return_to,
             origin.unwrap_or_else(native_function_host_origin),
+            execution_budget,
         ),
         NativeFunctionKind::DateStatic(method) => begin_date_static(
             runtime,

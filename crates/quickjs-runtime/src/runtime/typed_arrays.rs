@@ -315,7 +315,7 @@ impl Runtime {
     }
 
     /// Stores a pre-converted element after taking a fresh view witness. The
-    /// caller distinguishes `ContentTypeMismatch` so Number and BigInt views
+    /// caller distinguishes `ContentTypeMismatch` so Number and `BigInt` views
     /// report the ECMAScript `ToNumber`/`ToBigInt` domain error at the VM edge.
     pub(crate) fn typed_array_store_index(
         &mut self,
@@ -428,6 +428,10 @@ impl Runtime {
     }
 }
 
+#[allow(
+    clippy::float_cmp,
+    reason = "a canonical numeric index must be exactly an integral binary64 value"
+)]
 fn typed_array_property_key(key: &PropertyKey) -> Result<TypedArrayPropertyKey, ExecutionError> {
     if let Some(index) = key.as_index() {
         return Ok(TypedArrayPropertyKey::Index(index.get() as usize));
@@ -577,11 +581,11 @@ fn typed_array_write_element(
         (TypedArrayElementType::Float64, TypedArrayElementValue::Number(value)) => {
             value.as_f64().to_ne_bytes().to_vec()
         }
-        (TypedArrayElementType::BigInt64, TypedArrayElementValue::BigInt(value)) => {
-            (value.low_u64_twos_complement() as i64)
-                .to_ne_bytes()
-                .to_vec()
-        }
+        (TypedArrayElementType::BigInt64, TypedArrayElementValue::BigInt(value)) => value
+            .low_u64_twos_complement()
+            .cast_signed()
+            .to_ne_bytes()
+            .to_vec(),
         (TypedArrayElementType::BigUint64, TypedArrayElementValue::BigInt(value)) => {
             value.low_u64_twos_complement().to_ne_bytes().to_vec()
         }
@@ -644,6 +648,10 @@ fn typed_array_f16_to_f64(bits: u16) -> f64 {
     }
 }
 
+#[allow(
+    clippy::cast_possible_truncation,
+    reason = "the binary16 exponent is constrained to the normal binary16 range"
+)]
 fn typed_array_f64_to_f16(value: f64) -> u16 {
     let sign = u16::try_from((value.to_bits() >> 63) << 15)
         .expect("one-bit sign shifted into a u16 always fits");
@@ -683,6 +691,12 @@ fn typed_array_f64_to_f16(value: f64) -> u16 {
     sign | (encoded_exponent << 10) | (fraction & 0x03ff)
 }
 
+#[allow(
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss,
+    clippy::float_cmp,
+    reason = "binary16 ties-to-even needs exact halfway and integral-significand checks"
+)]
 fn typed_array_f16round(value: f64) -> f64 {
     if value >= 65520.0 {
         return f64::INFINITY;
@@ -796,6 +810,10 @@ mod tests {
     }
 
     #[test]
+    #[allow(
+        clippy::float_cmp,
+        reason = "the expected Uint8Clamp and binary16 values are exactly representable"
+    )]
     fn typed_array_element_storage_covers_number_bigint_and_float16_domains() {
         let mut runtime = Runtime::try_new(RuntimeLimits::default()).expect("runtime");
         let number = typed_array(

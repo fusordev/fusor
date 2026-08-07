@@ -750,6 +750,7 @@ enum NativeContinuation {
     DataViewConstructor(Box<DataViewConstructorState>),
     TypedArrayConstructorObject(Box<TypedArrayConstructorObjectState>),
     TypedArrayConstructorSequence(Box<TypedArrayConstructorSequenceState>),
+    TypedArrayPrototypeSet(Box<TypedArrayPrototypeSetState>),
     DateToJson(DateToJsonContinuation),
     TemporalDurationBag(Box<TemporalDurationBagContinuation>),
     TemporalDurationCompareOptions(TemporalDurationCompareOptionsContinuation),
@@ -862,6 +863,7 @@ impl NativeContinuation {
                 TypedArrayConstructorObjectState::retained_values()
             }
             Self::TypedArrayConstructorSequence(state) => state.retained_values(),
+            Self::TypedArrayPrototypeSet(_) => TypedArrayPrototypeSetState::retained_values(),
             Self::DateToJson(_) => DateToJsonContinuation::retained_values(),
             Self::TemporalDurationBag(state) => state.retained_values(),
             Self::TemporalDurationCompareOptions(_) => {
@@ -1967,15 +1969,22 @@ enum OperatorPrimitiveTarget {
     DataViewConstructorByteLength(Box<DataViewConstructorByteLengthState>),
     /// A concrete typed-array constructor's initial length after `ToIndex`.
     TypedArrayConstructorLength(Box<TypedArrayConstructorLengthState>),
-    /// A concrete typed-array ArrayBuffer view's byte offset after `ToIndex`.
+    /// A concrete typed-array `ArrayBuffer` view's byte offset after `ToIndex`.
     TypedArrayConstructorBufferOffset(Box<TypedArrayConstructorBufferOffsetState>),
-    /// A concrete typed-array ArrayBuffer view's explicit length after `ToIndex`.
+    /// A concrete typed-array `ArrayBuffer` view's explicit length after `ToIndex`.
     TypedArrayConstructorBufferLength(Box<TypedArrayConstructorBufferLengthState>),
     /// An array-like typed-array initializer's `length`, awaiting `ToLength`.
     TypedArrayConstructorArrayLikeLength(Box<TypedArrayConstructorSequenceState>),
     /// One array-like or collected iterable initializer element awaiting its
     /// destination typed-array numeric conversion.
     TypedArrayConstructorElement(Box<TypedArrayConstructorSequenceState>),
+    /// `%TypedArray%.prototype.set`'s target offset after
+    /// `ToIntegerOrInfinity`.
+    TypedArrayPrototypeSetOffset(Box<TypedArrayPrototypeSetState>),
+    /// A non-typed source's `length`, awaiting `ToLength`.
+    TypedArrayPrototypeSetSourceLength(Box<TypedArrayPrototypeSetState>),
+    /// One array-like source element awaiting destination numeric conversion.
+    TypedArrayPrototypeSetElement(Box<TypedArrayPrototypeSetState>),
     /// `DataView.prototype.get*` after `ToIndex(byteOffset)`.
     DataViewGetIndex(Box<DataViewGetState>),
     /// `DataView.prototype.set*` after `ToIndex(byteOffset)`.
@@ -2231,6 +2240,11 @@ impl OperatorPrimitiveTarget {
             }
             Self::TypedArrayConstructorArrayLikeLength(state)
             | Self::TypedArrayConstructorElement(state) => state.retained_values(),
+            Self::TypedArrayPrototypeSetOffset(_state)
+            | Self::TypedArrayPrototypeSetSourceLength(_state)
+            | Self::TypedArrayPrototypeSetElement(_state) => {
+                TypedArrayPrototypeSetState::retained_values()
+            }
             Self::DataViewGetIndex(_) => DataViewGetState::retained_values(),
             Self::DataViewSetOffset(_) => DataViewSetOffsetState::retained_values(),
             Self::DataViewSetValue(_) => DataViewSetValueState::retained_values(),
@@ -2573,6 +2587,9 @@ fn trace_operator_primitive_target_roots(
         OperatorPrimitiveTarget::TypedArrayConstructorBufferLength(state) => state.trace_roots(mark),
         OperatorPrimitiveTarget::TypedArrayConstructorArrayLikeLength(state)
         | OperatorPrimitiveTarget::TypedArrayConstructorElement(state) => state.trace_roots(mark),
+        OperatorPrimitiveTarget::TypedArrayPrototypeSetOffset(state)
+        | OperatorPrimitiveTarget::TypedArrayPrototypeSetSourceLength(state)
+        | OperatorPrimitiveTarget::TypedArrayPrototypeSetElement(state) => state.trace_roots(mark),
         OperatorPrimitiveTarget::DataViewGetIndex(state) => state.trace_roots(mark),
         OperatorPrimitiveTarget::DataViewSetOffset(state) => state.trace_roots(mark),
         OperatorPrimitiveTarget::DataViewSetValue(state) => state.trace_roots(mark),
@@ -2724,6 +2741,7 @@ fn trace_native_continuation_roots(
         NativeContinuation::DataViewConstructor(state) => state.trace_roots(mark),
         NativeContinuation::TypedArrayConstructorObject(state) => state.trace_roots(mark),
         NativeContinuation::TypedArrayConstructorSequence(state) => state.trace_roots(mark),
+        NativeContinuation::TypedArrayPrototypeSet(state) => state.trace_roots(mark),
         NativeContinuation::DateToJson(state) => state.trace_roots(mark),
         NativeContinuation::TemporalDurationBag(state) => state.trace_roots(mark),
         NativeContinuation::TemporalDurationCompareOptions(state) => state.trace_roots(mark),

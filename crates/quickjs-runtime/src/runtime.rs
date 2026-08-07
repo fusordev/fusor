@@ -1780,15 +1780,17 @@ pub(crate) enum TypedArrayPrototypeMethod {
     ByteOffset,
     Length,
     ToStringTag,
+    Set,
 }
 
 impl TypedArrayPrototypeMethod {
-    pub(crate) const ALL: [Self; 5] = [
+    pub(crate) const ALL: [Self; 6] = [
         Self::Buffer,
         Self::ByteLength,
         Self::ByteOffset,
         Self::Length,
         Self::ToStringTag,
+        Self::Set,
     ];
 
     #[must_use]
@@ -1799,6 +1801,7 @@ impl TypedArrayPrototypeMethod {
             Self::ByteOffset => "byteOffset",
             Self::Length => "length",
             Self::ToStringTag => "[Symbol.toStringTag]",
+            Self::Set => "set",
         }
     }
 
@@ -1810,6 +1813,24 @@ impl TypedArrayPrototypeMethod {
             Self::ByteOffset => "get byteOffset",
             Self::Length => "get length",
             Self::ToStringTag => "get [Symbol.toStringTag]",
+            Self::Set => "set",
+        }
+    }
+
+    #[must_use]
+    pub(crate) const fn is_accessor(self) -> bool {
+        !matches!(self, Self::Set)
+    }
+
+    #[must_use]
+    pub(crate) const fn arity(self) -> i32 {
+        match self {
+            Self::Set => 1,
+            Self::Buffer
+            | Self::ByteLength
+            | Self::ByteOffset
+            | Self::Length
+            | Self::ToStringTag => 0,
         }
     }
 }

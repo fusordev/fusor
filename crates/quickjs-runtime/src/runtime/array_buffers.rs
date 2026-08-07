@@ -132,6 +132,20 @@ impl Runtime {
         target: ObjectId,
         count: usize,
     ) -> Result<(), crate::ExecutionError> {
+        self.copy_array_buffer_bytes_to(source, source_offset, target, 0, count)
+    }
+
+    /// Copies one non-observable backing-store range into a byte offset of the
+    /// target buffer. The temporary source copy gives overlapping ranges the
+    /// `memmove` behavior required by typed-array copies over a shared buffer.
+    pub(crate) fn copy_array_buffer_bytes_to(
+        &mut self,
+        source: ObjectId,
+        source_offset: usize,
+        target: ObjectId,
+        target_offset: usize,
+        count: usize,
+    ) -> Result<(), crate::ExecutionError> {
         let bytes = {
             let state =
                 self.array_buffer_state(source)?
@@ -179,11 +193,17 @@ impl Runtime {
             .ok_or(crate::EngineFault::RuntimeInvariant {
                 message: "ArrayBuffer copy target is detached",
             })?;
-        let target = data
-            .get_mut(..count)
-            .ok_or(crate::EngineFault::RuntimeInvariant {
+        let target_end =
+            target_offset
+                .checked_add(count)
+                .ok_or(crate::EngineFault::RuntimeInvariant {
+                    message: "ArrayBuffer copy target range overflowed",
+                })?;
+        let target = data.get_mut(target_offset..target_end).ok_or(
+            crate::EngineFault::RuntimeInvariant {
                 message: "ArrayBuffer copy target range escaped its backing store",
-            })?;
+            },
+        )?;
         target.copy_from_slice(&bytes);
         Ok(())
     }

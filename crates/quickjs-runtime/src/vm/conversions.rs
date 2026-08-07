@@ -1895,6 +1895,33 @@ fn finish_operator_primitive_target(
                 execution_budget,
             )
         }
+        OperatorPrimitiveTarget::TypedArrayPrototypeSetOffset(state) => {
+            finish_typed_array_prototype_set_offset(
+                runtime,
+                *state,
+                value,
+                return_to,
+                execution_budget,
+            )
+        }
+        OperatorPrimitiveTarget::TypedArrayPrototypeSetSourceLength(state) => {
+            finish_typed_array_prototype_set_source_length(
+                runtime,
+                *state,
+                value,
+                return_to,
+                execution_budget,
+            )
+        }
+        OperatorPrimitiveTarget::TypedArrayPrototypeSetElement(state) => {
+            finish_typed_array_prototype_set_element(
+                runtime,
+                *state,
+                value,
+                return_to,
+                execution_budget,
+            )
+        }
         OperatorPrimitiveTarget::DataViewGetIndex(state) => {
             finish_data_view_get_index(runtime, state.as_ref(), value)
         }

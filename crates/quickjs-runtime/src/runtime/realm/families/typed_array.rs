@@ -45,28 +45,36 @@ pub(super) fn visit_functions(visit: FunctionSink<'_>) {
         visit(ordinary(
             NativeFunctionKind::TypedArrayPrototype(method),
             IntrinsicNameSpec::Literal(method.accessor_name()),
-            0,
+            method.arity(),
         ));
     }
 }
 
 pub(super) fn visit_properties(visit: PropertySink<'_>) {
     let prototype = IntrinsicIdentity::Object(IntrinsicObjectId::TypedArrayPrototype);
-    for method in TypedArrayPrototypeMethod::ALL {
-        let key = if method == TypedArrayPrototypeMethod::ToStringTag {
+    for prototype_method in TypedArrayPrototypeMethod::ALL {
+        let key = if prototype_method == TypedArrayPrototypeMethod::ToStringTag {
             IntrinsicKeySpec::WellKnownSymbol(PredefinedAtom::SymbolToStringTag)
         } else {
-            IntrinsicKeySpec::InternedString(RealmNameId::TypedArrayPrototype(method))
+            IntrinsicKeySpec::InternedString(RealmNameId::TypedArrayPrototype(prototype_method))
         };
-        visit(accessor(
-            prototype,
-            key,
-            PropertyLayout::accessor(false, true),
-            Some(IntrinsicFunctionId(
-                NativeFunctionKind::TypedArrayPrototype(method),
-            )),
-            None,
-        ));
+        if prototype_method.is_accessor() {
+            visit(accessor(
+                prototype,
+                key,
+                PropertyLayout::accessor(false, true),
+                Some(IntrinsicFunctionId(
+                    NativeFunctionKind::TypedArrayPrototype(prototype_method),
+                )),
+                None,
+            ));
+        } else {
+            visit(method(
+                prototype,
+                key,
+                NativeFunctionKind::TypedArrayPrototype(prototype_method),
+            ));
+        }
     }
 
     for element in TypedArrayElementType::ALL {

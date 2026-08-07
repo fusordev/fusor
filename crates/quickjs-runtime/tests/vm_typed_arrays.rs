@@ -191,3 +191,38 @@ fn typed_array_constructors_initialize_iterable_and_array_like_inputs_in_their_d
         "3|1|2|3|2|4|5|1|-2"
     );
 }
+
+#[test]
+fn typed_array_set_copies_typed_and_array_like_sources_with_fresh_target_indices() {
+    assert_eq!(
+        rendered(
+            "var target=new Uint8Array([1,2,3,4]),source=new Int16Array([9,258]);\
+             target.set(source,1);\
+             var overlap=new Uint8Array([1,2,3,4]);overlap.set(new Uint8Array(overlap.buffer,0,3),1);\
+             var arrayLike={0:-2,1:260,length:2},second=new Uint8Array(3);second.set(arrayLike,1);\
+             var bigints=new BigInt64Array(2);bigints.set({0:1n,1:-2n,length:2});\
+             return [target[0],target[1],target[2],target[3],overlap[0],overlap[1],overlap[2],overlap[3],second[0],second[1],second[2],\
+               String(bigints[0]),String(bigints[1])].join('|');"
+        ),
+        "1|9|2|4|1|1|2|3|0|254|4|1|-2"
+    );
+    assert_eq!(
+        thrown("new Uint8Array(1).set(new Uint8Array(2));"),
+        ExceptionKind::RangeError
+    );
+    assert_eq!(
+        thrown("new Uint8Array(1).set([1],-1);"),
+        ExceptionKind::RangeError
+    );
+    assert_eq!(
+        thrown("new BigInt64Array(1).set(new Int8Array(1));"),
+        ExceptionKind::TypeError
+    );
+    assert_eq!(
+        thrown(
+            "var buffer=new ArrayBuffer(4,{maxByteLength:4}),target=new Uint8Array(buffer);\
+             var source={length:1,get 0(){buffer.resize(0);return 1}};target.set(source);"
+        ),
+        ExceptionKind::TypeError
+    );
+}

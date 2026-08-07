@@ -295,6 +295,7 @@ fn reflect_type_error(realm: RealmId, origin: &JsStackFrame, message: &str) -> N
 /// method Boolean rather than turning a rejected write into an exception.
 #[allow(
     clippy::too_many_arguments,
+    clippy::too_many_lines,
     reason = "ordinary set keeps the target, receiver, key, value, resume target, origin, and budget explicit"
 )]
 pub(super) fn reflect_set_property(
