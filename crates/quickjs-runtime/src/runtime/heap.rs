@@ -1465,21 +1465,42 @@ impl Runtime {
         })
     }
 
-    /// Replaces an existing internal private-name data slot. The operation
-    /// never falls back to a prototype, setter, or Proxy trap.
+    /// Replaces an existing writable internal private-name data slot. The
+    /// operation never falls back to a prototype, setter, or Proxy trap.
+    ///
+    /// `None` means the slot is absent, `Some(false)` means it is an
+    /// immutable private method, and `Some(true)` reports a completed write.
     pub(crate) fn replace_private_own_data_property(
         &mut self,
         reference: HeapReference,
         key: &PropertyKey,
         value: StoredValue,
-    ) -> Result<bool, crate::ExecutionError> {
+    ) -> Result<Option<bool>, crate::ExecutionError> {
+        let writable = match self.object_record(reference)?.own_property(key) {
+            Some(OwnProperty::Data { layout, .. }) => {
+                layout
+                    .writable()
+                    .ok_or(crate::EngineFault::RuntimeInvariant {
+                        message: "private data storage has no writable attribute",
+                    })?
+            }
+            Some(OwnProperty::Accessor { .. }) => {
+                return Err(crate::EngineFault::RuntimeInvariant {
+                    message: "private data storage became an accessor",
+                }
+                .into());
+            }
+            None => return Ok(None),
+        };
+        if !writable {
+            return Ok(Some(false));
+        }
         let replaced = self
             .object_record_mut(reference)?
             .replace_existing_data(key, value);
-        if replaced {
-            self.collection_pending = true;
-        }
-        Ok(replaced)
+        debug_assert!(replaced, "checked private data slot remains present");
+        self.collection_pending = true;
+        Ok(Some(true))
     }
 
     /// Creates the ordinary arguments object used by strict functions.

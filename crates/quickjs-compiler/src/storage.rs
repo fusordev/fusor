@@ -267,7 +267,7 @@ pub enum DeclarationKind {
     /// computed public instance-field key for its class definition.
     ClassFieldKey,
     /// The compiler-created immutable class-scope cell that holds one fresh
-    /// private-name identity for an instance private element.
+    /// private-name identity for a private class element.
     ClassPrivateName,
     /// The compiler-created immutable class-scope cell that holds a class
     /// constructor while its static field initializers execute.
@@ -611,7 +611,7 @@ pub(crate) struct OxcIdentityMap {
     /// cell when they need the fresh identity from a class evaluation.
     pub(crate) class_private_name_bindings: HashMap<NodeId, BindingId>,
     /// The immutable class-scope method cell for every supported private
-    /// instance method. Constructors capture it so every branded instance
+    /// method. Instance constructors capture it so every branded instance
     /// refers to the one closure created by class definition evaluation.
     pub(crate) class_private_method_bindings: HashMap<NodeId, BindingId>,
     /// The immutable class-scope receiver cell for each class whose static
@@ -1389,8 +1389,7 @@ impl<'unit, 'arena, 'scope> Planner<'unit, 'arena, 'scope> {
                     field.span
                 }
                 AstKind::MethodDefinition(method)
-                    if !method.r#static
-                        && method.kind == MethodDefinitionKind::Method
+                    if method.kind == MethodDefinitionKind::Method
                         && matches!(method.key, PropertyKey::PrivateIdentifier(_)) =>
                 {
                     method.span
@@ -1444,12 +1443,11 @@ impl<'unit, 'arena, 'scope> Planner<'unit, 'arena, 'scope> {
                     span: None,
                 });
             };
-            if method.r#static
-                || method.kind != MethodDefinitionKind::Method
+            if method.kind != MethodDefinitionKind::Method
                 || !matches!(method.key, PropertyKey::PrivateIdentifier(_))
             {
                 return Err(CompilerError::SemanticInvariant {
-                    invariant: "private-method binding belongs to a private instance method",
+                    invariant: "private-method binding belongs to a supported private method",
                     span: Some(method.span),
                 });
             }
@@ -2587,8 +2585,7 @@ impl<'unit, 'arena, 'scope> Planner<'unit, 'arena, 'scope> {
                         (field.node_id.get(), identifier)
                     }
                     ClassElement::MethodDefinition(method)
-                        if !method.r#static
-                            && method.kind == MethodDefinitionKind::Method
+                        if method.kind == MethodDefinitionKind::Method
                             && !method.value.generator
                             && !method.value.r#async
                             && matches!(method.key, PropertyKey::PrivateIdentifier(_)) =>
@@ -2625,7 +2622,7 @@ impl<'unit, 'arena, 'scope> Planner<'unit, 'arena, 'scope> {
     }
 
     /// Creates one immutable class-scope function cell for every supported
-    /// private instance method. It is intentionally distinct from the private
+    /// private method. It is intentionally distinct from the private
     /// name cell: construction installs the fresh name as the private-slot
     /// key and this shared closure as its value.
     fn add_class_private_method_bindings(
@@ -2642,8 +2639,7 @@ impl<'unit, 'arena, 'scope> Planner<'unit, 'arena, 'scope> {
                 let ClassElement::MethodDefinition(method) = element else {
                     continue;
                 };
-                if method.r#static
-                    || method.kind != MethodDefinitionKind::Method
+                if method.kind != MethodDefinitionKind::Method
                     || method.value.generator
                     || method.value.r#async
                 {
@@ -2701,11 +2697,10 @@ impl<'unit, 'arena, 'scope> Planner<'unit, 'arena, 'scope> {
                     (field.span, !field.r#static)
                 }
                 AstKind::MethodDefinition(method)
-                    if !method.r#static
-                        && method.kind == MethodDefinitionKind::Method
+                    if method.kind == MethodDefinitionKind::Method
                         && matches!(method.key, PropertyKey::PrivateIdentifier(_)) =>
                 {
-                    (method.span, true)
+                    (method.span, !method.r#static)
                 }
                 _ => {
                     return Err(CompilerError::SemanticInvariant {
@@ -2819,14 +2814,16 @@ impl<'unit, 'arena, 'scope> Planner<'unit, 'arena, 'scope> {
                     span: None,
                 });
             };
-            if method.r#static
-                || method.kind != MethodDefinitionKind::Method
+            if method.kind != MethodDefinitionKind::Method
                 || !matches!(method.key, PropertyKey::PrivateIdentifier(_))
             {
                 return Err(CompilerError::SemanticInvariant {
-                    invariant: "private-method capture belongs to a private instance method",
+                    invariant: "private-method capture belongs to a supported private method",
                     span: Some(method.span),
                 });
+            }
+            if method.r#static {
+                continue;
             }
             let AstKind::ClassBody(body) = nodes.parent_kind(method_node) else {
                 return Err(CompilerError::SemanticInvariant {

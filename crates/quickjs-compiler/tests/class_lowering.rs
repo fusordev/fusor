@@ -94,6 +94,21 @@ fn public_private_instance_fields_receive_fresh_class_scope_names() {
 
     assert!(opcodes.contains(&FinalOpcode::PrivateSymbol));
     assert!(opcodes.contains(&FinalOpcode::DefinePrivateField));
+    assert!(
+        tree.functions()
+            .iter()
+            .flat_map(|function| function.control_flow().instructions())
+            .any(|instruction| matches!(
+                (
+                    instruction.decoded().instruction().opcode(),
+                    instruction.decoded().instruction().operands(),
+                ),
+                (
+                    FinalOpcode::DefinePrivateField,
+                    quickjs_bytecode::Operands::U8(0)
+                )
+            ))
+    );
     assert!(opcodes.contains(&FinalOpcode::GetPrivateField));
     assert!(opcodes.contains(&FinalOpcode::PutPrivateField));
     assert!(opcodes.contains(&FinalOpcode::PrivateIn));
@@ -120,6 +135,21 @@ fn private_instance_methods_keep_distinct_names_shared_closures_and_home_objects
 
     assert!(opcodes.contains(&FinalOpcode::PrivateSymbol));
     assert!(opcodes.contains(&FinalOpcode::DefinePrivateField));
+    assert!(
+        tree.functions()
+            .iter()
+            .flat_map(|function| function.control_flow().instructions())
+            .any(|instruction| matches!(
+                (
+                    instruction.decoded().instruction().opcode(),
+                    instruction.decoded().instruction().operands(),
+                ),
+                (
+                    FinalOpcode::DefinePrivateField,
+                    quickjs_bytecode::Operands::U8(1)
+                )
+            ))
+    );
     assert!(opcodes.contains(&FinalOpcode::GetPrivateField));
     assert!(opcodes.contains(&FinalOpcode::SetHomeObject));
     assert!(opcodes.contains(&FinalOpcode::CallMethod));

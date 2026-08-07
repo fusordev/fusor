@@ -4597,15 +4597,17 @@ fn verify_method_definitions(
                     definition_index,
                 )
             });
-            let private_method = index.checked_add(4).and_then(|set_name_index| {
-                private_method_name_pair(
-                    parent,
-                    metadata,
-                    instructions,
-                    &predecessor_counts,
-                    internal_stack,
-                    set_name_index,
-                )
+            let private_method = [4_usize, 10].into_iter().find_map(|offset| {
+                index.checked_add(offset).and_then(|set_name_index| {
+                    private_method_name_pair(
+                        parent,
+                        metadata,
+                        instructions,
+                        &predecessor_counts,
+                        internal_stack,
+                        set_name_index,
+                    )
+                })
             });
             if pair.map(|(defined, _)| defined) != Some(*child) && private_method != Some(*child) {
                 return Err(BytecodeVerificationError::function(
@@ -4797,7 +4799,7 @@ fn verify_inferred_function_names(
 /// definition evaluation. The method name is set only on a fresh anonymous
 /// method template, after the surrounding class prototype has become its home
 /// object, and the function is immediately retained in a class-local cell.
-fn private_method_name_pair(
+fn private_instance_method_name_pair(
     parent: &VerifiedCompilerFunction,
     metadata: &[VerifiedFunctionMetadata],
     instructions: &[VerifiedInstruction],
@@ -4876,6 +4878,120 @@ fn private_method_name_pair(
     .then_some(*child)
 }
 
+/// Certifies one private static method closure created during class definition
+/// evaluation. Its home object is the fresh constructor, and the closure is
+/// retained in its class-local cell before that same constructor receives the
+/// private method element.
+fn private_static_method_name_pair(
+    parent: &VerifiedCompilerFunction,
+    metadata: &[VerifiedFunctionMetadata],
+    instructions: &[VerifiedInstruction],
+    predecessor_counts: &[u32],
+    internal_stack: &InternalStackCertificate,
+    set_name_index: usize,
+) -> Option<FunctionTemplateId> {
+    let set_name = instructions.get(set_name_index)?.decoded().instruction();
+    if !matches!(
+        (set_name.opcode(), set_name.operands()),
+        (FinalOpcode::SetName, Operands::Atom(_))
+    ) || predecessor_counts.get(set_name_index) != Some(&1)
+    {
+        return None;
+    }
+    let closure_index = set_name_index.checked_sub(10)?;
+    if !matches!(
+        instructions
+            .get(closure_index)?
+            .decoded()
+            .instruction()
+            .opcode(),
+        FinalOpcode::FClosure | FinalOpcode::FClosure8
+    ) {
+        return None;
+    }
+    let expected = [
+        (closure_index.checked_add(1)?, FinalOpcode::Swap),
+        (closure_index.checked_add(2)?, FinalOpcode::Perm3),
+        (closure_index.checked_add(3)?, FinalOpcode::Swap),
+        (closure_index.checked_add(4)?, FinalOpcode::Perm3),
+        (closure_index.checked_add(5)?, FinalOpcode::SetHomeObject),
+        (closure_index.checked_add(6)?, FinalOpcode::Perm3),
+        (closure_index.checked_add(7)?, FinalOpcode::Swap),
+        (closure_index.checked_add(8)?, FinalOpcode::Perm3),
+        (closure_index.checked_add(9)?, FinalOpcode::Swap),
+    ];
+    for (index, opcode) in expected {
+        if instructions.get(index)?.decoded().instruction().opcode() != opcode {
+            return None;
+        }
+    }
+    let store_index = set_name_index.checked_add(1)?;
+    if !matches!(
+        instructions
+            .get(store_index)?
+            .decoded()
+            .instruction()
+            .opcode(),
+        FinalOpcode::PutLoc
+            | FinalOpcode::PutLoc8
+            | FinalOpcode::PutLoc0
+            | FinalOpcode::PutLoc1
+            | FinalOpcode::PutLoc2
+            | FinalOpcode::PutLoc3
+    ) {
+        return None;
+    }
+    for from in closure_index..store_index {
+        if !internal_stack.has_effective_successor(
+            instructions,
+            from,
+            usize_to_u32(from.checked_add(1)?),
+        ) {
+            return None;
+        }
+    }
+    let closure = instructions.get(closure_index)?.decoded().instruction();
+    let constant = closure_constant(closure.opcode(), closure.operands())?;
+    let crate::CompilerConstant::Function(child) = parent.constants().get(constant as usize)?
+    else {
+        return None;
+    };
+    let child_metadata = usize::try_from(child.get())
+        .ok()
+        .and_then(|index| metadata.get(index))?;
+    (child_metadata.executable_kind == CompilerExecutableKind::OrdinaryMethod
+        && child_metadata.function_name.is_none())
+    .then_some(*child)
+}
+
+fn private_method_name_pair(
+    parent: &VerifiedCompilerFunction,
+    metadata: &[VerifiedFunctionMetadata],
+    instructions: &[VerifiedInstruction],
+    predecessor_counts: &[u32],
+    internal_stack: &InternalStackCertificate,
+    set_name_index: usize,
+) -> Option<FunctionTemplateId> {
+    private_instance_method_name_pair(
+        parent,
+        metadata,
+        instructions,
+        predecessor_counts,
+        internal_stack,
+        set_name_index,
+    )
+    .or_else(|| {
+        private_static_method_name_pair(
+            parent,
+            metadata,
+            instructions,
+            predecessor_counts,
+            internal_stack,
+            set_name_index,
+        )
+    })
+}
+
 fn private_method_home_object_pair(
     parent: &VerifiedCompilerFunction,
     metadata: &[VerifiedFunctionMetadata],
@@ -4884,10 +5000,10 @@ fn private_method_home_object_pair(
     internal_stack: &InternalStackCertificate,
     home_object_index: usize,
 ) -> bool {
-    home_object_index
+    let instance = home_object_index
         .checked_add(2)
         .and_then(|set_name_index| {
-            private_method_name_pair(
+            private_instance_method_name_pair(
                 parent,
                 metadata,
                 instructions,
@@ -4896,7 +5012,21 @@ fn private_method_home_object_pair(
                 set_name_index,
             )
         })
-        .is_some()
+        .is_some();
+    let r#static = home_object_index
+        .checked_add(5)
+        .and_then(|set_name_index| {
+            private_static_method_name_pair(
+                parent,
+                metadata,
+                instructions,
+                predecessor_counts,
+                internal_stack,
+                set_name_index,
+            )
+        })
+        .is_some();
+    instance || r#static
 }
 
 fn inferred_function_name_pair(
@@ -5505,7 +5635,10 @@ fn derived_default_constructor_pair(
             [push_this, private_name, .., define, drop]
                 if push_this.decoded().instruction().opcode() == FinalOpcode::PushThis
                     && private_name.decoded().instruction().opcode() == FinalOpcode::GetVarRefCheck
-                    && define.decoded().instruction().opcode() == FinalOpcode::DefinePrivateField
+                    && matches!(
+                        (define.decoded().instruction().opcode(), define.decoded().instruction().operands()),
+                        (FinalOpcode::DefinePrivateField, Operands::U8(0 | 1))
+                    )
                     && drop.decoded().instruction().opcode() == FinalOpcode::Drop
         );
         if !static_field_region && !computed_field_region && !private_field_region {
@@ -6122,8 +6255,8 @@ fn transfer_object_definition_provenance(
                 state.push(key);
             }
         }
-        // A computed method definition and a private data-field definition
-        // each preserve their base below key/name and value. The latter has
+        // A computed method definition and private element definition each
+        // preserve their base below key/name and value. Private elements have
         // already been restricted to a certified class target above.
         FinalOpcode::DefinePrivateField | FinalOpcode::DefineMethodComputed => {
             let base = retained_object_definition_provenance(state[state.len() - 3]);

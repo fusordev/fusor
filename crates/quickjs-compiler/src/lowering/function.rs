@@ -171,8 +171,10 @@ impl CompilationContext<'_, '_, '_> {
                 ClassElement::MethodDefinition(method)
                     if matches!(method.key, super::OxcPropertyKey::PrivateIdentifier(_)) =>
                 {
-                    if method.r#static
-                        || method.kind != MethodDefinitionKind::Method
+                    if method.r#static {
+                        continue;
+                    }
+                    if method.kind != MethodDefinitionKind::Method
                         || method.value.generator
                         || method.value.r#async
                         || !method.decorators.is_empty()

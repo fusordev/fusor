@@ -132,6 +132,17 @@ fn static_private_fields_are_class_owned_and_captured_by_static_methods() {
 }
 
 #[test]
+fn static_private_methods_are_class_owned_immutable_and_use_the_static_home_object() {
+    run_with(
+        "function run(){class Base{static value(){return 'base';}}class First extends Base{static #method(){return super.value()+':private';}static call(){return this.#method();}static get(){return this.#method;}static has(candidate){return #method in candidate;}static assign(){this.#method=0;}}class Second{}let rejected=false;let immutable=false;try{First.call.call(Second);}catch(error){rejected=error.name==='TypeError';}try{First.assign();}catch(error){immutable=error.name==='TypeError';}return First.call()==='base:private'&&First.get().name==='#method'&&First.has(First)&&!First.has(Second)&&rejected&&immutable;}",
+        |result| {
+            let value = result.expect("static private method execution");
+            assert_eq!(value.as_boolean().expect("live Boolean"), Some(true));
+        },
+    );
+}
+
+#[test]
 fn private_instance_methods_share_a_closure_and_preserve_the_super_home_object() {
     run_with(
         "function run(){class Base{value(){return 40;}}class Box extends Base{#method(){return super.value()+2;}call(){return this.#method();}same(other){return this.#method===other.#method;}name(){return this.#method.name;}static has(candidate){return #method in candidate;}}let first=new Box;let second=new Box;let rejected=false;try{Box.prototype.call.call({});}catch(error){rejected=error.name==='TypeError';}return first.call()===42&&first.same(second)&&first.name()==='#method'&&Box.has(first)&&!Box.has({})&&rejected;}",

@@ -2178,13 +2178,24 @@ pub(super) fn execute_one(
                     "private field access requires an object receiver",
                 )?));
             };
-            if !runtime.replace_private_own_data_property(reference, &key, value)? {
-                return Ok(Step::Abrupt(private_field_exception(
-                    runtime,
-                    frame,
-                    source_pc,
-                    "private field is not present on this object",
-                )?));
+            match runtime.replace_private_own_data_property(reference, &key, value)? {
+                Some(true) => {}
+                Some(false) => {
+                    return Ok(Step::Abrupt(private_field_exception(
+                        runtime,
+                        frame,
+                        source_pc,
+                        "private method is not writable",
+                    )?));
+                }
+                None => {
+                    return Ok(Step::Abrupt(private_field_exception(
+                        runtime,
+                        frame,
+                        source_pc,
+                        "private field is not present on this object",
+                    )?));
+                }
             }
         }
         FinalOpcode::DefineField => {
@@ -2204,6 +2215,16 @@ pub(super) fn execute_one(
             }
         }
         FinalOpcode::DefinePrivateField => {
+            let writable = match operands {
+                Operands::U8(0) => true,
+                Operands::U8(1) => false,
+                _ => {
+                    return Err(EngineFault::RuntimeInvariant {
+                        message: "verified private element definition kind is invalid",
+                    }
+                    .into());
+                }
+            };
             let value = pop(frame)?;
             let private_name = pop(frame)?;
             let base = peek(frame)?.duplicate();
@@ -2237,7 +2258,7 @@ pub(super) fn execute_one(
             runtime.append_data_property(
                 reference,
                 key,
-                PropertyLayout::data(true, false, false),
+                PropertyLayout::data(writable, false, false),
                 value,
             )?;
         }

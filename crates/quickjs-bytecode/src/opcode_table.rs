@@ -92,7 +92,7 @@ define_opcode_tables! {
         PutField => ("put_field", 5, 2, 0, Atom),
         GetPrivateField => ("get_private_field", 1, 2, 1, None),
         PutPrivateField => ("put_private_field", 1, 3, 0, None),
-        DefinePrivateField => ("define_private_field", 1, 3, 1, None),
+        DefinePrivateField => ("define_private_field", 2, 3, 1, U8),
         GetArrayEl => ("get_array_el", 1, 2, 1, None),
         GetArrayEl2 => ("get_array_el2", 1, 2, 2, None),
         GetArrayEl3 => ("get_array_el3", 1, 2, 3, None),
