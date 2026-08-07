@@ -675,6 +675,45 @@ fn plain_date_with_calendar_accepts_identifiers_and_temporal_fast_paths_only() {
 }
 
 #[test]
+fn plain_date_to_plain_date_time_defaults_and_prepares_time_fields_in_order() {
+    assert_eq!(
+        rendered(
+            "var log=[];
+             function number(name,value){return {valueOf:function(){log.push(name);return value}}}
+             var fields={
+               get hour(){log.push('hour');return number('hour number',25)},
+               get microsecond(){log.push('microsecond');return number('microsecond number',8)},
+               get millisecond(){log.push('millisecond');return number('millisecond number',7)},
+               get minute(){log.push('minute');return number('minute number',70)},
+               get nanosecond(){log.push('nanosecond');return number('nanosecond number',9)},
+               get second(){log.push('second');return number('second number',23)}
+             };
+             var date=new Temporal.PlainDate(2020,2,29);
+             var defaulted=date.toPlainDateTime();
+             var string=date.toPlainDateTime('11:30:23');
+             var fieldsResult=date.toPlainDateTime(fields);
+             var fromDateTime=date.toPlainDateTime(new Temporal.PlainDateTime(2001,1,2,3,4,5,6,7,8));
+             return [Temporal.PlainDate.prototype.toPlainDateTime.length,
+               defaulted.toString(),string.toString(),fieldsResult.toString(),fromDateTime.toString(),
+               log.join(',')].join('|');"
+        ),
+        "0|2020-02-29T00:00:00|2020-02-29T11:30:23|2020-02-29T23:59:23.007008009|2020-02-29T03:04:05.006007008|hour,hour number,microsecond,microsecond number,millisecond,millisecond number,minute,minute number,nanosecond,nanosecond number,second,second number"
+    );
+    assert_eq!(
+        thrown("return new Temporal.PlainDate(2020,1,1).toPlainDateTime({});"),
+        ExceptionKind::TypeError
+    );
+    assert_eq!(
+        thrown("return new Temporal.PlainDate(2020,1,1).toPlainDateTime(1);"),
+        ExceptionKind::TypeError
+    );
+    assert_eq!(
+        thrown("return new Temporal.PlainDate(2020,1,1).toPlainDateTime('');"),
+        ExceptionKind::RangeError
+    );
+}
+
+#[test]
 fn plain_date_with_prepares_partial_fields_before_reading_overflow() {
     assert_eq!(
         rendered(

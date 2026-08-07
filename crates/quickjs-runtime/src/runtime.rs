@@ -2301,6 +2301,7 @@ pub(crate) enum TemporalPlainDatePrototypeMethod {
     Until,
     Since,
     Equals,
+    ToPlainDateTime,
     WithCalendar,
     ToString,
     ToJson,
@@ -2605,7 +2606,7 @@ impl TemporalPlainDateTimeStaticMethod {
 }
 
 impl TemporalPlainDatePrototypeMethod {
-    pub(crate) const ALL: [Self; 27] = [
+    pub(crate) const ALL: [Self; 28] = [
         Self::CalendarId,
         Self::Year,
         Self::Month,
@@ -2628,6 +2629,7 @@ impl TemporalPlainDatePrototypeMethod {
         Self::Until,
         Self::Since,
         Self::Equals,
+        Self::ToPlainDateTime,
         Self::WithCalendar,
         Self::ToString,
         Self::ToJson,
@@ -2659,6 +2661,7 @@ impl TemporalPlainDatePrototypeMethod {
             Self::Until => "until",
             Self::Since => "since",
             Self::Equals => "equals",
+            Self::ToPlainDateTime => "toPlainDateTime",
             Self::WithCalendar => "withCalendar",
             Self::ToString => "toString",
             Self::ToJson => "toJSON",
@@ -2691,6 +2694,7 @@ impl TemporalPlainDatePrototypeMethod {
             Self::Until => "until",
             Self::Since => "since",
             Self::Equals => "equals",
+            Self::ToPlainDateTime => "toPlainDateTime",
             Self::WithCalendar => "withCalendar",
             Self::ToString => "toString",
             Self::ToJson => "toJSON",

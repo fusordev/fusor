@@ -559,8 +559,8 @@ mod tests {
         let schema = RealmIntrinsicSchema::try_new().expect("Realm schema");
         let plan = RealmAtomPlan::try_new(&schema).expect("atom plan");
 
-        assert_eq!(plan.len(), 327);
-        assert_eq!(plan.description_code_units(), 2_767);
+        assert_eq!(plan.len(), 328);
+        assert_eq!(plan.description_code_units(), 2_782);
     }
 
     #[test]
