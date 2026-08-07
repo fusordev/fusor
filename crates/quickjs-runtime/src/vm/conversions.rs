@@ -1885,6 +1885,27 @@ fn finish_operator_primitive_target(
         OperatorPrimitiveTarget::TemporalDurationTotalUnit(state) => {
             finish_temporal_duration_total_unit(*state, value)
         }
+        OperatorPrimitiveTarget::TemporalDurationToStringFractionalSecondDigits(state) => {
+            finish_temporal_duration_to_string_fractional_second_digits(
+                runtime,
+                *state,
+                value,
+                return_to,
+                execution_budget,
+            )
+        }
+        OperatorPrimitiveTarget::TemporalDurationToStringRoundingMode(state) => {
+            finish_temporal_duration_to_string_rounding_mode(
+                runtime,
+                *state,
+                value,
+                return_to,
+                execution_budget,
+            )
+        }
+        OperatorPrimitiveTarget::TemporalDurationToStringSmallestUnit(state) => {
+            finish_temporal_duration_to_string_smallest_unit(&state, value)
+        }
         OperatorPrimitiveTarget::TemporalInstantRoundRoundingIncrement(state) => {
             finish_temporal_instant_round_rounding_increment(
                 runtime,

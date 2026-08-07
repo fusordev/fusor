@@ -136,6 +136,77 @@ fn duration_constructor_and_accessors_preserve_all_ten_fields() {
 }
 
 #[test]
+fn duration_to_string_formats_fractional_precision_and_rounding() {
+    assert_eq!(
+        rendered(
+            "var time=Temporal.Duration.from('PT1H29M31.987654321S');
+             var calendar=Temporal.Duration.from('P1Y2M3W4DT5H6M7.123456789S');
+             return [time.toString(),time.toString({}),
+               time.toString({fractionalSecondDigits:0}),
+               time.toString({fractionalSecondDigits:3}),
+               time.toString({fractionalSecondDigits:'auto'}),
+               time.toString({roundingMode:'ceil',smallestUnit:'second'}),
+               time.toString({fractionalSecondDigits:3,smallestUnit:'second'}),
+               calendar.toString({fractionalSecondDigits:3}),
+               calendar.toString({roundingMode:'ceil',smallestUnit:'second'})].join('|');"
+        ),
+        "PT1H29M31.987654321S|PT1H29M31.987654321S|PT1H29M31S|PT1H29M31.987S|PT1H29M31.987654321S|PT1H29M32S|PT1H29M31S|P1Y2M3W4DT5H6M7.123S|P1Y2M3W4DT5H6M8S"
+    );
+}
+
+#[test]
+fn duration_to_string_observes_options_and_coercions_in_specified_order() {
+    assert_eq!(
+        rendered(
+            "var log=[],options={};
+             Object.defineProperties(options,{
+               fractionalSecondDigits:{get:function(){log.push('digits');return {toString:function(){log.push('digits string');return 'auto';}}}},
+               roundingMode:{get:function(){log.push('mode');return {toString:function(){log.push('mode string');return 'trunc';}}}},
+               smallestUnit:{get:function(){log.push('unit');return {toString:function(){log.push('unit string');return 'millisecond';}}}}
+             });
+             return Temporal.Duration.from('PT1.234S').toString(options)+'|'+log.join(',');"
+        ),
+        "PT1.234S|digits,digits string,mode,mode string,unit,unit string"
+    );
+}
+
+#[test]
+fn duration_to_string_rejects_invalid_options_and_keeps_json_locale_defaults() {
+    assert_eq!(
+        thrown("return new Temporal.Duration().toString(1);"),
+        ExceptionKind::TypeError
+    );
+    assert_eq!(
+        thrown("return new Temporal.Duration().toString({fractionalSecondDigits:'invalid'});"),
+        ExceptionKind::RangeError
+    );
+    assert_eq!(
+        thrown("return new Temporal.Duration().toString({smallestUnit:'minute'});"),
+        ExceptionKind::RangeError
+    );
+    assert_eq!(
+        rendered(
+            "var log=[],options={};
+             Object.defineProperties(options,{
+               fractionalSecondDigits:{get:function(){log.push('digits');return undefined;}},
+               roundingMode:{get:function(){log.push('mode');return 'trunc';}},
+               smallestUnit:{get:function(){log.push('unit');return 'hour';}}
+             });
+             try { new Temporal.Duration().toString(options); }
+             catch (error) { return error.name+'|'+log.join(','); }"
+        ),
+        "RangeError|digits,mode,unit"
+    );
+    assert_eq!(
+        rendered(
+            "var duration=Temporal.Duration.from('PT1.23456789S');
+             return [duration.toJSON(),duration.toLocaleString('fr',{smallestUnit:'second'})].join('|');"
+        ),
+        "PT1.23456789S|PT1.23456789S"
+    );
+}
+
+#[test]
 fn duration_constructor_coerces_left_to_right_and_skips_undefined() {
     assert_eq!(
         rendered(

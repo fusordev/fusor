@@ -751,6 +751,7 @@ enum NativeContinuation {
     TemporalDurationCompareOptions(TemporalDurationCompareOptionsContinuation),
     TemporalDurationRoundOptions(Box<TemporalDurationRoundContinuation>),
     TemporalDurationTotalOptions(Box<TemporalDurationTotalContinuation>),
+    TemporalDurationToStringOptions(Box<TemporalDurationToStringContinuation>),
     TemporalInstantRoundOptions(Box<TemporalInstantRoundContinuation>),
     TemporalInstantDifferenceOptions(Box<TemporalInstantDifferenceContinuation>),
     TemporalInstantToStringOptions(Box<TemporalInstantToStringContinuation>),
@@ -837,6 +838,10 @@ enum NativeContinuation {
 }
 
 impl NativeContinuation {
+    #[allow(
+        clippy::too_many_lines,
+        reason = "each continuation variant has a single explicit accounting contract"
+    )]
     fn retained_values(&self) -> u64 {
         match self {
             Self::FunctionSource(state) => usize_to_u64(state.arguments.len())
@@ -855,6 +860,9 @@ impl NativeContinuation {
             }
             Self::TemporalDurationTotalOptions(_) => {
                 TemporalDurationTotalContinuation::retained_values()
+            }
+            Self::TemporalDurationToStringOptions(_) => {
+                TemporalDurationToStringContinuation::retained_values()
             }
             Self::TemporalInstantRoundOptions(_) => {
                 TemporalInstantRoundContinuation::retained_values()
@@ -1972,6 +1980,9 @@ enum OperatorPrimitiveTarget {
     TemporalDurationRoundRoundingMode(Box<TemporalDurationRoundContinuation>),
     TemporalDurationRoundSmallestUnit(Box<TemporalDurationRoundContinuation>),
     TemporalDurationTotalUnit(Box<TemporalDurationTotalContinuation>),
+    TemporalDurationToStringFractionalSecondDigits(Box<TemporalDurationToStringContinuation>),
+    TemporalDurationToStringRoundingMode(Box<TemporalDurationToStringContinuation>),
+    TemporalDurationToStringSmallestUnit(Box<TemporalDurationToStringContinuation>),
     TemporalInstantRoundRoundingIncrement(Box<TemporalInstantRoundContinuation>),
     TemporalInstantRoundRoundingMode(Box<TemporalInstantRoundContinuation>),
     TemporalInstantRoundSmallestUnit(Box<TemporalInstantRoundContinuation>),
@@ -2158,6 +2169,11 @@ impl OperatorPrimitiveTarget {
             }
             Self::TemporalDurationTotalUnit(_) => {
                 TemporalDurationTotalContinuation::retained_values()
+            }
+            Self::TemporalDurationToStringFractionalSecondDigits(_state)
+            | Self::TemporalDurationToStringRoundingMode(_state)
+            | Self::TemporalDurationToStringSmallestUnit(_state) => {
+                TemporalDurationToStringContinuation::retained_values()
             }
             Self::TemporalInstantRoundRoundingIncrement(_state)
             | Self::TemporalInstantRoundRoundingMode(_state)
@@ -2422,6 +2438,11 @@ fn trace_operator_primitive_target_roots(
             state.trace_roots(mark);
         }
         OperatorPrimitiveTarget::TemporalDurationTotalUnit(state) => state.trace_roots(mark),
+        OperatorPrimitiveTarget::TemporalDurationToStringFractionalSecondDigits(state)
+        | OperatorPrimitiveTarget::TemporalDurationToStringRoundingMode(state)
+        | OperatorPrimitiveTarget::TemporalDurationToStringSmallestUnit(state) => {
+            state.trace_roots(mark);
+        }
         OperatorPrimitiveTarget::TemporalInstantRoundRoundingIncrement(state)
         | OperatorPrimitiveTarget::TemporalInstantRoundRoundingMode(state)
         | OperatorPrimitiveTarget::TemporalInstantRoundSmallestUnit(state) => {
@@ -2616,6 +2637,7 @@ fn trace_native_continuation_roots(
         NativeContinuation::TemporalDurationCompareOptions(state) => state.trace_roots(mark),
         NativeContinuation::TemporalDurationRoundOptions(state) => state.trace_roots(mark),
         NativeContinuation::TemporalDurationTotalOptions(state) => state.trace_roots(mark),
+        NativeContinuation::TemporalDurationToStringOptions(state) => state.trace_roots(mark),
         NativeContinuation::TemporalInstantRoundOptions(state) => state.trace_roots(mark),
         NativeContinuation::TemporalInstantDifferenceOptions(state) => state.trace_roots(mark),
         NativeContinuation::TemporalInstantToStringOptions(state) => state.trace_roots(mark),
