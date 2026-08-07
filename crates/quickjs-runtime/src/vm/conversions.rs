@@ -539,6 +539,25 @@ pub(super) fn finish_intrinsic_get(
             element,
             length,
         } => finish_typed_array_constructor_wrapper(runtime, new_target, element, length, &value),
+        IntrinsicGetContinuation::TypedArrayConstructorBuffer {
+            new_target,
+            element,
+            buffer,
+            byte_offset,
+            length,
+            realm,
+            origin,
+        } => finish_typed_array_constructor_buffer_wrapper(
+            runtime,
+            new_target,
+            element,
+            buffer,
+            byte_offset,
+            length,
+            realm,
+            &origin,
+            &value,
+        ),
         IntrinsicGetContinuation::TemporalInstantConstructor {
             new_target,
             epoch_nanoseconds,
@@ -1852,6 +1871,24 @@ fn finish_operator_primitive_target(
         }
         OperatorPrimitiveTarget::TypedArrayConstructorLength(state) => {
             finish_typed_array_constructor_length(
+                runtime,
+                *state,
+                value,
+                return_to,
+                execution_budget,
+            )
+        }
+        OperatorPrimitiveTarget::TypedArrayConstructorBufferOffset(state) => {
+            finish_typed_array_constructor_buffer_offset(
+                runtime,
+                *state,
+                value,
+                return_to,
+                execution_budget,
+            )
+        }
+        OperatorPrimitiveTarget::TypedArrayConstructorBufferLength(state) => {
+            finish_typed_array_constructor_buffer_length(
                 runtime,
                 *state,
                 value,

@@ -46,6 +46,29 @@ pub(super) struct TypedArrayConstructorLengthState {
     origin: JsStackFrame,
 }
 
+/// `%TypedArray%` construction from an `ArrayBuffer`, awaiting `ToIndex` for
+/// the optional byte offset. The length operand remains rooted because its
+/// conversion must happen only after the offset has been validated.
+pub(super) struct TypedArrayConstructorBufferOffsetState {
+    new_target: FunctionId,
+    buffer: ObjectId,
+    byte_length: StoredValue,
+    element: TypedArrayElementType,
+    realm: RealmId,
+    origin: JsStackFrame,
+}
+
+/// `%TypedArray%` construction from an `ArrayBuffer`, awaiting `ToIndex` for
+/// the explicit element length.
+pub(super) struct TypedArrayConstructorBufferLengthState {
+    new_target: FunctionId,
+    buffer: ObjectId,
+    byte_offset: usize,
+    element: TypedArrayElementType,
+    realm: RealmId,
+    origin: JsStackFrame,
+}
+
 impl TypedArrayConstructorLengthState {
     pub(super) const fn retained_values() -> u64 {
         1
@@ -55,6 +78,33 @@ impl TypedArrayConstructorLengthState {
         mark(CollectionRoot::Heap(HeapReference::Function(
             self.new_target,
         )));
+    }
+}
+
+impl TypedArrayConstructorBufferOffsetState {
+    pub(super) const fn retained_values() -> u64 {
+        3
+    }
+
+    pub(super) fn trace_roots(&self, mark: &mut dyn FnMut(CollectionRoot)) {
+        mark(CollectionRoot::Heap(HeapReference::Function(
+            self.new_target,
+        )));
+        mark(CollectionRoot::Heap(HeapReference::Object(self.buffer)));
+        trace_stored_value_root(&self.byte_length, mark);
+    }
+}
+
+impl TypedArrayConstructorBufferLengthState {
+    pub(super) const fn retained_values() -> u64 {
+        2
+    }
+
+    pub(super) fn trace_roots(&self, mark: &mut dyn FnMut(CollectionRoot)) {
+        mark(CollectionRoot::Heap(HeapReference::Function(
+            self.new_target,
+        )));
+        mark(CollectionRoot::Heap(HeapReference::Object(self.buffer)));
     }
 }
 
@@ -129,17 +179,42 @@ pub(super) fn begin_typed_array_constructor(
         return typed_array_type_error(realm, &origin, "TypedArray constructor requires 'new'");
     };
     let mut arguments = inputs.arguments;
-    let length = arguments.take_first_or_undefined();
-    if matches!(length, StoredValue::Object(_) | StoredValue::Function(_)) {
+    let source = arguments.take_first_or_undefined();
+    let byte_offset = arguments.take_first_or_undefined();
+    let byte_length = arguments.take_first_or_undefined();
+    if let StoredValue::Object(buffer) = source
+        && runtime.array_buffer_state(buffer)?.is_some()
+    {
+        return begin_operator_primitive_conversion(
+            runtime,
+            byte_offset,
+            OperatorPrimitiveHint::Number,
+            OperatorPrimitiveTarget::TypedArrayConstructorBufferOffset(Box::new(
+                TypedArrayConstructorBufferOffsetState {
+                    new_target,
+                    buffer,
+                    byte_length,
+                    element,
+                    realm,
+                    origin: origin.clone(),
+                },
+            )),
+            realm,
+            return_to,
+            origin,
+            execution_budget,
+        );
+    }
+    if matches!(source, StoredValue::Object(_) | StoredValue::Function(_)) {
         return typed_array_type_error(
             realm,
             &origin,
-            "TypedArray object, iterable, and ArrayBuffer initializers are not implemented",
+            "TypedArray object, iterable, and array-like initializers are not implemented",
         );
     }
     begin_operator_primitive_conversion(
         runtime,
-        length,
+        source,
         OperatorPrimitiveHint::Number,
         OperatorPrimitiveTarget::TypedArrayConstructorLength(Box::new(
             TypedArrayConstructorLengthState {
@@ -152,6 +227,122 @@ pub(super) fn begin_typed_array_constructor(
         realm,
         return_to,
         origin,
+        execution_budget,
+    )
+}
+
+pub(super) fn finish_typed_array_constructor_buffer_offset(
+    runtime: &mut Runtime,
+    state: TypedArrayConstructorBufferOffsetState,
+    value: StoredValue,
+    return_to: Option<CallReturn>,
+    execution_budget: &mut ExecutionBudget,
+) -> Result<NativeDispatch, NativeFailure> {
+    let byte_offset = typed_array_to_index(value, state.realm, &state.origin)?;
+    let (buffer_byte_length, resizable) =
+        typed_array_buffer_length(runtime, state.buffer, state.realm, &state.origin)?;
+    let element_width = state.element.byte_width();
+    if byte_offset > buffer_byte_length {
+        return typed_array_range_error(
+            state.realm,
+            &state.origin,
+            "TypedArray byte offset is outside buffer",
+        );
+    }
+    if byte_offset % element_width != 0 {
+        return typed_array_range_error(
+            state.realm,
+            &state.origin,
+            "TypedArray byte offset is not aligned to its element size",
+        );
+    }
+    if matches!(state.byte_length, StoredValue::Undefined) {
+        let remainder = buffer_byte_length.saturating_sub(byte_offset);
+        if remainder % element_width != 0 {
+            return typed_array_range_error(
+                state.realm,
+                &state.origin,
+                "TypedArray byte length is not aligned to its element size",
+            );
+        }
+        let length = if resizable {
+            TypedArrayLength::Auto
+        } else {
+            TypedArrayLength::Fixed(remainder / element_width)
+        };
+        return begin_typed_array_constructor_buffer_prototype_get(
+            runtime,
+            state.new_target,
+            state.element,
+            state.buffer,
+            byte_offset,
+            length,
+            state.realm,
+            state.origin,
+            return_to,
+            execution_budget,
+        );
+    }
+    let byte_length = state.byte_length.duplicate();
+    begin_operator_primitive_conversion(
+        runtime,
+        byte_length,
+        OperatorPrimitiveHint::Number,
+        OperatorPrimitiveTarget::TypedArrayConstructorBufferLength(Box::new(
+            TypedArrayConstructorBufferLengthState {
+                new_target: state.new_target,
+                buffer: state.buffer,
+                byte_offset,
+                element: state.element,
+                realm: state.realm,
+                origin: state.origin.clone(),
+            },
+        )),
+        state.realm,
+        return_to,
+        state.origin,
+        execution_budget,
+    )
+}
+
+pub(super) fn finish_typed_array_constructor_buffer_length(
+    runtime: &mut Runtime,
+    state: TypedArrayConstructorBufferLengthState,
+    value: StoredValue,
+    return_to: Option<CallReturn>,
+    execution_budget: &mut ExecutionBudget,
+) -> Result<NativeDispatch, NativeFailure> {
+    let length = typed_array_to_index(value, state.realm, &state.origin)?;
+    let Some(byte_length) = length.checked_mul(state.element.byte_width()) else {
+        return typed_array_range_error(
+            state.realm,
+            &state.origin,
+            "TypedArray length exceeds implementation range",
+        );
+    };
+    let (buffer_byte_length, _) =
+        typed_array_buffer_length(runtime, state.buffer, state.realm, &state.origin)?;
+    if state
+        .byte_offset
+        .checked_add(byte_length)
+        .is_none_or(|end| end > buffer_byte_length)
+    {
+        return typed_array_range_error(
+            state.realm,
+            &state.origin,
+            "TypedArray length is outside buffer",
+        );
+    }
+    begin_typed_array_constructor_buffer_prototype_get(
+        runtime,
+        state.new_target,
+        state.element,
+        state.buffer,
+        state.byte_offset,
+        TypedArrayLength::Fixed(length),
+        state.realm,
+        state.origin,
+        return_to,
         execution_budget,
     )
 }
@@ -185,6 +376,44 @@ pub(super) fn finish_typed_array_constructor_length(
         },
         return_to,
         Some(state.origin),
+        execution_budget,
+    )
+}
+
+#[allow(
+    clippy::too_many_arguments,
+    reason = "the ArrayBuffer view constructor retains its validated slots across an observable prototype lookup"
+)]
+fn begin_typed_array_constructor_buffer_prototype_get(
+    runtime: &mut Runtime,
+    new_target: FunctionId,
+    element: TypedArrayElementType,
+    buffer: ObjectId,
+    byte_offset: usize,
+    length: TypedArrayLength,
+    realm: RealmId,
+    origin: JsStackFrame,
+    return_to: Option<CallReturn>,
+    execution_budget: &mut ExecutionBudget,
+) -> Result<NativeDispatch, NativeFailure> {
+    let prototype_key = runtime.predefined_property_key(PredefinedAtom::Prototype);
+    begin_intrinsic_get(
+        runtime,
+        realm,
+        HeapReference::Function(new_target),
+        StoredValue::Function(new_target),
+        &prototype_key,
+        IntrinsicGetContinuation::TypedArrayConstructorBuffer {
+            new_target,
+            element,
+            buffer,
+            byte_offset,
+            length,
+            realm,
+            origin: origin.clone(),
+        },
+        return_to,
+        Some(origin),
         execution_budget,
     )
 }
@@ -230,6 +459,68 @@ pub(super) fn finish_typed_array_constructor_wrapper(
         )
         .map_err(NativeFailure::Execution)?;
     Ok(NativeDispatch::Immediate(StoredValue::Object(object)))
+}
+
+#[allow(
+    clippy::too_many_arguments,
+    reason = "the post-Get ArrayBuffer witness includes the constructor, element kind, view slots, realm, and source origin"
+)]
+pub(super) fn finish_typed_array_constructor_buffer_wrapper(
+    runtime: &mut Runtime,
+    new_target: FunctionId,
+    element: TypedArrayElementType,
+    buffer: ObjectId,
+    byte_offset: usize,
+    length: TypedArrayLength,
+    realm: RealmId,
+    origin: &JsStackFrame,
+    requested: &StoredValue,
+) -> Result<NativeDispatch, NativeFailure> {
+    let prototype = typed_array_constructor_prototype(runtime, new_target, element, requested)?;
+    let (buffer_byte_length, _) = typed_array_buffer_length(runtime, buffer, realm, origin)?;
+    let valid = match length {
+        TypedArrayLength::Auto => byte_offset <= buffer_byte_length,
+        TypedArrayLength::Fixed(length) => length
+            .checked_mul(element.byte_width())
+            .and_then(|byte_length| byte_offset.checked_add(byte_length))
+            .is_some_and(|end| end <= buffer_byte_length),
+    };
+    if !valid {
+        return typed_array_type_error(
+            realm,
+            origin,
+            "TypedArray backing buffer changed during construction",
+        );
+    }
+    let object = runtime
+        .allocate_typed_array(
+            prototype,
+            TypedArrayState::new(buffer, byte_offset, length, element),
+        )
+        .map_err(NativeFailure::Execution)?;
+    Ok(NativeDispatch::Immediate(StoredValue::Object(object)))
+}
+
+fn typed_array_constructor_prototype(
+    runtime: &Runtime,
+    new_target: FunctionId,
+    element: TypedArrayElementType,
+    requested: &StoredValue,
+) -> Result<HeapReference, NativeFailure> {
+    Ok(match requested {
+        StoredValue::Function(function) => HeapReference::Function(*function),
+        StoredValue::Object(object) => HeapReference::Object(*object),
+        StoredValue::Undefined
+        | StoredValue::Null
+        | StoredValue::Boolean(_)
+        | StoredValue::Number(_)
+        | StoredValue::BigInt(_)
+        | StoredValue::String(_)
+        | StoredValue::Symbol(_) => {
+            let realm = runtime.function_realm(new_target)?;
+            HeapReference::Object(runtime.realm_typed_array_prototype(realm, element)?)
+        }
+    })
 }
 
 pub(super) fn dispatch_typed_array_prototype(
@@ -301,6 +592,23 @@ fn typed_array_to_index(
             origin: origin.clone(),
         })
     })
+}
+
+fn typed_array_buffer_length(
+    runtime: &Runtime,
+    buffer: ObjectId,
+    realm: RealmId,
+    origin: &JsStackFrame,
+) -> Result<(usize, bool), NativeFailure> {
+    let state = runtime
+        .array_buffer_state(buffer)?
+        .ok_or(EngineFault::RuntimeInvariant {
+            message: "TypedArray backing buffer lost its ArrayBuffer slots",
+        })?;
+    if state.is_detached() {
+        return typed_array_type_error(realm, origin, "TypedArray backing buffer is detached");
+    }
+    Ok((state.byte_length(), state.is_resizable()))
 }
 
 fn typed_array_name(element: TypedArrayElementType) -> &'static str {

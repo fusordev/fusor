@@ -134,3 +134,29 @@ fn typed_array_constructors_require_new_and_validate_the_length() {
         ExceptionKind::RangeError
     );
 }
+
+#[test]
+fn typed_array_constructors_create_fixed_and_length_tracking_array_buffer_views() {
+    assert_eq!(
+        rendered(
+            "var buffer=new ArrayBuffer(12,{maxByteLength:20});\
+             var tracking=new Uint16Array(buffer,2),fixed=new Uint16Array(buffer,2,3);\
+             tracking[0]=0x1234;fixed[2]=0x5678;buffer.resize(7);\
+             return [tracking.buffer===buffer,tracking.byteOffset,tracking.length,\
+               tracking[0],fixed.length,tracking.BYTES_PER_ELEMENT].join('|');"
+        ),
+        "true|2|2|4660|0|2"
+    );
+    assert_eq!(
+        thrown("return new Uint16Array(new ArrayBuffer(3));"),
+        ExceptionKind::RangeError
+    );
+    assert_eq!(
+        thrown("return new Uint16Array(new ArrayBuffer(4),1);"),
+        ExceptionKind::RangeError
+    );
+    assert_eq!(
+        thrown("return new Uint16Array(new ArrayBuffer(4),0,3);"),
+        ExceptionKind::RangeError
+    );
+}
