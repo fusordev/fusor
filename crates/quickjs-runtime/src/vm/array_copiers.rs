@@ -266,7 +266,7 @@ pub(super) fn advance_array_copier(
                     continue;
                 }
                 let key = runtime.predefined_property_key(PredefinedAtom::Constructor);
-                charge_copier_lookup(runtime, &state.target, execution_budget)?;
+                charge_copier_lookup(runtime, &state.target, &key, execution_budget)?;
                 state.stage = ArrayCopierStage::AwaitSliceConstructor;
                 let dispatch = begin_value_get(
                     runtime,
@@ -305,7 +305,7 @@ pub(super) fn advance_array_copier(
                     StoredValue::Function(_) | StoredValue::Object(_)
                 ) {
                     let key = runtime.predefined_symbol_property_key(PredefinedAtom::SymbolSpecies);
-                    charge_copier_lookup(runtime, &constructor, execution_budget)?;
+                    charge_copier_lookup(runtime, &constructor, &key, execution_budget)?;
                     state.stage = ArrayCopierStage::AwaitSliceSpecies;
                     let dispatch = begin_value_get(
                         runtime,
@@ -377,7 +377,7 @@ pub(super) fn advance_array_copier(
                     continue;
                 }
                 let key = runtime.predefined_property_key(PredefinedAtom::Constructor);
-                charge_copier_lookup(runtime, &state.target, execution_budget)?;
+                charge_copier_lookup(runtime, &state.target, &key, execution_budget)?;
                 state.stage = ArrayCopierStage::AwaitConcatConstructor;
                 let dispatch = begin_value_get(
                     runtime,
@@ -415,7 +415,7 @@ pub(super) fn advance_array_copier(
                     StoredValue::Function(_) | StoredValue::Object(_)
                 ) {
                     let key = runtime.predefined_symbol_property_key(PredefinedAtom::SymbolSpecies);
-                    charge_copier_lookup(runtime, &constructor, execution_budget)?;
+                    charge_copier_lookup(runtime, &constructor, &key, execution_budget)?;
                     state.stage = ArrayCopierStage::AwaitConcatSpecies;
                     let dispatch = begin_value_get(
                         runtime,
@@ -480,7 +480,7 @@ pub(super) fn advance_array_copier(
                 }
                 let key = runtime
                     .predefined_symbol_property_key(PredefinedAtom::SymbolIsConcatSpreadable);
-                charge_copier_lookup(runtime, &state.source, execution_budget)?;
+                charge_copier_lookup(runtime, &state.source, &key, execution_budget)?;
                 state.stage = ArrayCopierStage::AwaitSpreadability;
                 let dispatch = begin_value_get(
                     runtime,
@@ -523,7 +523,7 @@ pub(super) fn advance_array_copier(
                     continue;
                 }
                 let key = runtime.predefined_property_key(PredefinedAtom::Length);
-                charge_copier_lookup(runtime, &state.source, execution_budget)?;
+                charge_copier_lookup(runtime, &state.source, &key, execution_budget)?;
                 state.stage = ArrayCopierStage::AwaitLengthConversion;
                 let dispatch = begin_value_get(
                     runtime,
@@ -737,7 +737,7 @@ pub(super) fn advance_array_copier(
                     ArrayCopier::ToReversed | ArrayCopier::ToSpliced | ArrayCopier::With
                 ) {
                     let key = source_element_key(runtime, source_index)?;
-                    charge_copier_lookup(runtime, &state.source, execution_budget)?;
+                    charge_copier_lookup(runtime, &state.source, &key, execution_budget)?;
                     state.stage = ArrayCopierStage::AwaitPresence;
                     let dispatch = begin_value_has(
                         runtime,
@@ -1072,7 +1072,7 @@ fn begin_array_copier_element_get(
     execution_budget: &mut ExecutionBudget,
 ) -> Result<GetContinuationDispatch<ArrayCopierContinuation>, NativeFailure> {
     let key = source_element_key(runtime, source_index)?;
-    charge_copier_lookup(runtime, &state.source, execution_budget)?;
+    charge_copier_lookup(runtime, &state.source, &key, execution_budget)?;
     state.stage = ArrayCopierStage::AwaitElement;
     let dispatch = begin_value_get(
         runtime,
@@ -1178,13 +1178,52 @@ fn source_element_key(runtime: &mut Runtime, index: u64) -> Result<PropertyKey, 
 fn charge_copier_lookup(
     runtime: &Runtime,
     base: &StoredValue,
+    key: &PropertyKey,
     execution_budget: &mut ExecutionBudget,
 ) -> Result<(), NativeFailure> {
-    if base.heap_reference().is_none() {
+    let Some(reference) = base.heap_reference() else {
         execution_budget.charge_instructions(1)?;
         return Ok(());
+    };
+    if let Some(work) = copier_own_data_lookup_work(runtime, reference, key)? {
+        return execution_budget
+            .charge_instructions(work)
+            .map_err(Into::into);
     }
     charge_heap_property_lookup(runtime, base, execution_budget)
+}
+
+/// Returns the exact work for an indexed `Get` proven to finish at `reference`.
+///
+/// A dense Array element is constant-time. Other static own data properties
+/// still use the ordinary shape scan, but need not pay for an unvisited
+/// prototype chain. Proxies, mapped arguments, boxed strings, and typed arrays
+/// stay on the conservative generic path because their indexed access can be
+/// synthesized outside the ordinary record.
+fn copier_own_data_lookup_work(
+    runtime: &Runtime,
+    reference: HeapReference,
+    key: &PropertyKey,
+) -> Result<Option<u64>, NativeFailure> {
+    let Some(index) = key.as_index() else {
+        return Ok(None);
+    };
+    if !runtime.has_static_indexed_properties(reference)? {
+        return Ok(None);
+    }
+    if let HeapReference::Object(object) = reference
+        && runtime.is_array_object(object)?
+        && runtime.array_dense_index_present(object, index)?
+    {
+        return Ok(Some(1));
+    }
+    let record = runtime.object_record(reference)?;
+    if matches!(record.own_property(key), Some(OwnProperty::Data { .. })) {
+        return Ok(Some(
+            usize_to_u64(record.property_count()).saturating_add(1),
+        ));
+    }
+    Ok(None)
 }
 
 /// Returns whether a value needs a resumable `ToPrimitive`.
