@@ -50,6 +50,14 @@ use super::*;
 /// Which stage of the copier a continuation resumes into.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum ArrayCopierStage {
+    /// Chooses the `ArraySpeciesCreate` result for `concat`.
+    SelectConcatSpecies,
+    /// Awaiting the source Array's `constructor` property for `concat`.
+    AwaitConcatConstructor,
+    /// Awaiting the source constructor's `@@species` property for `concat`.
+    AwaitConcatSpecies,
+    /// Awaiting `concat`'s custom species construction.
+    AwaitConcatSpeciesConstruct,
     /// Ready to evaluate `IsConcatSpreadable` for the current concat source.
     CheckSpreadability,
     /// Awaiting the current source's `@@isConcatSpreadable` value.
@@ -95,9 +103,10 @@ pub(crate) struct ArrayCopierContinuation {
     next: u64,
     /// The exclusive end of the current source's range.
     end: u64,
-    /// The destination array, absent for `at` and until change-by-copy methods
-    /// know their validated result length/index.
-    destination: Option<ObjectId>,
+    /// The destination object, absent for `at` and until change-by-copy methods
+    /// know their validated result length/index. `concat` can use an arbitrary
+    /// object produced by its `ArraySpeciesCreate` constructor.
+    destination: Option<StoredValue>,
     /// The next index to write in the destination.
     written: u64,
     /// `at`'s answer.
@@ -124,8 +133,8 @@ impl ArrayCopierContinuation {
         trace_stored_value_root(&self.target, mark);
         trace_stored_value_root(&self.source, mark);
         trace_stored_value_root(&self.result, mark);
-        if let Some(destination) = self.destination {
-            mark(CollectionRoot::Heap(HeapReference::Object(destination)));
+        if let Some(destination) = &self.destination {
+            trace_stored_value_root(destination, mark);
         }
         for argument in &self.arguments {
             trace_stored_value_root(argument, mark);
@@ -165,14 +174,17 @@ pub(super) fn begin_array_copier(
             })?;
         collected.push(value);
     }
-    // `slice` and `concat` allocate their result before this shared driver.
+    // `slice` allocates its default result before this shared driver. `concat`
+    // selects its `ArraySpeciesCreate` result before observing its first
+    // `@@isConcatSpreadable` property.
     // `toReversed` must read `length` first, and `with` must additionally
     // convert and validate its index before ArrayCreate, so they allocate in
     // their later specification stages.
     let destination = match copier {
-        ArrayCopier::Slice | ArrayCopier::Concat => {
-            Some(runtime.allocate_array(realm, Vec::new())?)
-        }
+        ArrayCopier::Slice => Some(StoredValue::Object(
+            runtime.allocate_array(realm, Vec::new())?,
+        )),
+        ArrayCopier::Concat => None,
         ArrayCopier::At | ArrayCopier::ToReversed | ArrayCopier::ToSpliced | ArrayCopier::With => {
             None
         }
@@ -182,7 +194,7 @@ pub(super) fn begin_array_copier(
     // to Proxy-aware IsArray.
     let spreading = !matches!(copier, ArrayCopier::Concat);
     let initial_stage = if matches!(copier, ArrayCopier::Concat) {
-        ArrayCopierStage::CheckSpreadability
+        ArrayCopierStage::SelectConcatSpecies
     } else {
         ArrayCopierStage::AwaitLength
     };
@@ -240,6 +252,113 @@ pub(super) fn advance_array_copier(
     }
     loop {
         match state.stage {
+            ArrayCopierStage::SelectConcatSpecies => {
+                if !proxy_aware_is_array(
+                    runtime,
+                    state.target.duplicate(),
+                    state.realm,
+                    state.origin.clone(),
+                )? {
+                    allocate_concat_destination(runtime, &mut state)?;
+                    state.stage = ArrayCopierStage::CheckSpreadability;
+                    continue;
+                }
+                let key = runtime.predefined_property_key(PredefinedAtom::Constructor);
+                charge_copier_lookup(runtime, &state.target, execution_budget)?;
+                state.stage = ArrayCopierStage::AwaitConcatConstructor;
+                let dispatch = begin_value_get(
+                    runtime,
+                    &state.target,
+                    key,
+                    None,
+                    state.realm,
+                    return_to,
+                    state.origin.clone(),
+                    execution_budget,
+                )?;
+                await_get!(continue_get_state_after(
+                    dispatch,
+                    state,
+                    array_copier_continuation,
+                    "Array concat constructor Get produced a structured result",
+                ));
+            }
+            ArrayCopierStage::AwaitConcatConstructor => {
+                let constructor = take_completion(&mut completion)?;
+                if let StoredValue::Function(function) = constructor
+                    && function_is_constructor(runtime, function)?
+                {
+                    let constructor_realm = runtime.function_realm(function)?;
+                    if constructor_realm != state.realm
+                        && function == runtime.realm_array_constructor(constructor_realm)?
+                    {
+                        allocate_concat_destination(runtime, &mut state)?;
+                        state.stage = ArrayCopierStage::CheckSpreadability;
+                        continue;
+                    }
+                }
+                if matches!(
+                    constructor,
+                    StoredValue::Function(_) | StoredValue::Object(_)
+                ) {
+                    let key = runtime.predefined_symbol_property_key(PredefinedAtom::SymbolSpecies);
+                    charge_copier_lookup(runtime, &constructor, execution_budget)?;
+                    state.stage = ArrayCopierStage::AwaitConcatSpecies;
+                    let dispatch = begin_value_get(
+                        runtime,
+                        &constructor,
+                        key,
+                        None,
+                        state.realm,
+                        return_to,
+                        state.origin.clone(),
+                        execution_budget,
+                    )?;
+                    await_get!(continue_get_state_after(
+                        dispatch,
+                        state,
+                        array_copier_continuation,
+                        "Array concat species Get produced a structured result",
+                    ));
+                } else if matches!(constructor, StoredValue::Undefined) {
+                    allocate_concat_destination(runtime, &mut state)?;
+                    state.stage = ArrayCopierStage::CheckSpreadability;
+                } else {
+                    return copier_type_error(&state, "not a constructor");
+                }
+            }
+            ArrayCopierStage::AwaitConcatSpecies => {
+                let species = take_completion(&mut completion)?;
+                if matches!(species, StoredValue::Undefined | StoredValue::Null) {
+                    allocate_concat_destination(runtime, &mut state)?;
+                    state.stage = ArrayCopierStage::CheckSpreadability;
+                    continue;
+                }
+                let StoredValue::Function(constructor) = species else {
+                    return copier_type_error(&state, "not a constructor");
+                };
+                if !function_is_constructor(runtime, constructor)? {
+                    return copier_type_error(&state, "not a constructor");
+                }
+                state.stage = ArrayCopierStage::AwaitConcatSpeciesConstruct;
+                return suspend_construct_copier(
+                    state,
+                    constructor,
+                    StoredValue::Number(JsNumber::from_i32(0)),
+                    return_to,
+                );
+            }
+            ArrayCopierStage::AwaitConcatSpeciesConstruct => {
+                let destination = take_completion(&mut completion)?;
+                if destination.heap_reference().is_none() {
+                    return Err(EngineFault::RuntimeInvariant {
+                        message: "ArraySpeciesCreate constructor returned a primitive",
+                    }
+                    .into());
+                }
+                state.destination = Some(destination);
+                state.stage = ArrayCopierStage::CheckSpreadability;
+            }
             ArrayCopierStage::CheckSpreadability => {
                 if state.source.heap_reference().is_none() {
                     state.spreading = false;
@@ -286,7 +405,7 @@ pub(super) fn advance_array_copier(
                 // as one element, so it never has its length read.
                 if !state.spreading {
                     let element = state.source.duplicate();
-                    append_element(runtime, &mut state, element)?;
+                    append_element(runtime, &mut state, element, execution_budget)?;
                     state.stage = ArrayCopierStage::NextSource;
                     continue;
                 }
@@ -474,7 +593,7 @@ pub(super) fn advance_array_copier(
                         .arguments
                         .get(1)
                         .map_or(StoredValue::Undefined, StoredValue::duplicate);
-                    append_element(runtime, &mut state, replacement)?;
+                    append_element(runtime, &mut state, replacement, execution_budget)?;
                     continue;
                 }
                 let source_index = if matches!(state.copier, ArrayCopier::ToReversed) {
@@ -547,7 +666,7 @@ pub(super) fn advance_array_copier(
                     state.stage = ArrayCopierStage::Done;
                     continue;
                 }
-                append_element(runtime, &mut state, value)?;
+                append_element(runtime, &mut state, value, execution_budget)?;
                 state.stage = ArrayCopierStage::NextElement;
             }
             ArrayCopierStage::NextInsertion => {
@@ -555,7 +674,7 @@ pub(super) fn advance_array_copier(
                     execution_budget.charge_instructions(1)?;
                     let item = item.duplicate();
                     state.next_source = state.next_source.saturating_add(1);
-                    append_element(runtime, &mut state, item)?;
+                    append_element(runtime, &mut state, item, execution_budget)?;
                     continue;
                 }
                 let start = state.selected.ok_or(EngineFault::RuntimeInvariant {
@@ -582,15 +701,17 @@ pub(super) fn advance_array_copier(
                 state.stage = ArrayCopierStage::CheckSpreadability;
             }
             ArrayCopierStage::Done => {
-                return Ok(NativeDispatch::Immediate(match state.destination {
-                    Some(destination) => {
-                        // The destination's length is set once at the end, so a
-                        // trailing hole is still counted.
-                        finish_destination(runtime, &state, destination)?;
-                        StoredValue::Object(destination)
-                    }
-                    None => state.result,
-                }));
+                return Ok(NativeDispatch::Immediate(
+                    match state.destination.as_ref() {
+                        Some(destination) => {
+                            // The destination's length is set once at the end, so a
+                            // trailing hole is still counted.
+                            finish_destination(runtime, &state, destination, execution_budget)?;
+                            destination.duplicate()
+                        }
+                        None => state.result,
+                    },
+                ));
             }
         }
     }
@@ -682,7 +803,18 @@ fn allocate_change_by_copy_destination(
     let prototype = runtime.realm_array_prototype(state.realm)?;
     let destination =
         runtime.allocate_sparse_array_with_prototype(HeapReference::Object(prototype), length)?;
-    state.destination = Some(destination);
+    state.destination = Some(StoredValue::Object(destination));
+    Ok(())
+}
+
+/// Allocates the default `ArraySpeciesCreate` result for `concat`.
+fn allocate_concat_destination(
+    runtime: &mut Runtime,
+    state: &mut ArrayCopierContinuation,
+) -> Result<(), NativeFailure> {
+    state.destination = Some(StoredValue::Object(
+        runtime.allocate_array(state.realm, Vec::new())?,
+    ));
     Ok(())
 }
 
@@ -736,8 +868,9 @@ fn append_element(
     runtime: &mut Runtime,
     state: &mut ArrayCopierContinuation,
     value: StoredValue,
+    execution_budget: &mut ExecutionBudget,
 ) -> Result<(), NativeFailure> {
-    let Some(destination) = state.destination else {
+    let Some(destination) = state.destination.as_ref() else {
         return Err(EngineFault::RuntimeInvariant {
             message: "an array copier appended an element with no destination",
         }
@@ -745,19 +878,13 @@ fn append_element(
     };
     let key = element_key(state.written)?;
     state.written = state.written.saturating_add(1);
-    match runtime.define_array_data_property(
-        destination,
-        key,
-        PropertyLayout::data(true, true, true),
-        value,
-    )? {
-        ArrayDefineOutcome::Complete => Ok(()),
-        ArrayDefineOutcome::ReadOnlyLength | ArrayDefineOutcome::NonExtensible => {
-            Err(EngineFault::RuntimeInvariant {
-                message: "a freshly allocated destination array refused an element",
-            }
-            .into())
+    match define_static_property(runtime, destination, key, value, execution_budget)? {
+        PropertyWriteOutcome::Complete => Ok(()),
+        PropertyWriteOutcome::Failed(failure) => Err(copier_property_failure(state, failure)),
+        PropertyWriteOutcome::Setter { .. } => Err(EngineFault::RuntimeInvariant {
+            message: "Array copier CreateDataPropertyOrThrow attempted to call a setter",
         }
+        .into()),
     }
 }
 
@@ -768,16 +895,31 @@ fn append_element(
 fn finish_destination(
     runtime: &mut Runtime,
     state: &ArrayCopierContinuation,
-    destination: ObjectId,
+    destination: &StoredValue,
+    execution_budget: &mut ExecutionBudget,
 ) -> Result<(), NativeFailure> {
     let length = u32::try_from(state.written).map_err(|_| EngineFault::RuntimeInvariant {
         message: "an array copier produced a length outside the array-index domain",
     })?;
-    match runtime.set_array_length(destination, length)? {
-        ArrayLengthWriteOutcome::Complete
-        | ArrayLengthWriteOutcome::BlockedByNonConfigurable { .. } => Ok(()),
-        ArrayLengthWriteOutcome::ReadOnly => Err(EngineFault::RuntimeInvariant {
-            message: "a freshly allocated destination array refused its length",
+    if let StoredValue::Object(destination) = destination
+        && runtime.array_length(*destination)?.is_some()
+    {
+        return match runtime.set_array_length(*destination, length)? {
+            ArrayLengthWriteOutcome::Complete
+            | ArrayLengthWriteOutcome::BlockedByNonConfigurable { .. } => Ok(()),
+            ArrayLengthWriteOutcome::ReadOnly => Err(EngineFault::RuntimeInvariant {
+                message: "a freshly allocated destination array refused its length",
+            }
+            .into()),
+        };
+    }
+    let key = runtime.predefined_property_key(PredefinedAtom::Length);
+    let value = StoredValue::Number(JsNumber::from_u32(length));
+    match define_static_property(runtime, destination, key, value, execution_budget)? {
+        PropertyWriteOutcome::Complete => Ok(()),
+        PropertyWriteOutcome::Failed(failure) => Err(copier_property_failure(state, failure)),
+        PropertyWriteOutcome::Setter { .. } => Err(EngineFault::RuntimeInvariant {
+            message: "Array copier final length write attempted to call a setter",
         }
         .into()),
     }
@@ -829,6 +971,60 @@ fn copier_error(
         },
         origin: state.origin.clone(),
     })
+}
+
+fn copier_property_failure(
+    state: &ArrayCopierContinuation,
+    failure: PropertyFailure,
+) -> NativeFailure {
+    match property_exception_at(state.realm, state.origin.clone(), None, failure) {
+        Ok(exception) => NativeFailure::Abrupt(exception),
+        Err(error) => error.into(),
+    }
+}
+
+fn copier_type_error(
+    state: &ArrayCopierContinuation,
+    message: &str,
+) -> Result<NativeDispatch, NativeFailure> {
+    let message = JsString::from_utf8(message)?;
+    Err(NativeFailure::Abrupt(PendingException {
+        realm: state.realm,
+        payload: PendingExceptionPayload::EngineError {
+            kind: ExceptionKind::TypeError,
+            message,
+        },
+        origin: state.origin.clone(),
+    }))
+}
+
+/// Suspends into a species constructor that resumes the copier.
+fn suspend_construct_copier(
+    state: ArrayCopierContinuation,
+    constructor: FunctionId,
+    argument: StoredValue,
+    return_to: Option<CallReturn>,
+) -> Result<NativeDispatch, NativeFailure> {
+    let origin = state.origin.clone();
+    let mut continuations = Vec::new();
+    continuations
+        .try_reserve_exact(1)
+        .map_err(|_| ExecutionError::AllocationFailed {
+            resource: RuntimeResource::Frames,
+            additional: 1,
+        })?;
+    continuations.push(NativeContinuation::ArrayCopier(Box::new(state)));
+    Ok(NativeDispatch::Call(NativeCall {
+        function: constructor,
+        receiver: StoredValue::Undefined,
+        arguments: CallArguments::from_values(vec![argument]),
+        return_to,
+        origin,
+        continuations,
+        pre_call: None,
+        new_target: Some(constructor),
+        native_caller: None,
+    }))
 }
 
 /// Returns an integer-index key, including ordinary string keys above the
