@@ -305,6 +305,8 @@ struct TemporalIntrinsics {
     plain_date_constructor: FunctionId,
     plain_date_time_prototype: ObjectId,
     plain_date_time_constructor: FunctionId,
+    plain_time_prototype: ObjectId,
+    plain_time_constructor: FunctionId,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -1244,6 +1246,9 @@ pub(crate) enum NativeFunctionKind {
     TemporalPlainDateTimeConstructor,
     TemporalPlainDateTimeStatic(TemporalPlainDateTimeStaticMethod),
     TemporalPlainDateTimePrototype(TemporalPlainDateTimePrototypeMethod),
+    TemporalPlainTimeConstructor,
+    TemporalPlainTimeStatic(TemporalPlainTimeStaticMethod),
+    TemporalPlainTimePrototype(TemporalPlainTimePrototypeMethod),
     FunctionPrototypeToString,
     ErrorConstructor(ErrorIntrinsicKind),
     ErrorPrototypeToString,
@@ -2278,6 +2283,12 @@ pub(crate) enum TemporalPlainDateTimeStaticMethod {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum TemporalPlainTimeStaticMethod {
+    From,
+    Compare,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum TemporalPlainDatePrototypeMethod {
     CalendarId,
     Year,
@@ -2342,6 +2353,21 @@ pub(crate) enum TemporalPlainDateTimePrototypeMethod {
     Equals,
     ToPlainDate,
     WithCalendar,
+    ToString,
+    ToJson,
+    ToLocaleString,
+    ValueOf,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum TemporalPlainTimePrototypeMethod {
+    Hour,
+    Minute,
+    Second,
+    Millisecond,
+    Microsecond,
+    Nanosecond,
+    Equals,
     ToString,
     ToJson,
     ToLocaleString,
@@ -2601,6 +2627,91 @@ impl TemporalPlainDateTimeStaticMethod {
         match self {
             Self::From => 1,
             Self::Compare => 2,
+        }
+    }
+}
+
+impl TemporalPlainTimeStaticMethod {
+    pub(crate) const ALL: [Self; 2] = [Self::From, Self::Compare];
+
+    pub(crate) const fn name(self) -> &'static str {
+        match self {
+            Self::From => "from",
+            Self::Compare => "compare",
+        }
+    }
+
+    pub(crate) const fn length(self) -> i32 {
+        match self {
+            Self::From => 1,
+            Self::Compare => 2,
+        }
+    }
+}
+
+impl TemporalPlainTimePrototypeMethod {
+    pub(crate) const ALL: [Self; 11] = [
+        Self::Hour,
+        Self::Minute,
+        Self::Second,
+        Self::Millisecond,
+        Self::Microsecond,
+        Self::Nanosecond,
+        Self::Equals,
+        Self::ToString,
+        Self::ToJson,
+        Self::ToLocaleString,
+        Self::ValueOf,
+    ];
+
+    pub(crate) const fn name(self) -> &'static str {
+        match self {
+            Self::Hour => "hour",
+            Self::Minute => "minute",
+            Self::Second => "second",
+            Self::Millisecond => "millisecond",
+            Self::Microsecond => "microsecond",
+            Self::Nanosecond => "nanosecond",
+            Self::Equals => "equals",
+            Self::ToString => "toString",
+            Self::ToJson => "toJSON",
+            Self::ToLocaleString => "toLocaleString",
+            Self::ValueOf => "valueOf",
+        }
+    }
+
+    pub(crate) const fn function_name(self) -> &'static str {
+        match self {
+            Self::Hour => "get hour",
+            Self::Minute => "get minute",
+            Self::Second => "get second",
+            Self::Millisecond => "get millisecond",
+            Self::Microsecond => "get microsecond",
+            Self::Nanosecond => "get nanosecond",
+            Self::Equals => "equals",
+            Self::ToString => "toString",
+            Self::ToJson => "toJSON",
+            Self::ToLocaleString => "toLocaleString",
+            Self::ValueOf => "valueOf",
+        }
+    }
+
+    pub(crate) const fn is_accessor(self) -> bool {
+        matches!(
+            self,
+            Self::Hour
+                | Self::Minute
+                | Self::Second
+                | Self::Millisecond
+                | Self::Microsecond
+                | Self::Nanosecond
+        )
+    }
+
+    pub(crate) const fn length(self) -> i32 {
+        match self {
+            Self::Equals => 1,
+            _ => 0,
         }
     }
 }
@@ -3359,6 +3470,7 @@ impl NativeFunctionKind {
                 | Self::TemporalInstantConstructor
                 | Self::TemporalPlainDateConstructor
                 | Self::TemporalPlainDateTimeConstructor
+                | Self::TemporalPlainTimeConstructor
                 | Self::RegExpConstructor
                 | Self::GeneratorFunctionConstructor
                 | Self::AsyncFunctionConstructor

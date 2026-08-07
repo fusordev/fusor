@@ -31,7 +31,7 @@ use std::{
     rc::Rc,
     sync::{Arc, Weak},
 };
-use temporal_rs::{Duration, Instant, PlainDate, PlainDateTime};
+use temporal_rs::{Duration, Instant, PlainDate, PlainDateTime, PlainTime};
 
 use crate::ids::ObjectId;
 use crate::{
@@ -2490,6 +2490,8 @@ pub(crate) enum HeapObjectKind {
     TemporalPlainDate(PlainDate),
     /// An ECMAScript `Temporal.PlainDateTime` with ISO date/time and calendar slots.
     TemporalPlainDateTime(PlainDateTime),
+    /// An ECMAScript `Temporal.PlainTime` with ISO time slots.
+    TemporalPlainTime(PlainTime),
     /// An ECMAScript Map object with ordered `[[MapData]]`.
     Map(MapState),
     MapIterator(MapIterator),
@@ -2634,6 +2636,7 @@ impl HeapObjectKind {
             | Self::TemporalDuration(_)
             | Self::TemporalPlainDate(_)
             | Self::TemporalPlainDateTime(_)
+            | Self::TemporalPlainTime(_)
             | Self::Map(_)
             | Self::MapIterator(_)
             | Self::Set(_)
@@ -2669,6 +2672,7 @@ impl HeapObjectKind {
             | Self::TemporalDuration(_)
             | Self::TemporalPlainDate(_)
             | Self::TemporalPlainDateTime(_)
+            | Self::TemporalPlainTime(_)
             | Self::Map(_)
             | Self::MapIterator(_)
             | Self::Set(_)
@@ -2703,6 +2707,7 @@ impl HeapObjectKind {
             | Self::TemporalDuration(_)
             | Self::TemporalPlainDate(_)
             | Self::TemporalPlainDateTime(_)
+            | Self::TemporalPlainTime(_)
             | Self::Map(_)
             | Self::MapIterator(_)
             | Self::Set(_)
@@ -2737,6 +2742,7 @@ impl HeapObjectKind {
             | Self::TemporalDuration(_)
             | Self::TemporalPlainDate(_)
             | Self::TemporalPlainDateTime(_)
+            | Self::TemporalPlainTime(_)
             | Self::Map(_)
             | Self::MapIterator(_)
             | Self::Set(_)
@@ -2771,6 +2777,7 @@ impl HeapObjectKind {
             | Self::TemporalDuration(_)
             | Self::TemporalPlainDate(_)
             | Self::TemporalPlainDateTime(_)
+            | Self::TemporalPlainTime(_)
             | Self::Map(_)
             | Self::MapIterator(_)
             | Self::Set(_)
@@ -2805,6 +2812,7 @@ impl HeapObjectKind {
             | Self::TemporalDuration(_)
             | Self::TemporalPlainDate(_)
             | Self::TemporalPlainDateTime(_)
+            | Self::TemporalPlainTime(_)
             | Self::Map(_)
             | Self::MapIterator(_)
             | Self::Set(_)
@@ -2839,6 +2847,7 @@ impl HeapObjectKind {
             | Self::TemporalDuration(_)
             | Self::TemporalPlainDate(_)
             | Self::TemporalPlainDateTime(_)
+            | Self::TemporalPlainTime(_)
             | Self::Map(_)
             | Self::MapIterator(_)
             | Self::Set(_)
@@ -2873,6 +2882,7 @@ impl HeapObjectKind {
             | Self::TemporalDuration(_)
             | Self::TemporalPlainDate(_)
             | Self::TemporalPlainDateTime(_)
+            | Self::TemporalPlainTime(_)
             | Self::Map(_)
             | Self::MapIterator(_)
             | Self::Set(_)
@@ -2907,6 +2917,7 @@ impl HeapObjectKind {
             | Self::TemporalDuration(_)
             | Self::TemporalPlainDate(_)
             | Self::TemporalPlainDateTime(_)
+            | Self::TemporalPlainTime(_)
             | Self::Map(_)
             | Self::MapIterator(_)
             | Self::Set(_)
@@ -3277,6 +3288,15 @@ impl HeapObject {
     }
 
     #[must_use]
+    pub(crate) const fn temporal_plain_time(record: ObjectRecord, time: PlainTime) -> Self {
+        Self {
+            kind: HeapObjectKind::TemporalPlainTime(time),
+            record,
+            public_roots: 0,
+        }
+    }
+
+    #[must_use]
     pub(crate) const fn map(record: ObjectRecord, state: MapState) -> Self {
         Self {
             kind: HeapObjectKind::Map(state),
@@ -3477,6 +3497,14 @@ impl HeapObject {
     }
 
     #[must_use]
+    pub(crate) const fn temporal_plain_time_value(&self) -> Option<PlainTime> {
+        match self.kind {
+            HeapObjectKind::TemporalPlainTime(time) => Some(time),
+            _ => None,
+        }
+    }
+
+    #[must_use]
     pub(crate) const fn is_arguments(&self) -> bool {
         matches!(self.kind, HeapObjectKind::Arguments(_))
     }
@@ -3504,6 +3532,7 @@ impl HeapObject {
             | HeapObjectKind::TemporalDuration(_)
             | HeapObjectKind::TemporalPlainDate(_)
             | HeapObjectKind::TemporalPlainDateTime(_)
+            | HeapObjectKind::TemporalPlainTime(_)
             | HeapObjectKind::Map(_)
             | HeapObjectKind::MapIterator(_)
             | HeapObjectKind::Set(_)
@@ -3538,6 +3567,7 @@ impl HeapObject {
             | HeapObjectKind::TemporalDuration(_)
             | HeapObjectKind::TemporalPlainDate(_)
             | HeapObjectKind::TemporalPlainDateTime(_)
+            | HeapObjectKind::TemporalPlainTime(_)
             | HeapObjectKind::Map(_)
             | HeapObjectKind::MapIterator(_)
             | HeapObjectKind::Set(_)
@@ -3574,6 +3604,7 @@ impl HeapObject {
             | HeapObjectKind::TemporalDuration(_)
             | HeapObjectKind::TemporalPlainDate(_)
             | HeapObjectKind::TemporalPlainDateTime(_)
+            | HeapObjectKind::TemporalPlainTime(_)
             | HeapObjectKind::Map(_)
             | HeapObjectKind::MapIterator(_)
             | HeapObjectKind::Set(_)

@@ -176,6 +176,71 @@ fn plain_date_time_constructor_accessors_and_iso_formatting_are_spec_shaped() {
 }
 
 #[test]
+fn plain_time_constructor_conversion_and_accessors_are_spec_shaped() {
+    assert_eq!(
+        rendered(
+            "var time=new Temporal.PlainTime(12,34,56,7,8,9);
+             var hour=Object.getOwnPropertyDescriptor(Temporal.PlainTime.prototype,'hour');
+             var from=Temporal.PlainTime.from({hour:25,minute:70,microsecond:1000});
+             var parsed=Temporal.PlainTime.from('01:02:03.004005006');
+             return [Temporal.PlainTime.length,Temporal.PlainTime.name,
+               Object.getPrototypeOf(time)===Temporal.PlainTime.prototype,
+               Object.prototype.toString.call(time),hour.enumerable,hour.get.name,
+               time.hour,time.minute,time.second,time.millisecond,time.microsecond,time.nanosecond,
+               time.toString(),time.toJSON(),time.toLocaleString(),
+               Temporal.PlainTime.from.name,Temporal.PlainTime.from.length,
+               Temporal.PlainTime.compare.name,Temporal.PlainTime.compare.length,
+               from.toString(),parsed.toString(),Temporal.PlainTime.compare(time,parsed)].join('|');"
+        ),
+        "1|PlainTime|true|[object Temporal.PlainTime]|false|get hour|12|34|56|7|8|9|12:34:56.007008009|12:34:56.007008009|12:34:56.007008009|from|1|compare|2|23:59:00.000999|01:02:03.004005006|1"
+    );
+    assert_eq!(
+        rendered(
+            "var log=[];
+             var fields={
+               get hour(){log.push('hour');return 1.7},
+               get microsecond(){log.push('microsecond');return 2.7},
+               get millisecond(){log.push('millisecond');return 3.7},
+               get minute(){log.push('minute');return 4.7},
+               get nanosecond(){log.push('nanosecond');return 5.7},
+               get second(){log.push('second');return 6.7}
+             };
+             var time=Temporal.PlainTime.from(fields);
+             return [time.toString(),log.join(',')].join('|');"
+        ),
+        "01:04:06.003002005|hour,microsecond,millisecond,minute,nanosecond,second"
+    );
+    assert_eq!(
+        thrown("return Temporal.PlainTime(12);"),
+        ExceptionKind::TypeError
+    );
+    assert_eq!(
+        thrown("return new Temporal.PlainTime(24);"),
+        ExceptionKind::RangeError
+    );
+    assert_eq!(
+        rendered("return new Temporal.PlainTime().toString();"),
+        "00:00:00"
+    );
+    assert_eq!(
+        thrown("return new Temporal.PlainTime(undefined);"),
+        ExceptionKind::RangeError
+    );
+    assert_eq!(
+        thrown("return Temporal.PlainTime.from({});"),
+        ExceptionKind::TypeError
+    );
+    assert_eq!(
+        thrown("return Temporal.PlainTime.prototype.hour.call({});"),
+        ExceptionKind::TypeError
+    );
+    assert_eq!(
+        thrown("return new Temporal.PlainTime(1).valueOf();"),
+        ExceptionKind::TypeError
+    );
+}
+
+#[test]
 fn plain_date_time_constructor_preserves_order_defaults_and_branding() {
     assert_eq!(
         rendered(
@@ -693,11 +758,12 @@ fn plain_date_to_plain_date_time_defaults_and_prepares_time_fields_in_order() {
              var string=date.toPlainDateTime('11:30:23');
              var fieldsResult=date.toPlainDateTime(fields);
              var fromDateTime=date.toPlainDateTime(new Temporal.PlainDateTime(2001,1,2,3,4,5,6,7,8));
+             var fromTime=date.toPlainDateTime(new Temporal.PlainTime(9,8,7,6,5,4));
              return [Temporal.PlainDate.prototype.toPlainDateTime.length,
                defaulted.toString(),string.toString(),fieldsResult.toString(),fromDateTime.toString(),
-               log.join(',')].join('|');"
+               fromTime.toString(),log.join(',')].join('|');"
         ),
-        "0|2020-02-29T00:00:00|2020-02-29T11:30:23|2020-02-29T23:59:23.007008009|2020-02-29T03:04:05.006007008|hour,hour number,microsecond,microsecond number,millisecond,millisecond number,minute,minute number,nanosecond,nanosecond number,second,second number"
+        "0|2020-02-29T00:00:00|2020-02-29T11:30:23|2020-02-29T23:59:23.007008009|2020-02-29T03:04:05.006007008|2020-02-29T09:08:07.006005004|hour,hour number,microsecond,microsecond number,millisecond,millisecond number,minute,minute number,nanosecond,nanosecond number,second,second number"
     );
     assert_eq!(
         thrown("return new Temporal.PlainDate(2020,1,1).toPlainDateTime({});"),

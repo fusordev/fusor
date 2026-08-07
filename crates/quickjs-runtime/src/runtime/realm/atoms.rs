@@ -8,7 +8,7 @@ use crate::{
         TemporalDurationStaticMethod, TemporalInstantPrototypeMethod, TemporalInstantStaticMethod,
         TemporalPlainDatePrototypeMethod, TemporalPlainDateStaticMethod,
         TemporalPlainDateTimePrototypeMethod, TemporalPlainDateTimeStaticMethod,
-        TypedArrayPrototypeMethod,
+        TemporalPlainTimePrototypeMethod, TemporalPlainTimeStaticMethod, TypedArrayPrototypeMethod,
     },
 };
 
@@ -315,6 +315,13 @@ fn visit_realm_name_order(
     for method in TemporalPlainDateTimePrototypeMethod::ALL {
         visit(RealmNameId::TemporalPlainDateTimePrototype(method))?;
     }
+    visit(RealmNameId::PlainTime)?;
+    for method in TemporalPlainTimeStaticMethod::ALL {
+        visit(RealmNameId::TemporalPlainTimeStatic(method))?;
+    }
+    for method in TemporalPlainTimePrototypeMethod::ALL {
+        visit(RealmNameId::TemporalPlainTimePrototype(method))?;
+    }
     visit(RealmNameId::RegExpEscape)?;
     visit(RealmNameId::RegExpCompile)?;
     visit(RealmNameId::RegExpTest)?;
@@ -535,6 +542,9 @@ fn realm_name_description(id: RealmNameId) -> &'static str {
         RealmNameId::TemporalPlainDatePrototype(method) => method.name(),
         RealmNameId::TemporalPlainDateTimeStatic(method) => method.name(),
         RealmNameId::TemporalPlainDateTimePrototype(method) => method.name(),
+        RealmNameId::PlainTime => "PlainTime",
+        RealmNameId::TemporalPlainTimeStatic(method) => method.name(),
+        RealmNameId::TemporalPlainTimePrototype(method) => method.name(),
         RealmNameId::RegExpEscape => "escape",
         RealmNameId::RegExpCompile => "compile",
         RealmNameId::RegExpTest => "test",
@@ -559,8 +569,8 @@ mod tests {
         let schema = RealmIntrinsicSchema::try_new().expect("Realm schema");
         let plan = RealmAtomPlan::try_new(&schema).expect("atom plan");
 
-        assert_eq!(plan.len(), 328);
-        assert_eq!(plan.description_code_units(), 2_782);
+        assert_eq!(plan.len(), 329);
+        assert_eq!(plan.description_code_units(), 2_791);
     }
 
     #[test]

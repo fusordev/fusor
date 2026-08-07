@@ -44,6 +44,15 @@ pub(super) struct TemporalPlainDateTimeConstructorContinuation {
     new_target: FunctionId,
 }
 
+/// The `Temporal.PlainTime` constructor retains each ISO time component
+/// while user-defined numeric conversion is resumed.
+pub(super) struct TemporalPlainTimeConstructorContinuation {
+    arguments: Vec<StoredValue>,
+    converted: Vec<JsNumber>,
+    provided: usize,
+    new_target: FunctionId,
+}
+
 const TEMPORAL_PLAIN_DATE_BAG_FIELDS: [&str; 5] = ["calendar", "day", "month", "monthCode", "year"];
 const TEMPORAL_PLAIN_DATE_TIME_BAG_FIELDS: [&str; 11] = [
     "calendar",
@@ -246,6 +255,96 @@ enum TemporalPlainDateTimeLikeTarget {
     },
 }
 
+enum TemporalPlainTimeLikeTarget {
+    From { options: StoredValue },
+    CompareFirst { second: StoredValue },
+    CompareSecond { first: PlainTime },
+    Equals { receiver: PlainTime },
+}
+
+impl TemporalPlainTimeLikeTarget {
+    fn trace_roots(&self, mark: &mut dyn FnMut(CollectionRoot)) {
+        match self {
+            Self::From { options } | Self::CompareFirst { second: options } => {
+                trace_stored_value_root(options, mark);
+            }
+            Self::CompareSecond { .. } | Self::Equals { .. } => {}
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+enum TemporalPlainTimeBagStage {
+    ReadField,
+    AwaitField,
+    AwaitConversion,
+}
+
+/// Resumable `ToTemporalTime` conversion for ordinary property bags.
+///
+/// `PrepareTemporalFields` requires these Gets and numeric conversions in
+/// order, and each can execute JavaScript. The state owns the source bag
+/// until a `PartialTime` can be passed to its target.
+pub(super) struct TemporalPlainTimeBagContinuation {
+    base: StoredValue,
+    hour: Option<JsNumber>,
+    microsecond: Option<JsNumber>,
+    millisecond: Option<JsNumber>,
+    minute: Option<JsNumber>,
+    nanosecond: Option<JsNumber>,
+    second: Option<JsNumber>,
+    next: usize,
+    stage: TemporalPlainTimeBagStage,
+    target: TemporalPlainTimeLikeTarget,
+    realm: RealmId,
+    origin: JsStackFrame,
+}
+
+impl TemporalPlainTimeBagContinuation {
+    pub(super) const fn retained_values() -> u64 {
+        2
+    }
+
+    pub(super) fn trace_roots(&self, mark: &mut dyn FnMut(CollectionRoot)) {
+        trace_stored_value_root(&self.base, mark);
+        self.target.trace_roots(mark);
+    }
+}
+
+#[derive(Clone, Copy)]
+enum TemporalPlainTimeOptionsTarget {
+    Existing(PlainTime),
+    Partial(PartialTime),
+}
+
+#[derive(Clone, Copy)]
+enum TemporalPlainTimeOptionsStage {
+    ReadOverflow,
+    AwaitOverflow,
+    AwaitOverflowConversion,
+}
+
+/// `Temporal.PlainTime.from` options state. The input conversion always
+/// precedes `GetOptionsObject`, while the overflow Get/conversion precedes
+/// construction from a possibly out-of-range property bag.
+pub(super) struct TemporalPlainTimeOptionsContinuation {
+    target: TemporalPlainTimeOptionsTarget,
+    options: StoredValue,
+    stage: TemporalPlainTimeOptionsStage,
+    realm: RealmId,
+    origin: JsStackFrame,
+}
+
+impl TemporalPlainTimeOptionsContinuation {
+    pub(super) const fn retained_values() -> u64 {
+        1
+    }
+
+    pub(super) fn trace_roots(&self, mark: &mut dyn FnMut(CollectionRoot)) {
+        trace_stored_value_root(&self.options, mark);
+    }
+}
+
 impl TemporalPlainDateTimeLikeTarget {
     fn trace_roots(&self, mark: &mut dyn FnMut(CollectionRoot)) {
         match self {
@@ -369,6 +468,21 @@ impl TemporalPlainDateConstructorContinuation {
 }
 
 impl TemporalPlainDateTimeConstructorContinuation {
+    pub(super) fn retained_values(&self) -> u64 {
+        usize_to_u64(self.arguments.len()).saturating_add(1)
+    }
+
+    pub(super) fn trace_roots(&self, mark: &mut dyn FnMut(CollectionRoot)) {
+        for argument in &self.arguments {
+            trace_stored_value_root(argument, mark);
+        }
+        mark(CollectionRoot::Heap(HeapReference::Function(
+            self.new_target,
+        )));
+    }
+}
+
+impl TemporalPlainTimeConstructorContinuation {
     pub(super) fn retained_values(&self) -> u64 {
         usize_to_u64(self.arguments.len()).saturating_add(1)
     }
@@ -952,6 +1066,790 @@ pub(super) fn finish_temporal_plain_date_time_constructor_wrapper(
     };
     let object = runtime.allocate_temporal_plain_date_time(prototype, date_time)?;
     Ok(NativeDispatch::Immediate(StoredValue::Object(object)))
+}
+
+#[allow(
+    clippy::needless_pass_by_value,
+    clippy::too_many_arguments,
+    reason = "Temporal component conversion is resumable across user-defined primitive conversion"
+)]
+pub(super) fn begin_temporal_plain_time_constructor(
+    runtime: &mut Runtime,
+    realm: RealmId,
+    inputs: CallInputs,
+    return_to: Option<CallReturn>,
+    origin: JsStackFrame,
+    execution_budget: &mut ExecutionBudget,
+) -> Result<NativeDispatch, NativeFailure> {
+    let Some(new_target) = inputs.new_target else {
+        return temporal_type_error(realm, &origin, "Temporal.PlainTime is not callable");
+    };
+    let mut arguments = inputs.arguments.into_remaining_values();
+    arguments.truncate(6);
+    let provided = arguments.len();
+    arguments
+        .try_reserve(6_usize.saturating_sub(arguments.len()))
+        .map_err(|_| ExecutionError::AllocationFailed {
+            resource: RuntimeResource::FrameValues,
+            additional: 6_usize.saturating_sub(arguments.len()),
+        })?;
+    while arguments.len() < 6 {
+        arguments.push(StoredValue::Undefined);
+    }
+    let mut converted = Vec::new();
+    converted
+        .try_reserve_exact(6)
+        .map_err(|_| ExecutionError::AllocationFailed {
+            resource: RuntimeResource::FrameValues,
+            additional: 6,
+        })?;
+    advance_temporal_plain_time_constructor(
+        runtime,
+        TemporalPlainTimeConstructorContinuation {
+            arguments,
+            converted,
+            provided,
+            new_target,
+        },
+        None,
+        realm,
+        return_to,
+        &origin,
+        execution_budget,
+    )
+}
+
+#[allow(
+    clippy::needless_pass_by_value,
+    clippy::too_many_arguments,
+    reason = "Temporal component conversion is resumable across user-defined primitive conversion"
+)]
+pub(super) fn advance_temporal_plain_time_constructor(
+    runtime: &mut Runtime,
+    mut state: TemporalPlainTimeConstructorContinuation,
+    completion: Option<JsNumber>,
+    realm: RealmId,
+    return_to: Option<CallReturn>,
+    origin: &JsStackFrame,
+    execution_budget: &mut ExecutionBudget,
+) -> Result<NativeDispatch, NativeFailure> {
+    if let Some(value) = completion {
+        state.converted.push(value);
+    }
+    while state.converted.len() < 6 {
+        let index = state.converted.len();
+        let argument = std::mem::replace(&mut state.arguments[index], StoredValue::Undefined);
+        if (index == 0 && state.provided == 0)
+            || (index > 0 && matches!(argument, StoredValue::Undefined))
+        {
+            state.converted.push(JsNumber::from_i32(0));
+            continue;
+        }
+        return begin_operator_primitive_conversion(
+            runtime,
+            argument,
+            OperatorPrimitiveHint::Number,
+            OperatorPrimitiveTarget::TemporalPlainTimeConstructor(Box::new(state)),
+            realm,
+            return_to,
+            origin.clone(),
+            execution_budget,
+        );
+    }
+    complete_temporal_plain_time_constructor(
+        runtime,
+        &state,
+        realm,
+        return_to,
+        origin,
+        execution_budget,
+    )
+}
+
+#[allow(
+    clippy::too_many_arguments,
+    reason = "the completed constructor must still observe newTarget.prototype"
+)]
+fn complete_temporal_plain_time_constructor(
+    runtime: &mut Runtime,
+    state: &TemporalPlainTimeConstructorContinuation,
+    realm: RealmId,
+    return_to: Option<CallReturn>,
+    origin: &JsStackFrame,
+    execution_budget: &mut ExecutionBudget,
+) -> Result<NativeDispatch, NativeFailure> {
+    let [hour, minute, second, millisecond, microsecond, nanosecond] = state.converted.as_slice()
+    else {
+        return Err(EngineFault::RuntimeInvariant {
+            message: "Temporal.PlainTime constructor completed before all components converted",
+        }
+        .into());
+    };
+    let hour = temporal_plain_time_integer(*hour, realm, origin)?;
+    let minute = temporal_plain_time_integer(*minute, realm, origin)?;
+    let second = temporal_plain_time_integer(*second, realm, origin)?;
+    let millisecond = temporal_plain_time_integer(*millisecond, realm, origin)?;
+    let microsecond = temporal_plain_time_integer(*microsecond, realm, origin)?;
+    let nanosecond = temporal_plain_time_integer(*nanosecond, realm, origin)?;
+    let (Ok(hour), Ok(minute), Ok(second)) = (
+        u8::try_from(hour),
+        u8::try_from(minute),
+        u8::try_from(second),
+    ) else {
+        return temporal_range_error(
+            realm,
+            origin,
+            "Temporal.PlainTime fields are outside the supported range",
+        );
+    };
+    let (Ok(millisecond), Ok(microsecond), Ok(nanosecond)) = (
+        u16::try_from(millisecond),
+        u16::try_from(microsecond),
+        u16::try_from(nanosecond),
+    ) else {
+        return temporal_range_error(
+            realm,
+            origin,
+            "Temporal.PlainTime fields are outside the supported range",
+        );
+    };
+    let time = match PlainTime::try_new(hour, minute, second, millisecond, microsecond, nanosecond)
+    {
+        Ok(time) => time,
+        Err(error) => {
+            return Err(NativeFailure::Abrupt(temporal_exception_from_error(
+                realm, origin, error,
+            )?));
+        }
+    };
+    begin_temporal_plain_time_wrapper(
+        runtime,
+        realm,
+        state.new_target,
+        time,
+        return_to,
+        origin.clone(),
+        execution_budget,
+    )
+}
+
+#[allow(
+    clippy::cast_possible_truncation,
+    clippy::cast_precision_loss,
+    reason = "ECMA-262 ToIntegerWithTruncation is defined on binary64 values before their bounded Temporal fields are checked"
+)]
+fn temporal_plain_time_integer(
+    value: JsNumber,
+    realm: RealmId,
+    origin: &JsStackFrame,
+) -> Result<i64, NativeFailure> {
+    let value = value.as_f64();
+    if !value.is_finite() {
+        return Err(NativeFailure::Abrupt(temporal_pending_exception(
+            realm,
+            origin,
+            ExceptionKind::RangeError,
+            "Temporal.PlainTime fields must be finite Numbers",
+        )?));
+    }
+    let value = value.trunc();
+    if value < i64::MIN as f64 || value > i64::MAX as f64 {
+        return Err(NativeFailure::Abrupt(temporal_pending_exception(
+            realm,
+            origin,
+            ExceptionKind::RangeError,
+            "Temporal.PlainTime fields are outside the supported range",
+        )?));
+    }
+    Ok(value as i64)
+}
+
+#[allow(
+    clippy::needless_pass_by_value,
+    clippy::too_many_arguments,
+    reason = "newTarget prototype lookup is a resumable native operation"
+)]
+fn begin_temporal_plain_time_wrapper(
+    runtime: &mut Runtime,
+    realm: RealmId,
+    new_target: FunctionId,
+    time: PlainTime,
+    return_to: Option<CallReturn>,
+    origin: JsStackFrame,
+    execution_budget: &mut ExecutionBudget,
+) -> Result<NativeDispatch, NativeFailure> {
+    let prototype_key = runtime.predefined_property_key(PredefinedAtom::Prototype);
+    begin_intrinsic_get(
+        runtime,
+        realm,
+        HeapReference::Function(new_target),
+        StoredValue::Function(new_target),
+        &prototype_key,
+        IntrinsicGetContinuation::TemporalPlainTimeConstructor { new_target, time },
+        return_to,
+        Some(origin),
+        execution_budget,
+    )
+}
+
+pub(super) fn finish_temporal_plain_time_constructor_wrapper(
+    runtime: &mut Runtime,
+    new_target: FunctionId,
+    time: PlainTime,
+    requested: &StoredValue,
+) -> Result<NativeDispatch, NativeFailure> {
+    let prototype = match requested {
+        StoredValue::Function(function) => HeapReference::Function(*function),
+        StoredValue::Object(object) => HeapReference::Object(*object),
+        _ => {
+            let realm = runtime.function_realm(new_target)?;
+            HeapReference::Object(runtime.realm_temporal_plain_time_prototype(realm)?)
+        }
+    };
+    let object = runtime.allocate_temporal_plain_time(prototype, time)?;
+    Ok(NativeDispatch::Immediate(StoredValue::Object(object)))
+}
+
+#[allow(
+    clippy::needless_pass_by_value,
+    clippy::too_many_arguments,
+    reason = "Temporal.PlainTime static conversion retains the native call context"
+)]
+pub(super) fn begin_temporal_plain_time_static(
+    runtime: &mut Runtime,
+    method: TemporalPlainTimeStaticMethod,
+    realm: RealmId,
+    mut arguments: CallArguments,
+    return_to: Option<CallReturn>,
+    origin: JsStackFrame,
+    execution_budget: &mut ExecutionBudget,
+) -> Result<NativeDispatch, NativeFailure> {
+    match method {
+        TemporalPlainTimeStaticMethod::From => {
+            let value = arguments.take_first_or_undefined();
+            let options = arguments.take_first_or_undefined();
+            begin_temporal_plain_time_like(
+                runtime,
+                value,
+                TemporalPlainTimeLikeTarget::From { options },
+                realm,
+                return_to,
+                origin,
+                execution_budget,
+            )
+        }
+        TemporalPlainTimeStaticMethod::Compare => {
+            let first = arguments.take_first_or_undefined();
+            let second = arguments.take_first_or_undefined();
+            begin_temporal_plain_time_like(
+                runtime,
+                first,
+                TemporalPlainTimeLikeTarget::CompareFirst { second },
+                realm,
+                return_to,
+                origin,
+                execution_budget,
+            )
+        }
+    }
+}
+
+#[allow(
+    clippy::too_many_arguments,
+    reason = "all accepted Temporal.PlainTime inputs share a resumable conversion boundary"
+)]
+fn begin_temporal_plain_time_like(
+    runtime: &mut Runtime,
+    value: StoredValue,
+    target: TemporalPlainTimeLikeTarget,
+    realm: RealmId,
+    return_to: Option<CallReturn>,
+    origin: JsStackFrame,
+    execution_budget: &mut ExecutionBudget,
+) -> Result<NativeDispatch, NativeFailure> {
+    if let StoredValue::Object(object) = value {
+        if let Some(time) = runtime.temporal_plain_time(object)? {
+            return continue_temporal_plain_time_like(
+                runtime,
+                time,
+                target,
+                realm,
+                return_to,
+                origin,
+                execution_budget,
+            );
+        }
+        if let Some(date_time) = runtime.temporal_plain_date_time(object)? {
+            return continue_temporal_plain_time_like(
+                runtime,
+                PlainTime::from(date_time),
+                target,
+                realm,
+                return_to,
+                origin,
+                execution_budget,
+            );
+        }
+    }
+    if let StoredValue::String(value) = value {
+        let source = value.to_utf8_lossy()?;
+        let time = match PlainTime::from_utf8(source.as_bytes()) {
+            Ok(time) => time,
+            Err(error) => {
+                return Err(NativeFailure::Abrupt(temporal_exception_from_error(
+                    realm, &origin, error,
+                )?));
+            }
+        };
+        return continue_temporal_plain_time_like(
+            runtime,
+            time,
+            target,
+            realm,
+            return_to,
+            origin,
+            execution_budget,
+        );
+    }
+    if value.heap_reference().is_some() {
+        return advance_temporal_plain_time_property_bag(
+            runtime,
+            TemporalPlainTimeBagContinuation {
+                base: value,
+                hour: None,
+                microsecond: None,
+                millisecond: None,
+                minute: None,
+                nanosecond: None,
+                second: None,
+                next: 0,
+                stage: TemporalPlainTimeBagStage::ReadField,
+                target,
+                realm,
+                origin,
+            },
+            None,
+            return_to,
+            execution_budget,
+        );
+    }
+    temporal_type_error(
+        realm,
+        &origin,
+        "Temporal.PlainTime requires a PlainTime, PlainDateTime, ISO string, or property bag",
+    )
+}
+
+#[allow(
+    clippy::too_many_arguments,
+    reason = "the conversion target owns observable arguments across resumption"
+)]
+fn continue_temporal_plain_time_like(
+    runtime: &mut Runtime,
+    time: PlainTime,
+    target: TemporalPlainTimeLikeTarget,
+    realm: RealmId,
+    return_to: Option<CallReturn>,
+    origin: JsStackFrame,
+    execution_budget: &mut ExecutionBudget,
+) -> Result<NativeDispatch, NativeFailure> {
+    match target {
+        TemporalPlainTimeLikeTarget::From { options } => begin_temporal_plain_time_from_options(
+            runtime,
+            TemporalPlainTimeOptionsTarget::Existing(time),
+            options,
+            realm,
+            return_to,
+            origin,
+            execution_budget,
+        ),
+        TemporalPlainTimeLikeTarget::CompareFirst { second } => begin_temporal_plain_time_like(
+            runtime,
+            second,
+            TemporalPlainTimeLikeTarget::CompareSecond { first: time },
+            realm,
+            return_to,
+            origin,
+            execution_budget,
+        ),
+        TemporalPlainTimeLikeTarget::CompareSecond { first } => {
+            let result = match first.cmp(&time) {
+                std::cmp::Ordering::Less => -1,
+                std::cmp::Ordering::Equal => 0,
+                std::cmp::Ordering::Greater => 1,
+            };
+            Ok(NativeDispatch::Immediate(StoredValue::Number(
+                JsNumber::from_i32(result),
+            )))
+        }
+        TemporalPlainTimeLikeTarget::Equals { receiver } => Ok(NativeDispatch::Immediate(
+            StoredValue::Boolean(receiver == time),
+        )),
+    }
+}
+
+#[allow(
+    clippy::too_many_arguments,
+    clippy::too_many_lines,
+    reason = "the explicit state machine preserves property access and conversion order"
+)]
+pub(super) fn advance_temporal_plain_time_property_bag(
+    runtime: &mut Runtime,
+    mut state: TemporalPlainTimeBagContinuation,
+    completion: Option<StoredValue>,
+    return_to: Option<CallReturn>,
+    execution_budget: &mut ExecutionBudget,
+) -> Result<NativeDispatch, NativeFailure> {
+    let mut completion = completion;
+    loop {
+        match state.stage {
+            TemporalPlainTimeBagStage::ReadField => {
+                if state.next == TEMPORAL_PLAIN_TIME_BAG_FIELDS.len() {
+                    let partial = temporal_plain_time_partial_from_bag(&state)?;
+                    return match state.target {
+                        TemporalPlainTimeLikeTarget::From { options } => {
+                            begin_temporal_plain_time_from_options(
+                                runtime,
+                                TemporalPlainTimeOptionsTarget::Partial(partial),
+                                options,
+                                state.realm,
+                                return_to,
+                                state.origin,
+                                execution_budget,
+                            )
+                        }
+                        target => {
+                            let time =
+                                match PlainTime::from_partial(partial, Some(Overflow::Constrain)) {
+                                    Ok(time) => time,
+                                    Err(error) => {
+                                        return Err(NativeFailure::Abrupt(
+                                            temporal_exception_from_error(
+                                                state.realm,
+                                                &state.origin,
+                                                error,
+                                            )?,
+                                        ));
+                                    }
+                                };
+                            continue_temporal_plain_time_like(
+                                runtime,
+                                time,
+                                target,
+                                state.realm,
+                                return_to,
+                                state.origin,
+                                execution_budget,
+                            )
+                        }
+                    };
+                }
+                charge_heap_property_lookup(runtime, &state.base, execution_budget)?;
+                let name = JsString::from_utf8(TEMPORAL_PLAIN_TIME_BAG_FIELDS[state.next])?;
+                let key = runtime.property_key_from_string(&name)?;
+                state.stage = TemporalPlainTimeBagStage::AwaitField;
+                let dispatch = begin_value_get(
+                    runtime,
+                    &state.base,
+                    key,
+                    Some(&name),
+                    state.realm,
+                    return_to,
+                    state.origin.clone(),
+                    execution_budget,
+                )?;
+                match continue_get_state_after(
+                    dispatch,
+                    state,
+                    temporal_plain_time_bag_continuation,
+                    "Temporal.PlainTime property bag Get produced a structured result",
+                )? {
+                    GetContinuationDispatch::Ready {
+                        state: resumed,
+                        value,
+                    } => {
+                        state = resumed;
+                        completion = Some(value);
+                    }
+                    GetContinuationDispatch::Suspended(dispatch) => return Ok(dispatch),
+                }
+            }
+            TemporalPlainTimeBagStage::AwaitField => {
+                let value = completion.take().ok_or(EngineFault::RuntimeInvariant {
+                    message: "Temporal.PlainTime property bag Get resumed without a value",
+                })?;
+                if matches!(value, StoredValue::Undefined) {
+                    state.next = state.next.saturating_add(1);
+                    state.stage = TemporalPlainTimeBagStage::ReadField;
+                    continue;
+                }
+                state.stage = TemporalPlainTimeBagStage::AwaitConversion;
+                let realm = state.realm;
+                let origin = state.origin.clone();
+                return begin_operator_primitive_conversion(
+                    runtime,
+                    value,
+                    OperatorPrimitiveHint::Number,
+                    OperatorPrimitiveTarget::TemporalPlainTimeBag(Box::new(state)),
+                    realm,
+                    return_to,
+                    origin,
+                    execution_budget,
+                );
+            }
+            TemporalPlainTimeBagStage::AwaitConversion => {
+                let value = completion.take().ok_or(EngineFault::RuntimeInvariant {
+                    message: "Temporal.PlainTime property bag conversion resumed without a value",
+                })?;
+                let value = operator_to_number(value, state.realm, &state.origin)?;
+                match TEMPORAL_PLAIN_TIME_BAG_FIELDS[state.next] {
+                    "hour" => state.hour = Some(value),
+                    "microsecond" => state.microsecond = Some(value),
+                    "millisecond" => state.millisecond = Some(value),
+                    "minute" => state.minute = Some(value),
+                    "nanosecond" => state.nanosecond = Some(value),
+                    "second" => state.second = Some(value),
+                    _ => {
+                        return Err(EngineFault::RuntimeInvariant {
+                            message: "unknown Temporal.PlainTime property-bag field",
+                        }
+                        .into());
+                    }
+                }
+                state.next = state.next.saturating_add(1);
+                state.stage = TemporalPlainTimeBagStage::ReadField;
+            }
+        }
+    }
+}
+
+fn temporal_plain_time_bag_continuation(
+    state: TemporalPlainTimeBagContinuation,
+) -> NativeContinuation {
+    NativeContinuation::TemporalPlainTimeBag(Box::new(state))
+}
+
+fn temporal_plain_time_partial_from_bag(
+    state: &TemporalPlainTimeBagContinuation,
+) -> Result<PartialTime, NativeFailure> {
+    let convert_u8 = |value: Option<JsNumber>| temporal_plain_time_optional_u8(value, state);
+    let convert_u16 = |value: Option<JsNumber>| temporal_plain_time_optional_u16(value, state);
+    Ok(PartialTime::new()
+        .with_hour(convert_u8(state.hour)?)
+        .with_minute(convert_u8(state.minute)?)
+        .with_second(convert_u8(state.second)?)
+        .with_millisecond(convert_u16(state.millisecond)?)
+        .with_microsecond(convert_u16(state.microsecond)?)
+        .with_nanosecond(convert_u16(state.nanosecond)?))
+}
+
+fn temporal_plain_time_optional_u8(
+    value: Option<JsNumber>,
+    state: &TemporalPlainTimeBagContinuation,
+) -> Result<Option<u8>, NativeFailure> {
+    let Some(value) = value else {
+        return Ok(None);
+    };
+    let value = temporal_plain_time_integer(value, state.realm, &state.origin)?;
+    let Ok(value) = u8::try_from(value) else {
+        return Err(NativeFailure::Abrupt(temporal_pending_exception(
+            state.realm,
+            &state.origin,
+            ExceptionKind::RangeError,
+            "Temporal.PlainTime fields are outside the supported range",
+        )?));
+    };
+    Ok(Some(value))
+}
+
+fn temporal_plain_time_optional_u16(
+    value: Option<JsNumber>,
+    state: &TemporalPlainTimeBagContinuation,
+) -> Result<Option<u16>, NativeFailure> {
+    let Some(value) = value else {
+        return Ok(None);
+    };
+    let value = temporal_plain_time_integer(value, state.realm, &state.origin)?;
+    let Ok(value) = u16::try_from(value) else {
+        return Err(NativeFailure::Abrupt(temporal_pending_exception(
+            state.realm,
+            &state.origin,
+            ExceptionKind::RangeError,
+            "Temporal.PlainTime fields are outside the supported range",
+        )?));
+    };
+    Ok(Some(value))
+}
+
+#[allow(
+    clippy::too_many_arguments,
+    clippy::too_many_lines,
+    reason = "the explicit state machine preserves GetOptionsObject and overflow conversion order"
+)]
+fn begin_temporal_plain_time_from_options(
+    runtime: &mut Runtime,
+    target: TemporalPlainTimeOptionsTarget,
+    options: StoredValue,
+    realm: RealmId,
+    return_to: Option<CallReturn>,
+    origin: JsStackFrame,
+    execution_budget: &mut ExecutionBudget,
+) -> Result<NativeDispatch, NativeFailure> {
+    if matches!(options, StoredValue::Undefined) {
+        return finish_temporal_plain_time_from_options(
+            runtime,
+            target,
+            Overflow::Constrain,
+            realm,
+            &origin,
+        );
+    }
+    if options.heap_reference().is_none() {
+        return temporal_type_error(
+            realm,
+            &origin,
+            "Temporal.PlainTime.from options must be an object",
+        );
+    }
+    advance_temporal_plain_time_from_options(
+        runtime,
+        TemporalPlainTimeOptionsContinuation {
+            target,
+            options,
+            stage: TemporalPlainTimeOptionsStage::ReadOverflow,
+            realm,
+            origin,
+        },
+        None,
+        return_to,
+        execution_budget,
+    )
+}
+
+#[allow(
+    clippy::too_many_arguments,
+    clippy::too_many_lines,
+    reason = "the explicit state machine preserves GetOptionsObject and overflow conversion order"
+)]
+pub(super) fn advance_temporal_plain_time_from_options(
+    runtime: &mut Runtime,
+    mut state: TemporalPlainTimeOptionsContinuation,
+    completion: Option<StoredValue>,
+    return_to: Option<CallReturn>,
+    execution_budget: &mut ExecutionBudget,
+) -> Result<NativeDispatch, NativeFailure> {
+    let mut completion = completion;
+    loop {
+        match state.stage {
+            TemporalPlainTimeOptionsStage::ReadOverflow => {
+                charge_heap_property_lookup(runtime, &state.options, execution_budget)?;
+                let name = JsString::from_utf8("overflow")?;
+                let key = runtime.property_key_from_string(&name)?;
+                state.stage = TemporalPlainTimeOptionsStage::AwaitOverflow;
+                let dispatch = begin_value_get(
+                    runtime,
+                    &state.options,
+                    key,
+                    Some(&name),
+                    state.realm,
+                    return_to,
+                    state.origin.clone(),
+                    execution_budget,
+                )?;
+                match continue_get_state_after(
+                    dispatch,
+                    state,
+                    temporal_plain_time_options_continuation,
+                    "Temporal.PlainTime.from overflow Get produced a structured result",
+                )? {
+                    GetContinuationDispatch::Ready {
+                        state: resumed,
+                        value,
+                    } => {
+                        state = resumed;
+                        completion = Some(value);
+                    }
+                    GetContinuationDispatch::Suspended(dispatch) => return Ok(dispatch),
+                }
+            }
+            TemporalPlainTimeOptionsStage::AwaitOverflow => {
+                let value = completion.take().ok_or(EngineFault::RuntimeInvariant {
+                    message: "Temporal.PlainTime.from overflow Get resumed without a value",
+                })?;
+                if matches!(value, StoredValue::Undefined) {
+                    return finish_temporal_plain_time_from_options(
+                        runtime,
+                        state.target,
+                        Overflow::Constrain,
+                        state.realm,
+                        &state.origin,
+                    );
+                }
+                state.stage = TemporalPlainTimeOptionsStage::AwaitOverflowConversion;
+                let realm = state.realm;
+                let origin = state.origin.clone();
+                return begin_operator_primitive_conversion(
+                    runtime,
+                    value,
+                    OperatorPrimitiveHint::String,
+                    OperatorPrimitiveTarget::TemporalPlainTimeOptions(Box::new(state)),
+                    realm,
+                    return_to,
+                    origin,
+                    execution_budget,
+                );
+            }
+            TemporalPlainTimeOptionsStage::AwaitOverflowConversion => {
+                let value = completion.take().ok_or(EngineFault::RuntimeInvariant {
+                    message: "Temporal.PlainTime.from overflow conversion resumed without a value",
+                })?;
+                let value = operator_primitive_to_string(value, state.realm, &state.origin)?;
+                let Ok(overflow) = Overflow::from_str(&value.to_utf8_lossy()?) else {
+                    return temporal_range_error(
+                        state.realm,
+                        &state.origin,
+                        "Temporal.PlainTime.from overflow must be constrain or reject",
+                    );
+                };
+                return finish_temporal_plain_time_from_options(
+                    runtime,
+                    state.target,
+                    overflow,
+                    state.realm,
+                    &state.origin,
+                );
+            }
+        }
+    }
+}
+
+fn temporal_plain_time_options_continuation(
+    state: TemporalPlainTimeOptionsContinuation,
+) -> NativeContinuation {
+    NativeContinuation::TemporalPlainTimeOptions(Box::new(state))
+}
+
+fn finish_temporal_plain_time_from_options(
+    runtime: &mut Runtime,
+    target: TemporalPlainTimeOptionsTarget,
+    overflow: Overflow,
+    realm: RealmId,
+    origin: &JsStackFrame,
+) -> Result<NativeDispatch, NativeFailure> {
+    let time = match target {
+        TemporalPlainTimeOptionsTarget::Existing(time) => time,
+        TemporalPlainTimeOptionsTarget::Partial(partial) => {
+            match PlainTime::from_partial(partial, Some(overflow)) {
+                Ok(time) => time,
+                Err(error) => {
+                    return Err(NativeFailure::Abrupt(temporal_exception_from_error(
+                        realm, origin, error,
+                    )?));
+                }
+            }
+        }
+    };
+    allocate_temporal_plain_time_result(runtime, realm, time)
 }
 
 #[allow(
@@ -2572,6 +3470,16 @@ fn allocate_temporal_plain_date_time_result(
     Ok(NativeDispatch::Immediate(StoredValue::Object(object)))
 }
 
+fn allocate_temporal_plain_time_result(
+    runtime: &mut Runtime,
+    realm: RealmId,
+    time: PlainTime,
+) -> Result<NativeDispatch, NativeFailure> {
+    let prototype = HeapReference::Object(runtime.realm_temporal_plain_time_prototype(realm)?);
+    let object = runtime.allocate_temporal_plain_time(prototype, time)?;
+    Ok(NativeDispatch::Immediate(StoredValue::Object(object)))
+}
+
 fn finish_temporal_plain_date_with_calendar(
     runtime: &mut Runtime,
     date: &PlainDate,
@@ -2653,6 +3561,17 @@ fn begin_temporal_plain_date_to_plain_date_time(
             runtime,
             &date,
             Some(PlainTime::from(date_time)),
+            realm,
+            &origin,
+        );
+    }
+    if let StoredValue::Object(object) = value
+        && let Some(time) = runtime.temporal_plain_time(object)?
+    {
+        return finish_temporal_plain_date_to_plain_date_time(
+            runtime,
+            &date,
+            Some(time),
             realm,
             &origin,
         );
@@ -3359,6 +4278,81 @@ pub(super) fn dispatch_temporal_plain_date_time_prototype(
             "Temporal.PlainDateTime cannot be converted to a primitive value",
         ),
     }
+}
+
+#[allow(
+    clippy::needless_pass_by_value,
+    clippy::too_many_arguments,
+    reason = "one exhaustive dispatcher preserves receiver validation and method-specific argument order"
+)]
+pub(super) fn dispatch_temporal_plain_time_prototype(
+    runtime: &mut Runtime,
+    method: TemporalPlainTimePrototypeMethod,
+    realm: RealmId,
+    receiver: &StoredValue,
+    mut arguments: CallArguments,
+    return_to: Option<CallReturn>,
+    origin: &JsStackFrame,
+    execution_budget: &mut ExecutionBudget,
+) -> Result<NativeDispatch, NativeFailure> {
+    let time = require_temporal_plain_time(runtime, receiver, realm, origin)?;
+    let number = |value| NativeDispatch::Immediate(StoredValue::Number(JsNumber::from_i64(value)));
+    match method {
+        TemporalPlainTimePrototypeMethod::Hour => Ok(number(i64::from(time.hour()))),
+        TemporalPlainTimePrototypeMethod::Minute => Ok(number(i64::from(time.minute()))),
+        TemporalPlainTimePrototypeMethod::Second => Ok(number(i64::from(time.second()))),
+        TemporalPlainTimePrototypeMethod::Millisecond => Ok(number(i64::from(time.millisecond()))),
+        TemporalPlainTimePrototypeMethod::Microsecond => Ok(number(i64::from(time.microsecond()))),
+        TemporalPlainTimePrototypeMethod::Nanosecond => Ok(number(i64::from(time.nanosecond()))),
+        TemporalPlainTimePrototypeMethod::Equals => begin_temporal_plain_time_like(
+            runtime,
+            arguments.take_first_or_undefined(),
+            TemporalPlainTimeLikeTarget::Equals { receiver: time },
+            realm,
+            return_to,
+            origin.clone(),
+            execution_budget,
+        ),
+        TemporalPlainTimePrototypeMethod::ToString
+        | TemporalPlainTimePrototypeMethod::ToJson
+        | TemporalPlainTimePrototypeMethod::ToLocaleString => {
+            let text = match time.to_ixdtf_string(ToStringRoundingOptions::default()) {
+                Ok(text) => text,
+                Err(error) => {
+                    return Err(NativeFailure::Abrupt(temporal_exception_from_error(
+                        realm, origin, error,
+                    )?));
+                }
+            };
+            Ok(NativeDispatch::Immediate(StoredValue::String(
+                JsString::from_utf8(&text)?,
+            )))
+        }
+        TemporalPlainTimePrototypeMethod::ValueOf => temporal_type_error(
+            realm,
+            origin,
+            "Temporal.PlainTime cannot be converted to a primitive value",
+        ),
+    }
+}
+
+fn require_temporal_plain_time(
+    runtime: &Runtime,
+    receiver: &StoredValue,
+    realm: RealmId,
+    origin: &JsStackFrame,
+) -> Result<PlainTime, NativeFailure> {
+    if let StoredValue::Object(object) = receiver
+        && let Some(time) = runtime.temporal_plain_time(*object)?
+    {
+        return Ok(time);
+    }
+    Err(NativeFailure::Abrupt(temporal_pending_exception(
+        realm,
+        origin,
+        ExceptionKind::TypeError,
+        "not a Temporal.PlainTime object",
+    )?))
 }
 
 #[allow(

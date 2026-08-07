@@ -569,6 +569,9 @@ pub(super) fn finish_intrinsic_get(
         } => finish_temporal_plain_date_time_constructor_wrapper(
             runtime, new_target, date_time, &value,
         ),
+        IntrinsicGetContinuation::TemporalPlainTimeConstructor { new_target, time } => {
+            finish_temporal_plain_time_constructor_wrapper(runtime, new_target, time, &value)
+        }
         IntrinsicGetContinuation::StringConstructor {
             new_target,
             value: string_value,
@@ -2140,6 +2143,18 @@ fn finish_operator_primitive_target(
                 execution_budget,
             )
         }
+        OperatorPrimitiveTarget::TemporalPlainTimeConstructor(state) => {
+            let number = operator_to_number(value, realm, origin)?;
+            advance_temporal_plain_time_constructor(
+                runtime,
+                *state,
+                Some(number),
+                realm,
+                return_to,
+                origin,
+                execution_budget,
+            )
+        }
         OperatorPrimitiveTarget::TemporalPlainDateEquals(receiver) => {
             finish_temporal_plain_date_equals(receiver.as_ref(), value, realm, origin)
         }
@@ -2154,6 +2169,24 @@ fn finish_operator_primitive_target(
         }
         OperatorPrimitiveTarget::TemporalPlainDateTimeBag(state) => {
             advance_temporal_plain_date_time_property_bag(
+                runtime,
+                *state,
+                Some(value),
+                return_to,
+                execution_budget,
+            )
+        }
+        OperatorPrimitiveTarget::TemporalPlainTimeBag(state) => {
+            advance_temporal_plain_time_property_bag(
+                runtime,
+                *state,
+                Some(value),
+                return_to,
+                execution_budget,
+            )
+        }
+        OperatorPrimitiveTarget::TemporalPlainTimeOptions(state) => {
+            advance_temporal_plain_time_from_options(
                 runtime,
                 *state,
                 Some(value),
