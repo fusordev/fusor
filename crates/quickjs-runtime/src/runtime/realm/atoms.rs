@@ -8,6 +8,7 @@ use crate::{
         TemporalDurationStaticMethod, TemporalInstantPrototypeMethod, TemporalInstantStaticMethod,
         TemporalPlainDatePrototypeMethod, TemporalPlainDateStaticMethod,
         TemporalPlainDateTimePrototypeMethod, TemporalPlainDateTimeStaticMethod,
+        TemporalPlainMonthDayPrototypeMethod, TemporalPlainMonthDayStaticMethod,
         TemporalPlainTimePrototypeMethod, TemporalPlainTimeStaticMethod, TypedArrayPrototypeMethod,
     },
 };
@@ -322,6 +323,13 @@ fn visit_realm_name_order(
     for method in TemporalPlainTimePrototypeMethod::ALL {
         visit(RealmNameId::TemporalPlainTimePrototype(method))?;
     }
+    visit(RealmNameId::PlainMonthDay)?;
+    for method in TemporalPlainMonthDayStaticMethod::ALL {
+        visit(RealmNameId::TemporalPlainMonthDayStatic(method))?;
+    }
+    for method in TemporalPlainMonthDayPrototypeMethod::ALL {
+        visit(RealmNameId::TemporalPlainMonthDayPrototype(method))?;
+    }
     visit(RealmNameId::RegExpEscape)?;
     visit(RealmNameId::RegExpCompile)?;
     visit(RealmNameId::RegExpTest)?;
@@ -534,6 +542,7 @@ fn realm_name_description(id: RealmNameId) -> &'static str {
         RealmNameId::Instant => "Instant",
         RealmNameId::PlainDate => "PlainDate",
         RealmNameId::PlainDateTime => "PlainDateTime",
+        RealmNameId::PlainMonthDay => "PlainMonthDay",
         RealmNameId::TemporalDurationStatic(method) => method.name(),
         RealmNameId::TemporalDurationPrototype(method) => method.name(),
         RealmNameId::TemporalInstantStatic(method) => method.name(),
@@ -545,6 +554,8 @@ fn realm_name_description(id: RealmNameId) -> &'static str {
         RealmNameId::PlainTime => "PlainTime",
         RealmNameId::TemporalPlainTimeStatic(method) => method.name(),
         RealmNameId::TemporalPlainTimePrototype(method) => method.name(),
+        RealmNameId::TemporalPlainMonthDayStatic(method) => method.name(),
+        RealmNameId::TemporalPlainMonthDayPrototype(method) => method.name(),
         RealmNameId::RegExpEscape => "escape",
         RealmNameId::RegExpCompile => "compile",
         RealmNameId::RegExpTest => "test",
@@ -569,8 +580,8 @@ mod tests {
         let schema = RealmIntrinsicSchema::try_new().expect("Realm schema");
         let plan = RealmAtomPlan::try_new(&schema).expect("atom plan");
 
-        assert_eq!(plan.len(), 330);
-        assert_eq!(plan.description_code_units(), 2_802);
+        assert_eq!(plan.len(), 331);
+        assert_eq!(plan.description_code_units(), 2_815);
     }
 
     #[test]

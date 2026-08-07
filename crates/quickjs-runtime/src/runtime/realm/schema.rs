@@ -18,6 +18,7 @@ use crate::runtime::{
     TemporalDurationStaticMethod, TemporalInstantPrototypeMethod, TemporalInstantStaticMethod,
     TemporalPlainDatePrototypeMethod, TemporalPlainDateStaticMethod,
     TemporalPlainDateTimePrototypeMethod, TemporalPlainDateTimeStaticMethod,
+    TemporalPlainMonthDayPrototypeMethod, TemporalPlainMonthDayStaticMethod,
     TemporalPlainTimePrototypeMethod, TemporalPlainTimeStaticMethod, TypedArrayPrototypeMethod,
 };
 
@@ -47,6 +48,7 @@ pub(in crate::runtime) enum IntrinsicObjectId {
     TemporalPlainDatePrototype,
     TemporalPlainDateTimePrototype,
     TemporalPlainTimePrototype,
+    TemporalPlainMonthDayPrototype,
     RegExpPrototype,
     IteratorPrototype,
     AsyncIteratorPrototype,
@@ -76,7 +78,7 @@ pub(in crate::runtime) enum IntrinsicObjectId {
 }
 
 impl IntrinsicObjectId {
-    pub(in crate::runtime) const ALL: [Self; 65] = [
+    pub(in crate::runtime) const ALL: [Self; 66] = [
         Self::ObjectPrototype,
         Self::GlobalObject,
         Self::ErrorPrototype(ErrorIntrinsicKind::Error),
@@ -116,6 +118,7 @@ impl IntrinsicObjectId {
         Self::TemporalPlainDatePrototype,
         Self::TemporalPlainDateTimePrototype,
         Self::TemporalPlainTimePrototype,
+        Self::TemporalPlainMonthDayPrototype,
         Self::RegExpPrototype,
         Self::IteratorPrototype,
         Self::AsyncIteratorPrototype,
@@ -201,6 +204,7 @@ pub(in crate::runtime) enum RealmNameId {
     PlainDate,
     PlainDateTime,
     PlainTime,
+    PlainMonthDay,
     TemporalDurationStatic(TemporalDurationStaticMethod),
     TemporalDurationPrototype(TemporalDurationPrototypeMethod),
     TemporalInstantStatic(TemporalInstantStaticMethod),
@@ -211,6 +215,8 @@ pub(in crate::runtime) enum RealmNameId {
     TemporalPlainDateTimePrototype(TemporalPlainDateTimePrototypeMethod),
     TemporalPlainTimeStatic(TemporalPlainTimeStaticMethod),
     TemporalPlainTimePrototype(TemporalPlainTimePrototypeMethod),
+    TemporalPlainMonthDayStatic(TemporalPlainMonthDayStaticMethod),
+    TemporalPlainMonthDayPrototype(TemporalPlainMonthDayPrototypeMethod),
     RegExpEscape,
     RegExpCompile,
     RegExpTest,

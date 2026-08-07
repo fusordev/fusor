@@ -17,6 +17,7 @@ use crate::runtime::{
     TemporalDurationPrototypeMethod, TemporalDurationStaticMethod, TemporalInstantPrototypeMethod,
     TemporalInstantStaticMethod, TemporalPlainDatePrototypeMethod, TemporalPlainDateStaticMethod,
     TemporalPlainDateTimePrototypeMethod, TemporalPlainDateTimeStaticMethod,
+    TemporalPlainMonthDayPrototypeMethod, TemporalPlainMonthDayStaticMethod,
     TemporalPlainTimePrototypeMethod, TemporalPlainTimeStaticMethod,
 };
 
@@ -28,6 +29,7 @@ pub(super) fn visit_objects(visit: ObjectSink<'_>) {
         IntrinsicObjectId::TemporalPlainDatePrototype,
         IntrinsicObjectId::TemporalPlainDateTimePrototype,
         IntrinsicObjectId::TemporalPlainTimePrototype,
+        IntrinsicObjectId::TemporalPlainMonthDayPrototype,
     ] {
         visit(object(
             id,
@@ -268,6 +270,51 @@ pub(super) fn visit_functions(visit: FunctionSink<'_>) {
             method.length(),
         ));
     }
+    visit(ordinary(
+        NativeFunctionKind::TemporalPlainMonthDayConstructor,
+        IntrinsicNameSpec::RealmName(RealmNameId::PlainMonthDay),
+        2,
+    ));
+    for method in TemporalPlainMonthDayStaticMethod::ALL {
+        let name = match method {
+            TemporalPlainMonthDayStaticMethod::From => {
+                IntrinsicNameSpec::Predefined(PredefinedAtom::From)
+            }
+            TemporalPlainMonthDayStaticMethod::Compare => {
+                IntrinsicNameSpec::RealmName(RealmNameId::TemporalPlainMonthDayStatic(method))
+            }
+        };
+        visit(ordinary(
+            NativeFunctionKind::TemporalPlainMonthDayStatic(method),
+            name,
+            method.length(),
+        ));
+    }
+    for method in TemporalPlainMonthDayPrototypeMethod::ALL {
+        let name = match method {
+            TemporalPlainMonthDayPrototypeMethod::ToString => {
+                IntrinsicNameSpec::Predefined(PredefinedAtom::ToString)
+            }
+            TemporalPlainMonthDayPrototypeMethod::ToJson => {
+                IntrinsicNameSpec::Predefined(PredefinedAtom::ToJson)
+            }
+            TemporalPlainMonthDayPrototypeMethod::ToLocaleString => {
+                IntrinsicNameSpec::Predefined(PredefinedAtom::ToLocaleString)
+            }
+            TemporalPlainMonthDayPrototypeMethod::ValueOf => {
+                IntrinsicNameSpec::Predefined(PredefinedAtom::ValueOf)
+            }
+            method if method.is_accessor() => IntrinsicNameSpec::Literal(method.function_name()),
+            method => {
+                IntrinsicNameSpec::RealmName(RealmNameId::TemporalPlainMonthDayPrototype(method))
+            }
+        };
+        visit(ordinary(
+            NativeFunctionKind::TemporalPlainMonthDayPrototype(method),
+            name,
+            method.length(),
+        ));
+    }
 }
 
 #[allow(
@@ -299,6 +346,11 @@ pub(super) fn visit_properties(visit: PropertySink<'_>) {
         IntrinsicIdentity::Object(IntrinsicObjectId::TemporalPlainTimePrototype);
     let plain_time_constructor = IntrinsicIdentity::Function(IntrinsicFunctionId(
         NativeFunctionKind::TemporalPlainTimeConstructor,
+    ));
+    let plain_month_day_prototype =
+        IntrinsicIdentity::Object(IntrinsicObjectId::TemporalPlainMonthDayPrototype);
+    let plain_month_day_constructor = IntrinsicIdentity::Function(IntrinsicFunctionId(
+        NativeFunctionKind::TemporalPlainMonthDayConstructor,
     ));
 
     visit(data(
@@ -676,5 +728,78 @@ pub(super) fn visit_properties(visit: PropertySink<'_>) {
         IntrinsicKeySpec::WellKnownSymbol(PredefinedAtom::SymbolToStringTag),
         PropertyLayout::data(false, false, true),
         IntrinsicValueSpec::String(IntrinsicStringSpec::Literal("Temporal.PlainTime")),
+    ));
+    visit(method(
+        namespace,
+        IntrinsicKeySpec::InternedString(RealmNameId::PlainMonthDay),
+        NativeFunctionKind::TemporalPlainMonthDayConstructor,
+    ));
+    visit(data(
+        plain_month_day_constructor,
+        IntrinsicKeySpec::PredefinedString(PredefinedAtom::Prototype),
+        CONSTRUCTOR_PROTOTYPE_PROPERTY,
+        IntrinsicValueSpec::Object(IntrinsicObjectId::TemporalPlainMonthDayPrototype),
+    ));
+    visit(method(
+        plain_month_day_prototype,
+        IntrinsicKeySpec::PredefinedString(PredefinedAtom::Constructor),
+        NativeFunctionKind::TemporalPlainMonthDayConstructor,
+    ));
+    for method_id in TemporalPlainMonthDayStaticMethod::ALL {
+        let key = match method_id {
+            TemporalPlainMonthDayStaticMethod::From => {
+                IntrinsicKeySpec::PredefinedString(PredefinedAtom::From)
+            }
+            TemporalPlainMonthDayStaticMethod::Compare => IntrinsicKeySpec::InternedString(
+                RealmNameId::TemporalPlainMonthDayStatic(method_id),
+            ),
+        };
+        visit(method(
+            plain_month_day_constructor,
+            key,
+            NativeFunctionKind::TemporalPlainMonthDayStatic(method_id),
+        ));
+    }
+    for method_id in TemporalPlainMonthDayPrototypeMethod::ALL {
+        let key = match method_id {
+            TemporalPlainMonthDayPrototypeMethod::ToString => {
+                IntrinsicKeySpec::PredefinedString(PredefinedAtom::ToString)
+            }
+            TemporalPlainMonthDayPrototypeMethod::ToJson => {
+                IntrinsicKeySpec::PredefinedString(PredefinedAtom::ToJson)
+            }
+            TemporalPlainMonthDayPrototypeMethod::ToLocaleString => {
+                IntrinsicKeySpec::PredefinedString(PredefinedAtom::ToLocaleString)
+            }
+            TemporalPlainMonthDayPrototypeMethod::ValueOf => {
+                IntrinsicKeySpec::PredefinedString(PredefinedAtom::ValueOf)
+            }
+            method => IntrinsicKeySpec::InternedString(
+                RealmNameId::TemporalPlainMonthDayPrototype(method),
+            ),
+        };
+        if method_id.is_accessor() {
+            visit(accessor(
+                plain_month_day_prototype,
+                key,
+                PropertyLayout::accessor(false, true),
+                Some(IntrinsicFunctionId(
+                    NativeFunctionKind::TemporalPlainMonthDayPrototype(method_id),
+                )),
+                None,
+            ));
+        } else {
+            visit(method(
+                plain_month_day_prototype,
+                key,
+                NativeFunctionKind::TemporalPlainMonthDayPrototype(method_id),
+            ));
+        }
+    }
+    visit(data(
+        plain_month_day_prototype,
+        IntrinsicKeySpec::WellKnownSymbol(PredefinedAtom::SymbolToStringTag),
+        PropertyLayout::data(false, false, true),
+        IntrinsicValueSpec::String(IntrinsicStringSpec::Literal("Temporal.PlainMonthDay")),
     ));
 }

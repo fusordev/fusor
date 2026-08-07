@@ -556,6 +556,15 @@ pub(super) fn resume_native_continuations(
                     execution_budget,
                 )?
             }
+            NativeContinuation::TemporalPlainMonthDayBag(state) => {
+                advance_temporal_plain_month_day_property_bag(
+                    runtime,
+                    *state,
+                    Some(value),
+                    return_to,
+                    execution_budget,
+                )?
+            }
             NativeContinuation::TemporalPlainDateTimeBag(state) => {
                 advance_temporal_plain_date_time_property_bag(
                     runtime,
@@ -597,6 +606,33 @@ pub(super) fn resume_native_continuations(
                     runtime,
                     *state,
                     value,
+                    return_to,
+                    execution_budget,
+                )?
+            }
+            NativeContinuation::TemporalPlainMonthDayToStringOptions(state) => {
+                advance_temporal_plain_month_day_to_string(
+                    runtime,
+                    *state,
+                    value,
+                    return_to,
+                    execution_budget,
+                )?
+            }
+            NativeContinuation::TemporalPlainMonthDayToPlainDate(state) => {
+                advance_temporal_plain_month_day_to_plain_date(
+                    runtime,
+                    *state,
+                    Some(value),
+                    return_to,
+                    execution_budget,
+                )?
+            }
+            NativeContinuation::TemporalPlainMonthDayWith(state) => {
+                advance_temporal_plain_month_day_with(
+                    runtime,
+                    *state,
+                    Some(value),
                     return_to,
                     execution_budget,
                 )?
@@ -2765,6 +2801,40 @@ pub(super) fn dispatch_native_call_with_frames(
         NativeFunctionKind::TemporalPlainTimePrototype(method) => {
             let origin = origin.unwrap_or_else(native_function_host_origin);
             dispatch_temporal_plain_time_prototype(
+                runtime,
+                method,
+                native.realm,
+                &inputs.receiver,
+                inputs.arguments,
+                return_to,
+                &origin,
+                execution_budget,
+            )
+        }
+        NativeFunctionKind::TemporalPlainMonthDayConstructor => {
+            begin_temporal_plain_month_day_constructor(
+                runtime,
+                native.realm,
+                inputs,
+                return_to,
+                origin.unwrap_or_else(native_function_host_origin),
+                execution_budget,
+            )
+        }
+        NativeFunctionKind::TemporalPlainMonthDayStatic(method) => {
+            begin_temporal_plain_month_day_static(
+                runtime,
+                method,
+                native.realm,
+                inputs.arguments,
+                return_to,
+                origin.unwrap_or_else(native_function_host_origin),
+                execution_budget,
+            )
+        }
+        NativeFunctionKind::TemporalPlainMonthDayPrototype(method) => {
+            let origin = origin.unwrap_or_else(native_function_host_origin);
+            dispatch_temporal_plain_month_day_prototype(
                 runtime,
                 method,
                 native.realm,

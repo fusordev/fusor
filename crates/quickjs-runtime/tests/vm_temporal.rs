@@ -171,6 +171,53 @@ fn plain_date_to_string_reads_calendar_name_resumably() {
 }
 
 #[test]
+fn plain_month_day_converts_property_bags_and_preserves_observable_boundaries() {
+    assert_eq!(
+        rendered(
+            "var log=[];
+             function number(name,value){return {valueOf:function(){log.push(name);return value}}}
+             function string(name,value){return {toString:function(){log.push(name);return value}}}
+             var value=new Temporal.PlainMonthDay(2,29,'iso8601',2020);
+             var from=Temporal.PlainMonthDay.from({month:13,day:34},{overflow:'constrain'});
+             var changed=value.with({day:number('day',31),monthCode:string('monthCode','M12')},{get overflow(){log.push('overflow');return string('overflow string','constrain')}});
+             var date=value.toPlainDate({year:number('year',2021)});
+             return [Temporal.PlainMonthDay.length,Temporal.PlainMonthDay.name,
+               Object.prototype.toString.call(value),value.calendarId,value.monthCode,value.day,
+               value.toString({calendarName:'always'}),from.toString(),changed.toString(),
+               date.toString(),log.join(',')].join('|');"
+        ),
+        "2|PlainMonthDay|[object Temporal.PlainMonthDay]|iso8601|M02|29|2020-02-29[u-ca=iso8601]|12-31|12-31|2021-02-28|day,monthCode,overflow,overflow string,year"
+    );
+    assert_eq!(
+        rendered(
+            "var values=['','1997-12-04[u-ca=iso8601]','notacal','11111111','1111-11-11'];
+             var result=values.map(function(calendar){try{new Temporal.PlainMonthDay(12,15,calendar,1972)}catch(error){return error.name}});
+             [Infinity,-Infinity].forEach(function(value){try{new Temporal.PlainMonthDay(value,1)}catch(error){result.push(error.name)}});
+             return result.join('|');"
+        ),
+        "RangeError|RangeError|RangeError|RangeError|RangeError|RangeError|RangeError"
+    );
+    assert_eq!(
+        rendered(
+            "var log=[];
+             function O(value,name){return function(){return {valueOf:function(){log.push(name);return value}}}}
+             var args=[O(Infinity,'month'),O(1,'day'),function(){return 'iso8601'},O(1,'year')];
+             var values=args.map(function(factory){return factory()});
+             try{new Temporal.PlainMonthDay(...values)}catch(error){return error.name+'|'+log.join(',')}",
+        ),
+        "RangeError|month"
+    );
+    assert_eq!(
+        thrown("return new Temporal.PlainMonthDay(2,29).toPlainDate({year:Infinity});"),
+        ExceptionKind::RangeError
+    );
+    assert_eq!(
+        thrown("return new Temporal.PlainMonthDay(5,2).with({day:-1}, null);"),
+        ExceptionKind::RangeError
+    );
+}
+
+#[test]
 fn plain_date_time_constructor_accessors_and_iso_formatting_are_spec_shaped() {
     assert_eq!(
         rendered(

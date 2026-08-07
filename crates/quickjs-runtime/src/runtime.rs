@@ -307,6 +307,8 @@ struct TemporalIntrinsics {
     plain_date_time_constructor: FunctionId,
     plain_time_prototype: ObjectId,
     plain_time_constructor: FunctionId,
+    plain_month_day_prototype: ObjectId,
+    plain_month_day_constructor: FunctionId,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -1249,6 +1251,9 @@ pub(crate) enum NativeFunctionKind {
     TemporalPlainTimeConstructor,
     TemporalPlainTimeStatic(TemporalPlainTimeStaticMethod),
     TemporalPlainTimePrototype(TemporalPlainTimePrototypeMethod),
+    TemporalPlainMonthDayConstructor,
+    TemporalPlainMonthDayStatic(TemporalPlainMonthDayStaticMethod),
+    TemporalPlainMonthDayPrototype(TemporalPlainMonthDayPrototypeMethod),
     FunctionPrototypeToString,
     ErrorConstructor(ErrorIntrinsicKind),
     ErrorPrototypeToString,
@@ -2289,6 +2294,12 @@ pub(crate) enum TemporalPlainTimeStaticMethod {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum TemporalPlainMonthDayStaticMethod {
+    From,
+    Compare,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum TemporalPlainDatePrototypeMethod {
     CalendarId,
     Year,
@@ -2375,6 +2386,20 @@ pub(crate) enum TemporalPlainTimePrototypeMethod {
     Until,
     Since,
     Equals,
+    ToString,
+    ToJson,
+    ToLocaleString,
+    ValueOf,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum TemporalPlainMonthDayPrototypeMethod {
+    CalendarId,
+    MonthCode,
+    Day,
+    With,
+    Equals,
+    ToPlainDate,
     ToString,
     ToJson,
     ToLocaleString,
@@ -2656,6 +2681,24 @@ impl TemporalPlainTimeStaticMethod {
     }
 }
 
+impl TemporalPlainMonthDayStaticMethod {
+    pub(crate) const ALL: [Self; 2] = [Self::From, Self::Compare];
+
+    pub(crate) const fn name(self) -> &'static str {
+        match self {
+            Self::From => "from",
+            Self::Compare => "compare",
+        }
+    }
+
+    pub(crate) const fn length(self) -> i32 {
+        match self {
+            Self::From => 1,
+            Self::Compare => 2,
+        }
+    }
+}
+
 impl TemporalPlainTimePrototypeMethod {
     pub(crate) const ALL: [Self; 17] = [
         Self::Hour,
@@ -2742,6 +2785,56 @@ impl TemporalPlainTimePrototypeMethod {
             | Self::Until
             | Self::Since
             | Self::Equals => 1,
+            _ => 0,
+        }
+    }
+}
+
+impl TemporalPlainMonthDayPrototypeMethod {
+    pub(crate) const ALL: [Self; 10] = [
+        Self::CalendarId,
+        Self::MonthCode,
+        Self::Day,
+        Self::With,
+        Self::Equals,
+        Self::ToPlainDate,
+        Self::ToString,
+        Self::ToJson,
+        Self::ToLocaleString,
+        Self::ValueOf,
+    ];
+
+    pub(crate) const fn name(self) -> &'static str {
+        match self {
+            Self::CalendarId => "calendarId",
+            Self::MonthCode => "monthCode",
+            Self::Day => "day",
+            Self::With => "with",
+            Self::Equals => "equals",
+            Self::ToPlainDate => "toPlainDate",
+            Self::ToString => "toString",
+            Self::ToJson => "toJSON",
+            Self::ToLocaleString => "toLocaleString",
+            Self::ValueOf => "valueOf",
+        }
+    }
+
+    pub(crate) const fn function_name(self) -> &'static str {
+        match self {
+            Self::CalendarId => "get calendarId",
+            Self::MonthCode => "get monthCode",
+            Self::Day => "get day",
+            method => method.name(),
+        }
+    }
+
+    pub(crate) const fn is_accessor(self) -> bool {
+        matches!(self, Self::CalendarId | Self::MonthCode | Self::Day)
+    }
+
+    pub(crate) const fn length(self) -> i32 {
+        match self {
+            Self::With | Self::Equals | Self::ToPlainDate => 1,
             _ => 0,
         }
     }
@@ -3505,6 +3598,7 @@ impl NativeFunctionKind {
                 | Self::TemporalPlainDateConstructor
                 | Self::TemporalPlainDateTimeConstructor
                 | Self::TemporalPlainTimeConstructor
+                | Self::TemporalPlainMonthDayConstructor
                 | Self::RegExpConstructor
                 | Self::GeneratorFunctionConstructor
                 | Self::AsyncFunctionConstructor

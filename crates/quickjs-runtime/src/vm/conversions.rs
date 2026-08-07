@@ -572,6 +572,12 @@ pub(super) fn finish_intrinsic_get(
         IntrinsicGetContinuation::TemporalPlainTimeConstructor { new_target, time } => {
             finish_temporal_plain_time_constructor_wrapper(runtime, new_target, time, &value)
         }
+        IntrinsicGetContinuation::TemporalPlainMonthDayConstructor {
+            new_target,
+            month_day,
+        } => finish_temporal_plain_month_day_constructor_wrapper(
+            runtime, new_target, month_day, &value,
+        ),
         IntrinsicGetContinuation::StringConstructor {
             new_target,
             value: string_value,
@@ -2155,11 +2161,32 @@ fn finish_operator_primitive_target(
                 execution_budget,
             )
         }
+        OperatorPrimitiveTarget::TemporalPlainMonthDayConstructor(state) => {
+            let number = operator_to_number(value, realm, origin)?;
+            advance_temporal_plain_month_day_constructor(
+                runtime,
+                *state,
+                Some(number),
+                realm,
+                return_to,
+                origin,
+                execution_budget,
+            )
+        }
         OperatorPrimitiveTarget::TemporalPlainDateEquals(receiver) => {
             finish_temporal_plain_date_equals(receiver.as_ref(), value, realm, origin)
         }
         OperatorPrimitiveTarget::TemporalPlainDateBag(state) => {
             advance_temporal_plain_date_property_bag(
+                runtime,
+                *state,
+                Some(value),
+                return_to,
+                execution_budget,
+            )
+        }
+        OperatorPrimitiveTarget::TemporalPlainMonthDayBag(state) => {
+            advance_temporal_plain_month_day_property_bag(
                 runtime,
                 *state,
                 Some(value),
@@ -2205,6 +2232,27 @@ fn finish_operator_primitive_target(
         }
         OperatorPrimitiveTarget::TemporalPlainDateToStringCalendarName(state) => {
             finish_temporal_plain_date_to_string_calendar_name(state.as_ref(), value)
+        }
+        OperatorPrimitiveTarget::TemporalPlainMonthDayToStringCalendarName(state) => {
+            finish_temporal_plain_month_day_to_string_calendar_name(state.as_ref(), value)
+        }
+        OperatorPrimitiveTarget::TemporalPlainMonthDayToPlainDate(state) => {
+            advance_temporal_plain_month_day_to_plain_date(
+                runtime,
+                *state,
+                Some(value),
+                return_to,
+                execution_budget,
+            )
+        }
+        OperatorPrimitiveTarget::TemporalPlainMonthDayWith(state) => {
+            advance_temporal_plain_month_day_with(
+                runtime,
+                *state,
+                Some(value),
+                return_to,
+                execution_budget,
+            )
         }
         OperatorPrimitiveTarget::TemporalPlainDateWith(state) => advance_temporal_plain_date_with(
             runtime,
