@@ -1,5 +1,6 @@
 //! Pinned Test262 inventory and Global Script execution.
 
+use crate::DEFAULT_TIMEOUT_MS;
 use quickjs::{ScriptEvaluationError, ScriptLimits, evaluate_script};
 use quickjs_frontend::DiagnosticStage;
 use quickjs_runtime::{
@@ -17,6 +18,7 @@ use std::path::{Component, Path, PathBuf};
 use std::process::Command;
 use std::sync::Arc;
 use std::thread;
+use std::time::{Duration, Instant};
 use tokio::{runtime::Builder as TokioRuntimeBuilder, sync::mpsc};
 
 const DEFAULT_BASELINE: &str = "tests/test262/upstream";
@@ -35,6 +37,7 @@ pub struct Test262Options {
     pub report: Option<PathBuf>,
     pub inventory_only: bool,
     pub instruction_fuel: u64,
+    pub timeout_ms: u64,
     pub jobs: usize,
     pub progress_every: Option<usize>,
     pub verbose: bool,
@@ -51,6 +54,7 @@ pub fn parse_options(
     let mut report = None;
     let mut inventory_only = false;
     let mut instruction_fuel = DEFAULT_INSTRUCTION_FUEL;
+    let mut timeout_ms = DEFAULT_TIMEOUT_MS;
     let mut jobs = default_jobs();
     let mut progress_every = None;
     let mut verbose = false;
@@ -84,6 +88,9 @@ pub fn parse_options(
             "--instruction-fuel" => {
                 instruction_fuel = required_positive_u64(&mut arguments, "--instruction-fuel")?;
             }
+            "--timeout-ms" => {
+                timeout_ms = required_positive_u64(&mut arguments, "--timeout-ms")?;
+            }
             "--jobs" => jobs = required_positive_usize(&mut arguments, "--jobs")?,
             "--progress-every" => {
                 progress_every = Some(required_positive_usize(&mut arguments, "--progress-every")?);
@@ -102,6 +109,7 @@ pub fn parse_options(
         report,
         inventory_only,
         instruction_fuel,
+        timeout_ms,
         jobs,
         progress_every,
         verbose,
@@ -776,7 +784,7 @@ pub fn run_test262(options: &Test262Options) -> Result<bool, String> {
     }
     if options.verbose || options.progress_every.is_some() {
         println!(
-            "test262: selection filter={} files={} admitted-cases={} skipped-cases={} workers={} fuel={}",
+            "test262: selection filter={} files={} admitted-cases={} skipped-cases={} workers={} fuel={} timeout-ms={}",
             options.filter.as_deref().unwrap_or("test"),
             inventory.plans.len(),
             inventory.admitted_cases(),
@@ -787,6 +795,7 @@ pub fn run_test262(options: &Test262Options) -> Result<bool, String> {
                 options.jobs.min(inventory.admitted_cases())
             },
             options.instruction_fuel,
+            options.timeout_ms,
         );
         for (reason, count) in &inventory.skip_counts {
             println!("test262: skipped {count} cases ({reason})");
@@ -800,6 +809,7 @@ pub fn run_test262(options: &Test262Options) -> Result<bool, String> {
             &suite.root,
             &inventory,
             options.instruction_fuel,
+            options.timeout_ms,
             options.jobs,
             options.progress_every,
             options.verbose,
@@ -878,6 +888,7 @@ fn execute_inventory(
     suite: &Path,
     inventory: &Inventory,
     instruction_fuel: u64,
+    timeout_ms: u64,
     jobs: usize,
     progress_every: Option<usize>,
     verbose: bool,
@@ -904,8 +915,13 @@ fn execute_inventory(
     let mut passed = 0_usize;
     let mut failed = 0_usize;
     let mut runner_errors = 0_usize;
-    let results =
-        execute_cases_parallel(&cases, &harness, instruction_fuel, jobs, |index, result| {
+    let results = execute_cases_parallel(
+        &cases,
+        &harness,
+        instruction_fuel,
+        timeout_ms,
+        jobs,
+        |index, result| {
             completed += 1;
             match result {
                 Ok(None) => passed += 1,
@@ -919,7 +935,8 @@ fn execute_inventory(
             {
                 print_progress_completion(completed, cases.len(), passed, failed, runner_errors);
             }
-        })?;
+        },
+    )?;
     let mut summary = ExecutionSummary::default();
     for result in results {
         match result? {
@@ -1002,6 +1019,7 @@ fn execute_cases_parallel(
     cases: &[ExecutionCase],
     harness: &HarnessSources,
     instruction_fuel: u64,
+    timeout_ms: u64,
     jobs: usize,
     mut on_completion: impl FnMut(usize, &Result<Option<FailureRecord>, String>) + Send,
 ) -> Result<Vec<Result<Option<FailureRecord>, String>>, String> {
@@ -1037,6 +1055,7 @@ fn execute_cases_parallel(
                         &case.source,
                         harness,
                         instruction_fuel,
+                        timeout_ms,
                     );
                     if sender.blocking_send((index, result)).is_err() {
                         return;
@@ -1065,9 +1084,13 @@ fn execute_case(
     source: &str,
     harness: &HarnessSources,
     instruction_fuel: u64,
+    timeout_ms: u64,
 ) -> Result<Option<FailureRecord>, String> {
     let mut runtime = Runtime::try_new(RuntimeLimits::default())
         .map_err(|error| format!("could not create runtime: {error}"))?;
+    let started = Instant::now();
+    let timeout = Duration::from_millis(timeout_ms);
+    runtime.set_interrupt_handler(Arc::new(move || started.elapsed() >= timeout));
     let realm = runtime
         .create_realm()
         .map_err(|error| format!("could not create realm: {error}"))?;
@@ -1286,6 +1309,7 @@ fn build_report(
             "admitted_feature": options.admit_feature,
             "limit": options.limit,
             "instruction_fuel": options.instruction_fuel,
+            "timeout_ms": options.timeout_ms,
             "jobs": options.jobs,
             "progress_every": options.progress_every,
             "verbose": options.verbose,
@@ -1357,6 +1381,8 @@ mod tests {
             "/tmp/report.json",
             "--instruction-fuel",
             "5000",
+            "--timeout-ms",
+            "2500",
             "--jobs",
             "3",
             "--progress-every",
@@ -1377,6 +1403,7 @@ mod tests {
                 report: Some(PathBuf::from("/tmp/report.json")),
                 inventory_only: true,
                 instruction_fuel: 5_000,
+                timeout_ms: 2_500,
                 jobs: 3,
                 progress_every: Some(1_000),
                 verbose: true,
@@ -1414,6 +1441,7 @@ mod tests {
             report: None,
             inventory_only: false,
             instruction_fuel: DEFAULT_INSTRUCTION_FUEL,
+            timeout_ms: DEFAULT_TIMEOUT_MS,
             jobs: 1,
             progress_every: None,
             verbose: false,
@@ -1462,6 +1490,7 @@ mod tests {
                 &cases,
                 &harness,
                 DEFAULT_INSTRUCTION_FUEL,
+                DEFAULT_TIMEOUT_MS,
                 jobs,
                 |index, _| {
                     completed.push(index);
@@ -1605,11 +1634,40 @@ throw new TypeError();",
                 source,
                 &harness,
                 DEFAULT_INSTRUCTION_FUEL,
+                DEFAULT_TIMEOUT_MS,
             )
             .expect("execute")
             .is_none()
         );
         fs::remove_dir_all(root).expect("remove fixture");
+    }
+
+    #[test]
+    fn case_timeout_interrupts_an_infinite_script() {
+        let plan = TestPlan {
+            path: PathBuf::from("timeout.js"),
+            relative: "timeout.js".to_owned(),
+            metadata: Metadata::default(),
+            modes: vec![TestMode::Raw],
+            skip_reason: None,
+        };
+        let harness = HarnessSources {
+            assert: String::new(),
+            sta: String::new(),
+            root: PathBuf::from("unused-harness"),
+        };
+        let failure = execute_case(
+            &plan,
+            TestMode::Raw,
+            "while (true) {}",
+            &harness,
+            u64::MAX,
+            1,
+        )
+        .expect("runner result")
+        .expect("timeout failure");
+        assert_eq!(failure.actual, "host-execution");
+        assert!(failure.detail.contains("interrupted by the host"));
     }
 
     fn unique_temp_dir(label: &str) -> PathBuf {

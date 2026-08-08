@@ -344,7 +344,7 @@ Options:
                       Set manifest default: {DEFAULT_SET_CORPUS};
                       weak collections manifest default: {DEFAULT_WEAK_COLLECTIONS_CORPUS};
                       weak references manifest default: {DEFAULT_WEAK_REFERENCES_CORPUS})
-  --timeout-ms N      Per-process timeout (default: {DEFAULT_TIMEOUT_MS})
+  --timeout-ms N      Differential process/Test262 case timeout (default: {DEFAULT_TIMEOUT_MS})
   --baseline PATH     Test262 baseline artifacts (default: tests/test262/upstream)
   --filter PATH       Restrict Test262 to one file or subtree below test/
   --admit-feature N   Admit one baseline-skipped feature within --filter
