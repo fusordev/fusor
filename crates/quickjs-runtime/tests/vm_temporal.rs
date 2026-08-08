@@ -656,6 +656,96 @@ fn zoned_date_time_with_calendar_replaces_only_the_calendar_slot() {
 }
 
 #[test]
+fn zoned_date_time_with_merges_partial_fields_and_observes_option_order() {
+    assert_eq!(
+        rendered(
+            "var value=new Temporal.ZonedDateTime(3661987654321n,'UTC');
+             var result=value.with({year:2019,month:5,day:4,hour:3,minute:2,second:1});
+             var method=Object.getOwnPropertyDescriptor(Temporal.ZonedDateTime.prototype,'with');
+             return [result.toString(),result.epochNanoseconds,result===value,
+               method.value.length,method.value.name,method.enumerable,
+               method.writable,method.configurable].join('|');"
+        ),
+        "2019-05-04T03:02:01.987654321+00:00[UTC]|1556938921987654321|false|1|with|false|true|true"
+    );
+    assert_eq!(
+        rendered(
+            "var log=[],fields={},options={};
+             Object.defineProperty(fields,'calendar',{get:function(){log.push('get calendar');return undefined;}});
+             Object.defineProperty(fields,'timeZone',{get:function(){log.push('get timeZone');return undefined;}});
+             Object.defineProperty(fields,'month',{get:function(){log.push('get month');return 5;}});
+             Object.defineProperty(options,'overflow',{get:function(){log.push('get overflow');return 'constrain';}});
+             var result=new Temporal.ZonedDateTime(0n,'UTC').with(fields,options);
+             return [result.toString(),log.join(',')].join('|');"
+        ),
+        "1970-05-01T00:00:00+00:00[UTC]|get calendar,get timeZone,get month,get overflow"
+    );
+    assert_eq!(
+        rendered(
+            "var value=new Temporal.PlainDateTime(1976,11,18,15,23,30,123,456,789).toZonedDateTime('UTC');
+             return [value.with({month:5}).toPlainDateTime().toString(),
+               value.with({day:31}).toPlainDateTime().toString(),
+               value.with({hour:29},{overflow:'constrain'}).toPlainDateTime().toString()].join('|');"
+        ),
+        "1976-05-18T15:23:30.123456789|1976-11-30T15:23:30.123456789|1976-11-18T23:23:30.123456789"
+    );
+    assert_eq!(
+        thrown("return new Temporal.ZonedDateTime(0n,'UTC').with('1976-11-18');"),
+        ExceptionKind::TypeError
+    );
+    assert_eq!(
+        thrown("return new Temporal.ZonedDateTime(0n,'UTC').with({});"),
+        ExceptionKind::TypeError
+    );
+    assert_eq!(
+        thrown("return new Temporal.ZonedDateTime(0n,'UTC').with({month:2,calendar:'iso8601'});"),
+        ExceptionKind::TypeError
+    );
+    assert_eq!(
+        thrown("return new Temporal.ZonedDateTime(0n,'UTC').with({month:2,timeZone:'UTC'});"),
+        ExceptionKind::TypeError
+    );
+    assert_eq!(
+        thrown(
+            "return new Temporal.ZonedDateTime(0n,'UTC').with(new Temporal.PlainDate(1976,11,18));"
+        ),
+        ExceptionKind::TypeError
+    );
+    assert_eq!(
+        thrown("return new Temporal.ZonedDateTime(0n,'UTC').with({month:5,monthCode:'M06'});"),
+        ExceptionKind::RangeError
+    );
+    assert_eq!(
+        thrown("return new Temporal.ZonedDateTime(0n,'UTC').with({hour:Infinity});"),
+        ExceptionKind::RangeError
+    );
+    assert_eq!(
+        thrown(
+            "return new Temporal.ZonedDateTime(0n,'UTC').with({month:2,day:31},{overflow:'reject'});"
+        ),
+        ExceptionKind::RangeError
+    );
+    assert_eq!(
+        thrown("return new Temporal.ZonedDateTime(0n,'UTC').with({offset:0});"),
+        ExceptionKind::TypeError
+    );
+    assert_eq!(
+        thrown("return new Temporal.ZonedDateTime(0n,'UTC').with({offset:'00:00'});"),
+        ExceptionKind::RangeError
+    );
+    assert_eq!(
+        thrown(
+            "return new Temporal.ZonedDateTime(0n,'UTC').with({hour:2},{disambiguation:'balance'});"
+        ),
+        ExceptionKind::RangeError
+    );
+    assert_eq!(
+        thrown("return new Temporal.ZonedDateTime(0n,'UTC').with({hour:2},null);"),
+        ExceptionKind::TypeError
+    );
+}
+
+#[test]
 fn zoned_date_time_transition_accepts_string_and_resumable_options_forms() {
     assert_eq!(
         rendered(

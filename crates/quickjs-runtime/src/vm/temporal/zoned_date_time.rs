@@ -52,6 +52,37 @@ const TEMPORAL_ZONED_DATE_TIME_BAG_FIELDS: [&str; 13] = [
     "year",
 ];
 
+/// The `with` field order: `calendar` and `timeZone` are observed first by
+/// `RejectObjectWithCalendarOrTimeZone`, then the partial fields in
+/// alphabetical order.
+const TEMPORAL_ZONED_DATE_TIME_WITH_FIELDS: [&str; 13] = [
+    "calendar",
+    "timeZone",
+    "day",
+    "hour",
+    "microsecond",
+    "millisecond",
+    "minute",
+    "month",
+    "monthCode",
+    "nanosecond",
+    "offset",
+    "second",
+    "year",
+];
+
+fn temporal_zoned_date_time_property_bag_fields(
+    target: &TemporalZonedDateTimeLikeTarget,
+) -> &'static [&'static str] {
+    match target {
+        TemporalZonedDateTimeLikeTarget::With { .. } => &TEMPORAL_ZONED_DATE_TIME_WITH_FIELDS,
+        TemporalZonedDateTimeLikeTarget::From { .. }
+        | TemporalZonedDateTimeLikeTarget::CompareFirst { .. }
+        | TemporalZonedDateTimeLikeTarget::CompareSecond { .. }
+        | TemporalZonedDateTimeLikeTarget::Equals { .. } => &TEMPORAL_ZONED_DATE_TIME_BAG_FIELDS,
+    }
+}
+
 #[derive(Clone, Copy)]
 enum TemporalZonedDateTimeBagStage {
     ReadField,
@@ -60,16 +91,30 @@ enum TemporalZonedDateTimeBagStage {
 }
 
 enum TemporalZonedDateTimeLikeTarget {
-    From { options: StoredValue },
-    CompareFirst { second: StoredValue },
-    CompareSecond { first: ZonedDateTime },
-    Equals { receiver: ZonedDateTime },
+    From {
+        options: StoredValue,
+    },
+    CompareFirst {
+        second: StoredValue,
+    },
+    CompareSecond {
+        first: ZonedDateTime,
+    },
+    Equals {
+        receiver: ZonedDateTime,
+    },
+    With {
+        receiver: ZonedDateTime,
+        options: StoredValue,
+    },
 }
 
 impl TemporalZonedDateTimeLikeTarget {
     fn trace_roots(&self, mark: &mut dyn FnMut(CollectionRoot)) {
         match self {
-            Self::From { options } | Self::CompareFirst { second: options } => {
+            Self::From { options }
+            | Self::CompareFirst { second: options }
+            | Self::With { options, .. } => {
                 trace_stored_value_root(options, mark);
             }
             Self::CompareSecond { .. } | Self::Equals { .. } => {}
@@ -96,6 +141,68 @@ struct TemporalZonedDateTimeBagFields {
     second: Option<JsNumber>,
     time_zone: Option<TimeZone>,
     year: Option<JsNumber>,
+}
+
+/// Range-validated `with` fields.
+///
+/// Field range errors surface when property-bag reads complete, before the
+/// options object is normalized; calendar resolution and instant range stay
+/// deferred until all options have been observed.
+struct TemporalZonedDateTimeWithFields {
+    year: Option<i32>,
+    month: Option<u8>,
+    month_code: Option<MonthCode>,
+    day: Option<u8>,
+    hour: Option<u8>,
+    minute: Option<u8>,
+    second: Option<u8>,
+    millisecond: Option<u16>,
+    microsecond: Option<u16>,
+    nanosecond: Option<u16>,
+    offset: Option<UtcOffset>,
+}
+
+impl TemporalZonedDateTimeWithFields {
+    const fn is_empty(&self) -> bool {
+        self.year.is_none()
+            && self.month.is_none()
+            && self.month_code.is_none()
+            && self.day.is_none()
+            && self.hour.is_none()
+            && self.minute.is_none()
+            && self.second.is_none()
+            && self.millisecond.is_none()
+            && self.microsecond.is_none()
+            && self.nanosecond.is_none()
+            && self.offset.is_none()
+    }
+}
+
+fn temporal_zoned_date_time_with_fields_from_bag(
+    fields: &TemporalZonedDateTimeBagFields,
+    realm: RealmId,
+    origin: &JsStackFrame,
+) -> Result<TemporalZonedDateTimeWithFields, NativeFailure> {
+    let year = fields
+        .year
+        .map(|value| {
+            temporal_plain_date_time_integer(value, realm, origin)
+                .and_then(|value| temporal_plain_date_time_i32(value, realm, origin))
+        })
+        .transpose()?;
+    Ok(TemporalZonedDateTimeWithFields {
+        year,
+        month: temporal_plain_date_time_optional_u8(fields.month, realm, origin)?,
+        month_code: fields.month_code,
+        day: temporal_plain_date_time_optional_u8(fields.day, realm, origin)?,
+        hour: temporal_plain_date_time_optional_u8(fields.hour, realm, origin)?,
+        minute: temporal_plain_date_time_optional_u8(fields.minute, realm, origin)?,
+        second: temporal_plain_date_time_optional_u8(fields.second, realm, origin)?,
+        millisecond: temporal_plain_date_time_optional_u16(fields.millisecond, realm, origin)?,
+        microsecond: temporal_plain_date_time_optional_u16(fields.microsecond, realm, origin)?,
+        nanosecond: temporal_plain_date_time_optional_u16(fields.nanosecond, realm, origin)?,
+        offset: fields.offset,
+    })
 }
 
 /// Resumable `ToTemporalZonedDateTime` property-bag conversion.
@@ -157,12 +264,16 @@ enum TemporalZonedDateTimeFromTarget {
     Existing(ZonedDateTime),
     String(JsString),
     PropertyBag(TemporalZonedDateTimeBagFields),
+    With {
+        receiver: ZonedDateTime,
+        fields: TemporalZonedDateTimeWithFields,
+    },
 }
 
 impl TemporalZonedDateTimeFromTarget {
     const fn retained_values(&self) -> u64 {
         match self {
-            Self::Existing(_) | Self::PropertyBag(_) => 0,
+            Self::Existing(_) | Self::PropertyBag(_) | Self::With { .. } => 0,
             Self::String(_) => 1,
         }
     }
@@ -705,6 +816,9 @@ fn continue_temporal_zoned_date_time_like(
             };
             Ok(NativeDispatch::Immediate(StoredValue::Boolean(equals)))
         }
+        TemporalZonedDateTimeLikeTarget::With { .. } => {
+            unreachable!("Temporal.ZonedDateTime.with completes from its property-bag state")
+        }
     }
 }
 
@@ -721,12 +835,19 @@ fn begin_temporal_zoned_date_time_from_options(
     origin: JsStackFrame,
     execution_budget: &mut ExecutionBudget,
 ) -> Result<NativeDispatch, NativeFailure> {
+    // `from` rejects a missing offset; `with` prefers the receiver's offset.
+    let default_offset = match &target {
+        TemporalZonedDateTimeFromTarget::With { .. } => OffsetDisambiguation::Prefer,
+        TemporalZonedDateTimeFromTarget::Existing(_)
+        | TemporalZonedDateTimeFromTarget::String(_)
+        | TemporalZonedDateTimeFromTarget::PropertyBag(_) => OffsetDisambiguation::Reject,
+    };
     if matches!(options, StoredValue::Undefined) {
         return finish_temporal_zoned_date_time_from_options(
             runtime,
             target,
             Disambiguation::Compatible,
-            OffsetDisambiguation::Reject,
+            default_offset,
             Overflow::Constrain,
             realm,
             &origin,
@@ -745,7 +866,7 @@ fn begin_temporal_zoned_date_time_from_options(
             target,
             options,
             disambiguation: Disambiguation::Compatible,
-            offset: OffsetDisambiguation::Reject,
+            offset: default_offset,
             overflow: Overflow::Constrain,
             stage: TemporalZonedDateTimeOptionsStage::ReadDisambiguation,
             realm,
@@ -1010,6 +1131,33 @@ fn finish_temporal_zoned_date_time_from_options(
                 origin,
             )?
         }
+        TemporalZonedDateTimeFromTarget::With { receiver, fields } => {
+            let calendar_fields = CalendarFields::new()
+                .with_optional_year(fields.year)
+                .with_optional_month(fields.month)
+                .with_optional_month_code(fields.month_code)
+                .with_optional_day(fields.day);
+            let time = PartialTime::new()
+                .with_hour(fields.hour)
+                .with_minute(fields.minute)
+                .with_second(fields.second)
+                .with_millisecond(fields.millisecond)
+                .with_microsecond(fields.microsecond)
+                .with_nanosecond(fields.nanosecond);
+            let partial = ZonedDateTimeFields {
+                calendar_fields,
+                time,
+                offset: fields.offset,
+            };
+            match receiver.with(partial, Some(disambiguation), Some(offset), Some(overflow)) {
+                Ok(date_time) => date_time,
+                Err(error) => {
+                    return Err(NativeFailure::Abrupt(temporal_exception_from_error(
+                        realm, origin, error,
+                    )?));
+                }
+            }
+        }
     };
     allocate_temporal_zoned_date_time_result(runtime, realm, date_time)
 }
@@ -1030,13 +1178,37 @@ pub(in crate::vm) fn advance_temporal_zoned_date_time_property_bag(
     loop {
         match state.stage {
             TemporalZonedDateTimeBagStage::ReadField => {
-                if state.next == TEMPORAL_ZONED_DATE_TIME_BAG_FIELDS.len() {
+                let field_names = temporal_zoned_date_time_property_bag_fields(&state.target);
+                if state.next == field_names.len() {
                     let fields = state.to_fields();
                     return match state.target {
                         TemporalZonedDateTimeLikeTarget::From { options } => {
                             begin_temporal_zoned_date_time_from_options(
                                 runtime,
                                 TemporalZonedDateTimeFromTarget::PropertyBag(fields),
+                                options,
+                                state.realm,
+                                return_to,
+                                state.origin,
+                                execution_budget,
+                            )
+                        }
+                        TemporalZonedDateTimeLikeTarget::With { receiver, options } => {
+                            let fields = temporal_zoned_date_time_with_fields_from_bag(
+                                &fields,
+                                state.realm,
+                                &state.origin,
+                            )?;
+                            if fields.is_empty() {
+                                return temporal_type_error(
+                                    state.realm,
+                                    &state.origin,
+                                    "Temporal.ZonedDateTime.with requires at least one field",
+                                );
+                            }
+                            begin_temporal_zoned_date_time_from_options(
+                                runtime,
+                                TemporalZonedDateTimeFromTarget::With { receiver, fields },
                                 options,
                                 state.realm,
                                 return_to,
@@ -1066,7 +1238,7 @@ pub(in crate::vm) fn advance_temporal_zoned_date_time_property_bag(
                     };
                 }
                 charge_heap_property_lookup(runtime, &state.base, execution_budget)?;
-                let name = JsString::from_utf8(TEMPORAL_ZONED_DATE_TIME_BAG_FIELDS[state.next])?;
+                let name = JsString::from_utf8(field_names[state.next])?;
                 let key = runtime.property_key_from_string(&name)?;
                 state.stage = TemporalZonedDateTimeBagStage::AwaitField;
                 let dispatch = begin_value_get(
@@ -1099,7 +1271,21 @@ pub(in crate::vm) fn advance_temporal_zoned_date_time_property_bag(
                 let value = completion.take().ok_or(EngineFault::RuntimeInvariant {
                     message: "Temporal.ZonedDateTime property bag Get resumed without a value",
                 })?;
-                let field = TEMPORAL_ZONED_DATE_TIME_BAG_FIELDS[state.next];
+                let field = temporal_zoned_date_time_property_bag_fields(&state.target)[state.next];
+                if matches!(&state.target, TemporalZonedDateTimeLikeTarget::With { .. })
+                    && matches!(field, "calendar" | "timeZone")
+                {
+                    if !matches!(value, StoredValue::Undefined) {
+                        return temporal_type_error(
+                            state.realm,
+                            &state.origin,
+                            "Temporal.ZonedDateTime.with cannot override calendar or timeZone",
+                        );
+                    }
+                    state.next = state.next.saturating_add(1);
+                    state.stage = TemporalZonedDateTimeBagStage::ReadField;
+                    continue;
+                }
                 if matches!(value, StoredValue::Undefined) {
                     if field == "calendar" {
                         state.calendar = Some(Calendar::default());
@@ -1169,7 +1355,7 @@ pub(in crate::vm) fn advance_temporal_zoned_date_time_property_bag(
                 let value = completion.take().ok_or(EngineFault::RuntimeInvariant {
                     message: "Temporal.ZonedDateTime property bag conversion resumed without a value",
                 })?;
-                match TEMPORAL_ZONED_DATE_TIME_BAG_FIELDS[state.next] {
+                match temporal_zoned_date_time_property_bag_fields(&state.target)[state.next] {
                     "monthCode" => {
                         let StoredValue::String(value) = value else {
                             return temporal_type_error(
@@ -1546,6 +1732,20 @@ pub(in crate::vm) fn dispatch_temporal_zoned_date_time_prototype(
                 execution_budget,
             )
         }
+        TemporalZonedDateTimePrototypeMethod::With => {
+            let fields = arguments.take_first_or_undefined();
+            let options = arguments.take_first_or_undefined();
+            begin_temporal_zoned_date_time_with(
+                runtime,
+                date_time,
+                fields,
+                options,
+                realm,
+                return_to,
+                origin.clone(),
+                execution_budget,
+            )
+        }
         TemporalZonedDateTimePrototypeMethod::WithCalendar => {
             finish_temporal_zoned_date_time_with_calendar(
                 runtime,
@@ -1634,6 +1834,72 @@ pub(in crate::vm) fn dispatch_temporal_zoned_date_time_prototype(
             "Temporal.ZonedDateTime cannot be converted to a primitive value",
         ),
     }
+}
+
+#[allow(
+    clippy::too_many_arguments,
+    reason = "the native method retains its receiver and options across observable conversion"
+)]
+fn begin_temporal_zoned_date_time_with(
+    runtime: &mut Runtime,
+    receiver: ZonedDateTime,
+    fields: StoredValue,
+    options: StoredValue,
+    realm: RealmId,
+    return_to: Option<CallReturn>,
+    origin: JsStackFrame,
+    execution_budget: &mut ExecutionBudget,
+) -> Result<NativeDispatch, NativeFailure> {
+    if fields.heap_reference().is_none() {
+        return temporal_type_error(
+            realm,
+            &origin,
+            "Temporal.ZonedDateTime.with requires a property bag",
+        );
+    }
+    // RejectObjectWithCalendarOrTimeZone: branded Temporal objects are
+    // rejected from their internal slots before any property is observed.
+    if let StoredValue::Object(object) = fields
+        && (runtime.temporal_plain_date(object)?.is_some()
+            || runtime.temporal_plain_date_time(object)?.is_some()
+            || runtime.temporal_plain_time(object)?.is_some()
+            || runtime.temporal_plain_month_day(object)?.is_some()
+            || runtime.temporal_plain_year_month(object)?.is_some()
+            || runtime.temporal_zoned_date_time(object)?.is_some())
+    {
+        return temporal_type_error(
+            realm,
+            &origin,
+            "Temporal.ZonedDateTime.with cannot be called with a Temporal object",
+        );
+    }
+    advance_temporal_zoned_date_time_property_bag(
+        runtime,
+        TemporalZonedDateTimeBagContinuation {
+            base: fields,
+            calendar: None,
+            day: None,
+            hour: None,
+            microsecond: None,
+            millisecond: None,
+            minute: None,
+            month: None,
+            month_code: None,
+            nanosecond: None,
+            offset: None,
+            second: None,
+            time_zone: None,
+            year: None,
+            next: 0,
+            stage: TemporalZonedDateTimeBagStage::ReadField,
+            target: TemporalZonedDateTimeLikeTarget::With { receiver, options },
+            realm,
+            origin,
+        },
+        None,
+        return_to,
+        execution_budget,
+    )
 }
 
 fn finish_temporal_zoned_date_time_with_calendar(

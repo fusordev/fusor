@@ -437,7 +437,7 @@ fn complete_temporal_plain_date_time_constructor(
     clippy::cast_precision_loss,
     reason = "ECMA-262 ToIntegerWithTruncation is defined on binary64 values before their bounded Temporal fields are checked"
 )]
-fn temporal_plain_date_time_integer(
+pub(in crate::vm) fn temporal_plain_date_time_integer(
     value: JsNumber,
     realm: RealmId,
     origin: &JsStackFrame,

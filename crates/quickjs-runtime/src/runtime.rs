@@ -2376,6 +2376,7 @@ pub(crate) enum TemporalZonedDateTimePrototypeMethod {
     StartOfDay,
     Equals,
     GetTimeZoneTransition,
+    With,
     WithCalendar,
     WithPlainTime,
     WithTimeZone,
@@ -2851,7 +2852,7 @@ impl TemporalZonedDateTimeStaticMethod {
 }
 
 impl TemporalZonedDateTimePrototypeMethod {
-    pub(crate) const ALL: [Self; 44] = [
+    pub(crate) const ALL: [Self; 45] = [
         Self::CalendarId,
         Self::TimeZoneId,
         Self::Year,
@@ -2887,6 +2888,7 @@ impl TemporalZonedDateTimePrototypeMethod {
         Self::StartOfDay,
         Self::Equals,
         Self::GetTimeZoneTransition,
+        Self::With,
         Self::WithCalendar,
         Self::WithPlainTime,
         Self::WithTimeZone,
@@ -2935,6 +2937,7 @@ impl TemporalZonedDateTimePrototypeMethod {
             Self::StartOfDay => "startOfDay",
             Self::Equals => "equals",
             Self::GetTimeZoneTransition => "getTimeZoneTransition",
+            Self::With => "with",
             Self::WithCalendar => "withCalendar",
             Self::WithPlainTime => "withPlainTime",
             Self::WithTimeZone => "withTimeZone",
@@ -2991,6 +2994,7 @@ impl TemporalZonedDateTimePrototypeMethod {
                 | Self::StartOfDay
                 | Self::Equals
                 | Self::GetTimeZoneTransition
+                | Self::With
                 | Self::WithCalendar
                 | Self::WithPlainTime
                 | Self::WithTimeZone
@@ -3009,6 +3013,7 @@ impl TemporalZonedDateTimePrototypeMethod {
             | Self::GetTimeZoneTransition
             | Self::Add
             | Self::Subtract
+            | Self::With
             | Self::WithCalendar
             | Self::WithTimeZone => 1,
             _ => 0,
