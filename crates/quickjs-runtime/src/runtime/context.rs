@@ -755,6 +755,8 @@ impl Context<'_> {
                 environment: root_bindings,
                 lexical_receiver: None,
                 lexical_new_target: None,
+                lexical_derived_constructor: None,
+                lexical_derived_this: None,
                 home_object: None,
             }),
             object: root_records.function,

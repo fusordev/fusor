@@ -343,6 +343,8 @@ pub(crate) struct Frame {
     native_returns: Vec<NativeContinuation>,
     transient_cleanup_pending: bool,
     constructor_state: ConstructorState,
+    derived_constructor: Option<FunctionId>,
+    derived_this_cell: Option<BindingCellId>,
     native_caller: Option<SyntheticNativeFrame>,
     generator_resume: Option<ObjectId>,
     generator_result: Option<ObjectId>,
@@ -3700,6 +3702,12 @@ pub(crate) fn trace_frame_roots(frame: &Frame, mark: &mut dyn FnMut(CollectionRo
     if let Some(new_target) = frame.new_target {
         mark(CollectionRoot::Heap(HeapReference::Function(new_target)));
     }
+    if let Some(constructor) = frame.derived_constructor {
+        mark(CollectionRoot::Heap(HeapReference::Function(constructor)));
+    }
+    if let Some(cell) = frame.derived_this_cell {
+        mark(CollectionRoot::BindingCell(cell));
+    }
     if let Some(arguments) = &frame.arguments_snapshot {
         for value in arguments {
             trace_stored_value_root(value, mark);
@@ -4922,7 +4930,7 @@ fn execute_frame_loop(
                                     function: FunctionTemplateId::new(0),
                                     instruction: 0,
                                 })?;
-                            push_call_result(parent, value, return_to)?;
+                            push_call_result(runtime, parent, value, return_to)?;
                         }
                         Ok(NativeDispatch::Frame(child)) => {
                             *active_frame_values =
@@ -5032,7 +5040,7 @@ fn execute_frame_loop(
                                     function: FunctionTemplateId::new(0),
                                     instruction: 0,
                                 })?;
-                            push_call_result(parent, value, return_to)?;
+                            push_call_result(runtime, parent, value, return_to)?;
                         }
                         Ok(
                             NativeDispatch::Pair(_, _)
@@ -5149,7 +5157,7 @@ fn execute_frame_loop(
                                     function: FunctionTemplateId::new(0),
                                     instruction: 0,
                                 })?;
-                            push_call_result(parent, value, return_to)?;
+                            push_call_result(runtime, parent, value, return_to)?;
                         }
                         Ok(NativeDispatch::Frame(child)) => {
                             *active_frame_values =
@@ -5248,7 +5256,7 @@ fn execute_frame_loop(
                                     function: FunctionTemplateId::new(0),
                                     instruction: 0,
                                 })?;
-                            push_call_result(parent, value, return_to)?;
+                            push_call_result(runtime, parent, value, return_to)?;
                         }
                         Ok(NativeDispatch::Frame(child)) => {
                             *active_frame_values =
@@ -5351,7 +5359,7 @@ fn execute_frame_loop(
                                     function: FunctionTemplateId::new(0),
                                     instruction: 0,
                                 })?;
-                            push_call_result(parent, value, return_to)?;
+                            push_call_result(runtime, parent, value, return_to)?;
                         }
                         Ok(NativeDispatch::Frame(child)) => {
                             *active_frame_values =
@@ -5455,7 +5463,7 @@ fn execute_frame_loop(
                                     function: FunctionTemplateId::new(0),
                                     instruction: 0,
                                 })?;
-                            push_call_result(parent, value, return_to)?;
+                            push_call_result(runtime, parent, value, return_to)?;
                         }
                         Ok(NativeDispatch::Frame(child)) => {
                             *active_frame_values =
@@ -5682,7 +5690,7 @@ fn execute_frame_loop(
                             function: FunctionTemplateId::new(0),
                             instruction: 0,
                         })?;
-                        push_call_result(parent, value, return_to)?;
+                        push_call_result(runtime, parent, value, return_to)?;
                     }
                     Ok(NativeDispatch::Frame(child)) => {
                         *active_frame_values =
@@ -5767,7 +5775,7 @@ fn execute_frame_loop(
                             function: FunctionTemplateId::new(0),
                             instruction: 0,
                         })?;
-                        push_call_result(parent, value, return_to)?;
+                        push_call_result(runtime, parent, value, return_to)?;
                     }
                     Ok(NativeDispatch::Pair(original, updated)) => {
                         let parent = frames.last_mut().ok_or(EngineFault::MissingInstruction {
@@ -6024,6 +6032,7 @@ fn execute_frame_loop(
                 }
                 if let Some(parent) = frames.last_mut() {
                     push_call_result(
+                        runtime,
                         parent,
                         result,
                         return_to.ok_or(EngineFault::RuntimeInvariant {
@@ -6168,6 +6177,7 @@ fn execute_frame_loop(
                 }
                 if let Some(parent) = frames.last_mut() {
                     push_call_result(
+                        runtime,
                         parent,
                         result,
                         return_to.ok_or(EngineFault::RuntimeInvariant {
@@ -6325,6 +6335,7 @@ fn execute_frame_loop(
                 }
                 if let Some(parent) = frames.last_mut() {
                     push_call_result(
+                        runtime,
                         parent,
                         result,
                         return_to.ok_or(EngineFault::RuntimeInvariant {
@@ -6342,6 +6353,11 @@ fn execute_frame_loop(
                 return Ok(result);
             }
             Step::Return { value, source_pc } => {
+                if let Some(frame) = frames.last_mut()
+                    && frame.derived_this_cell.is_some()
+                {
+                    sync_derived_this(runtime, frame)?;
+                }
                 if let Some(frame) = frames.last()
                     && matches!(
                         frame.constructor_state,
@@ -6640,7 +6656,7 @@ fn execute_frame_loop(
                     let return_to = return_to.ok_or(EngineFault::RuntimeInvariant {
                         message: "nested frame has no caller continuation",
                     })?;
-                    push_call_result(parent, value, return_to)?;
+                    push_call_result(runtime, parent, value, return_to)?;
                     continue;
                 }
                 if return_to.is_some() {
@@ -6697,6 +6713,7 @@ fn finish_async_suspension(
             suspend_async_generator_await(runtime, generator, frame, promise, origin)?;
         if let Some(parent) = frames.last_mut() {
             push_call_result(
+                runtime,
                 parent,
                 result,
                 return_to.ok_or(EngineFault::RuntimeInvariant {
@@ -6731,6 +6748,7 @@ fn finish_async_suspension(
     }
     if let Some(parent) = frames.last_mut() {
         push_call_result(
+            runtime,
             parent,
             result,
             return_to.ok_or(EngineFault::RuntimeInvariant {
@@ -6915,7 +6933,62 @@ fn resume_suspended_native_returns(
     }
 }
 
+fn sync_derived_this(runtime: &Runtime, frame: &mut Frame) -> Result<bool, ExecutionError> {
+    let Some(cell) = frame.derived_this_cell else {
+        return Ok(frame.constructor_state != ConstructorState::DerivedUninitialized);
+    };
+    let value = match &runtime
+        .cells
+        .get(cell)
+        .ok_or(EngineFault::StaleHeapEdge {
+            edge: "derived-this binding",
+            index: cell.index(),
+            generation: cell.generation(),
+        })?
+        .value
+    {
+        SlotValue::Uninitialized => return Ok(false),
+        SlotValue::Value(value) => value.duplicate(),
+    };
+    frame.receiver = value;
+    if frame.constructor_state == ConstructorState::DerivedUninitialized {
+        frame.constructor_state = ConstructorState::DerivedInitialized;
+    }
+    Ok(true)
+}
+
+fn bind_derived_this(
+    runtime: &mut Runtime,
+    frame: &mut Frame,
+    value: &StoredValue,
+) -> Result<bool, ExecutionError> {
+    let Some(cell) = frame.derived_this_cell else {
+        return Err(EngineFault::RuntimeInvariant {
+            message: "verified derived-this initialization has no shared binding",
+        }
+        .into());
+    };
+    let binding = runtime
+        .cells
+        .get_mut(cell)
+        .ok_or(EngineFault::StaleHeapEdge {
+            edge: "derived-this binding",
+            index: cell.index(),
+            generation: cell.generation(),
+        })?;
+    if matches!(binding.value, SlotValue::Value(_)) {
+        return Ok(false);
+    }
+    binding.value = SlotValue::Value(value.duplicate());
+    frame.receiver = value.duplicate();
+    if frame.constructor_state == ConstructorState::DerivedUninitialized {
+        frame.constructor_state = ConstructorState::DerivedInitialized;
+    }
+    Ok(true)
+}
+
 fn push_call_result(
+    runtime: &mut Runtime,
     parent: &mut Frame,
     value: StoredValue,
     return_to: CallReturn,
@@ -6932,12 +7005,6 @@ fn push_call_result(
         }
         ReturnDisposition::Discard => {}
         ReturnDisposition::InitializeDerivedThis => {
-            if parent.constructor_state != ConstructorState::DerivedUninitialized {
-                return Err(EngineFault::RuntimeInvariant {
-                    message: "derived constructor completion reached an invalid parent frame",
-                }
-                .into());
-            }
             if value.heap_reference().is_none() {
                 return Err(EngineFault::RuntimeInvariant {
                     message: "superclass construction completed without an object receiver",
@@ -6950,8 +7017,12 @@ fn push_call_result(
                 }
                 .into());
             }
-            parent.receiver = value.duplicate();
-            parent.constructor_state = ConstructorState::DerivedInitialized;
+            if !bind_derived_this(runtime, parent, &value)? {
+                return Err(EngineFault::RuntimeInvariant {
+                    message: "synthesized derived constructor initialized this more than once",
+                }
+                .into());
+            }
             push(parent, value);
         }
     }

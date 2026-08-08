@@ -180,6 +180,24 @@ pub(super) fn derived_this_uninitialized_exception(
     })
 }
 
+pub(super) fn derived_this_already_initialized_exception(
+    runtime: &Runtime,
+    frame: &Frame,
+    pc: BytecodePc,
+) -> Result<PendingException, ExecutionError> {
+    let realm = code(runtime, frame.code)?.realm;
+    Ok(PendingException {
+        realm,
+        payload: PendingExceptionPayload::EngineError {
+            kind: ExceptionKind::ReferenceError,
+            message: JsString::from_utf8(
+                "Super constructor may only be called once in a derived constructor",
+            )?,
+        },
+        origin: instruction_location(runtime, frame, pc)?,
+    })
+}
+
 pub(super) fn derived_constructor_primitive_return_exception(
     runtime: &Runtime,
     frame: &Frame,
@@ -626,6 +644,7 @@ pub(super) fn dispatch_pending_exception(
             };
             if let Some(parent) = frames.last_mut() {
                 push_call_result(
+                    runtime,
                     parent,
                     result,
                     return_to.ok_or(EngineFault::RuntimeInvariant {
@@ -816,6 +835,7 @@ pub(super) fn dispatch_pending_exception(
                 Ok(NativeDispatch::Immediate(value)) => {
                     if let Some(parent) = frames.last_mut() {
                         push_call_result(
+                            runtime,
                             parent,
                             value,
                             return_to.ok_or(EngineFault::RuntimeInvariant {

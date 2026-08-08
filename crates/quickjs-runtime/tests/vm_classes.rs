@@ -351,6 +351,17 @@ fn an_explicit_derived_constructor_enforces_the_uninitialized_this_rules() {
 }
 
 #[test]
+fn derived_constructor_arrows_share_the_mutable_this_binding_for_super_calls() {
+    run_with(
+        "function run(){let calls=0;let escaped;class Base{constructor(){calls++;}}class First extends Base{constructor(){let call=()=>super();let receiver=call();this.same=receiver===this;}}class Nested extends Base{constructor(){let call=()=>()=>super();call()();this.ready=true;}}class After extends Base{constructor(){let read=()=>this;super();this.arrowSeesReceiver=read()===this;}}class Before extends Base{constructor(){let read=()=>this;let early=false;try{read();}catch(error){early=error.name==='ReferenceError';}super();this.early=early;}}class Override extends Base{constructor(){escaped=()=>this;return {};}}class Twice extends Base{constructor(){let call=()=>super();super();call();}}class DirectTwice extends Base{constructor(){super();super();}}let first=new First;let nested=new Nested;let after=new After;let before=new Before;new Override;let escapedThrows=false;let repeated=false;let directRepeated=false;try{escaped();}catch(error){escapedThrows=error.name==='ReferenceError';}try{new Twice;}catch(error){repeated=error.name==='ReferenceError';}try{new DirectTwice;}catch(error){directRepeated=error.name==='ReferenceError';}return first.same&&nested.ready&&after.arrowSeesReceiver&&before.early&&escapedThrows&&repeated&&directRepeated&&calls===8;}",
+        |result| {
+            let value = result.expect("derived constructor arrow super execution");
+            assert_eq!(value.as_boolean().expect("live Boolean"), Some(true));
+        },
+    );
+}
+
+#[test]
 fn class_super_properties_keep_the_method_receiver_for_reads_calls_and_writes() {
     run_with(
         "function run(){class Base{get value(){return this._value;}set value(next){this._value=next;}method(){return this._value+1;}static get answer(){return this._answer;}static set answer(next){this._answer=next;}static method(){return this._answer+1;}}class Derived extends Base{constructor(value){super();this._value=value;this.constructorRead=super.value;}read(){return super.value;}readComputed(){return super['value'];}call(){return super.method();}callComputed(){return super['method']();}write(next){return super.value=next;}writeComputed(next){return super['value']=next;}static read(){return super.answer;}static readComputed(){return super['answer'];}static call(){return super.method();}static callComputed(){return super['method']();}static write(next){return super.answer=next;}static writeComputed(next){return super['answer']=next;}}let value=new Derived(3);Derived._answer=11;return value.constructorRead===3&&value.read()===3&&value.readComputed()===3&&value.call()===4&&value.callComputed()===4&&value.write(7)===7&&value._value===7&&value.writeComputed(9)===9&&value._value===9&&Derived.read()===11&&Derived.readComputed()===11&&Derived.call()===12&&Derived.callComputed()===12&&Derived.write(13)===13&&Derived._answer===13&&Derived.writeComputed(17)===17&&Derived._answer===17;}",

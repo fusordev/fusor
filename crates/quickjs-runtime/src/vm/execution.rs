@@ -355,6 +355,8 @@ pub(super) fn create_frame(
         .as_ref()
         .map(StoredValue::duplicate);
     let lexical_new_target = bytecode.lexical_new_target;
+    let lexical_derived_constructor = bytecode.lexical_derived_constructor;
+    let lexical_derived_this = bytecode.lexical_derived_this;
     let code = runtime
         .code
         .get(plan.code)
@@ -550,9 +552,21 @@ pub(super) fn create_frame(
         let receiver = lexical_receiver.ok_or(EngineFault::InvalidClosureEnvironment {
             function: plan.template,
         })?;
+        if lexical_derived_constructor.is_some() != lexical_derived_this.is_some()
+            || lexical_derived_this.is_some_and(|cell| !runtime.cells.contains(cell))
+        {
+            return Err(EngineFault::InvalidClosureEnvironment {
+                function: plan.template,
+            }
+            .into());
+        }
         (receiver, lexical_new_target)
     } else {
-        if lexical_receiver.is_some() || lexical_new_target.is_some() {
+        if lexical_receiver.is_some()
+            || lexical_new_target.is_some()
+            || lexical_derived_constructor.is_some()
+            || lexical_derived_this.is_some()
+        {
             return Err(EngineFault::InvalidClosureEnvironment {
                 function: plan.template,
             }
@@ -575,6 +589,35 @@ pub(super) fn create_frame(
         native_returns.push(allocate_async_function_settlement(runtime, realm)?);
     }
 
+    let (derived_constructor, derived_this_cell) =
+        if plan.construction && plan.constructor_profile.is_derived() {
+            check_execution_limit(
+                RuntimeResource::BindingCells,
+                runtime.limits.max_binding_cells,
+                usize_to_u64(runtime.cells.len()).saturating_add(1),
+            )?;
+            runtime
+                .cells
+                .try_reserve(1)
+                .map_err(|_| ExecutionError::AllocationFailed {
+                    resource: RuntimeResource::BindingCells,
+                    additional: 1,
+                })?;
+            let cell = runtime
+                .cells
+                .try_insert(BindingCell {
+                    value: SlotValue::Uninitialized,
+                })
+                .map_err(|_| ExecutionError::AllocationFailed {
+                    resource: RuntimeResource::BindingCells,
+                    additional: 1,
+                })?;
+            runtime.collection_pending = true;
+            (Some(plan.function), Some(cell))
+        } else {
+            (lexical_derived_constructor, lexical_derived_this)
+        };
+
     Ok(Frame {
         function: plan.function,
         code: plan.code,
@@ -592,6 +635,8 @@ pub(super) fn create_frame(
         } else {
             ConstructorState::NonConstructor
         },
+        derived_constructor,
+        derived_this_cell,
         native_caller: None,
         generator_resume: None,
         generator_result: None,
@@ -757,7 +802,12 @@ pub(super) fn execute_one(
         FinalOpcode::Undefined => push(frame, StoredValue::Undefined),
         FinalOpcode::Null => push(frame, StoredValue::Null),
         FinalOpcode::PushThis => {
-            if frame.constructor_state == ConstructorState::DerivedUninitialized {
+            let initialized = if frame.derived_this_cell.is_some() {
+                sync_derived_this(runtime, frame)?
+            } else {
+                frame.constructor_state != ConstructorState::DerivedUninitialized
+            };
+            if !initialized {
                 return Ok(Step::Abrupt(derived_this_uninitialized_exception(
                     runtime, frame, source_pc,
                 )?));
@@ -814,12 +864,13 @@ pub(super) fn execute_one(
                         .map_or(StoredValue::Undefined, StoredValue::Function),
                 ),
                 4 => {
-                    if frame.constructor_state != ConstructorState::DerivedUninitialized {
-                        return Ok(Step::Abrupt(derived_this_uninitialized_exception(
-                            runtime, frame, source_pc,
-                        )?));
-                    }
-                    push(frame, StoredValue::Function(frame.function));
+                    let constructor =
+                        frame
+                            .derived_constructor
+                            .ok_or(EngineFault::RuntimeInvariant {
+                                message: "verified super call has no lexical derived constructor",
+                            })?;
+                    push(frame, StoredValue::Function(constructor));
                 }
                 5 => {
                     let function = runtime.functions.get(frame.function).ok_or(
@@ -1321,14 +1372,6 @@ pub(super) fn execute_one(
                 }
                 .into());
             };
-            if matches!(value, StoredValue::Function(function) if function == frame.function)
-                && frame.constructor_state != ConstructorState::DerivedUninitialized
-            {
-                return Err(EngineFault::RuntimeInvariant {
-                    message: "derived get_super escaped its uninitialized constructor frame",
-                }
-                .into());
-            }
             let superclass = runtime.object_record(reference)?.prototype();
             push(
                 frame,
@@ -1426,12 +1469,6 @@ pub(super) fn execute_one(
             );
         }
         FinalOpcode::CheckCtorReturn => {
-            if frame.constructor_state != ConstructorState::DerivedUninitialized {
-                return Err(EngineFault::RuntimeInvariant {
-                    message: "derived super completion reached an initialized constructor frame",
-                }
-                .into());
-            }
             let value = peek(frame)?.duplicate();
             if value.heap_reference().is_none() {
                 return Err(EngineFault::RuntimeInvariant {
@@ -1439,8 +1476,11 @@ pub(super) fn execute_one(
                 }
                 .into());
             }
-            frame.receiver = value;
-            frame.constructor_state = ConstructorState::DerivedInitialized;
+            if !bind_derived_this(runtime, frame, &value)? {
+                return Ok(Step::Abrupt(derived_this_already_initialized_exception(
+                    runtime, frame, source_pc,
+                )?));
+            }
             push(frame, StoredValue::Boolean(false));
         }
         FinalOpcode::CheckCtor => {

@@ -171,9 +171,15 @@ impl<'arena> ExpressionPlanner<'_, '_, 'arena, '_> {
                 Operands::None,
                 call.span,
             )));
-            let instance_fields = self.instance_field_definitions(layout.executable)?.ok_or(
+            let constructor = self.lexical_derived_constructor(layout.executable)?.ok_or(
                 LeafCompilationError::SemanticInvariant {
                     invariant: "super constructor call belongs to a class constructor",
+                    span: Some(call.span),
+                },
+            )?;
+            let instance_fields = self.instance_field_definitions(constructor)?.ok_or(
+                LeafCompilationError::SemanticInvariant {
+                    invariant: "super constructor call resolves its derived class constructor",
                     span: Some(call.span),
                 },
             )?;
@@ -183,7 +189,13 @@ impl<'arena> ExpressionPlanner<'_, '_, 'arena, '_> {
                     span: Some(call.span),
                 });
             }
-            if !instance_fields.elements.is_empty() {
+            if constructor != layout.executable && !instance_fields.elements.is_empty() {
+                return Err(LeafCompilationError::SemanticInvariant {
+                    invariant: "storage rejects arrow super calls that need reusable instance initialization",
+                    span: Some(call.span),
+                });
+            }
+            if constructor == layout.executable && !instance_fields.elements.is_empty() {
                 work.push(ExpressionWork::InitializeInstanceFields);
             }
             work.push(ExpressionWork::Emit(PlannedInstruction::new(
@@ -474,9 +486,15 @@ impl<'arena> ExpressionPlanner<'_, '_, 'arena, '_> {
             Operands::None,
             call.span,
         )));
-        let instance_fields = self.instance_field_definitions(layout.executable)?.ok_or(
+        let constructor = self.lexical_derived_constructor(layout.executable)?.ok_or(
             LeafCompilationError::SemanticInvariant {
                 invariant: "super spread call belongs to a class constructor",
+                span: Some(call.span),
+            },
+        )?;
+        let instance_fields = self.instance_field_definitions(constructor)?.ok_or(
+            LeafCompilationError::SemanticInvariant {
+                invariant: "super spread call resolves its derived class constructor",
                 span: Some(call.span),
             },
         )?;
@@ -486,7 +504,13 @@ impl<'arena> ExpressionPlanner<'_, '_, 'arena, '_> {
                 span: Some(call.span),
             });
         }
-        if !instance_fields.elements.is_empty() {
+        if constructor != layout.executable && !instance_fields.elements.is_empty() {
+            return Err(LeafCompilationError::SemanticInvariant {
+                invariant: "storage rejects arrow super calls that need reusable instance initialization",
+                span: Some(call.span),
+            });
+        }
+        if constructor == layout.executable && !instance_fields.elements.is_empty() {
             work.push(ExpressionWork::InitializeInstanceFields);
         }
         work.push(ExpressionWork::Emit(PlannedInstruction::new(

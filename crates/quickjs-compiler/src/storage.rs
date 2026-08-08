@@ -2004,14 +2004,18 @@ impl<'unit, 'arena, 'scope> Planner<'unit, 'arena, 'scope> {
             if direct_super_call && instance_field_owner.is_some() {
                 return unsupported(UnsupportedFeature::FunctionSyntheticBinding, span);
             }
-            let derived_constructor =
-                self.executable_drafts
-                    .get(owner.index())
-                    .is_some_and(|candidate| {
-                        matches!(candidate.executable.kind, ExecutableKind::Function { .. })
-                            && is_derived_class_constructor(nodes, candidate.node_id)
-                    });
-            if direct_super_call && derived_constructor {
+            if direct_super_call
+                && let Some(constructor) =
+                    self.executable_lexically_has_derived_constructor(owner, span)?
+            {
+                if constructor != owner
+                    && self.derived_constructor_has_instance_initializers(constructor, span)?
+                {
+                    // Arrow-contained first-super field initialization needs
+                    // the reusable initializer body tracked separately from
+                    // this mutable derived-this environment tranche.
+                    return unsupported(UnsupportedFeature::FunctionSyntheticBinding, span);
+                }
                 continue;
             }
             let direct_super_property = match nodes.parent_kind(node_id) {
@@ -2039,6 +2043,92 @@ impl<'unit, 'arena, 'scope> Planner<'unit, 'arena, 'scope> {
             return unsupported(UnsupportedFeature::FunctionSyntheticBinding, span);
         }
         Ok(())
+    }
+
+    fn executable_lexically_has_derived_constructor(
+        &self,
+        mut executable: ExecutableId,
+        span: Span,
+    ) -> Result<Option<ExecutableId>, CompilerError> {
+        let nodes = self.unit.semantic().nodes();
+        loop {
+            let candidate = self.executable_drafts.get(executable.index()).ok_or(
+                CompilerError::SemanticInvariant {
+                    invariant: "super call owner executable exists",
+                    span: Some(span),
+                },
+            )?;
+            match candidate.executable.kind {
+                ExecutableKind::Arrow { .. } => {
+                    let Some(parent) = candidate.executable.parent else {
+                        return Err(CompilerError::SemanticInvariant {
+                            invariant: "arrow super call has an executable parent",
+                            span: Some(span),
+                        });
+                    };
+                    executable = parent;
+                }
+                ExecutableKind::Function { .. } => {
+                    return Ok(is_derived_class_constructor(nodes, candidate.node_id)
+                        .then_some(executable));
+                }
+                ExecutableKind::ClassDefaultConstructor
+                | ExecutableKind::Script { .. }
+                | ExecutableKind::Module => return Ok(None),
+            }
+        }
+    }
+
+    fn derived_constructor_has_instance_initializers(
+        &self,
+        executable: ExecutableId,
+        span: Span,
+    ) -> Result<bool, CompilerError> {
+        let nodes = self.unit.semantic().nodes();
+        let candidate = self.executable_drafts.get(executable.index()).ok_or(
+            CompilerError::SemanticInvariant {
+                invariant: "derived constructor executable exists",
+                span: Some(span),
+            },
+        )?;
+        let AstKind::Function(function) = nodes.kind(candidate.node_id) else {
+            return Err(CompilerError::SemanticInvariant {
+                invariant: "source derived constructor remains a function",
+                span: Some(span),
+            });
+        };
+        let AstKind::MethodDefinition(method) = nodes.parent_kind(function.node_id.get()) else {
+            return Err(CompilerError::SemanticInvariant {
+                invariant: "derived constructor remains a class method",
+                span: Some(span),
+            });
+        };
+        let AstKind::ClassBody(body) = nodes.parent_kind(method.node_id.get()) else {
+            return Err(CompilerError::SemanticInvariant {
+                invariant: "derived constructor remains in a class body",
+                span: Some(span),
+            });
+        };
+        let AstKind::Class(class) = nodes.parent_kind(body.node_id.get()) else {
+            return Err(CompilerError::SemanticInvariant {
+                invariant: "derived constructor class body remains in a class",
+                span: Some(span),
+            });
+        };
+        Ok(class.body.body.iter().any(|element| match element {
+            ClassElement::PropertyDefinition(field) => !field.r#static,
+            ClassElement::MethodDefinition(method) => {
+                !method.r#static
+                    && matches!(method.key, PropertyKey::PrivateIdentifier(_))
+                    && matches!(
+                        method.kind,
+                        MethodDefinitionKind::Method
+                            | MethodDefinitionKind::Get
+                            | MethodDefinitionKind::Set
+                    )
+            }
+            _ => false,
+        }))
     }
 
     fn executable_lexically_has_home_object(

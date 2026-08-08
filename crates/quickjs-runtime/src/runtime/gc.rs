@@ -841,6 +841,19 @@ impl Runtime {
                                         &mut work,
                                     );
                                 }
+                                if let Some(constructor) = bytecode.lexical_derived_constructor {
+                                    mark_heap_reference(
+                                        HeapReference::Function(constructor),
+                                        &mut marked_functions,
+                                        &mut marked_objects,
+                                        &mut work,
+                                    );
+                                }
+                                if let Some(cell) = bytecode.lexical_derived_this
+                                    && marked_cells.insert(cell)
+                                {
+                                    work.push(GraphNode::Cell(cell));
+                                }
                                 if let Some(home_object) = bytecode.home_object {
                                     mark_heap_reference(
                                         home_object,

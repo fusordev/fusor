@@ -269,6 +269,7 @@ pub(super) fn create_closure(
         has_prototype,
         function_kind,
         executable_kind,
+        lexical_derived_this,
     ) = {
         let code = code(runtime, frame.code)?;
         let function = code
@@ -314,9 +315,34 @@ pub(super) fn create_closure(
             header.flags().has_prototype(),
             header.kind(),
             function.metadata().executable_kind(),
+            function.lexical_derived_this(),
         )
     };
     let lexical = executable_kind == CompilerExecutableKind::OrdinaryArrow;
+    let (lexical_derived_constructor, lexical_derived_this_cell) = if lexical_derived_this {
+        let constructor =
+            frame
+                .derived_constructor
+                .ok_or(EngineFault::InvalidClosureEnvironment {
+                    function: frame.template,
+                })?;
+        let cell = frame
+            .derived_this_cell
+            .ok_or(EngineFault::InvalidClosureEnvironment {
+                function: frame.template,
+            })?;
+        if !runtime.cells.contains(cell) {
+            return Err(EngineFault::StaleHeapEdge {
+                edge: "lexical derived-this binding",
+                index: cell.index(),
+                generation: cell.generation(),
+            }
+            .into());
+        }
+        (Some(constructor), Some(cell))
+    } else {
+        (None, None)
+    };
     let generator = function_kind == FunctionKind::Generator;
     let asynchronous = function_kind == FunctionKind::Async;
     let async_generator = function_kind == FunctionKind::AsyncGenerator;
@@ -661,6 +687,8 @@ pub(super) fn create_closure(
             environment,
             lexical_receiver: lexical.then(|| frame.receiver.duplicate()),
             lexical_new_target: if lexical { frame.new_target } else { None },
+            lexical_derived_constructor,
+            lexical_derived_this: lexical_derived_this_cell,
             home_object: if lexical { parent_home_object } else { None },
         }),
         object: function_record,

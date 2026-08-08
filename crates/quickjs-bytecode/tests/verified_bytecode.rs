@@ -5842,6 +5842,50 @@ fn ordinary_arrow_home_object_requires_a_verified_method_ancestor() {
 }
 
 #[test]
+fn ordinary_arrow_super_call_requires_a_verified_derived_constructor_ancestor() {
+    let text = "()=>super()";
+    let function_span = SourceByteSpan::new(0, u32::try_from(text.len()).expect("source length"));
+    let instructions = [
+        (FinalOpcode::SpecialObject, Operands::U8(4)),
+        (FinalOpcode::GetSuper, Operands::None),
+        (FinalOpcode::SpecialObject, Operands::U8(3)),
+        (
+            FinalOpcode::CallConstructor,
+            Operands::NPop { argument_count: 0 },
+        ),
+        (FinalOpcode::CheckCtorReturn, Operands::None),
+        (FinalOpcode::Drop, Operands::None),
+        (FinalOpcode::Drop, Operands::None),
+        (FinalOpcode::ReturnUndef, Operands::None),
+    ];
+    let mappings = [0, 2, 3, 5, 8, 9, 10, 11].map(|pc| (pc, function_span));
+    let input = profiled_single_input(
+        &instructions,
+        UnverifiedFunctionHeader::ordinary_arrow_with_variable_references(true, 0, 0),
+        CompilerExecutableKind::OrdinaryArrow,
+        &[],
+        None,
+        &[],
+        0,
+        0,
+        &[],
+        source(text, function_span, None, &mappings),
+    );
+    let error = verify_compiler_bytecode_graph(input, BytecodeGraphVerificationLimits::default())
+        .expect_err("an arrow without a derived constructor ancestor has no super-call binding");
+    assert!(
+        matches!(
+            error.kind(),
+            BytecodeVerificationErrorKind::UnsupportedCompilerOpcode {
+                pc,
+                opcode: FinalOpcode::SpecialObject,
+            } if *pc == BytecodePc::ZERO
+        ),
+        "unexpected error: {error:?}"
+    );
+}
+
+#[test]
 fn dynamic_function_script_profile_rejects_names_and_every_argument_domain() {
     let named_text = "script";
     let named_span = SourceByteSpan::new(0, 6);

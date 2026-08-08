@@ -199,6 +199,32 @@ impl CompilationContext<'_, '_, '_> {
             elements: private_methods,
         }))
     }
+
+    pub(in crate::lowering) fn lexical_derived_constructor(
+        &self,
+        mut executable: ExecutableId,
+    ) -> Result<Option<ExecutableId>, LeafCompilationError> {
+        loop {
+            let planned = self
+                .planned
+                .plan
+                .executable(executable)
+                .ok_or(LeafCompilationError::InvalidExecutable { executable })?;
+            if !matches!(planned.kind(), ExecutableKind::Arrow { .. }) {
+                return Ok(self
+                    .instance_field_definitions(executable)?
+                    .filter(|definitions| definitions.derived)
+                    .map(|_| executable));
+            }
+            let Some(parent) = planned.parent() else {
+                return Err(LeafCompilationError::SemanticInvariant {
+                    invariant: "arrow super call has an executable parent",
+                    span: Some(planned.span()),
+                });
+            };
+            executable = parent;
+        }
+    }
 }
 
 #[derive(Clone, Copy)]

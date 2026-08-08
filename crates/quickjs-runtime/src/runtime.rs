@@ -544,6 +544,12 @@ pub(crate) struct BytecodeFunction {
     pub(crate) environment: Vec<EnvironmentBinding>,
     pub(crate) lexical_receiver: Option<StoredValue>,
     pub(crate) lexical_new_target: Option<FunctionId>,
+    /// The derived constructor whose mutable `this` environment is retained
+    /// by this arrow, paired with `lexical_derived_this`.
+    pub(crate) lexical_derived_constructor: Option<FunctionId>,
+    /// Shared lexical derived-`this` binding. It remains uninitialized until
+    /// the first successful `super()` result is bound.
+    pub(crate) lexical_derived_this: Option<BindingCellId>,
     /// The ECMAScript `[[HomeObject]]` installed when this closure becomes a
     /// class method, class constructor, or object-literal method, or inherited
     /// lexically by an arrow created within one. It is an internal GC edge,

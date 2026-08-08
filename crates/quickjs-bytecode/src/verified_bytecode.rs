@@ -799,6 +799,7 @@ const _: () = assert!(
 pub struct VerifiedBytecodeFunction<'graph> {
     function: &'graph VerifiedCompilerFunction,
     metadata: &'graph VerifiedFunctionMetadata,
+    lexical_derived_this: bool,
 }
 
 impl<'graph> VerifiedBytecodeFunction<'graph> {
@@ -813,6 +814,14 @@ impl<'graph> VerifiedBytecodeFunction<'graph> {
     pub const fn metadata(self) -> &'graph VerifiedFunctionMetadata {
         self.metadata
     }
+
+    /// Returns whether this arrow closes over a derived constructor's mutable
+    /// `this` binding. The whole-graph verifier derives this authority from an
+    /// arrow-only ancestry ending at a derived class constructor.
+    #[must_use]
+    pub const fn lexical_derived_this(self) -> bool {
+        self.lexical_derived_this
+    }
 }
 
 /// Immutable execution authority for the current compiler-bytecode profile.
@@ -826,6 +835,7 @@ impl<'graph> VerifiedBytecodeFunction<'graph> {
 pub struct VerifiedBytecode {
     graph: Arc<VerifiedCompilerFunctionGraph>,
     metadata: Arc<Vec<VerifiedFunctionMetadata>>,
+    lexical_derived_this: Arc<[bool]>,
     requirements: Arc<[ExecutionRequirement]>,
     usage: BytecodeGraphUsage,
 }
@@ -844,6 +854,7 @@ impl VerifiedBytecode {
         VerifiedBytecodeFunction {
             function: self.graph.root(),
             metadata: &self.metadata[index],
+            lexical_derived_this: self.lexical_derived_this[index],
         }
     }
 
@@ -860,6 +871,7 @@ impl VerifiedBytecode {
         Some(VerifiedBytecodeFunction {
             function: self.graph.function(id)?,
             metadata: self.metadata.get(index)?,
+            lexical_derived_this: *self.lexical_derived_this.get(index)?,
         })
     }
 
@@ -870,7 +882,14 @@ impl VerifiedBytecode {
             .functions()
             .iter()
             .zip(self.metadata.iter())
-            .map(|(function, metadata)| VerifiedBytecodeFunction { function, metadata })
+            .zip(self.lexical_derived_this.iter().copied())
+            .map(
+                |((function, metadata), lexical_derived_this)| VerifiedBytecodeFunction {
+                    function,
+                    metadata,
+                    lexical_derived_this,
+                },
+            )
     }
 
     /// Returns final metadata in dense function-template order.
@@ -2097,7 +2116,8 @@ pub fn verify_compiler_bytecode_graph(
         verified.push(record);
     }
     verify_closure_metadata(&graph, &verified)?;
-    verify_lexical_arrow_home_objects(&graph, &verified, &function_parents)?;
+    let lexical_derived_this =
+        verify_lexical_arrow_environments(&graph, &verified, &function_parents)?;
     verify_class_field_key_bindings(&graph, &verified)?;
     verify_inferred_function_names(&graph, &verified)?;
     verify_method_definitions(&graph, &verified, limits, &mut usage)?;
@@ -2106,6 +2126,7 @@ pub fn verify_compiler_bytecode_graph(
     Ok(VerifiedBytecode {
         graph,
         metadata: Arc::new(verified),
+        lexical_derived_this: lexical_derived_this.into(),
         requirements: requirements.into(),
         usage,
     })
@@ -4189,14 +4210,71 @@ fn verify_closure_metadata(
     Ok(())
 }
 
-/// Certifies that an arrow using the lexical `super` home-object path is
-/// nested only through arrows beneath a method or class constructor. Static
-/// field arrows instead carry the separately certified class-receiver cell.
-fn verify_lexical_arrow_home_objects(
+/// Certifies the function-environment capabilities inherited by arrows.
+/// Home objects cross only arrow boundaries beneath methods or constructors;
+/// the mutable derived-`this` binding crosses only arrow boundaries beneath a
+/// derived constructor. Static field arrows instead carry the separately
+/// certified class-receiver cell.
+fn lexical_arrow_boundary(
+    id: FunctionTemplateId,
+    metadata: &[VerifiedFunctionMetadata],
+    parents: &[Option<FunctionTemplateId>],
+) -> Option<(FunctionTemplateId, CompilerExecutableKind)> {
+    let mut ancestor = id;
+    loop {
+        let parent = usize::try_from(ancestor.get())
+            .ok()
+            .and_then(|ancestor_index| parents.get(ancestor_index))
+            .copied()
+            .flatten()?;
+        let parent_metadata = usize::try_from(parent.get())
+            .ok()
+            .and_then(|parent_index| metadata.get(parent_index))?;
+        match parent_metadata.executable_kind {
+            CompilerExecutableKind::OrdinaryArrow => ancestor = parent,
+            kind => return Some((parent, kind)),
+        }
+    }
+}
+
+fn lexical_arrow_uses(
+    flow: &VerifiedControlFlow,
+    static_field_super: bool,
+) -> (Option<VerifiedInstruction>, Option<VerifiedInstruction>) {
+    let home_object = flow.instructions().iter().copied().find(|verified| {
+        let instruction = verified.decoded().instruction();
+        matches!(
+            (instruction.opcode(), instruction.operands()),
+            (FinalOpcode::SpecialObject, Operands::U8(5))
+        ) || (!static_field_super
+            && matches!(
+                instruction.opcode(),
+                FinalOpcode::GetSuper | FinalOpcode::GetSuperValue | FinalOpcode::PutSuperValue
+            ))
+    });
+    let derived_super = flow.instructions().iter().copied().find(|verified| {
+        matches!(
+            (
+                verified.decoded().instruction().opcode(),
+                verified.decoded().instruction().operands(),
+            ),
+            (FinalOpcode::SpecialObject, Operands::U8(4))
+        )
+    });
+    (home_object, derived_super)
+}
+
+fn verify_lexical_arrow_environments(
     graph: &VerifiedCompilerFunctionGraph,
     metadata: &[VerifiedFunctionMetadata],
     parents: &[Option<FunctionTemplateId>],
-) -> Result<(), BytecodeVerificationError> {
+) -> Result<Vec<bool>, BytecodeVerificationError> {
+    let mut lexical_derived_this = try_filled_vec(
+        graph.root_id(),
+        metadata.len(),
+        false,
+        BytecodeGraphResource::VerifiedMetadata,
+    )?;
     for (index, record) in metadata.iter().enumerate() {
         if record.executable_kind != CompilerExecutableKind::OrdinaryArrow {
             continue;
@@ -4225,53 +4303,22 @@ fn verify_lexical_arrow_home_objects(
                     .map(ClosureVariableDefinition::policy),
             )
             .any(|policy| policy.kind() == CompilerBindingKind::ClassStaticReceiver);
-        let offending = flow.instructions().iter().find(|verified| {
-            let instruction = verified.decoded().instruction();
-            matches!(
-                (instruction.opcode(), instruction.operands()),
-                (FinalOpcode::SpecialObject, Operands::U8(5))
-            ) || (!static_field_super
-                && matches!(
-                    instruction.opcode(),
-                    FinalOpcode::GetSuper | FinalOpcode::GetSuperValue | FinalOpcode::PutSuperValue
-                ))
-        });
-        let Some(offending) = offending else {
-            continue;
-        };
+        let (home_object_use, derived_super_call) = lexical_arrow_uses(flow, static_field_super);
+        let boundary = lexical_arrow_boundary(id, metadata, parents);
 
-        let mut ancestor = id;
-        let authorized = loop {
-            let Some(parent) = usize::try_from(ancestor.get())
-                .ok()
-                .and_then(|ancestor_index| parents.get(ancestor_index))
-                .copied()
-                .flatten()
-            else {
-                break false;
-            };
-            let Some(parent_metadata) = usize::try_from(parent.get())
-                .ok()
-                .and_then(|parent_index| metadata.get(parent_index))
-            else {
-                break false;
-            };
-            match parent_metadata.executable_kind {
-                CompilerExecutableKind::OrdinaryArrow => ancestor = parent,
-                CompilerExecutableKind::OrdinaryMethod
-                | CompilerExecutableKind::GeneratorMethod
-                | CompilerExecutableKind::AsyncMethod
-                | CompilerExecutableKind::AsyncGeneratorMethod
-                | CompilerExecutableKind::ClassConstructor => break true,
-                CompilerExecutableKind::GlobalScript
-                | CompilerExecutableKind::OrdinaryFunction
-                | CompilerExecutableKind::GeneratorFunction
-                | CompilerExecutableKind::AsyncFunction
-                | CompilerExecutableKind::AsyncGeneratorFunction
-                | CompilerExecutableKind::DynamicFunctionScript => break false,
-            }
-        };
-        if !authorized {
+        let derived_constructor = boundary.is_some_and(|(boundary, kind)| {
+            kind == CompilerExecutableKind::ClassConstructor
+                && graph.function(boundary).is_some_and(|function| {
+                    function
+                        .control_flow()
+                        .function_header()
+                        .flags()
+                        .is_derived_class_constructor()
+                })
+        });
+        if let Some(offending) = derived_super_call
+            && !derived_constructor
+        {
             return Err(BytecodeVerificationError::function(
                 id,
                 BytecodeVerificationErrorKind::UnsupportedCompilerOpcode {
@@ -4280,8 +4327,31 @@ fn verify_lexical_arrow_home_objects(
                 },
             ));
         }
+
+        let home_object_authorized = boundary.is_some_and(|(_, kind)| {
+            matches!(
+                kind,
+                CompilerExecutableKind::OrdinaryMethod
+                    | CompilerExecutableKind::GeneratorMethod
+                    | CompilerExecutableKind::AsyncMethod
+                    | CompilerExecutableKind::AsyncGeneratorMethod
+                    | CompilerExecutableKind::ClassConstructor
+            )
+        });
+        if let Some(offending) = home_object_use
+            && !home_object_authorized
+        {
+            return Err(BytecodeVerificationError::function(
+                id,
+                BytecodeVerificationErrorKind::UnsupportedCompilerOpcode {
+                    pc: offending.decoded().pc(),
+                    opcode: offending.decoded().instruction().opcode(),
+                },
+            ));
+        }
+        lexical_derived_this[index] = derived_constructor;
     }
-    Ok(())
+    Ok(lexical_derived_this)
 }
 
 /// Certifies the synthetic cell that retains one computed public field key.
@@ -7273,11 +7343,12 @@ fn verify_supported_opcodes(
             || (matches!(opcode, FinalOpcode::Return | FinalOpcode::ReturnUndef)
                 && (generator || asynchronous))
             || (opcode == FinalOpcode::CheckCtorReturn
-                && !(executable_kind == CompilerExecutableKind::ClassConstructor
-                    && flow
-                        .function_header()
-                        .flags()
-                        .is_derived_class_constructor()))
+                && !(executable_kind == CompilerExecutableKind::OrdinaryArrow
+                    || (executable_kind == CompilerExecutableKind::ClassConstructor
+                        && flow
+                            .function_header()
+                            .flags()
+                            .is_derived_class_constructor())))
             || (matches!(
                 opcode,
                 FinalOpcode::GetSuper | FinalOpcode::GetSuperValue | FinalOpcode::PutSuperValue
@@ -7408,11 +7479,12 @@ fn compiler_special_object_is_authorized(
         }
         Operands::U8(3) => flow.function_header().flags().new_target_allowed(),
         Operands::U8(4) => {
-            executable_kind == CompilerExecutableKind::ClassConstructor
-                && flow
-                    .function_header()
-                    .flags()
-                    .is_derived_class_constructor()
+            executable_kind == CompilerExecutableKind::OrdinaryArrow
+                || (executable_kind == CompilerExecutableKind::ClassConstructor
+                    && flow
+                        .function_header()
+                        .flags()
+                        .is_derived_class_constructor())
         }
         Operands::U8(5) => matches!(
             executable_kind,
