@@ -5,8 +5,8 @@ use super::{
     ordinary,
 };
 use crate::runtime::realm::{
-    CONSTRUCTOR_PROTOTYPE_PROPERTY, IDENTITY_PROPERTY, NativeFunctionKind, PredefinedAtom,
-    PropertyLayout,
+    CONSTRUCTOR_PROTOTYPE_PROPERTY, IDENTITY_PROPERTY, IteratorConsumer, NativeFunctionKind,
+    PredefinedAtom, PropertyLayout,
     schema::{
         IntrinsicFunctionId, IntrinsicIdentity, IntrinsicKeySpec, IntrinsicNameSpec,
         IntrinsicObjectId, IntrinsicObjectKind, IntrinsicStringSpec, IntrinsicValueSpec,
@@ -84,8 +84,18 @@ pub(super) fn visit_functions(visit: FunctionSink<'_>) {
             1,
         ),
         (
+            NativeFunctionKind::IteratorPrototypeConsumer(IteratorConsumer::Every),
+            IntrinsicNameSpec::RealmName(RealmNameId::IteratorConsumer(IteratorConsumer::Every)),
+            1,
+        ),
+        (
             NativeFunctionKind::IteratorPrototypeFilter,
             IntrinsicNameSpec::RealmName(RealmNameId::IteratorFilter),
+            1,
+        ),
+        (
+            NativeFunctionKind::IteratorPrototypeConsumer(IteratorConsumer::Find),
+            IntrinsicNameSpec::RealmName(RealmNameId::IteratorConsumer(IteratorConsumer::Find)),
             1,
         ),
         (
@@ -94,8 +104,18 @@ pub(super) fn visit_functions(visit: FunctionSink<'_>) {
             1,
         ),
         (
+            NativeFunctionKind::IteratorPrototypeConsumer(IteratorConsumer::ForEach),
+            IntrinsicNameSpec::RealmName(RealmNameId::IteratorConsumer(IteratorConsumer::ForEach)),
+            1,
+        ),
+        (
             NativeFunctionKind::IteratorPrototypeMap,
             IntrinsicNameSpec::RealmName(RealmNameId::IteratorMap),
+            1,
+        ),
+        (
+            NativeFunctionKind::IteratorPrototypeConsumer(IteratorConsumer::Some),
+            IntrinsicNameSpec::RealmName(RealmNameId::IteratorConsumer(IteratorConsumer::Some)),
             1,
         ),
         (
@@ -262,8 +282,18 @@ pub(super) fn visit_properties(visit: PropertySink<'_>) {
     ));
     visit(method(
         prototype,
+        IntrinsicKeySpec::InternedString(RealmNameId::IteratorConsumer(IteratorConsumer::Every)),
+        NativeFunctionKind::IteratorPrototypeConsumer(IteratorConsumer::Every),
+    ));
+    visit(method(
+        prototype,
         IntrinsicKeySpec::InternedString(RealmNameId::IteratorFilter),
         NativeFunctionKind::IteratorPrototypeFilter,
+    ));
+    visit(method(
+        prototype,
+        IntrinsicKeySpec::InternedString(RealmNameId::IteratorConsumer(IteratorConsumer::Find)),
+        NativeFunctionKind::IteratorPrototypeConsumer(IteratorConsumer::Find),
     ));
     visit(method(
         prototype,
@@ -272,8 +302,18 @@ pub(super) fn visit_properties(visit: PropertySink<'_>) {
     ));
     visit(method(
         prototype,
+        IntrinsicKeySpec::InternedString(RealmNameId::IteratorConsumer(IteratorConsumer::ForEach)),
+        NativeFunctionKind::IteratorPrototypeConsumer(IteratorConsumer::ForEach),
+    ));
+    visit(method(
+        prototype,
         IntrinsicKeySpec::InternedString(RealmNameId::IteratorMap),
         NativeFunctionKind::IteratorPrototypeMap,
+    ));
+    visit(method(
+        prototype,
+        IntrinsicKeySpec::InternedString(RealmNameId::IteratorConsumer(IteratorConsumer::Some)),
+        NativeFunctionKind::IteratorPrototypeConsumer(IteratorConsumer::Some),
     ));
     visit(method(
         prototype,

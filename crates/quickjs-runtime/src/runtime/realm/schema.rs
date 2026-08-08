@@ -7,9 +7,9 @@
 
 use super::{
     ArrayCallback, ArrayCopier, ArrayFlatten, ArrayMutator, ArrayReduction, ArraySearch, ArraySort,
-    ArrayStatic, ErrorIntrinsicKind, GlobalNumericFunction, LocaleStringMethod, MapMethod,
-    MathMethod, NativeFunctionKind, NumberFormat, NumberPredicate, PredefinedAtom, PromiseStatic,
-    PropertyLayout, ReflectMethod, SetMethod, StringMethod, UriFunction,
+    ArrayStatic, ErrorIntrinsicKind, GlobalNumericFunction, IteratorConsumer, LocaleStringMethod,
+    MapMethod, MathMethod, NativeFunctionKind, NumberFormat, NumberPredicate, PredefinedAtom,
+    PromiseStatic, PropertyLayout, ReflectMethod, SetMethod, StringMethod, UriFunction,
 };
 use crate::object::TypedArrayElementType;
 use crate::runtime::{
@@ -202,6 +202,7 @@ pub(in crate::runtime) enum RealmNameId {
     ArrayIsArray,
     ArrayFromAsync,
     IteratorDrop,
+    IteratorConsumer(IteratorConsumer),
     IteratorFilter,
     IteratorFlatMap,
     IteratorMap,

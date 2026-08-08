@@ -19,11 +19,11 @@ use crate::{
 use super::{
     ARRAY_CALLBACK_METHODS, ARRAY_COPIER_METHODS, ARRAY_FLATTEN_METHODS, ARRAY_MUTATOR_METHODS,
     ARRAY_REDUCTION_METHODS, ARRAY_SEARCH_METHODS, ARRAY_SORT_METHODS, AtomError, AtomTable,
-    BIGINT_INTERNED_STATICS, DYNAMIC_SYMBOL_STATIC_PROPERTIES, JsString, MATH_CONSTANTS, MapMethod,
-    MathMethod, NUMBER_FORMAT_METHODS, NUMBER_PREDICATE_STATICS, NUMBER_VALUE_STATICS,
-    NativeFunctionKind, OBJECT_PROTOTYPE_REFLECTION, OBJECT_STATIC_METHODS, PromiseStatic, Runtime,
-    RuntimeError, RuntimeResource, STRING_FROM_STATICS, STRING_PROTOTYPE_METHODS, SetMethod,
-    URI_FUNCTIONS, allocation_failed,
+    BIGINT_INTERNED_STATICS, DYNAMIC_SYMBOL_STATIC_PROPERTIES, IteratorConsumer, JsString,
+    MATH_CONSTANTS, MapMethod, MathMethod, NUMBER_FORMAT_METHODS, NUMBER_PREDICATE_STATICS,
+    NUMBER_VALUE_STATICS, NativeFunctionKind, OBJECT_PROTOTYPE_REFLECTION, OBJECT_STATIC_METHODS,
+    PromiseStatic, Runtime, RuntimeError, RuntimeResource, STRING_FROM_STATICS,
+    STRING_PROTOTYPE_METHODS, SetMethod, URI_FUNCTIONS, allocation_failed,
     families::RealmIntrinsicSchema,
     schema::{
         IntrinsicDescriptorSpec, IntrinsicKeySpec, IntrinsicNameSpec, IntrinsicStringSpec,
@@ -246,6 +246,9 @@ fn visit_realm_name_order(
     visit(RealmNameId::ArrayIsArray)?;
     visit(RealmNameId::ArrayFromAsync)?;
     visit(RealmNameId::IteratorDrop)?;
+    for consumer in IteratorConsumer::ALL {
+        visit(RealmNameId::IteratorConsumer(consumer))?;
+    }
     visit(RealmNameId::IteratorFilter)?;
     visit(RealmNameId::IteratorFlatMap)?;
     visit(RealmNameId::IteratorMap)?;
@@ -553,6 +556,7 @@ fn realm_name_description(id: RealmNameId) -> &'static str {
         RealmNameId::ArrayIsArray => "isArray",
         RealmNameId::ArrayFromAsync => "fromAsync",
         RealmNameId::IteratorDrop => "drop",
+        RealmNameId::IteratorConsumer(consumer) => consumer.name(),
         RealmNameId::IteratorFilter => "filter",
         RealmNameId::IteratorFlatMap => "flatMap",
         RealmNameId::IteratorMap => "map",

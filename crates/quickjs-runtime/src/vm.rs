@@ -827,6 +827,7 @@ enum NativeContinuation {
     ErrorConstructor(ErrorConstructorContinuation),
     ErrorToString(ErrorToStringContinuation),
     IteratorFrom(IteratorFromContinuation),
+    IteratorConsumer(IteratorConsumerContinuation),
     IteratorHelperCreation(IteratorHelperCreationContinuation),
     IteratorToArray(IteratorToArrayContinuation),
     IteratorHelperNext(IteratorHelperNextContinuation),
@@ -1046,6 +1047,7 @@ impl NativeContinuation {
             Self::ErrorConstructor(state) => state.retained_values(),
             Self::ErrorToString(state) => state.retained_values(),
             Self::IteratorFrom(state) => state.retained_values(),
+            Self::IteratorConsumer(state) => state.retained_values(),
             Self::IteratorHelperCreation(state) => state.retained_values(),
             Self::IteratorToArray(state) => state.retained_values(),
             Self::IteratorHelperNext(state) => state.retained_values(),
@@ -1129,7 +1131,8 @@ impl NativeContinuation {
                 | Self::AsyncFromSync(_)
                 | Self::AsyncFromSyncClose(_)
                 | Self::AsyncGeneratorReturnAwait { .. }
-        ) || matches!(self, Self::Promise(state) if state.handles_abrupt())
+        ) || matches!(self, Self::IteratorConsumer(state) if state.handles_abrupt())
+            || matches!(self, Self::Promise(state) if state.handles_abrupt())
             || matches!(self, Self::RegExp(state) if state.handles_abrupt())
             || matches!(
                 self,
@@ -3437,6 +3440,7 @@ fn trace_native_continuation_roots(
         NativeContinuation::ErrorConstructor(state) => state.trace_roots(mark),
         NativeContinuation::ErrorToString(state) => state.trace_roots(mark),
         NativeContinuation::IteratorFrom(state) => state.trace_roots(mark),
+        NativeContinuation::IteratorConsumer(state) => state.trace_roots(mark),
         NativeContinuation::IteratorHelperCreation(state) => state.trace_roots(mark),
         NativeContinuation::IteratorToArray(state) => state.trace_roots(mark),
         NativeContinuation::IteratorHelperNext(state) => state.trace_roots(mark),

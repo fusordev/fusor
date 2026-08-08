@@ -127,6 +127,62 @@ impl IteratorToArrayContinuation {
     }
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum IteratorConsumerStage {
+    NextMethod,
+    NextResult,
+    Done,
+    Value,
+    Callback,
+    CloseReturnProperty,
+    CloseReturnCall,
+}
+
+pub(super) struct IteratorConsumerContinuation {
+    iterator: StoredValue,
+    next_method: Option<FunctionId>,
+    callback: FunctionId,
+    kind: crate::runtime::IteratorConsumer,
+    counter: u64,
+    result: Option<StoredValue>,
+    candidate: Option<StoredValue>,
+    outcome: Option<StoredValue>,
+    realm: RealmId,
+    stage: IteratorConsumerStage,
+    origin: JsStackFrame,
+}
+
+impl IteratorConsumerContinuation {
+    pub(super) fn retained_values(&self) -> u64 {
+        2_u64
+            .saturating_add(u64::from(self.next_method.is_some()))
+            .saturating_add(u64::from(self.result.is_some()))
+            .saturating_add(u64::from(self.candidate.is_some()))
+            .saturating_add(u64::from(self.outcome.is_some()))
+    }
+
+    pub(super) fn trace_roots(&self, mark: &mut dyn FnMut(CollectionRoot)) {
+        trace_stored_value_root(&self.iterator, mark);
+        mark(CollectionRoot::Heap(HeapReference::Function(self.callback)));
+        if let Some(next_method) = self.next_method {
+            mark(CollectionRoot::Heap(HeapReference::Function(next_method)));
+        }
+        if let Some(result) = &self.result {
+            trace_stored_value_root(result, mark);
+        }
+        if let Some(candidate) = &self.candidate {
+            trace_stored_value_root(candidate, mark);
+        }
+        if let Some(outcome) = &self.outcome {
+            trace_stored_value_root(outcome, mark);
+        }
+    }
+
+    pub(super) const fn handles_abrupt(&self) -> bool {
+        matches!(self.stage, IteratorConsumerStage::Callback)
+    }
+}
+
 pub(super) struct IteratorHelperCreationContinuation {
     iterator: StoredValue,
     kind: crate::object::IteratorHelperKind,
@@ -591,6 +647,68 @@ pub(super) fn begin_iterator_to_array(
         origin,
     };
     read_iterator_to_array_property(
+        runtime,
+        state,
+        runtime.predefined_property_key(PredefinedAtom::Next),
+        return_to,
+        execution_budget,
+    )
+}
+
+#[allow(
+    clippy::too_many_arguments,
+    reason = "native dispatch keeps the consumer kind, receiver, callback, realm, source origin, and shared budget explicit"
+)]
+pub(super) fn begin_iterator_consumer(
+    runtime: &mut Runtime,
+    kind: crate::runtime::IteratorConsumer,
+    receiver: StoredValue,
+    callback: &StoredValue,
+    realm: RealmId,
+    return_to: Option<CallReturn>,
+    origin: JsStackFrame,
+    execution_budget: &mut ExecutionBudget,
+) -> Result<NativeDispatch, NativeFailure> {
+    if receiver.heap_reference().is_none() {
+        return Err(iterator_exception(
+            realm,
+            origin,
+            ExceptionKind::TypeError,
+            "Iterator consumer receiver must be an object",
+        )?);
+    }
+    let StoredValue::Function(callback) = callback else {
+        let NativeFailure::Abrupt(pending) = iterator_exception(
+            realm,
+            origin,
+            ExceptionKind::TypeError,
+            "Iterator consumer callback must be callable",
+        )?
+        else {
+            unreachable!("iterator_exception always returns an abrupt completion")
+        };
+        return begin_exceptional_iterator_close(
+            runtime,
+            receiver,
+            pending,
+            return_to,
+            execution_budget,
+        );
+    };
+    let state = IteratorConsumerContinuation {
+        iterator: receiver,
+        next_method: None,
+        callback: *callback,
+        kind,
+        counter: 0,
+        result: None,
+        candidate: None,
+        outcome: None,
+        realm,
+        stage: IteratorConsumerStage::NextMethod,
+        origin,
+    };
+    read_iterator_consumer_property(
         runtime,
         state,
         runtime.predefined_property_key(PredefinedAtom::Next),
@@ -1836,6 +1954,298 @@ fn iterator_counter_number(counter: u64) -> JsNumber {
     let high = u32::try_from(counter >> 32).unwrap_or(u32::MAX);
     let low = u32::try_from(counter & u64::from(u32::MAX)).unwrap_or(u32::MAX);
     JsNumber::from_f64(f64::from(high) * 4_294_967_296.0 + f64::from(low))
+}
+
+#[allow(
+    clippy::too_many_lines,
+    reason = "the shared consumer exposes every IteratorStepValue and normal-close suspension boundary as one typed state machine"
+)]
+pub(super) fn advance_iterator_consumer(
+    runtime: &mut Runtime,
+    mut state: IteratorConsumerContinuation,
+    completion: StoredValue,
+    return_to: Option<CallReturn>,
+    execution_budget: &mut ExecutionBudget,
+) -> Result<NativeDispatch, NativeFailure> {
+    match state.stage {
+        IteratorConsumerStage::NextMethod => {
+            let StoredValue::Function(next_method) = completion else {
+                return Err(iterator_exception(
+                    state.realm,
+                    state.origin,
+                    ExceptionKind::TypeError,
+                    "iterator next method is not callable",
+                )?);
+            };
+            state.next_method = Some(next_method);
+            call_iterator_consumer_next(state, return_to, execution_budget)
+        }
+        IteratorConsumerStage::NextResult => {
+            if completion.heap_reference().is_none() {
+                return Err(iterator_exception(
+                    state.realm,
+                    state.origin,
+                    ExceptionKind::TypeError,
+                    "iterator next method did not return an object",
+                )?);
+            }
+            state.result = Some(completion);
+            state.stage = IteratorConsumerStage::Done;
+            read_iterator_consumer_property(
+                runtime,
+                state,
+                runtime.predefined_property_key(PredefinedAtom::Done),
+                return_to,
+                execution_budget,
+            )
+        }
+        IteratorConsumerStage::Done => {
+            if completion.is_truthy() {
+                return Ok(NativeDispatch::Immediate(iterator_consumer_exhausted(
+                    state.kind,
+                )));
+            }
+            state.stage = IteratorConsumerStage::Value;
+            read_iterator_consumer_property(
+                runtime,
+                state,
+                runtime.predefined_property_key(PredefinedAtom::Value),
+                return_to,
+                execution_budget,
+            )
+        }
+        IteratorConsumerStage::Value => {
+            let mut arguments = Vec::new();
+            arguments
+                .try_reserve_exact(2)
+                .map_err(|_| ExecutionError::AllocationFailed {
+                    resource: RuntimeResource::FrameValues,
+                    additional: 2,
+                })?;
+            if matches!(state.kind, crate::runtime::IteratorConsumer::Find) {
+                state.candidate = Some(completion.duplicate());
+            }
+            arguments.push(completion);
+            arguments.push(StoredValue::Number(iterator_counter_number(state.counter)));
+            state.result = None;
+            state.stage = IteratorConsumerStage::Callback;
+            execution_budget.charge_instructions(1)?;
+            let origin = state.origin.clone();
+            iterator_call_with_arguments(
+                state.callback,
+                StoredValue::Undefined,
+                arguments,
+                NativeContinuation::IteratorConsumer(state),
+                return_to,
+                origin,
+            )
+        }
+        IteratorConsumerStage::Callback => finish_iterator_consumer_callback(
+            runtime,
+            state,
+            &completion,
+            return_to,
+            execution_budget,
+        ),
+        IteratorConsumerStage::CloseReturnProperty => match completion {
+            StoredValue::Undefined | StoredValue::Null => finish_iterator_consumer_close(state),
+            StoredValue::Function(return_method) => {
+                state.stage = IteratorConsumerStage::CloseReturnCall;
+                execution_budget.charge_instructions(1)?;
+                let receiver = state.iterator.duplicate();
+                let origin = state.origin.clone();
+                iterator_method_call(
+                    return_method,
+                    receiver,
+                    NativeContinuation::IteratorConsumer(state),
+                    return_to,
+                    origin,
+                )
+            }
+            StoredValue::Boolean(_)
+            | StoredValue::Number(_)
+            | StoredValue::BigInt(_)
+            | StoredValue::String(_)
+            | StoredValue::Symbol(_)
+            | StoredValue::Object(_) => Err(iterator_exception(
+                state.realm,
+                state.origin,
+                ExceptionKind::TypeError,
+                "iterator return method is not callable",
+            )?),
+        },
+        IteratorConsumerStage::CloseReturnCall => {
+            if completion.heap_reference().is_none() {
+                return Err(iterator_exception(
+                    state.realm,
+                    state.origin,
+                    ExceptionKind::TypeError,
+                    "iterator return method did not return an object",
+                )?);
+            }
+            finish_iterator_consumer_close(state)
+        }
+    }
+}
+
+fn finish_iterator_consumer_callback(
+    runtime: &mut Runtime,
+    mut state: IteratorConsumerContinuation,
+    completion: &StoredValue,
+    return_to: Option<CallReturn>,
+    execution_budget: &mut ExecutionBudget,
+) -> Result<NativeDispatch, NativeFailure> {
+    let exits = match state.kind {
+        crate::runtime::IteratorConsumer::Every => !completion.is_truthy(),
+        crate::runtime::IteratorConsumer::Find | crate::runtime::IteratorConsumer::Some => {
+            completion.is_truthy()
+        }
+        crate::runtime::IteratorConsumer::ForEach => false,
+    };
+    if exits {
+        let outcome = match state.kind {
+            crate::runtime::IteratorConsumer::Every => StoredValue::Boolean(false),
+            crate::runtime::IteratorConsumer::Some => StoredValue::Boolean(true),
+            crate::runtime::IteratorConsumer::Find => {
+                state
+                    .candidate
+                    .take()
+                    .ok_or(EngineFault::RuntimeInvariant {
+                        message: "Iterator.prototype.find lost its candidate value",
+                    })?
+            }
+            crate::runtime::IteratorConsumer::ForEach => {
+                return Err(EngineFault::RuntimeInvariant {
+                    message: "Iterator.prototype.forEach cannot exit from a callback result",
+                }
+                .into());
+            }
+        };
+        state.outcome = Some(outcome);
+        state.candidate = None;
+        state.stage = IteratorConsumerStage::CloseReturnProperty;
+        return read_iterator_consumer_property(
+            runtime,
+            state,
+            runtime.predefined_property_key(PredefinedAtom::Return),
+            return_to,
+            execution_budget,
+        );
+    }
+    state.candidate = None;
+    state.counter = state.counter.saturating_add(1);
+    call_iterator_consumer_next(state, return_to, execution_budget)
+}
+
+fn iterator_consumer_exhausted(kind: crate::runtime::IteratorConsumer) -> StoredValue {
+    match kind {
+        crate::runtime::IteratorConsumer::Every => StoredValue::Boolean(true),
+        crate::runtime::IteratorConsumer::Some => StoredValue::Boolean(false),
+        crate::runtime::IteratorConsumer::Find | crate::runtime::IteratorConsumer::ForEach => {
+            StoredValue::Undefined
+        }
+    }
+}
+
+fn finish_iterator_consumer_close(
+    mut state: IteratorConsumerContinuation,
+) -> Result<NativeDispatch, NativeFailure> {
+    Ok(NativeDispatch::Immediate(state.outcome.take().ok_or(
+        EngineFault::RuntimeInvariant {
+            message: "Iterator consumer close lost its normal completion",
+        },
+    )?))
+}
+
+fn call_iterator_consumer_next(
+    mut state: IteratorConsumerContinuation,
+    return_to: Option<CallReturn>,
+    execution_budget: &mut ExecutionBudget,
+) -> Result<NativeDispatch, NativeFailure> {
+    let next_method = state.next_method.ok_or(EngineFault::RuntimeInvariant {
+        message: "Iterator consumer has no callable next method",
+    })?;
+    state.result = None;
+    state.stage = IteratorConsumerStage::NextResult;
+    execution_budget.charge_instructions(1)?;
+    let receiver = state.iterator.duplicate();
+    let origin = state.origin.clone();
+    iterator_method_call(
+        next_method,
+        receiver,
+        NativeContinuation::IteratorConsumer(state),
+        return_to,
+        origin,
+    )
+}
+
+fn read_iterator_consumer_property(
+    runtime: &mut Runtime,
+    state: IteratorConsumerContinuation,
+    key: PropertyKey,
+    return_to: Option<CallReturn>,
+    execution_budget: &mut ExecutionBudget,
+) -> Result<NativeDispatch, NativeFailure> {
+    let base = match state.stage {
+        IteratorConsumerStage::NextMethod | IteratorConsumerStage::CloseReturnProperty => {
+            &state.iterator
+        }
+        IteratorConsumerStage::Done | IteratorConsumerStage::Value => {
+            state.result.as_ref().ok_or(EngineFault::RuntimeInvariant {
+                message: "Iterator consumer result lookup has no result object",
+            })?
+        }
+        IteratorConsumerStage::NextResult
+        | IteratorConsumerStage::Callback
+        | IteratorConsumerStage::CloseReturnCall => {
+            return Err(EngineFault::RuntimeInvariant {
+                message: "Iterator consumer call stage attempted a property lookup",
+            }
+            .into());
+        }
+    };
+    charge_iterator_property_lookup(runtime, base, execution_budget)?;
+    let dispatch = begin_value_get(
+        runtime,
+        base,
+        key,
+        None,
+        state.realm,
+        return_to,
+        state.origin.clone(),
+        execution_budget,
+    )?;
+    continue_get_after(
+        dispatch,
+        state,
+        NativeContinuation::IteratorConsumer,
+        |state, value| {
+            advance_iterator_consumer(runtime, state, value, return_to, execution_budget)
+        },
+        "Iterator consumer property Get produced a structured result",
+    )
+}
+
+pub(super) fn resume_iterator_consumer_abrupt(
+    runtime: &mut Runtime,
+    state: IteratorConsumerContinuation,
+    pending: PendingException,
+    return_to: Option<CallReturn>,
+    execution_budget: &mut ExecutionBudget,
+) -> Result<NativeDispatch, NativeFailure> {
+    if !state.handles_abrupt() {
+        return Err(EngineFault::RuntimeInvariant {
+            message: "Iterator consumer handled an abrupt completion outside its callback",
+        }
+        .into());
+    }
+    begin_exceptional_iterator_close(
+        runtime,
+        state.iterator,
+        pending,
+        return_to,
+        execution_budget,
+    )
 }
 
 pub(super) fn advance_iterator_to_array(
@@ -3492,6 +3902,9 @@ pub(super) fn resume_iterator_abrupt(
     execution_budget: &mut ExecutionBudget,
 ) -> Result<NativeDispatch, NativeFailure> {
     match continuation {
+        NativeContinuation::IteratorConsumer(state) => {
+            resume_iterator_consumer_abrupt(runtime, state, pending, return_to, execution_budget)
+        }
         NativeContinuation::IteratorHelperNext(state) => {
             complete_iterator_helper(runtime, state.helper)?;
             if iterator_helper_stage_closes_outer(state.stage) {

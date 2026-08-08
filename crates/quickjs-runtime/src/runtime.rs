@@ -742,6 +742,29 @@ pub(crate) enum ArrayFlatten {
     FlatMap,
 }
 
+/// Which immediate `Iterator.prototype` callback consumer is executing.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum IteratorConsumer {
+    Every,
+    Find,
+    ForEach,
+    Some,
+}
+
+impl IteratorConsumer {
+    pub(crate) const ALL: [Self; 4] = [Self::Every, Self::Find, Self::ForEach, Self::Some];
+
+    /// Returns the property name this consumer is installed under.
+    pub(crate) const fn name(self) -> &'static str {
+        match self {
+            Self::Every => "every",
+            Self::Find => "find",
+            Self::ForEach => "forEach",
+            Self::Some => "some",
+        }
+    }
+}
+
 /// Which no-`Intl` locale-string built-in is being invoked.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum LocaleStringMethod {
@@ -1341,6 +1364,7 @@ pub(crate) enum NativeFunctionKind {
     IteratorConstructor,
     IteratorFrom,
     IteratorPrototypeDrop,
+    IteratorPrototypeConsumer(IteratorConsumer),
     IteratorPrototypeFilter,
     IteratorPrototypeFlatMap,
     IteratorPrototypeMap,

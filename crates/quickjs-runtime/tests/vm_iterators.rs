@@ -671,6 +671,74 @@ fn iterator_flat_map_closes_inner_then_outer_and_preserves_abrupts() {
 }
 
 #[test]
+fn iterator_consumers_share_indexed_callback_and_exhaustion_semantics() {
+    let mut runtime = Runtime::try_new(RuntimeLimits::default()).expect("runtime");
+    let realm = runtime.create_realm().expect("realm");
+    let mut context = runtime.context(&realm).expect("context");
+    let function = dynamic_function(
+        &mut context,
+        "function source(){let index=0;return {next(){index++;return index<4\
+           ?{done:false,value:index}:{done:true};}};}\
+         let everyLog='',someLog='',findLog='',forEachLog='',thisValues=[];\
+         let every=Iterator.prototype.every.call(source(),function(value,index){'use strict';\
+           everyLog+=value+':'+index+',';thisValues.push(this);return value<4;});\
+         let some=Iterator.prototype.some.call(source(),function(value,index){'use strict';\
+           someLog+=value+':'+index+',';thisValues.push(this);return value===2;});\
+         let found=Iterator.prototype.find.call(source(),function(value,index){'use strict';\
+           findLog+=value+':'+index+',';thisValues.push(this);return value===2;});\
+         let each=Iterator.prototype.forEach.call(source(),function(value,index){'use strict';\
+           forEachLog+=value+':'+index+',';thisValues.push(this);return 99;});\
+         let empty={next(){return {done:true};}};\
+         return [every,everyLog,some,someLog,found,findLog,each===undefined,forEachLog,\
+           Iterator.prototype.every.call(empty,()=>false),\
+           Iterator.prototype.some.call(empty,()=>true),\
+           Iterator.prototype.find.call(empty,()=>true)===undefined,\
+           thisValues.every(value=>value===undefined)].join('|');",
+    );
+
+    let result = context
+        .call(&function, &[], ExecutionLimits::default())
+        .expect("Iterator consuming helpers");
+    assert_eq!(
+        string_value(&result),
+        "true|1:0,2:1,3:2,|true|1:0,2:1,|2|1:0,2:1,|true|1:0,2:1,3:2,|true|false|true|true"
+    );
+}
+
+#[test]
+fn iterator_consumers_close_only_for_validation_callbacks_and_early_exit() {
+    let mut runtime = Runtime::try_new(RuntimeLimits::default()).expect("runtime");
+    let realm = runtime.create_realm().expect("realm");
+    let mut context = runtime.context(&realm).expect("context");
+    let function = dynamic_function(
+        &mut context,
+        "let validationLog='',validationType=false;\
+         let validation={get next(){validationLog+='n';throw {};},\
+           return(){validationLog+='r';throw {};}};\
+         try{Iterator.prototype.every.call(validation,0);}catch(error){\
+           validationType=error instanceof TypeError;}\
+         let callbackError={},callbackCloses=0,callbackPreserved=false;\
+         try{Iterator.prototype.forEach.call({next(){return {done:false,value:1};},\
+           return(){callbackCloses++;throw {};}} ,function(){throw callbackError;});}\
+         catch(error){callbackPreserved=error===callbackError;}\
+         let closeError={},closeOverrides=false;\
+         try{Iterator.prototype.some.call({next(){return {done:false,value:1};},\
+           return(){throw closeError;}},()=>true);}catch(error){closeOverrides=error===closeError;}\
+         let stepError={},stepCloses=0,stepPreserved=false;\
+         try{Iterator.prototype.find.call({next(){return {get done(){throw stepError;}};},\
+           return(){stepCloses++;return {};}},()=>true);}\
+         catch(error){stepPreserved=error===stepError;}\
+         return [validationLog,validationType,callbackPreserved,callbackCloses,\
+           closeOverrides,stepPreserved,stepCloses].join('|');",
+    );
+
+    let result = context
+        .call(&function, &[], ExecutionLimits::default())
+        .expect("Iterator consumer close ordering");
+    assert_eq!(string_value(&result), "r|true|true|1|true|true|0");
+}
+
+#[test]
 fn iterator_filter_is_lazy_and_indexes_every_examined_value() {
     let mut runtime = Runtime::try_new(RuntimeLimits::default()).expect("runtime");
     let realm = runtime.create_realm().expect("realm");

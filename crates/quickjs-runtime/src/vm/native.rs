@@ -989,6 +989,9 @@ pub(super) fn resume_native_continuations(
             NativeContinuation::IteratorFrom(state) => {
                 advance_iterator_from(runtime, state, value, return_to, execution_budget)?
             }
+            NativeContinuation::IteratorConsumer(state) => {
+                advance_iterator_consumer(runtime, state, value, return_to, execution_budget)?
+            }
             NativeContinuation::IteratorHelperCreation(state) => {
                 advance_iterator_helper_creation(runtime, state, value)?
             }
@@ -3719,6 +3722,19 @@ pub(super) fn dispatch_native_call_with_frames(
             origin.unwrap_or_else(native_function_host_origin),
             execution_budget,
         ),
+        NativeFunctionKind::IteratorPrototypeConsumer(kind) => {
+            let callback = inputs.arguments.take_first_or_undefined();
+            begin_iterator_consumer(
+                runtime,
+                kind,
+                inputs.receiver,
+                &callback,
+                native.realm,
+                return_to,
+                origin.unwrap_or_else(native_function_host_origin),
+                execution_budget,
+            )
+        }
         NativeFunctionKind::IteratorPrototypeDrop => begin_iterator_drop(
             runtime,
             inputs.receiver,
