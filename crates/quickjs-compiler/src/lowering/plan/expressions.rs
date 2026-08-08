@@ -1503,9 +1503,9 @@ impl<'compiler, 'unit, 'arena, 'scope> ExpressionPlanner<'compiler, 'unit, 'aren
             return Ok(());
         }
         let flags = match method.kind {
-            MethodDefinitionKind::Method => 4,
-            MethodDefinitionKind::Get => 5,
-            MethodDefinitionKind::Set => 6,
+            MethodDefinitionKind::Method => 0,
+            MethodDefinitionKind::Get => 1,
+            MethodDefinitionKind::Set => 2,
             MethodDefinitionKind::Constructor => unreachable!("constructors were skipped"),
         };
         if method.computed {

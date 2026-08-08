@@ -2151,7 +2151,7 @@ fn final_authority_rejects_invalid_computed_set_name_shapes() {
 }
 
 #[test]
-fn final_authority_admits_only_enumerable_static_define_method_kinds() {
+fn final_authority_admits_enumerable_object_literal_method_kinds() {
     for (flags, arguments) in [(4, 0), (5, 0), (6, 1)] {
         let instructions = [
             (FinalOpcode::Object, Operands::None),
@@ -2302,7 +2302,7 @@ fn final_authority_admits_only_typed_base_class_templates() {
 }
 
 #[test]
-fn final_authority_rejects_non_enumerable_method_definitions() {
+fn final_authority_rejects_non_enumerable_object_literal_method_definitions() {
     for flags in 0..=2 {
         for (opcode, operands) in [
             (
@@ -2334,13 +2334,10 @@ fn final_authority_rejects_non_enumerable_method_definitions() {
                 ),
                 BytecodeGraphVerificationLimits::default(),
             )
-            .expect_err("non-enumerable class-style flags remain outside object-literal authority");
+            .expect_err("non-enumerable flags require a certified class target");
             assert!(matches!(
                 error.kind(),
-                BytecodeVerificationErrorKind::UnsupportedCompilerOpcode {
-                    opcode: rejected,
-                    ..
-                } if *rejected == opcode
+                BytecodeVerificationErrorKind::DefineMethodTargetMismatch { .. }
             ));
         }
     }

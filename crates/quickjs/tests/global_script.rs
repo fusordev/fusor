@@ -119,6 +119,26 @@ fn global_class_declarations_use_realm_lexical_bindings() {
 }
 
 #[test]
+fn same_line_generator_then_private_method_preserves_both_class_elements() {
+    let mut runtime = Runtime::try_new(RuntimeLimits::default()).expect("runtime");
+    let realm = runtime.create_realm().expect("realm");
+    let mut context = runtime.context(&realm).expect("context");
+
+    let value = evaluate_script(
+        &mut context,
+        "class Box{*m(){return 42;}#m(){return 'private';};call(){return this.#m();}}let box=new Box;let bits=0;if(box.m().next().value===42)bits+=1;if(!box.hasOwnProperty('m'))bits+=2;if(box.m===Box.prototype.m)bits+=4;let descriptor=Object.getOwnPropertyDescriptor(Box.prototype,'m');if(descriptor)bits+=8;if(descriptor&&!descriptor.enumerable)bits+=16;if(descriptor&&descriptor.configurable)bits+=32;if(descriptor&&descriptor.writable)bits+=64;if(box.call()==='private')bits+=128;bits;",
+        "global-class-same-line-private.js",
+        ScriptLimits::default(),
+    )
+    .expect("same-line generator and private method Script");
+    let bits = number(&value);
+    assert!(
+        bits.strict_equals(JsNumber::from_i32(255)),
+        "bits: {bits:?}"
+    );
+}
+
+#[test]
 fn global_lexical_access_preserves_tdz_and_immutable_assignment_errors() {
     let mut runtime = Runtime::try_new(RuntimeLimits::default()).expect("runtime");
     let realm = runtime.create_realm().expect("realm");

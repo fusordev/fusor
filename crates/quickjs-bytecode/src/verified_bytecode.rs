@@ -1613,8 +1613,9 @@ pub enum BytecodeVerificationErrorKind {
         /// Final bytecode position of the inferred-name opcode.
         pc: BytecodePc,
     },
-    /// `define_method` does not target one fresh object-literal value on every
-    /// incoming control-flow path.
+    /// `define_method` does not target one certified object-literal or class
+    /// slot with the matching enumerability on every incoming control-flow
+    /// path.
     DefineMethodTargetMismatch {
         /// Final bytecode position of `define_method`.
         pc: BytecodePc,
@@ -5283,7 +5284,7 @@ fn method_definition_pair(
     else {
         return None;
     };
-    if !(4..=6).contains(&flags) || predecessor_counts.get(definition_index) != Some(&1) {
+    if !matches!(flags, 0..=2 | 4..=6) || predecessor_counts.get(definition_index) != Some(&1) {
         return None;
     }
     let closure_index = definition_index.checked_sub(1)?;
@@ -5317,7 +5318,8 @@ fn method_definition_pair(
         .control_flow()
         .function_header()
         .defined_argument_count();
-    if (flags == 5 && arguments != 0) || (flags == 6 && arguments != 1) {
+    let kind = flags & 0b11;
+    if (kind == 1 && arguments != 0) || (kind == 2 && arguments != 1) {
         return None;
     }
     Some((*child, flags))
@@ -5891,29 +5893,27 @@ fn verify_object_definition_provenance(
                     ));
                 }
             },
-            FinalOpcode::DefineMethod
-                if !matches!(
+            FinalOpcode::DefineMethod => {
+                let Operands::AtomU8 { value: flags, .. } = instruction.operands() else {
+                    return Err(method_target_error(id, decoded.pc()));
+                };
+                if !method_target_matches_enumerability(
                     state.get(state.len().saturating_sub(2)),
-                    Some(
-                        ObjectDefinitionProvenance::FreshObject(_)
-                            | ObjectDefinitionProvenance::ClassConstructor(_)
-                            | ObjectDefinitionProvenance::ClassPrototype(_)
-                    )
-                ) =>
-            {
-                return Err(method_target_error(id, decoded.pc()));
+                    flags,
+                ) {
+                    return Err(method_target_error(id, decoded.pc()));
+                }
             }
-            FinalOpcode::DefineMethodComputed
-                if !matches!(
+            FinalOpcode::DefineMethodComputed => {
+                let Operands::U8(flags) = instruction.operands() else {
+                    return Err(method_target_error(id, decoded.pc()));
+                };
+                if !method_target_matches_enumerability(
                     state.get(state.len().saturating_sub(3)),
-                    Some(
-                        ObjectDefinitionProvenance::FreshObject(_)
-                            | ObjectDefinitionProvenance::ClassConstructor(_)
-                            | ObjectDefinitionProvenance::ClassPrototype(_)
-                    )
-                ) =>
-            {
-                return Err(method_target_error(id, decoded.pc()));
+                    flags,
+                ) {
+                    return Err(method_target_error(id, decoded.pc()));
+                }
             }
             FinalOpcode::CopyDataProperties => {
                 let Some(target) =
@@ -6899,6 +6899,23 @@ fn method_target_error(id: FunctionTemplateId, pc: BytecodePc) -> BytecodeVerifi
     )
 }
 
+const fn method_target_matches_enumerability(
+    target: Option<&ObjectDefinitionProvenance>,
+    flags: u8,
+) -> bool {
+    matches!(
+        (target, flags),
+        (Some(ObjectDefinitionProvenance::FreshObject(_)), 4..=6)
+            | (
+                Some(
+                    ObjectDefinitionProvenance::ClassConstructor(_)
+                        | ObjectDefinitionProvenance::ClassPrototype(_)
+                ),
+                0..=2
+            )
+    )
+}
+
 fn define_array_element_key_error(
     id: FunctionTemplateId,
     pc: BytecodePc,
@@ -7128,7 +7145,7 @@ fn verify_supported_opcodes(
                 (opcode, instruction.operands()),
                 (FinalOpcode::DefineMethod, Operands::AtomU8 { value, .. })
                     | (FinalOpcode::DefineMethodComputed, Operands::U8(value))
-                    if !(4..=6).contains(&value)
+                    if !matches!(value, 0..=2 | 4..=6)
             )
             || matches!(
                 (opcode, instruction.operands()),

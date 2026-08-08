@@ -250,10 +250,10 @@ pub(super) fn define_method_computed_operand(
             message: "verified define_method_computed operand is not u8",
         });
     };
-    let kind = match value {
-        4 => DefineMethodKind::Method,
-        5 => DefineMethodKind::Getter,
-        6 => DefineMethodKind::Setter,
+    let kind = match value & 0b11 {
+        0 => DefineMethodKind::Method,
+        1 => DefineMethodKind::Getter,
+        2 => DefineMethodKind::Setter,
         _ => {
             return Err(EngineFault::RuntimeInvariant {
                 message: "verified define_method_computed flags are invalid",
@@ -262,7 +262,7 @@ pub(super) fn define_method_computed_operand(
     };
     Ok(DefineMethodComputedOperand {
         kind,
-        enumerable: true,
+        enumerable: value & 0b100 != 0,
     })
 }
 
