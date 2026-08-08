@@ -320,6 +320,15 @@ pub(in crate::vm) fn advance_temporal_duration_constructor(
     execution_budget: &mut ExecutionBudget,
 ) -> Result<NativeDispatch, NativeFailure> {
     if let Some(value) = completion {
+        // Each field validates right after its own conversion so a later
+        // argument's user-defined conversion is never observed after an error.
+        if temporal_duration_integer(value.as_f64(), state.converted.len()).is_none() {
+            return temporal_range_error(
+                realm,
+                origin,
+                "Temporal.Duration fields must be finite integral Numbers",
+            );
+        }
         state.converted.push(value);
     }
     while state.converted.len() < state.arguments.len() {
@@ -713,7 +722,7 @@ fn temporal_duration_round_continuation(
 )]
 pub(in crate::vm) fn advance_temporal_duration_round_options(
     runtime: &mut Runtime,
-    mut state: TemporalDurationRoundContinuation,
+    state: TemporalDurationRoundContinuation,
     value: StoredValue,
     return_to: Option<CallReturn>,
     execution_budget: &mut ExecutionBudget,
@@ -744,14 +753,15 @@ pub(in crate::vm) fn advance_temporal_duration_round_options(
             )
         }
         TemporalDurationRoundStage::RelativeTo => {
-            state.relative_to =
-                temporal_relative_to_from_value(runtime, &value, state.realm, &state.origin)?;
-            begin_temporal_duration_round_get(
+            let realm = state.realm;
+            let origin = state.origin.clone();
+            begin_temporal_relative_to_from_value(
                 runtime,
-                state,
-                "roundingIncrement",
-                TemporalDurationRoundStage::RoundingIncrement,
+                value,
+                TemporalRelativeToTarget::Round(Box::new(state)),
+                realm,
                 return_to,
+                origin,
                 execution_budget,
             )
         }
@@ -1062,21 +1072,22 @@ fn temporal_duration_total_continuation(
 
 pub(in crate::vm) fn advance_temporal_duration_total_options(
     runtime: &mut Runtime,
-    mut state: TemporalDurationTotalContinuation,
+    state: TemporalDurationTotalContinuation,
     value: StoredValue,
     return_to: Option<CallReturn>,
     execution_budget: &mut ExecutionBudget,
 ) -> Result<NativeDispatch, NativeFailure> {
     match state.stage {
         TemporalDurationTotalStage::AwaitRelativeTo => {
-            state.relative_to =
-                temporal_relative_to_from_value(runtime, &value, state.realm, &state.origin)?;
-            begin_temporal_duration_total_get(
+            let realm = state.realm;
+            let origin = state.origin.clone();
+            begin_temporal_relative_to_from_value(
                 runtime,
-                state,
-                "unit",
-                TemporalDurationTotalStage::AwaitUnit,
+                value,
+                TemporalRelativeToTarget::Total(Box::new(state)),
+                realm,
                 return_to,
+                origin,
                 execution_budget,
             )
         }
@@ -1687,7 +1698,13 @@ fn begin_temporal_duration_compare_options(
         "Temporal.Duration relativeTo Get produced a structured result",
     )? {
         GetContinuationDispatch::Ready { state, value } => {
-            finish_temporal_duration_compare_options(runtime, &state, &value)
+            finish_temporal_duration_compare_options(
+                runtime,
+                state,
+                value,
+                return_to,
+                execution_budget,
+            )
         }
         GetContinuationDispatch::Suspended(dispatch) => Ok(dispatch),
     }
@@ -1701,60 +1718,161 @@ fn temporal_duration_compare_options_continuation(
 
 pub(in crate::vm) fn finish_temporal_duration_compare_options(
     runtime: &mut Runtime,
-    state: &TemporalDurationCompareOptionsContinuation,
-    relative_to: &StoredValue,
+    state: TemporalDurationCompareOptionsContinuation,
+    relative_to: StoredValue,
+    return_to: Option<CallReturn>,
+    execution_budget: &mut ExecutionBudget,
 ) -> Result<NativeDispatch, NativeFailure> {
-    let relative_to =
-        temporal_relative_to_from_value(runtime, relative_to, state.realm, &state.origin)?;
-    complete_temporal_duration_compare(
-        state.first,
-        state.second,
+    let realm = state.realm;
+    let origin = state.origin.clone();
+    begin_temporal_relative_to_from_value(
+        runtime,
         relative_to,
-        state.realm,
-        &state.origin,
+        TemporalRelativeToTarget::Compare(Box::new(state)),
+        realm,
+        return_to,
+        origin,
+        execution_budget,
     )
 }
 
-fn temporal_relative_to_from_value(
-    runtime: &Runtime,
-    value: &StoredValue,
+/// The duration operation waiting on a `relativeTo` conversion.
+///
+/// Plain-object `relativeTo` values go through the resumable ZonedDateTime
+/// property-bag machinery; these targets resume the originating operation
+/// once the kernel `RelativeTo` is known.
+pub(in crate::vm) enum TemporalRelativeToTarget {
+    Round(Box<TemporalDurationRoundContinuation>),
+    Total(Box<TemporalDurationTotalContinuation>),
+    Compare(Box<TemporalDurationCompareOptionsContinuation>),
+}
+
+impl TemporalRelativeToTarget {
+    pub(in crate::vm) fn trace_roots(&self, mark: &mut dyn FnMut(CollectionRoot)) {
+        match self {
+            Self::Round(state) => state.trace_roots(mark),
+            Self::Total(state) => state.trace_roots(mark),
+            Self::Compare(state) => state.trace_roots(mark),
+        }
+    }
+}
+
+#[allow(
+    clippy::too_many_arguments,
+    reason = "a property-bag relativeTo suspends into the shared ZonedDateTime bag machinery"
+)]
+pub(in crate::vm) fn begin_temporal_relative_to_from_value(
+    runtime: &mut Runtime,
+    value: StoredValue,
+    target: TemporalRelativeToTarget,
     realm: RealmId,
-    origin: &JsStackFrame,
-) -> Result<Option<RelativeTo>, NativeFailure> {
+    return_to: Option<CallReturn>,
+    origin: JsStackFrame,
+    execution_budget: &mut ExecutionBudget,
+) -> Result<NativeDispatch, NativeFailure> {
     match value {
-        StoredValue::Undefined => Ok(None),
+        StoredValue::Undefined => {
+            finish_temporal_relative_to(runtime, target, None, return_to, execution_budget)
+        }
         StoredValue::String(source) => {
-            let source = source.to_utf8_lossy()?;
-            match RelativeTo::try_from_str(&source) {
-                Ok(relative_to) => Ok(Some(relative_to)),
-                Err(error) => Err(NativeFailure::Abrupt(temporal_exception_from_error(
-                    realm, origin, error,
-                )?)),
-            }
+            let relative_to = match RelativeTo::try_from_str(&source.to_utf8_lossy()?) {
+                Ok(relative_to) => Some(relative_to),
+                Err(error) => {
+                    return Err(NativeFailure::Abrupt(temporal_exception_from_error(
+                        realm, &origin, error,
+                    )?));
+                }
+            };
+            finish_temporal_relative_to(runtime, target, relative_to, return_to, execution_budget)
         }
         StoredValue::Object(object) => {
-            if let Some(date) = runtime.temporal_plain_date(*object)? {
-                return Ok(Some(RelativeTo::PlainDate(date)));
+            if let Some(date) = runtime.temporal_plain_date(object)? {
+                return finish_temporal_relative_to(
+                    runtime,
+                    target,
+                    Some(RelativeTo::PlainDate(date)),
+                    return_to,
+                    execution_budget,
+                );
             }
-            if let Some(date_time) = runtime.temporal_plain_date_time(*object)? {
-                return Ok(Some(RelativeTo::PlainDate(date_time.to_plain_date())));
+            if let Some(date_time) = runtime.temporal_plain_date_time(object)? {
+                return finish_temporal_relative_to(
+                    runtime,
+                    target,
+                    Some(RelativeTo::PlainDate(date_time.to_plain_date())),
+                    return_to,
+                    execution_budget,
+                );
             }
-            if let Some(date_time) = runtime.temporal_zoned_date_time(*object)? {
-                return Ok(Some(RelativeTo::ZonedDateTime(date_time)));
+            if let Some(date_time) = runtime.temporal_zoned_date_time(object)? {
+                return finish_temporal_relative_to(
+                    runtime,
+                    target,
+                    Some(RelativeTo::ZonedDateTime(date_time)),
+                    return_to,
+                    execution_budget,
+                );
             }
-            Err(NativeFailure::Abrupt(temporal_pending_exception(
+            begin_temporal_zoned_date_time_like(
+                runtime,
+                value,
+                TemporalZonedDateTimeLikeTarget::RelativeTo(target),
                 realm,
+                return_to,
                 origin,
-                ExceptionKind::TypeError,
-                "Temporal relativeTo must be a string or Temporal object",
-            )?))
+                execution_budget,
+            )
         }
         _ => Err(NativeFailure::Abrupt(temporal_pending_exception(
             realm,
-            origin,
+            &origin,
             ExceptionKind::TypeError,
             "Temporal relativeTo must be a string or Temporal object",
         )?)),
+    }
+}
+
+#[allow(
+    clippy::too_many_arguments,
+    reason = "the completed relativeTo resumes the waiting duration operation"
+)]
+pub(in crate::vm) fn finish_temporal_relative_to(
+    runtime: &mut Runtime,
+    target: TemporalRelativeToTarget,
+    relative_to: Option<RelativeTo>,
+    return_to: Option<CallReturn>,
+    execution_budget: &mut ExecutionBudget,
+) -> Result<NativeDispatch, NativeFailure> {
+    match target {
+        TemporalRelativeToTarget::Round(mut state) => {
+            state.relative_to = relative_to;
+            begin_temporal_duration_round_get(
+                runtime,
+                *state,
+                "roundingIncrement",
+                TemporalDurationRoundStage::RoundingIncrement,
+                return_to,
+                execution_budget,
+            )
+        }
+        TemporalRelativeToTarget::Total(mut state) => {
+            state.relative_to = relative_to;
+            begin_temporal_duration_total_get(
+                runtime,
+                *state,
+                "unit",
+                TemporalDurationTotalStage::AwaitUnit,
+                return_to,
+                execution_budget,
+            )
+        }
+        TemporalRelativeToTarget::Compare(state) => complete_temporal_duration_compare(
+            state.first,
+            state.second,
+            relative_to,
+            state.realm,
+            &state.origin,
+        ),
     }
 }
 

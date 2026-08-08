@@ -7,15 +7,15 @@ use super::*;
 use crate::runtime::{TemporalZonedDateTimePrototypeMethod, TemporalZonedDateTimeStaticMethod};
 use core::str::FromStr;
 use temporal_rs::{
-    Calendar, MonthCode, PlainTime, TimeZone, UtcOffset, ZonedDateTime,
+    Calendar, MonthCode, PlainDate, PlainTime, TimeZone, UtcOffset, ZonedDateTime,
     fields::{CalendarFields, ZonedDateTimeFields},
     options::{
         DifferenceSettings, Disambiguation, DisplayCalendar, DisplayOffset, DisplayTimeZone,
-        OffsetDisambiguation, Overflow, RoundingIncrement, RoundingMode, RoundingOptions,
-        ToStringRoundingOptions, Unit,
+        OffsetDisambiguation, Overflow, RelativeTo, RoundingIncrement, RoundingMode,
+        RoundingOptions, ToStringRoundingOptions, Unit,
     },
     parsers::Precision,
-    partial::{PartialTime, PartialZonedDateTime},
+    partial::{PartialDate, PartialTime, PartialZonedDateTime},
     provider::TransitionDirection,
 };
 
@@ -81,9 +81,8 @@ fn temporal_zoned_date_time_property_bag_fields(
         | TemporalZonedDateTimeLikeTarget::CompareFirst { .. }
         | TemporalZonedDateTimeLikeTarget::CompareSecond { .. }
         | TemporalZonedDateTimeLikeTarget::Equals { .. }
-        | TemporalZonedDateTimeLikeTarget::Difference { .. } => {
-            &TEMPORAL_ZONED_DATE_TIME_BAG_FIELDS
-        }
+        | TemporalZonedDateTimeLikeTarget::Difference { .. }
+        | TemporalZonedDateTimeLikeTarget::RelativeTo(_) => &TEMPORAL_ZONED_DATE_TIME_BAG_FIELDS,
     }
 }
 
@@ -94,7 +93,7 @@ enum TemporalZonedDateTimeBagStage {
     AwaitConversion,
 }
 
-enum TemporalZonedDateTimeLikeTarget {
+pub(in crate::vm) enum TemporalZonedDateTimeLikeTarget {
     From {
         options: StoredValue,
     },
@@ -116,6 +115,7 @@ enum TemporalZonedDateTimeLikeTarget {
         options: StoredValue,
         since: bool,
     },
+    RelativeTo(TemporalRelativeToTarget),
 }
 
 impl TemporalZonedDateTimeLikeTarget {
@@ -127,6 +127,7 @@ impl TemporalZonedDateTimeLikeTarget {
             | Self::Difference { options, .. } => {
                 trace_stored_value_root(options, mark);
             }
+            Self::RelativeTo(target) => target.trace_roots(mark),
             Self::CompareSecond { .. } | Self::Equals { .. } => {}
         }
     }
@@ -650,7 +651,7 @@ pub(in crate::vm) fn begin_temporal_zoned_date_time_static(
     clippy::too_many_arguments,
     reason = "all ZonedDateTime input forms share one resumable conversion boundary"
 )]
-fn begin_temporal_zoned_date_time_like(
+pub(in crate::vm) fn begin_temporal_zoned_date_time_like(
     runtime: &mut Runtime,
     value: StoredValue,
     target: TemporalZonedDateTimeLikeTarget,
@@ -828,6 +829,9 @@ fn continue_temporal_zoned_date_time_like(
         }
         TemporalZonedDateTimeLikeTarget::With { .. } => {
             unreachable!("Temporal.ZonedDateTime.with completes from its property-bag state")
+        }
+        TemporalZonedDateTimeLikeTarget::RelativeTo(_) => {
+            unreachable!("Temporal relativeTo completes from its property-bag state")
         }
         TemporalZonedDateTimeLikeTarget::Difference {
             receiver,
@@ -1241,6 +1245,36 @@ pub(in crate::vm) fn advance_temporal_zoned_date_time_property_bag(
                                 execution_budget,
                             )
                         }
+                        TemporalZonedDateTimeLikeTarget::RelativeTo(target) => {
+                            // ToTemporalRelativeTo: a bag with timeZone becomes
+                            // a ZonedDateTime; without one it becomes a
+                            // PlainDate built from the same observed fields.
+                            let relative_to = if fields.time_zone.is_some() {
+                                RelativeTo::ZonedDateTime(temporal_zoned_date_time_from_bag_fields(
+                                    fields,
+                                    Overflow::Constrain,
+                                    Disambiguation::Compatible,
+                                    OffsetDisambiguation::Reject,
+                                    state.realm,
+                                    &state.origin,
+                                )?)
+                            } else {
+                                RelativeTo::PlainDate(
+                                    temporal_plain_date_from_relative_to_bag_fields(
+                                        &fields,
+                                        state.realm,
+                                        &state.origin,
+                                    )?,
+                                )
+                            };
+                            finish_temporal_relative_to(
+                                runtime,
+                                target,
+                                Some(relative_to),
+                                return_to,
+                                execution_budget,
+                            )
+                        }
                         target => {
                             let date_time = temporal_zoned_date_time_from_bag_fields(
                                 fields,
@@ -1588,6 +1622,63 @@ fn temporal_zoned_date_time_from_bag_fields(
         Some(offset_option),
     ) {
         Ok(date_time) => Ok(date_time),
+        Err(error) => Err(NativeFailure::Abrupt(temporal_exception_from_error(
+            realm, origin, error,
+        )?)),
+    }
+}
+
+/// Builds the PlainDate arm of `ToTemporalRelativeTo` from the observed
+/// property-bag fields. Time fields are range-checked for finiteness during
+/// their integer conversion and then dropped, per the specification.
+fn temporal_plain_date_from_relative_to_bag_fields(
+    fields: &TemporalZonedDateTimeBagFields,
+    realm: RealmId,
+    origin: &JsStackFrame,
+) -> Result<PlainDate, NativeFailure> {
+    if fields.year.is_none()
+        || fields.day.is_none()
+        || (fields.month.is_none() && fields.month_code.is_none())
+    {
+        return Err(NativeFailure::Abrupt(temporal_pending_exception(
+            realm,
+            origin,
+            ExceptionKind::TypeError,
+            "Temporal relativeTo property bag is missing a required field",
+        )?));
+    }
+    for value in [
+        fields.hour,
+        fields.minute,
+        fields.second,
+        fields.millisecond,
+        fields.microsecond,
+        fields.nanosecond,
+    ]
+    .into_iter()
+    .flatten()
+    {
+        temporal_plain_date_time_integer(value, realm, origin)?;
+    }
+    let year = temporal_plain_date_time_i32(
+        temporal_plain_date_time_required_field(fields.year, realm, origin)?,
+        realm,
+        origin,
+    )?;
+    let day = temporal_plain_date_time_u8(
+        temporal_plain_date_time_required_field(fields.day, realm, origin)?,
+        realm,
+        origin,
+    )?;
+    let month = temporal_plain_date_time_optional_u8(fields.month, realm, origin)?;
+    let partial = PartialDate::new()
+        .with_calendar(fields.calendar.clone())
+        .with_year(Some(year))
+        .with_month(month)
+        .with_month_code(fields.month_code)
+        .with_day(Some(day));
+    match PlainDate::from_partial(partial, Some(Overflow::Constrain)) {
+        Ok(date) => Ok(date),
         Err(error) => Err(NativeFailure::Abrupt(temporal_exception_from_error(
             realm, origin, error,
         )?)),

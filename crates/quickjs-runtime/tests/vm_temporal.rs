@@ -2735,3 +2735,94 @@ fn duration_round_rejects_absent_invalid_and_unanchored_options() {
         ExceptionKind::RangeError
     );
 }
+
+#[test]
+fn duration_relative_to_accepts_property_bags_in_observed_field_order() {
+    assert_eq!(
+        rendered(
+            "var hours25=new Temporal.Duration(0,0,0,0,25);
+             return [hours25.round({largestUnit:'days',relativeTo:{year:2019,month:11,day:2}}).toString(),
+               new Temporal.Duration(0,1).total({unit:'day',relativeTo:{year:2020,month:2,day:1}}),
+               Temporal.Duration.compare(new Temporal.Duration(0,0,0,1),new Temporal.Duration(0,0,0,0,24),{relativeTo:{year:2019,month:11,day:3}}),
+               hours25.round({largestUnit:'days',relativeTo:{year:2019,month:11,day:2,timeZone:'UTC'}}).toString(),
+               hours25.round({largestUnit:'days',relativeTo:{year:2019,month:11,day:2,hour:10,offset:'+00:00',timeZone:'UTC'}}).toString()].join('|');"
+        ),
+        "P1DT1H|29|0|P1DT1H|P1DT1H"
+    );
+    assert_eq!(
+        rendered(
+            "var log=[],relativeTo={};
+             Object.defineProperty(relativeTo,'calendar',{get:function(){log.push('calendar');return 'iso8601';}});
+             Object.defineProperty(relativeTo,'day',{get:function(){log.push('day');return 2;}});
+             Object.defineProperty(relativeTo,'timeZone',{get:function(){log.push('timeZone');return undefined;}});
+             Object.defineProperty(relativeTo,'year',{get:function(){log.push('year');return 2019;}});
+             Object.defineProperty(relativeTo,'month',{get:function(){log.push('month');return 11;}});
+             new Temporal.Duration(0,0,0,0,25).round({largestUnit:'days',relativeTo});
+             return log.join(',');"
+        ),
+        "calendar,day,month,timeZone,year"
+    );
+    assert_eq!(
+        thrown(
+            "return new Temporal.Duration(1).round({largestUnit:'months',relativeTo:{month:1,day:2}});"
+        ),
+        ExceptionKind::TypeError
+    );
+    assert_eq!(
+        thrown(
+            "return new Temporal.Duration(1).round({largestUnit:'months',relativeTo:{year:2000,month:5,day:2,timeZone:1}});"
+        ),
+        ExceptionKind::TypeError
+    );
+    assert_eq!(
+        thrown(
+            "return new Temporal.Duration(1).round({largestUnit:'months',relativeTo:{year:2000,month:5,day:2,timeZone:''}});"
+        ),
+        ExceptionKind::RangeError
+    );
+    assert_eq!(
+        thrown(
+            "return new Temporal.Duration(1).round({largestUnit:'months',relativeTo:{year:2000,month:5,day:2,timeZone:'UTC',offset:0}});"
+        ),
+        ExceptionKind::TypeError
+    );
+    assert_eq!(
+        thrown(
+            "return new Temporal.Duration(1).round({largestUnit:'months',relativeTo:{year:2000,month:5,day:2,timeZone:'UTC',offset:'00:00'}});"
+        ),
+        ExceptionKind::RangeError
+    );
+    assert_eq!(
+        thrown(
+            "return new Temporal.Duration(1).round({largestUnit:'months',relativeTo:{year:2000,month:5,day:2,calendar:'1997-12-04[u-ca=notacal]'}});"
+        ),
+        ExceptionKind::RangeError
+    );
+    assert_eq!(
+        thrown(
+            "return new Temporal.Duration(1).round({largestUnit:'months',relativeTo:{year:2000,month:5,day:2,hour:Infinity}});"
+        ),
+        ExceptionKind::RangeError
+    );
+}
+
+#[test]
+fn duration_constructor_rejects_infinite_fields_at_their_own_conversion() {
+    assert_eq!(
+        thrown("return new Temporal.Duration(Infinity);"),
+        ExceptionKind::RangeError
+    );
+    assert_eq!(
+        thrown("return new Temporal.Duration(0,0,0,0,0,0,0,0,0,-Infinity);"),
+        ExceptionKind::RangeError
+    );
+    assert_eq!(
+        rendered(
+            "var log=[];
+             try{new Temporal.Duration(0,{valueOf:function(){log.push('months');return Infinity;}},
+               {valueOf:function(){log.push('weeks');return 0;}})}catch(error){log.push(error.name);}
+             return log.join(',');"
+        ),
+        "months,RangeError"
+    );
+}
