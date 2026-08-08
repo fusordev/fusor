@@ -17,6 +17,7 @@ rust-version = "1.97"
 license = "MIT"
 
 [workspace.dependencies]
+icu = { version = "=2.2.0", default-features = false }
 icu_casemap = "=2.2.0"
 icu_locale_core = "=2.2.0"
 icu_normalizer = { version = "=2.2.0", default-features = false, features = ["compiled_data"] }

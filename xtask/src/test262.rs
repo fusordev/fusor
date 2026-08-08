@@ -36,6 +36,7 @@ pub struct Test262Options {
     pub inventory_only: bool,
     pub instruction_fuel: u64,
     pub jobs: usize,
+    pub progress_every: Option<usize>,
     pub verbose: bool,
 }
 
@@ -51,6 +52,7 @@ pub fn parse_options(
     let mut inventory_only = false;
     let mut instruction_fuel = DEFAULT_INSTRUCTION_FUEL;
     let mut jobs = default_jobs();
+    let mut progress_every = None;
     let mut verbose = false;
 
     while let Some(option) = arguments.next() {
@@ -83,6 +85,9 @@ pub fn parse_options(
                 instruction_fuel = required_positive_u64(&mut arguments, "--instruction-fuel")?;
             }
             "--jobs" => jobs = required_positive_usize(&mut arguments, "--jobs")?,
+            "--progress-every" => {
+                progress_every = Some(required_positive_usize(&mut arguments, "--progress-every")?);
+            }
             "--verbose" | "-v" => verbose = true,
             unknown => return Err(format!("unknown test262 option `{unknown}`")),
         }
@@ -98,6 +103,7 @@ pub fn parse_options(
         inventory_only,
         instruction_fuel,
         jobs,
+        progress_every,
         verbose,
     })
 }
@@ -745,6 +751,7 @@ impl HarnessSources {
 }
 
 pub fn run_test262(options: &Test262Options) -> Result<bool, String> {
+    validate_execution_profile(options, cfg!(debug_assertions))?;
     let baseline = Baseline::load(&options.baseline)?;
     if let Some(feature) = options.admit_feature.as_deref() {
         if options.filter.is_none() {
@@ -767,7 +774,7 @@ pub fn run_test262(options: &Test262Options) -> Result<bool, String> {
     if inventory.plans.is_empty() {
         return Err("Test262 selection contains no runnable test source files".to_owned());
     }
-    if options.verbose {
+    if options.verbose || options.progress_every.is_some() {
         println!(
             "test262: selection filter={} files={} admitted-cases={} skipped-cases={} workers={} fuel={}",
             options.filter.as_deref().unwrap_or("test"),
@@ -784,7 +791,7 @@ pub fn run_test262(options: &Test262Options) -> Result<bool, String> {
         for (reason, count) in &inventory.skip_counts {
             println!("test262: skipped {count} cases ({reason})");
         }
-        flush_verbose_output();
+        flush_progress_output();
     }
     let execution = if options.inventory_only {
         ExecutionSummary::default()
@@ -794,6 +801,7 @@ pub fn run_test262(options: &Test262Options) -> Result<bool, String> {
             &inventory,
             options.instruction_fuel,
             options.jobs,
+            options.progress_every,
             options.verbose,
         )?
     };
@@ -836,6 +844,23 @@ pub fn run_test262(options: &Test262Options) -> Result<bool, String> {
     Ok(options.inventory_only || execution.failed == 0)
 }
 
+fn validate_execution_profile(
+    options: &Test262Options,
+    debug_assertions_enabled: bool,
+) -> Result<(), String> {
+    if debug_assertions_enabled
+        && !options.inventory_only
+        && options.filter.is_none()
+        && options.limit.is_none()
+    {
+        return Err(
+            "full Test262 execution requires an optimized xtask binary; run `cargo run --release --quiet -p xtask -- test262 ...`"
+                .to_owned(),
+        );
+    }
+    Ok(())
+}
+
 fn test262_pass_rate(passed: usize, failed: usize) -> String {
     let executed = passed.saturating_add(failed);
     if executed == 0 {
@@ -854,6 +879,7 @@ fn execute_inventory(
     inventory: &Inventory,
     instruction_fuel: u64,
     jobs: usize,
+    progress_every: Option<usize>,
     verbose: bool,
 ) -> Result<ExecutionSummary, String> {
     let harness = HarnessSources::load(suite)?;
@@ -875,11 +901,23 @@ fn execute_inventory(
         }
     }
     let mut completed = 0_usize;
+    let mut passed = 0_usize;
+    let mut failed = 0_usize;
+    let mut runner_errors = 0_usize;
     let results =
         execute_cases_parallel(&cases, &harness, instruction_fuel, jobs, |index, result| {
+            completed += 1;
+            match result {
+                Ok(None) => passed += 1,
+                Ok(Some(_)) => failed += 1,
+                Err(_) => runner_errors += 1,
+            }
             if verbose {
-                completed += 1;
                 print_verbose_completion(completed, cases.len(), &cases[index], result);
+            } else if progress_every
+                .is_some_and(|interval| should_print_progress(completed, cases.len(), interval))
+            {
+                print_progress_completion(completed, cases.len(), passed, failed, runner_errors);
             }
         })?;
     let mut summary = ExecutionSummary::default();
@@ -924,10 +962,39 @@ fn print_verbose_completion(
             case.mode.name(),
         ),
     }
-    flush_verbose_output();
+    flush_progress_output();
 }
 
-fn flush_verbose_output() {
+fn should_print_progress(completed: usize, total: usize, interval: usize) -> bool {
+    completed == total || completed.is_multiple_of(interval)
+}
+
+fn print_progress_completion(
+    completed: usize,
+    total: usize,
+    passed: usize,
+    failed: usize,
+    runner_errors: usize,
+) {
+    let line = format_progress_completion(completed, total, passed, failed, runner_errors);
+    println!("{line}");
+    flush_progress_output();
+}
+
+fn format_progress_completion(
+    completed: usize,
+    total: usize,
+    passed: usize,
+    failed: usize,
+    runner_errors: usize,
+) -> String {
+    let pass_rate = test262_pass_rate(passed, failed);
+    format!(
+        "test262: progress completed={completed}/{total} passed={passed} failed={failed} pass-rate={pass_rate} runner-errors={runner_errors}"
+    )
+}
+
+fn flush_progress_output() {
     let _ = std::io::stdout().flush();
 }
 
@@ -1220,6 +1287,7 @@ fn build_report(
             "limit": options.limit,
             "instruction_fuel": options.instruction_fuel,
             "jobs": options.jobs,
+            "progress_every": options.progress_every,
             "verbose": options.verbose,
         },
         "inventory": {
@@ -1291,6 +1359,8 @@ mod tests {
             "5000",
             "--jobs",
             "3",
+            "--progress-every",
+            "1000",
             "--verbose",
             "--inventory-only",
         ]
@@ -1308,8 +1378,21 @@ mod tests {
                 inventory_only: true,
                 instruction_fuel: 5_000,
                 jobs: 3,
+                progress_every: Some(1_000),
                 verbose: true,
             })
+        );
+    }
+
+    #[test]
+    fn progress_interval_prints_milestones_and_final_completion() {
+        assert!(!should_print_progress(999, 2_500, 1_000));
+        assert!(should_print_progress(1_000, 2_500, 1_000));
+        assert!(should_print_progress(2_000, 2_500, 1_000));
+        assert!(should_print_progress(2_500, 2_500, 1_000));
+        assert_eq!(
+            format_progress_completion(1_000, 2_500, 750, 250, 0),
+            "test262: progress completed=1000/2500 passed=750 failed=250 pass-rate=750/1000 (75.00%) runner-errors=0"
         );
     }
 
@@ -1318,6 +1401,38 @@ mod tests {
         assert_eq!(test262_pass_rate(0, 0), "n/a");
         assert_eq!(test262_pass_rate(1, 2), "1/3 (33.33%)");
         assert_eq!(test262_pass_rate(100, 0), "100/100 (100.00%)");
+    }
+
+    #[test]
+    fn full_test262_requires_an_optimized_runner() {
+        let mut options = Test262Options {
+            suite: PathBuf::from("/tmp/test262"),
+            baseline: PathBuf::from("/tmp/baseline"),
+            filter: None,
+            admit_feature: None,
+            limit: None,
+            report: None,
+            inventory_only: false,
+            instruction_fuel: DEFAULT_INSTRUCTION_FUEL,
+            jobs: 1,
+            progress_every: None,
+            verbose: false,
+        };
+
+        let error = validate_execution_profile(&options, true)
+            .expect_err("an unbounded debug-profile run must be rejected");
+        assert!(error.contains("--release"));
+
+        options.filter = Some("built-ins/Array".to_owned());
+        assert_eq!(validate_execution_profile(&options, true), Ok(()));
+        options.filter = None;
+        options.limit = Some(10);
+        assert_eq!(validate_execution_profile(&options, true), Ok(()));
+        options.limit = None;
+        options.inventory_only = true;
+        assert_eq!(validate_execution_profile(&options, true), Ok(()));
+        options.inventory_only = false;
+        assert_eq!(validate_execution_profile(&options, false), Ok(()));
     }
 
     #[test]

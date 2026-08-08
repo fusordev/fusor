@@ -1,6 +1,6 @@
 use std::ops::Range;
 
-use icu_casemap::CaseMapperBorrowed;
+use icu::casemap::CaseMapperBorrowed;
 
 use crate::{
     ExecError, ExecLimits, Match,

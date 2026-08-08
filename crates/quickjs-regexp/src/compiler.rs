@@ -16,8 +16,9 @@ use crate::{
     flags::{MatchMode, RegExpFlags},
     program::{
         BoundaryKind, CharacterClass, CharacterClassItem, CharacterClassKind, Direction,
-        Instruction, LookaroundKind, Program, UnicodeProperty,
+        Instruction, LookaroundKind, Program,
     },
+    properties::UnicodeProperty,
 };
 
 pub(crate) fn compile(
@@ -614,12 +615,12 @@ fn lower_unicode_property(
             "RGI emoji ZWJ properties of strings",
         ));
     }
-    Ok(UnicodeProperty {
-        negative: property.negative,
-        strings: property.strings,
-        name: property.name.to_string(),
-        value: property.value.as_ref().map(ToString::to_string),
-    })
+    Ok(UnicodeProperty::compile(
+        property.negative,
+        property.strings,
+        property.name.as_str(),
+        property.value.as_deref(),
+    ))
 }
 
 enum Visit<'pattern, 'allocator> {

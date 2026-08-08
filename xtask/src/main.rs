@@ -354,6 +354,7 @@ Options:
   --instruction-fuel N
                       Per-Script Test262 interpreter fuel (default: 10000000)
   --jobs N           Parallel Test262 workers (default: available CPU parallelism)
+  --progress-every N Print aggregate Test262 progress every N completed cases
   -v, --verbose       Stream selection, skip counts, and each case result to the CI log
   -h, --help          Show this help
 

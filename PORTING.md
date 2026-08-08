@@ -56,7 +56,7 @@ Finish frontend/diagnostics and language/compiler/execution before broad Test262
 
 - [ ] Module linking/evaluation, cycles, resolver semantics, dynamic `import`, and top-level `await`. Parsing a Module is not execution.
 - [ ] Embedding API, ESM REPL, `qjs`, Rust-native `qjsc`, bytecode viewer, CDP adapter, and portable `std`/`os` modules.
-- [x] `cargo xtask test262` and the manual-dispatch GitHub Actions workflow clone current upstream Test262, apply the custom non-Annex-B policy (with `Temporal` explicitly enabled), use bounded Rayon workers with 64 MiB stacks and a Tokio progress coordinator, stream flushed `--verbose` case completion lines, print the revision/full-suite pass rate, and upload a deterministic JSON report.
+- [x] The release-mode Test262 runner and manual-dispatch GitHub Actions workflow clone current upstream Test262, apply the custom non-Annex-B policy (with `Temporal` explicitly enabled), use explicitly sized bounded Rayon workers with 64 MiB stacks and a Tokio progress coordinator, reject impractically slow unbounded debug runs, enforce a one-hour CI ceiling, stream flushed aggregate progress and the live pass rate every 1,000 completed cases, print the revision/full-suite pass rate, and upload a deterministic JSON report.
 - [ ] After the preceding language/compiler/module gates close, run Test262 by feature cohort; investigate every admitted failure against ECMA-262 and QuickJS/Node; remove temporary skips; then run the full configured suite.
 - [ ] Establish startup/memory/interpreter/compile benchmarks and finish release, resource, cancellation, dependency, and public-API audits.
 

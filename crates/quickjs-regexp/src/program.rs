@@ -1,4 +1,7 @@
-use crate::flags::{MatchMode, RegExpFlags};
+use crate::{
+    flags::{MatchMode, RegExpFlags},
+    properties::UnicodeProperty,
+};
 
 #[derive(Clone, Debug)]
 pub(crate) struct Program {
@@ -118,12 +121,4 @@ pub(crate) enum CharacterClassItem {
     UnicodeProperty(UnicodeProperty),
     Nested(Box<CharacterClass>),
     String(Vec<u32>),
-}
-
-#[derive(Clone, Debug)]
-pub(crate) struct UnicodeProperty {
-    pub negative: bool,
-    pub strings: bool,
-    pub name: String,
-    pub value: Option<String>,
 }
