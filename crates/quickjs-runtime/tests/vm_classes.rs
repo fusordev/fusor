@@ -186,6 +186,17 @@ fn private_instance_methods_share_a_closure_and_preserve_the_super_home_object()
 }
 
 #[test]
+fn private_instance_methods_and_accessors_are_installed_before_field_initializers() {
+    run_with(
+        "function run(){class Box{first=this.#method();#value=this.#method();#method(){return 42;}get value(){return this.#value;}same(other){return this.#method===other.#method;}}class Accessors{first=this.#accessor;second=(this.#accessor=7);get #accessor(){return 42;}set #accessor(next){this.seen=next;}}let first=new Box;let second=new Box;let accessors=new Accessors;return first.first===42&&first.value===42&&first.same(second)&&accessors.first===42&&accessors.second===7&&accessors.seen===7;}",
+        |result| {
+            let value = result.expect("private methods and accessors before fields");
+            assert_eq!(value.as_boolean().expect("live Boolean"), Some(true));
+        },
+    );
+}
+
+#[test]
 fn private_in_uses_private_identity_and_requires_an_object() {
     run_with(
         "function run(){class First{#value=1;static has(candidate){return #value in candidate;}}class Second{#value=2;}let first=new First;let second=new Second;let primitive=false;try{First.has(null);}catch(error){primitive=error.name==='TypeError';}return First.has(first)&&!First.has(second)&&!First.has({})&&primitive;}",

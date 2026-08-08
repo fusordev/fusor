@@ -71,8 +71,9 @@ fn synthesized_class_constructor_flow(
     Ok(flow)
 }
 
-/// Each supported instance element is initialized in the constructor frame,
-/// preserving source order for fields and private-method brand installation.
+/// Each supported instance element is initialized in the constructor frame.
+/// Private methods and accessors are installed before any field initializer;
+/// each group otherwise preserves class-element source order.
 pub(in crate::lowering) struct InstanceFieldDefinitions {
     pub(in crate::lowering) derived: bool,
     pub(in crate::lowering) elements: Vec<NodeId>,
@@ -133,7 +134,8 @@ impl CompilationContext<'_, '_, '_> {
             }
             _ => return Ok(None),
         };
-        let mut elements = Vec::new();
+        let mut private_methods = Vec::new();
+        let mut fields = Vec::new();
         for element in &class.body.body {
             match element {
                 ClassElement::PropertyDefinition(field) => {
@@ -166,7 +168,7 @@ impl CompilationContext<'_, '_, '_> {
                             },
                         )?;
                     }
-                    elements.push(field.node_id.get());
+                    fields.push(field.node_id.get());
                 }
                 ClassElement::MethodDefinition(method)
                     if matches!(method.key, super::OxcPropertyKey::PrivateIdentifier(_)) =>
@@ -186,14 +188,15 @@ impl CompilationContext<'_, '_, '_> {
                             method.span,
                         );
                     }
-                    elements.push(method.node_id.get());
+                    private_methods.push(method.node_id.get());
                 }
                 _ => {}
             }
         }
+        private_methods.extend(fields);
         Ok(Some(InstanceFieldDefinitions {
             derived: class.super_class.is_some(),
-            elements,
+            elements: private_methods,
         }))
     }
 }
