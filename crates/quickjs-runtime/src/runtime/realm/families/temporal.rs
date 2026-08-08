@@ -238,7 +238,7 @@ pub(super) fn visit_functions(visit: FunctionSink<'_>) {
     visit(ordinary(
         NativeFunctionKind::TemporalPlainTimeConstructor,
         IntrinsicNameSpec::RealmName(RealmNameId::PlainTime),
-        1,
+        0,
     ));
     for method in TemporalPlainTimeStaticMethod::ALL {
         let name = match method {

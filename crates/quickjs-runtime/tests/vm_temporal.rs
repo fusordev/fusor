@@ -1132,7 +1132,7 @@ fn plain_time_constructor_conversion_and_accessors_are_spec_shaped() {
                Temporal.PlainTime.compare.name,Temporal.PlainTime.compare.length,
                from.toString(),parsed.toString(),Temporal.PlainTime.compare(time,parsed)].join('|');"
         ),
-        "1|PlainTime|true|[object Temporal.PlainTime]|false|get hour|12|34|56|7|8|9|12:34:56.007008009|12:34:56.007008009|12:34:56.007008009|from|1|compare|2|23:59:00.000999|01:02:03.004005006|1"
+        "0|PlainTime|true|[object Temporal.PlainTime]|false|get hour|12|34|56|7|8|9|12:34:56.007008009|12:34:56.007008009|12:34:56.007008009|from|1|compare|2|23:59:00.000999|01:02:03.004005006|1"
     );
     assert_eq!(
         rendered(
@@ -1163,8 +1163,18 @@ fn plain_time_constructor_conversion_and_accessors_are_spec_shaped() {
         "00:00:00"
     );
     assert_eq!(
-        thrown("return new Temporal.PlainTime(undefined);"),
-        ExceptionKind::RangeError
+        rendered("return new Temporal.PlainTime(undefined).toString();"),
+        "00:00:00"
+    );
+    assert_eq!(
+        rendered(
+            "var log=[];
+             try{new Temporal.PlainTime(1,
+               {valueOf:function(){log.push('minute');return Infinity;}},
+               {valueOf:function(){log.push('second');return 1;}})}catch(error){log.push(error.name);}
+             return log.join(',');"
+        ),
+        "minute,RangeError"
     );
     assert_eq!(
         thrown("return Temporal.PlainTime.from({});"),

@@ -20,7 +20,6 @@ use temporal_rs::{
 pub(in crate::vm) struct TemporalPlainTimeConstructorContinuation {
     arguments: Vec<StoredValue>,
     converted: Vec<JsNumber>,
-    provided: usize,
     new_target: FunctionId,
 }
 
@@ -199,7 +198,6 @@ pub(in crate::vm) fn begin_temporal_plain_time_constructor(
     };
     let mut arguments = inputs.arguments.into_remaining_values();
     arguments.truncate(6);
-    let provided = arguments.len();
     arguments
         .try_reserve(6_usize.saturating_sub(arguments.len()))
         .map_err(|_| ExecutionError::AllocationFailed {
@@ -221,7 +219,6 @@ pub(in crate::vm) fn begin_temporal_plain_time_constructor(
         TemporalPlainTimeConstructorContinuation {
             arguments,
             converted,
-            provided,
             new_target,
         },
         None,
@@ -247,14 +244,15 @@ pub(in crate::vm) fn advance_temporal_plain_time_constructor(
     execution_budget: &mut ExecutionBudget,
 ) -> Result<NativeDispatch, NativeFailure> {
     if let Some(value) = completion {
+        // ToIntegerWithTruncation rejects a non-finite component before the
+        // next argument's observable conversion begins.
+        temporal_plain_time_integer(value, realm, origin)?;
         state.converted.push(value);
     }
     while state.converted.len() < 6 {
         let index = state.converted.len();
         let argument = std::mem::replace(&mut state.arguments[index], StoredValue::Undefined);
-        if (index == 0 && state.provided == 0)
-            || (index > 0 && matches!(argument, StoredValue::Undefined))
-        {
+        if matches!(argument, StoredValue::Undefined) {
             state.converted.push(JsNumber::from_i32(0));
             continue;
         }
