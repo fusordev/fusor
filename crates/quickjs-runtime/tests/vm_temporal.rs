@@ -601,6 +601,61 @@ fn zoned_date_time_with_time_zone_preserves_the_instant() {
 }
 
 #[test]
+fn zoned_date_time_with_calendar_replaces_only_the_calendar_slot() {
+    assert_eq!(
+        rendered(
+            "var value=new Temporal.ZonedDateTime(3661987654321n,'UTC');
+             var result=value.withCalendar('gregory');
+             var method=Object.getOwnPropertyDescriptor(Temporal.ZonedDateTime.prototype,'withCalendar');
+             return [result.epochNanoseconds,result.timeZoneId,result.calendarId,result.year,
+               result===value,method.value.length,method.value.name,method.enumerable,
+               method.writable,method.configurable].join('|');"
+        ),
+        "3661987654321|UTC|gregory|1970|false|1|withCalendar|false|true|true"
+    );
+    assert_eq!(
+        rendered(
+            "var value=new Temporal.ZonedDateTime(3661987654321n,'UTC','gregory');
+             return [value.withCalendar('2020-01-01[u-ca=iso8601]').calendarId,
+               value.withCalendar(new Temporal.PlainDate(2000,5,2,'japanese')).calendarId,
+               value.withCalendar(new Temporal.PlainMonthDay(5,2,'hebrew')).calendarId,
+               value.withCalendar(value).calendarId].join('|');"
+        ),
+        "iso8601|japanese|hebrew|gregory"
+    );
+    assert_eq!(
+        thrown("return new Temporal.ZonedDateTime(0n,'UTC').withCalendar();"),
+        ExceptionKind::TypeError
+    );
+    assert_eq!(
+        thrown("return new Temporal.ZonedDateTime(0n,'UTC').withCalendar(1);"),
+        ExceptionKind::TypeError
+    );
+    assert_eq!(
+        thrown("return new Temporal.ZonedDateTime(0n,'UTC').withCalendar({});"),
+        ExceptionKind::TypeError
+    );
+    assert_eq!(
+        thrown(
+            "return new Temporal.ZonedDateTime(0n,'UTC').withCalendar(new Temporal.Duration());"
+        ),
+        ExceptionKind::TypeError
+    );
+    assert_eq!(
+        thrown(
+            "return new Temporal.ZonedDateTime(0n,'UTC').withCalendar('1997-12-04[u-ca=notacal]');"
+        ),
+        ExceptionKind::RangeError
+    );
+    assert_eq!(
+        thrown(
+            "return Object.getOwnPropertyDescriptor(Temporal.ZonedDateTime.prototype,'withCalendar').value.call({},'iso8601');"
+        ),
+        ExceptionKind::TypeError
+    );
+}
+
+#[test]
 fn zoned_date_time_transition_accepts_string_and_resumable_options_forms() {
     assert_eq!(
         rendered(

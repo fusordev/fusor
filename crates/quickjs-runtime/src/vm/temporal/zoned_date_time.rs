@@ -1546,6 +1546,15 @@ pub(in crate::vm) fn dispatch_temporal_zoned_date_time_prototype(
                 execution_budget,
             )
         }
+        TemporalZonedDateTimePrototypeMethod::WithCalendar => {
+            finish_temporal_zoned_date_time_with_calendar(
+                runtime,
+                &date_time,
+                arguments.take_first_or_undefined(),
+                realm,
+                origin,
+            )
+        }
         TemporalZonedDateTimePrototypeMethod::WithPlainTime => {
             begin_temporal_zoned_date_time_with_plain_time(
                 runtime,
@@ -1625,6 +1634,46 @@ pub(in crate::vm) fn dispatch_temporal_zoned_date_time_prototype(
             "Temporal.ZonedDateTime cannot be converted to a primitive value",
         ),
     }
+}
+
+fn finish_temporal_zoned_date_time_with_calendar(
+    runtime: &mut Runtime,
+    date_time: &ZonedDateTime,
+    value: StoredValue,
+    realm: RealmId,
+    origin: &JsStackFrame,
+) -> Result<NativeDispatch, NativeFailure> {
+    // ToTemporalCalendarSlotValue: Temporal objects contribute their calendar
+    // slot; strings parse as a calendar string (including ISO strings whose
+    // annotation supplies the identifier); anything else is a TypeError.
+    let calendar = match value {
+        StoredValue::String(source) => match Calendar::from_str(&source.to_utf8_lossy()?) {
+            Ok(calendar) => calendar,
+            Err(error) => {
+                return Err(NativeFailure::Abrupt(temporal_exception_from_error(
+                    realm, origin, error,
+                )?));
+            }
+        },
+        StoredValue::Object(_) => match temporal_calendar_from_object(runtime, &value)? {
+            Some(calendar) => calendar,
+            None => {
+                return temporal_type_error(
+                    realm,
+                    origin,
+                    "Temporal.ZonedDateTime.withCalendar requires a calendar identifier or Temporal object",
+                );
+            }
+        },
+        _ => {
+            return temporal_type_error(
+                realm,
+                origin,
+                "Temporal.ZonedDateTime.withCalendar requires a calendar identifier or Temporal object",
+            );
+        }
+    };
+    allocate_temporal_zoned_date_time_result(runtime, realm, date_time.with_calendar(calendar))
 }
 
 #[allow(
