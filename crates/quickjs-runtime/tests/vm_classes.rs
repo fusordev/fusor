@@ -175,6 +175,17 @@ fn private_accessors_merge_by_name_and_preserve_instance_static_and_super_receiv
 }
 
 #[test]
+fn private_accessors_reject_reinitializing_the_same_receiver() {
+    run_with(
+        "function run(){class Base{constructor(value){return value;}}class Getter extends Base{get #value(){}}class Setter extends Base{set #value(next){}}class Pair extends Base{get #value(){}set #value(next){}}let getterTarget={};let setterTarget={};let pairTarget={};new Getter(getterTarget);new Setter(setterTarget);new Pair(pairTarget);let getter=false;let setter=false;let pair=false;try{new Getter(getterTarget);}catch(error){getter=error.name==='TypeError';}try{new Setter(setterTarget);}catch(error){setter=error.name==='TypeError';}try{new Pair(pairTarget);}catch(error){pair=error.name==='TypeError';}return getter&&setter&&pair;}",
+        |result| {
+            let value = result.expect("private accessor reinitialization completion");
+            assert_eq!(value.as_boolean().expect("live Boolean"), Some(true));
+        },
+    );
+}
+
+#[test]
 fn nested_instance_field_classes_keep_private_accessor_names_lexically_distinct() {
     run_with(
         "function run(){class Outer{get #value(){}Inner=class{set #value(next){}read(){return this.#value;}};}class Other{set #value(next){}Inner=class{get #value(){}};read(){return this.#value;}}let innerRejected=false;let outerRejected=false;try{new (new Outer().Inner)().read();}catch(error){innerRejected=error.name==='TypeError';}try{new Other().read();}catch(error){outerRejected=error.name==='TypeError';}return innerRejected&&outerRejected;}",
