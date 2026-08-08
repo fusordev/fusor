@@ -4548,7 +4548,8 @@ const fn global_declaration_property_layout(
         true,
         matches!(
             executable_kind,
-            CompilerExecutableKind::DynamicFunctionScript
+            CompilerExecutableKind::IndirectEvalScript
+                | CompilerExecutableKind::DynamicFunctionScript
         ),
     )
 }
@@ -4870,6 +4871,9 @@ fn require_root_kind(
     let message = match expected {
         CompilerExecutableKind::GlobalScript => {
             "non-Script executable cannot execute as a host-loaded Global Script"
+        }
+        CompilerExecutableKind::IndirectEvalScript => {
+            "non-eval executable cannot execute as an indirect-eval Script"
         }
         CompilerExecutableKind::OrdinaryFunction => {
             "non-instantiable executable cannot be instantiated as a source function"

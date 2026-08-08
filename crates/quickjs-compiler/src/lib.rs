@@ -34,10 +34,21 @@ pub(crate) const fn is_supported_global_script_goal(
     )
 }
 
+pub(crate) const fn is_supported_indirect_eval_goal(
+    goal: quickjs_frontend::CompilationGoal<'_>,
+) -> bool {
+    matches!(
+        goal,
+        quickjs_frontend::CompilationGoal::IndirectEval(eval) if !eval.forces_strict()
+    )
+}
+
 pub(crate) const fn is_supported_script_root_goal(
     goal: quickjs_frontend::CompilationGoal<'_>,
 ) -> bool {
-    is_supported_global_script_goal(goal) || is_supported_dynamic_function_goal(goal)
+    is_supported_global_script_goal(goal)
+        || is_supported_indirect_eval_goal(goal)
+        || is_supported_dynamic_function_goal(goal)
 }
 
 pub use lowering::{

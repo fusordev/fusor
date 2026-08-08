@@ -5363,6 +5363,7 @@ fn define_method_input_with_root_arguments(
                 panic!("a define_method child cannot be an arrow")
             }
             CompilerExecutableKind::GlobalScript
+            | CompilerExecutableKind::IndirectEvalScript
             | CompilerExecutableKind::DynamicFunctionScript => {
                 panic!("a define_method child cannot be a Script")
             }

@@ -877,6 +877,13 @@ impl CompilationContext<'_, '_, '_> {
             if crate::is_supported_global_script_goal(self.unit.goal()) {
                 let (executable, program) = self.selected_global_script(executable_id)?;
                 (executable, program, CompilerExecutableKind::GlobalScript)
+            } else if crate::is_supported_indirect_eval_goal(self.unit.goal()) {
+                let (executable, program) = self.selected_indirect_eval_script(executable_id)?;
+                (
+                    executable,
+                    program,
+                    CompilerExecutableKind::IndirectEvalScript,
+                )
             } else {
                 let (executable, program) = self.selected_dynamic_function_script(executable_id)?;
                 (
@@ -906,7 +913,7 @@ impl CompilationContext<'_, '_, '_> {
         let closure_variables = self.compiled_closure_variables(executable_id, tree_layout)?;
         if !closure_variables.is_empty() {
             return Err(LeafCompilationError::SemanticInvariant {
-                invariant: "dynamic Function Script root imports no caller closure",
+                invariant: "isolated Script root imports no caller closure",
                 span: Some(program.span),
             });
         }
@@ -986,7 +993,7 @@ const fn executable_header(
     variable_reference_count: u32,
 ) -> UnverifiedFunctionHeader {
     let header = match kind {
-        CompilerExecutableKind::GlobalScript => {
+        CompilerExecutableKind::GlobalScript | CompilerExecutableKind::IndirectEvalScript => {
             UnverifiedFunctionHeader::global_script(strict, variable_reference_count)
         }
         CompilerExecutableKind::OrdinaryFunction => {

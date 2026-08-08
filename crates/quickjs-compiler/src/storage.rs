@@ -1011,6 +1011,12 @@ impl<'unit, 'arena, 'scope> Planner<'unit, 'arena, 'scope> {
                 },
             ),
             CompilationGoal::Module => (CompilationUnitKind::Module, ExecutableKind::Module),
+            CompilationGoal::IndirectEval(goal) if !goal.forces_strict() => (
+                CompilationUnitKind::Script,
+                ExecutableKind::Script {
+                    asynchronous: false,
+                },
+            ),
             CompilationGoal::IndirectEval(_) | CompilationGoal::DirectEval(_) => {
                 return Err(CompilerError::Unsupported {
                     feature: UnsupportedFeature::EvalCompilationGoal,
@@ -2366,7 +2372,14 @@ impl<'unit, 'arena, 'scope> Planner<'unit, 'arena, 'scope> {
         match self.kind {
             CompilationUnitKind::Script => match kind {
                 DeclarationKind::Let | DeclarationKind::Const | DeclarationKind::Class
-                    if crate::is_supported_dynamic_function_goal(self.unit.goal()) =>
+                    if crate::is_supported_dynamic_function_goal(self.unit.goal())
+                        || crate::is_supported_indirect_eval_goal(self.unit.goal()) =>
+                {
+                    Ok(StoragePlacement::Local)
+                }
+                DeclarationKind::Var | DeclarationKind::Function
+                    if crate::is_supported_indirect_eval_goal(self.unit.goal())
+                        && self.executable_drafts[owner.index()].executable.is_strict() =>
                 {
                     Ok(StoragePlacement::Local)
                 }

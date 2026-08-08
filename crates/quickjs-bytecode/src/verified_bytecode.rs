@@ -541,6 +541,8 @@ impl CompilerSource {
 pub enum CompilerExecutableKind {
     /// A host-loaded ECMAScript Global Script.
     GlobalScript,
+    /// A Script compiled for an indirect invocation of `%eval%`.
+    IndirectEvalScript,
     /// An ordinary callable JavaScript function.
     #[default]
     OrdinaryFunction,
@@ -1260,6 +1262,18 @@ pub enum BytecodeVerificationErrorKind {
     /// A Global Script record carries function-name metadata or a named
     /// function self binding.
     GlobalScriptHasFunctionName,
+    /// An indirect-eval Script record is not the graph root.
+    IndirectEvalScriptNotRoot,
+    /// An indirect-eval Script record declares a call-argument domain.
+    IndirectEvalScriptHasArguments {
+        /// Header-defined arguments.
+        defined: u32,
+        /// Frame argument slots.
+        arguments: u32,
+    },
+    /// An indirect-eval Script record carries function-name metadata or a
+    /// named-function self binding.
+    IndirectEvalScriptHasFunctionName,
     /// A dynamic-Function Script record is not the graph root.
     DynamicFunctionScriptNotRoot,
     /// A dynamic-Function Script record declares a call-argument domain.
@@ -1731,6 +1745,15 @@ impl fmt::Display for BytecodeVerificationErrorKind {
             ),
             Self::GlobalScriptHasFunctionName => formatter
                 .write_str("Global Script carries function-name metadata or a self binding"),
+            Self::IndirectEvalScriptNotRoot => {
+                formatter.write_str("indirect-eval Script executable is not the graph root")
+            }
+            Self::IndirectEvalScriptHasArguments { defined, arguments } => write!(
+                formatter,
+                "indirect-eval Script declares {defined} defined arguments and {arguments} frame arguments"
+            ),
+            Self::IndirectEvalScriptHasFunctionName => formatter
+                .write_str("indirect-eval Script carries function-name metadata or a self binding"),
             Self::DynamicFunctionScriptNotRoot => {
                 formatter.write_str("dynamic-Function Script executable is not the graph root")
             }
@@ -2480,16 +2503,25 @@ fn verify_executable_kind(
                     BytecodeVerificationErrorKind::GlobalScriptNotRoot,
                 ));
             }
-            let has_function_name_binding =
-                metadata.variables.iter().any(|definition| {
-                    definition.policy.kind() == CompilerBindingKind::FunctionName
-                }) || metadata.closures.iter().any(|definition| {
-                    definition.policy().kind() == CompilerBindingKind::FunctionName
-                });
-            if metadata.function_name.is_some() || has_function_name_binding {
+            if metadata_has_function_name(metadata) {
                 return Err(BytecodeVerificationError::function(
                     id,
                     BytecodeVerificationErrorKind::GlobalScriptHasFunctionName,
+                ));
+            }
+            Ok(())
+        }
+        CompilerExecutableKind::IndirectEvalScript => {
+            if id != root {
+                return Err(BytecodeVerificationError::function(
+                    id,
+                    BytecodeVerificationErrorKind::IndirectEvalScriptNotRoot,
+                ));
+            }
+            if metadata_has_function_name(metadata) {
+                return Err(BytecodeVerificationError::function(
+                    id,
+                    BytecodeVerificationErrorKind::IndirectEvalScriptHasFunctionName,
                 ));
             }
             Ok(())
@@ -2499,13 +2531,7 @@ fn verify_executable_kind(
         | CompilerExecutableKind::AsyncFunction
         | CompilerExecutableKind::AsyncGeneratorFunction => Ok(()),
         CompilerExecutableKind::OrdinaryArrow => {
-            let has_function_name_binding =
-                metadata.variables.iter().any(|definition| {
-                    definition.policy.kind() == CompilerBindingKind::FunctionName
-                }) || metadata.closures.iter().any(|definition| {
-                    definition.policy().kind() == CompilerBindingKind::FunctionName
-                });
-            if metadata.function_name.is_some() || has_function_name_binding {
+            if metadata_has_function_name(metadata) {
                 return Err(BytecodeVerificationError::function(
                     id,
                     BytecodeVerificationErrorKind::OrdinaryArrowHasFunctionName,
@@ -2518,13 +2544,7 @@ fn verify_executable_kind(
         | CompilerExecutableKind::AsyncMethod
         | CompilerExecutableKind::AsyncGeneratorMethod
         | CompilerExecutableKind::ClassConstructor => {
-            let has_function_name_binding =
-                metadata.variables.iter().any(|definition| {
-                    definition.policy.kind() == CompilerBindingKind::FunctionName
-                }) || metadata.closures.iter().any(|definition| {
-                    definition.policy().kind() == CompilerBindingKind::FunctionName
-                });
-            if metadata.function_name.is_some() || has_function_name_binding {
+            if metadata_has_function_name(metadata) {
                 return Err(BytecodeVerificationError::function(
                     id,
                     BytecodeVerificationErrorKind::OrdinaryMethodHasFunctionName,
@@ -2539,13 +2559,7 @@ fn verify_executable_kind(
                     BytecodeVerificationErrorKind::DynamicFunctionScriptNotRoot,
                 ));
             }
-            let has_function_name_binding =
-                metadata.variables.iter().any(|definition| {
-                    definition.policy.kind() == CompilerBindingKind::FunctionName
-                }) || metadata.closures.iter().any(|definition| {
-                    definition.policy().kind() == CompilerBindingKind::FunctionName
-                });
-            if metadata.function_name.is_some() || has_function_name_binding {
+            if metadata_has_function_name(metadata) {
                 return Err(BytecodeVerificationError::function(
                     id,
                     BytecodeVerificationErrorKind::DynamicFunctionScriptHasFunctionName,
@@ -2554,6 +2568,18 @@ fn verify_executable_kind(
             Ok(())
         }
     }
+}
+
+fn metadata_has_function_name(metadata: &UnverifiedFunctionMetadata) -> bool {
+    metadata.function_name.is_some()
+        || metadata
+            .variables
+            .iter()
+            .any(|definition| definition.policy.kind() == CompilerBindingKind::FunctionName)
+        || metadata
+            .closures
+            .iter()
+            .any(|definition| definition.policy().kind() == CompilerBindingKind::FunctionName)
 }
 
 #[allow(
@@ -2582,6 +2608,26 @@ fn verify_header(
                 return Err(BytecodeVerificationError::function(
                     id,
                     BytecodeVerificationErrorKind::GlobalScriptHasArguments {
+                        defined: header.defined_argument_count(),
+                        arguments,
+                    },
+                ));
+            }
+        }
+        CompilerExecutableKind::IndirectEvalScript => {
+            if header.kind() != FunctionKind::Normal
+                || header.flags().bits() != 0x0400
+                || header.mode().bits() & !1 != 0
+            {
+                return Err(BytecodeVerificationError::function(
+                    id,
+                    BytecodeVerificationErrorKind::UnsupportedFunctionHeader,
+                ));
+            }
+            if header.defined_argument_count() != 0 || arguments != 0 {
+                return Err(BytecodeVerificationError::function(
+                    id,
+                    BytecodeVerificationErrorKind::IndirectEvalScriptHasArguments {
                         defined: header.defined_argument_count(),
                         arguments,
                     },
@@ -3925,7 +3971,9 @@ const fn realm_global_policy_supported(policy: CompilerBindingPolicy) -> bool {
 const fn is_script_authority_kind(kind: CompilerExecutableKind) -> bool {
     matches!(
         kind,
-        CompilerExecutableKind::GlobalScript | CompilerExecutableKind::DynamicFunctionScript
+        CompilerExecutableKind::GlobalScript
+            | CompilerExecutableKind::IndirectEvalScript
+            | CompilerExecutableKind::DynamicFunctionScript
     )
 }
 

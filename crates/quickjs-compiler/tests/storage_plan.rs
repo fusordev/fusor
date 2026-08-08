@@ -3,8 +3,8 @@ use quickjs_compiler::{
     InitializationPolicy, StoragePlacement, UnsupportedFeature, WritePolicy, build_storage_plan,
 };
 use quickjs_frontend::{
-    Allocator, CompilationGoal, FrontendOptions, GlobalScriptGoal, ParseMode, parse,
-    with_parsed_program,
+    Allocator, CompilationGoal, FrontendOptions, GlobalScriptGoal, IndirectEvalGoal, ParseMode,
+    parse, with_parsed_program,
 };
 
 fn script(source: &str) -> quickjs_compiler::StoragePlan {
@@ -29,6 +29,16 @@ fn module(source: &str) -> quickjs_compiler::StoragePlan {
     )
     .expect("front-end acceptance")
     .expect("storage plan")
+}
+
+fn indirect_eval(source: &str) -> quickjs_compiler::StoragePlan {
+    with_parsed_program(
+        source,
+        FrontendOptions::for_goal(CompilationGoal::IndirectEval(IndirectEvalGoal::new())),
+        build_storage_plan,
+    )
+    .expect("front-end acceptance")
+    .expect("indirect eval storage plan")
 }
 
 #[test]
@@ -164,6 +174,49 @@ fn script_storage_distinguishes_root_globals_from_nested_blocks() {
     assert!(!lookup("object").policy().has_temporal_dead_zone());
     assert_eq!(lookup("fixed").policy().writes(), WritePolicy::Immutable);
     assert!(lookup("fixed").policy().has_temporal_dead_zone());
+}
+
+#[test]
+fn sloppy_indirect_eval_keeps_lexicals_local_and_vars_global() {
+    let plan =
+        indirect_eval("var shared; function declared() {} let local; const fixed = 1; class C {}");
+    let lookup = |name: &str| {
+        plan.bindings()
+            .iter()
+            .find(|binding| binding.name() == name)
+            .expect("binding")
+    };
+
+    assert_eq!(lookup("shared").placement(), StoragePlacement::GlobalObject);
+    assert_eq!(
+        lookup("declared").placement(),
+        StoragePlacement::GlobalObject
+    );
+    for name in ["local", "fixed", "C"] {
+        assert_eq!(lookup(name).placement(), StoragePlacement::Local, "{name}");
+    }
+}
+
+#[test]
+fn strict_indirect_eval_keeps_every_declaration_local() {
+    let plan = indirect_eval(
+        "\"use strict\"; var localVar; function localFunction() {} let localLet; const localConst = 1; class LocalClass {}",
+    );
+
+    for name in [
+        "localVar",
+        "localFunction",
+        "localLet",
+        "localConst",
+        "LocalClass",
+    ] {
+        let binding = plan
+            .bindings()
+            .iter()
+            .find(|binding| binding.name() == name)
+            .expect("binding");
+        assert_eq!(binding.placement(), StoragePlacement::Local, "{name}");
+    }
 }
 
 #[test]
