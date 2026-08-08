@@ -311,7 +311,7 @@ fn array_from_preflights_fuel_and_runtime_limits_before_stack_mutation() {
 }
 
 #[test]
-fn array_length_and_index_mutations_precharge_shape_work_before_mutation() {
+fn array_length_and_index_mutations_precharge_work_before_mutation() {
     let mut runtime = Runtime::try_new(RuntimeLimits::default()).expect("runtime");
     let realm = runtime.create_realm().expect("realm");
     let realm = runtime.context(&realm).expect("context").realm;
@@ -357,15 +357,16 @@ fn array_length_and_index_mutations_precharge_shape_work_before_mutation() {
     assert_eq!(runtime.array_length(array).expect("length"), Some(2));
     assert_eq!(runtime.usage(), baseline);
 
+    let index = PropertyKey::from_index(ArrayIndex::new(2).expect("index"));
     let define_work = runtime
-        .preview_array_define_data_property_work(array)
+        .preview_array_data_property_work(array, &index)
         .expect("definition work");
     let mut budget = execution_budget_with_consumed(define_work, 1);
     let Err(error) = write_static_property(
         &mut runtime,
         realm,
         &StoredValue::Object(array),
-        PropertyKey::from_index(ArrayIndex::new(2).expect("index")),
+        index,
         StoredValue::Number(JsNumber::from_i32(3)),
         true,
         &mut budget,
@@ -629,8 +630,12 @@ fn array_iterator_creation_boxes_a_primitive_receiver_once() {
 
 #[test]
 fn array_iterator_primitive_boxing_preflights_the_complete_transaction() {
+    let mut measurement = Runtime::try_new(RuntimeLimits::default()).expect("measurement runtime");
+    let _measurement_realm = measurement.create_realm().expect("measurement realm");
+    let realm_object_limit = measurement.usage().heap_objects();
     let mut runtime =
-        Runtime::try_new(RuntimeLimits::default().with_max_heap_objects(47)).expect("runtime");
+        Runtime::try_new(RuntimeLimits::default().with_max_heap_objects(realm_object_limit))
+            .expect("runtime");
     let realm = runtime.create_realm().expect("realm");
     let realm_id = runtime.context(&realm).expect("context").realm;
     let usage = runtime.usage();
@@ -647,9 +652,9 @@ fn array_iterator_primitive_boxing_preflights_the_complete_transaction() {
         result,
         Err(NativeFailure::Execution(ExecutionError::LimitExceeded {
             resource: RuntimeResource::HeapObjects,
-            limit: 47,
-            observed: 49,
-        }))
+            limit,
+            observed,
+        })) if limit == realm_object_limit && observed == realm_object_limit + 2
     ));
     assert_eq!(runtime.usage(), usage);
     assert_eq!(runtime.collection_pending, collection_pending);

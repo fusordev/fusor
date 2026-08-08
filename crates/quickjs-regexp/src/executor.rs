@@ -51,6 +51,7 @@ fn run_candidate(
         position: candidate,
         captures: vec![CaptureSlot::default(); program.capture_count],
         repeats: vec![RepeatState::default(); program.repeat_count],
+        terminal_repeat: None,
         direction: Direction::Forward,
     };
     let mut backtrack = Vec::new();
@@ -65,13 +66,13 @@ fn run_candidate(
                 let Some((actual, next)) =
                     decode_in_direction(input, state.position, mode.unicode, state.direction)
                 else {
-                    if !restore(&mut state, &mut backtrack) {
+                    if !recover_or_restore_terminal_repeat(&mut state, &mut backtrack) {
                         return Ok(None);
                     }
                     continue;
                 };
                 if canonicalize(actual, *mode) != canonicalize(*value, *mode) {
-                    if !restore(&mut state, &mut backtrack) {
+                    if !recover_or_restore_terminal_repeat(&mut state, &mut backtrack) {
                         return Ok(None);
                     }
                     continue;
@@ -83,13 +84,13 @@ fn run_candidate(
                 let Some((actual, next)) =
                     decode_in_direction(input, state.position, mode.unicode, state.direction)
                 else {
-                    if !restore(&mut state, &mut backtrack) {
+                    if !recover_or_restore_terminal_repeat(&mut state, &mut backtrack) {
                         return Ok(None);
                     }
                     continue;
                 };
                 if !mode.dot_all && is_line_terminator(actual) {
-                    if !restore(&mut state, &mut backtrack) {
+                    if !recover_or_restore_terminal_repeat(&mut state, &mut backtrack) {
                         return Ok(None);
                     }
                     continue;
@@ -101,7 +102,7 @@ fn run_candidate(
                 let positions =
                     class_match_positions(class, input, state.position, *mode, state.direction);
                 let Some((&next, alternatives)) = positions.split_first() else {
-                    if !restore(&mut state, &mut backtrack) {
+                    if !recover_or_restore_terminal_repeat(&mut state, &mut backtrack) {
                         return Ok(None);
                     }
                     continue;
@@ -228,6 +229,7 @@ fn run_candidate(
                 let reached_max = max.is_some_and(|maximum| repeated.count >= maximum);
                 if reached_max {
                     state.repeats[*slot].active = false;
+                    clear_terminal_repeat(&mut state, *slot);
                     state.pc = *exit;
                     continue;
                 }
@@ -238,6 +240,7 @@ fn run_candidate(
                         }
                     } else {
                         state.repeats[*slot].active = false;
+                        clear_terminal_repeat(&mut state, *slot);
                         state.pc = *exit;
                     }
                     continue;
@@ -254,7 +257,13 @@ fn run_candidate(
                 exit_state.repeats[*slot].active = false;
                 exit_state.pc = *exit;
                 if *greedy {
-                    push_alternative(&mut backtrack, exit_state, limits.max_backtrack_states)?;
+                    if let Some(terminal) =
+                        terminal_repeat(program, *slot, *body, *exit, *capture_start, *capture_end)
+                    {
+                        body_state.terminal_repeat = Some(terminal);
+                    } else {
+                        push_alternative(&mut backtrack, exit_state, limits.max_backtrack_states)?;
+                    }
                     state = body_state;
                 } else {
                     push_alternative(&mut backtrack, body_state, limits.max_backtrack_states)?;
@@ -322,6 +331,84 @@ fn restore(state: &mut State, backtrack: &mut Vec<BacktrackEntry>) -> bool {
         }
     }
     false
+}
+
+/// Recovers from a failed token in a committed terminal repeat, or restores a
+/// regular backtracking alternative.
+fn recover_or_restore_terminal_repeat(
+    state: &mut State,
+    backtrack: &mut Vec<BacktrackEntry>,
+) -> bool {
+    if let Some(terminal) = state.terminal_repeat
+        && state.pc == terminal.body
+        && let Some(repeat) = state.repeats.get_mut(terminal.slot)
+    {
+        repeat.active = false;
+        state.terminal_repeat = None;
+        state.pc = terminal.exit;
+        return true;
+    }
+    restore(state, backtrack)
+}
+
+/// Clears a terminal-repeat commitment when the repeat exits normally.
+fn clear_terminal_repeat(state: &mut State, slot: usize) {
+    if state
+        .terminal_repeat
+        .is_some_and(|terminal| terminal.slot == slot)
+    {
+        state.terminal_repeat = None;
+    }
+}
+
+/// Recognizes a greedy, single-token repeat whose only continuation is a
+/// non-multiline end anchor followed by the implicit whole-match save and
+/// match. No shorter repetition can satisfy that continuation after the token
+/// first fails, so per-iteration exit alternatives are unnecessary.
+fn terminal_repeat(
+    program: &Program,
+    slot: usize,
+    body: usize,
+    exit: usize,
+    capture_start: usize,
+    capture_end: usize,
+) -> Option<TerminalRepeat> {
+    if capture_start != capture_end
+        || !matches!(
+            program.instructions.get(body),
+            Some(
+                Instruction::Character { .. }
+                    | Instruction::Dot(_)
+                    | Instruction::CharacterClass { .. }
+            )
+        )
+        || !matches!(
+            program.instructions.get(body.saturating_add(1)),
+            Some(Instruction::RepeatEnd { .. })
+        )
+    {
+        return None;
+    }
+    let Instruction::Boundary {
+        kind: BoundaryKind::End,
+        mode,
+    } = program.instructions.get(exit)?
+    else {
+        return None;
+    };
+    if mode.multiline
+        || !matches!(
+            program.instructions.get(exit.saturating_add(1)),
+            Some(Instruction::SaveEnd(0))
+        )
+        || !matches!(
+            program.instructions.get(exit.saturating_add(2)),
+            Some(Instruction::Match)
+        )
+    {
+        return None;
+    }
+    Some(TerminalRepeat { slot, body, exit })
 }
 
 fn pop_lookaround(backtrack: &mut Vec<BacktrackEntry>) -> Option<State> {
@@ -679,7 +766,21 @@ struct State {
     position: usize,
     captures: Vec<CaptureSlot>,
     repeats: Vec<RepeatState>,
+    terminal_repeat: Option<TerminalRepeat>,
     direction: Direction,
+}
+
+/// A greedy repeat whose only continuation is an ordinary end anchor.
+///
+/// Such a repeat can discard its per-iteration exit alternatives: if its
+/// one-token body stops matching, the only viable continuation is its final
+/// end-anchor path. Retaining that state here avoids linear backtracking
+/// storage for Test262's full-Unicode property tests.
+#[derive(Clone, Copy, Debug)]
+struct TerminalRepeat {
+    slot: usize,
+    body: usize,
+    exit: usize,
 }
 
 #[derive(Clone, Debug)]

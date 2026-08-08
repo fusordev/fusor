@@ -547,6 +547,238 @@ pub(super) fn resume_native_continuations(
             NativeContinuation::DateToJson(state) => {
                 finish_date_to_json_call(state, value, return_to)?
             }
+            NativeContinuation::TemporalPlainDateBag(state) => {
+                advance_temporal_plain_date_property_bag(
+                    runtime,
+                    *state,
+                    Some(value),
+                    return_to,
+                    execution_budget,
+                )?
+            }
+            NativeContinuation::TemporalPlainMonthDayBag(state) => {
+                advance_temporal_plain_month_day_property_bag(
+                    runtime,
+                    *state,
+                    Some(value),
+                    return_to,
+                    execution_budget,
+                )?
+            }
+            NativeContinuation::TemporalPlainYearMonthBag(state) => {
+                advance_temporal_plain_year_month_property_bag(
+                    runtime,
+                    *state,
+                    Some(value),
+                    return_to,
+                    execution_budget,
+                )?
+            }
+            NativeContinuation::TemporalPlainYearMonthWith(state) => {
+                advance_temporal_plain_year_month_with(
+                    runtime,
+                    *state,
+                    Some(value),
+                    return_to,
+                    execution_budget,
+                )?
+            }
+            NativeContinuation::TemporalPlainYearMonthDifferenceOptions(state) => {
+                advance_temporal_plain_year_month_difference_options(
+                    runtime,
+                    *state,
+                    value,
+                    return_to,
+                    execution_budget,
+                )?
+            }
+            NativeContinuation::TemporalPlainDateTimeBag(state) => {
+                advance_temporal_plain_date_time_property_bag(
+                    runtime,
+                    *state,
+                    Some(value),
+                    return_to,
+                    execution_budget,
+                )?
+            }
+            NativeContinuation::TemporalZonedDateTimeBag(state) => {
+                advance_temporal_zoned_date_time_property_bag(
+                    runtime,
+                    *state,
+                    Some(value),
+                    return_to,
+                    execution_budget,
+                )?
+            }
+            NativeContinuation::TemporalZonedDateTimeOptions(state) => {
+                advance_temporal_zoned_date_time_from_options(
+                    runtime,
+                    *state,
+                    Some(value),
+                    return_to,
+                    execution_budget,
+                )?
+            }
+            NativeContinuation::TemporalPlainTimeBag(state) => {
+                advance_temporal_plain_time_property_bag(
+                    runtime,
+                    *state,
+                    Some(value),
+                    return_to,
+                    execution_budget,
+                )?
+            }
+            NativeContinuation::TemporalPlainTimeOptions(state) => {
+                advance_temporal_plain_time_options(
+                    runtime,
+                    *state,
+                    Some(value),
+                    return_to,
+                    execution_budget,
+                )?
+            }
+            NativeContinuation::TemporalPlainDateOptions(state) => {
+                advance_temporal_plain_date_from_options(
+                    runtime,
+                    *state,
+                    Some(value),
+                    return_to,
+                    execution_budget,
+                )?
+            }
+            NativeContinuation::TemporalPlainDateToStringOptions(state) => {
+                advance_temporal_plain_date_to_string(
+                    runtime,
+                    *state,
+                    value,
+                    return_to,
+                    execution_budget,
+                )?
+            }
+            NativeContinuation::TemporalPlainMonthDayToStringOptions(state) => {
+                advance_temporal_plain_month_day_to_string(
+                    runtime,
+                    *state,
+                    value,
+                    return_to,
+                    execution_budget,
+                )?
+            }
+            NativeContinuation::TemporalPlainYearMonthToStringOptions(state) => {
+                advance_temporal_plain_year_month_to_string(
+                    runtime,
+                    *state,
+                    value,
+                    return_to,
+                    execution_budget,
+                )?
+            }
+            NativeContinuation::TemporalPlainYearMonthToPlainDate(state) => {
+                advance_temporal_plain_year_month_to_plain_date(
+                    runtime,
+                    *state,
+                    Some(value),
+                    return_to,
+                    execution_budget,
+                )?
+            }
+            NativeContinuation::TemporalPlainMonthDayToPlainDate(state) => {
+                advance_temporal_plain_month_day_to_plain_date(
+                    runtime,
+                    *state,
+                    Some(value),
+                    return_to,
+                    execution_budget,
+                )?
+            }
+            NativeContinuation::TemporalPlainMonthDayWith(state) => {
+                advance_temporal_plain_month_day_with(
+                    runtime,
+                    *state,
+                    Some(value),
+                    return_to,
+                    execution_budget,
+                )?
+            }
+            NativeContinuation::TemporalPlainDateWith(state) => advance_temporal_plain_date_with(
+                runtime,
+                *state,
+                Some(value),
+                return_to,
+                execution_budget,
+            )?,
+            NativeContinuation::TemporalPlainDateDifferenceOptions(state) => {
+                advance_temporal_plain_date_difference_options(
+                    runtime,
+                    *state,
+                    value,
+                    return_to,
+                    execution_budget,
+                )?
+            }
+            NativeContinuation::TemporalPlainDateTimeDifferenceOptions(state) => {
+                advance_temporal_plain_date_time_difference_options(
+                    runtime,
+                    *state,
+                    value,
+                    return_to,
+                    execution_budget,
+                )?
+            }
+            NativeContinuation::TemporalPlainTimeDifferenceOptions(state) => {
+                advance_temporal_plain_time_difference_options(
+                    runtime,
+                    *state,
+                    value,
+                    return_to,
+                    execution_budget,
+                )?
+            }
+            NativeContinuation::TemporalPlainDateTimeRoundOptions(state) => {
+                advance_temporal_plain_date_time_round_options(
+                    runtime,
+                    *state,
+                    value,
+                    return_to,
+                    execution_budget,
+                )?
+            }
+            NativeContinuation::TemporalPlainTimeRoundOptions(state) => {
+                advance_temporal_plain_time_round_options(
+                    runtime,
+                    *state,
+                    value,
+                    return_to,
+                    execution_budget,
+                )?
+            }
+            NativeContinuation::TemporalPlainDateTimeToStringOptions(state) => {
+                advance_temporal_plain_date_time_to_string_options(
+                    runtime,
+                    *state,
+                    value,
+                    return_to,
+                    execution_budget,
+                )?
+            }
+            NativeContinuation::TemporalZonedDateTimeToStringOptions(state) => {
+                advance_temporal_zoned_date_time_to_string_options(
+                    runtime,
+                    *state,
+                    value,
+                    return_to,
+                    execution_budget,
+                )?
+            }
+            NativeContinuation::TemporalZonedDateTimeTransition(state) => {
+                advance_temporal_zoned_date_time_transition(
+                    runtime,
+                    *state,
+                    value,
+                    return_to,
+                    execution_budget,
+                )?
+            }
             NativeContinuation::TemporalDurationBag(state) => {
                 advance_temporal_duration_property_bag(
                     runtime,
@@ -579,6 +811,15 @@ pub(super) fn resume_native_continuations(
             }
             NativeContinuation::TemporalDurationToStringOptions(state) => {
                 advance_temporal_duration_to_string_options(
+                    runtime,
+                    *state,
+                    value,
+                    return_to,
+                    execution_budget,
+                )?
+            }
+            NativeContinuation::TemporalPlainTimeToStringOptions(state) => {
+                advance_temporal_plain_time_to_string_options(
                     runtime,
                     *state,
                     value,
@@ -2557,6 +2798,202 @@ pub(super) fn dispatch_native_call_with_frames(
                 execution_budget,
             )
         }
+        NativeFunctionKind::TemporalPlainDateConstructor => begin_temporal_plain_date_constructor(
+            runtime,
+            native.realm,
+            inputs,
+            return_to,
+            origin.unwrap_or_else(native_function_host_origin),
+            execution_budget,
+        ),
+        NativeFunctionKind::TemporalPlainDateStatic(method) => begin_temporal_plain_date_static(
+            runtime,
+            method,
+            native.realm,
+            inputs.arguments,
+            return_to,
+            origin.unwrap_or_else(native_function_host_origin),
+            execution_budget,
+        ),
+        NativeFunctionKind::TemporalPlainDatePrototype(method) => {
+            let origin = origin.unwrap_or_else(native_function_host_origin);
+            dispatch_temporal_plain_date_prototype(
+                runtime,
+                method,
+                native.realm,
+                &inputs.receiver,
+                inputs.arguments,
+                return_to,
+                &origin,
+                execution_budget,
+            )
+        }
+        NativeFunctionKind::TemporalPlainDateTimeConstructor => {
+            begin_temporal_plain_date_time_constructor(
+                runtime,
+                native.realm,
+                inputs,
+                return_to,
+                origin.unwrap_or_else(native_function_host_origin),
+                execution_budget,
+            )
+        }
+        NativeFunctionKind::TemporalPlainDateTimeStatic(method) => {
+            begin_temporal_plain_date_time_static(
+                runtime,
+                method,
+                native.realm,
+                inputs.arguments,
+                return_to,
+                origin.unwrap_or_else(native_function_host_origin),
+                execution_budget,
+            )
+        }
+        NativeFunctionKind::TemporalPlainDateTimePrototype(method) => {
+            let origin = origin.unwrap_or_else(native_function_host_origin);
+            dispatch_temporal_plain_date_time_prototype(
+                runtime,
+                method,
+                native.realm,
+                &inputs.receiver,
+                inputs.arguments,
+                return_to,
+                &origin,
+                execution_budget,
+            )
+        }
+        NativeFunctionKind::TemporalPlainTimeConstructor => begin_temporal_plain_time_constructor(
+            runtime,
+            native.realm,
+            inputs,
+            return_to,
+            origin.unwrap_or_else(native_function_host_origin),
+            execution_budget,
+        ),
+        NativeFunctionKind::TemporalPlainTimeStatic(method) => begin_temporal_plain_time_static(
+            runtime,
+            method,
+            native.realm,
+            inputs.arguments,
+            return_to,
+            origin.unwrap_or_else(native_function_host_origin),
+            execution_budget,
+        ),
+        NativeFunctionKind::TemporalPlainTimePrototype(method) => {
+            let origin = origin.unwrap_or_else(native_function_host_origin);
+            dispatch_temporal_plain_time_prototype(
+                runtime,
+                method,
+                native.realm,
+                &inputs.receiver,
+                inputs.arguments,
+                return_to,
+                &origin,
+                execution_budget,
+            )
+        }
+        NativeFunctionKind::TemporalPlainMonthDayConstructor => {
+            begin_temporal_plain_month_day_constructor(
+                runtime,
+                native.realm,
+                inputs,
+                return_to,
+                origin.unwrap_or_else(native_function_host_origin),
+                execution_budget,
+            )
+        }
+        NativeFunctionKind::TemporalPlainMonthDayStatic(method) => {
+            begin_temporal_plain_month_day_static(
+                runtime,
+                method,
+                native.realm,
+                inputs.arguments,
+                return_to,
+                origin.unwrap_or_else(native_function_host_origin),
+                execution_budget,
+            )
+        }
+        NativeFunctionKind::TemporalPlainMonthDayPrototype(method) => {
+            let origin = origin.unwrap_or_else(native_function_host_origin);
+            dispatch_temporal_plain_month_day_prototype(
+                runtime,
+                method,
+                native.realm,
+                &inputs.receiver,
+                inputs.arguments,
+                return_to,
+                &origin,
+                execution_budget,
+            )
+        }
+        NativeFunctionKind::TemporalPlainYearMonthConstructor => {
+            begin_temporal_plain_year_month_constructor(
+                runtime,
+                native.realm,
+                inputs,
+                return_to,
+                origin.unwrap_or_else(native_function_host_origin),
+                execution_budget,
+            )
+        }
+        NativeFunctionKind::TemporalPlainYearMonthStatic(method) => {
+            begin_temporal_plain_year_month_static(
+                runtime,
+                method,
+                native.realm,
+                inputs.arguments,
+                return_to,
+                origin.unwrap_or_else(native_function_host_origin),
+                execution_budget,
+            )
+        }
+        NativeFunctionKind::TemporalPlainYearMonthPrototype(method) => {
+            let origin = origin.unwrap_or_else(native_function_host_origin);
+            dispatch_temporal_plain_year_month_prototype(
+                runtime,
+                method,
+                native.realm,
+                &inputs.receiver,
+                inputs.arguments,
+                return_to,
+                &origin,
+                execution_budget,
+            )
+        }
+        NativeFunctionKind::TemporalZonedDateTimeConstructor => {
+            begin_temporal_zoned_date_time_constructor(
+                runtime,
+                native.realm,
+                inputs,
+                return_to,
+                origin.unwrap_or_else(native_function_host_origin),
+                execution_budget,
+            )
+        }
+        NativeFunctionKind::TemporalZonedDateTimeStatic(method) => {
+            begin_temporal_zoned_date_time_static(
+                runtime,
+                method,
+                native.realm,
+                inputs.arguments,
+                return_to,
+                origin.unwrap_or_else(native_function_host_origin),
+                execution_budget,
+            )
+        }
+        NativeFunctionKind::TemporalZonedDateTimePrototype(method) => {
+            let origin = origin.unwrap_or_else(native_function_host_origin);
+            dispatch_temporal_zoned_date_time_prototype(
+                runtime,
+                method,
+                native.realm,
+                &inputs.receiver,
+                inputs.arguments,
+                return_to,
+                &origin,
+                execution_budget,
+            )
+        }
         NativeFunctionKind::ObjectPrototypeToString => begin_object_prototype_to_string(
             runtime,
             native.realm,
@@ -4025,7 +4462,7 @@ fn advance_function_apply_indices(
             message: "apply argument index exceeds the array-index domain",
         })?;
         let key = PropertyKey::from_index(index);
-        charge_heap_property_lookup(runtime, &state.array_like, execution_budget)?;
+        charge_function_apply_index_lookup(runtime, &state.array_like, index, execution_budget)?;
         let dispatch = stamp_function_apply_native_caller(
             begin_value_get(
                 runtime,
@@ -4065,6 +4502,28 @@ fn advance_function_apply_indices(
         state.new_target,
         state.native_caller,
     )
+}
+
+/// Charges one `CreateListFromArrayLike` indexed Get.
+///
+/// A present dense Array element is a default own data property, so the
+/// following Get resolves in constant time and never visits `Array.prototype`.
+/// Keep sparse Arrays and every other receiver on the conservative general
+/// charge: their property lookup can still scan an ordinary shape or execute
+/// exotic internal methods.
+fn charge_function_apply_index_lookup(
+    runtime: &Runtime,
+    array_like: &StoredValue,
+    index: ArrayIndex,
+    execution_budget: &mut ExecutionBudget,
+) -> Result<(), NativeFailure> {
+    if let StoredValue::Object(object) = array_like
+        && runtime.is_array_object(*object)?
+        && runtime.array_dense_index_present(*object, index)?
+    {
+        return execution_budget.charge_instructions(1).map_err(Into::into);
+    }
+    charge_heap_property_lookup(runtime, array_like, execution_budget)
 }
 
 fn stamp_function_apply_native_caller(

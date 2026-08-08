@@ -1147,7 +1147,7 @@ pub(super) fn write_static_property(
             OwnProperty::Data { layout, .. } => {
                 if layout.writable() == Some(true) {
                     if let Some(array) = array {
-                        let work = runtime.preview_array_define_data_property_work(array)?;
+                        let work = runtime.preview_array_data_property_work(array, &key)?;
                         execution_budget.charge_instructions(work)?;
                         let outcome =
                             runtime.define_array_data_property(array, key, layout, value)?;
@@ -1218,7 +1218,7 @@ pub(super) fn write_static_property(
         });
     }
     if let Some(array) = array {
-        let work = runtime.preview_array_define_data_property_work(array)?;
+        let work = runtime.preview_array_data_property_work(array, &key)?;
         execution_budget.charge_instructions(work)?;
         let outcome = runtime.define_array_data_property(
             array,
@@ -1269,7 +1269,7 @@ pub(super) fn define_static_property(
                 PropertyFailure::NotConfigurable,
             ));
         }
-        let work = runtime.preview_array_define_data_property_work(object)?;
+        let work = runtime.preview_array_data_property_work(object, &key)?;
         execution_budget.charge_instructions(work)?;
         return Ok(
             match runtime.define_array_data_property(
@@ -1598,10 +1598,11 @@ pub(super) fn set_inferred_function_name(
     set_preflighted_function_name(runtime, function, name)
 }
 
-/// Starts the pinned `copy_data_properties` abstract operation over the
-/// source's own enumerable string-keyed properties: each key not present on
-/// the excluded object is read (resumably, so accessors run) and defined on
-/// the target with the ordinary writable/enumerable/configurable layout.
+/// Starts the pinned `CopyDataProperties` abstract operation. A nullish source
+/// contributes no properties; every other primitive is boxed before its own
+/// enumerable string and Symbol keys are copied. Each non-excluded key is read
+/// (so accessors run) and defined on the target with the ordinary
+/// writable/enumerable/configurable layout.
 /// The operand stack is untouched; the caller consumes the three operands.
 #[allow(
     clippy::too_many_arguments,
@@ -1617,22 +1618,24 @@ pub(super) fn begin_copy_data_properties(
     origin: JsStackFrame,
     execution_budget: &mut ExecutionBudget,
 ) -> Result<NativeDispatch, NativeFailure> {
-    let reference = match &source {
-        StoredValue::Function(function) => HeapReference::Function(*function),
-        StoredValue::Object(object) => HeapReference::Object(*object),
-        StoredValue::Undefined
-        | StoredValue::Null
-        | StoredValue::Boolean(_)
-        | StoredValue::Number(_)
-        | StoredValue::BigInt(_)
-        | StoredValue::String(_)
-        | StoredValue::Symbol(_) => {
-            return Err(EngineFault::RuntimeInvariant {
-                message: "copy-data-properties source is not an object",
-            }
-            .into());
+    // CopyDataProperties is used both for destructuring rest (whose source is
+    // already an object) and object-literal spread. The latter follows the
+    // abstract operation directly: null/undefined are no-ops and every other
+    // primitive is boxed before its own keys are observed.
+    let source = match source {
+        StoredValue::Undefined | StoredValue::Null => {
+            return Ok(NativeDispatch::CopyDataPropertiesDone);
         }
+        source => match to_object_value(runtime, realm, source, origin.clone())? {
+            Ok(source) => source,
+            Err(exception) => return Err(NativeFailure::Abrupt(exception)),
+        },
     };
+    let reference = source
+        .heap_reference()
+        .ok_or(EngineFault::RuntimeInvariant {
+            message: "copy-data-properties boxed source is not an object",
+        })?;
     // CopyDataProperties snapshots all own keys, including Symbols. Whether a
     // snapshotted key is still present and enumerable is rechecked when that
     // key is reached after any earlier getter re-entry.

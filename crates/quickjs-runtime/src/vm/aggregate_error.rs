@@ -380,11 +380,12 @@ fn append_aggregate_value(
     let array = state.array.ok_or(EngineFault::RuntimeInvariant {
         message: "AggregateError append has no result array",
     })?;
-    let work = runtime.preview_array_define_data_property_work(array)?;
+    let key = PropertyKey::from_index(index);
+    let work = runtime.preview_array_data_property_work(array, &key)?;
     execution_budget.charge_instructions(work)?;
     match runtime.define_array_data_property(
         array,
-        PropertyKey::from_index(index),
+        key,
         PropertyLayout::data(true, true, true),
         value,
     )? {

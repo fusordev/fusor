@@ -4636,6 +4636,7 @@ fn verify_method_definitions(
                 FinalOpcode::DefineMethod
                     | FinalOpcode::DefineMethodComputed
                     | FinalOpcode::DefineClass
+                    | FinalOpcode::CopyDataProperties
                     | FinalOpcode::DefineArrayEl
                     | FinalOpcode::Append
                     | FinalOpcode::Dup1
@@ -5914,6 +5915,19 @@ fn verify_object_definition_provenance(
             {
                 return Err(method_target_error(id, decoded.pc()));
             }
+            FinalOpcode::CopyDataProperties => {
+                let Some(target) =
+                    copy_data_properties_target_index(&state, instruction.operands())
+                else {
+                    return Err(object_definition_error(id, decoded.pc()));
+                };
+                if !matches!(
+                    state.get(target),
+                    Some(ObjectDefinitionProvenance::FreshObject(_))
+                ) {
+                    return Err(object_definition_error(id, decoded.pc()));
+                }
+            }
             FinalOpcode::DefineArrayEl => {
                 let object = state.get(state.len().saturating_sub(3));
                 let key = state.get(state.len().saturating_sub(2));
@@ -6223,10 +6237,13 @@ fn transfer_object_definition_provenance(
             state.push(ObjectDefinitionProvenance::Unknown);
         }
         FinalOpcode::ToPropKey => convert_property_key_provenance(state),
-        // Both primitives mutate only the fresh closure at the top of the
-        // stack. They preserve the surrounding class constructor/prototype
-        // provenance needed by later public method definitions.
-        FinalOpcode::SetNameComputed | FinalOpcode::SetHomeObject => {}
+        // The closure-name/home-object primitives retain their surrounding
+        // class provenance. `copy_data_properties` likewise retains all
+        // referenced operands after its resumable work; its fresh target and
+        // packed depths were checked by the entry validation above.
+        FinalOpcode::SetNameComputed
+        | FinalOpcode::SetHomeObject
+        | FinalOpcode::CopyDataProperties => {}
         FinalOpcode::DefineField => {
             let base = state[state.len() - 2];
             let base = match base {
@@ -6365,6 +6382,27 @@ fn transfer_object_definition_provenance(
         return Err(object_definition_error(id, decoded.pc()));
     }
     Ok(true)
+}
+
+/// Returns the target slot of a well-formed packed `copy_data_properties`
+/// operand. Its fixed stack effect requires three values, while the packed
+/// source/excluded depths may refer farther down the stack; prove all three
+/// references are in bounds before granting the mutation authority.
+fn copy_data_properties_target_index(
+    state: &[ObjectDefinitionProvenance],
+    operands: Operands,
+) -> Option<usize> {
+    let Operands::U8(mask) = operands else {
+        return None;
+    };
+    let target_depth = usize::from(mask & 0b11);
+    let source_depth = usize::from((mask >> 2) & 0b111);
+    let excluded_depth = usize::from((mask >> 5) & 0b111);
+    let index_at_depth = |depth: usize| state.len().checked_sub(depth.saturating_add(1));
+    let target = index_at_depth(target_depth)?;
+    index_at_depth(source_depth)?;
+    index_at_depth(excluded_depth)?;
+    Some(target)
 }
 
 fn apply_nip_catch_provenance(
@@ -9273,6 +9311,41 @@ fn transfer_internal_operand_stack(
                     ret_finalizer: None,
                 });
             }
+            // A `for (const [value] of iterable)` head starts an inner
+            // iterator for the pattern. Dropping that iterator's done flag
+            // leaves the element value above its record. Preserve a distinct
+            // head value only when an enclosing complete for-of record proves
+            // that this nested iterator belongs to an iteration head. The
+            // following lexical store can then be certified as the permitted
+            // fresh initialization of a captured per-iteration binding.
+            if let Some(base) = state.len().checked_sub(5)
+                && let (
+                    InternalStackValue::ForOfIterator(iterator),
+                    InternalStackValue::ForOfNextMethod(next),
+                    InternalStackValue::ForOfCatch(catch),
+                    InternalStackValue::ForOfValue(value),
+                    InternalStackValue::ForOfDone(done),
+                ) = (
+                    state[base],
+                    state[base + 1],
+                    state[base + 2],
+                    state[base + 3],
+                    state[base + 4],
+                )
+                && iterator == next
+                && next == catch
+                && catch == value
+                && value == done
+                && has_enclosing_for_of_record(&state[..base])
+            {
+                state.truncate(base + 4);
+                state[base + 3] = InternalStackValue::ForOfHeadValue(value);
+                return Ok(InternalStackTransfer {
+                    normal_completion: true,
+                    iteration_branch_value: None,
+                    ret_finalizer: None,
+                });
+            }
             if state.is_empty() {
                 if effectively_reachable {
                     return Err(internal_stack_error(id, decoded.pc(), opcode, state));
@@ -9728,6 +9801,19 @@ fn transfer_internal_operand_stack(
         normal_completion: true,
         iteration_branch_value: None,
         ret_finalizer: None,
+    })
+}
+
+fn has_enclosing_for_of_record(state: &[InternalStackValue]) -> bool {
+    state.windows(3).any(|record| {
+        matches!(
+            record,
+            [
+                InternalStackValue::ForOfIterator(iterator),
+                InternalStackValue::ForOfNextMethod(next),
+                InternalStackValue::ForOfCatch(catch),
+            ] if iterator == next && next == catch
+        )
     })
 }
 

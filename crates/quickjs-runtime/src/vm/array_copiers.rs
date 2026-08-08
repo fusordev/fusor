@@ -50,6 +50,14 @@ use super::*;
 /// Which stage of the copier a continuation resumes into.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum ArrayCopierStage {
+    /// Chooses the `ArraySpeciesCreate` result for `slice`.
+    SelectSliceSpecies,
+    /// Awaiting the source Array's `constructor` property for `slice`.
+    AwaitSliceConstructor,
+    /// Awaiting the source constructor's `@@species` property for `slice`.
+    AwaitSliceSpecies,
+    /// Awaiting `slice`'s custom species construction.
+    AwaitSliceSpeciesConstruct,
     /// Chooses the `ArraySpeciesCreate` result for `concat`.
     SelectConcatSpecies,
     /// Awaiting the source Array's `constructor` property for `concat`.
@@ -103,9 +111,9 @@ pub(crate) struct ArrayCopierContinuation {
     next: u64,
     /// The exclusive end of the current source's range.
     end: u64,
-    /// The destination object, absent for `at` and until change-by-copy methods
-    /// know their validated result length/index. `concat` can use an arbitrary
-    /// object produced by its `ArraySpeciesCreate` constructor.
+    /// The destination object, absent for `at` and until its method has
+    /// validated the result length. `slice` and `concat` can use an arbitrary
+    /// object produced by their `ArraySpeciesCreate` constructor.
     destination: Option<StoredValue>,
     /// The next index to write in the destination.
     written: u64,
@@ -174,21 +182,14 @@ pub(super) fn begin_array_copier(
             })?;
         collected.push(value);
     }
-    // `slice` allocates its default result before this shared driver. `concat`
-    // selects its `ArraySpeciesCreate` result before observing its first
+    // `slice` performs `ArraySpeciesCreate` after resolving the requested
+    // range, but before any source index observation. `concat` selects its
+    // `ArraySpeciesCreate` result before observing its first
     // `@@isConcatSpreadable` property.
     // `toReversed` must read `length` first, and `with` must additionally
     // convert and validate its index before ArrayCreate, so they allocate in
     // their later specification stages.
-    let destination = match copier {
-        ArrayCopier::Slice => Some(StoredValue::Object(
-            runtime.allocate_array(realm, Vec::new())?,
-        )),
-        ArrayCopier::Concat => None,
-        ArrayCopier::At | ArrayCopier::ToReversed | ArrayCopier::ToSpliced | ArrayCopier::With => {
-            None
-        }
-    };
+    let destination = None;
     // Every non-concat copier reads its receiver's elements. Concat first
     // performs the observable `@@isConcatSpreadable` Get and then falls back
     // to Proxy-aware IsArray.
@@ -252,6 +253,118 @@ pub(super) fn advance_array_copier(
     }
     loop {
         match state.stage {
+            ArrayCopierStage::SelectSliceSpecies => {
+                if !proxy_aware_is_array(
+                    runtime,
+                    state.target.duplicate(),
+                    state.realm,
+                    state.origin.clone(),
+                )? {
+                    let length = state.end.saturating_sub(state.next);
+                    allocate_array_create_destination(runtime, &mut state, length)?;
+                    state.stage = ArrayCopierStage::NextElement;
+                    continue;
+                }
+                let key = runtime.predefined_property_key(PredefinedAtom::Constructor);
+                charge_copier_lookup(runtime, &state.target, &key, execution_budget)?;
+                state.stage = ArrayCopierStage::AwaitSliceConstructor;
+                let dispatch = begin_value_get(
+                    runtime,
+                    &state.target,
+                    key,
+                    None,
+                    state.realm,
+                    return_to,
+                    state.origin.clone(),
+                    execution_budget,
+                )?;
+                await_get!(continue_get_state_after(
+                    dispatch,
+                    state,
+                    array_copier_continuation,
+                    "Array slice constructor Get produced a structured result",
+                ));
+            }
+            ArrayCopierStage::AwaitSliceConstructor => {
+                let constructor = take_completion(&mut completion)?;
+                if let StoredValue::Function(function) = constructor
+                    && function_is_constructor(runtime, function)?
+                {
+                    let constructor_realm = runtime.function_realm(function)?;
+                    if constructor_realm != state.realm
+                        && function == runtime.realm_array_constructor(constructor_realm)?
+                    {
+                        let length = state.end.saturating_sub(state.next);
+                        allocate_array_create_destination(runtime, &mut state, length)?;
+                        state.stage = ArrayCopierStage::NextElement;
+                        continue;
+                    }
+                }
+                if matches!(
+                    constructor,
+                    StoredValue::Function(_) | StoredValue::Object(_)
+                ) {
+                    let key = runtime.predefined_symbol_property_key(PredefinedAtom::SymbolSpecies);
+                    charge_copier_lookup(runtime, &constructor, &key, execution_budget)?;
+                    state.stage = ArrayCopierStage::AwaitSliceSpecies;
+                    let dispatch = begin_value_get(
+                        runtime,
+                        &constructor,
+                        key,
+                        None,
+                        state.realm,
+                        return_to,
+                        state.origin.clone(),
+                        execution_budget,
+                    )?;
+                    await_get!(continue_get_state_after(
+                        dispatch,
+                        state,
+                        array_copier_continuation,
+                        "Array slice species Get produced a structured result",
+                    ));
+                } else if matches!(constructor, StoredValue::Undefined) {
+                    let length = state.end.saturating_sub(state.next);
+                    allocate_array_create_destination(runtime, &mut state, length)?;
+                    state.stage = ArrayCopierStage::NextElement;
+                } else {
+                    return copier_type_error(&state, "not a constructor");
+                }
+            }
+            ArrayCopierStage::AwaitSliceSpecies => {
+                let species = take_completion(&mut completion)?;
+                if matches!(species, StoredValue::Undefined | StoredValue::Null) {
+                    let length = state.end.saturating_sub(state.next);
+                    allocate_array_create_destination(runtime, &mut state, length)?;
+                    state.stage = ArrayCopierStage::NextElement;
+                    continue;
+                }
+                let StoredValue::Function(constructor) = species else {
+                    return copier_type_error(&state, "not a constructor");
+                };
+                if !function_is_constructor(runtime, constructor)? {
+                    return copier_type_error(&state, "not a constructor");
+                }
+                state.stage = ArrayCopierStage::AwaitSliceSpeciesConstruct;
+                let length = state.end.saturating_sub(state.next);
+                return suspend_construct_copier(
+                    state,
+                    constructor,
+                    StoredValue::Number(JsNumber::from_f64(length_as_f64(length))),
+                    return_to,
+                );
+            }
+            ArrayCopierStage::AwaitSliceSpeciesConstruct => {
+                let destination = take_completion(&mut completion)?;
+                if destination.heap_reference().is_none() {
+                    return Err(EngineFault::RuntimeInvariant {
+                        message: "ArraySpeciesCreate constructor returned a primitive",
+                    }
+                    .into());
+                }
+                state.destination = Some(destination);
+                state.stage = ArrayCopierStage::NextElement;
+            }
             ArrayCopierStage::SelectConcatSpecies => {
                 if !proxy_aware_is_array(
                     runtime,
@@ -264,7 +377,7 @@ pub(super) fn advance_array_copier(
                     continue;
                 }
                 let key = runtime.predefined_property_key(PredefinedAtom::Constructor);
-                charge_copier_lookup(runtime, &state.target, execution_budget)?;
+                charge_copier_lookup(runtime, &state.target, &key, execution_budget)?;
                 state.stage = ArrayCopierStage::AwaitConcatConstructor;
                 let dispatch = begin_value_get(
                     runtime,
@@ -302,7 +415,7 @@ pub(super) fn advance_array_copier(
                     StoredValue::Function(_) | StoredValue::Object(_)
                 ) {
                     let key = runtime.predefined_symbol_property_key(PredefinedAtom::SymbolSpecies);
-                    charge_copier_lookup(runtime, &constructor, execution_budget)?;
+                    charge_copier_lookup(runtime, &constructor, &key, execution_budget)?;
                     state.stage = ArrayCopierStage::AwaitConcatSpecies;
                     let dispatch = begin_value_get(
                         runtime,
@@ -367,7 +480,7 @@ pub(super) fn advance_array_copier(
                 }
                 let key = runtime
                     .predefined_symbol_property_key(PredefinedAtom::SymbolIsConcatSpreadable);
-                charge_copier_lookup(runtime, &state.source, execution_budget)?;
+                charge_copier_lookup(runtime, &state.source, &key, execution_budget)?;
                 state.stage = ArrayCopierStage::AwaitSpreadability;
                 let dispatch = begin_value_get(
                     runtime,
@@ -410,7 +523,7 @@ pub(super) fn advance_array_copier(
                     continue;
                 }
                 let key = runtime.predefined_property_key(PredefinedAtom::Length);
-                charge_copier_lookup(runtime, &state.source, execution_budget)?;
+                charge_copier_lookup(runtime, &state.source, &key, execution_budget)?;
                 state.stage = ArrayCopierStage::AwaitLengthConversion;
                 let dispatch = begin_value_get(
                     runtime,
@@ -450,6 +563,13 @@ pub(super) fn advance_array_copier(
                 match state.copier {
                     // `concat` always takes a whole source.
                     ArrayCopier::Concat => {
+                        // `concat` checks the complete spread length before
+                        // it probes any indexed property. Without this guard a
+                        // length of `2^53 - 1` would enter an impossible loop
+                        // even though the required result must throw first.
+                        if state.length > MAX_SAFE_INTEGER.saturating_sub(state.written) {
+                            return copier_type_error(&state, "invalid array length");
+                        }
                         state.next = 0;
                         state.end = state.length;
                         state.stage = ArrayCopierStage::NextElement;
@@ -462,7 +582,7 @@ pub(super) fn advance_array_copier(
                     }
                     ArrayCopier::ToReversed => {
                         let length = state.length;
-                        allocate_change_by_copy_destination(runtime, &mut state, length)?;
+                        allocate_array_create_destination(runtime, &mut state, length)?;
                         state.next = 0;
                         state.end = state.length;
                         state.stage = ArrayCopierStage::NextElement;
@@ -544,7 +664,11 @@ pub(super) fn advance_array_copier(
                 if let Some(value) = completion.take() {
                     let number = operator_to_number(value, state.realm, &state.origin)?;
                     state.end = relative_bound(number_to_integer_or_infinity(number), state.length);
-                    state.stage = ArrayCopierStage::NextElement;
+                    state.stage = if matches!(state.copier, ArrayCopier::Slice) {
+                        ArrayCopierStage::SelectSliceSpecies
+                    } else {
+                        ArrayCopierStage::NextElement
+                    };
                     continue;
                 }
                 match state.arguments.get(1) {
@@ -552,7 +676,11 @@ pub(super) fn advance_array_copier(
                     // so it runs to the length rather than converting to `0`.
                     Some(StoredValue::Undefined) | None => {
                         state.end = state.length;
-                        state.stage = ArrayCopierStage::NextElement;
+                        state.stage = if matches!(state.copier, ArrayCopier::Slice) {
+                            ArrayCopierStage::SelectSliceSpecies
+                        } else {
+                            ArrayCopierStage::NextElement
+                        };
                     }
                     Some(value) if needs_conversion(value) => {
                         let value = value.duplicate();
@@ -609,7 +737,7 @@ pub(super) fn advance_array_copier(
                     ArrayCopier::ToReversed | ArrayCopier::ToSpliced | ArrayCopier::With
                 ) {
                     let key = source_element_key(runtime, source_index)?;
-                    charge_copier_lookup(runtime, &state.source, execution_budget)?;
+                    charge_copier_lookup(runtime, &state.source, &key, execution_budget)?;
                     state.stage = ArrayCopierStage::AwaitPresence;
                     let dispatch = begin_value_has(
                         runtime,
@@ -704,9 +832,15 @@ pub(super) fn advance_array_copier(
                 return Ok(NativeDispatch::Immediate(
                     match state.destination.as_ref() {
                         Some(destination) => {
-                            // The destination's length is set once at the end, so a
-                            // trailing hole is still counted.
-                            finish_destination(runtime, &state, destination, execution_budget)?;
+                            // `ArraySpeciesCreate` initialized `slice`'s default
+                            // Array with its final length, and a custom species
+                            // result must not receive an extra length write.
+                            // The other copying operations create their result
+                            // empty or fill it directly, so they finalize the
+                            // trailing-hole length here.
+                            if !matches!(state.copier, ArrayCopier::Slice) {
+                                finish_destination(runtime, &state, destination, execution_budget)?;
+                            }
                             destination.duplicate()
                         }
                         None => state.result,
@@ -778,7 +912,7 @@ fn apply_start(
             let selected = actual as u64;
             state.selected = Some(selected);
             let length = state.length;
-            allocate_change_by_copy_destination(runtime, state, length)?;
+            allocate_array_create_destination(runtime, state, length)?;
             state.next = 0;
             state.end = state.length;
             state.stage = ArrayCopierStage::NextElement;
@@ -787,8 +921,9 @@ fn apply_start(
     Ok(())
 }
 
-/// Performs the `ArrayCreate(length)` used by change-by-copy methods.
-fn allocate_change_by_copy_destination(
+/// Performs the `ArrayCreate(length)` used by copying methods with a validated
+/// result length.
+fn allocate_array_create_destination(
     runtime: &mut Runtime,
     state: &mut ArrayCopierContinuation,
     result_length: u64,
@@ -834,7 +969,7 @@ fn prepare_to_spliced(
             "invalid array length",
         )?));
     }
-    allocate_change_by_copy_destination(runtime, state, result_length)?;
+    allocate_array_create_destination(runtime, state, result_length)?;
     state.skipped = skipped;
     state.next = 0;
     state.end = state.selected.ok_or(EngineFault::RuntimeInvariant {
@@ -937,7 +1072,7 @@ fn begin_array_copier_element_get(
     execution_budget: &mut ExecutionBudget,
 ) -> Result<GetContinuationDispatch<ArrayCopierContinuation>, NativeFailure> {
     let key = source_element_key(runtime, source_index)?;
-    charge_copier_lookup(runtime, &state.source, execution_budget)?;
+    charge_copier_lookup(runtime, &state.source, &key, execution_budget)?;
     state.stage = ArrayCopierStage::AwaitElement;
     let dispatch = begin_value_get(
         runtime,
@@ -1043,13 +1178,52 @@ fn source_element_key(runtime: &mut Runtime, index: u64) -> Result<PropertyKey, 
 fn charge_copier_lookup(
     runtime: &Runtime,
     base: &StoredValue,
+    key: &PropertyKey,
     execution_budget: &mut ExecutionBudget,
 ) -> Result<(), NativeFailure> {
-    if base.heap_reference().is_none() {
+    let Some(reference) = base.heap_reference() else {
         execution_budget.charge_instructions(1)?;
         return Ok(());
+    };
+    if let Some(work) = copier_own_data_lookup_work(runtime, reference, key)? {
+        return execution_budget
+            .charge_instructions(work)
+            .map_err(Into::into);
     }
     charge_heap_property_lookup(runtime, base, execution_budget)
+}
+
+/// Returns the exact work for an indexed `Get` proven to finish at `reference`.
+///
+/// A dense Array element is constant-time. Other static own data properties
+/// still use the ordinary shape scan, but need not pay for an unvisited
+/// prototype chain. Proxies, mapped arguments, boxed strings, and typed arrays
+/// stay on the conservative generic path because their indexed access can be
+/// synthesized outside the ordinary record.
+fn copier_own_data_lookup_work(
+    runtime: &Runtime,
+    reference: HeapReference,
+    key: &PropertyKey,
+) -> Result<Option<u64>, NativeFailure> {
+    let Some(index) = key.as_index() else {
+        return Ok(None);
+    };
+    if !runtime.has_static_indexed_properties(reference)? {
+        return Ok(None);
+    }
+    if let HeapReference::Object(object) = reference
+        && runtime.is_array_object(object)?
+        && runtime.array_dense_index_present(object, index)?
+    {
+        return Ok(Some(1));
+    }
+    let record = runtime.object_record(reference)?;
+    if matches!(record.own_property(key), Some(OwnProperty::Data { .. })) {
+        return Ok(Some(
+            usize_to_u64(record.property_count()).saturating_add(1),
+        ));
+    }
+    Ok(None)
 }
 
 /// Returns whether a value needs a resumable `ToPrimitive`.

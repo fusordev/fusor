@@ -6,6 +6,12 @@ use crate::{
         ArrayBufferPrototypeMethod, AtomicsMethod, DataViewPrototypeMethod, DatePrototypeMethod,
         DateStaticMethod, SharedArrayBufferPrototypeMethod, TemporalDurationPrototypeMethod,
         TemporalDurationStaticMethod, TemporalInstantPrototypeMethod, TemporalInstantStaticMethod,
+        TemporalPlainDatePrototypeMethod, TemporalPlainDateStaticMethod,
+        TemporalPlainDateTimePrototypeMethod, TemporalPlainDateTimeStaticMethod,
+        TemporalPlainMonthDayPrototypeMethod, TemporalPlainMonthDayStaticMethod,
+        TemporalPlainTimePrototypeMethod, TemporalPlainTimeStaticMethod,
+        TemporalPlainYearMonthPrototypeMethod, TemporalPlainYearMonthStaticMethod,
+        TemporalZonedDateTimePrototypeMethod, TemporalZonedDateTimeStaticMethod,
         TypedArrayPrototypeMethod,
     },
 };
@@ -278,6 +284,8 @@ fn visit_realm_name_order(
     visit(RealmNameId::Temporal)?;
     visit(RealmNameId::Duration)?;
     visit(RealmNameId::Instant)?;
+    visit(RealmNameId::PlainDate)?;
+    visit(RealmNameId::PlainDateTime)?;
     for method in TemporalDurationStaticMethod::ALL {
         visit(RealmNameId::TemporalDurationStatic(method))?;
     }
@@ -298,6 +306,46 @@ fn visit_realm_name_order(
         TemporalInstantPrototypeMethod::Equals,
     ] {
         visit(RealmNameId::TemporalInstantPrototype(method))?;
+    }
+    for method in TemporalPlainDateStaticMethod::ALL {
+        visit(RealmNameId::TemporalPlainDateStatic(method))?;
+    }
+    for method in TemporalPlainDatePrototypeMethod::ALL {
+        visit(RealmNameId::TemporalPlainDatePrototype(method))?;
+    }
+    for method in TemporalPlainDateTimeStaticMethod::ALL {
+        visit(RealmNameId::TemporalPlainDateTimeStatic(method))?;
+    }
+    for method in TemporalPlainDateTimePrototypeMethod::ALL {
+        visit(RealmNameId::TemporalPlainDateTimePrototype(method))?;
+    }
+    visit(RealmNameId::PlainTime)?;
+    for method in TemporalPlainTimeStaticMethod::ALL {
+        visit(RealmNameId::TemporalPlainTimeStatic(method))?;
+    }
+    for method in TemporalPlainTimePrototypeMethod::ALL {
+        visit(RealmNameId::TemporalPlainTimePrototype(method))?;
+    }
+    visit(RealmNameId::PlainMonthDay)?;
+    for method in TemporalPlainMonthDayStaticMethod::ALL {
+        visit(RealmNameId::TemporalPlainMonthDayStatic(method))?;
+    }
+    for method in TemporalPlainMonthDayPrototypeMethod::ALL {
+        visit(RealmNameId::TemporalPlainMonthDayPrototype(method))?;
+    }
+    visit(RealmNameId::PlainYearMonth)?;
+    for method in TemporalPlainYearMonthStaticMethod::ALL {
+        visit(RealmNameId::TemporalPlainYearMonthStatic(method))?;
+    }
+    for method in TemporalPlainYearMonthPrototypeMethod::ALL {
+        visit(RealmNameId::TemporalPlainYearMonthPrototype(method))?;
+    }
+    visit(RealmNameId::ZonedDateTime)?;
+    for method in TemporalZonedDateTimeStaticMethod::ALL {
+        visit(RealmNameId::TemporalZonedDateTimeStatic(method))?;
+    }
+    for method in TemporalZonedDateTimePrototypeMethod::ALL {
+        visit(RealmNameId::TemporalZonedDateTimePrototype(method))?;
     }
     visit(RealmNameId::RegExpEscape)?;
     visit(RealmNameId::RegExpCompile)?;
@@ -424,6 +472,10 @@ fn visit_set_name_order(
     Ok(())
 }
 
+#[allow(
+    clippy::too_many_lines,
+    reason = "the complete Realm-name mapping is kept as one exhaustive, auditable match"
+)]
 fn realm_name_description(id: RealmNameId) -> &'static str {
     match id {
         RealmNameId::Call => "call",
@@ -505,10 +557,28 @@ fn realm_name_description(id: RealmNameId) -> &'static str {
         RealmNameId::Temporal => "Temporal",
         RealmNameId::Duration => "Duration",
         RealmNameId::Instant => "Instant",
+        RealmNameId::PlainDate => "PlainDate",
+        RealmNameId::PlainDateTime => "PlainDateTime",
+        RealmNameId::PlainMonthDay => "PlainMonthDay",
+        RealmNameId::PlainYearMonth => "PlainYearMonth",
+        RealmNameId::ZonedDateTime => "ZonedDateTime",
         RealmNameId::TemporalDurationStatic(method) => method.name(),
         RealmNameId::TemporalDurationPrototype(method) => method.name(),
         RealmNameId::TemporalInstantStatic(method) => method.name(),
         RealmNameId::TemporalInstantPrototype(method) => method.name(),
+        RealmNameId::TemporalPlainDateStatic(method) => method.name(),
+        RealmNameId::TemporalPlainDatePrototype(method) => method.name(),
+        RealmNameId::TemporalPlainDateTimeStatic(method) => method.name(),
+        RealmNameId::TemporalPlainDateTimePrototype(method) => method.name(),
+        RealmNameId::PlainTime => "PlainTime",
+        RealmNameId::TemporalPlainTimeStatic(method) => method.name(),
+        RealmNameId::TemporalPlainTimePrototype(method) => method.name(),
+        RealmNameId::TemporalPlainMonthDayStatic(method) => method.name(),
+        RealmNameId::TemporalPlainMonthDayPrototype(method) => method.name(),
+        RealmNameId::TemporalPlainYearMonthStatic(method) => method.name(),
+        RealmNameId::TemporalPlainYearMonthPrototype(method) => method.name(),
+        RealmNameId::TemporalZonedDateTimeStatic(method) => method.name(),
+        RealmNameId::TemporalZonedDateTimePrototype(method) => method.name(),
         RealmNameId::RegExpEscape => "escape",
         RealmNameId::RegExpCompile => "compile",
         RealmNameId::RegExpTest => "test",
@@ -533,8 +603,8 @@ mod tests {
         let schema = RealmIntrinsicSchema::try_new().expect("Realm schema");
         let plan = RealmAtomPlan::try_new(&schema).expect("atom plan");
 
-        assert_eq!(plan.len(), 283);
-        assert_eq!(plan.description_code_units(), 2_424);
+        assert_eq!(plan.len(), 342);
+        assert_eq!(plan.description_code_units(), 2_950);
     }
 
     #[test]

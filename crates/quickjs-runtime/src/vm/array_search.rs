@@ -80,6 +80,10 @@ pub(super) struct ArraySearchContinuation {
     next: u64,
     /// The index most recently read, retained so a resumed getter knows it.
     current: u64,
+    /// Whether the direct Array receiver's prototype chain was just proven to
+    /// have no indexed properties. The proof is discarded before each element
+    /// Get because an accessor can mutate the chain.
+    own_presence_only: bool,
     realm: RealmId,
     stage: ArraySearchStage,
     origin: JsStackFrame,
@@ -132,6 +136,7 @@ pub(super) fn begin_array_search(
         length: 0,
         next: 0,
         current: 0,
+        own_presence_only: false,
         realm,
         stage: ArraySearchStage::AwaitLength,
         origin,
@@ -252,6 +257,21 @@ pub(super) fn advance_array_search(
                 // what makes `[1,,3].indexOf(undefined)` and
                 // `[1,,3].includes(undefined)` disagree.
                 if state.search.skips_holes() {
+                    if let Some(array) = array_search_own_presence_array(runtime, &mut state)? {
+                        if runtime.array_own_property(array, &key)?.is_none() {
+                            state.stage = ArraySearchStage::NextElement;
+                            continue;
+                        }
+                        // The following Get can enter an accessor, so a later
+                        // iteration must revalidate inherited indexes.
+                        state.own_presence_only = false;
+                        await_get!(begin_array_search_element_get(
+                            runtime,
+                            state,
+                            return_to,
+                            execution_budget,
+                        ));
+                    }
                     charge_search_lookup(runtime, &state.target, execution_budget)?;
                     state.stage = ArraySearchStage::AwaitPresence;
                     let dispatch = begin_value_has(
@@ -449,6 +469,37 @@ fn charge_search_lookup(
         return Ok(());
     }
     charge_heap_property_lookup(runtime, base, execution_budget)
+}
+
+/// Returns the direct Array whose next `HasProperty` can be decided from its
+/// own indexed storage. The cached proof is invalidated before any accessor
+/// could run, so inherited indexes added by that accessor are still observed.
+fn array_search_own_presence_array(
+    runtime: &Runtime,
+    state: &mut ArraySearchContinuation,
+) -> Result<Option<ObjectId>, NativeFailure> {
+    let StoredValue::Object(array) = state.target else {
+        return Ok(None);
+    };
+    if !runtime.is_array_object(array)? {
+        return Ok(None);
+    }
+    if state.own_presence_only {
+        return Ok(Some(array));
+    }
+    let mut current = runtime
+        .object_record(HeapReference::Object(array))?
+        .prototype();
+    while let Some(reference) = current {
+        if !runtime.has_static_indexed_properties(reference)?
+            || runtime.heap_has_indexed_own_property(reference)?
+        {
+            return Ok(None);
+        }
+        current = runtime.object_record(reference)?.prototype();
+    }
+    state.own_presence_only = true;
+    Ok(Some(array))
 }
 
 fn array_search_continuation(state: ArraySearchContinuation) -> NativeContinuation {

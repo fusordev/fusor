@@ -96,13 +96,21 @@ fn dynamic_function(context: &mut Context<'_>, body: &str) -> Function {
         .expect("dynamic Function")
 }
 
-fn evaluate<T>(body: &str, project: impl FnOnce(Result<JsValue, ExecutionError>) -> T) -> T {
+fn evaluate_with_limits<T>(
+    body: &str,
+    limits: ExecutionLimits,
+    project: impl FnOnce(Result<JsValue, ExecutionError>) -> T,
+) -> T {
     let mut runtime = Runtime::try_new(RuntimeLimits::default()).expect("runtime");
     let realm = runtime.create_realm().expect("realm");
     let mut context = runtime.context(&realm).expect("context");
     let run = dynamic_function(&mut context, body);
-    let result = context.call(&run, &[], ExecutionLimits::default());
+    let result = context.call(&run, &[], limits);
     project(result)
+}
+
+fn evaluate<T>(body: &str, project: impl FnOnce(Result<JsValue, ExecutionError>) -> T) -> T {
+    evaluate_with_limits(body, ExecutionLimits::default(), project)
 }
 
 /// Evaluates `expression` and renders the result with `String()`.
@@ -423,6 +431,57 @@ fn callback_methods_use_proxy_internal_methods() {
         })()",
         "glength;h0;g0;h1;|6,|false",
     )]);
+}
+
+/// Sparse Arrays with the ordinary prototype chain can skip a succession of
+/// holes without repeatedly traversing `Array.prototype`. The shortcut is
+/// invalidated after a callback, so an inherited index installed there remains
+/// visible to the following iteration.
+#[test]
+fn sparse_callbacks_preserve_late_inherited_indices() {
+    assert_all(&[(
+        "(function(){\
+            const source=[1,,3];\
+            let log='';\
+            source.forEach(function(value,index){\
+                log+=index+':'+value+'|';\
+                if(index===0)Array.prototype[1]='inherited';\
+            });\
+            return log;\
+        })()",
+        "0:1|1:inherited|2:3|",
+    )]);
+}
+
+/// Test262 contains several one-million-index sparse Array callback tests.
+/// They are finite linear traversals; ordinary prototype methods must not make
+/// each absent index consume a full prototype-shape scan from the shared fuel.
+#[test]
+fn sparse_callbacks_complete_with_test262_instruction_fuel() {
+    evaluate_with_limits(
+        "return (function(){\
+            const source=[0,1,true,null,{},'five'];\
+            source[999999]=-6.6;\
+            let calls=0;\
+            const result=source.map(function(value,index,array){\
+                calls++;\
+                if(array[index]!==value)throw new Error('bad callback arguments');\
+                return value;\
+            });\
+            return calls+'|'+result.length+'|'+result[999999];\
+        })();",
+        ExecutionLimits::default().with_instruction_fuel(50_000_000),
+        |result| {
+            let result = result.expect("finite sparse callback traversal completed");
+            let result = result
+                .as_string()
+                .expect("live value")
+                .expect("String")
+                .to_utf8_lossy()
+                .expect("UTF-8");
+            assert_eq!(result, "7|1000000|-6.6");
+        },
+    );
 }
 
 /// Every installed method reports arity 1 with the pinned descriptors.

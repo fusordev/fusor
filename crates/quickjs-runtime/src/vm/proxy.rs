@@ -1259,6 +1259,7 @@ pub(super) fn begin_internal_own_keys(
         length: 0,
         next_index: 0,
         trap_keys: Vec::new(),
+        trap_key_set: HashSet::new(),
         target_keys: Vec::new(),
         next_target_key: 0,
         non_configurable_keys: Vec::new(),
@@ -1287,48 +1288,14 @@ fn begin_proxy_own_keys_index(
     return_to: Option<CallReturn>,
     execution_budget: &mut ExecutionBudget,
 ) -> Result<NativeDispatch, NativeFailure> {
-    if state.next_index >= state.length {
-        state.stage = ProxyOwnKeysStage::TargetKeys;
-        let dispatch = begin_internal_own_keys(
-            runtime,
-            state.target,
-            state.realm,
-            return_to,
-            state.origin.clone(),
-            execution_budget,
-        )?;
-        return continue_proxy_own_keys_after(
-            runtime,
-            dispatch,
-            state,
-            return_to,
-            execution_budget,
-        );
-    }
-    let raw = u32::try_from(state.next_index).map_err(|_| ExecutionError::LimitExceeded {
-        resource: RuntimeResource::FrameValues,
-        limit: u64::from(u32::MAX),
-        observed: usize_to_u64(state.next_index),
-    })?;
-    let key =
-        PropertyKey::from_index(ArrayIndex::new(raw).ok_or(EngineFault::RuntimeInvariant {
-            message: "Proxy ownKeys result index exceeded the array-index domain",
-        })?);
-    state.stage = ProxyOwnKeysStage::ResultIndex;
-    let result = state.result.ok_or(EngineFault::RuntimeInvariant {
-        message: "Proxy ownKeys result object was lost",
-    })?;
-    let dispatch = begin_internal_get(
+    state.stage = ProxyOwnKeysStage::ResultIndexStart;
+    advance_proxy_own_keys(
         runtime,
-        result,
-        proxy_reference_value(result),
-        key,
-        state.realm,
+        state,
+        StoredValue::Undefined,
         return_to,
-        state.origin.clone(),
         execution_budget,
-    )?;
-    continue_proxy_own_keys_after(runtime, dispatch, state, return_to, execution_budget)
+    )
 }
 
 pub(super) fn finish_proxy_own_keys_length(
@@ -1356,6 +1323,13 @@ pub(super) fn finish_proxy_own_keys_length(
             resource: RuntimeResource::FrameValues,
             additional: state.length,
         })?;
+    state
+        .trap_key_set
+        .try_reserve(state.length)
+        .map_err(|_| ExecutionError::AllocationFailed {
+            resource: RuntimeResource::FrameValues,
+            additional: state.length,
+        })?;
     begin_proxy_own_keys_index(runtime, state, return_to, execution_budget)
 }
 
@@ -1364,7 +1338,7 @@ fn proxy_own_keys_validate(
     state: ProxyOwnKeysContinuation,
 ) -> Result<NativeDispatch, NativeFailure> {
     for key in &state.non_configurable_keys {
-        if !state.trap_keys.contains(key) {
+        if !state.trap_key_set.contains(key) {
             return proxy_abrupt(
                 state.realm,
                 state.origin,
@@ -1377,7 +1351,7 @@ fn proxy_own_keys_validate(
             || state
                 .target_keys
                 .iter()
-                .any(|key| !state.trap_keys.contains(key)))
+                .any(|key| !state.trap_key_set.contains(key)))
     {
         return proxy_abrupt(
             state.realm,
@@ -1392,182 +1366,286 @@ fn proxy_own_keys_validate(
     )?))
 }
 
-fn begin_proxy_target_descriptor(
-    runtime: &mut Runtime,
-    mut state: ProxyOwnKeysContinuation,
-    return_to: Option<CallReturn>,
-    execution_budget: &mut ExecutionBudget,
-) -> Result<NativeDispatch, NativeFailure> {
-    if state.next_target_key >= state.target_keys.len() {
-        return proxy_own_keys_validate(runtime, state);
-    }
-    let key = state.target_keys[state.next_target_key].clone();
-    state.stage = ProxyOwnKeysStage::TargetDescriptor;
-    let dispatch = begin_internal_get_own_property(
-        runtime,
-        state.target,
-        key,
-        state.realm,
-        return_to,
-        state.origin.clone(),
-        execution_budget,
-    )?;
-    continue_proxy_own_keys_after(runtime, dispatch, state, return_to, execution_budget)
-}
-
 pub(super) fn advance_proxy_own_keys(
     runtime: &mut Runtime,
     mut state: ProxyOwnKeysContinuation,
-    completion: StoredValue,
+    mut completion: StoredValue,
     return_to: Option<CallReturn>,
     execution_budget: &mut ExecutionBudget,
 ) -> Result<NativeDispatch, NativeFailure> {
-    match state.stage {
-        ProxyOwnKeysStage::TrapLookup => {
-            if matches!(completion, StoredValue::Undefined | StoredValue::Null) {
-                return begin_internal_own_keys(
+    loop {
+        match state.stage {
+            ProxyOwnKeysStage::TrapLookup => {
+                if matches!(completion, StoredValue::Undefined | StoredValue::Null) {
+                    return begin_internal_own_keys(
+                        runtime,
+                        state.target,
+                        state.realm,
+                        return_to,
+                        state.origin,
+                        execution_budget,
+                    );
+                }
+                let StoredValue::Function(trap) = completion else {
+                    return proxy_abrupt(
+                        state.realm,
+                        state.origin,
+                        "Proxy ownKeys trap is not callable",
+                    );
+                };
+                state.stage = ProxyOwnKeysStage::TrapCall;
+                return Ok(NativeDispatch::Call(NativeCall {
+                    function: trap,
+                    receiver: proxy_reference_value(state.handler),
+                    arguments: CallArguments::from_values(vec![proxy_reference_value(
+                        state.target,
+                    )]),
+                    return_to,
+                    origin: state.origin.clone(),
+                    continuations: vec![NativeContinuation::ProxyOwnKeys(Box::new(state))],
+                    pre_call: None,
+                    new_target: None,
+                    native_caller: None,
+                }));
+            }
+            ProxyOwnKeysStage::TrapCall => {
+                let Some(result) = completion.heap_reference() else {
+                    return proxy_abrupt(
+                        state.realm,
+                        state.origin,
+                        "Proxy ownKeys trap returned a non-object",
+                    );
+                };
+                state.result = Some(result);
+                state.stage = ProxyOwnKeysStage::ResultLength;
+                let length_key = runtime.predefined_property_key(PredefinedAtom::Length);
+                let dispatch = begin_internal_get(
+                    runtime,
+                    result,
+                    proxy_reference_value(result),
+                    length_key,
+                    state.realm,
+                    return_to,
+                    state.origin.clone(),
+                    execution_budget,
+                )?;
+                match dispatch {
+                    NativeDispatch::Immediate(value) => {
+                        completion = value;
+                    }
+                    dispatch => {
+                        return continue_proxy_own_keys_after(
+                            runtime,
+                            dispatch,
+                            state,
+                            return_to,
+                            execution_budget,
+                        );
+                    }
+                }
+            }
+            ProxyOwnKeysStage::ResultLength => {
+                let realm = state.realm;
+                let origin = state.origin.clone();
+                return begin_operator_primitive_conversion(
+                    runtime,
+                    completion,
+                    OperatorPrimitiveHint::Number,
+                    OperatorPrimitiveTarget::ProxyOwnKeysLength(Box::new(state)),
+                    realm,
+                    return_to,
+                    origin,
+                    execution_budget,
+                );
+            }
+            ProxyOwnKeysStage::ResultIndexStart => {
+                if state.next_index >= state.length {
+                    state.stage = ProxyOwnKeysStage::TargetKeys;
+                    let dispatch = begin_internal_own_keys(
+                        runtime,
+                        state.target,
+                        state.realm,
+                        return_to,
+                        state.origin.clone(),
+                        execution_budget,
+                    )?;
+                    match dispatch {
+                        NativeDispatch::Immediate(value) => {
+                            completion = value;
+                            continue;
+                        }
+                        dispatch => {
+                            return continue_proxy_own_keys_after(
+                                runtime,
+                                dispatch,
+                                state,
+                                return_to,
+                                execution_budget,
+                            );
+                        }
+                    }
+                }
+                let raw =
+                    u32::try_from(state.next_index).map_err(|_| ExecutionError::LimitExceeded {
+                        resource: RuntimeResource::FrameValues,
+                        limit: u64::from(u32::MAX),
+                        observed: usize_to_u64(state.next_index),
+                    })?;
+                let key = PropertyKey::from_index(ArrayIndex::new(raw).ok_or(
+                    EngineFault::RuntimeInvariant {
+                        message: "Proxy ownKeys result index exceeded the array-index domain",
+                    },
+                )?);
+                state.stage = ProxyOwnKeysStage::ResultIndex;
+                let result = state.result.ok_or(EngineFault::RuntimeInvariant {
+                    message: "Proxy ownKeys result object was lost",
+                })?;
+                let dispatch = begin_internal_get(
+                    runtime,
+                    result,
+                    proxy_reference_value(result),
+                    key,
+                    state.realm,
+                    return_to,
+                    state.origin.clone(),
+                    execution_budget,
+                )?;
+                match dispatch {
+                    NativeDispatch::Immediate(value) => {
+                        completion = value;
+                    }
+                    dispatch => {
+                        return continue_proxy_own_keys_after(
+                            runtime,
+                            dispatch,
+                            state,
+                            return_to,
+                            execution_budget,
+                        );
+                    }
+                }
+            }
+            ProxyOwnKeysStage::ResultIndex => {
+                let key = match &completion {
+                    StoredValue::String(name) => runtime.property_key_from_string(name)?,
+                    StoredValue::Symbol(symbol) => runtime.property_key_from_symbol(symbol)?,
+                    _ => {
+                        return proxy_abrupt(
+                            state.realm,
+                            state.origin,
+                            "Proxy ownKeys trap returned a non-property key",
+                        );
+                    }
+                };
+                if !state.trap_key_set.insert(key.clone()) {
+                    return proxy_abrupt(
+                        state.realm,
+                        state.origin,
+                        "Proxy ownKeys trap returned duplicate keys",
+                    );
+                }
+                state.trap_keys.push(key);
+                state.next_index = state.next_index.saturating_add(1);
+                state.stage = ProxyOwnKeysStage::ResultIndexStart;
+            }
+            ProxyOwnKeysStage::TargetKeys => {
+                state.target_keys = generated_key_list(runtime, completion)?;
+                state.stage = ProxyOwnKeysStage::TargetExtensible;
+                let dispatch = begin_internal_is_extensible(
                     runtime,
                     state.target,
                     state.realm,
                     return_to,
-                    state.origin,
+                    state.origin.clone(),
                     execution_budget,
-                );
-            }
-            let StoredValue::Function(trap) = completion else {
-                return proxy_abrupt(
-                    state.realm,
-                    state.origin,
-                    "Proxy ownKeys trap is not callable",
-                );
-            };
-            state.stage = ProxyOwnKeysStage::TrapCall;
-            Ok(NativeDispatch::Call(NativeCall {
-                function: trap,
-                receiver: proxy_reference_value(state.handler),
-                arguments: CallArguments::from_values(vec![proxy_reference_value(state.target)]),
-                return_to,
-                origin: state.origin.clone(),
-                continuations: vec![NativeContinuation::ProxyOwnKeys(Box::new(state))],
-                pre_call: None,
-                new_target: None,
-                native_caller: None,
-            }))
-        }
-        ProxyOwnKeysStage::TrapCall => {
-            let Some(result) = completion.heap_reference() else {
-                return proxy_abrupt(
-                    state.realm,
-                    state.origin,
-                    "Proxy ownKeys trap returned a non-object",
-                );
-            };
-            state.result = Some(result);
-            state.stage = ProxyOwnKeysStage::ResultLength;
-            let length_key = runtime.predefined_property_key(PredefinedAtom::Length);
-            let dispatch = begin_internal_get(
-                runtime,
-                result,
-                proxy_reference_value(result),
-                length_key,
-                state.realm,
-                return_to,
-                state.origin.clone(),
-                execution_budget,
-            )?;
-            continue_proxy_own_keys_after(runtime, dispatch, state, return_to, execution_budget)
-        }
-        ProxyOwnKeysStage::ResultLength => {
-            let realm = state.realm;
-            let origin = state.origin.clone();
-            begin_operator_primitive_conversion(
-                runtime,
-                completion,
-                OperatorPrimitiveHint::Number,
-                OperatorPrimitiveTarget::ProxyOwnKeysLength(Box::new(state)),
-                realm,
-                return_to,
-                origin,
-                execution_budget,
-            )
-        }
-        ProxyOwnKeysStage::ResultIndex => {
-            let key = match completion {
-                StoredValue::String(name) => runtime.property_key_from_string(&name)?,
-                StoredValue::Symbol(symbol) => runtime.property_key_from_symbol(&symbol)?,
-                _ => {
-                    return proxy_abrupt(
-                        state.realm,
-                        state.origin,
-                        "Proxy ownKeys trap returned a non-property key",
-                    );
+                )?;
+                match dispatch {
+                    NativeDispatch::Immediate(value) => {
+                        completion = value;
+                    }
+                    dispatch => {
+                        return continue_proxy_own_keys_after(
+                            runtime,
+                            dispatch,
+                            state,
+                            return_to,
+                            execution_budget,
+                        );
+                    }
                 }
-            };
-            if state.trap_keys.contains(&key) {
-                return proxy_abrupt(
-                    state.realm,
-                    state.origin,
-                    "Proxy ownKeys trap returned duplicate keys",
-                );
             }
-            state.trap_keys.push(key);
-            state.next_index = state.next_index.saturating_add(1);
-            begin_proxy_own_keys_index(runtime, state, return_to, execution_budget)
-        }
-        ProxyOwnKeysStage::TargetKeys => {
-            state.target_keys = generated_key_list(runtime, completion)?;
-            state.stage = ProxyOwnKeysStage::TargetExtensible;
-            let dispatch = begin_internal_is_extensible(
-                runtime,
-                state.target,
-                state.realm,
-                return_to,
-                state.origin.clone(),
-                execution_budget,
-            )?;
-            continue_proxy_own_keys_after(runtime, dispatch, state, return_to, execution_budget)
-        }
-        ProxyOwnKeysStage::TargetExtensible => {
-            let StoredValue::Boolean(extensible) = completion else {
-                return Err(EngineFault::RuntimeInvariant {
-                    message: "Proxy ownKeys target extensibility was not Boolean",
-                }
-                .into());
-            };
-            state.target_extensible = Some(extensible);
-            begin_proxy_target_descriptor(runtime, state, return_to, execution_budget)
-        }
-        ProxyOwnKeysStage::TargetDescriptor => {
-            if let StoredValue::Object(descriptor) = completion {
-                let configurable_key =
-                    runtime.predefined_property_key(PredefinedAtom::Configurable);
-                let Some(OwnProperty::Data {
-                    value: StoredValue::Boolean(configurable),
-                    ..
-                }) = heap_own_property(
-                    runtime,
-                    HeapReference::Object(descriptor),
-                    &configurable_key,
-                )?
-                else {
+            ProxyOwnKeysStage::TargetExtensible => {
+                let StoredValue::Boolean(extensible) = completion else {
                     return Err(EngineFault::RuntimeInvariant {
-                        message: "internal property descriptor lacks configurable",
+                        message: "Proxy ownKeys target extensibility was not Boolean",
                     }
                     .into());
                 };
-                if !configurable {
-                    state
-                        .non_configurable_keys
-                        .push(state.target_keys[state.next_target_key].clone());
-                }
-            } else if !matches!(completion, StoredValue::Undefined) {
-                return Err(EngineFault::RuntimeInvariant {
-                    message: "internal target descriptor is neither object nor undefined",
-                }
-                .into());
+                state.target_extensible = Some(extensible);
+                state.stage = ProxyOwnKeysStage::TargetDescriptorStart;
             }
-            state.next_target_key = state.next_target_key.saturating_add(1);
-            begin_proxy_target_descriptor(runtime, state, return_to, execution_budget)
+            ProxyOwnKeysStage::TargetDescriptorStart => {
+                if state.next_target_key >= state.target_keys.len() {
+                    return proxy_own_keys_validate(runtime, state);
+                }
+                let key = state.target_keys[state.next_target_key].clone();
+                state.stage = ProxyOwnKeysStage::TargetDescriptor;
+                let dispatch = begin_internal_get_own_property(
+                    runtime,
+                    state.target,
+                    key,
+                    state.realm,
+                    return_to,
+                    state.origin.clone(),
+                    execution_budget,
+                )?;
+                match dispatch {
+                    NativeDispatch::Immediate(value) => {
+                        completion = value;
+                    }
+                    dispatch => {
+                        return continue_proxy_own_keys_after(
+                            runtime,
+                            dispatch,
+                            state,
+                            return_to,
+                            execution_budget,
+                        );
+                    }
+                }
+            }
+            ProxyOwnKeysStage::TargetDescriptor => {
+                if let StoredValue::Object(descriptor) = completion {
+                    let configurable_key =
+                        runtime.predefined_property_key(PredefinedAtom::Configurable);
+                    let Some(OwnProperty::Data {
+                        value: StoredValue::Boolean(configurable),
+                        ..
+                    }) = heap_own_property(
+                        runtime,
+                        HeapReference::Object(descriptor),
+                        &configurable_key,
+                    )?
+                    else {
+                        return Err(EngineFault::RuntimeInvariant {
+                            message: "internal property descriptor lacks configurable",
+                        }
+                        .into());
+                    };
+                    if !configurable {
+                        state
+                            .non_configurable_keys
+                            .push(state.target_keys[state.next_target_key].clone());
+                    }
+                } else if !matches!(completion, StoredValue::Undefined) {
+                    return Err(EngineFault::RuntimeInvariant {
+                        message: "internal target descriptor is neither object nor undefined",
+                    }
+                    .into());
+                }
+                state.next_target_key = state.next_target_key.saturating_add(1);
+                state.stage = ProxyOwnKeysStage::TargetDescriptorStart;
+            }
         }
     }
 }

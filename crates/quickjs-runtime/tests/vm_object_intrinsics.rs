@@ -2199,3 +2199,25 @@ fn proxy_own_keys_enforces_target_invariants() {
         ExceptionKind::TypeError,
     );
 }
+
+/// `Proxy.[[OwnPropertyKeys]]` consumes immediate trap-result and descriptor
+/// completions iteratively. A large ordinary target must not turn that native
+/// state machine into host-stack recursion or quadratic key validation.
+#[test]
+fn proxy_own_keys_scales_for_a_large_reversed_trap_result() {
+    assert_number(
+        "var count=2048;var target={};var keys=[];\
+         for(var index=0;index<count;index=index+1){\
+           var key='key'+index;\
+           Object.defineProperty(target,key,{configurable:(index%2)===0,value:0});\
+           keys.push(key);\
+         }\
+         var proxy=new Proxy(target,{ownKeys(){\
+           var result=[];\
+           for(var index=keys.length;index>0;index=index-1)result.push(keys[index-1]);\
+           return result;\
+         }});\
+         return Object.getOwnPropertyNames(proxy).length;",
+        2048,
+    );
+}

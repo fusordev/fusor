@@ -300,7 +300,7 @@ fn unlabeled_break_and_continue_target_the_innermost_loop() {
             (
                 BytecodePc::new(4),
                 FinalOpcode::IfFalse8,
-                Operands::Label8(3),
+                Operands::Label8(7),
             ),
             (BytecodePc::new(6), FinalOpcode::Goto8, Operands::Label8(-7)),
             (BytecodePc::new(8), FinalOpcode::Goto8, Operands::Label8(3)),
@@ -321,7 +321,7 @@ fn unlabeled_break_and_continue_target_the_innermost_loop() {
         source_slice_at(&compiled, source, BytecodePc::new(8)),
         "break;"
     );
-    for pc in [0, 3, 6, 8, 12] {
+    for pc in [0, 3, 6, 12] {
         let instruction = compiled
             .control_flow()
             .instructions()
@@ -334,6 +334,13 @@ fn unlabeled_break_and_continue_target_the_innermost_loop() {
             "statement boundary at PC {pc} has an empty operand stack"
         );
     }
+    let unreachable_break = compiled
+        .control_flow()
+        .instructions()
+        .iter()
+        .find(|instruction| instruction.decoded().pc() == BytecodePc::new(8))
+        .expect("preserved break source instruction");
+    assert_eq!(unreachable_break.entry_stack_depth(), None);
 }
 
 #[test]
@@ -348,7 +355,7 @@ fn do_while_continue_targets_the_trailing_test_and_break_targets_the_exit() {
             (
                 BytecodePc::new(1),
                 FinalOpcode::IfFalse8,
-                Operands::Label8(3),
+                Operands::Label8(8),
             ),
             (BytecodePc::new(3), FinalOpcode::Goto8, Operands::Label8(3)),
             (BytecodePc::new(5), FinalOpcode::Goto8, Operands::Label8(4)),
@@ -480,9 +487,9 @@ fn nested_loops_select_the_nearest_break_and_continue_targets() {
             (
                 BytecodePc::new(4),
                 FinalOpcode::IfFalse8,
-                Operands::Label8(5),
+                Operands::Label8(-5),
             ),
-            (BytecodePc::new(6), FinalOpcode::Goto8, Operands::Label8(3)),
+            (BytecodePc::new(6), FinalOpcode::Goto8, Operands::Label8(-7)),
             (BytecodePc::new(8), FinalOpcode::Goto8, Operands::Label8(-6)),
             (
                 BytecodePc::new(10),

@@ -691,6 +691,34 @@ impl RealmBuildTransaction<'_> {
                 duration_constructor: function(NativeFunctionKind::TemporalDurationConstructor),
                 instant_prototype: object(IntrinsicObjectId::TemporalInstantPrototype),
                 instant_constructor: function(NativeFunctionKind::TemporalInstantConstructor),
+                plain_date_prototype: object(IntrinsicObjectId::TemporalPlainDatePrototype),
+                plain_date_constructor: function(NativeFunctionKind::TemporalPlainDateConstructor),
+                plain_date_time_prototype: object(
+                    IntrinsicObjectId::TemporalPlainDateTimePrototype,
+                ),
+                plain_date_time_constructor: function(
+                    NativeFunctionKind::TemporalPlainDateTimeConstructor,
+                ),
+                plain_time_prototype: object(IntrinsicObjectId::TemporalPlainTimePrototype),
+                plain_time_constructor: function(NativeFunctionKind::TemporalPlainTimeConstructor),
+                plain_month_day_prototype: object(
+                    IntrinsicObjectId::TemporalPlainMonthDayPrototype,
+                ),
+                plain_month_day_constructor: function(
+                    NativeFunctionKind::TemporalPlainMonthDayConstructor,
+                ),
+                plain_year_month_prototype: object(
+                    IntrinsicObjectId::TemporalPlainYearMonthPrototype,
+                ),
+                plain_year_month_constructor: function(
+                    NativeFunctionKind::TemporalPlainYearMonthConstructor,
+                ),
+                zoned_date_time_prototype: object(
+                    IntrinsicObjectId::TemporalZonedDateTimePrototype,
+                ),
+                zoned_date_time_constructor: function(
+                    NativeFunctionKind::TemporalZonedDateTimeConstructor,
+                ),
             },
             map: MapIntrinsics {
                 prototype: object(IntrinsicObjectId::MapPrototype),

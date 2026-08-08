@@ -2620,6 +2620,63 @@ fn final_authority_requires_define_method_to_target_one_fresh_literal_object() {
 }
 
 #[test]
+fn final_authority_retains_one_fresh_literal_target_across_copy_data_properties() {
+    let instructions = [
+        (FinalOpcode::Object, Operands::None),
+        (FinalOpcode::Object, Operands::None),
+        (FinalOpcode::Undefined, Operands::None),
+        (FinalOpcode::CopyDataProperties, Operands::U8(0b0000_0110)),
+        (FinalOpcode::Drop, Operands::None),
+        (FinalOpcode::Drop, Operands::None),
+        (FinalOpcode::FClosure8, Operands::Const8(0)),
+        (
+            FinalOpcode::DefineMethod,
+            Operands::AtomU8 {
+                atom: AtomPoolIndex::new(1),
+                value: 4,
+            },
+        ),
+        (FinalOpcode::Return, Operands::None),
+    ];
+    verify_compiler_bytecode_graph(
+        define_method_input(&instructions, CompilerExecutableKind::OrdinaryMethod, 0),
+        BytecodeGraphVerificationLimits::default(),
+    )
+    .expect("object-spread copy preserves the fresh target for a later accessor definition");
+}
+
+#[test]
+fn final_authority_rejects_copy_data_properties_into_an_argument() {
+    let instructions = [
+        (FinalOpcode::GetArg0, Operands::NoneArg),
+        (FinalOpcode::Object, Operands::None),
+        (FinalOpcode::Undefined, Operands::None),
+        (FinalOpcode::CopyDataProperties, Operands::U8(0b0000_0110)),
+        (FinalOpcode::Drop, Operands::None),
+        (FinalOpcode::Drop, Operands::None),
+        (FinalOpcode::Drop, Operands::None),
+        (FinalOpcode::ReturnUndef, Operands::None),
+    ];
+    let error = verify_compiler_bytecode_graph(
+        define_method_input_with_root_arguments(
+            &instructions,
+            CompilerExecutableKind::OrdinaryFunction,
+            0,
+            1,
+        ),
+        BytecodeGraphVerificationLimits::default(),
+    )
+    .expect_err("copy_data_properties cannot mutate an arbitrary argument");
+    assert!(
+        matches!(
+            error.kind(),
+            BytecodeVerificationErrorKind::DefineMethodTargetMismatch { .. }
+        ),
+        "{error:?}"
+    );
+}
+
+#[test]
 fn final_authority_preserves_one_fresh_method_target_across_a_field_value_join() {
     let same_literal_across_join = [
         (FinalOpcode::Object, Operands::None),

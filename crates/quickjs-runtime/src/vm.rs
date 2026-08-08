@@ -25,7 +25,14 @@
 
 //! Iterative execution of runtime-installed verified bytecode.
 
-use std::{cell::RefCell, collections::VecDeque, error::Error, fmt, rc::Rc, sync::Arc};
+use std::{
+    cell::RefCell,
+    collections::{HashSet, VecDeque},
+    error::Error,
+    fmt,
+    rc::Rc,
+    sync::Arc,
+};
 
 use quickjs_bytecode::{
     BytecodePc, CompilerBindingKind, CompilerClosureBinding, CompilerClosureSource,
@@ -73,6 +80,11 @@ use crate::{
         ReflectMethod, RegExpFlag, RegExpSymbolMethod, SetMethod, SetPrototypeOutcome,
         StringArgument, StringMethod, TemporalDurationPrototypeMethod,
         TemporalDurationStaticMethod, TemporalInstantPrototypeMethod, TemporalInstantStaticMethod,
+        TemporalPlainDatePrototypeMethod, TemporalPlainDateStaticMethod,
+        TemporalPlainDateTimePrototypeMethod, TemporalPlainDateTimeStaticMethod,
+        TemporalPlainMonthDayPrototypeMethod, TemporalPlainMonthDayStaticMethod,
+        TemporalPlainTimePrototypeMethod, TemporalPlainTimeStaticMethod,
+        TemporalPlainYearMonthPrototypeMethod, TemporalPlainYearMonthStaticMethod,
         TypedArrayElementValue, TypedArrayOwnProperty, TypedArrayPropertyKey,
         TypedArrayPrototypeMethod, TypedArrayStoreOutcome, TypedArrayView, UriFunction,
         WeakMapMethod, WeakSetMethod, array_length_from_number, check_execution_limit,
@@ -679,9 +691,11 @@ enum ProxyOwnKeysStage {
     TrapLookup,
     TrapCall,
     ResultLength,
+    ResultIndexStart,
     ResultIndex,
     TargetKeys,
     TargetExtensible,
+    TargetDescriptorStart,
     TargetDescriptor,
 }
 
@@ -693,6 +707,7 @@ struct ProxyOwnKeysContinuation {
     length: usize,
     next_index: usize,
     trap_keys: Vec<PropertyKey>,
+    trap_key_set: HashSet<PropertyKey>,
     target_keys: Vec<PropertyKey>,
     next_target_key: usize,
     non_configurable_keys: Vec<PropertyKey>,
@@ -736,6 +751,7 @@ impl ProxyOwnKeysContinuation {
         4_u64
             .saturating_add(u64::from(self.result.is_some()))
             .saturating_add(usize_to_u64(self.trap_keys.len()))
+            .saturating_add(usize_to_u64(self.trap_key_set.len()))
             .saturating_add(usize_to_u64(self.target_keys.len()))
             .saturating_add(usize_to_u64(self.non_configurable_keys.len()))
     }
@@ -758,11 +774,38 @@ enum NativeContinuation {
     TypedArrayPrototypeMap(Box<TypedArrayPrototypeMapState>),
     TypedArrayPrototypeFilter(Box<TypedArrayPrototypeFilterState>),
     DateToJson(DateToJsonContinuation),
+    TemporalPlainDateBag(Box<TemporalPlainDateBagContinuation>),
+    TemporalPlainMonthDayBag(Box<TemporalPlainMonthDayBagContinuation>),
+    TemporalPlainYearMonthBag(Box<TemporalPlainYearMonthBagContinuation>),
+    TemporalPlainYearMonthWith(Box<TemporalPlainYearMonthWithContinuation>),
+    TemporalPlainYearMonthDifferenceOptions(Box<TemporalPlainYearMonthDifferenceContinuation>),
+    TemporalPlainDateTimeBag(Box<TemporalPlainDateTimeBagContinuation>),
+    TemporalZonedDateTimeBag(Box<TemporalZonedDateTimeBagContinuation>),
+    TemporalZonedDateTimeOptions(Box<TemporalZonedDateTimeOptionsContinuation>),
+    TemporalPlainTimeBag(Box<TemporalPlainTimeBagContinuation>),
+    TemporalPlainTimeOptions(Box<TemporalPlainTimeOptionsContinuation>),
+    TemporalPlainDateOptions(Box<TemporalPlainDateOptionsContinuation>),
+    TemporalPlainDateToStringOptions(Box<TemporalPlainDateToStringContinuation>),
+    TemporalPlainMonthDayToStringOptions(Box<TemporalPlainMonthDayToStringContinuation>),
+    TemporalPlainYearMonthToStringOptions(Box<TemporalPlainYearMonthToStringContinuation>),
+    TemporalPlainYearMonthToPlainDate(Box<TemporalPlainYearMonthToPlainDateContinuation>),
+    TemporalPlainMonthDayToPlainDate(Box<TemporalPlainMonthDayToPlainDateContinuation>),
+    TemporalPlainMonthDayWith(Box<TemporalPlainMonthDayWithContinuation>),
+    TemporalPlainDateWith(Box<TemporalPlainDateWithContinuation>),
+    TemporalPlainDateDifferenceOptions(Box<TemporalPlainDateDifferenceContinuation>),
+    TemporalPlainDateTimeDifferenceOptions(Box<TemporalPlainDateTimeDifferenceContinuation>),
+    TemporalPlainTimeDifferenceOptions(Box<TemporalPlainTimeDifferenceContinuation>),
+    TemporalPlainDateTimeRoundOptions(Box<TemporalPlainDateTimeRoundContinuation>),
+    TemporalPlainTimeRoundOptions(Box<TemporalPlainTimeRoundContinuation>),
+    TemporalPlainDateTimeToStringOptions(Box<TemporalPlainDateTimeToStringContinuation>),
+    TemporalZonedDateTimeToStringOptions(Box<TemporalZonedDateTimeToStringContinuation>),
+    TemporalZonedDateTimeTransition(Box<TemporalZonedDateTimeTransitionContinuation>),
     TemporalDurationBag(Box<TemporalDurationBagContinuation>),
     TemporalDurationCompareOptions(TemporalDurationCompareOptionsContinuation),
     TemporalDurationRoundOptions(Box<TemporalDurationRoundContinuation>),
     TemporalDurationTotalOptions(Box<TemporalDurationTotalContinuation>),
     TemporalDurationToStringOptions(Box<TemporalDurationToStringContinuation>),
+    TemporalPlainTimeToStringOptions(Box<TemporalPlainTimeToStringContinuation>),
     TemporalInstantRoundOptions(Box<TemporalInstantRoundContinuation>),
     TemporalInstantDifferenceOptions(Box<TemporalInstantDifferenceContinuation>),
     TemporalInstantToStringOptions(Box<TemporalInstantToStringContinuation>),
@@ -877,6 +920,76 @@ impl NativeContinuation {
             Self::TypedArrayPrototypeMap(_) => TypedArrayPrototypeMapState::retained_values(),
             Self::TypedArrayPrototypeFilter(state) => state.retained_values(),
             Self::DateToJson(_) => DateToJsonContinuation::retained_values(),
+            Self::TemporalPlainDateBag(_) => TemporalPlainDateBagContinuation::retained_values(),
+            Self::TemporalPlainMonthDayBag(_) => {
+                TemporalPlainMonthDayBagContinuation::retained_values()
+            }
+            Self::TemporalPlainYearMonthBag(_) => {
+                TemporalPlainYearMonthBagContinuation::retained_values()
+            }
+            Self::TemporalPlainYearMonthWith(_) => {
+                TemporalPlainYearMonthWithContinuation::retained_values()
+            }
+            Self::TemporalPlainYearMonthDifferenceOptions(_) => {
+                TemporalPlainYearMonthDifferenceContinuation::retained_values()
+            }
+            Self::TemporalPlainDateTimeBag(_) => {
+                TemporalPlainDateTimeBagContinuation::retained_values()
+            }
+            Self::TemporalZonedDateTimeBag(_) => {
+                TemporalZonedDateTimeBagContinuation::retained_values()
+            }
+            Self::TemporalZonedDateTimeOptions(state) => state.retained_values(),
+            Self::TemporalPlainTimeBag(_) => TemporalPlainTimeBagContinuation::retained_values(),
+            Self::TemporalPlainTimeOptions(_) => {
+                TemporalPlainTimeOptionsContinuation::retained_values()
+            }
+            Self::TemporalPlainDateOptions(_) => {
+                TemporalPlainDateOptionsContinuation::retained_values()
+            }
+            Self::TemporalPlainDateToStringOptions(_) => {
+                TemporalPlainDateToStringContinuation::retained_values()
+            }
+            Self::TemporalPlainMonthDayToStringOptions(_) => {
+                TemporalPlainMonthDayToStringContinuation::retained_values()
+            }
+            Self::TemporalPlainYearMonthToStringOptions(_) => {
+                TemporalPlainYearMonthToStringContinuation::retained_values()
+            }
+            Self::TemporalPlainYearMonthToPlainDate(_) => {
+                TemporalPlainYearMonthToPlainDateContinuation::retained_values()
+            }
+            Self::TemporalPlainMonthDayToPlainDate(_) => {
+                TemporalPlainMonthDayToPlainDateContinuation::retained_values()
+            }
+            Self::TemporalPlainMonthDayWith(_) => {
+                TemporalPlainMonthDayWithContinuation::retained_values()
+            }
+            Self::TemporalPlainDateWith(_) => TemporalPlainDateWithContinuation::retained_values(),
+            Self::TemporalPlainDateDifferenceOptions(_) => {
+                TemporalPlainDateDifferenceContinuation::retained_values()
+            }
+            Self::TemporalPlainDateTimeDifferenceOptions(_) => {
+                TemporalPlainDateTimeDifferenceContinuation::retained_values()
+            }
+            Self::TemporalPlainTimeDifferenceOptions(_) => {
+                TemporalPlainTimeDifferenceContinuation::retained_values()
+            }
+            Self::TemporalPlainDateTimeRoundOptions(_) => {
+                TemporalPlainDateTimeRoundContinuation::retained_values()
+            }
+            Self::TemporalPlainTimeRoundOptions(_) => {
+                TemporalPlainTimeRoundContinuation::retained_values()
+            }
+            Self::TemporalPlainDateTimeToStringOptions(_) => {
+                TemporalPlainDateTimeToStringContinuation::retained_values()
+            }
+            Self::TemporalZonedDateTimeToStringOptions(_) => {
+                TemporalZonedDateTimeToStringContinuation::retained_values()
+            }
+            Self::TemporalZonedDateTimeTransition(_) => {
+                TemporalZonedDateTimeTransitionContinuation::retained_values()
+            }
             Self::TemporalDurationBag(state) => state.retained_values(),
             Self::TemporalDurationCompareOptions(_) => {
                 TemporalDurationCompareOptionsContinuation::retained_values()
@@ -889,6 +1002,9 @@ impl NativeContinuation {
             }
             Self::TemporalDurationToStringOptions(_) => {
                 TemporalDurationToStringContinuation::retained_values()
+            }
+            Self::TemporalPlainTimeToStringOptions(_) => {
+                TemporalPlainTimeToStringContinuation::retained_values()
             }
             Self::TemporalInstantRoundOptions(_) => {
                 TemporalInstantRoundContinuation::retained_values()
@@ -1238,6 +1354,30 @@ enum IntrinsicGetContinuation {
         new_target: FunctionId,
         duration: temporal_rs::Duration,
     },
+    TemporalPlainDateConstructor {
+        new_target: FunctionId,
+        date: temporal_rs::PlainDate,
+    },
+    TemporalPlainDateTimeConstructor {
+        new_target: FunctionId,
+        date_time: temporal_rs::PlainDateTime,
+    },
+    TemporalPlainTimeConstructor {
+        new_target: FunctionId,
+        time: temporal_rs::PlainTime,
+    },
+    TemporalPlainMonthDayConstructor {
+        new_target: FunctionId,
+        month_day: temporal_rs::PlainMonthDay,
+    },
+    TemporalPlainYearMonthConstructor {
+        new_target: FunctionId,
+        year_month: temporal_rs::PlainYearMonth,
+    },
+    TemporalZonedDateTimeConstructor {
+        new_target: FunctionId,
+        date_time: temporal_rs::ZonedDateTime,
+    },
     StringConstructor {
         new_target: FunctionId,
         value: JsString,
@@ -1293,6 +1433,12 @@ impl IntrinsicGetContinuation {
             | Self::TypedArrayConstructor { .. }
             | Self::TemporalInstantConstructor { .. }
             | Self::TemporalDurationConstructor { .. }
+            | Self::TemporalPlainDateConstructor { .. }
+            | Self::TemporalPlainDateTimeConstructor { .. }
+            | Self::TemporalPlainTimeConstructor { .. }
+            | Self::TemporalPlainMonthDayConstructor { .. }
+            | Self::TemporalPlainYearMonthConstructor { .. }
+            | Self::TemporalZonedDateTimeConstructor { .. }
             | Self::StringConstructor { .. } => 1,
             Self::ArrayConstructor { arguments, .. } => {
                 1_u64.saturating_add(usize_to_u64(arguments.len()))
@@ -2089,6 +2235,64 @@ enum OperatorPrimitiveTarget {
     TemporalInstantMilliseconds,
     TemporalInstantString(Box<TemporalInstantLikeTarget>),
     TemporalDurationConstructor(Box<TemporalDurationConstructorContinuation>),
+    TemporalPlainDateConstructor(Box<TemporalPlainDateConstructorContinuation>),
+    TemporalPlainDateTimeConstructor(Box<TemporalPlainDateTimeConstructorContinuation>),
+    TemporalPlainTimeConstructor(Box<TemporalPlainTimeConstructorContinuation>),
+    TemporalPlainMonthDayConstructor(Box<TemporalPlainMonthDayConstructorContinuation>),
+    TemporalPlainYearMonthConstructor(Box<TemporalPlainYearMonthConstructorContinuation>),
+    TemporalZonedDateTimeConstructor(Box<TemporalZonedDateTimeConstructorContinuation>),
+    TemporalPlainDateEquals(Box<temporal_rs::PlainDate>),
+    TemporalPlainDateBag(Box<TemporalPlainDateBagContinuation>),
+    TemporalPlainMonthDayBag(Box<TemporalPlainMonthDayBagContinuation>),
+    TemporalPlainYearMonthBag(Box<TemporalPlainYearMonthBagContinuation>),
+    TemporalPlainYearMonthWith(Box<TemporalPlainYearMonthWithContinuation>),
+    TemporalPlainYearMonthDifferenceLargestUnit(Box<TemporalPlainYearMonthDifferenceContinuation>),
+    TemporalPlainYearMonthDifferenceRoundingIncrement(
+        Box<TemporalPlainYearMonthDifferenceContinuation>,
+    ),
+    TemporalPlainYearMonthDifferenceRoundingMode(Box<TemporalPlainYearMonthDifferenceContinuation>),
+    TemporalPlainYearMonthDifferenceSmallestUnit(Box<TemporalPlainYearMonthDifferenceContinuation>),
+    TemporalPlainDateTimeBag(Box<TemporalPlainDateTimeBagContinuation>),
+    TemporalZonedDateTimeBag(Box<TemporalZonedDateTimeBagContinuation>),
+    TemporalZonedDateTimeOptions(Box<TemporalZonedDateTimeOptionsContinuation>),
+    TemporalPlainTimeBag(Box<TemporalPlainTimeBagContinuation>),
+    TemporalPlainTimeOptions(Box<TemporalPlainTimeOptionsContinuation>),
+    TemporalPlainDateOptions(Box<TemporalPlainDateOptionsContinuation>),
+    TemporalPlainDateToStringCalendarName(Box<TemporalPlainDateToStringContinuation>),
+    TemporalPlainMonthDayToStringCalendarName(Box<TemporalPlainMonthDayToStringContinuation>),
+    TemporalPlainYearMonthToStringCalendarName(Box<TemporalPlainYearMonthToStringContinuation>),
+    TemporalPlainYearMonthToPlainDate(Box<TemporalPlainYearMonthToPlainDateContinuation>),
+    TemporalPlainMonthDayToPlainDate(Box<TemporalPlainMonthDayToPlainDateContinuation>),
+    TemporalPlainMonthDayWith(Box<TemporalPlainMonthDayWithContinuation>),
+    TemporalPlainDateWith(Box<TemporalPlainDateWithContinuation>),
+    TemporalPlainDateDifferenceLargestUnit(Box<TemporalPlainDateDifferenceContinuation>),
+    TemporalPlainDateDifferenceRoundingIncrement(Box<TemporalPlainDateDifferenceContinuation>),
+    TemporalPlainDateDifferenceRoundingMode(Box<TemporalPlainDateDifferenceContinuation>),
+    TemporalPlainDateDifferenceSmallestUnit(Box<TemporalPlainDateDifferenceContinuation>),
+    TemporalPlainDateTimeDifferenceLargestUnit(Box<TemporalPlainDateTimeDifferenceContinuation>),
+    TemporalPlainDateTimeDifferenceRoundingIncrement(
+        Box<TemporalPlainDateTimeDifferenceContinuation>,
+    ),
+    TemporalPlainDateTimeDifferenceRoundingMode(Box<TemporalPlainDateTimeDifferenceContinuation>),
+    TemporalPlainDateTimeDifferenceSmallestUnit(Box<TemporalPlainDateTimeDifferenceContinuation>),
+    TemporalPlainTimeDifferenceLargestUnit(Box<TemporalPlainTimeDifferenceContinuation>),
+    TemporalPlainTimeDifferenceRoundingIncrement(Box<TemporalPlainTimeDifferenceContinuation>),
+    TemporalPlainTimeDifferenceRoundingMode(Box<TemporalPlainTimeDifferenceContinuation>),
+    TemporalPlainTimeDifferenceSmallestUnit(Box<TemporalPlainTimeDifferenceContinuation>),
+    TemporalPlainDateTimeRoundRoundingIncrement(Box<TemporalPlainDateTimeRoundContinuation>),
+    TemporalPlainDateTimeRoundRoundingMode(Box<TemporalPlainDateTimeRoundContinuation>),
+    TemporalPlainDateTimeRoundSmallestUnit(Box<TemporalPlainDateTimeRoundContinuation>),
+    TemporalPlainTimeRoundRoundingIncrement(Box<TemporalPlainTimeRoundContinuation>),
+    TemporalPlainTimeRoundRoundingMode(Box<TemporalPlainTimeRoundContinuation>),
+    TemporalPlainTimeRoundSmallestUnit(Box<TemporalPlainTimeRoundContinuation>),
+    TemporalPlainDateTimeToStringCalendarName(Box<TemporalPlainDateTimeToStringContinuation>),
+    TemporalPlainDateTimeToStringFractionalSecondDigits(
+        Box<TemporalPlainDateTimeToStringContinuation>,
+    ),
+    TemporalPlainDateTimeToStringRoundingMode(Box<TemporalPlainDateTimeToStringContinuation>),
+    TemporalPlainDateTimeToStringSmallestUnit(Box<TemporalPlainDateTimeToStringContinuation>),
+    TemporalZonedDateTimeToString(Box<TemporalZonedDateTimeToStringContinuation>),
+    TemporalZonedDateTimeTransition(Box<TemporalZonedDateTimeTransitionContinuation>),
     TemporalDurationBag(Box<TemporalDurationBagContinuation>),
     TemporalDurationRoundLargestUnit(Box<TemporalDurationRoundContinuation>),
     TemporalDurationRoundRoundingIncrement(Box<TemporalDurationRoundContinuation>),
@@ -2098,6 +2302,9 @@ enum OperatorPrimitiveTarget {
     TemporalDurationToStringFractionalSecondDigits(Box<TemporalDurationToStringContinuation>),
     TemporalDurationToStringRoundingMode(Box<TemporalDurationToStringContinuation>),
     TemporalDurationToStringSmallestUnit(Box<TemporalDurationToStringContinuation>),
+    TemporalPlainTimeToStringFractionalSecondDigits(Box<TemporalPlainTimeToStringContinuation>),
+    TemporalPlainTimeToStringRoundingMode(Box<TemporalPlainTimeToStringContinuation>),
+    TemporalPlainTimeToStringSmallestUnit(Box<TemporalPlainTimeToStringContinuation>),
     TemporalInstantRoundRoundingIncrement(Box<TemporalInstantRoundContinuation>),
     TemporalInstantRoundRoundingMode(Box<TemporalInstantRoundContinuation>),
     TemporalInstantRoundSmallestUnit(Box<TemporalInstantRoundContinuation>),
@@ -2259,7 +2466,8 @@ impl OperatorPrimitiveTarget {
             | Self::GlobalUri(_)
             | Self::BigIntToString { .. }
             | Self::BigIntTruncationBits { .. }
-            | Self::BigIntTruncationValue { .. } => 0,
+            | Self::BigIntTruncationValue { .. }
+            | Self::TemporalPlainDateEquals(_) => 0,
             Self::BinaryRight { .. }
             | Self::BinaryFinish { .. }
             | Self::EqualityFinish { .. }
@@ -2349,6 +2557,101 @@ impl OperatorPrimitiveTarget {
             | Self::AtomicsReplacement(state)
             | Self::AtomicsTimeout(state) => state.retained_values(),
             Self::TemporalDurationConstructor(state) => state.retained_values(),
+            Self::TemporalPlainDateConstructor(state) => state.retained_values(),
+            Self::TemporalPlainDateTimeConstructor(state) => state.retained_values(),
+            Self::TemporalPlainTimeConstructor(state) => state.retained_values(),
+            Self::TemporalPlainMonthDayConstructor(state) => state.retained_values(),
+            Self::TemporalPlainYearMonthConstructor(state) => state.retained_values(),
+            Self::TemporalZonedDateTimeConstructor(state) => state.retained_values(),
+            Self::TemporalPlainDateBag(_) => TemporalPlainDateBagContinuation::retained_values(),
+            Self::TemporalPlainMonthDayBag(_) => {
+                TemporalPlainMonthDayBagContinuation::retained_values()
+            }
+            Self::TemporalPlainYearMonthBag(_) => {
+                TemporalPlainYearMonthBagContinuation::retained_values()
+            }
+            Self::TemporalPlainYearMonthWith(_) => {
+                TemporalPlainYearMonthWithContinuation::retained_values()
+            }
+            Self::TemporalPlainYearMonthDifferenceLargestUnit(_)
+            | Self::TemporalPlainYearMonthDifferenceRoundingIncrement(_)
+            | Self::TemporalPlainYearMonthDifferenceRoundingMode(_)
+            | Self::TemporalPlainYearMonthDifferenceSmallestUnit(_) => {
+                TemporalPlainYearMonthDifferenceContinuation::retained_values()
+            }
+            Self::TemporalPlainDateTimeBag(_) => {
+                TemporalPlainDateTimeBagContinuation::retained_values()
+            }
+            Self::TemporalZonedDateTimeBag(_) => {
+                TemporalZonedDateTimeBagContinuation::retained_values()
+            }
+            Self::TemporalZonedDateTimeOptions(state) => state.retained_values(),
+            Self::TemporalPlainTimeBag(_) => TemporalPlainTimeBagContinuation::retained_values(),
+            Self::TemporalPlainTimeOptions(_) => {
+                TemporalPlainTimeOptionsContinuation::retained_values()
+            }
+            Self::TemporalPlainDateOptions(_) => {
+                TemporalPlainDateOptionsContinuation::retained_values()
+            }
+            Self::TemporalPlainDateToStringCalendarName(_) => {
+                TemporalPlainDateToStringContinuation::retained_values()
+            }
+            Self::TemporalPlainMonthDayToStringCalendarName(_) => {
+                TemporalPlainMonthDayToStringContinuation::retained_values()
+            }
+            Self::TemporalPlainYearMonthToStringCalendarName(_) => {
+                TemporalPlainYearMonthToStringContinuation::retained_values()
+            }
+            Self::TemporalPlainYearMonthToPlainDate(_) => {
+                TemporalPlainYearMonthToPlainDateContinuation::retained_values()
+            }
+            Self::TemporalPlainMonthDayToPlainDate(_) => {
+                TemporalPlainMonthDayToPlainDateContinuation::retained_values()
+            }
+            Self::TemporalPlainMonthDayWith(_) => {
+                TemporalPlainMonthDayWithContinuation::retained_values()
+            }
+            Self::TemporalPlainDateWith(_) => TemporalPlainDateWithContinuation::retained_values(),
+            Self::TemporalPlainDateDifferenceLargestUnit(_)
+            | Self::TemporalPlainDateDifferenceRoundingIncrement(_)
+            | Self::TemporalPlainDateDifferenceRoundingMode(_)
+            | Self::TemporalPlainDateDifferenceSmallestUnit(_) => {
+                TemporalPlainDateDifferenceContinuation::retained_values()
+            }
+            Self::TemporalPlainDateTimeDifferenceLargestUnit(_)
+            | Self::TemporalPlainDateTimeDifferenceRoundingIncrement(_)
+            | Self::TemporalPlainDateTimeDifferenceRoundingMode(_)
+            | Self::TemporalPlainDateTimeDifferenceSmallestUnit(_) => {
+                TemporalPlainDateTimeDifferenceContinuation::retained_values()
+            }
+            Self::TemporalPlainTimeDifferenceLargestUnit(_)
+            | Self::TemporalPlainTimeDifferenceRoundingIncrement(_)
+            | Self::TemporalPlainTimeDifferenceRoundingMode(_)
+            | Self::TemporalPlainTimeDifferenceSmallestUnit(_) => {
+                TemporalPlainTimeDifferenceContinuation::retained_values()
+            }
+            Self::TemporalPlainDateTimeRoundRoundingIncrement(_)
+            | Self::TemporalPlainDateTimeRoundRoundingMode(_)
+            | Self::TemporalPlainDateTimeRoundSmallestUnit(_) => {
+                TemporalPlainDateTimeRoundContinuation::retained_values()
+            }
+            Self::TemporalPlainTimeRoundRoundingIncrement(_)
+            | Self::TemporalPlainTimeRoundRoundingMode(_)
+            | Self::TemporalPlainTimeRoundSmallestUnit(_) => {
+                TemporalPlainTimeRoundContinuation::retained_values()
+            }
+            Self::TemporalPlainDateTimeToStringCalendarName(_)
+            | Self::TemporalPlainDateTimeToStringFractionalSecondDigits(_)
+            | Self::TemporalPlainDateTimeToStringRoundingMode(_)
+            | Self::TemporalPlainDateTimeToStringSmallestUnit(_) => {
+                TemporalPlainDateTimeToStringContinuation::retained_values()
+            }
+            Self::TemporalZonedDateTimeToString(_) => {
+                TemporalZonedDateTimeToStringContinuation::retained_values()
+            }
+            Self::TemporalZonedDateTimeTransition(_) => {
+                TemporalZonedDateTimeTransitionContinuation::retained_values()
+            }
             Self::TemporalDurationBag(state) => state.retained_values(),
             Self::TemporalDurationRoundLargestUnit(_state)
             | Self::TemporalDurationRoundRoundingIncrement(_state)
@@ -2363,6 +2666,11 @@ impl OperatorPrimitiveTarget {
             | Self::TemporalDurationToStringRoundingMode(_state)
             | Self::TemporalDurationToStringSmallestUnit(_state) => {
                 TemporalDurationToStringContinuation::retained_values()
+            }
+            Self::TemporalPlainTimeToStringFractionalSecondDigits(_state)
+            | Self::TemporalPlainTimeToStringRoundingMode(_state)
+            | Self::TemporalPlainTimeToStringSmallestUnit(_state) => {
+                TemporalPlainTimeToStringContinuation::retained_values()
             }
             Self::TemporalInstantRoundRoundingIncrement(_state)
             | Self::TemporalInstantRoundRoundingMode(_state)
@@ -2603,6 +2911,7 @@ fn trace_operator_primitive_target_roots(
         | OperatorPrimitiveTarget::JsonRawJsonText
         | OperatorPrimitiveTarget::BigIntToString { .. }
         | OperatorPrimitiveTarget::BigIntTruncationValue { .. }
+        | OperatorPrimitiveTarget::TemporalPlainDateEquals(_)
         // The converted left Number carries no heap edge.
         | OperatorPrimitiveTarget::MathBinaryFinish { .. } => {}
         OperatorPrimitiveTarget::DateSetTime { object }
@@ -2621,6 +2930,81 @@ fn trace_operator_primitive_target_roots(
         OperatorPrimitiveTarget::DateUtc(state) => state.trace_roots(mark),
         OperatorPrimitiveTarget::DateConstructorComponents(state) => state.trace_roots(mark),
         OperatorPrimitiveTarget::TemporalDurationConstructor(state) => state.trace_roots(mark),
+        OperatorPrimitiveTarget::TemporalPlainDateConstructor(state) => state.trace_roots(mark),
+        OperatorPrimitiveTarget::TemporalPlainDateTimeConstructor(state) => state.trace_roots(mark),
+        OperatorPrimitiveTarget::TemporalPlainTimeConstructor(state) => state.trace_roots(mark),
+        OperatorPrimitiveTarget::TemporalPlainMonthDayConstructor(state) => state.trace_roots(mark),
+        OperatorPrimitiveTarget::TemporalPlainYearMonthConstructor(state) => state.trace_roots(mark),
+        OperatorPrimitiveTarget::TemporalZonedDateTimeConstructor(state) => state.trace_roots(mark),
+        OperatorPrimitiveTarget::TemporalPlainDateBag(state) => state.trace_roots(mark),
+        OperatorPrimitiveTarget::TemporalPlainMonthDayBag(state) => state.trace_roots(mark),
+        OperatorPrimitiveTarget::TemporalPlainYearMonthBag(state) => state.trace_roots(mark),
+        OperatorPrimitiveTarget::TemporalPlainYearMonthWith(state) => state.trace_roots(mark),
+        OperatorPrimitiveTarget::TemporalPlainYearMonthDifferenceLargestUnit(state)
+        | OperatorPrimitiveTarget::TemporalPlainYearMonthDifferenceRoundingIncrement(state)
+        | OperatorPrimitiveTarget::TemporalPlainYearMonthDifferenceRoundingMode(state)
+        | OperatorPrimitiveTarget::TemporalPlainYearMonthDifferenceSmallestUnit(state) => {
+            state.trace_roots(mark);
+        }
+        OperatorPrimitiveTarget::TemporalPlainDateTimeBag(state) => state.trace_roots(mark),
+        OperatorPrimitiveTarget::TemporalZonedDateTimeBag(state) => state.trace_roots(mark),
+        OperatorPrimitiveTarget::TemporalZonedDateTimeOptions(state) => state.trace_roots(mark),
+        OperatorPrimitiveTarget::TemporalPlainTimeBag(state) => state.trace_roots(mark),
+        OperatorPrimitiveTarget::TemporalPlainTimeOptions(state) => state.trace_roots(mark),
+        OperatorPrimitiveTarget::TemporalPlainDateOptions(state) => state.trace_roots(mark),
+        OperatorPrimitiveTarget::TemporalPlainDateToStringCalendarName(state) => {
+            state.trace_roots(mark);
+        }
+        OperatorPrimitiveTarget::TemporalPlainMonthDayToStringCalendarName(state) => {
+            state.trace_roots(mark);
+        }
+        OperatorPrimitiveTarget::TemporalPlainYearMonthToStringCalendarName(state) => {
+            state.trace_roots(mark);
+        }
+        OperatorPrimitiveTarget::TemporalPlainYearMonthToPlainDate(state) => state.trace_roots(mark),
+        OperatorPrimitiveTarget::TemporalPlainMonthDayToPlainDate(state) => state.trace_roots(mark),
+        OperatorPrimitiveTarget::TemporalPlainMonthDayWith(state) => state.trace_roots(mark),
+        OperatorPrimitiveTarget::TemporalPlainDateWith(state) => state.trace_roots(mark),
+        OperatorPrimitiveTarget::TemporalPlainDateDifferenceLargestUnit(state)
+        | OperatorPrimitiveTarget::TemporalPlainDateDifferenceRoundingIncrement(state)
+        | OperatorPrimitiveTarget::TemporalPlainDateDifferenceRoundingMode(state)
+        | OperatorPrimitiveTarget::TemporalPlainDateDifferenceSmallestUnit(state) => {
+            state.trace_roots(mark);
+        }
+        OperatorPrimitiveTarget::TemporalPlainDateTimeDifferenceLargestUnit(state)
+        | OperatorPrimitiveTarget::TemporalPlainDateTimeDifferenceRoundingIncrement(state)
+        | OperatorPrimitiveTarget::TemporalPlainDateTimeDifferenceRoundingMode(state)
+        | OperatorPrimitiveTarget::TemporalPlainDateTimeDifferenceSmallestUnit(state) => {
+            state.trace_roots(mark);
+        }
+        OperatorPrimitiveTarget::TemporalPlainTimeDifferenceLargestUnit(state)
+        | OperatorPrimitiveTarget::TemporalPlainTimeDifferenceRoundingIncrement(state)
+        | OperatorPrimitiveTarget::TemporalPlainTimeDifferenceRoundingMode(state)
+        | OperatorPrimitiveTarget::TemporalPlainTimeDifferenceSmallestUnit(state) => {
+            state.trace_roots(mark);
+        }
+        OperatorPrimitiveTarget::TemporalPlainDateTimeRoundRoundingIncrement(state)
+        | OperatorPrimitiveTarget::TemporalPlainDateTimeRoundRoundingMode(state)
+        | OperatorPrimitiveTarget::TemporalPlainDateTimeRoundSmallestUnit(state) => {
+            state.trace_roots(mark);
+        }
+        OperatorPrimitiveTarget::TemporalPlainTimeRoundRoundingIncrement(state)
+        | OperatorPrimitiveTarget::TemporalPlainTimeRoundRoundingMode(state)
+        | OperatorPrimitiveTarget::TemporalPlainTimeRoundSmallestUnit(state) => {
+            state.trace_roots(mark);
+        }
+        OperatorPrimitiveTarget::TemporalPlainDateTimeToStringCalendarName(state)
+        | OperatorPrimitiveTarget::TemporalPlainDateTimeToStringFractionalSecondDigits(state)
+        | OperatorPrimitiveTarget::TemporalPlainDateTimeToStringRoundingMode(state)
+        | OperatorPrimitiveTarget::TemporalPlainDateTimeToStringSmallestUnit(state) => {
+            state.trace_roots(mark);
+        }
+        OperatorPrimitiveTarget::TemporalZonedDateTimeToString(state) => {
+            state.trace_roots(mark);
+        }
+        OperatorPrimitiveTarget::TemporalZonedDateTimeTransition(state) => {
+            state.trace_roots(mark);
+        }
         OperatorPrimitiveTarget::TemporalDurationBag(state) => state.trace_roots(mark),
         OperatorPrimitiveTarget::TemporalDurationRoundLargestUnit(state)
         | OperatorPrimitiveTarget::TemporalDurationRoundRoundingIncrement(state)
@@ -2632,6 +3016,11 @@ fn trace_operator_primitive_target_roots(
         OperatorPrimitiveTarget::TemporalDurationToStringFractionalSecondDigits(state)
         | OperatorPrimitiveTarget::TemporalDurationToStringRoundingMode(state)
         | OperatorPrimitiveTarget::TemporalDurationToStringSmallestUnit(state) => {
+            state.trace_roots(mark);
+        }
+        OperatorPrimitiveTarget::TemporalPlainTimeToStringFractionalSecondDigits(state)
+        | OperatorPrimitiveTarget::TemporalPlainTimeToStringRoundingMode(state)
+        | OperatorPrimitiveTarget::TemporalPlainTimeToStringSmallestUnit(state) => {
             state.trace_roots(mark);
         }
         OperatorPrimitiveTarget::TemporalInstantRoundRoundingIncrement(state)
@@ -2875,11 +3264,42 @@ fn trace_native_continuation_roots(
         NativeContinuation::TypedArrayPrototypeMap(state) => state.trace_roots(mark),
         NativeContinuation::TypedArrayPrototypeFilter(state) => state.trace_roots(mark),
         NativeContinuation::DateToJson(state) => state.trace_roots(mark),
+        NativeContinuation::TemporalPlainDateBag(state) => state.trace_roots(mark),
+        NativeContinuation::TemporalPlainMonthDayBag(state) => state.trace_roots(mark),
+        NativeContinuation::TemporalPlainYearMonthBag(state) => state.trace_roots(mark),
+        NativeContinuation::TemporalPlainYearMonthWith(state) => state.trace_roots(mark),
+        NativeContinuation::TemporalPlainYearMonthDifferenceOptions(state) => {
+            state.trace_roots(mark);
+        }
+        NativeContinuation::TemporalPlainDateTimeBag(state) => state.trace_roots(mark),
+        NativeContinuation::TemporalZonedDateTimeBag(state) => state.trace_roots(mark),
+        NativeContinuation::TemporalZonedDateTimeOptions(state) => state.trace_roots(mark),
+        NativeContinuation::TemporalPlainTimeBag(state) => state.trace_roots(mark),
+        NativeContinuation::TemporalPlainTimeOptions(state) => state.trace_roots(mark),
+        NativeContinuation::TemporalPlainDateOptions(state) => state.trace_roots(mark),
+        NativeContinuation::TemporalPlainDateToStringOptions(state) => state.trace_roots(mark),
+        NativeContinuation::TemporalPlainMonthDayToStringOptions(state) => state.trace_roots(mark),
+        NativeContinuation::TemporalPlainYearMonthToStringOptions(state) => state.trace_roots(mark),
+        NativeContinuation::TemporalPlainYearMonthToPlainDate(state) => state.trace_roots(mark),
+        NativeContinuation::TemporalPlainMonthDayToPlainDate(state) => state.trace_roots(mark),
+        NativeContinuation::TemporalPlainMonthDayWith(state) => state.trace_roots(mark),
+        NativeContinuation::TemporalPlainDateWith(state) => state.trace_roots(mark),
+        NativeContinuation::TemporalPlainDateDifferenceOptions(state) => state.trace_roots(mark),
+        NativeContinuation::TemporalPlainDateTimeDifferenceOptions(state) => {
+            state.trace_roots(mark);
+        }
+        NativeContinuation::TemporalPlainTimeDifferenceOptions(state) => state.trace_roots(mark),
+        NativeContinuation::TemporalPlainDateTimeRoundOptions(state) => state.trace_roots(mark),
+        NativeContinuation::TemporalPlainTimeRoundOptions(state) => state.trace_roots(mark),
+        NativeContinuation::TemporalPlainDateTimeToStringOptions(state) => state.trace_roots(mark),
+        NativeContinuation::TemporalZonedDateTimeToStringOptions(state) => state.trace_roots(mark),
+        NativeContinuation::TemporalZonedDateTimeTransition(state) => state.trace_roots(mark),
         NativeContinuation::TemporalDurationBag(state) => state.trace_roots(mark),
         NativeContinuation::TemporalDurationCompareOptions(state) => state.trace_roots(mark),
         NativeContinuation::TemporalDurationRoundOptions(state) => state.trace_roots(mark),
         NativeContinuation::TemporalDurationTotalOptions(state) => state.trace_roots(mark),
         NativeContinuation::TemporalDurationToStringOptions(state) => state.trace_roots(mark),
+        NativeContinuation::TemporalPlainTimeToStringOptions(state) => state.trace_roots(mark),
         NativeContinuation::TemporalInstantRoundOptions(state) => state.trace_roots(mark),
         NativeContinuation::TemporalInstantDifferenceOptions(state) => state.trace_roots(mark),
         NativeContinuation::TemporalInstantToStringOptions(state) => state.trace_roots(mark),
@@ -2891,6 +3311,12 @@ fn trace_native_continuation_roots(
             | IntrinsicGetContinuation::TypedArrayConstructor { new_target, .. }
             | IntrinsicGetContinuation::TemporalInstantConstructor { new_target, .. }
             | IntrinsicGetContinuation::TemporalDurationConstructor { new_target, .. }
+            | IntrinsicGetContinuation::TemporalPlainDateConstructor { new_target, .. }
+            | IntrinsicGetContinuation::TemporalPlainDateTimeConstructor { new_target, .. }
+            | IntrinsicGetContinuation::TemporalPlainTimeConstructor { new_target, .. }
+            | IntrinsicGetContinuation::TemporalPlainMonthDayConstructor { new_target, .. }
+            | IntrinsicGetContinuation::TemporalPlainYearMonthConstructor { new_target, .. }
+            | IntrinsicGetContinuation::TemporalZonedDateTimeConstructor { new_target, .. }
             | IntrinsicGetContinuation::StringConstructor { new_target, .. } => {
                 mark(CollectionRoot::Heap(HeapReference::Function(*new_target)));
             }

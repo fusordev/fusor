@@ -2962,11 +2962,12 @@ fn append_regexp_split_element(
     let output = state.output.ok_or(EngineFault::RuntimeInvariant {
         message: "RegExp split lost its output array",
     })?;
-    let work = runtime.preview_array_define_data_property_work(output)?;
+    let key = PropertyKey::from_index(index);
+    let work = runtime.preview_array_data_property_work(output, &key)?;
     execution_budget.charge_instructions(work)?;
     match runtime.define_array_data_property(
         output,
-        PropertyKey::from_index(index),
+        key,
         PropertyLayout::data(true, true, true),
         value,
     )? {
@@ -3422,11 +3423,12 @@ fn append_global_regexp_match(
     let array = state.result_array.ok_or(EngineFault::RuntimeInvariant {
         message: "global RegExp match append has no result array",
     })?;
-    let work = runtime.preview_array_define_data_property_work(array)?;
+    let key = PropertyKey::from_index(index);
+    let work = runtime.preview_array_data_property_work(array, &key)?;
     execution_budget.charge_instructions(work)?;
     match runtime.define_array_data_property(
         array,
-        PropertyKey::from_index(index),
+        key,
         PropertyLayout::data(true, true, true),
         StoredValue::String(value),
     )? {
@@ -4075,6 +4077,7 @@ fn continue_regexp_replace_template(
             message: "RegExp replace lost its converted replacement template",
         })?
         .clone();
+    preflight_regexp_replace_template_length(&state, &template, execution_budget)?;
     loop {
         let cursor = current_regexp_replacement(&state)?.template_cursor;
         if cursor >= template.len() {
@@ -4224,6 +4227,128 @@ fn continue_regexp_replace_template(
             execution_budget,
         )?;
     }
+}
+
+/// Rejects a substitution that cannot fit in one ECMAScript string before its
+/// individual capture fragments are materialized. This is only used for
+/// templates without named captures: named-capture property reads remain an
+/// observable, resumable boundary in the regular replacement state machine.
+fn preflight_regexp_replace_template_length(
+    state: &RegExpReplaceContinuation,
+    template: &JsString,
+    execution_budget: &mut ExecutionBudget,
+) -> Result<(), NativeFailure> {
+    if contains_regexp_named_capture_reference(template) {
+        return Ok(());
+    }
+    execution_budget.charge_instructions(u64::from(template.len()).saturating_add(1))?;
+
+    let current = current_regexp_replacement(state)?;
+    let input = required_regexp_replace_input(state)?;
+    let matched = current
+        .matched
+        .as_ref()
+        .ok_or(EngineFault::RuntimeInvariant {
+            message: "RegExp replacement template preflight lost its match",
+        })?;
+    let mut output_length = 0_u64;
+    let mut cursor = 0_u32;
+    while cursor < template.len() {
+        let current_unit = template
+            .code_unit_at(cursor)
+            .ok_or(EngineFault::RuntimeInvariant {
+                message: "RegExp replacement template preflight read past its bound",
+            })?;
+        let next = template.code_unit_at(cursor.saturating_add(1));
+        let mut consumed = 1_u32;
+        let replacement_length = if current_unit != u16::from(b'$') {
+            1
+        } else if let Some(next) = next {
+            match next {
+                unit if unit == u16::from(b'$') => {
+                    consumed = 2;
+                    1
+                }
+                unit if unit == u16::from(b'`') => {
+                    consumed = 2;
+                    current.position
+                }
+                unit if unit == u16::from(b'&') => {
+                    consumed = 2;
+                    matched.len()
+                }
+                unit if unit == u16::from(b'\'') => {
+                    consumed = 2;
+                    input
+                        .len()
+                        .saturating_sub(current.position.saturating_add(matched.len()))
+                }
+                unit if regexp_decimal_digit(unit).is_some() => {
+                    let first = u64::from(unit - u16::from(b'0'));
+                    let second = template.code_unit_at(cursor.saturating_add(2));
+                    let mut digit_count = usize::from(
+                        second.is_some_and(|unit| regexp_decimal_digit(unit).is_some()),
+                    ) + 1;
+                    let mut capture_index = first;
+                    if let Some(second) =
+                        second.filter(|unit| regexp_decimal_digit(*unit).is_some())
+                    {
+                        capture_index = capture_index
+                            .saturating_mul(10)
+                            .saturating_add(u64::from(second - u16::from(b'0')));
+                    }
+                    let capture_len = usize_to_u64(current.captures.len());
+                    if digit_count == 2 && capture_index > capture_len {
+                        digit_count = 1;
+                        capture_index = first;
+                    }
+                    consumed = u32::try_from(1 + digit_count).map_err(|_| {
+                        EngineFault::RuntimeInvariant {
+                            message: "RegExp replacement preflight digit count overflowed",
+                        }
+                    })?;
+                    if (1..=capture_len).contains(&capture_index) {
+                        let capture = usize::try_from(capture_index - 1)
+                            .ok()
+                            .and_then(|index| current.captures.get(index))
+                            .ok_or(EngineFault::RuntimeInvariant {
+                                message: "RegExp replacement preflight capture disappeared",
+                            })?;
+                        capture.as_ref().map_or(0, JsString::len)
+                    } else {
+                        consumed
+                    }
+                }
+                _ => 1,
+            }
+        } else {
+            1
+        };
+        output_length = output_length.saturating_add(u64::from(replacement_length));
+        if output_length > u64::from(MAX_STRING_CODE_UNITS) {
+            return regexp_replace_string_too_long(state);
+        }
+        cursor = cursor.saturating_add(consumed);
+    }
+    Ok(())
+}
+
+fn contains_regexp_named_capture_reference(template: &JsString) -> bool {
+    (0..template.len()).any(|index| {
+        template.code_unit_at(index) == Some(u16::from(b'$'))
+            && template.code_unit_at(index.saturating_add(1)) == Some(u16::from(b'<'))
+    })
+}
+
+fn regexp_replace_string_too_long(state: &RegExpReplaceContinuation) -> Result<(), NativeFailure> {
+    Err(NativeFailure::Abrupt(PendingException {
+        realm: state.realm,
+        payload: PendingExceptionPayload::EngineError {
+            kind: ExceptionKind::InternalError,
+            message: JsString::from_utf8("string too long")?,
+        },
+        origin: state.origin.clone(),
+    }))
 }
 
 fn finish_regexp_replace_match(

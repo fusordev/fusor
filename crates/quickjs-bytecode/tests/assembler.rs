@@ -141,6 +141,91 @@ fn symbolic_forward_branches_relax_to_exact_quickjs_short_forms() {
 }
 
 #[test]
+fn symbolic_assembly_threads_ordinary_branches_through_unconditional_gotos() {
+    let mut assembler = BytecodeAssembler::new();
+    let dispatch = assembler.new_label().expect("dispatch label");
+    let exit = assembler.new_label().expect("exit label");
+
+    assembler
+        .push(FinalOpcode::PushTrue, Operands::None)
+        .expect("condition");
+    assembler
+        .branch(BranchKind::IfFalse, &dispatch)
+        .expect("conditional branch");
+    assembler
+        .push(FinalOpcode::Nop, Operands::None)
+        .expect("true path");
+    assembler
+        .branch(BranchKind::Goto, &exit)
+        .expect("true-path exit");
+    assembler.bind(&dispatch).expect("dispatch target");
+    assembler
+        .branch(BranchKind::Goto, &exit)
+        .expect("dispatch exit");
+    assembler.bind(&exit).expect("exit target");
+    assembler
+        .push(FinalOpcode::ReturnUndef, Operands::None)
+        .expect("exit instruction");
+
+    let output = assembler.finish().expect("assembly");
+    assert_eq!(
+        decoded(output.bytecode()),
+        [
+            (BytecodePc::new(0), FinalOpcode::PushTrue, Operands::None),
+            (
+                BytecodePc::new(1),
+                FinalOpcode::IfFalse8,
+                Operands::Label8(6),
+            ),
+            (BytecodePc::new(3), FinalOpcode::Nop, Operands::None),
+            (BytecodePc::new(4), FinalOpcode::Goto8, Operands::Label8(3)),
+            (BytecodePc::new(6), FinalOpcode::Goto8, Operands::Label8(1)),
+            (BytecodePc::new(8), FinalOpcode::ReturnUndef, Operands::None),
+        ]
+    );
+    assert_eq!(output.instruction_pcs().len(), 6);
+
+    verify_compiler_control_flow(
+        UnverifiedCompilerFunctionBody::new(
+            output.into_bytes(),
+            FunctionIndexDomains::default(),
+            UnverifiedFunctionHeader::stripped_ordinary_source_function(false, 0),
+        ),
+        VerificationLimits::default(),
+    )
+    .expect("threaded compiler output must remain independently verified");
+}
+
+#[test]
+fn symbolic_assembly_leaves_cyclic_goto_targets_unthreaded() {
+    let mut assembler = BytecodeAssembler::new();
+    let first = assembler.new_label().expect("first label");
+    let second = assembler.new_label().expect("second label");
+
+    assembler
+        .branch(BranchKind::Goto, &first)
+        .expect("entry branch");
+    assembler.bind(&first).expect("first target");
+    assembler
+        .branch(BranchKind::Goto, &second)
+        .expect("first cycle edge");
+    assembler.bind(&second).expect("second target");
+    assembler
+        .branch(BranchKind::Goto, &first)
+        .expect("second cycle edge");
+
+    let output = assembler.finish().expect("bounded cyclic assembly");
+    assert_eq!(
+        decoded(output.bytecode()),
+        [
+            (BytecodePc::new(0), FinalOpcode::Goto8, Operands::Label8(1)),
+            (BytecodePc::new(2), FinalOpcode::Goto8, Operands::Label8(1)),
+            (BytecodePc::new(4), FinalOpcode::Goto8, Operands::Label8(-3)),
+        ]
+    );
+}
+
+#[test]
 fn symbolic_catch_uses_the_fixed_long_encoding_and_pc_plus_one_base() {
     let mut assembler = BytecodeAssembler::new();
     let handler = assembler.new_label().expect("handler label");

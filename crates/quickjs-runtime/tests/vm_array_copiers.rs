@@ -172,6 +172,49 @@ fn slice_copies_a_resolved_range() {
     ]);
 }
 
+/// `slice` performs `ArraySpeciesCreate` with the resolved count before it
+/// reads an indexed source property. Its custom result is returned as-is: in
+/// particular, `slice` does not finish by assigning a `length` property.
+#[test]
+fn slice_honors_species_construction_before_copying() {
+    assert_all(&[(
+        "(function(){\
+            let log='';\
+            const target={};\
+            Object.defineProperty(target,'length',{set:function(){log+='set|';}});\
+            function Species(length){log+='ctor:'+length+'|';return target;}\
+            const source=[1];\
+            source.constructor={};\
+            source.constructor[Symbol.species]=Species;\
+            Object.defineProperty(source,'0',{get:function(){log+='get|';return 1;}});\
+            const result=source.slice(0,1);\
+            return log+(result===target)+'|'+result[0];\
+        })()",
+        "ctor:1|get|true|1",
+    )]);
+
+    let (kind, _) = thrown(
+        "(function(){\
+            function Species(){Object.preventExtensions(this);}\
+            const source=[1];\
+            source.constructor={};\
+            source.constructor[Symbol.species]=Species;\
+            return source.slice();\
+        })()",
+    );
+    assert_eq!(kind, ExceptionKind::TypeError);
+}
+
+/// `ArraySpeciesCreate(O, count)` rejects a count outside the Array length
+/// domain before `slice` can start a potentially unbounded indexed loop.
+#[test]
+fn slice_rejects_an_impossible_result_length_before_index_reads() {
+    let (kind, _) = thrown(
+        "return Array.prototype.slice.call({length:4294967296,get 0(){throw new Error('read');}});",
+    );
+    assert_eq!(kind, ExceptionKind::RangeError);
+}
+
 /// `at` answers a single element and accepts a negative index.
 #[test]
 fn at_answers_one_element() {
@@ -246,6 +289,21 @@ fn concat_uses_is_concat_spreadable_then_is_array() {
             "2|true",
         ),
     ]);
+}
+
+/// `concat` validates a spread source's complete length before probing its
+/// first indexed property, as the result cannot exceed `2^53 - 1`.
+#[test]
+fn concat_rejects_an_impossible_spread_length_before_index_reads() {
+    let (kind, _) = thrown(
+        "(function(){\
+            const source={length:Number.MAX_SAFE_INTEGER};\
+            source[Symbol.isConcatSpreadable]=true;\
+            Object.defineProperty(source,'0',{get:function(){throw new Error('read');}});\
+            return [1].concat(source);\
+        })()",
+    );
+    assert_eq!(kind, ExceptionKind::TypeError);
 }
 
 /// `concat` obtains its `ArraySpeciesCreate` destination before observing the

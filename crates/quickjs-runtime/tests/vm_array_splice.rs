@@ -220,10 +220,16 @@ fn splice_preserves_holes() {
 /// `splice` accepts any array-like receiver and writes its length back.
 #[test]
 fn splice_accepts_an_array_like_receiver() {
-    assert_all(&[(
-        "(function(){const o={length:3,0:'a',1:'b',2:'c'};const r=Array.prototype.splice.call(o,1,1);return r.join()+'|'+o.length+'|'+o[1];})()",
-        "b|2|c",
-    )]);
+    assert_all(&[
+        (
+            "(function(){const o={length:3,0:'a',1:'b',2:'c'};const r=Array.prototype.splice.call(o,1,1);return r.join()+'|'+o.length+'|'+o[1];})()",
+            "b|2|c",
+        ),
+        (
+            "(function(){const o={length:9007199254740991};const r=Array.prototype.splice.call(o);return r.length+'|'+o.length;})()",
+            "0|9007199254740991",
+        ),
+    ]);
 }
 
 /// Extraction, replacement, and the final length write all use Proxy internal
@@ -242,8 +248,56 @@ fn splice_uses_proxy_internal_methods() {
             const removed=Array.prototype.splice.call(proxy,1,1,'x');\
             return log+'|'+removed.join()+'|'+target.join();\
         })()",
-        "glength;h1;g1;s1=x;slength=3;|2|1,x,3",
+        "glength;gconstructor;h1;g1;s1=x;slength=3;|2|1,x,3",
     )]);
+}
+
+/// `splice` obtains the removed-elements object through `ArraySpeciesCreate`
+/// before it observes any removed index, then sets that object's `length` with
+/// the ordinary `Set` operation.
+#[test]
+fn splice_honors_species_construction_and_result_length_set() {
+    assert_all(&[
+        (
+            "(function(){\
+                let order='';\
+                const target={};\
+                function Species(length){order+='ctor:'+length+'|';return target;}\
+                const source=[1];\
+                source.constructor={};\
+                source.constructor[Symbol.species]=Species;\
+                Object.defineProperty(source,'0',{configurable:true,get:function(){order+='get|';return 1;}});\
+                const result=source.splice(0,1);\
+                return order+(result===target)+'|'+result.length+'|'+result[0]+'|'+source.length;\
+            })()",
+            "ctor:1|get|true|1|1|0",
+        ),
+        (
+            "(function(){\
+                let set='';\
+                const target={};\
+                Object.defineProperty(target,'length',{set:function(value){set='length:'+value;}});\
+                function Species(){return target;}\
+                const source=[1];\
+                source.constructor={};\
+                source.constructor[Symbol.species]=Species;\
+                const result=source.splice(0,1);\
+                return (result===target)+'|'+target[0]+'|'+set;\
+            })()",
+            "true|1|length:1",
+        ),
+    ]);
+
+    let (kind, _) = thrown(
+        "(function(){\
+            function Species(){Object.preventExtensions(this);}\
+            const source=[1];\
+            source.constructor={};\
+            source.constructor[Symbol.species]=Species;\
+            return source.splice(0,1);\
+        })()",
+    );
+    assert_eq!(kind, ExceptionKind::TypeError);
 }
 
 /// `splice` reports arity 2 with the pinned descriptors.

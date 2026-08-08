@@ -503,6 +503,10 @@ pub(super) fn intrinsic_getter_call_with_reserved_continuation(
     })
 }
 
+#[allow(
+    clippy::too_many_lines,
+    reason = "one exhaustive continuation dispatcher keeps every intrinsic wrapper auditable"
+)]
 pub(super) fn finish_intrinsic_get(
     runtime: &mut Runtime,
     continuation: IntrinsicGetContinuation,
@@ -556,6 +560,36 @@ pub(super) fn finish_intrinsic_get(
             new_target,
             duration,
         } => finish_temporal_duration_constructor_wrapper(runtime, new_target, duration, &value),
+        IntrinsicGetContinuation::TemporalPlainDateConstructor { new_target, date } => {
+            finish_temporal_plain_date_constructor_wrapper(runtime, new_target, date, &value)
+        }
+        IntrinsicGetContinuation::TemporalPlainDateTimeConstructor {
+            new_target,
+            date_time,
+        } => finish_temporal_plain_date_time_constructor_wrapper(
+            runtime, new_target, date_time, &value,
+        ),
+        IntrinsicGetContinuation::TemporalPlainTimeConstructor { new_target, time } => {
+            finish_temporal_plain_time_constructor_wrapper(runtime, new_target, time, &value)
+        }
+        IntrinsicGetContinuation::TemporalPlainMonthDayConstructor {
+            new_target,
+            month_day,
+        } => finish_temporal_plain_month_day_constructor_wrapper(
+            runtime, new_target, month_day, &value,
+        ),
+        IntrinsicGetContinuation::TemporalPlainYearMonthConstructor {
+            new_target,
+            year_month,
+        } => finish_temporal_plain_year_month_constructor_wrapper(
+            runtime, new_target, year_month, &value,
+        ),
+        IntrinsicGetContinuation::TemporalZonedDateTimeConstructor {
+            new_target,
+            date_time,
+        } => finish_temporal_zoned_date_time_constructor_wrapper(
+            runtime, new_target, date_time, &value,
+        ),
         IntrinsicGetContinuation::StringConstructor {
             new_target,
             value: string_value,
@@ -2103,6 +2137,427 @@ fn finish_operator_primitive_target(
                 execution_budget,
             )
         }
+        OperatorPrimitiveTarget::TemporalPlainDateConstructor(state) => {
+            let number = operator_to_number(value, realm, origin)?;
+            advance_temporal_plain_date_constructor(
+                runtime,
+                *state,
+                Some(number),
+                realm,
+                return_to,
+                origin,
+                execution_budget,
+            )
+        }
+        OperatorPrimitiveTarget::TemporalPlainDateTimeConstructor(state) => {
+            let number = operator_to_number(value, realm, origin)?;
+            advance_temporal_plain_date_time_constructor(
+                runtime,
+                *state,
+                Some(number),
+                realm,
+                return_to,
+                origin,
+                execution_budget,
+            )
+        }
+        OperatorPrimitiveTarget::TemporalPlainTimeConstructor(state) => {
+            let number = operator_to_number(value, realm, origin)?;
+            advance_temporal_plain_time_constructor(
+                runtime,
+                *state,
+                Some(number),
+                realm,
+                return_to,
+                origin,
+                execution_budget,
+            )
+        }
+        OperatorPrimitiveTarget::TemporalPlainMonthDayConstructor(state) => {
+            let number = operator_to_number(value, realm, origin)?;
+            advance_temporal_plain_month_day_constructor(
+                runtime,
+                *state,
+                Some(number),
+                realm,
+                return_to,
+                origin,
+                execution_budget,
+            )
+        }
+        OperatorPrimitiveTarget::TemporalPlainYearMonthConstructor(state) => {
+            let number = operator_to_number(value, realm, origin)?;
+            advance_temporal_plain_year_month_constructor(
+                runtime,
+                *state,
+                Some(number),
+                realm,
+                return_to,
+                origin,
+                execution_budget,
+            )
+        }
+        OperatorPrimitiveTarget::TemporalZonedDateTimeConstructor(state) => {
+            advance_temporal_zoned_date_time_constructor(
+                runtime,
+                *state,
+                Some(value),
+                realm,
+                return_to,
+                origin,
+                execution_budget,
+            )
+        }
+        OperatorPrimitiveTarget::TemporalPlainDateEquals(receiver) => {
+            finish_temporal_plain_date_equals(receiver.as_ref(), value, realm, origin)
+        }
+        OperatorPrimitiveTarget::TemporalPlainDateBag(state) => {
+            advance_temporal_plain_date_property_bag(
+                runtime,
+                *state,
+                Some(value),
+                return_to,
+                execution_budget,
+            )
+        }
+        OperatorPrimitiveTarget::TemporalPlainMonthDayBag(state) => {
+            advance_temporal_plain_month_day_property_bag(
+                runtime,
+                *state,
+                Some(value),
+                return_to,
+                execution_budget,
+            )
+        }
+        OperatorPrimitiveTarget::TemporalPlainYearMonthBag(state) => {
+            advance_temporal_plain_year_month_property_bag(
+                runtime,
+                *state,
+                Some(value),
+                return_to,
+                execution_budget,
+            )
+        }
+        OperatorPrimitiveTarget::TemporalPlainYearMonthWith(state) => {
+            advance_temporal_plain_year_month_with(
+                runtime,
+                *state,
+                Some(value),
+                return_to,
+                execution_budget,
+            )
+        }
+        OperatorPrimitiveTarget::TemporalPlainYearMonthDifferenceLargestUnit(state) => {
+            finish_temporal_plain_year_month_difference_largest_unit(
+                runtime,
+                *state,
+                value,
+                return_to,
+                execution_budget,
+            )
+        }
+        OperatorPrimitiveTarget::TemporalPlainYearMonthDifferenceRoundingIncrement(state) => {
+            finish_temporal_plain_year_month_difference_rounding_increment(
+                runtime,
+                *state,
+                value,
+                return_to,
+                execution_budget,
+            )
+        }
+        OperatorPrimitiveTarget::TemporalPlainYearMonthDifferenceRoundingMode(state) => {
+            finish_temporal_plain_year_month_difference_rounding_mode(
+                runtime,
+                *state,
+                value,
+                return_to,
+                execution_budget,
+            )
+        }
+        OperatorPrimitiveTarget::TemporalPlainYearMonthDifferenceSmallestUnit(state) => {
+            finish_temporal_plain_year_month_difference_smallest_unit(
+                runtime,
+                state.as_ref(),
+                value,
+            )
+        }
+        OperatorPrimitiveTarget::TemporalPlainDateTimeBag(state) => {
+            advance_temporal_plain_date_time_property_bag(
+                runtime,
+                *state,
+                Some(value),
+                return_to,
+                execution_budget,
+            )
+        }
+        OperatorPrimitiveTarget::TemporalZonedDateTimeBag(state) => {
+            advance_temporal_zoned_date_time_property_bag(
+                runtime,
+                *state,
+                Some(value),
+                return_to,
+                execution_budget,
+            )
+        }
+        OperatorPrimitiveTarget::TemporalZonedDateTimeOptions(state) => {
+            advance_temporal_zoned_date_time_from_options(
+                runtime,
+                *state,
+                Some(value),
+                return_to,
+                execution_budget,
+            )
+        }
+        OperatorPrimitiveTarget::TemporalPlainTimeBag(state) => {
+            advance_temporal_plain_time_property_bag(
+                runtime,
+                *state,
+                Some(value),
+                return_to,
+                execution_budget,
+            )
+        }
+        OperatorPrimitiveTarget::TemporalPlainTimeOptions(state) => {
+            advance_temporal_plain_time_options(
+                runtime,
+                *state,
+                Some(value),
+                return_to,
+                execution_budget,
+            )
+        }
+        OperatorPrimitiveTarget::TemporalPlainDateOptions(state) => {
+            advance_temporal_plain_date_from_options(
+                runtime,
+                *state,
+                Some(value),
+                return_to,
+                execution_budget,
+            )
+        }
+        OperatorPrimitiveTarget::TemporalPlainDateToStringCalendarName(state) => {
+            finish_temporal_plain_date_to_string_calendar_name(state.as_ref(), value)
+        }
+        OperatorPrimitiveTarget::TemporalPlainMonthDayToStringCalendarName(state) => {
+            finish_temporal_plain_month_day_to_string_calendar_name(state.as_ref(), value)
+        }
+        OperatorPrimitiveTarget::TemporalPlainYearMonthToStringCalendarName(state) => {
+            finish_temporal_plain_year_month_to_string_calendar_name(state.as_ref(), value)
+        }
+        OperatorPrimitiveTarget::TemporalPlainYearMonthToPlainDate(state) => {
+            advance_temporal_plain_year_month_to_plain_date(
+                runtime,
+                *state,
+                Some(value),
+                return_to,
+                execution_budget,
+            )
+        }
+        OperatorPrimitiveTarget::TemporalPlainMonthDayToPlainDate(state) => {
+            advance_temporal_plain_month_day_to_plain_date(
+                runtime,
+                *state,
+                Some(value),
+                return_to,
+                execution_budget,
+            )
+        }
+        OperatorPrimitiveTarget::TemporalPlainMonthDayWith(state) => {
+            advance_temporal_plain_month_day_with(
+                runtime,
+                *state,
+                Some(value),
+                return_to,
+                execution_budget,
+            )
+        }
+        OperatorPrimitiveTarget::TemporalPlainDateWith(state) => advance_temporal_plain_date_with(
+            runtime,
+            *state,
+            Some(value),
+            return_to,
+            execution_budget,
+        ),
+        OperatorPrimitiveTarget::TemporalPlainDateDifferenceLargestUnit(state) => {
+            finish_temporal_plain_date_difference_largest_unit(
+                runtime,
+                *state,
+                value,
+                return_to,
+                execution_budget,
+            )
+        }
+        OperatorPrimitiveTarget::TemporalPlainDateDifferenceRoundingIncrement(state) => {
+            finish_temporal_plain_date_difference_rounding_increment(
+                runtime,
+                *state,
+                value,
+                return_to,
+                execution_budget,
+            )
+        }
+        OperatorPrimitiveTarget::TemporalPlainDateDifferenceRoundingMode(state) => {
+            finish_temporal_plain_date_difference_rounding_mode(
+                runtime,
+                *state,
+                value,
+                return_to,
+                execution_budget,
+            )
+        }
+        OperatorPrimitiveTarget::TemporalPlainDateDifferenceSmallestUnit(state) => {
+            finish_temporal_plain_date_difference_smallest_unit(runtime, state.as_ref(), value)
+        }
+        OperatorPrimitiveTarget::TemporalPlainDateTimeDifferenceLargestUnit(state) => {
+            finish_temporal_plain_date_time_difference_largest_unit(
+                runtime,
+                *state,
+                value,
+                return_to,
+                execution_budget,
+            )
+        }
+        OperatorPrimitiveTarget::TemporalPlainDateTimeDifferenceRoundingIncrement(state) => {
+            finish_temporal_plain_date_time_difference_rounding_increment(
+                runtime,
+                *state,
+                value,
+                return_to,
+                execution_budget,
+            )
+        }
+        OperatorPrimitiveTarget::TemporalPlainDateTimeDifferenceRoundingMode(state) => {
+            finish_temporal_plain_date_time_difference_rounding_mode(
+                runtime,
+                *state,
+                value,
+                return_to,
+                execution_budget,
+            )
+        }
+        OperatorPrimitiveTarget::TemporalPlainDateTimeDifferenceSmallestUnit(state) => {
+            finish_temporal_plain_date_time_difference_smallest_unit(runtime, state.as_ref(), value)
+        }
+        OperatorPrimitiveTarget::TemporalPlainTimeDifferenceLargestUnit(state) => {
+            finish_temporal_plain_time_difference_largest_unit(
+                runtime,
+                *state,
+                value,
+                return_to,
+                execution_budget,
+            )
+        }
+        OperatorPrimitiveTarget::TemporalPlainTimeDifferenceRoundingIncrement(state) => {
+            finish_temporal_plain_time_difference_rounding_increment(
+                runtime,
+                *state,
+                value,
+                return_to,
+                execution_budget,
+            )
+        }
+        OperatorPrimitiveTarget::TemporalPlainTimeDifferenceRoundingMode(state) => {
+            finish_temporal_plain_time_difference_rounding_mode(
+                runtime,
+                *state,
+                value,
+                return_to,
+                execution_budget,
+            )
+        }
+        OperatorPrimitiveTarget::TemporalPlainTimeDifferenceSmallestUnit(state) => {
+            finish_temporal_plain_time_difference_smallest_unit(runtime, state.as_ref(), value)
+        }
+        OperatorPrimitiveTarget::TemporalPlainDateTimeRoundRoundingIncrement(state) => {
+            finish_temporal_plain_date_time_round_rounding_increment(
+                runtime,
+                *state,
+                value,
+                return_to,
+                execution_budget,
+            )
+        }
+        OperatorPrimitiveTarget::TemporalPlainDateTimeRoundRoundingMode(state) => {
+            finish_temporal_plain_date_time_round_rounding_mode(
+                runtime,
+                *state,
+                value,
+                return_to,
+                execution_budget,
+            )
+        }
+        OperatorPrimitiveTarget::TemporalPlainDateTimeRoundSmallestUnit(state) => {
+            finish_temporal_plain_date_time_round_smallest_unit(runtime, state.as_ref(), value)
+        }
+        OperatorPrimitiveTarget::TemporalPlainTimeRoundRoundingIncrement(state) => {
+            finish_temporal_plain_time_round_rounding_increment(
+                runtime,
+                *state,
+                value,
+                return_to,
+                execution_budget,
+            )
+        }
+        OperatorPrimitiveTarget::TemporalPlainTimeRoundRoundingMode(state) => {
+            finish_temporal_plain_time_round_rounding_mode(
+                runtime,
+                *state,
+                value,
+                return_to,
+                execution_budget,
+            )
+        }
+        OperatorPrimitiveTarget::TemporalPlainTimeRoundSmallestUnit(state) => {
+            finish_temporal_plain_time_round_smallest_unit(runtime, state.as_ref(), value)
+        }
+        OperatorPrimitiveTarget::TemporalPlainDateTimeToStringCalendarName(state) => {
+            finish_temporal_plain_date_time_to_string_calendar_name(
+                runtime,
+                *state,
+                value,
+                return_to,
+                execution_budget,
+            )
+        }
+        OperatorPrimitiveTarget::TemporalPlainDateTimeToStringFractionalSecondDigits(state) => {
+            finish_temporal_plain_date_time_to_string_fractional_second_digits(
+                runtime,
+                *state,
+                value,
+                return_to,
+                execution_budget,
+            )
+        }
+        OperatorPrimitiveTarget::TemporalPlainDateTimeToStringRoundingMode(state) => {
+            finish_temporal_plain_date_time_to_string_rounding_mode(
+                runtime,
+                *state,
+                value,
+                return_to,
+                execution_budget,
+            )
+        }
+        OperatorPrimitiveTarget::TemporalPlainDateTimeToStringSmallestUnit(state) => {
+            finish_temporal_plain_date_time_to_string_smallest_unit(state.as_ref(), value)
+        }
+        OperatorPrimitiveTarget::TemporalZonedDateTimeToString(state) => {
+            finish_temporal_zoned_date_time_to_string_option(
+                runtime,
+                *state,
+                value,
+                return_to,
+                execution_budget,
+            )
+        }
+        OperatorPrimitiveTarget::TemporalZonedDateTimeTransition(state) => {
+            finish_temporal_zoned_date_time_transition(
+                runtime,
+                state.as_ref(),
+                value,
+                return_to,
+                execution_budget,
+            )
+        }
         OperatorPrimitiveTarget::TemporalDurationBag(state) => {
             advance_temporal_duration_property_bag(
                 runtime,
@@ -2171,6 +2626,27 @@ fn finish_operator_primitive_target(
         }
         OperatorPrimitiveTarget::TemporalDurationToStringSmallestUnit(state) => {
             finish_temporal_duration_to_string_smallest_unit(&state, value)
+        }
+        OperatorPrimitiveTarget::TemporalPlainTimeToStringFractionalSecondDigits(state) => {
+            finish_temporal_plain_time_to_string_fractional_second_digits(
+                runtime,
+                *state,
+                value,
+                return_to,
+                execution_budget,
+            )
+        }
+        OperatorPrimitiveTarget::TemporalPlainTimeToStringRoundingMode(state) => {
+            finish_temporal_plain_time_to_string_rounding_mode(
+                runtime,
+                *state,
+                value,
+                return_to,
+                execution_budget,
+            )
+        }
+        OperatorPrimitiveTarget::TemporalPlainTimeToStringSmallestUnit(state) => {
+            finish_temporal_plain_time_to_string_smallest_unit(&state, value)
         }
         OperatorPrimitiveTarget::TemporalInstantRoundRoundingIncrement(state) => {
             finish_temporal_instant_round_rounding_increment(

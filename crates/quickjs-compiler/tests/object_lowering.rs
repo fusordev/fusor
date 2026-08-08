@@ -1,7 +1,6 @@
 use quickjs_bytecode::{AtomPoolIndex, BytecodePc, FinalOpcode, Operands, VerificationLimits};
 use quickjs_compiler::{
     CompilationContext, CompiledFunction, CompiledFunctionTree, CompiledLeafFunction,
-    LeafCompilationError, UnsupportedLeafFeature,
 };
 use quickjs_frontend::{CompilationGoal, FrontendOptions, GlobalScriptGoal, with_parsed_program};
 
@@ -18,24 +17,6 @@ fn compile(source: &str, name: &str) -> CompiledLeafFunction {
             context
                 .compile_leaf(&executable, VerificationLimits::default())
                 .expect("ordinary object lowering must succeed")
-        },
-    )
-    .expect("front-end acceptance")
-}
-
-fn compile_error(source: &str, name: &str) -> LeafCompilationError {
-    with_parsed_program(
-        source,
-        FrontendOptions::for_goal(CompilationGoal::GlobalScript(GlobalScriptGoal::new())),
-        |unit| {
-            let context = CompilationContext::new(unit).expect("storage planning must succeed");
-            let executable = context
-                .executables()
-                .find(|executable| executable.metadata().name() == Some(name))
-                .expect("named function executable");
-            context
-                .compile_tree(&executable, VerificationLimits::default())
-                .expect_err("unsupported object form must fail closed")
         },
     )
     .expect("front-end acceptance")
@@ -1032,13 +1013,22 @@ fn computed_anonymous_function_data_properties_use_the_exact_name_definition_seq
 }
 
 #[test]
-fn object_spread_remains_fail_closed_at_the_relevant_source() {
-    let source = "function make(value){return {...value};}";
-    let LeafCompilationError::Unsupported { feature, span } = compile_error(source, "make") else {
-        panic!("object spread must remain fail closed");
-    };
-    assert_eq!(feature, UnsupportedLeafFeature::UnsupportedExpression);
-    assert_eq!(&source[span.start as usize..span.end as usize], "...value");
+fn object_spread_retains_the_literal_target_and_discards_its_copy_operands() {
+    let compiled = compile("function make(value){return {...value};}", "make");
+
+    assert_eq!(
+        instructions(&compiled),
+        [
+            (FinalOpcode::Object, Operands::None),
+            (FinalOpcode::GetArg0, Operands::NoneArg),
+            (FinalOpcode::Undefined, Operands::None),
+            (FinalOpcode::CopyDataProperties, Operands::U8(0b0000_0110)),
+            (FinalOpcode::Drop, Operands::None),
+            (FinalOpcode::Drop, Operands::None),
+            (FinalOpcode::Return, Operands::None),
+        ]
+    );
+    assert_eq!(compiled.control_flow().computed_stack_size(), 3);
 }
 
 #[test]

@@ -144,6 +144,34 @@ fn object_literal_own_data_property_reads_and_writes() {
 }
 
 #[test]
+fn object_spread_copies_data_ignores_nullish_and_boxes_strings() {
+    let authority = compile(
+        "function run(){\
+            let value={first:1,...{alpha:3,beta:2},second:4,...null,...(void 0),...\"xy\",alpha:5};\
+            return value.first+\"|\"+value.alpha+\"|\"+value.beta+\"|\"+value.second+\"|\"+value[0]+\"|\"+value[1];\
+        }",
+        "run",
+    );
+    let mut runtime = runtime(RuntimeLimits::default());
+    let realm = runtime.create_realm().expect("realm");
+    let mut context = runtime.context(&realm).expect("context");
+    let run = context.instantiate(authority).expect("run");
+
+    let result = context
+        .call(&run, &[], ExecutionLimits::default())
+        .expect("object spread execution");
+    assert_eq!(
+        result
+            .as_string()
+            .expect("live result")
+            .expect("string")
+            .to_utf8_lossy()
+            .expect("UTF-8"),
+        "1|5|2|4|x|y"
+    );
+}
+
+#[test]
 fn duplicate_literal_key_replaces_one_slot_without_double_charging() {
     let authority = compile("function run(){return {value:1,value:2}.value;}", "run");
     let mut runtime = runtime(RuntimeLimits::default());
