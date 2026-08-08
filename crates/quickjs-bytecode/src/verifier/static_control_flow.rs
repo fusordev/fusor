@@ -23,11 +23,12 @@ use super::{
 /// Structurally checked successors before ordinary stack dataflow.
 pub(super) struct StructurallyVerifiedControlFlow {
     instructions: Vec<VerifiedInstruction>,
+    function_kind: FunctionKind,
 }
 
 impl StructurallyVerifiedControlFlow {
-    pub(super) fn into_instructions(self) -> Vec<VerifiedInstruction> {
-        self.instructions
+    pub(super) fn into_parts(self) -> (Vec<VerifiedInstruction>, FunctionKind) {
+        (self.instructions, self.function_kind)
     }
 }
 
@@ -136,6 +137,7 @@ pub(super) fn validate_static_semantics(
 
     Ok(StructurallyVerifiedControlFlow {
         instructions: verified,
+        function_kind,
     })
 }
 

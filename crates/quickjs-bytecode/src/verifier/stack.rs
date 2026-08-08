@@ -1,6 +1,6 @@
 use std::collections::VecDeque;
 
-use crate::{DecodedInstruction, FinalOpcode};
+use crate::{DecodedInstruction, FinalOpcode, FunctionKind};
 
 use super::{
     InstructionIndex, VerificationError, VerificationErrorKind, VerificationLimits,
@@ -27,7 +27,7 @@ pub(super) fn analyze_ordinary_stack(
     limits: VerificationLimits,
     require_empty_exits: bool,
 ) -> Result<StackCertificate, VerificationError> {
-    let mut instructions = structurally_verified.into_instructions();
+    let (mut instructions, function_kind) = structurally_verified.into_parts();
     let Some(entry) = instructions.first_mut() else {
         return Err(VerificationError::root(
             VerificationErrorKind::EmptyBytecode,
@@ -200,6 +200,17 @@ pub(super) fn analyze_ordinary_stack(
                     );
                 let returns_from_finally =
                     current.decoded.instruction().opcode() == FinalOpcode::Ret;
+                // Resuming a suspended `yield` with `generator.return(value)`
+                // abandons the surrounding expression evaluation. The VM
+                // retains that expression stack in the suspended frame, then
+                // discards the frame after `return_async` consumes `value`.
+                // Async functions have no corresponding suspended expression
+                // context and retain the ordinary empty-exit requirement.
+                let abandons_generator_expression = matches!(
+                    function_kind,
+                    FunctionKind::Generator | FunctionKind::AsyncGenerator
+                ) && current.decoded.instruction().opcode()
+                    == FinalOpcode::ReturnAsync;
                 // This structural pass cannot distinguish the pending
                 // completion and return-address slots introduced by `gosub`.
                 // A body containing `gosub` may therefore defer non-empty
@@ -214,6 +225,7 @@ pub(super) fn analyze_ordinary_stack(
                     && output_depth != 0
                     && !protected_throw
                     && !returns_from_finally
+                    && !abandons_generator_expression
                     && !defers_typed_finally_exit
                 {
                     return Err(VerificationError::at_instruction(

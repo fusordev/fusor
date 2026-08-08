@@ -233,6 +233,44 @@ fn compiler_throw_rejects_values_stranded_below_the_thrown_value() {
 }
 
 #[test]
+fn compiler_generator_return_async_may_abandon_suspended_expression_values() {
+    let bytecode = encode(&[
+        (FinalOpcode::Object, Operands::None),
+        (FinalOpcode::Push0, Operands::NoneInt),
+        (FinalOpcode::Undefined, Operands::None),
+        (FinalOpcode::ReturnAsync, Operands::None),
+    ]);
+    for kind in [FunctionKind::Generator, FunctionKind::AsyncGenerator] {
+        let generator_header = UnverifiedFunctionHeader::new((kind as u16) << 4, 0, 0, 0);
+        let verified = verify_compiler_control_flow(
+            UnverifiedCompilerFunctionBody::new(
+                bytecode.clone(),
+                FunctionIndexDomains::default(),
+                generator_header,
+            ),
+            VerificationLimits::default(),
+        )
+        .expect("a generator return abandons its suspended enclosing expression state");
+        assert_eq!(verified.instructions()[3].entry_stack_depth(), Some(3));
+    }
+
+    let async_header = UnverifiedFunctionHeader::new((FunctionKind::Async as u16) << 4, 0, 0, 0);
+    let error = verify_compiler_control_flow(
+        UnverifiedCompilerFunctionBody::new(
+            bytecode,
+            FunctionIndexDomains::default(),
+            async_header,
+        ),
+        VerificationLimits::default(),
+    )
+    .expect_err("an async function has no suspended expression stack to abandon");
+    assert_eq!(
+        error.kind(),
+        &VerificationErrorKind::NonEmptyCompilerExitStack { remaining: 2 }
+    );
+}
+
+#[test]
 fn conditional_edges_use_exact_instruction_indices_and_equal_join_depths() {
     let bytecode = encode(&[
         (FinalOpcode::PushTrue, Operands::None),

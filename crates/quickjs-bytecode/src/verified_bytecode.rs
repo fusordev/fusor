@@ -4634,7 +4634,8 @@ fn verify_method_definitions(
         if instructions.iter().any(|instruction| {
             matches!(
                 instruction.decoded().instruction().opcode(),
-                FinalOpcode::DefineMethod
+                FinalOpcode::ArrayFrom
+                    | FinalOpcode::DefineMethod
                     | FinalOpcode::DefineMethodComputed
                     | FinalOpcode::DefineClass
                     | FinalOpcode::CopyDataProperties
@@ -6048,7 +6049,19 @@ fn verify_object_definition_provenance(
                 state.pop();
             }
         }
-        if !has_successor && state.iter().copied().any(is_append_provenance) {
+        let abandons_generator_expression = decoded.instruction().opcode()
+            == FinalOpcode::ReturnAsync
+            && matches!(
+                metadata.executable_kind,
+                CompilerExecutableKind::GeneratorFunction
+                    | CompilerExecutableKind::GeneratorMethod
+                    | CompilerExecutableKind::AsyncGeneratorFunction
+                    | CompilerExecutableKind::AsyncGeneratorMethod
+            );
+        if !has_successor
+            && state.iter().copied().any(is_append_provenance)
+            && !abandons_generator_expression
+        {
             return Err(BytecodeVerificationError::function(
                 id,
                 BytecodeVerificationErrorKind::AppendMarkerAtExit { pc: decoded.pc() },

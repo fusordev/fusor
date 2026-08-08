@@ -789,6 +789,38 @@ fn final_authority_rejects_append_provenance_at_a_terminal() {
 }
 
 #[test]
+fn final_authority_allows_generator_return_to_abandon_append_provenance() {
+    let instructions = [
+        (FinalOpcode::InitialYield, Operands::None),
+        (FinalOpcode::ArrayFrom, Operands::NPop { argument_count: 0 }),
+        (FinalOpcode::Push0, Operands::NoneInt),
+        (FinalOpcode::Undefined, Operands::None),
+        (FinalOpcode::ReturnAsync, Operands::None),
+    ];
+    let text = "function* f(){}";
+    let span = SourceByteSpan::new(0, u32::try_from(text.len()).expect("source length"));
+    let input = profiled_single_input(
+        &instructions,
+        UnverifiedFunctionHeader::generator_source_function_with_variable_references(false, 0, 0),
+        CompilerExecutableKind::GeneratorFunction,
+        &[atom("f")],
+        Some(AtomPoolIndex::new(0)),
+        &[],
+        0,
+        0,
+        &[],
+        source(
+            text,
+            span,
+            Some(SourceByteSpan::new(10, 11)),
+            &[(0, span), (1, span), (4, span), (5, span), (6, span)],
+        ),
+    );
+    verify_compiler_bytecode_graph(input, BytecodeGraphVerificationLimits::default())
+        .expect("generator return discards the suspended array-append state");
+}
+
+#[test]
 fn final_authority_rejects_linear_append_provenance_laundering() {
     let cases = [
         vec![
