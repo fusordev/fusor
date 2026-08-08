@@ -748,13 +748,10 @@ impl CompilationGoal<'_> {
 
     const fn supported_parse_mode(self) -> Result<ParseMode, UnsupportedCompilationGoal> {
         match self {
-            Self::GlobalScript(_) => Ok(ParseMode::Script),
+            Self::GlobalScript(_) | Self::DirectEval(_) => Ok(ParseMode::Script),
             Self::Module => Ok(ParseMode::Module),
             Self::IndirectEval(goal) if !goal.forces_strict() => Ok(ParseMode::Script),
             Self::IndirectEval(goal) => Err(UnsupportedCompilationGoal::IndirectEval(goal)),
-            Self::DirectEval(context) => Err(UnsupportedCompilationGoal::DirectEval(
-                context.capabilities(),
-            )),
             Self::DynamicFunction(kind) => Err(UnsupportedCompilationGoal::DynamicFunction(kind)),
         }
     }
@@ -2991,9 +2988,9 @@ fn parse_in_mode<'arena, 'scope>(
         CompilationGoal::GlobalScript(goal) => {
             (goal.forces_strict(), goal.allows_top_level_await())
         }
+        CompilationGoal::DirectEval(context) => (context.capabilities().is_strict(), false),
         CompilationGoal::Module
         | CompilationGoal::IndirectEval(_)
-        | CompilationGoal::DirectEval(_)
         | CompilationGoal::DynamicFunction(_) => (false, false),
     };
     let mut parsed = if allow_top_level_await {

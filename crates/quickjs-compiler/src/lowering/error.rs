@@ -49,6 +49,8 @@ pub enum UnsupportedLeafFeature {
     UnsupportedPattern,
     /// Program-level bindings require the constructor realm's global environment.
     GlobalEnvironment,
+    /// Sloppy direct eval requires its caller's variable environment.
+    DirectEvalVariableEnvironment,
     /// A reference access or binding write policy is not supported.
     UnsupportedReference,
     /// An identifier remained unresolved after Oxc semantics.

@@ -43,10 +43,10 @@ use quickjs_bytecode::{
 #[cfg(test)]
 use crate::runtime::ForInAdvance;
 use crate::{
-    ArrayIndex, BigIntError, Context, DynamicFunctionCompileFailure, DynamicFunctionFamily,
-    EngineFault, ExceptionKind, ExecutionError, Function, GlobalDeclarationRejectionKind,
-    HandleError, HandleKind, IndirectEvalCompileRequest, JsBigInt, JsException, JsNumber,
-    JsStackFrame, JsString, JsStringError, JsValue, MAX_STRING_CODE_UNITS,
+    ArrayIndex, BigIntError, Context, DirectEvalCompileRequest, DynamicFunctionCompileFailure,
+    DynamicFunctionFamily, EngineFault, ExceptionKind, ExecutionError, Function,
+    GlobalDeclarationRejectionKind, HandleError, HandleKind, IndirectEvalCompileRequest, JsBigInt,
+    JsException, JsNumber, JsStackFrame, JsString, JsStringError, JsValue, MAX_STRING_CODE_UNITS,
     OrdinaryDynamicFunctionCompiler, OrdinaryDynamicFunctionSource, PredefinedAtom, PropertyKey,
     PropertyLayout, Runtime, RuntimeError, RuntimeResource,
     conversion::{
@@ -4051,6 +4051,13 @@ impl CallReturn {
 )]
 enum Step {
     Continue,
+    DirectEval {
+        function: FunctionId,
+        argument_count: usize,
+        scope_index: u16,
+        return_to: CallReturn,
+        source_pc: BytecodePc,
+    },
     Call {
         function: FunctionId,
         inputs: CallInputSource,
@@ -4777,6 +4784,88 @@ fn execute_frame_loop(
         let step = execute_one(runtime, frame, execution_budget)?;
         match step {
             Step::Continue => {}
+            Step::DirectEval {
+                function,
+                argument_count,
+                scope_index,
+                return_to,
+                source_pc,
+            } => {
+                let inputs = take_call_inputs(
+                    frames.last_mut().ok_or(EngineFault::MissingInstruction {
+                        function: FunctionTemplateId::new(0),
+                        instruction: 0,
+                    })?,
+                    function,
+                    CallInputSource::Frame {
+                        argument_count,
+                        kind: CallKind::Direct,
+                    },
+                )?;
+                let mut arguments = inputs.arguments;
+                let argument = arguments.take_first_or_undefined();
+                let StoredValue::String(source) = argument else {
+                    let parent = frames.last_mut().ok_or(EngineFault::MissingInstruction {
+                        function: FunctionTemplateId::new(0),
+                        instruction: 0,
+                    })?;
+                    push_call_result(runtime, parent, argument, return_to)?;
+                    continue;
+                };
+                let caller = frames.last().ok_or(EngineFault::MissingInstruction {
+                    function: FunctionTemplateId::new(0),
+                    instruction: 0,
+                })?;
+                let realm = code(runtime, caller.code)?.realm;
+                let origin = instruction_location(runtime, caller, source_pc)?;
+                let request = direct_eval_compile_request(runtime, caller, source, scope_index)?;
+                let receiver = caller.receiver.duplicate();
+                let active_frames = active_execution_frames(frames);
+                frames
+                    .try_reserve(1)
+                    .map_err(|_| ExecutionError::AllocationFailed {
+                        resource: RuntimeResource::Frames,
+                        additional: 1,
+                    })?;
+                let Some(compiler) = compiler else {
+                    return Err(DynamicFunctionCompileFailure::Engine {
+                        source: Arc::new(DynamicFunctionServiceUnavailable),
+                    }
+                    .into());
+                };
+                match finish_direct_eval(
+                    runtime,
+                    realm,
+                    request,
+                    receiver,
+                    return_to,
+                    origin,
+                    active_frames,
+                    *active_frame_values,
+                    compiler,
+                    execution_budget,
+                ) {
+                    Ok(child) => {
+                        *active_frame_values =
+                            active_frame_values.saturating_add(child.reserved_values);
+                        frames.push(child);
+                    }
+                    Err(
+                        NativeFailure::Abrupt(pending)
+                        | NativeFailure::AbruptAfterTransient(pending),
+                    ) => {
+                        dispatch_pending_exception(
+                            runtime,
+                            frames,
+                            active_frame_values,
+                            pending,
+                            Some(compiler),
+                            execution_budget,
+                        )?;
+                    }
+                    Err(NativeFailure::Execution(error)) => return Err(error),
+                }
+            }
             Step::Call {
                 function,
                 inputs,

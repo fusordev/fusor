@@ -44,6 +44,14 @@ fn eval_intrinsic_has_the_standard_global_descriptor() {
 }
 
 #[test]
+fn closed_direct_eval_returns_the_script_completion() {
+    evaluate(
+        "function local(){return eval('let answer=40+2;answer;');} local();",
+        |value| assert!(number(value).strict_equals(JsNumber::from_i32(42))),
+    );
+}
+
+#[test]
 fn indirect_eval_without_an_argument_returns_undefined() {
     evaluate("(0, eval)();", |value| {
         assert_eq!(value.kind(), Ok(ValueKind::Undefined));

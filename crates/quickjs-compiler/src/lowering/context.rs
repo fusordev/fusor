@@ -332,6 +332,61 @@ impl<'unit, 'arena, 'scope> CompilationContext<'unit, 'arena, 'scope> {
         self.compile_subtree_with_all_limits(root, limits, graph_limits, bytecode_limits)
     }
 
+    /// Lowers a closed direct-eval Script and every nested function template
+    /// as an indivisible verified authority.
+    ///
+    /// Caller strictness and source strict directives are honored. Eval-local
+    /// lexical declarations and strict `var` declarations are supported;
+    /// caller/global name resolution and sloppy variable-environment mutation
+    /// remain fail closed until an external environment is supplied.
+    ///
+    /// # Errors
+    ///
+    /// Rejects non-direct-eval goals, caller/global references, sloppy `var`
+    /// declarations, unsupported syntax, resource limits, and verification
+    /// failures.
+    pub fn compile_direct_eval_script(
+        &self,
+        limits: VerificationLimits,
+    ) -> Result<CompiledFunctionTree, LeafCompilationError> {
+        self.compile_direct_eval_script_with_all_limits(
+            limits,
+            FunctionGraphVerificationLimits::default(),
+            BytecodeGraphVerificationLimits::default(),
+        )
+    }
+
+    /// Lowers a closed direct-eval Script with every staged and final graph
+    /// limit explicit.
+    ///
+    /// # Errors
+    ///
+    /// Returns the same failures as [`Self::compile_direct_eval_script`].
+    pub fn compile_direct_eval_script_with_all_limits(
+        &self,
+        limits: VerificationLimits,
+        graph_limits: FunctionGraphVerificationLimits,
+        bytecode_limits: BytecodeGraphVerificationLimits,
+    ) -> Result<CompiledFunctionTree, LeafCompilationError> {
+        if !crate::is_supported_direct_eval_goal(self.unit.goal()) {
+            return unsupported(
+                UnsupportedLeafFeature::UnsupportedCompilationUnit,
+                self.unit.program().span,
+            );
+        }
+        let root = self
+            .planned
+            .plan
+            .executables()
+            .first()
+            .ok_or(LeafCompilationError::SemanticInvariant {
+                invariant: "direct eval storage plan has a Program root",
+                span: Some(self.unit.program().span),
+            })?
+            .id();
+        self.compile_subtree_with_all_limits(root, limits, graph_limits, bytecode_limits)
+    }
+
     /// Lowers the complete exact wrapper Script for a supported synchronous
     /// dynamic-function constructor invocation.
     ///

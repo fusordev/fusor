@@ -1284,6 +1284,58 @@ pub(super) fn execute_one(
                 source_pc,
             });
         }
+        FinalOpcode::Eval => {
+            let Operands::NPopU16 {
+                argument_count,
+                scope_index,
+            } = operands
+            else {
+                return unsupported_dispatch(opcode);
+            };
+            let argument_count = usize::from(argument_count);
+            let required = argument_count.saturating_add(1);
+            if frame.stack.len() < required {
+                return Err(EngineFault::StackDepthMismatch {
+                    function: frame.template,
+                    pc: source_pc,
+                    expected: u32::try_from(required).unwrap_or(u32::MAX),
+                    actual: frame.stack.len(),
+                }
+                .into());
+            }
+            let callee_index = frame.stack.len() - required;
+            let StoredValue::Function(function) = stack_value_at(frame, callee_index)? else {
+                return Ok(Step::Abrupt(not_callable_exception(
+                    runtime, frame, source_pc,
+                )?));
+            };
+            let return_to =
+                CallReturn::push(verified_instruction.successors().fallthrough().ok_or(
+                    EngineFault::InvalidSuccessor {
+                        function: frame.template,
+                        pc: source_pc,
+                    },
+                )?);
+            let realm = code(runtime, frame.code)?.realm;
+            if !is_canonical_realm_eval(runtime, *function, realm)? {
+                return Ok(Step::Call {
+                    function: *function,
+                    inputs: CallInputSource::Frame {
+                        argument_count,
+                        kind: CallKind::Direct,
+                    },
+                    return_to,
+                    source_pc,
+                });
+            }
+            return Ok(Step::DirectEval {
+                function: *function,
+                argument_count,
+                scope_index,
+                return_to,
+                source_pc,
+            });
+        }
         FinalOpcode::CallMethod => {
             let Operands::NPop { argument_count } = operands else {
                 return unsupported_dispatch(opcode);

@@ -1994,7 +1994,7 @@ fn apply_native_pre_call(
 }
 
 #[derive(Debug)]
-struct DynamicFunctionServiceUnavailable;
+pub(super) struct DynamicFunctionServiceUnavailable;
 
 impl fmt::Display for DynamicFunctionServiceUnavailable {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {

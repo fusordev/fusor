@@ -372,6 +372,10 @@ fn global_and_eval_goals_reject_top_level_return() {
     for goal in [
         CompilationGoal::GlobalScript(GlobalScriptGoal::new()),
         CompilationGoal::IndirectEval(IndirectEvalGoal::new()),
+        CompilationGoal::DirectEval(DirectEvalContext::new(
+            DirectEvalCapabilities::new(),
+            DirectEvalScopeSnapshot::default(),
+        )),
     ] {
         let error = parse(&allocator, source, FrontendOptions::for_goal(goal))
             .expect_err("top-level return is invalid for global and eval code");
@@ -400,28 +404,12 @@ fn plain_indirect_eval_succeeds_without_losing_its_compilation_goal() {
 }
 
 #[test]
-fn eval_goals_fail_before_oxc_until_their_adapters_are_faithful() {
-    let direct_capabilities = DirectEvalCapabilities::new()
-        .with_strict(true)
-        .with_new_target(true)
-        .with_super_call(true)
-        .with_arguments_allowed(true);
-    let direct_context =
-        DirectEvalContext::new(direct_capabilities, DirectEvalScopeSnapshot::default());
-    let cases = [
-        (
-            CompilationGoal::IndirectEval(IndirectEvalGoal::new().with_forced_strict(true)),
-            UnsupportedCompilationGoal::IndirectEval(
-                IndirectEvalGoal::new().with_forced_strict(true),
-            ),
-            "force_strict=true",
-        ),
-        (
-            CompilationGoal::DirectEval(direct_context),
-            UnsupportedCompilationGoal::DirectEval(direct_capabilities),
-            "strict=true, new_target=true, super_property=false, super_call=true, arguments_allowed=true",
-        ),
-    ];
+fn forced_strict_indirect_eval_fails_before_oxc_until_its_adapter_is_faithful() {
+    let cases = [(
+        CompilationGoal::IndirectEval(IndirectEvalGoal::new().with_forced_strict(true)),
+        UnsupportedCompilationGoal::IndirectEval(IndirectEvalGoal::new().with_forced_strict(true)),
+        "force_strict=true",
+    )];
 
     for (goal, expected, requested_flags) in cases {
         let allocator = Allocator::new();
@@ -444,6 +432,27 @@ fn eval_goals_fail_before_oxc_until_their_adapters_are_faithful() {
         );
         assert!(error.diagnostics()[0].message.contains("not implemented"));
     }
+}
+
+#[test]
+fn direct_eval_parses_as_script_and_inherits_caller_strictness() {
+    let capabilities = DirectEvalCapabilities::new()
+        .with_strict(true)
+        .with_new_target(true)
+        .with_arguments_allowed(true);
+    let context = DirectEvalContext::new(capabilities, DirectEvalScopeSnapshot::default());
+    let allocator = Allocator::new();
+    let unit = parse(
+        &allocator,
+        "let answer = 40 + 2; answer;",
+        FrontendOptions::for_goal(CompilationGoal::DirectEval(context)),
+    )
+    .expect("closed direct eval Script");
+
+    assert_eq!(unit.goal(), CompilationGoal::DirectEval(context));
+    assert!(unit.program().source_type.is_script());
+    assert!(unit.has_synthetic_strict_directive());
+    assert!(unit.source_directives().is_empty());
 }
 
 #[test]

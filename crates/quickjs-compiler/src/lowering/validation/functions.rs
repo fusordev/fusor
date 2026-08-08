@@ -380,11 +380,13 @@ impl<'arena> CompilationContext<'_, 'arena, '_> {
         Ok((executable, program))
     }
 
-    pub(in crate::lowering) fn selected_indirect_eval_script(
+    pub(in crate::lowering) fn selected_eval_script(
         &self,
         executable_id: ExecutableId,
     ) -> Result<(&Executable, &Program<'arena>), LeafCompilationError> {
-        if !crate::is_supported_indirect_eval_goal(self.unit.goal()) {
+        if !crate::is_supported_indirect_eval_goal(self.unit.goal())
+            && !crate::is_supported_direct_eval_goal(self.unit.goal())
+        {
             return unsupported(
                 UnsupportedLeafFeature::UnsupportedCompilationUnit,
                 self.unit.program().span,
@@ -402,7 +404,7 @@ impl<'arena> CompilationContext<'_, 'arena, '_> {
             .get(executable_id.index())
             .copied()
             .ok_or(LeafCompilationError::SemanticInvariant {
-                invariant: "indirect eval executable has an Oxc node identity",
+                invariant: "eval executable has an Oxc node identity",
                 span: Some(executable.span()),
             })?;
         if self
@@ -415,7 +417,7 @@ impl<'arena> CompilationContext<'_, 'arena, '_> {
             != Some(executable_id)
         {
             return Err(LeafCompilationError::SemanticInvariant {
-                invariant: "indirect eval Oxc node and executable identities are bijective",
+                invariant: "eval Oxc node and executable identities are bijective",
                 span: Some(executable.span()),
             });
         }
@@ -437,7 +439,7 @@ impl<'arena> CompilationContext<'_, 'arena, '_> {
             || self.planned.plan.kind() != CompilationUnitKind::Script
         {
             return Err(LeafCompilationError::SemanticInvariant {
-                invariant: "indirect eval has one synchronous zero-argument Program root",
+                invariant: "eval has one synchronous zero-argument Program root",
                 span: Some(program.span),
             });
         }

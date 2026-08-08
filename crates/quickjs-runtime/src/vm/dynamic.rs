@@ -314,6 +314,96 @@ pub(super) fn finish_indirect_eval(
 }
 
 #[allow(
+    clippy::too_many_arguments,
+    reason = "direct eval compilation and caller-frame admission form one audited boundary"
+)]
+pub(super) fn finish_direct_eval(
+    runtime: &mut Runtime,
+    realm: RealmId,
+    request: DirectEvalCompileRequest,
+    receiver: StoredValue,
+    return_to: CallReturn,
+    origin: JsStackFrame,
+    active_frames: usize,
+    active_frame_values: u64,
+    compiler: &Arc<dyn OrdinaryDynamicFunctionCompiler>,
+    execution_budget: &mut ExecutionBudget,
+) -> Result<Frame, NativeFailure> {
+    execution_budget.charge_indirect_eval_compilation(request.source())?;
+    let authority = match compiler.compile_direct_eval(request) {
+        Ok(authority) => authority,
+        Err(DynamicFunctionCompileFailure::Syntax { message }) => {
+            return Err(NativeFailure::Abrupt(PendingException {
+                realm,
+                payload: PendingExceptionPayload::EngineError {
+                    kind: ExceptionKind::SyntaxError,
+                    message,
+                },
+                origin,
+            }));
+        }
+        Err(error @ DynamicFunctionCompileFailure::Engine { .. }) => {
+            return Err(NativeFailure::Execution(error.into()));
+        }
+    };
+    if !authority.root().metadata().closures().is_empty() {
+        return Err(NativeFailure::Execution(
+            EngineFault::RuntimeInvariant {
+                message: "closed direct eval authority imported an external environment",
+            }
+            .into(),
+        ));
+    }
+
+    let installation = {
+        let mut context = Context { runtime, realm };
+        context.install_indirect_eval_script_during_execution(authority)
+    };
+    let mut installed = installation.map_err(|error| NativeFailure::Execution(error.into()))?;
+    let plan = match plan_frame(
+        runtime,
+        installed.function,
+        active_frames,
+        active_frame_values,
+        0,
+        false,
+    ) {
+        Ok(plan) => plan,
+        Err(error) => {
+            retire_failed_dynamic_root(runtime, installed)?;
+            return Err(NativeFailure::Execution(error));
+        }
+    };
+    let mut frame = match create_frame(
+        runtime,
+        plan,
+        receiver,
+        None,
+        FrameArguments::Owned(CallArguments::empty()),
+        Some(return_to),
+        None,
+    ) {
+        Ok(frame) => frame,
+        Err(error) => {
+            retire_failed_dynamic_root(runtime, installed)?;
+            return Err(NativeFailure::Execution(error));
+        }
+    };
+    if let Err(error) = installed.commit_environment() {
+        retire_failed_dynamic_root(runtime, installed)?;
+        return Err(NativeFailure::Execution(error.into()));
+    }
+    frame.dynamic_return = Some(DynamicFunctionReturn {
+        root: installed,
+        realm,
+        kind: DynamicRootKind::IndirectEval,
+        construction: None,
+        origin: None,
+    });
+    Ok(frame)
+}
+
+#[allow(
     clippy::too_many_lines,
     reason = "one resumable Object.prototype.toString entry keeps every primitive wrapper and branded default-tag branch in specification order"
 )]
@@ -1048,6 +1138,64 @@ fn apply_dynamic_constructor_prototype(
         )?));
     }
     Ok(completion)
+}
+
+pub(super) fn is_canonical_realm_eval(
+    runtime: &Runtime,
+    function: FunctionId,
+    realm: RealmId,
+) -> Result<bool, EngineFault> {
+    let node = runtime
+        .functions
+        .get(function)
+        .ok_or(EngineFault::StaleHeapEdge {
+            edge: "function",
+            index: function.index(),
+            generation: function.generation(),
+        })?;
+    Ok(matches!(
+        node.native(),
+        Some(native) if native.kind == NativeFunctionKind::Eval && native.realm == realm
+    ))
+}
+
+pub(super) fn direct_eval_compile_request(
+    runtime: &Runtime,
+    frame: &Frame,
+    source: JsString,
+    scope_index: u16,
+) -> Result<DirectEvalCompileRequest, ExecutionError> {
+    let template = code(runtime, frame.code)?
+        .authority
+        .function(frame.template)
+        .ok_or(EngineFault::InvalidClosureEnvironment {
+            function: frame.template,
+        })?;
+    let function_code = runtime
+        .functions
+        .get(frame.function)
+        .ok_or(EngineFault::StaleHeapEdge {
+            edge: "function",
+            index: frame.function.index(),
+            generation: frame.function.generation(),
+        })?
+        .bytecode()?;
+    let kind = template.metadata().executable_kind();
+    let function_context = !matches!(
+        kind,
+        CompilerExecutableKind::GlobalScript
+            | CompilerExecutableKind::IndirectEvalScript
+            | CompilerExecutableKind::DynamicFunctionScript
+    );
+    Ok(DirectEvalCompileRequest::new(source, frame.strict)
+        .with_scope_index(scope_index)
+        .with_new_target(function_context)
+        .with_super_property(function_code.home_object.is_some())
+        .with_super_call(matches!(
+            frame.constructor_state,
+            ConstructorState::DerivedUninitialized | ConstructorState::DerivedInitialized
+        ))
+        .with_arguments_allowed(function_context))
 }
 
 pub(super) fn function_is_constructor(

@@ -37,6 +37,121 @@ pub struct IndirectEvalCompileRequest {
     source: JsString,
 }
 
+/// Owned source and caller grammar capabilities for one direct `eval`.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct DirectEvalCompileRequest {
+    source: JsString,
+    scope_index: u16,
+    capabilities: u8,
+}
+
+impl DirectEvalCompileRequest {
+    const STRICT: u8 = 1 << 0;
+    const NEW_TARGET: u8 = 1 << 1;
+    const SUPER_PROPERTY: u8 = 1 << 2;
+    const SUPER_CALL: u8 = 1 << 3;
+    const ARGUMENTS_ALLOWED: u8 = 1 << 4;
+
+    /// Creates a direct-eval request with the caller's strictness.
+    #[must_use]
+    pub const fn new(source: JsString, strict: bool) -> Self {
+        Self {
+            source,
+            scope_index: 1,
+            capabilities: if strict { Self::STRICT } else { 0 },
+        }
+    }
+
+    /// Retains the verified adjusted lexical-scope operand from the callsite.
+    #[must_use]
+    pub const fn with_scope_index(mut self, scope_index: u16) -> Self {
+        self.scope_index = scope_index;
+        self
+    }
+
+    /// Selects whether the caller admits `new.target`.
+    #[must_use]
+    pub const fn with_new_target(mut self, yes: bool) -> Self {
+        self.set_capability(Self::NEW_TARGET, yes);
+        self
+    }
+
+    /// Selects whether the caller admits `super` property access.
+    #[must_use]
+    pub const fn with_super_property(mut self, yes: bool) -> Self {
+        self.set_capability(Self::SUPER_PROPERTY, yes);
+        self
+    }
+
+    /// Selects whether the caller admits a direct `super()` call.
+    #[must_use]
+    pub const fn with_super_call(mut self, yes: bool) -> Self {
+        self.set_capability(Self::SUPER_CALL, yes);
+        self
+    }
+
+    /// Selects whether the caller admits the `arguments` identifier.
+    #[must_use]
+    pub const fn with_arguments_allowed(mut self, yes: bool) -> Self {
+        self.set_capability(Self::ARGUMENTS_ALLOWED, yes);
+        self
+    }
+
+    /// Returns the exact JavaScript source string.
+    #[must_use]
+    pub const fn source(&self) -> &JsString {
+        &self.source
+    }
+
+    /// Returns whether caller strictness forces strict eval code.
+    #[must_use]
+    pub const fn is_strict(&self) -> bool {
+        self.has_capability(Self::STRICT)
+    }
+
+    /// Returns the verified adjusted lexical-scope operand from the callsite.
+    #[must_use]
+    pub const fn scope_index(&self) -> u16 {
+        self.scope_index
+    }
+
+    /// Returns whether `new.target` is meaningful in the caller.
+    #[must_use]
+    pub const fn allows_new_target(&self) -> bool {
+        self.has_capability(Self::NEW_TARGET)
+    }
+
+    /// Returns whether the caller admits `super` property access.
+    #[must_use]
+    pub const fn allows_super_property(&self) -> bool {
+        self.has_capability(Self::SUPER_PROPERTY)
+    }
+
+    /// Returns whether the caller admits a direct `super()` call.
+    #[must_use]
+    pub const fn allows_super_call(&self) -> bool {
+        self.has_capability(Self::SUPER_CALL)
+    }
+
+    /// Returns whether the caller admits the `arguments` identifier.
+    #[must_use]
+    pub const fn allows_arguments(&self) -> bool {
+        self.has_capability(Self::ARGUMENTS_ALLOWED)
+    }
+
+    const fn set_capability(&mut self, flag: u8, yes: bool) {
+        if yes {
+            self.capabilities |= flag;
+        } else {
+            self.capabilities &= !flag;
+        }
+    }
+
+    const fn has_capability(&self, flag: u8) -> bool {
+        self.capabilities & flag != 0
+    }
+}
+
 impl IndirectEvalCompileRequest {
     /// Creates an owned indirect-eval request.
     #[must_use]
@@ -127,10 +242,31 @@ pub trait DynamicFunctionCompiler: Send + Sync + 'static {
             source: Arc::new(IndirectEvalCompilerUnavailable),
         })
     }
+
+    /// Compiles one direct-eval Script against caller grammar context.
+    ///
+    /// The default keeps embedders without direct-eval environment support
+    /// fail closed.
+    ///
+    /// # Errors
+    ///
+    /// Returns either an exact JavaScript syntax failure or a shared engine
+    /// failure.
+    fn compile_direct_eval(
+        &self,
+        _source: DirectEvalCompileRequest,
+    ) -> Result<Arc<VerifiedBytecode>, DynamicFunctionCompileFailure> {
+        Err(DynamicFunctionCompileFailure::Engine {
+            source: Arc::new(DirectEvalCompilerUnavailable),
+        })
+    }
 }
 
 #[derive(Debug)]
 struct IndirectEvalCompilerUnavailable;
+
+#[derive(Debug)]
+struct DirectEvalCompilerUnavailable;
 
 impl fmt::Display for IndirectEvalCompilerUnavailable {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -139,6 +275,14 @@ impl fmt::Display for IndirectEvalCompilerUnavailable {
 }
 
 impl Error for IndirectEvalCompilerUnavailable {}
+
+impl fmt::Display for DirectEvalCompilerUnavailable {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("the host compiler does not support direct eval")
+    }
+}
+
+impl Error for DirectEvalCompilerUnavailable {}
 
 /// Compatibility name for the pre-generator compiler-service contract.
 pub use DynamicFunctionCompiler as OrdinaryDynamicFunctionCompiler;
@@ -153,8 +297,8 @@ mod tests {
     use quickjs_bytecode::VerifiedBytecode;
 
     use super::{
-        DynamicFunctionCompileRequest, DynamicFunctionCompiler, DynamicFunctionFamily,
-        IndirectEvalCompileRequest,
+        DirectEvalCompileRequest, DynamicFunctionCompileRequest, DynamicFunctionCompiler,
+        DynamicFunctionFamily, IndirectEvalCompileRequest,
     };
     use crate::{JsString, error::DynamicFunctionCompileFailure};
 
@@ -190,6 +334,25 @@ mod tests {
     }
 
     #[test]
+    fn direct_eval_request_retains_verified_caller_context() {
+        let source = string("answer");
+        let request = DirectEvalCompileRequest::new(source.clone(), true)
+            .with_scope_index(7)
+            .with_new_target(true)
+            .with_super_property(true)
+            .with_super_call(true)
+            .with_arguments_allowed(true);
+
+        assert_eq!(request.source(), &source);
+        assert!(request.is_strict());
+        assert_eq!(request.scope_index(), 7);
+        assert!(request.allows_new_target());
+        assert!(request.allows_super_property());
+        assert!(request.allows_super_call());
+        assert!(request.allows_arguments());
+    }
+
+    #[test]
     fn compiler_contract_is_shared_and_object_safe() {
         fn assert_send_sync_static<T: Send + Sync + 'static>() {}
         assert_send_sync_static::<Arc<dyn DynamicFunctionCompiler>>();
@@ -210,6 +373,11 @@ mod tests {
         let error = compiler
             .compile_indirect_eval(IndirectEvalCompileRequest::new(string("1")))
             .expect_err("default eval compiler is unavailable");
+        assert!(error.engine_source().is_some());
+
+        let error = compiler
+            .compile_direct_eval(DirectEvalCompileRequest::new(string("1"), false))
+            .expect_err("default direct eval compiler is unavailable");
         assert!(error.engine_source().is_some());
     }
 }

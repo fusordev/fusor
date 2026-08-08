@@ -1017,13 +1017,14 @@ impl<'unit, 'arena, 'scope> Planner<'unit, 'arena, 'scope> {
                     asynchronous: false,
                 },
             ),
-            CompilationGoal::IndirectEval(_) | CompilationGoal::DirectEval(_) => {
+            CompilationGoal::IndirectEval(_) => {
                 return Err(CompilerError::Unsupported {
                     feature: UnsupportedFeature::EvalCompilationGoal,
                     span: root_span,
                 });
             }
-            CompilationGoal::DynamicFunction(
+            CompilationGoal::DirectEval(_)
+            | CompilationGoal::DynamicFunction(
                 DynamicFunctionKind::Function
                 | DynamicFunctionKind::GeneratorFunction
                 | DynamicFunctionKind::AsyncFunction
@@ -2356,12 +2357,14 @@ impl<'unit, 'arena, 'scope> Planner<'unit, 'arena, 'scope> {
             CompilationUnitKind::Script => match kind {
                 DeclarationKind::Let | DeclarationKind::Const | DeclarationKind::Class
                     if crate::is_supported_dynamic_function_goal(self.unit.goal())
-                        || crate::is_supported_indirect_eval_goal(self.unit.goal()) =>
+                        || crate::is_supported_indirect_eval_goal(self.unit.goal())
+                        || crate::is_supported_direct_eval_goal(self.unit.goal()) =>
                 {
                     Ok(StoragePlacement::Local)
                 }
                 DeclarationKind::Var | DeclarationKind::Function
-                    if crate::is_supported_indirect_eval_goal(self.unit.goal())
+                    if (crate::is_supported_indirect_eval_goal(self.unit.goal())
+                        || crate::is_supported_direct_eval_goal(self.unit.goal()))
                         && self.executable_drafts[owner.index()].executable.is_strict() =>
                 {
                     Ok(StoragePlacement::Local)

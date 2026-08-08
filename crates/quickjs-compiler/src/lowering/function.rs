@@ -410,6 +410,11 @@ impl<'compiler, 'statement, 'unit, 'arena, 'scope, 'layout>
         planning.validate_owner()?;
         let program_scope =
             compiler.created_scope(program.scope_id.get(), program.node_id.get(), program.span)?;
+        let directives = if compiler.unit.has_synthetic_strict_directive() {
+            &program.directives[1..]
+        } else {
+            &program.directives
+        };
         Ok(Self {
             compiler,
             planning,
@@ -422,7 +427,7 @@ impl<'compiler, 'statement, 'unit, 'arena, 'scope, 'layout>
                         next: 0,
                     },
                     StatementWork::VisitDirectiveList {
-                        directives: &program.directives,
+                        directives,
                         next: 0,
                     },
                     StatementWork::PushScope {
@@ -881,8 +886,10 @@ impl CompilationContext<'_, '_, '_> {
             if crate::is_supported_global_script_goal(self.unit.goal()) {
                 let (executable, program) = self.selected_global_script(executable_id)?;
                 (executable, program, CompilerExecutableKind::GlobalScript)
-            } else if crate::is_supported_indirect_eval_goal(self.unit.goal()) {
-                let (executable, program) = self.selected_indirect_eval_script(executable_id)?;
+            } else if crate::is_supported_indirect_eval_goal(self.unit.goal())
+                || crate::is_supported_direct_eval_goal(self.unit.goal())
+            {
+                let (executable, program) = self.selected_eval_script(executable_id)?;
                 (
                     executable,
                     program,

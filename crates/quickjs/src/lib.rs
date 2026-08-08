@@ -22,16 +22,17 @@ pub use quickjs_diagnostics::{
     render_pretty_report,
 };
 use quickjs_frontend::{
-    CompilationGoal, DiagnosticStage, DynamicFunctionError, DynamicFunctionKind,
+    CompilationGoal, DiagnosticStage, DirectEvalCapabilities as FrontendDirectEvalCapabilities,
+    DirectEvalContext, DirectEvalScopeSnapshot, DynamicFunctionError, DynamicFunctionKind,
     DynamicFunctionSource, FrontendError, FrontendLimits, FrontendOptions, GlobalScriptGoal,
     IndirectEvalGoal, PreparedDynamicFunctionSource, RegisteredFrontendError, SourceFragment,
     with_dynamic_function_source_and_prepared, with_parsed_program, with_registered_program,
 };
 use quickjs_runtime::{
-    Context, DynamicFunctionCompileFailure, DynamicFunctionCompileRequest, DynamicFunctionCompiler,
-    DynamicFunctionFamily, DynamicFunctionScriptError, ExecutionError, ExecutionLimits, Function,
-    GlobalScriptError, IndirectEvalCompileRequest, InstallError, JsString, JsValue,
-    RuntimeDiagnosticError,
+    Context, DirectEvalCompileRequest, DynamicFunctionCompileFailure,
+    DynamicFunctionCompileRequest, DynamicFunctionCompiler, DynamicFunctionFamily,
+    DynamicFunctionScriptError, ExecutionError, ExecutionLimits, Function, GlobalScriptError,
+    IndirectEvalCompileRequest, InstallError, JsString, JsValue, RuntimeDiagnosticError,
 };
 
 /// Resource limits applied across Global Script parsing, compilation,
@@ -851,6 +852,7 @@ enum RuntimeSourceFragment {
     Parameter(usize),
     Body,
     IndirectEval,
+    DirectEval,
 }
 
 impl fmt::Display for RuntimeSourceFragment {
@@ -859,6 +861,7 @@ impl fmt::Display for RuntimeSourceFragment {
             Self::Parameter(index) => write!(formatter, "parameter fragment {index}"),
             Self::Body => formatter.write_str("body fragment"),
             Self::IndirectEval => formatter.write_str("indirect eval source"),
+            Self::DirectEval => formatter.write_str("direct eval source"),
         }
     }
 }
@@ -927,6 +930,13 @@ impl DynamicFunctionCompiler for OxcDynamicFunctionCompiler {
     ) -> Result<Arc<VerifiedBytecode>, DynamicFunctionCompileFailure> {
         compile_indirect_eval_source(source.source(), self.limits)
     }
+
+    fn compile_direct_eval(
+        &self,
+        source: DirectEvalCompileRequest,
+    ) -> Result<Arc<VerifiedBytecode>, DynamicFunctionCompileFailure> {
+        compile_direct_eval_source(&source, self.limits)
+    }
 }
 
 fn compile_indirect_eval_source(
@@ -943,6 +953,49 @@ fn compile_indirect_eval_source(
                 .map_err(DynamicFunctionCompilerError::Planning)?;
             compiler
                 .compile_indirect_eval_script_with_all_limits(
+                    limits.bytecode,
+                    limits.function_graph,
+                    limits.final_graph,
+                )
+                .map_err(DynamicFunctionCompilerError::Lowering)
+        },
+    )
+    .map_err(map_eval_frontend_error)?
+    .map_err(|source| {
+        let stage = match &source {
+            DynamicFunctionCompilerError::Planning(_) => {
+                DynamicFunctionEngineStage::CompilerPlanning
+            }
+            DynamicFunctionCompilerError::Lowering(_) => {
+                DynamicFunctionEngineStage::CompilerLowering
+            }
+        };
+        engine_failure_with_source(stage, source.to_string(), source)
+    })?;
+    Ok(Arc::new(compiled.verified_bytecode().clone()))
+}
+
+fn compile_direct_eval_source(
+    request: &DirectEvalCompileRequest,
+    limits: DynamicFunctionLimits,
+) -> Result<Arc<VerifiedBytecode>, DynamicFunctionCompileFailure> {
+    let source = js_string_to_utf8(request.source(), RuntimeSourceFragment::DirectEval)?;
+    let capabilities = FrontendDirectEvalCapabilities::new()
+        .with_strict(request.is_strict())
+        .with_new_target(request.allows_new_target())
+        .with_super_property(request.allows_super_property())
+        .with_super_call(request.allows_super_call())
+        .with_arguments_allowed(request.allows_arguments());
+    let context = DirectEvalContext::new(capabilities, DirectEvalScopeSnapshot::default());
+    let compiled = with_parsed_program(
+        &source,
+        FrontendOptions::for_goal(CompilationGoal::DirectEval(context))
+            .with_limits(limits.frontend),
+        |unit| {
+            let compiler = CompilationContext::new_with_source_name(unit, Arc::from("<eval>"))
+                .map_err(DynamicFunctionCompilerError::Planning)?;
+            compiler
+                .compile_direct_eval_script_with_all_limits(
                     limits.bytecode,
                     limits.function_graph,
                     limits.final_graph,

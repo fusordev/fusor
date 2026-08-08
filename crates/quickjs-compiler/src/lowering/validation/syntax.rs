@@ -53,6 +53,9 @@ impl CompilationContext<'_, '_, '_> {
         storage: &crate::storage::BindingStorage,
         span: Span,
     ) -> Result<(), LeafCompilationError> {
+        if crate::is_supported_direct_eval_goal(self.unit.goal()) {
+            return unsupported(UnsupportedLeafFeature::DirectEvalVariableEnvironment, span);
+        }
         let valid = match storage.placement() {
             StoragePlacement::GlobalObject => {
                 declaration_kind == VariableDeclarationKind::Var

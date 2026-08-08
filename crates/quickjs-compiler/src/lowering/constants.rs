@@ -111,7 +111,7 @@ impl<'arena> CompilationContext<'_, 'arena, '_> {
                 });
             }
             if executable.id().index() == 0
-                && crate::is_supported_script_root_goal(self.unit.goal())
+                && crate::is_supported_script_compilation_goal(self.unit.goal())
             {
                 owner.push(CompiledMetadataAtomCandidate {
                     key: CompiledMetadataAtomKey::ScriptCompletion,
@@ -382,7 +382,7 @@ impl<'arena> CompilationContext<'_, 'arena, '_> {
             AstKind::StringLiteral(literal)
                 if (!matches!(nodes.parent_kind(node_id), AstKind::Directive(_))
                     || (owner.index() == 0
-                        && crate::is_supported_script_root_goal(self.unit.goal())))
+                        && crate::is_supported_script_compilation_goal(self.unit.goal())))
                     && !is_noncomputed_static_property_key_node(self.unit, node_id) =>
             {
                 let value = decode_compiler_string(
