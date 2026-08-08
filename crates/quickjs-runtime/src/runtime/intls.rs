@@ -1,11 +1,185 @@
 //! `%Intl%` object allocation and Locale internal-slot access.
 
+use quickjs_intl::CollatorState;
+
 use super::{
-    HeapObject, HeapReference, JsString, ObjectId, ObjectRecord, RealmId, RealmIntrinsics, Runtime,
-    RuntimeResource, check_execution_limit, stale_heap_reference, usize_to_u64,
+    BoundFunction, FunctionId, FunctionImplementation, HeapFunction, HeapObject, HeapReference,
+    JsString, NativeFunctionKind, ObjectId, ObjectRecord, PredefinedAtom, PropertyLayout, RealmId,
+    RealmIntrinsics, Runtime, RuntimeResource, StoredValue, check_execution_limit,
+    stale_heap_reference, usize_to_u64,
 };
 
 impl Runtime {
+    pub(crate) fn allocate_intl_collator(
+        &mut self,
+        prototype: HeapReference,
+        resolved: CollatorState,
+    ) -> Result<ObjectId, crate::ExecutionError> {
+        if !self.heap_reference_is_live(prototype) {
+            return Err(stale_heap_reference(prototype).into());
+        }
+        check_execution_limit(
+            RuntimeResource::HeapObjects,
+            self.limits.max_heap_objects,
+            usize_to_u64(self.objects.len()).saturating_add(1),
+        )?;
+        self.objects
+            .try_reserve(1)
+            .map_err(|_| crate::ExecutionError::AllocationFailed {
+                resource: RuntimeResource::HeapObjects,
+                additional: 1,
+            })?;
+        let object = self
+            .insert_heap_object(HeapObject::intl_collator(
+                ObjectRecord::empty(Some(prototype)),
+                resolved,
+            ))
+            .map_err(|_| crate::ExecutionError::AllocationFailed {
+                resource: RuntimeResource::HeapObjects,
+                additional: 1,
+            })?;
+        self.collection_pending = true;
+        Ok(object)
+    }
+
+    pub(crate) fn intl_collator_state(
+        &self,
+        object: ObjectId,
+    ) -> Result<Option<&CollatorState>, crate::EngineFault> {
+        self.objects
+            .get(object)
+            .ok_or(crate::EngineFault::StaleHeapEdge {
+                edge: "Intl.Collator object",
+                index: object.index(),
+                generation: object.generation(),
+            })
+            .map(|object| object.intl_collator_state().map(|state| &state.resolved))
+    }
+
+    pub(crate) fn intl_collator_bound_compare(
+        &self,
+        object: ObjectId,
+    ) -> Result<Option<FunctionId>, crate::EngineFault> {
+        self.objects
+            .get(object)
+            .ok_or(crate::EngineFault::StaleHeapEdge {
+                edge: "Intl.Collator object",
+                index: object.index(),
+                generation: object.generation(),
+            })
+            .map(|object| {
+                object
+                    .intl_collator_state()
+                    .and_then(|state| state.bound_compare)
+            })
+    }
+
+    pub(crate) fn set_intl_collator_bound_compare(
+        &mut self,
+        object: ObjectId,
+        function: FunctionId,
+    ) -> Result<(), crate::EngineFault> {
+        if self.functions.get(function).is_none() {
+            return Err(crate::EngineFault::StaleHeapEdge {
+                edge: "Intl.Collator bound compare",
+                index: function.index(),
+                generation: function.generation(),
+            });
+        }
+        let object = self
+            .objects
+            .get_mut(object)
+            .ok_or(crate::EngineFault::StaleHeapEdge {
+                edge: "Intl.Collator object",
+                index: object.index(),
+                generation: object.generation(),
+            })?;
+        let state =
+            object
+                .intl_collator_state_mut()
+                .ok_or(crate::EngineFault::RuntimeInvariant {
+                    message: "bound compare target is not an Intl.Collator",
+                })?;
+        state.bound_compare = Some(function);
+        Ok(())
+    }
+
+    pub(crate) fn allocate_intl_collator_bound_compare(
+        &mut self,
+        realm: RealmId,
+        collator: ObjectId,
+    ) -> Result<FunctionId, crate::ExecutionError> {
+        if self.intl_collator_state(collator)?.is_none() {
+            return Err(crate::EngineFault::RuntimeInvariant {
+                message: "bound compare target is not an Intl.Collator",
+            }
+            .into());
+        }
+        let target = self.realm_intl_collator_compare(realm)?;
+        let prototype = self.realm_function_prototype(realm)?;
+        check_execution_limit(
+            RuntimeResource::HeapFunctions,
+            self.limits.max_heap_functions,
+            usize_to_u64(self.functions.len()).saturating_add(1),
+        )?;
+        check_execution_limit(
+            RuntimeResource::ObjectProperties,
+            self.limits.max_object_properties,
+            self.object_properties.saturating_add(2),
+        )?;
+        self.functions
+            .try_reserve(1)
+            .map_err(|_| crate::ExecutionError::AllocationFailed {
+                resource: RuntimeResource::HeapFunctions,
+                additional: 1,
+            })?;
+        let mut record = ObjectRecord::empty(Some(HeapReference::Function(prototype)));
+        record
+            .try_reserve_data(2)
+            .map_err(|_| crate::ExecutionError::AllocationFailed {
+                resource: RuntimeResource::ObjectProperties,
+                additional: 2,
+            })?;
+        record
+            .append_data(
+                self.predefined_property_key(PredefinedAtom::Length),
+                PropertyLayout::data(false, false, true),
+                StoredValue::Number(2.0.into()),
+            )
+            .map_err(|_| crate::ExecutionError::AllocationFailed {
+                resource: RuntimeResource::ObjectProperties,
+                additional: 1,
+            })?;
+        record
+            .append_data(
+                self.predefined_property_key(PredefinedAtom::Name),
+                PropertyLayout::data(false, false, true),
+                StoredValue::String(JsString::empty()),
+            )
+            .map_err(|_| crate::ExecutionError::AllocationFailed {
+                resource: RuntimeResource::ObjectProperties,
+                additional: 1,
+            })?;
+        let function = self
+            .insert_heap_function(HeapFunction {
+                implementation: FunctionImplementation::Bound(BoundFunction {
+                    target,
+                    bound_this: StoredValue::Object(collator),
+                    bound_arguments: Vec::new(),
+                }),
+                object: record,
+                public_roots: 0,
+            })
+            .map_err(|_| crate::ExecutionError::AllocationFailed {
+                resource: RuntimeResource::HeapFunctions,
+                additional: 1,
+            })?;
+        self.object_properties = self.object_properties.saturating_add(2);
+        self.collection_pending = true;
+        self.set_intl_collator_bound_compare(collator, function)?;
+        Ok(function)
+    }
+
     pub(crate) fn allocate_intl_locale(
         &mut self,
         prototype: HeapReference,
@@ -77,5 +251,71 @@ impl Runtime {
             });
         }
         Ok(intl.locale_prototype)
+    }
+
+    pub(crate) fn realm_intl_collator_prototype(
+        &self,
+        realm: RealmId,
+    ) -> Result<ObjectId, crate::EngineFault> {
+        let state = self
+            .realms
+            .get(realm)
+            .ok_or(crate::EngineFault::StaleHeapEdge {
+                edge: "realm",
+                index: realm.index(),
+                generation: realm.generation(),
+            })?;
+        let RealmIntrinsics::Ready { intl, .. } = state.intrinsics else {
+            return Err(crate::EngineFault::RuntimeInvariant {
+                message: "realm Intl intrinsics are not initialized",
+            });
+        };
+        if self.objects.get(intl.collator_prototype).is_none() {
+            return Err(crate::EngineFault::StaleHeapEdge {
+                edge: "Intl.Collator.prototype intrinsic",
+                index: intl.collator_prototype.index(),
+                generation: intl.collator_prototype.generation(),
+            });
+        }
+        Ok(intl.collator_prototype)
+    }
+
+    fn realm_intl_collator_compare(
+        &self,
+        realm: RealmId,
+    ) -> Result<FunctionId, crate::EngineFault> {
+        let state = self
+            .realms
+            .get(realm)
+            .ok_or(crate::EngineFault::StaleHeapEdge {
+                edge: "realm",
+                index: realm.index(),
+                generation: realm.generation(),
+            })?;
+        let RealmIntrinsics::Ready { intl, .. } = state.intrinsics else {
+            return Err(crate::EngineFault::RuntimeInvariant {
+                message: "realm Intl intrinsics are not initialized",
+            });
+        };
+        let function =
+            self.functions
+                .get(intl.collator_compare)
+                .ok_or(crate::EngineFault::StaleHeapEdge {
+                    edge: "Intl.Collator compare intrinsic",
+                    index: intl.collator_compare.index(),
+                    generation: intl.collator_compare.generation(),
+                })?;
+        if !matches!(
+            function.native(),
+            Some(super::NativeFunction {
+                realm: function_realm,
+                kind: NativeFunctionKind::IntlCollatorCompare,
+            }) if *function_realm == realm
+        ) {
+            return Err(crate::EngineFault::RuntimeInvariant {
+                message: "realm Intl.Collator compare intrinsic has the wrong implementation",
+            });
+        }
+        Ok(intl.collator_compare)
     }
 }

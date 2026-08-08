@@ -399,6 +399,24 @@ impl Runtime {
                     &mut work,
                 );
                 mark_heap_reference(
+                    HeapReference::Object(intl.collator_prototype),
+                    &mut marked_functions,
+                    &mut marked_objects,
+                    &mut work,
+                );
+                mark_heap_reference(
+                    HeapReference::Function(intl.collator_constructor),
+                    &mut marked_functions,
+                    &mut marked_objects,
+                    &mut work,
+                );
+                mark_heap_reference(
+                    HeapReference::Function(intl.collator_compare),
+                    &mut marked_functions,
+                    &mut marked_objects,
+                    &mut work,
+                );
+                mark_heap_reference(
                     HeapReference::Object(intl.locale_prototype),
                     &mut marked_functions,
                     &mut marked_objects,
@@ -1164,6 +1182,17 @@ impl Runtime {
                             if let Some(array) = object.typed_array_state() {
                                 mark_heap_reference(
                                     HeapReference::Object(array.buffer()),
+                                    &mut marked_functions,
+                                    &mut marked_objects,
+                                    &mut work,
+                                );
+                            }
+                            if let Some(compare) = object
+                                .intl_collator_state()
+                                .and_then(|state| state.bound_compare)
+                            {
+                                mark_heap_reference(
+                                    HeapReference::Function(compare),
                                     &mut marked_functions,
                                     &mut marked_objects,
                                     &mut work,

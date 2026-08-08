@@ -23,6 +23,7 @@
  * THE SOFTWARE.
  */
 
+use quickjs_intl::CollatorState;
 use std::{
     cell::RefCell,
     collections::hash_map::DefaultHasher,
@@ -2650,6 +2651,8 @@ pub(crate) enum HeapObjectKind {
     Date(DateState),
     /// An ECMA-402 `Intl.Locale` object with its canonical `[[Locale]]` string.
     IntlLocale(JsString),
+    /// An ECMA-402 `Intl.Collator` object and its cached bound comparator.
+    IntlCollator(IntlCollatorObjectState),
     /// An ECMAScript `ArrayBuffer` object with its byte-data block slots.
     ArrayBuffer(ArrayBufferState),
     /// An ECMAScript `DataView` object with its view and buffer slots.
@@ -2690,6 +2693,11 @@ pub(crate) enum HeapObjectKind {
     WeakRef(WeakRefState),
     /// An ECMAScript `FinalizationRegistry` with strongly held cleanup state.
     FinalizationRegistry(FinalizationRegistryState),
+}
+
+pub(crate) struct IntlCollatorObjectState {
+    pub(crate) resolved: CollatorState,
+    pub(crate) bound_compare: Option<FunctionId>,
 }
 
 /// Specification-level Proxy slots shared by callable and non-callable proxy
@@ -2815,6 +2823,7 @@ impl HeapObjectKind {
             | Self::RegExp(_)
             | Self::Date(_)
             | Self::IntlLocale(_)
+            | Self::IntlCollator(_)
             | Self::ArrayBuffer(_)
             | Self::DataView(_)
             | Self::TypedArray(_)
@@ -2856,6 +2865,7 @@ impl HeapObjectKind {
             | Self::RegExp(_)
             | Self::Date(_)
             | Self::IntlLocale(_)
+            | Self::IntlCollator(_)
             | Self::ArrayBuffer(_)
             | Self::DataView(_)
             | Self::TypedArray(_)
@@ -2896,6 +2906,7 @@ impl HeapObjectKind {
             | Self::RegExp(_)
             | Self::Date(_)
             | Self::IntlLocale(_)
+            | Self::IntlCollator(_)
             | Self::ArrayBuffer(_)
             | Self::DataView(_)
             | Self::TypedArray(_)
@@ -2936,6 +2947,7 @@ impl HeapObjectKind {
             | Self::RegExp(_)
             | Self::Date(_)
             | Self::IntlLocale(_)
+            | Self::IntlCollator(_)
             | Self::ArrayBuffer(_)
             | Self::DataView(_)
             | Self::TypedArray(_)
@@ -2976,6 +2988,7 @@ impl HeapObjectKind {
             | Self::RegExp(_)
             | Self::Date(_)
             | Self::IntlLocale(_)
+            | Self::IntlCollator(_)
             | Self::ArrayBuffer(_)
             | Self::DataView(_)
             | Self::TypedArray(_)
@@ -3016,6 +3029,7 @@ impl HeapObjectKind {
             | Self::RegExp(_)
             | Self::Date(_)
             | Self::IntlLocale(_)
+            | Self::IntlCollator(_)
             | Self::ArrayBuffer(_)
             | Self::DataView(_)
             | Self::TypedArray(_)
@@ -3056,6 +3070,7 @@ impl HeapObjectKind {
             | Self::RegExp(_)
             | Self::Date(_)
             | Self::IntlLocale(_)
+            | Self::IntlCollator(_)
             | Self::ArrayBuffer(_)
             | Self::DataView(_)
             | Self::TypedArray(_)
@@ -3110,6 +3125,7 @@ impl HeapObjectKind {
             | Self::RegExp(_)
             | Self::Date(_)
             | Self::IntlLocale(_)
+            | Self::IntlCollator(_)
             | Self::ArrayBuffer(_)
             | Self::DataView(_)
             | Self::TypedArray(_)
@@ -3150,6 +3166,7 @@ impl HeapObjectKind {
             | Self::RegExp(_)
             | Self::Date(_)
             | Self::IntlLocale(_)
+            | Self::IntlCollator(_)
             | Self::ArrayBuffer(_)
             | Self::DataView(_)
             | Self::TypedArray(_)
@@ -3482,6 +3499,18 @@ impl HeapObject {
     }
 
     #[must_use]
+    pub(crate) const fn intl_collator(record: ObjectRecord, resolved: CollatorState) -> Self {
+        Self {
+            kind: HeapObjectKind::IntlCollator(IntlCollatorObjectState {
+                resolved,
+                bound_compare: None,
+            }),
+            record,
+            public_roots: 0,
+        }
+    }
+
+    #[must_use]
     pub(crate) fn array_buffer(record: ObjectRecord, state: ArrayBufferState) -> Self {
         Self {
             kind: HeapObjectKind::ArrayBuffer(state),
@@ -3738,6 +3767,20 @@ impl HeapObject {
         }
     }
 
+    pub(crate) const fn intl_collator_state(&self) -> Option<&IntlCollatorObjectState> {
+        match &self.kind {
+            HeapObjectKind::IntlCollator(state) => Some(state),
+            _ => None,
+        }
+    }
+
+    pub(crate) const fn intl_collator_state_mut(&mut self) -> Option<&mut IntlCollatorObjectState> {
+        match &mut self.kind {
+            HeapObjectKind::IntlCollator(state) => Some(state),
+            _ => None,
+        }
+    }
+
     pub(crate) const fn array_buffer_state(&self) -> Option<&ArrayBufferState> {
         match &self.kind {
             HeapObjectKind::ArrayBuffer(state) => Some(state),
@@ -3848,6 +3891,7 @@ impl HeapObject {
             | HeapObjectKind::RegExp(_)
             | HeapObjectKind::Date(_)
             | HeapObjectKind::IntlLocale(_)
+            | HeapObjectKind::IntlCollator(_)
             | HeapObjectKind::ArrayBuffer(_)
             | HeapObjectKind::DataView(_)
             | HeapObjectKind::TypedArray(_)
@@ -3888,6 +3932,7 @@ impl HeapObject {
             | HeapObjectKind::RegExp(_)
             | HeapObjectKind::Date(_)
             | HeapObjectKind::IntlLocale(_)
+            | HeapObjectKind::IntlCollator(_)
             | HeapObjectKind::ArrayBuffer(_)
             | HeapObjectKind::DataView(_)
             | HeapObjectKind::TypedArray(_)
@@ -3930,6 +3975,7 @@ impl HeapObject {
             | HeapObjectKind::RegExp(_)
             | HeapObjectKind::Date(_)
             | HeapObjectKind::IntlLocale(_)
+            | HeapObjectKind::IntlCollator(_)
             | HeapObjectKind::ArrayBuffer(_)
             | HeapObjectKind::DataView(_)
             | HeapObjectKind::TypedArray(_)

@@ -4,10 +4,10 @@ use crate::{
     Atom,
     runtime::{
         ArrayBufferPrototypeMethod, AtomicsMethod, DataViewPrototypeMethod, DatePrototypeMethod,
-        DateStaticMethod, IntlLocalePrototypeMethod, SharedArrayBufferPrototypeMethod,
-        TemporalDurationPrototypeMethod, TemporalDurationStaticMethod,
-        TemporalInstantPrototypeMethod, TemporalInstantStaticMethod, TemporalNowMethod,
-        TemporalPlainDatePrototypeMethod, TemporalPlainDateStaticMethod,
+        DateStaticMethod, IntlCollatorPrototypeMethod, IntlLocalePrototypeMethod,
+        SharedArrayBufferPrototypeMethod, TemporalDurationPrototypeMethod,
+        TemporalDurationStaticMethod, TemporalInstantPrototypeMethod, TemporalInstantStaticMethod,
+        TemporalNowMethod, TemporalPlainDatePrototypeMethod, TemporalPlainDateStaticMethod,
         TemporalPlainDateTimePrototypeMethod, TemporalPlainDateTimeStaticMethod,
         TemporalPlainMonthDayPrototypeMethod, TemporalPlainMonthDayStaticMethod,
         TemporalPlainTimePrototypeMethod, TemporalPlainTimeStaticMethod,
@@ -436,6 +436,8 @@ fn visit_core_name_order(
         RealmNameId::Intl,
         RealmNameId::IntlGetCanonicalLocales,
         RealmNameId::IntlSupportedValuesOf,
+        RealmNameId::Collator,
+        RealmNameId::IntlCollatorSupportedLocalesOf,
         RealmNameId::Locale,
         RealmNameId::Deref,
         RealmNameId::Register,
@@ -443,6 +445,9 @@ fn visit_core_name_order(
         RealmNameId::ProxyRevocable,
     ] {
         visit(id)?;
+    }
+    for method in IntlCollatorPrototypeMethod::ALL {
+        visit(RealmNameId::IntlCollatorPrototype(method))?;
     }
     for method in IntlLocalePrototypeMethod::ALL {
         if !matches!(method, IntlLocalePrototypeMethod::ToString) {
@@ -507,6 +512,9 @@ fn realm_name_description(id: RealmNameId) -> &'static str {
         RealmNameId::Intl => "Intl",
         RealmNameId::IntlGetCanonicalLocales => "getCanonicalLocales",
         RealmNameId::IntlSupportedValuesOf => "supportedValuesOf",
+        RealmNameId::Collator => "Collator",
+        RealmNameId::IntlCollatorSupportedLocalesOf => "supportedLocalesOf",
+        RealmNameId::IntlCollatorPrototype(method) => method.name(),
         RealmNameId::Locale => "Locale",
         RealmNameId::IntlLocalePrototype(method) => method.name(),
         RealmNameId::Deref => "deref",
@@ -635,8 +643,8 @@ mod tests {
         let schema = RealmIntrinsicSchema::try_new().expect("Realm schema");
         let plan = RealmAtomPlan::try_new(&schema).expect("atom plan");
 
-        assert_eq!(plan.len(), 380);
-        assert_eq!(plan.description_code_units(), 3_355);
+        assert_eq!(plan.len(), 383);
+        assert_eq!(plan.description_code_units(), 3_396);
     }
 
     #[test]

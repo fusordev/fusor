@@ -243,3 +243,75 @@ fn locale_info_methods_use_locale_data_and_create_fresh_spec_shaped_results() {
         "buddhist,gregory|h23,h12|emoji,eor|latn|direction|rtl|firstDay,weekend|3|6,7|true|true|true|hebrew|phonebk|h11|thai"
     );
 }
+
+#[test]
+fn collator_constructor_reads_options_in_order_and_resolves_unicode_extensions() {
+    assert_eq!(
+        rendered(
+            "var log=[];
+             var options={
+               get usage(){log.push('usage');return 'sort'},
+               get localeMatcher(){log.push('localeMatcher');return {toString:function(){log.push('localeMatcher string');return 'lookup'}}},
+               get collation(){log.push('collation');return undefined},
+               get numeric(){log.push('numeric');return true},
+               get caseFirst(){log.push('caseFirst');return 'upper'},
+               get sensitivity(){log.push('sensitivity');return 'base'},
+               get ignorePunctuation(){log.push('ignorePunctuation');return true}
+             };
+             var collator=Intl.Collator.call({ignored:true},'de-u-co-phonebk-kf-lower-kn',options);
+             var resolved=collator.resolvedOptions();
+             var descriptor=Object.getOwnPropertyDescriptor(Intl,'Collator');
+             return [Intl.Collator.length,Intl.Collator.name,descriptor.writable,
+               descriptor.enumerable,descriptor.configurable,
+               Object.getPrototypeOf(collator)===Intl.Collator.prototype,
+               Object.keys(resolved).join(','),resolved.locale,resolved.usage,
+               resolved.sensitivity,resolved.ignorePunctuation,resolved.collation,
+               resolved.numeric,resolved.caseFirst,log.join(',')].join('|');"
+        ),
+        "0|Collator|true|false|true|true|locale,usage,sensitivity,ignorePunctuation,collation,numeric,caseFirst|de-u-co-phonebk-kn|sort|base|true|phonebk|true|upper|usage,localeMatcher,localeMatcher string,collation,numeric,caseFirst,sensitivity,ignorePunctuation"
+    );
+}
+
+#[test]
+fn collator_compare_is_cached_bound_and_observably_coerces_left_then_right() {
+    assert_eq!(
+        rendered(
+            "var collator=new Intl.Collator('en',{sensitivity:'base',numeric:true});
+             var compare=collator.compare;
+             var log=[];
+             var left={toString:function(){log.push('left');return 'A'}};
+             var right={toString:function(){log.push('right');return 'á'}};
+             var brand;
+             try{Object.getOwnPropertyDescriptor(Intl.Collator.prototype,'compare').get.call({})}catch(e){brand=e.name}
+             var search=new Intl.Collator('de',{usage:'search'});
+             return [compare===collator.compare,compare.name,compare.length,
+               Object.getOwnPropertyNames(compare).join(','),compare.call(null,left,right),
+               compare('10','2')>0,log.join(','),brand,
+               search.compare('AE','Ä')].join('|');"
+        ),
+        "true||2|length,name|0|true|left,right|TypeError|0"
+    );
+}
+
+#[test]
+fn collator_supported_locales_subclassing_and_default_options_are_spec_shaped() {
+    assert_eq!(
+        rendered(
+            "var log=[];
+             var supported=Intl.Collator.supportedLocalesOf(['tlh','id','en-u-kn'],{
+               get localeMatcher(){log.push('get');return {toString:function(){log.push('string');return 'lookup'}}}
+             });
+             class CustomCollator extends Intl.Collator{}
+             var custom=new CustomCollator('en');
+             Object.prototype.sensitivity='base';
+             var defaultSensitivity=new Intl.Collator('en').resolvedOptions().sensitivity;
+             delete Object.prototype.sensitivity;
+             return [supported.join(','),log.join(','),
+               Object.getPrototypeOf(custom)===CustomCollator.prototype,
+               custom instanceof Intl.Collator,defaultSensitivity,
+               Intl.Collator.supportedLocalesOf.length,
+               Intl.Collator.supportedLocalesOf.name].join('|');"
+        ),
+        "id,en-u-kn|get,string|true|true|variant|1|supportedLocalesOf"
+    );
+}

@@ -3115,6 +3115,30 @@ fn finish_operator_primitive_target(
             return_to,
             execution_budget,
         ),
+        OperatorPrimitiveTarget::IntlCollatorConstructor(state) => {
+            advance_intl_collator_constructor(
+                runtime,
+                *state,
+                Some(value),
+                return_to,
+                execution_budget,
+            )
+        }
+        OperatorPrimitiveTarget::IntlCollatorSupportedLocalesOf(state) => {
+            advance_intl_collator_supported_locales(
+                runtime,
+                *state,
+                Some(value),
+                return_to,
+                execution_budget,
+            )
+        }
+        OperatorPrimitiveTarget::IntlCollatorCompareFirst(state) => {
+            finish_intl_collator_compare_first(runtime, *state, value, return_to, execution_budget)
+        }
+        OperatorPrimitiveTarget::IntlCollatorCompareSecond(state) => {
+            finish_intl_collator_compare_second(runtime, *state, value)
+        }
         OperatorPrimitiveTarget::IntlSupportedValuesOf => {
             finish_intl_supported_values_of(runtime, value, realm, origin)
         }

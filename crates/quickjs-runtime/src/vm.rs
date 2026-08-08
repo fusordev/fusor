@@ -71,14 +71,14 @@ use crate::{
         DataViewElementType, DataViewPrototypeMethod, DatePrototypeMethod, DateStaticMethod,
         EnvironmentBinding, FinalizationRegistryMethod, FrameBindingAddress,
         FunctionImplementation, GlobalNumericFunction, HeapFunction, InstalledCode,
-        InstalledConstant, InstalledRoot, InstalledTemplate, IntlLocalePrototypeMethod,
-        LocaleStringMethod, MapMethod, MathMethod, NativeFunction, NativeFunctionKind,
-        NumberFormat, NumberPredicate, PreparedIteratorResultPlan, PromiseCapabilityCapture,
-        PromiseCapabilityExecutor, PromiseCombinatorElementFunction, PromiseCombinatorElementKind,
-        PromiseCombinatorKind, PromiseCombinatorShared, PromiseFinallyFunction,
-        PromiseFinallyThunkKind, PromiseJob, PromiseResolvingFunction, PromiseResolvingKind,
-        PromiseStatic, RealmGlobalBindingState, ReflectMethod, RegExpFlag, RegExpSymbolMethod,
-        SetMethod, SetPrototypeOutcome, StringArgument, StringMethod,
+        InstalledConstant, InstalledRoot, InstalledTemplate, IntlCollatorPrototypeMethod,
+        IntlLocalePrototypeMethod, LocaleStringMethod, MapMethod, MathMethod, NativeFunction,
+        NativeFunctionKind, NumberFormat, NumberPredicate, PreparedIteratorResultPlan,
+        PromiseCapabilityCapture, PromiseCapabilityExecutor, PromiseCombinatorElementFunction,
+        PromiseCombinatorElementKind, PromiseCombinatorKind, PromiseCombinatorShared,
+        PromiseFinallyFunction, PromiseFinallyThunkKind, PromiseJob, PromiseResolvingFunction,
+        PromiseResolvingKind, PromiseStatic, RealmGlobalBindingState, ReflectMethod, RegExpFlag,
+        RegExpSymbolMethod, SetMethod, SetPrototypeOutcome, StringArgument, StringMethod,
         TemporalDurationPrototypeMethod, TemporalDurationStaticMethod,
         TemporalInstantPrototypeMethod, TemporalInstantStaticMethod, TemporalNowMethod,
         TemporalPlainDatePrototypeMethod, TemporalPlainDateStaticMethod,
@@ -870,6 +870,8 @@ enum NativeContinuation {
     RegExp(Box<RegExpContinuation>),
     LocaleString(Box<LocaleStringContinuation>),
     IntlLocaleList(Box<IntlLocaleListContinuation>),
+    IntlCollatorConstructor(Box<IntlCollatorConstructorContinuation>),
+    IntlCollatorSupportedLocalesOf(Box<IntlCollatorSupportedLocalesContinuation>),
     IntlLocaleConstructor(Box<IntlLocaleConstructorContinuation>),
     DefineProperty(Box<DefinePropertyContinuation>),
     DefineProperties(Box<DefinePropertiesContinuation>),
@@ -1099,6 +1101,8 @@ impl NativeContinuation {
             Self::RegExp(state) => state.retained_values(),
             Self::LocaleString(state) => state.retained_values(),
             Self::IntlLocaleList(state) => state.retained_values(),
+            Self::IntlCollatorConstructor(state) => state.retained_values(),
+            Self::IntlCollatorSupportedLocalesOf(state) => state.retained_values(),
             Self::IntlLocaleConstructor(state) => state.retained_values(),
             Self::DefineProperty(state) => state.retained_values(),
             Self::DefineProperties(state) => state.retained_values(),
@@ -2473,6 +2477,14 @@ enum OperatorPrimitiveTarget {
     IntlLocaleListElement(Box<IntlLocaleListContinuation>),
     /// `%Intl.Locale%` tag or string-valued option awaiting `ToString`.
     IntlLocaleConstructor(Box<IntlLocaleConstructorContinuation>),
+    /// One `%Intl.Collator%` string-valued option awaiting `ToString`.
+    IntlCollatorConstructor(Box<IntlCollatorConstructorContinuation>),
+    /// `Intl.Collator.supportedLocalesOf`'s matcher awaiting `ToString`.
+    IntlCollatorSupportedLocalesOf(Box<IntlCollatorSupportedLocalesContinuation>),
+    /// The first bound Collator comparison operand awaiting `ToString`.
+    IntlCollatorCompareFirst(Box<IntlCollatorCompareContinuation>),
+    /// The second bound Collator comparison operand awaiting `ToString`.
+    IntlCollatorCompareSecond(Box<IntlCollatorCompareContinuation>),
     /// `Intl.supportedValuesOf` key awaiting `ToString`.
     IntlSupportedValuesOf,
     /// An array-like `Array.fromAsync` length awaiting `ToNumber`.
@@ -2808,6 +2820,11 @@ impl OperatorPrimitiveTarget {
                 state.retained_values()
             }
             Self::IntlLocaleConstructor(state) => state.retained_values(),
+            Self::IntlCollatorConstructor(state) => state.retained_values(),
+            Self::IntlCollatorSupportedLocalesOf(state) => state.retained_values(),
+            Self::IntlCollatorCompareFirst(state) | Self::IntlCollatorCompareSecond(state) => {
+                state.retained_values()
+            }
             Self::StringRawValue(state) => state.retained_values(),
             Self::StringReplaceValue(state) => state.retained_values(),
             Self::StringSplitValue(state) => state.retained_values(),
@@ -3238,6 +3255,10 @@ fn trace_operator_primitive_target_roots(
         OperatorPrimitiveTarget::IntlLocaleListLength(state)
         | OperatorPrimitiveTarget::IntlLocaleListElement(state) => state.trace_roots(mark),
         OperatorPrimitiveTarget::IntlLocaleConstructor(state) => state.trace_roots(mark),
+        OperatorPrimitiveTarget::IntlCollatorConstructor(state) => state.trace_roots(mark),
+        OperatorPrimitiveTarget::IntlCollatorSupportedLocalesOf(state) => state.trace_roots(mark),
+        OperatorPrimitiveTarget::IntlCollatorCompareFirst(state)
+        | OperatorPrimitiveTarget::IntlCollatorCompareSecond(state) => state.trace_roots(mark),
         OperatorPrimitiveTarget::ArrayFromAsyncLength { operation } => {
             mark(CollectionRoot::Heap(HeapReference::Object(*operation)));
         }
@@ -3342,6 +3363,8 @@ fn trace_native_continuation_roots(
         NativeContinuation::RegExp(state) => state.trace_roots(mark),
         NativeContinuation::LocaleString(state) => state.trace_roots(mark),
         NativeContinuation::IntlLocaleList(state) => state.trace_roots(mark),
+        NativeContinuation::IntlCollatorConstructor(state) => state.trace_roots(mark),
+        NativeContinuation::IntlCollatorSupportedLocalesOf(state) => state.trace_roots(mark),
         NativeContinuation::IntlLocaleConstructor(state) => state.trace_roots(mark),
         NativeContinuation::DefineProperty(state) => state.trace_roots(mark),
         NativeContinuation::FunctionBind(state) => {

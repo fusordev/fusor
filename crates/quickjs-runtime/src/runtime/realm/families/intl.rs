@@ -4,7 +4,6 @@ use super::{
     FunctionSink, ObjectSink, PropertySink, accessor, data, method, object, object_prototype,
     ordinary,
 };
-use crate::runtime::IntlLocalePrototypeMethod;
 use crate::runtime::realm::{
     CONSTRUCTOR_PROTOTYPE_PROPERTY, IDENTITY_PROPERTY, METHOD_PROPERTY, NativeFunctionKind,
     PredefinedAtom, PropertyLayout,
@@ -14,10 +13,12 @@ use crate::runtime::realm::{
         RealmNameId,
     },
 };
+use crate::runtime::{IntlCollatorPrototypeMethod, IntlLocalePrototypeMethod};
 
 pub(super) fn visit_objects(visit: ObjectSink<'_>) {
     for id in [
         IntrinsicObjectId::Intl,
+        IntrinsicObjectId::IntlCollatorPrototype,
         IntrinsicObjectId::IntlLocalePrototype,
     ] {
         visit(object(
@@ -40,6 +41,33 @@ pub(super) fn visit_functions(visit: FunctionSink<'_>) {
         1,
     ));
     visit(ordinary(
+        NativeFunctionKind::IntlCollatorConstructor,
+        IntrinsicNameSpec::RealmName(RealmNameId::Collator),
+        0,
+    ));
+    visit(ordinary(
+        NativeFunctionKind::IntlCollatorSupportedLocalesOf,
+        IntrinsicNameSpec::RealmName(RealmNameId::IntlCollatorSupportedLocalesOf),
+        1,
+    ));
+    for method in IntlCollatorPrototypeMethod::ALL {
+        let name = if method.is_accessor() {
+            IntrinsicNameSpec::Literal("get compare")
+        } else {
+            IntrinsicNameSpec::RealmName(RealmNameId::IntlCollatorPrototype(method))
+        };
+        visit(ordinary(
+            NativeFunctionKind::IntlCollatorPrototype(method),
+            name,
+            0,
+        ));
+    }
+    visit(ordinary(
+        NativeFunctionKind::IntlCollatorCompare,
+        IntrinsicNameSpec::Literal(""),
+        2,
+    ));
+    visit(ordinary(
         NativeFunctionKind::IntlLocaleConstructor,
         IntrinsicNameSpec::RealmName(RealmNameId::Locale),
         1,
@@ -60,12 +88,25 @@ pub(super) fn visit_functions(visit: FunctionSink<'_>) {
     }
 }
 
+#[allow(
+    clippy::too_many_lines,
+    reason = "the declarative Intl graph stays together for descriptor and identity audits"
+)]
 pub(super) fn visit_properties(visit: PropertySink<'_>) {
     let intl = IntrinsicIdentity::Object(IntrinsicObjectId::Intl);
+    let collator_constructor = IntrinsicIdentity::Function(IntrinsicFunctionId(
+        NativeFunctionKind::IntlCollatorConstructor,
+    ));
+    let collator_prototype = IntrinsicIdentity::Object(IntrinsicObjectId::IntlCollatorPrototype);
     let locale_constructor = IntrinsicIdentity::Function(IntrinsicFunctionId(
         NativeFunctionKind::IntlLocaleConstructor,
     ));
     let locale_prototype = IntrinsicIdentity::Object(IntrinsicObjectId::IntlLocalePrototype);
+    visit(method(
+        intl,
+        IntrinsicKeySpec::InternedString(RealmNameId::Collator),
+        NativeFunctionKind::IntlCollatorConstructor,
+    ));
     visit(method(
         intl,
         IntrinsicKeySpec::InternedString(RealmNameId::IntlGetCanonicalLocales),
@@ -92,6 +133,49 @@ pub(super) fn visit_properties(visit: PropertySink<'_>) {
         IntrinsicKeySpec::InternedString(RealmNameId::Intl),
         METHOD_PROPERTY,
         IntrinsicValueSpec::Object(IntrinsicObjectId::Intl),
+    ));
+
+    visit(data(
+        collator_constructor,
+        IntrinsicKeySpec::PredefinedString(PredefinedAtom::Prototype),
+        CONSTRUCTOR_PROTOTYPE_PROPERTY,
+        IntrinsicValueSpec::Object(IntrinsicObjectId::IntlCollatorPrototype),
+    ));
+    visit(method(
+        collator_constructor,
+        IntrinsicKeySpec::InternedString(RealmNameId::IntlCollatorSupportedLocalesOf),
+        NativeFunctionKind::IntlCollatorSupportedLocalesOf,
+    ));
+    visit(method(
+        collator_prototype,
+        IntrinsicKeySpec::PredefinedString(PredefinedAtom::Constructor),
+        NativeFunctionKind::IntlCollatorConstructor,
+    ));
+    for method_id in IntlCollatorPrototypeMethod::ALL {
+        let key = IntrinsicKeySpec::InternedString(RealmNameId::IntlCollatorPrototype(method_id));
+        if method_id.is_accessor() {
+            visit(accessor(
+                collator_prototype,
+                key,
+                PropertyLayout::accessor(false, true),
+                Some(IntrinsicFunctionId(
+                    NativeFunctionKind::IntlCollatorPrototype(method_id),
+                )),
+                None,
+            ));
+        } else {
+            visit(method(
+                collator_prototype,
+                key,
+                NativeFunctionKind::IntlCollatorPrototype(method_id),
+            ));
+        }
+    }
+    visit(data(
+        collator_prototype,
+        IntrinsicKeySpec::WellKnownSymbol(PredefinedAtom::SymbolToStringTag),
+        PropertyLayout::data(false, false, true),
+        IntrinsicValueSpec::String(IntrinsicStringSpec::Literal("Intl.Collator")),
     ));
 
     visit(data(

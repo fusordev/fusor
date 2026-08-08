@@ -688,6 +688,9 @@ impl RealmBuildTransaction<'_> {
             },
             intl: IntlIntrinsics {
                 namespace: object(IntrinsicObjectId::Intl),
+                collator_prototype: object(IntrinsicObjectId::IntlCollatorPrototype),
+                collator_constructor: function(NativeFunctionKind::IntlCollatorConstructor),
+                collator_compare: function(NativeFunctionKind::IntlCollatorCompare),
                 locale_prototype: object(IntrinsicObjectId::IntlLocalePrototype),
                 locale_constructor: function(NativeFunctionKind::IntlLocaleConstructor),
             },

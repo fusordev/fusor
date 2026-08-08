@@ -22,10 +22,9 @@ const CALENDARS: &[&str] = &[
     "roc",
 ];
 
-// ICU4X's collation service is not wired into the runtime yet. Keep this
-// capability inventory empty until `%Intl.Collator%` is installed rather than
-// advertising a value the runtime cannot consume.
-const COLLATIONS: &[&str] = &[];
+// Keep the inventory aligned with the tailorings accepted by the runtime's
+// ICU4X-backed Collator resolver.
+const COLLATIONS: &[&str] = &["emoji", "eor", "phonebk", "pinyin"];
 
 // Currency formatting and display names are not wired into the runtime yet.
 // ECMA-402 permits this implementation-defined inventory to be empty.

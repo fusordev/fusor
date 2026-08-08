@@ -299,6 +299,9 @@ struct DateIntrinsics {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 struct IntlIntrinsics {
     namespace: ObjectId,
+    collator_prototype: ObjectId,
+    collator_constructor: FunctionId,
+    collator_compare: FunctionId,
     locale_prototype: ObjectId,
     locale_constructor: FunctionId,
 }
@@ -1234,6 +1237,14 @@ pub(crate) enum NativeFunctionKind {
     IntlGetCanonicalLocales,
     /// `Intl.supportedValuesOf`.
     IntlSupportedValuesOf,
+    /// The `%Intl.Collator%` constructor.
+    IntlCollatorConstructor,
+    /// `Intl.Collator.supportedLocalesOf`.
+    IntlCollatorSupportedLocalesOf,
+    /// One `%Intl.Collator.prototype%` accessor or method.
+    IntlCollatorPrototype(IntlCollatorPrototypeMethod),
+    /// Hidden comparison target bound by the Collator `compare` getter.
+    IntlCollatorCompare,
     /// The `%Intl.Locale%` constructor.
     IntlLocaleConstructor,
     /// One `%Intl.Locale.prototype%` accessor or method.
@@ -1603,6 +1614,27 @@ pub(crate) enum DatePrototypeMethod {
     ToTemporalInstant,
     ToJson,
     SymbolToPrimitive,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum IntlCollatorPrototypeMethod {
+    Compare,
+    ResolvedOptions,
+}
+
+impl IntlCollatorPrototypeMethod {
+    pub(crate) const ALL: [Self; 2] = [Self::Compare, Self::ResolvedOptions];
+
+    pub(crate) const fn is_accessor(self) -> bool {
+        matches!(self, Self::Compare)
+    }
+
+    pub(crate) const fn name(self) -> &'static str {
+        match self {
+            Self::Compare => "compare",
+            Self::ResolvedOptions => "resolvedOptions",
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -4227,6 +4259,7 @@ impl NativeFunctionKind {
                 | Self::DataViewConstructor
                 | Self::TypedArrayConstructor(_)
                 | Self::DateConstructor
+                | Self::IntlCollatorConstructor
                 | Self::IntlLocaleConstructor
                 | Self::TemporalDurationConstructor
                 | Self::TemporalInstantConstructor

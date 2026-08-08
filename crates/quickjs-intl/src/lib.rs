@@ -11,9 +11,15 @@ use icu::locale::{
     extensions::{transform, unicode},
 };
 
+mod collator;
 mod locale;
 mod locale_info;
 mod supported_values;
+
+pub use collator::{
+    CollatorRequestOptions, CollatorSensitivity, CollatorState, CollatorUsage,
+    collator_supported_locales, compare_with_collator, resolve_collator,
+};
 
 pub use locale::{
     LocaleComponents, LocaleOptionKind, LocaleOptions, apply_locale_options,

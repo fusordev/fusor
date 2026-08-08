@@ -1250,6 +1250,24 @@ pub(super) fn resume_native_continuations(
                 return_to,
                 execution_budget,
             )?,
+            NativeContinuation::IntlCollatorConstructor(state) => {
+                advance_intl_collator_constructor(
+                    runtime,
+                    *state,
+                    Some(value.duplicate()),
+                    return_to,
+                    execution_budget,
+                )?
+            }
+            NativeContinuation::IntlCollatorSupportedLocalesOf(state) => {
+                advance_intl_collator_supported_locales(
+                    runtime,
+                    *state,
+                    Some(value.duplicate()),
+                    return_to,
+                    execution_budget,
+                )?
+            }
             NativeContinuation::IntlLocaleConstructor(state) => advance_intl_locale_constructor(
                 runtime,
                 *state,
@@ -2717,6 +2735,41 @@ pub(super) fn dispatch_native_call_with_frames(
         NativeFunctionKind::IntlSupportedValuesOf => begin_intl_supported_values_of(
             runtime,
             inputs.arguments.take_first_or_undefined(),
+            native.realm,
+            return_to,
+            origin.unwrap_or_else(native_function_host_origin),
+            execution_budget,
+        ),
+        NativeFunctionKind::IntlCollatorConstructor => begin_intl_collator_constructor(
+            runtime,
+            function,
+            inputs,
+            native.realm,
+            return_to,
+            origin.unwrap_or_else(native_function_host_origin),
+            execution_budget,
+        ),
+        NativeFunctionKind::IntlCollatorSupportedLocalesOf => {
+            begin_intl_collator_supported_locales_of(
+                runtime,
+                inputs.arguments,
+                native.realm,
+                return_to,
+                origin.unwrap_or_else(native_function_host_origin),
+                execution_budget,
+            )
+        }
+        NativeFunctionKind::IntlCollatorPrototype(method) => begin_intl_collator_prototype(
+            runtime,
+            method,
+            &inputs.receiver,
+            native.realm,
+            origin.unwrap_or_else(native_function_host_origin),
+        ),
+        NativeFunctionKind::IntlCollatorCompare => begin_intl_collator_compare(
+            runtime,
+            &inputs.receiver,
+            inputs.arguments,
             native.realm,
             return_to,
             origin.unwrap_or_else(native_function_host_origin),
