@@ -1122,9 +1122,12 @@ impl Runtime {
                                         &mut work,
                                     );
                                 }
-                                if let Some(helper) = iterator.helper() {
+                                if let Some(callback) = iterator
+                                    .helper()
+                                    .and_then(crate::object::IteratorHelperState::callback)
+                                {
                                     mark_heap_reference(
-                                        HeapReference::Function(helper.callback()),
+                                        HeapReference::Function(callback),
                                         &mut marked_functions,
                                         &mut marked_objects,
                                         &mut work,

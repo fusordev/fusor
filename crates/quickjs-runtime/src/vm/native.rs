@@ -282,6 +282,15 @@ pub(super) fn resume_iterator_abrupt_continuations(
                         execution_budget,
                     )
                 }
+                OperatorPrimitiveTarget::IteratorTakeLimit(state) => {
+                    resume_iterator_take_limit_abrupt(
+                        runtime,
+                        *state,
+                        pending,
+                        return_to,
+                        execution_budget,
+                    )
+                }
                 OperatorPrimitiveTarget::RegExpValue(state) if state.handles_abrupt() => {
                     resume_regexp_abrupt(runtime, &state, pending)
                 }
@@ -3718,6 +3727,15 @@ pub(super) fn dispatch_native_call_with_frames(
                 execution_budget,
             )
         }
+        NativeFunctionKind::IteratorPrototypeTake => begin_iterator_take(
+            runtime,
+            inputs.receiver,
+            inputs.arguments.take_first_or_undefined(),
+            native.realm,
+            return_to,
+            origin.unwrap_or_else(native_function_host_origin),
+            execution_budget,
+        ),
         NativeFunctionKind::IteratorPrototypeToArray => begin_iterator_to_array(
             runtime,
             inputs.receiver,

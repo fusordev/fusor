@@ -130,19 +130,38 @@ impl IteratorToArrayContinuation {
 pub(super) struct IteratorHelperCreationContinuation {
     iterator: StoredValue,
     kind: crate::object::IteratorHelperKind,
-    callback: FunctionId,
+    callback: Option<FunctionId>,
+    remaining: f64,
     realm: RealmId,
     origin: JsStackFrame,
 }
 
 impl IteratorHelperCreationContinuation {
-    pub(super) const fn retained_values() -> u64 {
-        2
+    pub(super) fn retained_values(&self) -> u64 {
+        1_u64.saturating_add(u64::from(self.callback.is_some()))
     }
 
     pub(super) fn trace_roots(&self, mark: &mut dyn FnMut(CollectionRoot)) {
         trace_stored_value_root(&self.iterator, mark);
-        mark(CollectionRoot::Heap(HeapReference::Function(self.callback)));
+        if let Some(callback) = self.callback {
+            mark(CollectionRoot::Heap(HeapReference::Function(callback)));
+        }
+    }
+}
+
+pub(super) struct IteratorTakeLimitContinuation {
+    iterator: StoredValue,
+    realm: RealmId,
+    origin: JsStackFrame,
+}
+
+impl IteratorTakeLimitContinuation {
+    pub(super) const fn retained_values() -> u64 {
+        1
+    }
+
+    pub(super) fn trace_roots(&self, mark: &mut dyn FnMut(CollectionRoot)) {
+        trace_stored_value_root(&self.iterator, mark);
     }
 }
 
@@ -159,7 +178,7 @@ pub(super) struct IteratorHelperNextContinuation {
     iterator: StoredValue,
     next_method: StoredValue,
     kind: crate::object::IteratorHelperKind,
-    callback: FunctionId,
+    callback: Option<FunctionId>,
     counter: u64,
     result: Option<StoredValue>,
     candidate: Option<StoredValue>,
@@ -170,7 +189,8 @@ pub(super) struct IteratorHelperNextContinuation {
 
 impl IteratorHelperNextContinuation {
     pub(super) fn retained_values(&self) -> u64 {
-        4_u64
+        3_u64
+            .saturating_add(u64::from(self.callback.is_some()))
             .saturating_add(u64::from(self.result.is_some()))
             .saturating_add(u64::from(self.candidate.is_some()))
     }
@@ -179,7 +199,9 @@ impl IteratorHelperNextContinuation {
         mark(CollectionRoot::Heap(HeapReference::Object(self.helper)));
         trace_stored_value_root(&self.iterator, mark);
         trace_stored_value_root(&self.next_method, mark);
-        mark(CollectionRoot::Heap(HeapReference::Function(self.callback)));
+        if let Some(callback) = self.callback {
+            mark(CollectionRoot::Heap(HeapReference::Function(callback)));
+        }
         if let Some(result) = &self.result {
             trace_stored_value_root(result, mark);
         }
@@ -641,10 +663,136 @@ fn begin_iterator_callback_helper(
     let state = IteratorHelperCreationContinuation {
         iterator: receiver,
         kind,
-        callback: *callback,
+        callback: Some(*callback),
+        remaining: 0.0,
         realm,
         origin,
     };
+    begin_iterator_helper_creation(runtime, state, return_to, execution_budget)
+}
+
+pub(super) fn begin_iterator_take(
+    runtime: &mut Runtime,
+    receiver: StoredValue,
+    limit: StoredValue,
+    realm: RealmId,
+    return_to: Option<CallReturn>,
+    origin: JsStackFrame,
+    execution_budget: &mut ExecutionBudget,
+) -> Result<NativeDispatch, NativeFailure> {
+    if receiver.heap_reference().is_none() {
+        return Err(iterator_exception(
+            realm,
+            origin,
+            ExceptionKind::TypeError,
+            "Iterator.prototype.take receiver must be an object",
+        )?);
+    }
+    begin_operator_primitive_conversion(
+        runtime,
+        limit,
+        OperatorPrimitiveHint::Number,
+        OperatorPrimitiveTarget::IteratorTakeLimit(Box::new(IteratorTakeLimitContinuation {
+            iterator: receiver,
+            realm,
+            origin: origin.clone(),
+        })),
+        realm,
+        return_to,
+        origin,
+        execution_budget,
+    )
+}
+
+pub(super) fn advance_iterator_take_limit(
+    runtime: &mut Runtime,
+    state: IteratorTakeLimitContinuation,
+    limit: StoredValue,
+    return_to: Option<CallReturn>,
+    execution_budget: &mut ExecutionBudget,
+) -> Result<NativeDispatch, NativeFailure> {
+    let number = match operator_to_number(limit, state.realm, &state.origin) {
+        Ok(number) => number,
+        Err(NativeFailure::Abrupt(pending) | NativeFailure::AbruptAfterTransient(pending)) => {
+            return resume_iterator_take_limit_abrupt(
+                runtime,
+                state,
+                pending,
+                return_to,
+                execution_budget,
+            );
+        }
+        Err(error) => return Err(error),
+    };
+    let raw_limit = number.as_f64();
+    if raw_limit.is_nan() {
+        return close_iterator_take_range_error(runtime, state, return_to, execution_budget);
+    }
+    let remaining = number_to_integer_or_infinity(number);
+    if remaining.is_sign_negative() && remaining != 0.0 {
+        return close_iterator_take_range_error(runtime, state, return_to, execution_budget);
+    }
+    begin_iterator_helper_creation(
+        runtime,
+        IteratorHelperCreationContinuation {
+            iterator: state.iterator,
+            kind: crate::object::IteratorHelperKind::Take,
+            callback: None,
+            remaining,
+            realm: state.realm,
+            origin: state.origin,
+        },
+        return_to,
+        execution_budget,
+    )
+}
+
+pub(super) fn resume_iterator_take_limit_abrupt(
+    runtime: &mut Runtime,
+    state: IteratorTakeLimitContinuation,
+    pending: PendingException,
+    return_to: Option<CallReturn>,
+    execution_budget: &mut ExecutionBudget,
+) -> Result<NativeDispatch, NativeFailure> {
+    begin_exceptional_iterator_close(
+        runtime,
+        state.iterator,
+        pending,
+        return_to,
+        execution_budget,
+    )
+}
+
+fn close_iterator_take_range_error(
+    runtime: &mut Runtime,
+    state: IteratorTakeLimitContinuation,
+    return_to: Option<CallReturn>,
+    execution_budget: &mut ExecutionBudget,
+) -> Result<NativeDispatch, NativeFailure> {
+    let NativeFailure::Abrupt(pending) = iterator_exception(
+        state.realm,
+        state.origin,
+        ExceptionKind::RangeError,
+        "Iterator.prototype.take limit must be a non-negative number",
+    )?
+    else {
+        unreachable!("iterator_exception always returns an abrupt completion")
+    };
+    begin_exceptional_iterator_close(
+        runtime,
+        state.iterator,
+        pending,
+        return_to,
+        execution_budget,
+    )
+}
+
+fn begin_iterator_helper_creation(
+    runtime: &mut Runtime,
+    state: IteratorHelperCreationContinuation,
+    return_to: Option<CallReturn>,
+    execution_budget: &mut ExecutionBudget,
+) -> Result<NativeDispatch, NativeFailure> {
     charge_iterator_property_lookup(runtime, &state.iterator, execution_budget)?;
     let dispatch = begin_value_get(
         runtime,
@@ -670,13 +818,26 @@ pub(super) fn advance_iterator_helper_creation(
     state: IteratorHelperCreationContinuation,
     next_method: StoredValue,
 ) -> Result<NativeDispatch, NativeFailure> {
-    let helper = runtime.allocate_iterator_helper(
-        state.realm,
-        state.iterator,
-        next_method,
-        state.kind,
-        state.callback,
-    )?;
+    let helper = match state.kind {
+        crate::object::IteratorHelperKind::Map | crate::object::IteratorHelperKind::Filter => {
+            let callback = state.callback.ok_or(EngineFault::RuntimeInvariant {
+                message: "callback Iterator Helper creation has no callback",
+            })?;
+            runtime.allocate_iterator_callback_helper(
+                state.realm,
+                state.iterator,
+                next_method,
+                state.kind,
+                callback,
+            )?
+        }
+        crate::object::IteratorHelperKind::Take => runtime.allocate_iterator_take_helper(
+            state.realm,
+            state.iterator,
+            next_method,
+            state.remaining,
+        )?,
+    };
     Ok(NativeDispatch::Immediate(StoredValue::Object(helper)))
 }
 
@@ -720,8 +881,22 @@ pub(super) fn begin_iterator_helper_next(
         crate::object::IteratorHelperLifecycle::SuspendedStart
         | crate::object::IteratorHelperLifecycle::SuspendedYield => {}
     }
+    if matches!(snapshot.kind, crate::object::IteratorHelperKind::Take) && snapshot.remaining == 0.0
+    {
+        return begin_iterator_helper_return(
+            runtime,
+            receiver,
+            realm,
+            return_to,
+            origin,
+            execution_budget,
+        );
+    }
     runtime
         .set_iterator_helper_lifecycle(helper, crate::object::IteratorHelperLifecycle::Executing)?;
+    if matches!(snapshot.kind, crate::object::IteratorHelperKind::Take) {
+        runtime.begin_iterator_take_step(helper)?;
+    }
     let StoredValue::Function(next_method) = snapshot.next_method else {
         runtime.set_iterator_helper_lifecycle(
             helper,
@@ -800,6 +975,10 @@ pub(super) fn advance_iterator_helper_next(
             )
         }
         IteratorHelperNextStage::Value => {
+            if matches!(state.kind, crate::object::IteratorHelperKind::Take) {
+                runtime.finish_iterator_take_yield(state.helper)?;
+                return iterator_result(runtime, state.realm, completion, false);
+            }
             let mut arguments = Vec::new();
             arguments
                 .try_reserve_exact(2)
@@ -816,8 +995,11 @@ pub(super) fn advance_iterator_helper_next(
             state.stage = IteratorHelperNextStage::Callback;
             execution_budget.charge_instructions(1)?;
             let origin = state.origin.clone();
+            let callback = state.callback.ok_or(EngineFault::RuntimeInvariant {
+                message: "callback Iterator Helper has no callback",
+            })?;
             iterator_call_with_arguments(
-                state.callback,
+                callback,
                 StoredValue::Undefined,
                 arguments,
                 NativeContinuation::IteratorHelperNext(state),
@@ -878,6 +1060,10 @@ fn advance_iterator_helper_callback(
                 origin,
             )
         }
+        crate::object::IteratorHelperKind::Take => Err(EngineFault::RuntimeInvariant {
+            message: "take Iterator Helper resumed from a callback",
+        }
+        .into()),
     }
 }
 

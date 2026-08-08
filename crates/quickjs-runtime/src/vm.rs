@@ -1038,9 +1038,7 @@ impl NativeContinuation {
             Self::ErrorConstructor(state) => state.retained_values(),
             Self::ErrorToString(state) => state.retained_values(),
             Self::IteratorFrom(state) => state.retained_values(),
-            Self::IteratorHelperCreation(_) => {
-                IteratorHelperCreationContinuation::retained_values()
-            }
+            Self::IteratorHelperCreation(state) => state.retained_values(),
             Self::IteratorToArray(state) => state.retained_values(),
             Self::IteratorHelperNext(state) => state.retained_values(),
             Self::IteratorHelperReturn(_) => IteratorHelperReturnContinuation::retained_values(),
@@ -1130,6 +1128,7 @@ impl NativeContinuation {
                     if matches!(
                         &state.target,
                         OperatorPrimitiveTarget::ArrayFromAsyncLength { .. }
+                            | OperatorPrimitiveTarget::IteratorTakeLimit(_)
                     ) || matches!(
                         &state.target,
                         OperatorPrimitiveTarget::RegExpValue(state) if state.handles_abrupt()
@@ -2399,6 +2398,8 @@ enum OperatorPrimitiveTarget {
     ErrorToStringName(ErrorToStringContinuation),
     ErrorToStringMessage(ErrorToStringContinuation),
     ArrayIteratorLength(ArrayIteratorNextContinuation),
+    /// `Iterator.prototype.take`'s limit, awaiting `ToNumber`.
+    IteratorTakeLimit(Box<IteratorTakeLimitContinuation>),
     FunctionApplyLength(FunctionApplyContinuation),
     ProxyOwnKeysLength(Box<ProxyOwnKeysContinuation>),
     /// `BigInt.prototype.toString`'s radix, awaiting `ToNumber`.
@@ -2729,6 +2730,7 @@ impl OperatorPrimitiveTarget {
                 state.retained_values()
             }
             Self::ArrayIteratorLength(state) => state.retained_values(),
+            Self::IteratorTakeLimit(_) => IteratorTakeLimitContinuation::retained_values(),
             Self::FunctionApplyLength(state) => state.retained_values(),
             Self::ProxyOwnKeysLength(state) => state.retained_values(),
             Self::ArrayJoinSeparator(_) | Self::ArrayJoinElement(_) => {
@@ -3139,6 +3141,7 @@ fn trace_operator_primitive_target_roots(
             mark(CollectionRoot::Heap(HeapReference::Object(state.iterator)));
             trace_stored_value_root(&state.iterated, mark);
         }
+        OperatorPrimitiveTarget::IteratorTakeLimit(state) => state.trace_roots(mark),
         OperatorPrimitiveTarget::FunctionApplyLength(state) => {
             trace_function_apply_roots(state, mark);
         }

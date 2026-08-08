@@ -203,6 +203,7 @@ pub(in crate::runtime) enum RealmNameId {
     ArrayFromAsync,
     IteratorFilter,
     IteratorMap,
+    IteratorTake,
     IteratorToArray,
     ArrayBufferIsView,
     ArrayBufferPrototype(ArrayBufferPrototypeMethod),

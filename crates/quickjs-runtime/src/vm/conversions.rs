@@ -2966,6 +2966,9 @@ fn finish_operator_primitive_target(
         OperatorPrimitiveTarget::ArrayIteratorLength(state) => {
             finish_array_iterator_length(runtime, state, value, return_to, execution_budget)
         }
+        OperatorPrimitiveTarget::IteratorTakeLimit(state) => {
+            advance_iterator_take_limit(runtime, *state, value, return_to, execution_budget)
+        }
         OperatorPrimitiveTarget::FunctionApplyLength(state) => {
             finish_function_apply_length(runtime, state, value, return_to, execution_budget)
         }

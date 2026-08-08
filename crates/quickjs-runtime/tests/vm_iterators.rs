@@ -626,6 +626,78 @@ fn iterator_filter_predicate_abrupt_closes_and_preserves_the_original_error() {
 }
 
 #[test]
+fn iterator_take_coerces_before_getting_next_and_closes_at_the_limit() {
+    let mut runtime = Runtime::try_new(RuntimeLimits::default()).expect("runtime");
+    let realm = runtime.create_realm().expect("realm");
+    let mut context = runtime.context(&realm).expect("context");
+    let function = dynamic_function(
+        &mut context,
+        "let log='',nextCalls=0,returnCalls=0;\
+         let iterator={get next(){log+='n';return function(){nextCalls++;\
+           return {done:false,value:nextCalls};};},return(){returnCalls++;log+='r';return {};}};\
+         let limit={[Symbol.toPrimitive](){log+='c';return 2.9;}};\
+         let helper=Iterator.prototype.take.call(iterator,limit);\
+         let before=[log,nextCalls,returnCalls].join(',');\
+         let first=helper.next();let second=helper.next();let done=helper.next();\
+         return [before,first.value,first.done,second.value,second.done,\
+           done.value===undefined,done.done,log,nextCalls,returnCalls].join('|');",
+    );
+
+    let result = context
+        .call(&function, &[], ExecutionLimits::default())
+        .expect("Iterator.prototype.take ordering");
+    assert_eq!(
+        string_value(&result),
+        "cn,0,0|1|false|2|false|true|true|cnr|2|1"
+    );
+}
+
+#[test]
+fn iterator_take_invalid_limits_close_before_reading_next() {
+    let mut runtime = Runtime::try_new(RuntimeLimits::default()).expect("runtime");
+    let realm = runtime.create_realm().expect("realm");
+    let mut context = runtime.context(&realm).expect("context");
+    let function = dynamic_function(
+        &mut context,
+        "let log='',range=false,negative=false,getterPreserved=false,\
+           preserved=false,original={};\
+         let iterator={get next(){log+='n';return function(){};},\
+           return(){log+='r';return {};}};\
+         try{Iterator.prototype.take.call(iterator,NaN);}catch(error){range=error instanceof RangeError;}\
+         try{Iterator.prototype.take.call(iterator,-1);}catch(error){negative=error instanceof RangeError;}\
+         try{Iterator.prototype.take.call(iterator,{get valueOf(){throw original;}});}\
+         catch(error){getterPreserved=error===original;}\
+         try{Iterator.prototype.take.call(iterator,{[Symbol.toPrimitive](){throw original;}});}\
+         catch(error){preserved=error===original;}\
+         return [log,range,negative,getterPreserved,preserved].join('|');",
+    );
+
+    let result = context
+        .call(&function, &[], ExecutionLimits::default())
+        .expect("Iterator.prototype.take invalid limits");
+    assert_eq!(string_value(&result), "rrrr|true|true|true|true");
+}
+
+#[test]
+fn iterator_take_accepts_finite_limits_above_max_safe_integer() {
+    let mut runtime = Runtime::try_new(RuntimeLimits::default()).expect("runtime");
+    let realm = runtime.create_realm().expect("realm");
+    let mut context = runtime.context(&realm).expect("context");
+    let function = dynamic_function(
+        &mut context,
+        "let nextGets=0;let iterator={get next(){nextGets++;return function(){\
+           return {done:true};};}};\
+         let helper=Iterator.prototype.take.call(iterator,Number.MAX_SAFE_INTEGER+1);\
+         let done=helper.next();return [nextGets,done.done,done.value===undefined].join('|');",
+    );
+
+    let result = context
+        .call(&function, &[], ExecutionLimits::default())
+        .expect("current Iterator.prototype.take large limit");
+    assert_eq!(string_value(&result), "1|true|true");
+}
+
+#[test]
 fn array_spread_reads_iterator_twice_and_retains_next_once() {
     let mut runtime = Runtime::try_new(RuntimeLimits::default()).expect("runtime");
     let realm = runtime.create_realm().expect("realm");

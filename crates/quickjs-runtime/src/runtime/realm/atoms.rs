@@ -247,6 +247,7 @@ fn visit_realm_name_order(
     visit(RealmNameId::ArrayFromAsync)?;
     visit(RealmNameId::IteratorFilter)?;
     visit(RealmNameId::IteratorMap)?;
+    visit(RealmNameId::IteratorTake)?;
     visit(RealmNameId::IteratorToArray)?;
     visit(RealmNameId::ArrayBufferIsView)?;
     for method in ArrayBufferPrototypeMethod::ALL {
@@ -551,6 +552,7 @@ fn realm_name_description(id: RealmNameId) -> &'static str {
         RealmNameId::ArrayFromAsync => "fromAsync",
         RealmNameId::IteratorFilter => "filter",
         RealmNameId::IteratorMap => "map",
+        RealmNameId::IteratorTake => "take",
         RealmNameId::IteratorToArray => "toArray",
         RealmNameId::ArrayBufferIsView => "isView",
         RealmNameId::ArrayBufferPrototype(method) => method.name(),
@@ -609,8 +611,8 @@ mod tests {
         let schema = RealmIntrinsicSchema::try_new().expect("Realm schema");
         let plan = RealmAtomPlan::try_new(&schema).expect("atom plan");
 
-        assert_eq!(plan.len(), 343);
-        assert_eq!(plan.description_code_units(), 2_957);
+        assert_eq!(plan.len(), 344);
+        assert_eq!(plan.description_code_units(), 2_961);
     }
 
     #[test]

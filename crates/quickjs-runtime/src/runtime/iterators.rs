@@ -75,8 +75,9 @@ pub(crate) struct IteratorHelperSnapshot {
     pub(crate) iterator: StoredValue,
     pub(crate) next_method: StoredValue,
     pub(crate) kind: IteratorHelperKind,
-    pub(crate) callback: FunctionId,
+    pub(crate) callback: Option<FunctionId>,
     pub(crate) counter: u64,
+    pub(crate) remaining: f64,
     pub(crate) lifecycle: IteratorHelperLifecycle,
 }
 
@@ -174,7 +175,7 @@ impl Runtime {
         ))
     }
 
-    pub(crate) fn allocate_iterator_helper(
+    pub(crate) fn allocate_iterator_callback_helper(
         &mut self,
         realm: RealmId,
         iterator: StoredValue,
@@ -185,7 +186,21 @@ impl Runtime {
         let prototype = self.realm_iterator_helper_prototype(realm)?;
         self.allocate_iterator_object(HeapObject::iterator_wrapper(
             ObjectRecord::empty(Some(HeapReference::Object(prototype))),
-            IteratorRecord::new_helper(iterator, next_method, kind, callback),
+            IteratorRecord::new_callback_helper(iterator, next_method, kind, callback),
+        ))
+    }
+
+    pub(crate) fn allocate_iterator_take_helper(
+        &mut self,
+        realm: RealmId,
+        iterator: StoredValue,
+        next_method: StoredValue,
+        remaining: f64,
+    ) -> Result<ObjectId, crate::ExecutionError> {
+        let prototype = self.realm_iterator_helper_prototype(realm)?;
+        self.allocate_iterator_object(HeapObject::iterator_wrapper(
+            ObjectRecord::empty(Some(HeapReference::Object(prototype))),
+            IteratorRecord::new_take_helper(iterator, next_method, remaining),
         ))
     }
 
@@ -223,6 +238,7 @@ impl Runtime {
             kind: helper_state.kind(),
             callback: helper_state.callback(),
             counter: helper_state.counter(),
+            remaining: helper_state.remaining(),
             lifecycle: helper_state.lifecycle(),
         }))
     }
@@ -260,6 +276,40 @@ impl Runtime {
                 message: "Iterator Helper state disappeared",
             })?;
         helper_state.finish_callback(yielded);
+        Ok(())
+    }
+
+    pub(crate) fn begin_iterator_take_step(
+        &mut self,
+        helper: ObjectId,
+    ) -> Result<(), crate::EngineFault> {
+        let helper_state = self
+            .objects
+            .get_mut(helper)
+            .ok_or_else(|| stale_heap_reference(HeapReference::Object(helper)))?
+            .iterator_wrapper_state_mut()
+            .and_then(IteratorRecord::helper_mut)
+            .ok_or(crate::EngineFault::RuntimeInvariant {
+                message: "Iterator Helper state disappeared",
+            })?;
+        helper_state.begin_take_step();
+        Ok(())
+    }
+
+    pub(crate) fn finish_iterator_take_yield(
+        &mut self,
+        helper: ObjectId,
+    ) -> Result<(), crate::EngineFault> {
+        let helper_state = self
+            .objects
+            .get_mut(helper)
+            .ok_or_else(|| stale_heap_reference(HeapReference::Object(helper)))?
+            .iterator_wrapper_state_mut()
+            .and_then(IteratorRecord::helper_mut)
+            .ok_or(crate::EngineFault::RuntimeInvariant {
+                message: "Iterator Helper state disappeared",
+            })?;
+        helper_state.finish_take_yield();
         Ok(())
     }
 

@@ -389,23 +389,37 @@ pub(crate) enum IteratorHelperLifecycle {
 pub(crate) enum IteratorHelperKind {
     Map,
     Filter,
+    Take,
 }
 
 #[derive(Clone, Copy)]
 pub(crate) struct IteratorHelperState {
     kind: IteratorHelperKind,
-    callback: FunctionId,
+    callback: Option<FunctionId>,
     counter: u64,
+    remaining: f64,
     lifecycle: IteratorHelperLifecycle,
 }
 
 impl IteratorHelperState {
     #[must_use]
-    pub(crate) const fn new(kind: IteratorHelperKind, callback: FunctionId) -> Self {
+    pub(crate) const fn new_callback(kind: IteratorHelperKind, callback: FunctionId) -> Self {
         Self {
             kind,
-            callback,
+            callback: Some(callback),
             counter: 0,
+            remaining: 0.0,
+            lifecycle: IteratorHelperLifecycle::SuspendedStart,
+        }
+    }
+
+    #[must_use]
+    pub(crate) const fn new_take(remaining: f64) -> Self {
+        Self {
+            kind: IteratorHelperKind::Take,
+            callback: None,
+            counter: 0,
+            remaining,
             lifecycle: IteratorHelperLifecycle::SuspendedStart,
         }
     }
@@ -416,7 +430,7 @@ impl IteratorHelperState {
     }
 
     #[must_use]
-    pub(crate) const fn callback(&self) -> FunctionId {
+    pub(crate) const fn callback(&self) -> Option<FunctionId> {
         self.callback
     }
 
@@ -430,6 +444,11 @@ impl IteratorHelperState {
         self.lifecycle
     }
 
+    #[must_use]
+    pub(crate) const fn remaining(&self) -> f64 {
+        self.remaining
+    }
+
     pub(crate) const fn set_lifecycle(&mut self, lifecycle: IteratorHelperLifecycle) {
         self.lifecycle = lifecycle;
     }
@@ -439,6 +458,16 @@ impl IteratorHelperState {
         if yielded {
             self.lifecycle = IteratorHelperLifecycle::SuspendedYield;
         }
+    }
+
+    pub(crate) fn begin_take_step(&mut self) {
+        if self.remaining.is_finite() {
+            self.remaining -= 1.0;
+        }
+    }
+
+    pub(crate) const fn finish_take_yield(&mut self) {
+        self.lifecycle = IteratorHelperLifecycle::SuspendedYield;
     }
 }
 
@@ -461,7 +490,7 @@ impl IteratorRecord {
     }
 
     #[must_use]
-    pub(crate) const fn new_helper(
+    pub(crate) const fn new_callback_helper(
         iterator: StoredValue,
         next_method: StoredValue,
         kind: IteratorHelperKind,
@@ -470,7 +499,20 @@ impl IteratorRecord {
         Self {
             iterator,
             next_method,
-            helper: Some(IteratorHelperState::new(kind, callback)),
+            helper: Some(IteratorHelperState::new_callback(kind, callback)),
+        }
+    }
+
+    #[must_use]
+    pub(crate) const fn new_take_helper(
+        iterator: StoredValue,
+        next_method: StoredValue,
+        remaining: f64,
+    ) -> Self {
+        Self {
+            iterator,
+            next_method,
+            helper: Some(IteratorHelperState::new_take(remaining)),
         }
     }
 
