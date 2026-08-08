@@ -12,6 +12,7 @@ icu_casemap.workspace = true
 icu_locale_core.workspace = true
 icu_normalizer.workspace = true
 quickjs-bytecode = { path = "../quickjs-bytecode" }
+quickjs-diagnostics = { path = "../quickjs-diagnostics" }
 quickjs-regexp = { path = "../quickjs-regexp" }
 temporal_rs.workspace = true
 writeable.workspace = true

@@ -20,6 +20,7 @@ mod atom;
 mod bigint;
 mod conversion;
 mod define_property;
+mod diagnostic;
 mod error;
 mod host;
 mod ids;
@@ -41,6 +42,7 @@ pub use atom::{
     PREDEFINED_INTERNER_SLOTS, PropertyKey,
 };
 pub use bigint::{BigIntError, JsBigInt};
+pub use diagnostic::RuntimeDiagnosticError;
 pub use error::{
     DynamicFunctionCompileFailure, DynamicFunctionScriptError, EngineFault, ErrorObjectKind,
     ExceptionKind, ExecutionError, GlobalScriptError, HandleError, HandleKind, InstallError,

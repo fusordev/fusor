@@ -13,16 +13,24 @@ use quickjs_bytecode::{
     VerifiedBytecode,
 };
 use quickjs_compiler::{CompilationContext, CompilerError, LeafCompilationError};
+pub use quickjs_diagnostics::{
+    ByteSpan, ColumnEncoding, Diagnostic, DiagnosticCode, DiagnosticCodeError, DiagnosticLabel,
+    DiagnosticReport, DiagnosticSeverity, LineColumn, OriginalLocation, PrettyDiagnostic,
+    PrettyDiagnosticError, PrettyDiagnosticReport, ResolvedLocation, ResolvedSpan, SourceError,
+    SourceFile, SourceId, SourceMap, SourceMapError, SourceMapErrorKind, SourceMapMapping,
+    SourceMapPosition, SourceRegistry, SourceSnippet, SourceSpan, render_pretty,
+    render_pretty_report,
+};
 use quickjs_frontend::{
     CompilationGoal, DiagnosticStage, DynamicFunctionError, DynamicFunctionKind,
     DynamicFunctionSource, FrontendError, FrontendLimits, FrontendOptions, GlobalScriptGoal,
-    PreparedDynamicFunctionSource, SourceFragment, with_dynamic_function_source_and_prepared,
-    with_parsed_program,
+    PreparedDynamicFunctionSource, RegisteredFrontendError, SourceFragment,
+    with_dynamic_function_source_and_prepared, with_parsed_program, with_registered_program,
 };
 use quickjs_runtime::{
     Context, DynamicFunctionCompileFailure, DynamicFunctionCompileRequest, DynamicFunctionCompiler,
     DynamicFunctionFamily, DynamicFunctionScriptError, ExecutionError, ExecutionLimits, Function,
-    GlobalScriptError, JsString, JsValue,
+    GlobalScriptError, InstallError, JsString, JsValue, RuntimeDiagnosticError,
 };
 
 /// Resource limits applied across Global Script parsing, compilation,
@@ -171,6 +179,403 @@ impl Error for ScriptEvaluationError {
     }
 }
 
+/// Exact stage that rejected a registered Global Script evaluation.
+#[derive(Debug)]
+#[non_exhaustive]
+pub enum RegisteredScriptFailure {
+    /// Registered source access, parsing, compatibility, or early errors.
+    Frontend(RegisteredFrontendError),
+    /// The parsed Script could not become complete verified bytecode.
+    Compiler(ScriptCompilerError),
+    /// Realm installation or verified Script execution failed.
+    Runtime(GlobalScriptError),
+}
+
+impl fmt::Display for RegisteredScriptFailure {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Frontend(error) => error.fmt(formatter),
+            Self::Compiler(error) => error.fmt(formatter),
+            Self::Runtime(error) => error.fmt(formatter),
+        }
+    }
+}
+
+impl Error for RegisteredScriptFailure {
+    fn source(&self) -> Option<&(dyn Error + 'static)> {
+        match self {
+            Self::Frontend(error) => Some(error),
+            Self::Compiler(error) => Some(error),
+            Self::Runtime(error) => Some(error),
+        }
+    }
+}
+
+/// Failure of a registered Global Script pipeline with stable source identity.
+#[derive(Debug)]
+pub struct RegisteredScriptEvaluationError {
+    source_id: SourceId,
+    failure: RegisteredScriptFailure,
+}
+
+impl RegisteredScriptEvaluationError {
+    fn new(source_id: SourceId, failure: RegisteredScriptFailure) -> Self {
+        Self { source_id, failure }
+    }
+
+    /// Returns the registered generated source that was evaluated.
+    #[must_use]
+    pub const fn source_id(&self) -> &SourceId {
+        &self.source_id
+    }
+
+    /// Returns the exact failing pipeline stage.
+    #[must_use]
+    pub const fn failure(&self) -> &RegisteredScriptFailure {
+        &self.failure
+    }
+
+    /// Converts the failure into stable, source-map-resolved diagnostics ready
+    /// for the shared Miette adapter.
+    ///
+    /// Frontend diagnostic batches use their first diagnostic as primary and
+    /// retain the rest as related diagnostics. Compiler failures receive exact
+    /// source labels when their typed error carries a span. Runtime exceptions
+    /// retain their verified origin and caller stack as independently sourced
+    /// related diagnostics.
+    ///
+    /// # Errors
+    ///
+    /// Returns a structured source, source-map, runtime-provenance, or internal
+    /// stable-code conversion failure.
+    pub fn diagnostic_report(
+        &self,
+        sources: &SourceRegistry,
+    ) -> Result<DiagnosticReport, ScriptDiagnosticError> {
+        match &self.failure {
+            RegisteredScriptFailure::Frontend(error) => frontend_diagnostic_report(error, sources),
+            RegisteredScriptFailure::Compiler(error) => {
+                compiler_diagnostic_report(error, sources, &self.source_id)
+            }
+            RegisteredScriptFailure::Runtime(error) => {
+                runtime_diagnostic_report(error, sources, &self.source_id)
+            }
+        }
+    }
+}
+
+impl fmt::Display for RegisteredScriptEvaluationError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.failure.fmt(formatter)
+    }
+}
+
+impl Error for RegisteredScriptEvaluationError {
+    fn source(&self) -> Option<&(dyn Error + 'static)> {
+        Some(&self.failure)
+    }
+}
+
+/// Failure while adapting a registered Script error to shared diagnostics.
+#[derive(Clone, Debug, Eq, PartialEq)]
+#[non_exhaustive]
+pub enum ScriptDiagnosticError {
+    /// A stable engine-owned code failed validation.
+    DiagnosticCode(DiagnosticCodeError),
+    /// The registered source or a typed source span was invalid.
+    Source(SourceError),
+    /// Incoming source-map resolution failed.
+    SourceMap(SourceMapError),
+    /// Runtime frame provenance could not be validated.
+    Runtime(RuntimeDiagnosticError),
+    /// A frontend rejection unexpectedly contained no diagnostic.
+    EmptyFrontendDiagnostics,
+}
+
+impl fmt::Display for ScriptDiagnosticError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::DiagnosticCode(error) => write!(formatter, "invalid diagnostic code: {error}"),
+            Self::Source(error) => write!(formatter, "invalid diagnostic source: {error}"),
+            Self::SourceMap(error) => write!(formatter, "source-map resolution failed: {error}"),
+            Self::Runtime(error) => write!(formatter, "runtime diagnostic failed: {error}"),
+            Self::EmptyFrontendDiagnostics => {
+                formatter.write_str("frontend rejection contained no diagnostics")
+            }
+        }
+    }
+}
+
+impl Error for ScriptDiagnosticError {
+    fn source(&self) -> Option<&(dyn Error + 'static)> {
+        match self {
+            Self::DiagnosticCode(error) => Some(error),
+            Self::Source(error) => Some(error),
+            Self::SourceMap(error) => Some(error),
+            Self::Runtime(error) => Some(error),
+            Self::EmptyFrontendDiagnostics => None,
+        }
+    }
+}
+
+impl From<DiagnosticCodeError> for ScriptDiagnosticError {
+    fn from(error: DiagnosticCodeError) -> Self {
+        Self::DiagnosticCode(error)
+    }
+}
+
+impl From<SourceError> for ScriptDiagnosticError {
+    fn from(error: SourceError) -> Self {
+        Self::Source(error)
+    }
+}
+
+impl From<SourceMapError> for ScriptDiagnosticError {
+    fn from(error: SourceMapError) -> Self {
+        Self::SourceMap(error)
+    }
+}
+
+impl From<RuntimeDiagnosticError> for ScriptDiagnosticError {
+    fn from(error: RuntimeDiagnosticError) -> Self {
+        Self::Runtime(error)
+    }
+}
+
+fn shared_diagnostic(
+    code: &'static str,
+    message: impl Into<String>,
+) -> Result<Diagnostic, ScriptDiagnosticError> {
+    Ok(Diagnostic::new(
+        DiagnosticCode::new(code)?,
+        DiagnosticSeverity::Error,
+        message,
+    ))
+}
+
+fn frontend_diagnostic_report(
+    error: &RegisteredFrontendError,
+    sources: &SourceRegistry,
+) -> Result<DiagnosticReport, ScriptDiagnosticError> {
+    let RegisteredFrontendError::Diagnostics(diagnostics) = error else {
+        return Ok(DiagnosticReport::new(shared_diagnostic(
+            "quickjs::frontend::source_integration",
+            error.to_string(),
+        )?));
+    };
+    let mut diagnostics = diagnostics.diagnostics().iter();
+    let primary = diagnostics
+        .next()
+        .ok_or(ScriptDiagnosticError::EmptyFrontendDiagnostics)?
+        .clone();
+    DiagnosticReport::new(primary)
+        .with_related_diagnostics(diagnostics.cloned())
+        .resolve_source_maps(sources)
+        .map_err(Into::into)
+}
+
+fn source_label(
+    sources: &SourceRegistry,
+    source_id: &SourceId,
+    span: quickjs_frontend::Span,
+    message: &'static str,
+    primary: bool,
+) -> Result<DiagnosticLabel, ScriptDiagnosticError> {
+    let generated = sources.span(source_id, span.start as usize, span.end as usize)?;
+    let resolved = sources.resolve_span(&generated)?;
+    Ok(if primary {
+        DiagnosticLabel::primary(resolved.display_span().clone(), Some(message.to_owned()))
+    } else {
+        DiagnosticLabel::secondary(resolved.display_span().clone(), Some(message.to_owned()))
+    })
+}
+
+fn planning_diagnostic(
+    error: &CompilerError,
+    sources: &SourceRegistry,
+    source_id: &SourceId,
+) -> Result<Diagnostic, ScriptDiagnosticError> {
+    let (code, span, help) = match error {
+        CompilerError::Unsupported { span, .. } => (
+            "quickjs::compiler::planning::unsupported",
+            Some(*span),
+            Some("the syntax parsed successfully but its runtime semantics are not admitted yet"),
+        ),
+        CompilerError::SemanticInvariant { span, .. } => (
+            "quickjs::compiler::planning::semantic_invariant",
+            *span,
+            None,
+        ),
+        CompilerError::CapacityExceeded { .. } => {
+            ("quickjs::compiler::planning::capacity_exceeded", None, None)
+        }
+    };
+    let mut diagnostic = shared_diagnostic(code, error.to_string())?;
+    if let Some(help) = help {
+        diagnostic = diagnostic.with_help(help);
+    }
+    if let Some(span) = span {
+        diagnostic = diagnostic.with_label(source_label(
+            sources,
+            source_id,
+            span,
+            "compiler planning rejected this syntax",
+            true,
+        )?);
+    }
+    Ok(diagnostic)
+}
+
+fn lowering_code(error: &LeafCompilationError) -> &'static str {
+    match error {
+        LeafCompilationError::ForeignExecutable { .. } => {
+            "quickjs::compiler::lowering::foreign_executable"
+        }
+        LeafCompilationError::InvalidExecutable { .. } => {
+            "quickjs::compiler::lowering::invalid_executable"
+        }
+        LeafCompilationError::Unsupported { .. } => "quickjs::compiler::lowering::unsupported",
+        LeafCompilationError::SemanticInvariant { .. } => {
+            "quickjs::compiler::lowering::semantic_invariant"
+        }
+        LeafCompilationError::CapacityExceeded { .. } => {
+            "quickjs::compiler::lowering::capacity_exceeded"
+        }
+        LeafCompilationError::CookedStringDecoding { .. } => {
+            "quickjs::compiler::lowering::cooked_string"
+        }
+        LeafCompilationError::CompilerString { .. } => {
+            "quickjs::compiler::lowering::compiler_string"
+        }
+        LeafCompilationError::CompilerBigInt { .. } => {
+            "quickjs::compiler::lowering::compiler_bigint"
+        }
+        LeafCompilationError::CompilerTemplateObject { .. } => {
+            "quickjs::compiler::lowering::template_object"
+        }
+        LeafCompilationError::RegExp { .. } => "quickjs::compiler::lowering::regexp",
+        LeafCompilationError::BytecodeEncoding { .. } => {
+            "quickjs::compiler::lowering::bytecode_encoding"
+        }
+        LeafCompilationError::BytecodeAssembly { .. } => {
+            "quickjs::compiler::lowering::bytecode_assembly"
+        }
+        LeafCompilationError::BytecodeStackInvariant { .. } => {
+            "quickjs::compiler::lowering::stack_invariant"
+        }
+        LeafCompilationError::BytecodeVerification { .. } => {
+            "quickjs::compiler::lowering::bytecode_verification"
+        }
+        LeafCompilationError::FunctionGraphVerification { .. } => {
+            "quickjs::compiler::lowering::function_graph_verification"
+        }
+        LeafCompilationError::BytecodeGraphVerification { .. } => {
+            "quickjs::compiler::lowering::bytecode_graph_verification"
+        }
+    }
+}
+
+fn lowering_spans(
+    error: &LeafCompilationError,
+) -> (
+    Option<quickjs_frontend::Span>,
+    Option<quickjs_frontend::Span>,
+) {
+    match error {
+        LeafCompilationError::Unsupported { span, .. }
+        | LeafCompilationError::CookedStringDecoding { span, .. }
+        | LeafCompilationError::CompilerString { span, .. }
+        | LeafCompilationError::CompilerBigInt { span, .. }
+        | LeafCompilationError::CompilerTemplateObject { span, .. }
+        | LeafCompilationError::RegExp { span, .. }
+        | LeafCompilationError::BytecodeEncoding { span, .. }
+        | LeafCompilationError::BytecodeStackInvariant { span, .. } => (Some(*span), None),
+        LeafCompilationError::SemanticInvariant { span, .. }
+        | LeafCompilationError::BytecodeAssembly { span, .. }
+        | LeafCompilationError::FunctionGraphVerification { span, .. }
+        | LeafCompilationError::BytecodeGraphVerification { span, .. } => (*span, None),
+        LeafCompilationError::BytecodeVerification {
+            span, related_span, ..
+        } => (*span, *related_span),
+        LeafCompilationError::ForeignExecutable { .. }
+        | LeafCompilationError::InvalidExecutable { .. }
+        | LeafCompilationError::CapacityExceeded { .. } => (None, None),
+    }
+}
+
+fn lowering_diagnostic(
+    error: &LeafCompilationError,
+    sources: &SourceRegistry,
+    source_id: &SourceId,
+) -> Result<Diagnostic, ScriptDiagnosticError> {
+    let mut diagnostic = shared_diagnostic(lowering_code(error), error.to_string())?;
+    let (span, related_span) = lowering_spans(error);
+    if let Some(span) = span {
+        diagnostic = diagnostic.with_label(source_label(
+            sources,
+            source_id,
+            span,
+            "lowering failed here",
+            true,
+        )?);
+    }
+    if let Some(span) = related_span {
+        diagnostic = diagnostic.with_label(source_label(
+            sources,
+            source_id,
+            span,
+            "related control-flow location",
+            false,
+        )?);
+    }
+    Ok(diagnostic)
+}
+
+fn compiler_diagnostic_report(
+    error: &ScriptCompilerError,
+    sources: &SourceRegistry,
+    source_id: &SourceId,
+) -> Result<DiagnosticReport, ScriptDiagnosticError> {
+    let diagnostic = match error {
+        ScriptCompilerError::Planning(error) => planning_diagnostic(error, sources, source_id)?,
+        ScriptCompilerError::Lowering(error) => lowering_diagnostic(error, sources, source_id)?,
+    };
+    Ok(DiagnosticReport::new(diagnostic))
+}
+
+fn install_span(error: &InstallError) -> Option<quickjs_bytecode::SourceByteSpan> {
+    match error {
+        InstallError::UnsupportedOpcode { source_span, .. }
+        | InstallError::GlobalDeclarationRejected { source_span, .. } => Some(*source_span),
+        InstallError::LimitExceeded { .. }
+        | InstallError::AllocationFailed { .. }
+        | InstallError::String(_)
+        | InstallError::BigInt(_)
+        | InstallError::Atom(_)
+        | InstallError::AuthorityInvariant { .. } => None,
+    }
+}
+
+fn runtime_diagnostic_report(
+    error: &GlobalScriptError,
+    sources: &SourceRegistry,
+    source_id: &SourceId,
+) -> Result<DiagnosticReport, ScriptDiagnosticError> {
+    let GlobalScriptError::Install(install) = error else {
+        return error.to_diagnostic_report(sources).map_err(Into::into);
+    };
+    let mut diagnostic = install.to_diagnostic()?;
+    if let Some(span) = install_span(install) {
+        let generated = sources.span(source_id, span.start() as usize, span.end() as usize)?;
+        let resolved = sources.resolve_span(&generated)?;
+        diagnostic = diagnostic.with_label(DiagnosticLabel::primary(
+            resolved.display_span().clone(),
+            Some("installation failed here".to_owned()),
+        ));
+    }
+    Ok(DiagnosticReport::new(diagnostic))
+}
+
 /// Parses, compiles, final-verifies, installs, and executes one host-loaded
 /// ECMAScript Global Script.
 ///
@@ -218,6 +623,85 @@ pub fn evaluate_script(
             &dynamic_service,
         )
         .map_err(ScriptEvaluationError::Runtime)
+}
+
+/// Parses, compiles, final-verifies, installs, and executes one registered
+/// ECMAScript Global Script.
+///
+/// Source text and display identity come from `sources`; any incoming source
+/// map registered on `source_id` remains available to
+/// [`RegisteredScriptEvaluationError::diagnostic_report`]. Successfully
+/// instantiated global bindings stay in `context`'s realm for later Script
+/// evaluations.
+///
+/// # Errors
+///
+/// Returns a [`RegisteredScriptEvaluationError`] retaining the registered
+/// source identity and the exact failing frontend, compiler, installation, or
+/// execution stage.
+pub fn evaluate_registered_script(
+    context: &mut Context<'_>,
+    sources: &SourceRegistry,
+    source_id: &SourceId,
+    limits: ScriptLimits,
+) -> Result<JsValue, RegisteredScriptEvaluationError> {
+    let source_name = match sources.source(source_id) {
+        Ok(source) => Arc::<str>::from(source.display_name()),
+        Err(error) => {
+            let failure = RegisteredScriptFailure::Frontend(RegisteredFrontendError::Source(
+                quickjs_frontend::FrontendSourceError::Registry(error),
+            ));
+            return Err(RegisteredScriptEvaluationError::new(
+                source_id.clone(),
+                failure,
+            ));
+        }
+    };
+    let compiled = with_registered_program(
+        sources,
+        source_id,
+        FrontendOptions::for_goal(CompilationGoal::GlobalScript(GlobalScriptGoal::new()))
+            .with_limits(limits.frontend),
+        move |unit| {
+            let compiler = CompilationContext::new_with_source_name(unit, source_name)
+                .map_err(ScriptCompilerError::Planning)?;
+            compiler
+                .compile_global_script_with_all_limits(
+                    limits.bytecode,
+                    limits.function_graph,
+                    limits.final_graph,
+                )
+                .map_err(ScriptCompilerError::Lowering)
+        },
+    )
+    .map_err(|error| {
+        RegisteredScriptEvaluationError::new(
+            source_id.clone(),
+            RegisteredScriptFailure::Frontend(error),
+        )
+    })?
+    .map_err(|error| {
+        RegisteredScriptEvaluationError::new(
+            source_id.clone(),
+            RegisteredScriptFailure::Compiler(error),
+        )
+    })?;
+    let authority = Arc::new(compiled.verified_bytecode().clone());
+    let dynamic_service: Arc<dyn DynamicFunctionCompiler> = Arc::new(
+        OxcDynamicFunctionCompiler::new(limits.dynamic_function_limits()),
+    );
+    context
+        .execute_global_script_with_dynamic_function_compiler(
+            authority,
+            limits.execution,
+            &dynamic_service,
+        )
+        .map_err(|error| {
+            RegisteredScriptEvaluationError::new(
+                source_id.clone(),
+                RegisteredScriptFailure::Runtime(error),
+            )
+        })
 }
 
 /// Resource limits applied across every supported dynamic-function stage.

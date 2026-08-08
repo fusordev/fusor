@@ -26,7 +26,7 @@ Finish frontend/diagnostics and language/compiler/execution before broad Test262
 
 - [x] Published Oxc `0.142.0` is directly pinned; Script, Module, strict/async-global, and dynamic-Function goals retain owned source, binding, and module records. RegExp literal errors use `quickjs-regexp`.
 - [x] The compatibility ledger covers admitted grammar and reachable diagnostics.
-- [ ] Complete chained source maps and the public diagnostic/API audit.
+- [x] Registered sources resolve UTF-8 spans through bounded, cycle-checked source-map v3 chains with generated fallbacks. `evaluate_registered_script` preserves source identity across frontend, compiler, install, and runtime failures; stable diagnostics render through Miette, with verified JavaScript caller frames as independently sourced related diagnostics and exact source-text validation before mapping.
 
 ### Compiler, bytecode, and execution
 

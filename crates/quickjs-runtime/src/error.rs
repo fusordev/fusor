@@ -642,6 +642,12 @@ impl JsException {
         self.origin.source_span
     }
 
+    /// Returns the complete verified origin frame.
+    #[must_use]
+    pub const fn origin_frame(&self) -> &JsStackFrame {
+        &self.origin
+    }
+
     /// Returns caller call sites from the immediate caller outward.
     ///
     /// The exception's own location remains available through
