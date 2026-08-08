@@ -2211,9 +2211,6 @@ fn finish_operator_primitive_target(
                 execution_budget,
             )
         }
-        OperatorPrimitiveTarget::TemporalPlainDateEquals(receiver) => {
-            finish_temporal_plain_date_equals(receiver.as_ref(), value, realm, origin)
-        }
         OperatorPrimitiveTarget::TemporalPlainDateBag(state) => {
             advance_temporal_plain_date_property_bag(
                 runtime,

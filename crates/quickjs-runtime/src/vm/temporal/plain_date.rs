@@ -139,6 +139,9 @@ enum TemporalPlainDateLikeTarget {
     CompareSecond {
         first: PlainDate,
     },
+    Equals {
+        receiver: PlainDate,
+    },
     Difference {
         receiver: PlainDate,
         options: StoredValue,
@@ -154,7 +157,7 @@ impl TemporalPlainDateLikeTarget {
             | Self::Difference { options, .. } => {
                 trace_stored_value_root(options, mark);
             }
-            Self::CompareSecond { .. } => {}
+            Self::CompareSecond { .. } | Self::Equals { .. } => {}
         }
     }
 }
@@ -330,6 +333,9 @@ pub(in crate::vm) fn advance_temporal_plain_date_constructor(
     execution_budget: &mut ExecutionBudget,
 ) -> Result<NativeDispatch, NativeFailure> {
     if let Some(value) = completion {
+        // Each field validates right after its own conversion so a later
+        // argument's user-defined conversion is never observed after an error.
+        temporal_plain_date_integer(value, "component", realm, origin)?;
         state.converted.push(value);
     }
     if state.converted.len() < 3 {
@@ -366,7 +372,8 @@ pub(in crate::vm) fn advance_temporal_plain_date_constructor(
             "Temporal.PlainDate calendar must be a string",
         );
     };
-    let calendar = match Calendar::from_str(&value.to_utf8_lossy()?) {
+    // ToTemporalCalendarIdentifier: a bare calendar identifier only.
+    let calendar = match Calendar::try_from_utf8(value.to_utf8_lossy()?.as_bytes()) {
         Ok(calendar) => calendar,
         Err(error) => {
             return Err(NativeFailure::Abrupt(temporal_exception_from_error(
@@ -477,6 +484,29 @@ pub(in crate::vm) fn temporal_plain_date_integer(
         )?));
     }
     Ok(value as i64)
+}
+
+/// `ToPositiveIntegerWithTruncation` for month and day fields: zero and
+/// negative values are a RangeError, while values beyond the kernel's `u8`
+/// domain saturate and leave constrain-or-reject resolution to the calendar.
+fn temporal_plain_date_positive_u8(
+    value: i64,
+    field: &str,
+    realm: RealmId,
+    origin: &JsStackFrame,
+) -> Result<u8, NativeFailure> {
+    if value < 1 {
+        return Err(NativeFailure::Abrupt(temporal_pending_exception(
+            realm,
+            origin,
+            ExceptionKind::RangeError,
+            match field {
+                "month" => "Temporal.PlainDate month must be a positive integer",
+                _ => "Temporal.PlainDate day must be a positive integer",
+            },
+        )?));
+    }
+    Ok(u8::try_from(value).unwrap_or(u8::MAX))
 }
 
 #[allow(
@@ -607,18 +637,42 @@ fn begin_temporal_plain_date_like(
     origin: JsStackFrame,
     execution_budget: &mut ExecutionBudget,
 ) -> Result<NativeDispatch, NativeFailure> {
-    if let StoredValue::Object(object) = value
-        && let Some(date) = runtime.temporal_plain_date(object)?
-    {
-        return continue_temporal_plain_date_like(
-            runtime,
-            date,
-            target,
-            realm,
-            return_to,
-            origin,
-            execution_budget,
-        );
+    if let StoredValue::Object(object) = value {
+        // ToTemporalDate slot fast paths: branded Temporal values contribute
+        // their date slots without any observable property reads.
+        if let Some(date) = runtime.temporal_plain_date(object)? {
+            return continue_temporal_plain_date_like(
+                runtime,
+                date,
+                target,
+                realm,
+                return_to,
+                origin,
+                execution_budget,
+            );
+        }
+        if let Some(date_time) = runtime.temporal_plain_date_time(object)? {
+            return continue_temporal_plain_date_like(
+                runtime,
+                date_time.to_plain_date(),
+                target,
+                realm,
+                return_to,
+                origin,
+                execution_budget,
+            );
+        }
+        if let Some(date_time) = runtime.temporal_zoned_date_time(object)? {
+            return continue_temporal_plain_date_like(
+                runtime,
+                date_time.to_plain_date(),
+                target,
+                realm,
+                return_to,
+                origin,
+                execution_budget,
+            );
+        }
     }
     if let StoredValue::String(value) = value {
         let date = temporal_plain_date_from_string(realm, &value, &origin)?;
@@ -702,6 +756,9 @@ fn continue_temporal_plain_date_like(
                 JsNumber::from_i32(result),
             )))
         }
+        TemporalPlainDateLikeTarget::Equals { receiver } => Ok(NativeDispatch::Immediate(
+            StoredValue::Boolean(receiver == date),
+        )),
         TemporalPlainDateLikeTarget::Difference {
             receiver,
             options,
@@ -1178,21 +1235,42 @@ pub(in crate::vm) fn advance_temporal_plain_date_property_bag(
                     continue;
                 }
                 if TEMPORAL_PLAIN_DATE_BAG_FIELDS[state.next] == "calendar" {
-                    let StoredValue::String(value) = value else {
-                        return temporal_type_error(
-                            state.realm,
-                            &state.origin,
-                            "Temporal.PlainDate calendar must be a string",
-                        );
-                    };
-                    let calendar = match Calendar::from_str(&value.to_utf8_lossy()?) {
-                        Ok(calendar) => calendar,
-                        Err(error) => {
-                            return Err(NativeFailure::Abrupt(temporal_exception_from_error(
+                    // ToTemporalCalendarSlotValue: branded Temporal objects
+                    // contribute their calendar slot; strings parse as a
+                    // calendar string; anything else is a TypeError.
+                    let calendar = match value {
+                        StoredValue::String(value) => {
+                            match Calendar::from_str(&value.to_utf8_lossy()?) {
+                                Ok(calendar) => calendar,
+                                Err(error) => {
+                                    return Err(NativeFailure::Abrupt(
+                                        temporal_exception_from_error(
+                                            state.realm,
+                                            &state.origin,
+                                            error,
+                                        )?,
+                                    ));
+                                }
+                            }
+                        }
+                        StoredValue::Object(_) => {
+                            match temporal_calendar_from_object(runtime, &value)? {
+                                Some(calendar) => calendar,
+                                None => {
+                                    return temporal_type_error(
+                                        state.realm,
+                                        &state.origin,
+                                        "Temporal.PlainDate calendar must be a calendar identifier or Temporal object",
+                                    );
+                                }
+                            }
+                        }
+                        _ => {
+                            return temporal_type_error(
                                 state.realm,
                                 &state.origin,
-                                error,
-                            )?));
+                                "Temporal.PlainDate calendar must be a calendar identifier or Temporal object",
+                            );
                         }
                     };
                     state.calendar = Some(calendar);
@@ -1295,28 +1373,16 @@ fn temporal_plain_date_partial_from_bag(
             "Temporal.PlainDate year is outside the supported range",
         )?));
     };
-    let Ok(day) = u8::try_from(day) else {
-        return Err(NativeFailure::Abrupt(temporal_pending_exception(
+    let month = match month {
+        Some(month) => Some(temporal_plain_date_positive_u8(
+            month,
+            "month",
             state.realm,
             &state.origin,
-            ExceptionKind::RangeError,
-            "Temporal.PlainDate day is outside the supported range",
-        )?));
-    };
-    let month = match month {
-        Some(month) => match u8::try_from(month) {
-            Ok(month) => Some(month),
-            Err(_) => {
-                return Err(NativeFailure::Abrupt(temporal_pending_exception(
-                    state.realm,
-                    &state.origin,
-                    ExceptionKind::RangeError,
-                    "Temporal.PlainDate month is outside the supported range",
-                )?));
-            }
-        },
+        )?),
         None => None,
     };
+    let day = temporal_plain_date_positive_u8(day, "day", state.realm, &state.origin)?;
     Ok(PartialDate::new()
         .with_calendar(state.calendar.clone().unwrap_or_default())
         .with_year(Some(year))
@@ -1695,6 +1761,22 @@ fn begin_temporal_plain_date_with(
             "Temporal.PlainDate.with requires a property bag",
         );
     }
+    // RejectObjectWithCalendarOrTimeZone: branded Temporal objects are
+    // rejected from their internal slots before any property is observed.
+    if let StoredValue::Object(object) = fields
+        && (runtime.temporal_plain_date(object)?.is_some()
+            || runtime.temporal_plain_date_time(object)?.is_some()
+            || runtime.temporal_plain_time(object)?.is_some()
+            || runtime.temporal_plain_month_day(object)?.is_some()
+            || runtime.temporal_plain_year_month(object)?.is_some()
+            || runtime.temporal_zoned_date_time(object)?.is_some())
+    {
+        return temporal_type_error(
+            realm,
+            &origin,
+            "Temporal.PlainDate.with cannot be called with a Temporal object",
+        );
+    }
     advance_temporal_plain_date_with(
         runtime,
         TemporalPlainDateWithContinuation {
@@ -1847,14 +1929,12 @@ pub(in crate::vm) fn advance_temporal_plain_date_with(
                             state.realm,
                             &state.origin,
                         )?;
-                        let Ok(value) = u8::try_from(value) else {
-                            return temporal_range_error(
-                                state.realm,
-                                &state.origin,
-                                "Temporal.PlainDate month is outside the supported range",
-                            );
-                        };
-                        state.fields.month = Some(value);
+                        state.fields.month = Some(temporal_plain_date_positive_u8(
+                            value,
+                            "month",
+                            state.realm,
+                            &state.origin,
+                        )?);
                     }
                     "day" => {
                         let value = temporal_plain_date_integer(
@@ -1863,14 +1943,12 @@ pub(in crate::vm) fn advance_temporal_plain_date_with(
                             state.realm,
                             &state.origin,
                         )?;
-                        let Ok(value) = u8::try_from(value) else {
-                            return temporal_range_error(
-                                state.realm,
-                                &state.origin,
-                                "Temporal.PlainDate day is outside the supported range",
-                            );
-                        };
-                        state.fields.day = Some(value);
+                        state.fields.day = Some(temporal_plain_date_positive_u8(
+                            value,
+                            "day",
+                            state.realm,
+                            &state.origin,
+                        )?);
                     }
                     "monthCode" => {
                         let StoredValue::String(value) = value else {
@@ -2008,6 +2086,28 @@ pub(in crate::vm) fn dispatch_temporal_plain_date_prototype(
                 execution_budget,
             )
         }
+        TemporalPlainDatePrototypeMethod::ToPlainMonthDay => {
+            let month_day = match date.to_plain_month_day() {
+                Ok(month_day) => month_day,
+                Err(error) => {
+                    return Err(NativeFailure::Abrupt(temporal_exception_from_error(
+                        realm, origin, error,
+                    )?));
+                }
+            };
+            allocate_temporal_plain_month_day_result(runtime, realm, month_day)
+        }
+        TemporalPlainDatePrototypeMethod::ToPlainYearMonth => {
+            let year_month = match date.to_plain_year_month() {
+                Ok(year_month) => year_month,
+                Err(error) => {
+                    return Err(NativeFailure::Abrupt(temporal_exception_from_error(
+                        realm, origin, error,
+                    )?));
+                }
+            };
+            allocate_temporal_plain_year_month_result(runtime, realm, year_month)
+        }
         TemporalPlainDatePrototypeMethod::ToZonedDateTime => {
             begin_temporal_plain_date_to_zoned_date_time(
                 runtime,
@@ -2040,10 +2140,10 @@ pub(in crate::vm) fn dispatch_temporal_plain_date_prototype(
                 execution_budget,
             )
         }
-        TemporalPlainDatePrototypeMethod::Equals => begin_temporal_plain_date_equals(
+        TemporalPlainDatePrototypeMethod::Equals => begin_temporal_plain_date_like(
             runtime,
-            date,
             arguments.take_first_or_undefined(),
+            TemporalPlainDateLikeTarget::Equals { receiver: date },
             realm,
             return_to,
             origin.clone(),
@@ -2199,70 +2299,6 @@ fn complete_temporal_plain_date_to_string(
 ) -> Result<NativeDispatch, NativeFailure> {
     Ok(NativeDispatch::Immediate(StoredValue::String(
         JsString::from_utf8(&date.to_ixdtf_string(display_calendar))?,
-    )))
-}
-
-#[allow(
-    clippy::needless_pass_by_value,
-    clippy::too_many_arguments,
-    reason = "equals uses ordinary primitive conversion for non-Temporal inputs"
-)]
-fn begin_temporal_plain_date_equals(
-    runtime: &mut Runtime,
-    receiver: PlainDate,
-    value: StoredValue,
-    realm: RealmId,
-    return_to: Option<CallReturn>,
-    origin: JsStackFrame,
-    execution_budget: &mut ExecutionBudget,
-) -> Result<NativeDispatch, NativeFailure> {
-    if let StoredValue::Object(object) = value
-        && let Some(other) = runtime.temporal_plain_date(object)?
-    {
-        return Ok(NativeDispatch::Immediate(StoredValue::Boolean(
-            receiver == other,
-        )));
-    }
-    if let StoredValue::String(value) = value {
-        return finish_temporal_plain_date_equals(
-            &receiver,
-            StoredValue::String(value),
-            realm,
-            &origin,
-        );
-    }
-    begin_operator_primitive_conversion(
-        runtime,
-        value,
-        OperatorPrimitiveHint::String,
-        OperatorPrimitiveTarget::TemporalPlainDateEquals(Box::new(receiver)),
-        realm,
-        return_to,
-        origin,
-        execution_budget,
-    )
-}
-
-pub(in crate::vm) fn finish_temporal_plain_date_equals(
-    receiver: &PlainDate,
-    value: StoredValue,
-    realm: RealmId,
-    origin: &JsStackFrame,
-) -> Result<NativeDispatch, NativeFailure> {
-    let StoredValue::String(value) = value else {
-        return temporal_type_error(realm, origin, "Temporal.PlainDate.equals requires a string");
-    };
-    let source = value.to_utf8_lossy()?;
-    let other = match PlainDate::from_utf8(source.as_bytes()) {
-        Ok(date) => date,
-        Err(error) => {
-            return Err(NativeFailure::Abrupt(temporal_exception_from_error(
-                realm, origin, error,
-            )?));
-        }
-    };
-    Ok(NativeDispatch::Immediate(StoredValue::Boolean(
-        *receiver == other,
     )))
 }
 

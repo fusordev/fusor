@@ -2279,7 +2279,6 @@ enum OperatorPrimitiveTarget {
     TemporalPlainMonthDayConstructor(Box<TemporalPlainMonthDayConstructorContinuation>),
     TemporalPlainYearMonthConstructor(Box<TemporalPlainYearMonthConstructorContinuation>),
     TemporalZonedDateTimeConstructor(Box<TemporalZonedDateTimeConstructorContinuation>),
-    TemporalPlainDateEquals(Box<temporal_rs::PlainDate>),
     TemporalPlainDateBag(Box<TemporalPlainDateBagContinuation>),
     TemporalPlainMonthDayBag(Box<TemporalPlainMonthDayBagContinuation>),
     TemporalPlainYearMonthBag(Box<TemporalPlainYearMonthBagContinuation>),
@@ -2516,8 +2515,7 @@ impl OperatorPrimitiveTarget {
             | Self::GlobalUri(_)
             | Self::BigIntToString { .. }
             | Self::BigIntTruncationBits { .. }
-            | Self::BigIntTruncationValue { .. }
-            | Self::TemporalPlainDateEquals(_) => 0,
+            | Self::BigIntTruncationValue { .. } => 0,
             Self::BinaryRight { .. }
             | Self::BinaryFinish { .. }
             | Self::EqualityFinish { .. }
@@ -2976,7 +2974,6 @@ fn trace_operator_primitive_target_roots(
         | OperatorPrimitiveTarget::JsonRawJsonText
         | OperatorPrimitiveTarget::BigIntToString { .. }
         | OperatorPrimitiveTarget::BigIntTruncationValue { .. }
-        | OperatorPrimitiveTarget::TemporalPlainDateEquals(_)
         // The converted left Number carries no heap edge.
         | OperatorPrimitiveTarget::MathBinaryFinish { .. } => {}
         OperatorPrimitiveTarget::DateSetTime { object }

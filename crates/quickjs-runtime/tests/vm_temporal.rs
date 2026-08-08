@@ -2893,3 +2893,89 @@ fn instant_arguments_accept_branded_zoned_date_time_values() {
         "1000000000000000000|-1|true|PT3.6S|PT1S"
     );
 }
+
+#[test]
+fn plain_date_arguments_accept_plain_date_time_and_zoned_date_time_slots() {
+    assert_eq!(
+        rendered(
+            "var date=new Temporal.PlainDate(2000,5,2);
+             var dateTime=new Temporal.PlainDateTime(2000,5,2,12,34);
+             var zoned=new Temporal.ZonedDateTime(957270896987654321n,'UTC');
+             return [Temporal.PlainDate.from(dateTime).toString(),
+               Temporal.PlainDate.from(zoned).toString(),
+               Temporal.PlainDate.compare(dateTime,date),
+               date.equals(dateTime),date.equals(zoned),
+               date.until(new Temporal.PlainDateTime(2000,5,12,12,0)).toString(),
+               date.since(zoned).toString()].join('|');"
+        ),
+        "2000-05-02|2000-05-02|0|true|true|P10D|PT0S"
+    );
+    assert_eq!(
+        rendered(
+            "var date=new Temporal.PlainDate(2000,5,2,'gregory');
+             return [date.toPlainMonthDay().toString(),date.toPlainMonthDay().calendarId,
+               date.toPlainYearMonth().toString(),date.toPlainYearMonth().calendarId,
+               Temporal.PlainDate.prototype.toPlainMonthDay.length,
+               Temporal.PlainDate.prototype.toPlainYearMonth.length].join('|');"
+        ),
+        "1972-05-02[u-ca=gregory]|gregory|2000-05-01[u-ca=gregory]|gregory|0|0"
+    );
+    assert_eq!(
+        rendered(
+            "return [Temporal.PlainDate.from({year:2021,month:13,day:500}).toString(),
+               Temporal.PlainDate.from({year:2021,month:2,day:31}).toString(),
+               new Temporal.PlainDate(1976,11,18).with({month:13}).toString(),
+               new Temporal.PlainDate(1976,11,18).with({day:31}).toString()].join('|');"
+        ),
+        "2021-12-31|2021-02-28|1976-12-18|1976-11-30"
+    );
+    assert_eq!(
+        thrown("return new Temporal.PlainDate(2000,5,2,'1997-12-04[u-ca=iso8601]');"),
+        ExceptionKind::RangeError
+    );
+    assert_eq!(
+        thrown("return new Temporal.PlainDate(Infinity,1,1);"),
+        ExceptionKind::RangeError
+    );
+    assert_eq!(
+        thrown("return Temporal.PlainDate.from({year:2021,month:0,day:2});"),
+        ExceptionKind::RangeError
+    );
+    assert_eq!(
+        thrown("return new Temporal.PlainDate(1976,11,18).with({day:0});"),
+        ExceptionKind::RangeError
+    );
+    assert_eq!(
+        thrown("return new Temporal.PlainDate(1976,11,18).with({month:13},{overflow:'reject'});"),
+        ExceptionKind::RangeError
+    );
+    assert_eq!(
+        thrown("return new Temporal.PlainDate(1976,11,18).with(new Temporal.PlainDate(2000,1,1));"),
+        ExceptionKind::TypeError
+    );
+    assert_eq!(
+        thrown("return new Temporal.PlainDate(2000,5,2).equals(new Temporal.PlainTime(12,0));"),
+        ExceptionKind::TypeError
+    );
+    assert_eq!(
+        thrown("return new Temporal.PlainDate(2000,5,2).equals({year:2000,month:5});"),
+        ExceptionKind::TypeError
+    );
+    assert_eq!(
+        thrown("return Temporal.PlainDate.prototype.toPlainMonthDay.call({});"),
+        ExceptionKind::TypeError
+    );
+    assert_eq!(
+        thrown("return Temporal.PlainDate.prototype.toPlainYearMonth.call({});"),
+        ExceptionKind::TypeError
+    );
+    assert_eq!(
+        rendered(
+            "var log=[];
+             try{new Temporal.PlainDate(0,{valueOf:function(){log.push('month');return Infinity;}},
+               {valueOf:function(){log.push('day');return 1;}})}catch(error){log.push(error.name);}
+             return log.join(',');"
+        ),
+        "month,RangeError"
+    );
+}
