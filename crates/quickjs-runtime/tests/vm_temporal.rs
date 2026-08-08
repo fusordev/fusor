@@ -746,6 +746,90 @@ fn zoned_date_time_with_merges_partial_fields_and_observes_option_order() {
 }
 
 #[test]
+fn zoned_date_time_round_uses_time_zone_aware_day_rounding() {
+    assert_eq!(
+        rendered(
+            "var value=new Temporal.ZonedDateTime(3661987654321n,'UTC');
+             var result=value.round({smallestUnit:'minute'});
+             var method=Object.getOwnPropertyDescriptor(Temporal.ZonedDateTime.prototype,'round');
+             return [result.toString(),result===value,method.value.length,method.value.name,
+               method.enumerable,method.writable,method.configurable].join('|');"
+        ),
+        "1970-01-01T01:01:00+00:00[UTC]|false|1|round|false|true|true"
+    );
+    assert_eq!(
+        rendered(
+            "var berlin=new Temporal.ZonedDateTime(1743294600000000000n,'Europe/Berlin');
+             return [berlin.toString(),berlin.round('day').toString(),
+               berlin.round({smallestUnit:'day',roundingMode:'ceil'}).toString(),
+               berlin.round({smallestUnit:'hour'}).toString()].join('|');"
+        ),
+        "2025-03-30T01:30:00+01:00[Europe/Berlin]|2025-03-30T00:00:00+01:00[Europe/Berlin]|2025-03-31T00:00:00+02:00[Europe/Berlin]|2025-03-30T03:00:00+02:00[Europe/Berlin]"
+    );
+    assert_eq!(
+        rendered(
+            "var log=[],options={};
+             Object.defineProperty(options,'roundingIncrement',{get:function(){log.push('get roundingIncrement');return 1;}});
+             Object.defineProperty(options,'roundingMode',{get:function(){log.push('get roundingMode');return 'halfExpand';}});
+             Object.defineProperty(options,'smallestUnit',{get:function(){log.push('get smallestUnit');return 'second';}});
+             new Temporal.ZonedDateTime(0n,'UTC').round(options);
+             return log.join(',');"
+        ),
+        "get roundingIncrement,get roundingMode,get smallestUnit"
+    );
+    assert_eq!(
+        thrown("return new Temporal.ZonedDateTime(0n,'UTC').round();"),
+        ExceptionKind::TypeError
+    );
+    assert_eq!(
+        thrown("return new Temporal.ZonedDateTime(0n,'UTC').round(5);"),
+        ExceptionKind::TypeError
+    );
+    assert_eq!(
+        thrown("return new Temporal.ZonedDateTime(0n,'UTC').round({});"),
+        ExceptionKind::RangeError
+    );
+    assert_eq!(
+        thrown("return new Temporal.ZonedDateTime(0n,'UTC').round({smallestUnit:'year'});"),
+        ExceptionKind::RangeError
+    );
+    assert_eq!(
+        thrown("return new Temporal.ZonedDateTime(0n,'UTC').round({smallestUnit:'fortnight'});"),
+        ExceptionKind::RangeError
+    );
+    assert_eq!(
+        thrown(
+            "return new Temporal.ZonedDateTime(0n,'UTC').round({smallestUnit:'hour',roundingIncrement:25});"
+        ),
+        ExceptionKind::RangeError
+    );
+    assert_eq!(
+        thrown(
+            "return new Temporal.ZonedDateTime(0n,'UTC').round({smallestUnit:'day',roundingIncrement:2});"
+        ),
+        ExceptionKind::RangeError
+    );
+    assert_eq!(
+        thrown(
+            "return new Temporal.ZonedDateTime(0n,'UTC').round({smallestUnit:'hour',roundingIncrement:NaN});"
+        ),
+        ExceptionKind::RangeError
+    );
+    assert_eq!(
+        thrown(
+            "return new Temporal.ZonedDateTime(0n,'UTC').round({smallestUnit:'hour',roundingMode:'balance'});"
+        ),
+        ExceptionKind::RangeError
+    );
+    assert_eq!(
+        thrown(
+            "return Object.getOwnPropertyDescriptor(Temporal.ZonedDateTime.prototype,'round').value.call({},'hour');"
+        ),
+        ExceptionKind::TypeError
+    );
+}
+
+#[test]
 fn zoned_date_time_transition_accepts_string_and_resumable_options_forms() {
     assert_eq!(
         rendered(
