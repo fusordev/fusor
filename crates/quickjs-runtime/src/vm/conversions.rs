@@ -594,6 +594,9 @@ pub(super) fn finish_intrinsic_get(
             new_target,
             value: string_value,
         } => finish_string_constructor_wrapper(runtime, new_target, string_value, &value),
+        IntrinsicGetContinuation::IteratorConstructor { new_target } => {
+            finish_iterator_constructor_wrapper(runtime, new_target, &value)
+        }
         IntrinsicGetContinuation::ArrayConstructor { .. } => Err(EngineFault::RuntimeInvariant {
             message: "Array prototype getter resumed without an execution budget",
         }
@@ -2308,6 +2311,15 @@ fn finish_operator_primitive_target(
                 execution_budget,
             )
         }
+        OperatorPrimitiveTarget::TemporalPlainDateTimeToZonedDateTime(state) => {
+            advance_temporal_plain_date_time_to_zoned_date_time(
+                runtime,
+                *state,
+                value,
+                return_to,
+                execution_budget,
+            )
+        }
         OperatorPrimitiveTarget::TemporalPlainTimeBag(state) => {
             advance_temporal_plain_time_property_bag(
                 runtime,
@@ -2962,6 +2974,9 @@ fn finish_operator_primitive_target(
         }
         OperatorPrimitiveTarget::ArrayIteratorLength(state) => {
             finish_array_iterator_length(runtime, state, value, return_to, execution_budget)
+        }
+        OperatorPrimitiveTarget::IteratorLimit(state) => {
+            advance_iterator_limit(runtime, *state, value, return_to, execution_budget)
         }
         OperatorPrimitiveTarget::FunctionApplyLength(state) => {
             finish_function_apply_length(runtime, state, value, return_to, execution_budget)

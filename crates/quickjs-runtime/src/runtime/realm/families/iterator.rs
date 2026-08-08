@@ -1,13 +1,16 @@
 //! Iterator prototype and iterator function declarations.
 
 use super::{
-    FunctionSink, ObjectSink, PropertySink, data, method, object, object_prototype, ordinary,
+    FunctionSink, ObjectSink, PropertySink, accessor, data, method, object, object_prototype,
+    ordinary,
 };
 use crate::runtime::realm::{
-    IDENTITY_PROPERTY, NativeFunctionKind, PredefinedAtom,
+    CONSTRUCTOR_PROTOTYPE_PROPERTY, IDENTITY_PROPERTY, NativeFunctionKind, PredefinedAtom,
+    PropertyLayout,
     schema::{
-        IntrinsicIdentity, IntrinsicKeySpec, IntrinsicNameSpec, IntrinsicObjectId,
-        IntrinsicObjectKind, IntrinsicStringSpec, IntrinsicValueSpec, PrototypeSpec, RealmNameId,
+        IntrinsicFunctionId, IntrinsicIdentity, IntrinsicKeySpec, IntrinsicNameSpec,
+        IntrinsicObjectId, IntrinsicObjectKind, IntrinsicStringSpec, IntrinsicValueSpec,
+        PrototypeSpec, RealmNameId,
     },
 };
 
@@ -18,8 +21,22 @@ pub(super) fn visit_objects(visit: ObjectSink<'_>) {
         IntrinsicObjectKind::Ordinary,
     ));
     visit(object(
+        IntrinsicObjectId::IteratorHelperPrototype,
+        PrototypeSpec::Intrinsic(IntrinsicIdentity::Object(
+            IntrinsicObjectId::IteratorPrototype,
+        )),
+        IntrinsicObjectKind::Ordinary,
+    ));
+    visit(object(
         IntrinsicObjectId::AsyncIteratorPrototype,
         object_prototype(),
+        IntrinsicObjectKind::Ordinary,
+    ));
+    visit(object(
+        IntrinsicObjectId::WrapForValidIteratorPrototype,
+        PrototypeSpec::Intrinsic(IntrinsicIdentity::Object(
+            IntrinsicObjectId::IteratorPrototype,
+        )),
         IntrinsicObjectKind::Ordinary,
     ));
     visit(object(
@@ -45,7 +62,90 @@ pub(super) fn visit_objects(visit: ObjectSink<'_>) {
     }
 }
 
+#[allow(
+    clippy::too_many_lines,
+    reason = "the specification-ordered Iterator intrinsic functions are audited as one declaration list"
+)]
 pub(super) fn visit_functions(visit: FunctionSink<'_>) {
+    for (kind, name, length) in [
+        (
+            NativeFunctionKind::IteratorConstructor,
+            IntrinsicNameSpec::Predefined(PredefinedAtom::Iterator),
+            0,
+        ),
+        (
+            NativeFunctionKind::IteratorFrom,
+            IntrinsicNameSpec::Predefined(PredefinedAtom::From),
+            1,
+        ),
+        (
+            NativeFunctionKind::IteratorPrototypeDrop,
+            IntrinsicNameSpec::RealmName(RealmNameId::IteratorDrop),
+            1,
+        ),
+        (
+            NativeFunctionKind::IteratorPrototypeFilter,
+            IntrinsicNameSpec::RealmName(RealmNameId::IteratorFilter),
+            1,
+        ),
+        (
+            NativeFunctionKind::IteratorPrototypeMap,
+            IntrinsicNameSpec::RealmName(RealmNameId::IteratorMap),
+            1,
+        ),
+        (
+            NativeFunctionKind::IteratorPrototypeTake,
+            IntrinsicNameSpec::RealmName(RealmNameId::IteratorTake),
+            1,
+        ),
+        (
+            NativeFunctionKind::IteratorPrototypeToArray,
+            IntrinsicNameSpec::RealmName(RealmNameId::IteratorToArray),
+            0,
+        ),
+        (
+            NativeFunctionKind::IteratorPrototypeConstructorGetter,
+            IntrinsicNameSpec::Literal("get constructor"),
+            0,
+        ),
+        (
+            NativeFunctionKind::IteratorPrototypeConstructorSetter,
+            IntrinsicNameSpec::Literal("set constructor"),
+            1,
+        ),
+        (
+            NativeFunctionKind::IteratorPrototypeToStringTagGetter,
+            IntrinsicNameSpec::Literal("get [Symbol.toStringTag]"),
+            0,
+        ),
+        (
+            NativeFunctionKind::IteratorPrototypeToStringTagSetter,
+            IntrinsicNameSpec::Literal("set [Symbol.toStringTag]"),
+            1,
+        ),
+        (
+            NativeFunctionKind::IteratorWrapperNext,
+            IntrinsicNameSpec::Predefined(PredefinedAtom::Next),
+            0,
+        ),
+        (
+            NativeFunctionKind::IteratorWrapperReturn,
+            IntrinsicNameSpec::Predefined(PredefinedAtom::Return),
+            0,
+        ),
+        (
+            NativeFunctionKind::IteratorHelperNext,
+            IntrinsicNameSpec::Predefined(PredefinedAtom::Next),
+            0,
+        ),
+        (
+            NativeFunctionKind::IteratorHelperReturn,
+            IntrinsicNameSpec::Predefined(PredefinedAtom::Return),
+            0,
+        ),
+    ] {
+        visit(ordinary(kind, name, length));
+    }
     for (kind, name) in [
         (
             NativeFunctionKind::IteratorPrototypeIterator,
@@ -104,11 +204,109 @@ pub(super) fn visit_functions(visit: FunctionSink<'_>) {
     }
 }
 
+#[allow(
+    clippy::too_many_lines,
+    reason = "the specification-ordered Iterator intrinsic surface is audited as one declaration list"
+)]
 pub(super) fn visit_properties(visit: PropertySink<'_>) {
+    let constructor =
+        IntrinsicIdentity::Function(IntrinsicFunctionId(NativeFunctionKind::IteratorConstructor));
+    let prototype = IntrinsicIdentity::Object(IntrinsicObjectId::IteratorPrototype);
+    visit(data(
+        constructor,
+        IntrinsicKeySpec::PredefinedString(PredefinedAtom::Prototype),
+        CONSTRUCTOR_PROTOTYPE_PROPERTY,
+        IntrinsicValueSpec::Object(IntrinsicObjectId::IteratorPrototype),
+    ));
     visit(method(
-        IntrinsicIdentity::Object(IntrinsicObjectId::IteratorPrototype),
+        constructor,
+        IntrinsicKeySpec::PredefinedString(PredefinedAtom::From),
+        NativeFunctionKind::IteratorFrom,
+    ));
+    visit(accessor(
+        prototype,
+        IntrinsicKeySpec::PredefinedString(PredefinedAtom::Constructor),
+        PropertyLayout::accessor(false, true),
+        Some(IntrinsicFunctionId(
+            NativeFunctionKind::IteratorPrototypeConstructorGetter,
+        )),
+        Some(IntrinsicFunctionId(
+            NativeFunctionKind::IteratorPrototypeConstructorSetter,
+        )),
+    ));
+    visit(accessor(
+        prototype,
+        IntrinsicKeySpec::WellKnownSymbol(PredefinedAtom::SymbolToStringTag),
+        PropertyLayout::accessor(false, true),
+        Some(IntrinsicFunctionId(
+            NativeFunctionKind::IteratorPrototypeToStringTagGetter,
+        )),
+        Some(IntrinsicFunctionId(
+            NativeFunctionKind::IteratorPrototypeToStringTagSetter,
+        )),
+    ));
+    visit(method(
+        prototype,
         IntrinsicKeySpec::WellKnownSymbol(PredefinedAtom::SymbolIterator),
         NativeFunctionKind::IteratorPrototypeIterator,
+    ));
+    visit(method(
+        prototype,
+        IntrinsicKeySpec::InternedString(RealmNameId::IteratorDrop),
+        NativeFunctionKind::IteratorPrototypeDrop,
+    ));
+    visit(method(
+        prototype,
+        IntrinsicKeySpec::InternedString(RealmNameId::IteratorFilter),
+        NativeFunctionKind::IteratorPrototypeFilter,
+    ));
+    visit(method(
+        prototype,
+        IntrinsicKeySpec::InternedString(RealmNameId::IteratorMap),
+        NativeFunctionKind::IteratorPrototypeMap,
+    ));
+    visit(method(
+        prototype,
+        IntrinsicKeySpec::InternedString(RealmNameId::IteratorTake),
+        NativeFunctionKind::IteratorPrototypeTake,
+    ));
+    visit(method(
+        prototype,
+        IntrinsicKeySpec::InternedString(RealmNameId::IteratorToArray),
+        NativeFunctionKind::IteratorPrototypeToArray,
+    ));
+    let helper = IntrinsicIdentity::Object(IntrinsicObjectId::IteratorHelperPrototype);
+    visit(method(
+        helper,
+        IntrinsicKeySpec::PredefinedString(PredefinedAtom::Next),
+        NativeFunctionKind::IteratorHelperNext,
+    ));
+    visit(method(
+        helper,
+        IntrinsicKeySpec::PredefinedString(PredefinedAtom::Return),
+        NativeFunctionKind::IteratorHelperReturn,
+    ));
+    visit(data(
+        helper,
+        IntrinsicKeySpec::WellKnownSymbol(PredefinedAtom::SymbolToStringTag),
+        IDENTITY_PROPERTY,
+        IntrinsicValueSpec::String(IntrinsicStringSpec::Literal("Iterator Helper")),
+    ));
+    let wrapper = IntrinsicIdentity::Object(IntrinsicObjectId::WrapForValidIteratorPrototype);
+    visit(method(
+        wrapper,
+        IntrinsicKeySpec::PredefinedString(PredefinedAtom::Next),
+        NativeFunctionKind::IteratorWrapperNext,
+    ));
+    visit(method(
+        wrapper,
+        IntrinsicKeySpec::PredefinedString(PredefinedAtom::Return),
+        NativeFunctionKind::IteratorWrapperReturn,
+    ));
+    visit(method(
+        IntrinsicIdentity::Object(IntrinsicObjectId::GlobalObject),
+        IntrinsicKeySpec::PredefinedString(PredefinedAtom::Iterator),
+        NativeFunctionKind::IteratorConstructor,
     ));
     visit(method(
         IntrinsicIdentity::Object(IntrinsicObjectId::AsyncIteratorPrototype),

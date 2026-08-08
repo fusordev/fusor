@@ -282,6 +282,13 @@ pub(super) fn resume_iterator_abrupt_continuations(
                         execution_budget,
                     )
                 }
+                OperatorPrimitiveTarget::IteratorLimit(state) => resume_iterator_limit_abrupt(
+                    runtime,
+                    *state,
+                    pending,
+                    return_to,
+                    execution_budget,
+                ),
                 OperatorPrimitiveTarget::RegExpValue(state) if state.handles_abrupt() => {
                     resume_regexp_abrupt(runtime, &state, pending)
                 }
@@ -615,6 +622,24 @@ pub(super) fn resume_native_continuations(
                     runtime,
                     *state,
                     Some(value),
+                    return_to,
+                    execution_budget,
+                )?
+            }
+            NativeContinuation::TemporalPlainDateToZonedDateTime(state) => {
+                advance_temporal_plain_date_to_zoned_date_time(
+                    runtime,
+                    *state,
+                    value,
+                    return_to,
+                    execution_budget,
+                )?
+            }
+            NativeContinuation::TemporalPlainDateTimeToZonedDateTime(state) => {
+                advance_temporal_plain_date_time_to_zoned_date_time(
+                    runtime,
+                    *state,
+                    value,
                     return_to,
                     execution_budget,
                 )?
@@ -960,6 +985,37 @@ pub(super) fn resume_native_continuations(
             }
             NativeContinuation::ErrorToString(state) => {
                 advance_error_to_string(runtime, state, value, return_to, execution_budget)?
+            }
+            NativeContinuation::IteratorFrom(state) => {
+                advance_iterator_from(runtime, state, value, return_to, execution_budget)?
+            }
+            NativeContinuation::IteratorHelperCreation(state) => {
+                advance_iterator_helper_creation(runtime, state, value)?
+            }
+            NativeContinuation::IteratorToArray(state) => {
+                advance_iterator_to_array(runtime, state, value, return_to, execution_budget)?
+            }
+            NativeContinuation::IteratorHelperNext(state) => {
+                advance_iterator_helper_next(runtime, state, value, return_to, execution_budget)?
+            }
+            NativeContinuation::IteratorHelperReturn(state) => {
+                advance_iterator_helper_return(runtime, state, &value, return_to, execution_budget)?
+            }
+            NativeContinuation::IteratorWrapperReturn(state) => advance_iterator_wrapper_return(
+                runtime,
+                state,
+                &value,
+                return_to,
+                execution_budget,
+            )?,
+            NativeContinuation::IteratorPrototypeSetter(state) => {
+                advance_iterator_prototype_setter(
+                    runtime,
+                    state,
+                    &value,
+                    return_to,
+                    execution_budget,
+                )?
             }
             NativeContinuation::ArrayIteratorNext(state) => {
                 advance_array_iterator_next(runtime, state, value, return_to, execution_budget)?
@@ -3646,6 +3702,137 @@ pub(super) fn dispatch_native_call_with_frames(
                 execution_budget,
             )
         }
+        NativeFunctionKind::IteratorConstructor => begin_iterator_constructor(
+            runtime,
+            function,
+            inputs.new_target,
+            native.realm,
+            return_to,
+            origin.unwrap_or_else(native_function_host_origin),
+            execution_budget,
+        ),
+        NativeFunctionKind::IteratorFrom => begin_iterator_from(
+            runtime,
+            inputs.arguments.take_first_or_undefined(),
+            native.realm,
+            return_to,
+            origin.unwrap_or_else(native_function_host_origin),
+            execution_budget,
+        ),
+        NativeFunctionKind::IteratorPrototypeDrop => begin_iterator_drop(
+            runtime,
+            inputs.receiver,
+            inputs.arguments.take_first_or_undefined(),
+            native.realm,
+            return_to,
+            origin.unwrap_or_else(native_function_host_origin),
+            execution_budget,
+        ),
+        NativeFunctionKind::IteratorPrototypeFilter => {
+            let predicate = inputs.arguments.take_first_or_undefined();
+            begin_iterator_filter(
+                runtime,
+                inputs.receiver,
+                &predicate,
+                native.realm,
+                return_to,
+                origin.unwrap_or_else(native_function_host_origin),
+                execution_budget,
+            )
+        }
+        NativeFunctionKind::IteratorPrototypeMap => {
+            let mapper = inputs.arguments.take_first_or_undefined();
+            begin_iterator_map(
+                runtime,
+                inputs.receiver,
+                &mapper,
+                native.realm,
+                return_to,
+                origin.unwrap_or_else(native_function_host_origin),
+                execution_budget,
+            )
+        }
+        NativeFunctionKind::IteratorPrototypeTake => begin_iterator_take(
+            runtime,
+            inputs.receiver,
+            inputs.arguments.take_first_or_undefined(),
+            native.realm,
+            return_to,
+            origin.unwrap_or_else(native_function_host_origin),
+            execution_budget,
+        ),
+        NativeFunctionKind::IteratorPrototypeToArray => begin_iterator_to_array(
+            runtime,
+            inputs.receiver,
+            native.realm,
+            return_to,
+            origin.unwrap_or_else(native_function_host_origin),
+            execution_budget,
+        ),
+        NativeFunctionKind::IteratorPrototypeConstructorGetter => Ok(NativeDispatch::Immediate(
+            StoredValue::Function(runtime.realm_iterator_constructor(native.realm)?),
+        )),
+        NativeFunctionKind::IteratorPrototypeToStringTagGetter => Ok(NativeDispatch::Immediate(
+            StoredValue::String(JsString::from_utf8("Iterator")?),
+        )),
+        NativeFunctionKind::IteratorPrototypeConstructorSetter
+        | NativeFunctionKind::IteratorPrototypeToStringTagSetter => {
+            let value = inputs.arguments.take_first_or_undefined();
+            let (key, name) = match native.kind {
+                NativeFunctionKind::IteratorPrototypeConstructorSetter => (
+                    runtime.predefined_property_key(PredefinedAtom::Constructor),
+                    JsString::from_utf8("constructor")?,
+                ),
+                NativeFunctionKind::IteratorPrototypeToStringTagSetter => (
+                    runtime.predefined_symbol_property_key(PredefinedAtom::SymbolToStringTag),
+                    JsString::from_utf8("[Symbol.toStringTag]")?,
+                ),
+                _ => unreachable!("Iterator prototype setter arm is exhaustive"),
+            };
+            begin_iterator_prototype_setter(
+                runtime,
+                inputs.receiver,
+                value,
+                key,
+                name,
+                native.realm,
+                return_to,
+                origin.unwrap_or_else(native_function_host_origin),
+                execution_budget,
+            )
+        }
+        NativeFunctionKind::IteratorWrapperNext => begin_iterator_wrapper_next(
+            runtime,
+            &inputs.receiver,
+            native.realm,
+            return_to,
+            origin.unwrap_or_else(native_function_host_origin),
+            execution_budget,
+        ),
+        NativeFunctionKind::IteratorWrapperReturn => begin_iterator_wrapper_return(
+            runtime,
+            &inputs.receiver,
+            native.realm,
+            return_to,
+            origin.unwrap_or_else(native_function_host_origin),
+            execution_budget,
+        ),
+        NativeFunctionKind::IteratorHelperNext => begin_iterator_helper_next(
+            runtime,
+            &inputs.receiver,
+            native.realm,
+            return_to,
+            origin.unwrap_or_else(native_function_host_origin),
+            execution_budget,
+        ),
+        NativeFunctionKind::IteratorHelperReturn => begin_iterator_helper_return(
+            runtime,
+            &inputs.receiver,
+            native.realm,
+            return_to,
+            origin.unwrap_or_else(native_function_host_origin),
+            execution_budget,
+        ),
         NativeFunctionKind::ArraySpeciesGetter
         | NativeFunctionKind::ArrayBufferSpeciesGetter
         | NativeFunctionKind::SharedArrayBufferSpeciesGetter

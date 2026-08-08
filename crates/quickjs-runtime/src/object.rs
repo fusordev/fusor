@@ -377,6 +377,177 @@ pub(crate) struct ArrayIterator {
     next: u32,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum IteratorHelperLifecycle {
+    SuspendedStart,
+    SuspendedYield,
+    Executing,
+    Completed,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum IteratorHelperKind {
+    Drop,
+    Map,
+    Filter,
+    Take,
+}
+
+#[derive(Clone, Copy)]
+pub(crate) struct IteratorHelperState {
+    kind: IteratorHelperKind,
+    callback: Option<FunctionId>,
+    counter: u64,
+    remaining: f64,
+    lifecycle: IteratorHelperLifecycle,
+}
+
+impl IteratorHelperState {
+    #[must_use]
+    pub(crate) const fn new_callback(kind: IteratorHelperKind, callback: FunctionId) -> Self {
+        Self {
+            kind,
+            callback: Some(callback),
+            counter: 0,
+            remaining: 0.0,
+            lifecycle: IteratorHelperLifecycle::SuspendedStart,
+        }
+    }
+
+    #[must_use]
+    pub(crate) const fn new_limit(kind: IteratorHelperKind, remaining: f64) -> Self {
+        Self {
+            kind,
+            callback: None,
+            counter: 0,
+            remaining,
+            lifecycle: IteratorHelperLifecycle::SuspendedStart,
+        }
+    }
+
+    #[must_use]
+    pub(crate) const fn kind(&self) -> IteratorHelperKind {
+        self.kind
+    }
+
+    #[must_use]
+    pub(crate) const fn callback(&self) -> Option<FunctionId> {
+        self.callback
+    }
+
+    #[must_use]
+    pub(crate) const fn counter(&self) -> u64 {
+        self.counter
+    }
+
+    #[must_use]
+    pub(crate) const fn lifecycle(&self) -> IteratorHelperLifecycle {
+        self.lifecycle
+    }
+
+    #[must_use]
+    pub(crate) const fn remaining(&self) -> f64 {
+        self.remaining
+    }
+
+    pub(crate) const fn set_lifecycle(&mut self, lifecycle: IteratorHelperLifecycle) {
+        self.lifecycle = lifecycle;
+    }
+
+    pub(crate) const fn finish_callback(&mut self, yielded: bool) {
+        self.counter = self.counter.saturating_add(1);
+        if yielded {
+            self.lifecycle = IteratorHelperLifecycle::SuspendedYield;
+        }
+    }
+
+    pub(crate) fn consume_remaining(&mut self) -> f64 {
+        if self.remaining.is_finite() {
+            self.remaining -= 1.0;
+        }
+        self.remaining
+    }
+
+    pub(crate) const fn finish_limit_yield(&mut self) {
+        self.lifecycle = IteratorHelperLifecycle::SuspendedYield;
+    }
+}
+
+/// The iterator record retained by a wrapper or Iterator Helper instance.
+/// All values remain opaque to JavaScript property reflection.
+pub(crate) struct IteratorRecord {
+    iterator: StoredValue,
+    next_method: StoredValue,
+    helper: Option<IteratorHelperState>,
+}
+
+impl IteratorRecord {
+    #[must_use]
+    pub(crate) const fn new(iterator: StoredValue, next_method: StoredValue) -> Self {
+        Self {
+            iterator,
+            next_method,
+            helper: None,
+        }
+    }
+
+    #[must_use]
+    pub(crate) const fn new_callback_helper(
+        iterator: StoredValue,
+        next_method: StoredValue,
+        kind: IteratorHelperKind,
+        callback: FunctionId,
+    ) -> Self {
+        Self {
+            iterator,
+            next_method,
+            helper: Some(IteratorHelperState::new_callback(kind, callback)),
+        }
+    }
+
+    #[must_use]
+    pub(crate) const fn new_limit_helper(
+        iterator: StoredValue,
+        next_method: StoredValue,
+        kind: IteratorHelperKind,
+        remaining: f64,
+    ) -> Self {
+        Self {
+            iterator,
+            next_method,
+            helper: Some(IteratorHelperState::new_limit(kind, remaining)),
+        }
+    }
+
+    #[must_use]
+    pub(crate) fn duplicate(&self) -> Self {
+        Self {
+            iterator: self.iterator.duplicate(),
+            next_method: self.next_method.duplicate(),
+            helper: self.helper,
+        }
+    }
+
+    #[must_use]
+    pub(crate) const fn iterator(&self) -> &StoredValue {
+        &self.iterator
+    }
+
+    #[must_use]
+    pub(crate) const fn next_method(&self) -> &StoredValue {
+        &self.next_method
+    }
+
+    #[must_use]
+    pub(crate) const fn helper(&self) -> Option<&IteratorHelperState> {
+        self.helper.as_ref()
+    }
+
+    pub(crate) const fn helper_mut(&mut self) -> Option<&mut IteratorHelperState> {
+        self.helper.as_mut()
+    }
+}
+
 impl ArrayIterator {
     pub(crate) const fn new(iterated: StoredValue, kind: ArrayIteratorKind) -> Self {
         Self {
@@ -2469,6 +2640,8 @@ pub(crate) enum HeapObjectKind {
     BoxedPrimitive(BoxedPrimitive),
     ForInIterator(ForInIterator),
     ArrayIterator(ArrayIterator),
+    /// An ordinary object with the internal `[[Iterated]]` Iterator Record.
+    IteratorWrapper(IteratorRecord),
     StringIterator(StringIterator),
     RegExpStringIterator(RegExpStringIterator),
     /// An ECMAScript `RegExp` object with compiled `[[RegExpMatcher]]` state.
@@ -2634,6 +2807,7 @@ impl HeapObjectKind {
             | Self::Promise(_)
             | Self::ForInIterator(_)
             | Self::ArrayIterator(_)
+            | Self::IteratorWrapper(_)
             | Self::StringIterator(_)
             | Self::RegExpStringIterator(_)
             | Self::RegExp(_)
@@ -2673,6 +2847,7 @@ impl HeapObjectKind {
             | Self::BoxedPrimitive(_)
             | Self::ForInIterator(_)
             | Self::ArrayIterator(_)
+            | Self::IteratorWrapper(_)
             | Self::StringIterator(_)
             | Self::RegExpStringIterator(_)
             | Self::RegExp(_)
@@ -2711,6 +2886,7 @@ impl HeapObjectKind {
             | Self::BoxedPrimitive(_)
             | Self::ForInIterator(_)
             | Self::ArrayIterator(_)
+            | Self::IteratorWrapper(_)
             | Self::StringIterator(_)
             | Self::RegExpStringIterator(_)
             | Self::RegExp(_)
@@ -2749,6 +2925,7 @@ impl HeapObjectKind {
             | Self::Promise(_)
             | Self::BoxedPrimitive(_)
             | Self::ArrayIterator(_)
+            | Self::IteratorWrapper(_)
             | Self::StringIterator(_)
             | Self::RegExpStringIterator(_)
             | Self::RegExp(_)
@@ -2787,6 +2964,7 @@ impl HeapObjectKind {
             | Self::Promise(_)
             | Self::BoxedPrimitive(_)
             | Self::ArrayIterator(_)
+            | Self::IteratorWrapper(_)
             | Self::StringIterator(_)
             | Self::RegExpStringIterator(_)
             | Self::RegExp(_)
@@ -2825,6 +3003,7 @@ impl HeapObjectKind {
             | Self::Promise(_)
             | Self::BoxedPrimitive(_)
             | Self::ForInIterator(_)
+            | Self::IteratorWrapper(_)
             | Self::StringIterator(_)
             | Self::RegExpStringIterator(_)
             | Self::RegExp(_)
@@ -2863,6 +3042,7 @@ impl HeapObjectKind {
             | Self::Promise(_)
             | Self::BoxedPrimitive(_)
             | Self::ForInIterator(_)
+            | Self::IteratorWrapper(_)
             | Self::StringIterator(_)
             | Self::RegExpStringIterator(_)
             | Self::RegExp(_)
@@ -2889,6 +3069,20 @@ impl HeapObjectKind {
         }
     }
 
+    pub(crate) const fn iterator_wrapper(&self) -> Option<&IteratorRecord> {
+        match self {
+            Self::IteratorWrapper(iterator) => Some(iterator),
+            _ => None,
+        }
+    }
+
+    pub(crate) const fn iterator_wrapper_mut(&mut self) -> Option<&mut IteratorRecord> {
+        match self {
+            Self::IteratorWrapper(iterator) => Some(iterator),
+            _ => None,
+        }
+    }
+
     pub(crate) const fn string_iterator(&self) -> Option<&StringIterator> {
         match self {
             Self::StringIterator(iterator) => Some(iterator),
@@ -2902,6 +3096,7 @@ impl HeapObjectKind {
             | Self::BoxedPrimitive(_)
             | Self::ForInIterator(_)
             | Self::ArrayIterator(_)
+            | Self::IteratorWrapper(_)
             | Self::RegExpStringIterator(_)
             | Self::RegExp(_)
             | Self::Date(_)
@@ -2940,6 +3135,7 @@ impl HeapObjectKind {
             | Self::BoxedPrimitive(_)
             | Self::ForInIterator(_)
             | Self::ArrayIterator(_)
+            | Self::IteratorWrapper(_)
             | Self::RegExpStringIterator(_)
             | Self::RegExp(_)
             | Self::Date(_)
@@ -3212,6 +3408,15 @@ impl HeapObject {
     pub(crate) const fn array_iterator(record: ObjectRecord, iterator: ArrayIterator) -> Self {
         Self {
             kind: HeapObjectKind::ArrayIterator(iterator),
+            record,
+            public_roots: 0,
+        }
+    }
+
+    #[must_use]
+    pub(crate) const fn iterator_wrapper(record: ObjectRecord, iterator: IteratorRecord) -> Self {
+        Self {
+            kind: HeapObjectKind::IteratorWrapper(iterator),
             record,
             public_roots: 0,
         }
@@ -3610,6 +3815,7 @@ impl HeapObject {
             | HeapObjectKind::BoxedPrimitive(_)
             | HeapObjectKind::ForInIterator(_)
             | HeapObjectKind::ArrayIterator(_)
+            | HeapObjectKind::IteratorWrapper(_)
             | HeapObjectKind::StringIterator(_)
             | HeapObjectKind::RegExpStringIterator(_)
             | HeapObjectKind::RegExp(_)
@@ -3648,6 +3854,7 @@ impl HeapObject {
             | HeapObjectKind::BoxedPrimitive(_)
             | HeapObjectKind::ForInIterator(_)
             | HeapObjectKind::ArrayIterator(_)
+            | HeapObjectKind::IteratorWrapper(_)
             | HeapObjectKind::StringIterator(_)
             | HeapObjectKind::RegExpStringIterator(_)
             | HeapObjectKind::RegExp(_)
@@ -3688,6 +3895,7 @@ impl HeapObject {
             | HeapObjectKind::BoxedPrimitive(_)
             | HeapObjectKind::ForInIterator(_)
             | HeapObjectKind::ArrayIterator(_)
+            | HeapObjectKind::IteratorWrapper(_)
             | HeapObjectKind::StringIterator(_)
             | HeapObjectKind::RegExpStringIterator(_)
             | HeapObjectKind::RegExp(_)
@@ -3877,6 +4085,15 @@ impl HeapObject {
     #[must_use]
     pub(crate) const fn array_iterator_state_mut(&mut self) -> Option<&mut ArrayIterator> {
         self.kind.array_iterator_mut()
+    }
+
+    #[must_use]
+    pub(crate) const fn iterator_wrapper_state(&self) -> Option<&IteratorRecord> {
+        self.kind.iterator_wrapper()
+    }
+
+    pub(crate) const fn iterator_wrapper_state_mut(&mut self) -> Option<&mut IteratorRecord> {
+        self.kind.iterator_wrapper_mut()
     }
 
     #[must_use]

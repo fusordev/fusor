@@ -520,20 +520,25 @@ fn named_class_member_writes_retain_a_dedicated_immutable_class_name_capture() {
 #[test]
 fn computed_public_class_methods_use_the_typed_computed_definition_path() {
     let tree = compile(
-        "function make(key){class Box{[key](){return 3;}static[key+'Static'](){return 7;}}return Box;}",
+        "function make(key){class Box{[key](){return 3;}get[key+'Get'](){return 4;}set[key+'Set'](value){}static[key+'Static'](){return 7;}static get[key+'StaticGet'](){return 8;}static set[key+'StaticSet'](value){}}return Box;}",
         "make",
     );
-    assert_eq!(
-        tree.root()
-            .control_flow()
-            .instructions()
-            .iter()
-            .filter(|instruction| {
-                instruction.decoded().instruction().opcode() == FinalOpcode::DefineMethodComputed
-            })
-            .count(),
-        2
-    );
+    let flags = tree
+        .root()
+        .control_flow()
+        .instructions()
+        .iter()
+        .filter_map(|instruction| {
+            let instruction = instruction.decoded().instruction();
+            match (instruction.opcode(), instruction.operands()) {
+                (FinalOpcode::DefineMethodComputed, quickjs_bytecode::Operands::U8(flags)) => {
+                    Some(flags)
+                }
+                _ => None,
+            }
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(flags, [0, 1, 2, 0, 1, 2]);
 }
 
 #[test]

@@ -782,6 +782,8 @@ enum NativeContinuation {
     TemporalPlainDateTimeBag(Box<TemporalPlainDateTimeBagContinuation>),
     TemporalZonedDateTimeBag(Box<TemporalZonedDateTimeBagContinuation>),
     TemporalZonedDateTimeOptions(Box<TemporalZonedDateTimeOptionsContinuation>),
+    TemporalPlainDateToZonedDateTime(Box<TemporalPlainDateToZonedDateTimeContinuation>),
+    TemporalPlainDateTimeToZonedDateTime(Box<TemporalPlainDateTimeToZonedDateTimeContinuation>),
     TemporalPlainTimeBag(Box<TemporalPlainTimeBagContinuation>),
     TemporalPlainTimeOptions(Box<TemporalPlainTimeOptionsContinuation>),
     TemporalPlainDateOptions(Box<TemporalPlainDateOptionsContinuation>),
@@ -824,6 +826,13 @@ enum NativeContinuation {
     JsonStringify(Box<JsonStringifyContinuation>),
     ErrorConstructor(ErrorConstructorContinuation),
     ErrorToString(ErrorToStringContinuation),
+    IteratorFrom(IteratorFromContinuation),
+    IteratorHelperCreation(IteratorHelperCreationContinuation),
+    IteratorToArray(IteratorToArrayContinuation),
+    IteratorHelperNext(IteratorHelperNextContinuation),
+    IteratorHelperReturn(IteratorHelperReturnContinuation),
+    IteratorWrapperReturn(IteratorWrapperReturnContinuation),
+    IteratorPrototypeSetter(IteratorPrototypeSetterContinuation),
     ArrayIteratorNext(ArrayIteratorNextContinuation),
     ForOfStart(ForOfStartContinuation),
     ForOfNext(ForOfNextContinuation),
@@ -940,6 +949,12 @@ impl NativeContinuation {
                 TemporalZonedDateTimeBagContinuation::retained_values()
             }
             Self::TemporalZonedDateTimeOptions(state) => state.retained_values(),
+            Self::TemporalPlainDateToZonedDateTime(_) => {
+                TemporalPlainDateToZonedDateTimeContinuation::retained_values()
+            }
+            Self::TemporalPlainDateTimeToZonedDateTime(_) => {
+                TemporalPlainDateTimeToZonedDateTimeContinuation::retained_values()
+            }
             Self::TemporalPlainTimeBag(_) => TemporalPlainTimeBagContinuation::retained_values(),
             Self::TemporalPlainTimeOptions(_) => {
                 TemporalPlainTimeOptionsContinuation::retained_values()
@@ -1030,6 +1045,15 @@ impl NativeContinuation {
             Self::JsonStringify(state) => state.retained_values(),
             Self::ErrorConstructor(state) => state.retained_values(),
             Self::ErrorToString(state) => state.retained_values(),
+            Self::IteratorFrom(state) => state.retained_values(),
+            Self::IteratorHelperCreation(state) => state.retained_values(),
+            Self::IteratorToArray(state) => state.retained_values(),
+            Self::IteratorHelperNext(state) => state.retained_values(),
+            Self::IteratorHelperReturn(_) => IteratorHelperReturnContinuation::retained_values(),
+            Self::IteratorWrapperReturn(_) => IteratorWrapperReturnContinuation::retained_values(),
+            Self::IteratorPrototypeSetter(_) => {
+                IteratorPrototypeSetterContinuation::retained_values()
+            }
             Self::ArrayIteratorNext(state) => state.retained_values(),
             Self::ForOfStart(state) => state.retained_values(),
             Self::ForOfNext(state) => state.retained_values(),
@@ -1098,6 +1122,7 @@ impl NativeContinuation {
                 | Self::ArrayStatic(_)
                 | Self::ArrayFromAsync(_)
                 | Self::PromiseCombinator(_)
+                | Self::IteratorHelperNext(_)
                 | Self::IteratorAppend(_)
                 | Self::IteratorClose(_)
                 | Self::AsyncFromSync(_)
@@ -1111,6 +1136,7 @@ impl NativeContinuation {
                     if matches!(
                         &state.target,
                         OperatorPrimitiveTarget::ArrayFromAsyncLength { .. }
+                            | OperatorPrimitiveTarget::IteratorLimit(_)
                     ) || matches!(
                         &state.target,
                         OperatorPrimitiveTarget::RegExpValue(state) if state.handles_abrupt()
@@ -1382,6 +1408,9 @@ enum IntrinsicGetContinuation {
         new_target: FunctionId,
         value: JsString,
     },
+    IteratorConstructor {
+        new_target: FunctionId,
+    },
     ArrayConstructor {
         realm: RealmId,
         new_target: FunctionId,
@@ -1439,7 +1468,8 @@ impl IntrinsicGetContinuation {
             | Self::TemporalPlainMonthDayConstructor { .. }
             | Self::TemporalPlainYearMonthConstructor { .. }
             | Self::TemporalZonedDateTimeConstructor { .. }
-            | Self::StringConstructor { .. } => 1,
+            | Self::StringConstructor { .. }
+            | Self::IteratorConstructor { .. } => 1,
             Self::ArrayConstructor { arguments, .. } => {
                 1_u64.saturating_add(usize_to_u64(arguments.len()))
             }
@@ -2255,6 +2285,7 @@ enum OperatorPrimitiveTarget {
     TemporalPlainDateTimeBag(Box<TemporalPlainDateTimeBagContinuation>),
     TemporalZonedDateTimeBag(Box<TemporalZonedDateTimeBagContinuation>),
     TemporalZonedDateTimeOptions(Box<TemporalZonedDateTimeOptionsContinuation>),
+    TemporalPlainDateTimeToZonedDateTime(Box<TemporalPlainDateTimeToZonedDateTimeContinuation>),
     TemporalPlainTimeBag(Box<TemporalPlainTimeBagContinuation>),
     TemporalPlainTimeOptions(Box<TemporalPlainTimeOptionsContinuation>),
     TemporalPlainDateOptions(Box<TemporalPlainDateOptionsContinuation>),
@@ -2376,6 +2407,8 @@ enum OperatorPrimitiveTarget {
     ErrorToStringName(ErrorToStringContinuation),
     ErrorToStringMessage(ErrorToStringContinuation),
     ArrayIteratorLength(ArrayIteratorNextContinuation),
+    /// An Iterator Helper limit, awaiting `ToNumber`.
+    IteratorLimit(Box<IteratorLimitContinuation>),
     FunctionApplyLength(FunctionApplyContinuation),
     ProxyOwnKeysLength(Box<ProxyOwnKeysContinuation>),
     /// `BigInt.prototype.toString`'s radix, awaiting `ToNumber`.
@@ -2586,6 +2619,9 @@ impl OperatorPrimitiveTarget {
                 TemporalZonedDateTimeBagContinuation::retained_values()
             }
             Self::TemporalZonedDateTimeOptions(state) => state.retained_values(),
+            Self::TemporalPlainDateTimeToZonedDateTime(_) => {
+                TemporalPlainDateTimeToZonedDateTimeContinuation::retained_values()
+            }
             Self::TemporalPlainTimeBag(_) => TemporalPlainTimeBagContinuation::retained_values(),
             Self::TemporalPlainTimeOptions(_) => {
                 TemporalPlainTimeOptionsContinuation::retained_values()
@@ -2706,6 +2742,7 @@ impl OperatorPrimitiveTarget {
                 state.retained_values()
             }
             Self::ArrayIteratorLength(state) => state.retained_values(),
+            Self::IteratorLimit(_) => IteratorLimitContinuation::retained_values(),
             Self::FunctionApplyLength(state) => state.retained_values(),
             Self::ProxyOwnKeysLength(state) => state.retained_values(),
             Self::ArrayJoinSeparator(_) | Self::ArrayJoinElement(_) => {
@@ -2949,6 +2986,9 @@ fn trace_operator_primitive_target_roots(
         OperatorPrimitiveTarget::TemporalPlainDateTimeBag(state) => state.trace_roots(mark),
         OperatorPrimitiveTarget::TemporalZonedDateTimeBag(state) => state.trace_roots(mark),
         OperatorPrimitiveTarget::TemporalZonedDateTimeOptions(state) => state.trace_roots(mark),
+        OperatorPrimitiveTarget::TemporalPlainDateTimeToZonedDateTime(state) => {
+            state.trace_roots(mark);
+        }
         OperatorPrimitiveTarget::TemporalPlainTimeBag(state) => state.trace_roots(mark),
         OperatorPrimitiveTarget::TemporalPlainTimeOptions(state) => state.trace_roots(mark),
         OperatorPrimitiveTarget::TemporalPlainDateOptions(state) => state.trace_roots(mark),
@@ -3116,6 +3156,7 @@ fn trace_operator_primitive_target_roots(
             mark(CollectionRoot::Heap(HeapReference::Object(state.iterator)));
             trace_stored_value_root(&state.iterated, mark);
         }
+        OperatorPrimitiveTarget::IteratorLimit(state) => state.trace_roots(mark),
         OperatorPrimitiveTarget::FunctionApplyLength(state) => {
             trace_function_apply_roots(state, mark);
         }
@@ -3274,6 +3315,10 @@ fn trace_native_continuation_roots(
         NativeContinuation::TemporalPlainDateTimeBag(state) => state.trace_roots(mark),
         NativeContinuation::TemporalZonedDateTimeBag(state) => state.trace_roots(mark),
         NativeContinuation::TemporalZonedDateTimeOptions(state) => state.trace_roots(mark),
+        NativeContinuation::TemporalPlainDateToZonedDateTime(state) => state.trace_roots(mark),
+        NativeContinuation::TemporalPlainDateTimeToZonedDateTime(state) => {
+            state.trace_roots(mark);
+        }
         NativeContinuation::TemporalPlainTimeBag(state) => state.trace_roots(mark),
         NativeContinuation::TemporalPlainTimeOptions(state) => state.trace_roots(mark),
         NativeContinuation::TemporalPlainDateOptions(state) => state.trace_roots(mark),
@@ -3317,7 +3362,8 @@ fn trace_native_continuation_roots(
             | IntrinsicGetContinuation::TemporalPlainMonthDayConstructor { new_target, .. }
             | IntrinsicGetContinuation::TemporalPlainYearMonthConstructor { new_target, .. }
             | IntrinsicGetContinuation::TemporalZonedDateTimeConstructor { new_target, .. }
-            | IntrinsicGetContinuation::StringConstructor { new_target, .. } => {
+            | IntrinsicGetContinuation::StringConstructor { new_target, .. }
+            | IntrinsicGetContinuation::IteratorConstructor { new_target } => {
                 mark(CollectionRoot::Heap(HeapReference::Function(*new_target)));
             }
             IntrinsicGetContinuation::ArrayConstructor {
@@ -3389,6 +3435,13 @@ fn trace_native_continuation_roots(
         NativeContinuation::JsonStringify(state) => state.trace_roots(mark),
         NativeContinuation::ErrorConstructor(state) => state.trace_roots(mark),
         NativeContinuation::ErrorToString(state) => state.trace_roots(mark),
+        NativeContinuation::IteratorFrom(state) => state.trace_roots(mark),
+        NativeContinuation::IteratorHelperCreation(state) => state.trace_roots(mark),
+        NativeContinuation::IteratorToArray(state) => state.trace_roots(mark),
+        NativeContinuation::IteratorHelperNext(state) => state.trace_roots(mark),
+        NativeContinuation::IteratorHelperReturn(state) => state.trace_roots(mark),
+        NativeContinuation::IteratorWrapperReturn(state) => state.trace_roots(mark),
+        NativeContinuation::IteratorPrototypeSetter(state) => state.trace_roots(mark),
         NativeContinuation::ArrayIteratorNext(state) => {
             mark(CollectionRoot::Heap(HeapReference::Object(state.iterator)));
             trace_stored_value_root(&state.iterated, mark);

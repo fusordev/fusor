@@ -42,11 +42,10 @@ fn run_with<T>(
 #[test]
 fn base_class_construction_public_methods_and_accessors_obey_the_class_topology() {
     run_with(
-        "function run(){class Box{constructor(value){this.value=value;}get doubled(){return this.value*2;}static answer(){return 7;}}let box=new Box(5);return box.doubled+Box.answer();}",
+        "function run(){class Box{constructor(value){this.value=value;}get doubled(){return this.value*2;}static answer(){return 7;}}let box=new Box(5);let initial=box.doubled===10&&Box.answer()===7;let nonenumerable=!Box.prototype.propertyIsEnumerable('doubled')&&!Box.propertyIsEnumerable('answer');Box.answer=function(){return 8;};let writable=Box.answer()===8;let configurable=delete Box.answer&&!Box.hasOwnProperty('answer')&&delete Box.prototype.doubled&&!Box.prototype.hasOwnProperty('doubled');return initial&&nonenumerable&&writable&&configurable;}",
         |result| {
             let value = result.expect("class execution");
-            let number = value.as_number().expect("live value").expect("number");
-            assert!(number.strict_equals(JsNumber::from_i32(17)));
+            assert_eq!(value.as_boolean().expect("live Boolean"), Some(true));
         },
     );
 }

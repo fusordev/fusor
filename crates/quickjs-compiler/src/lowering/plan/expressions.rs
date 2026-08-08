@@ -1503,9 +1503,9 @@ impl<'compiler, 'unit, 'arena, 'scope> ExpressionPlanner<'compiler, 'unit, 'aren
             return Ok(());
         }
         let flags = match method.kind {
-            MethodDefinitionKind::Method => 4,
-            MethodDefinitionKind::Get => 5,
-            MethodDefinitionKind::Set => 6,
+            MethodDefinitionKind::Method => 0,
+            MethodDefinitionKind::Get => 1,
+            MethodDefinitionKind::Set => 2,
             MethodDefinitionKind::Constructor => unreachable!("constructors were skipped"),
         };
         if method.computed {
@@ -3853,6 +3853,15 @@ impl<'compiler, 'unit, 'arena, 'scope> ExpressionPlanner<'compiler, 'unit, 'aren
                     tree_layout,
                     constants,
                 )?));
+                continue;
+            }
+            if !property.shorthand && key.value.latin1_units() == Some(b"__proto__") {
+                work.push(ExpressionWork::Emit(PlannedInstruction::new(
+                    FinalOpcode::SetProto,
+                    Operands::None,
+                    property.span,
+                )));
+                work.push(ExpressionWork::Visit(&property.value));
                 continue;
             }
             let inferred_name = Self::plan_inferred_static_property_name_for_initializer(

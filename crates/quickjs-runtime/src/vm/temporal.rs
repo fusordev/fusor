@@ -613,6 +613,63 @@ impl TemporalZonedDateTimeOptionsContinuation {
 }
 
 #[derive(Clone, Copy)]
+enum TemporalPlainDateToZonedDateTimeStage {
+    AwaitTimeZone,
+    AwaitPlainTime,
+}
+
+/// Resumable property access for `Temporal.PlainDate.prototype.toZonedDateTime`.
+///
+/// An object argument exposes `timeZone` first and, only when that property is
+/// present and valid, `plainTime`. The original item remains rooted because a
+/// missing `timeZone` is interpreted as a branded `ZonedDateTime` argument.
+pub(super) struct TemporalPlainDateToZonedDateTimeContinuation {
+    date: PlainDate,
+    item: StoredValue,
+    time_zone: Option<TimeZone>,
+    stage: TemporalPlainDateToZonedDateTimeStage,
+    realm: RealmId,
+    origin: JsStackFrame,
+}
+
+impl TemporalPlainDateToZonedDateTimeContinuation {
+    pub(super) const fn retained_values() -> u64 {
+        1
+    }
+
+    pub(super) fn trace_roots(&self, mark: &mut dyn FnMut(CollectionRoot)) {
+        trace_stored_value_root(&self.item, mark);
+    }
+}
+
+#[derive(Clone, Copy)]
+enum TemporalPlainDateTimeToZonedDateTimeStage {
+    AwaitDisambiguation,
+    AwaitDisambiguationConversion,
+}
+
+/// Resumable disambiguation option handling for
+/// `Temporal.PlainDateTime.prototype.toZonedDateTime`.
+pub(super) struct TemporalPlainDateTimeToZonedDateTimeContinuation {
+    date_time: PlainDateTime,
+    time_zone: TimeZone,
+    options: StoredValue,
+    stage: TemporalPlainDateTimeToZonedDateTimeStage,
+    realm: RealmId,
+    origin: JsStackFrame,
+}
+
+impl TemporalPlainDateTimeToZonedDateTimeContinuation {
+    pub(super) const fn retained_values() -> u64 {
+        1
+    }
+
+    pub(super) fn trace_roots(&self, mark: &mut dyn FnMut(CollectionRoot)) {
+        trace_stored_value_root(&self.options, mark);
+    }
+}
+
+#[derive(Clone, Copy)]
 enum TemporalPlainDateWithStage {
     ReadField,
     AwaitField,
@@ -715,6 +772,10 @@ enum TemporalPlainTimeLikeTarget {
     ZonedDateTimeWithPlainTime {
         receiver: ZonedDateTime,
     },
+    PlainDateToZonedDateTime {
+        receiver: PlainDate,
+        time_zone: TimeZone,
+    },
 }
 
 impl TemporalPlainTimeLikeTarget {
@@ -728,7 +789,8 @@ impl TemporalPlainTimeLikeTarget {
             }
             Self::CompareSecond { .. }
             | Self::Equals { .. }
-            | Self::ZonedDateTimeWithPlainTime { .. } => {}
+            | Self::ZonedDateTimeWithPlainTime { .. }
+            | Self::PlainDateToZonedDateTime { .. } => {}
         }
     }
 }
@@ -4722,6 +4784,17 @@ fn continue_temporal_plain_time_like(
                 &origin,
             )
         }
+        TemporalPlainTimeLikeTarget::PlainDateToZonedDateTime {
+            receiver,
+            time_zone,
+        } => finish_temporal_plain_date_to_zoned_date_time(
+            runtime,
+            &receiver,
+            time_zone,
+            Some(time),
+            realm,
+            &origin,
+        ),
     }
 }
 
@@ -7054,6 +7127,191 @@ fn finish_temporal_plain_date_to_plain_date_time(
     allocate_temporal_plain_date_time_result(runtime, realm, date_time)
 }
 
+fn finish_temporal_plain_date_to_zoned_date_time(
+    runtime: &mut Runtime,
+    date: &PlainDate,
+    time_zone: TimeZone,
+    plain_time: Option<PlainTime>,
+    realm: RealmId,
+    origin: &JsStackFrame,
+) -> Result<NativeDispatch, NativeFailure> {
+    let date_time = match date.to_zoned_date_time(time_zone, plain_time) {
+        Ok(date_time) => date_time,
+        Err(error) => {
+            return Err(NativeFailure::Abrupt(temporal_exception_from_error(
+                realm, origin, error,
+            )?));
+        }
+    };
+    allocate_temporal_zoned_date_time_result(runtime, realm, date_time)
+}
+
+#[allow(
+    clippy::too_many_arguments,
+    reason = "the observable timeZone Get retains the complete native call context"
+)]
+fn begin_temporal_plain_date_to_zoned_date_time(
+    runtime: &mut Runtime,
+    date: PlainDate,
+    item: StoredValue,
+    realm: RealmId,
+    return_to: Option<CallReturn>,
+    origin: JsStackFrame,
+    execution_budget: &mut ExecutionBudget,
+) -> Result<NativeDispatch, NativeFailure> {
+    if item.heap_reference().is_none() {
+        let time_zone =
+            temporal_zoned_date_time_time_zone_from_value(runtime, item, realm, &origin)?;
+        return finish_temporal_plain_date_to_zoned_date_time(
+            runtime, &date, time_zone, None, realm, &origin,
+        );
+    }
+    charge_heap_property_lookup(runtime, &item, execution_budget)?;
+    let name = JsString::from_utf8("timeZone")?;
+    let key = runtime.property_key_from_string(&name)?;
+    let state = TemporalPlainDateToZonedDateTimeContinuation {
+        date,
+        item,
+        time_zone: None,
+        stage: TemporalPlainDateToZonedDateTimeStage::AwaitTimeZone,
+        realm,
+        origin,
+    };
+    let dispatch = begin_value_get(
+        runtime,
+        &state.item,
+        key,
+        Some(&name),
+        state.realm,
+        return_to,
+        state.origin.clone(),
+        execution_budget,
+    )?;
+    match continue_get_state_after(
+        dispatch,
+        state,
+        temporal_plain_date_to_zoned_date_time_continuation,
+        "Temporal.PlainDate toZonedDateTime timeZone Get produced a structured result",
+    )? {
+        GetContinuationDispatch::Ready { state, value } => {
+            advance_temporal_plain_date_to_zoned_date_time(
+                runtime,
+                state,
+                value,
+                return_to,
+                execution_budget,
+            )
+        }
+        GetContinuationDispatch::Suspended(dispatch) => Ok(dispatch),
+    }
+}
+
+#[allow(
+    clippy::too_many_arguments,
+    reason = "the plainTime Get resumes with its retained date and time zone"
+)]
+pub(super) fn advance_temporal_plain_date_to_zoned_date_time(
+    runtime: &mut Runtime,
+    mut state: TemporalPlainDateToZonedDateTimeContinuation,
+    value: StoredValue,
+    return_to: Option<CallReturn>,
+    execution_budget: &mut ExecutionBudget,
+) -> Result<NativeDispatch, NativeFailure> {
+    match state.stage {
+        TemporalPlainDateToZonedDateTimeStage::AwaitTimeZone => {
+            if matches!(value, StoredValue::Undefined) {
+                let time_zone = temporal_zoned_date_time_time_zone_from_value(
+                    runtime,
+                    state.item,
+                    state.realm,
+                    &state.origin,
+                )?;
+                return finish_temporal_plain_date_to_zoned_date_time(
+                    runtime,
+                    &state.date,
+                    time_zone,
+                    None,
+                    state.realm,
+                    &state.origin,
+                );
+            }
+            state.time_zone = Some(temporal_zoned_date_time_time_zone_from_value(
+                runtime,
+                value,
+                state.realm,
+                &state.origin,
+            )?);
+            charge_heap_property_lookup(runtime, &state.item, execution_budget)?;
+            let name = JsString::from_utf8("plainTime")?;
+            let key = runtime.property_key_from_string(&name)?;
+            state.stage = TemporalPlainDateToZonedDateTimeStage::AwaitPlainTime;
+            let dispatch = begin_value_get(
+                runtime,
+                &state.item,
+                key,
+                Some(&name),
+                state.realm,
+                return_to,
+                state.origin.clone(),
+                execution_budget,
+            )?;
+            match continue_get_state_after(
+                dispatch,
+                state,
+                temporal_plain_date_to_zoned_date_time_continuation,
+                "Temporal.PlainDate toZonedDateTime plainTime Get produced a structured result",
+            )? {
+                GetContinuationDispatch::Ready { state, value } => {
+                    advance_temporal_plain_date_to_zoned_date_time(
+                        runtime,
+                        state,
+                        value,
+                        return_to,
+                        execution_budget,
+                    )
+                }
+                GetContinuationDispatch::Suspended(dispatch) => Ok(dispatch),
+            }
+        }
+        TemporalPlainDateToZonedDateTimeStage::AwaitPlainTime => {
+            let Some(time_zone) = state.time_zone else {
+                return Err(EngineFault::RuntimeInvariant {
+                    message: "Temporal.PlainDate toZonedDateTime lost its time zone",
+                }
+                .into());
+            };
+            if matches!(value, StoredValue::Undefined) {
+                return finish_temporal_plain_date_to_zoned_date_time(
+                    runtime,
+                    &state.date,
+                    time_zone,
+                    None,
+                    state.realm,
+                    &state.origin,
+                );
+            }
+            begin_temporal_plain_time_like(
+                runtime,
+                value,
+                TemporalPlainTimeLikeTarget::PlainDateToZonedDateTime {
+                    receiver: state.date,
+                    time_zone,
+                },
+                state.realm,
+                return_to,
+                state.origin,
+                execution_budget,
+            )
+        }
+    }
+}
+
+fn temporal_plain_date_to_zoned_date_time_continuation(
+    state: TemporalPlainDateToZonedDateTimeContinuation,
+) -> NativeContinuation {
+    NativeContinuation::TemporalPlainDateToZonedDateTime(Box::new(state))
+}
+
 #[allow(
     clippy::too_many_arguments,
     reason = "ToTemporalTime property bags retain every observable conversion across suspension"
@@ -7508,6 +7766,17 @@ pub(super) fn dispatch_temporal_plain_date_prototype(
         ),
         TemporalPlainDatePrototypeMethod::ToPlainDateTime => {
             begin_temporal_plain_date_to_plain_date_time(
+                runtime,
+                date,
+                arguments.take_first_or_undefined(),
+                realm,
+                return_to,
+                origin.clone(),
+                execution_budget,
+            )
+        }
+        TemporalPlainDatePrototypeMethod::ToZonedDateTime => {
+            begin_temporal_plain_date_to_zoned_date_time(
                 runtime,
                 date,
                 arguments.take_first_or_undefined(),
@@ -10526,6 +10795,162 @@ fn complete_temporal_plain_month_day_to_string(
     )))
 }
 
+fn finish_temporal_plain_date_time_to_zoned_date_time(
+    runtime: &mut Runtime,
+    date_time: &PlainDateTime,
+    time_zone: TimeZone,
+    disambiguation: Disambiguation,
+    realm: RealmId,
+    origin: &JsStackFrame,
+) -> Result<NativeDispatch, NativeFailure> {
+    let date_time = match date_time.to_zoned_date_time(time_zone, disambiguation) {
+        Ok(date_time) => date_time,
+        Err(error) => {
+            return Err(NativeFailure::Abrupt(temporal_exception_from_error(
+                realm, origin, error,
+            )?));
+        }
+    };
+    allocate_temporal_zoned_date_time_result(runtime, realm, date_time)
+}
+
+#[allow(
+    clippy::too_many_arguments,
+    reason = "the observable disambiguation Get retains the complete native call context"
+)]
+fn begin_temporal_plain_date_time_to_zoned_date_time(
+    runtime: &mut Runtime,
+    date_time: PlainDateTime,
+    time_zone_like: StoredValue,
+    options: StoredValue,
+    realm: RealmId,
+    return_to: Option<CallReturn>,
+    origin: JsStackFrame,
+    execution_budget: &mut ExecutionBudget,
+) -> Result<NativeDispatch, NativeFailure> {
+    let time_zone =
+        temporal_zoned_date_time_time_zone_from_value(runtime, time_zone_like, realm, &origin)?;
+    if matches!(options, StoredValue::Undefined) {
+        return finish_temporal_plain_date_time_to_zoned_date_time(
+            runtime,
+            &date_time,
+            time_zone,
+            Disambiguation::Compatible,
+            realm,
+            &origin,
+        );
+    }
+    if options.heap_reference().is_none() {
+        return temporal_type_error(
+            realm,
+            &origin,
+            "Temporal.PlainDateTime.prototype.toZonedDateTime options must be an object",
+        );
+    }
+    charge_heap_property_lookup(runtime, &options, execution_budget)?;
+    let name = JsString::from_utf8("disambiguation")?;
+    let key = runtime.property_key_from_string(&name)?;
+    let state = TemporalPlainDateTimeToZonedDateTimeContinuation {
+        date_time,
+        time_zone,
+        options,
+        stage: TemporalPlainDateTimeToZonedDateTimeStage::AwaitDisambiguation,
+        realm,
+        origin,
+    };
+    let dispatch = begin_value_get(
+        runtime,
+        &state.options,
+        key,
+        Some(&name),
+        state.realm,
+        return_to,
+        state.origin.clone(),
+        execution_budget,
+    )?;
+    match continue_get_state_after(
+        dispatch,
+        state,
+        temporal_plain_date_time_to_zoned_date_time_continuation,
+        "Temporal.PlainDateTime toZonedDateTime disambiguation Get produced a structured result",
+    )? {
+        GetContinuationDispatch::Ready { state, value } => {
+            advance_temporal_plain_date_time_to_zoned_date_time(
+                runtime,
+                state,
+                value,
+                return_to,
+                execution_budget,
+            )
+        }
+        GetContinuationDispatch::Suspended(dispatch) => Ok(dispatch),
+    }
+}
+
+#[allow(
+    clippy::too_many_arguments,
+    reason = "disambiguation conversion resumes with the retained date-time and time zone"
+)]
+pub(super) fn advance_temporal_plain_date_time_to_zoned_date_time(
+    runtime: &mut Runtime,
+    mut state: TemporalPlainDateTimeToZonedDateTimeContinuation,
+    value: StoredValue,
+    return_to: Option<CallReturn>,
+    execution_budget: &mut ExecutionBudget,
+) -> Result<NativeDispatch, NativeFailure> {
+    match state.stage {
+        TemporalPlainDateTimeToZonedDateTimeStage::AwaitDisambiguation => {
+            if matches!(value, StoredValue::Undefined) {
+                return finish_temporal_plain_date_time_to_zoned_date_time(
+                    runtime,
+                    &state.date_time,
+                    state.time_zone,
+                    Disambiguation::Compatible,
+                    state.realm,
+                    &state.origin,
+                );
+            }
+            state.stage = TemporalPlainDateTimeToZonedDateTimeStage::AwaitDisambiguationConversion;
+            let realm = state.realm;
+            let origin = state.origin.clone();
+            begin_operator_primitive_conversion(
+                runtime,
+                value,
+                OperatorPrimitiveHint::String,
+                OperatorPrimitiveTarget::TemporalPlainDateTimeToZonedDateTime(Box::new(state)),
+                realm,
+                return_to,
+                origin,
+                execution_budget,
+            )
+        }
+        TemporalPlainDateTimeToZonedDateTimeStage::AwaitDisambiguationConversion => {
+            let source = operator_primitive_to_string(value, state.realm, &state.origin)?;
+            let Ok(disambiguation) = Disambiguation::from_str(&source.to_utf8_lossy()?) else {
+                return temporal_range_error(
+                    state.realm,
+                    &state.origin,
+                    "Temporal.PlainDateTime.prototype.toZonedDateTime disambiguation is invalid",
+                );
+            };
+            finish_temporal_plain_date_time_to_zoned_date_time(
+                runtime,
+                &state.date_time,
+                state.time_zone,
+                disambiguation,
+                state.realm,
+                &state.origin,
+            )
+        }
+    }
+}
+
+fn temporal_plain_date_time_to_zoned_date_time_continuation(
+    state: TemporalPlainDateTimeToZonedDateTimeContinuation,
+) -> NativeContinuation {
+    NativeContinuation::TemporalPlainDateTimeToZonedDateTime(Box::new(state))
+}
+
 #[allow(
     clippy::needless_pass_by_value,
     clippy::too_many_arguments,
@@ -10637,6 +11062,18 @@ pub(super) fn dispatch_temporal_plain_date_time_prototype(
             origin.clone(),
             execution_budget,
         ),
+        TemporalPlainDateTimePrototypeMethod::ToZonedDateTime => {
+            begin_temporal_plain_date_time_to_zoned_date_time(
+                runtime,
+                date_time,
+                arguments.take_first_or_undefined(),
+                arguments.take_first_or_undefined(),
+                realm,
+                return_to,
+                origin.clone(),
+                execution_budget,
+            )
+        }
         TemporalPlainDateTimePrototypeMethod::ToPlainDate => {
             allocate_temporal_plain_date_result(runtime, realm, date_time.to_plain_date())
         }
