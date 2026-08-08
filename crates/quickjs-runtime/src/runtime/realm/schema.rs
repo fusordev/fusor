@@ -185,6 +185,7 @@ pub(in crate::runtime) enum RealmNameId {
     Bind,
     Intl,
     IntlGetCanonicalLocales,
+    IntlSupportedValuesOf,
     Locale,
     IntlLocalePrototype(IntlLocalePrototypeMethod),
     Reflect,

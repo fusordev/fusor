@@ -35,6 +35,11 @@ pub(super) fn visit_functions(visit: FunctionSink<'_>) {
         1,
     ));
     visit(ordinary(
+        NativeFunctionKind::IntlSupportedValuesOf,
+        IntrinsicNameSpec::RealmName(RealmNameId::IntlSupportedValuesOf),
+        1,
+    ));
+    visit(ordinary(
         NativeFunctionKind::IntlLocaleConstructor,
         IntrinsicNameSpec::RealmName(RealmNameId::Locale),
         1,
@@ -65,6 +70,11 @@ pub(super) fn visit_properties(visit: PropertySink<'_>) {
         intl,
         IntrinsicKeySpec::InternedString(RealmNameId::IntlGetCanonicalLocales),
         NativeFunctionKind::IntlGetCanonicalLocales,
+    ));
+    visit(method(
+        intl,
+        IntrinsicKeySpec::InternedString(RealmNameId::IntlSupportedValuesOf),
+        NativeFunctionKind::IntlSupportedValuesOf,
     ));
     visit(method(
         intl,

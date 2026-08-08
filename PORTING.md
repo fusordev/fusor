@@ -54,6 +54,7 @@ Finish frontend/diagnostics and language/compiler/execution before broad Test262
 - [~] ECMA-402 is isolated behind `quickjs-intl` with direct ICU4X 2.2 data; JavaScript coercion and observable property order remain runtime-owned. The pinned Intl-only baseline admits 6,692 modes across 3,357 files: 3,256 pass, 3,436 fail, 22 host-API modes skip, and zero runner errors.
 - [x] `%Intl%` and `Intl.getCanonicalLocales` implement resumable `CanonicalizeLocaleList`, UTS #35 aliases/extensions, ordered deduplication, Locale-slot bypass, and standard descriptors. Pinned `intl402/Intl/getCanonicalLocales` is 76/76.
 - [x] `%Intl.Locale%` covers the constructor's observable coercion/option order and subclass prototype selection; canonical slots/accessors; `maximize`/`minimize`; and the seven Locale-info methods. ICU4X supplies canonicalization, likely subtags, script direction, and week data; pinned CLDR 48 tables supply calendar/hour-cycle preferences with `rg`/region/`sd`/likely-region priority. Pinned `intl402/Locale` is 334/334 admitted modes across 168 files, with two host-API modes explicitly skipped and zero runner errors.
+- [~] `Intl.supportedValuesOf` implements resumable key coercion, fresh Realm arrays, mandated calendar/numbering-system/unit inventories, and canonical ICU4X time-zone enumeration. Its pinned cohort is 32/50 with zero runner errors: every direct API mode passes; the 18 residual modes are the nine cross-service acceptance files awaiting their referenced constructors.
 
 ### Modules, conformance, and host layers
 

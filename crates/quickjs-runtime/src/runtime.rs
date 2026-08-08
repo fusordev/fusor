@@ -1232,6 +1232,8 @@ pub(crate) enum NativeFunctionKind {
     JsonStringify,
     /// `Intl.getCanonicalLocales`.
     IntlGetCanonicalLocales,
+    /// `Intl.supportedValuesOf`.
+    IntlSupportedValuesOf,
     /// The `%Intl.Locale%` constructor.
     IntlLocaleConstructor,
     /// One `%Intl.Locale.prototype%` accessor or method.

@@ -3115,6 +3115,9 @@ fn finish_operator_primitive_target(
             return_to,
             execution_budget,
         ),
+        OperatorPrimitiveTarget::IntlSupportedValuesOf => {
+            finish_intl_supported_values_of(runtime, value, realm, origin)
+        }
         OperatorPrimitiveTarget::ArrayFromAsyncLength { operation } => {
             resume_array_from_async_length_conversion(
                 runtime,

@@ -13,6 +13,7 @@ use icu::locale::{
 
 mod locale;
 mod locale_info;
+mod supported_values;
 
 pub use locale::{
     LocaleComponents, LocaleOptionKind, LocaleOptions, apply_locale_options,
@@ -23,6 +24,7 @@ pub use locale_info::{
     numbering_systems_of_locale, text_direction_of_locale, time_zones_of_locale,
     week_info_of_locale,
 };
+pub use supported_values::supported_values;
 
 /// A locale identifier that is not structurally valid under UTS #35.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

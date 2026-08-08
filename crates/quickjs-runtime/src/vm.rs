@@ -2473,6 +2473,8 @@ enum OperatorPrimitiveTarget {
     IntlLocaleListElement(Box<IntlLocaleListContinuation>),
     /// `%Intl.Locale%` tag or string-valued option awaiting `ToString`.
     IntlLocaleConstructor(Box<IntlLocaleConstructorContinuation>),
+    /// `Intl.supportedValuesOf` key awaiting `ToString`.
+    IntlSupportedValuesOf,
     /// An array-like `Array.fromAsync` length awaiting `ToNumber`.
     ArrayFromAsyncLength {
         operation: ObjectId,
@@ -2523,6 +2525,7 @@ impl OperatorPrimitiveTarget {
             | Self::StringIteratorIntrinsic
             | Self::JsonRawJsonText
             | Self::GlobalNumeric(_)
+            | Self::IntlSupportedValuesOf
             | Self::MathUnary(_)
             | Self::GlobalUri(_)
             | Self::BigIntToString { .. }
@@ -2990,6 +2993,7 @@ fn trace_operator_primitive_target_roots(
         | OperatorPrimitiveTarget::JsonRawJsonText
         | OperatorPrimitiveTarget::BigIntToString { .. }
         | OperatorPrimitiveTarget::BigIntTruncationValue { .. }
+        | OperatorPrimitiveTarget::IntlSupportedValuesOf
         // The converted left Number carries no heap edge.
         | OperatorPrimitiveTarget::MathBinaryFinish { .. } => {}
         OperatorPrimitiveTarget::DateSetTime { object }

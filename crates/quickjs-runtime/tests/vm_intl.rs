@@ -105,6 +105,40 @@ fn intl_namespace_and_get_canonical_locales_are_spec_shaped() {
 }
 
 #[test]
+fn intl_supported_values_of_is_spec_shaped_and_coerces_its_key() {
+    assert_eq!(
+        rendered(
+            "var d=Object.getOwnPropertyDescriptor(Intl,'supportedValuesOf');
+             var log=[];
+             var first=Intl.supportedValuesOf({toString:function(){log.push('toString');return 'calendar'}});
+             var second=Intl.supportedValuesOf('calendar');
+             var range,type;
+             try{Intl.supportedValuesOf('calendars')}catch(e){range=e.name}
+             try{Intl.supportedValuesOf(Symbol())}catch(e){type=e.name}
+             return [typeof Intl.supportedValuesOf,Intl.supportedValuesOf.length,
+               Intl.supportedValuesOf.name,d.writable,d.enumerable,d.configurable,
+               first!==second,Object.getPrototypeOf(first)===Array.prototype,
+               log.join(','),range,type].join('|');"
+        ),
+        "function|1|supportedValuesOf|true|false|true|true|true|toString|RangeError|TypeError"
+    );
+}
+
+#[test]
+fn intl_supported_values_of_exposes_required_sorted_inventories() {
+    assert_eq!(
+        rendered(
+            "var calendars=Intl.supportedValuesOf('calendar');
+             var numbering=Intl.supportedValuesOf('numberingSystem');
+             var units=Intl.supportedValuesOf('unit');
+             return [calendars.join(','),numbering.includes('latn'),numbering.includes('tols'),
+               numbering.length,units.length,units[0],units[units.length-1]].join('|');"
+        ),
+        "buddhist,chinese,coptic,dangi,ethioaa,ethiopic,gregory,hebrew,indian,islamic-civil,islamic-tbla,islamic-umalqura,iso8601,japanese,persian,roc|true|true|78|45|acre|year"
+    );
+}
+
+#[test]
 fn canonicalize_locale_list_preserves_observable_array_like_order() {
     assert_eq!(
         rendered(

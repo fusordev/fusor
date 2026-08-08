@@ -10,7 +10,7 @@ use quickjs_intl::{
     LocaleComponents, LocaleOptionKind, LocaleOptions, LocaleWeekInfo, apply_locale_options,
     calendars_of_locale, canonicalize_locale, canonicalize_locale_option, collations_of_locale,
     hour_cycles_of_locale, locale_components, maximize_locale, minimize_locale,
-    numbering_systems_of_locale, text_direction_of_locale, time_zones_of_locale,
+    numbering_systems_of_locale, supported_values, text_direction_of_locale, time_zones_of_locale,
     week_info_of_locale,
 };
 
@@ -162,6 +162,58 @@ impl IntlLocaleListContinuation {
             trace_stored_value_root(value, mark);
         }
     }
+}
+
+pub(super) fn begin_intl_supported_values_of(
+    runtime: &mut Runtime,
+    key: StoredValue,
+    realm: RealmId,
+    return_to: Option<CallReturn>,
+    origin: JsStackFrame,
+    execution_budget: &mut ExecutionBudget,
+) -> Result<NativeDispatch, NativeFailure> {
+    match key {
+        StoredValue::Object(object) => begin_operator_primitive_conversion(
+            runtime,
+            StoredValue::Object(object),
+            OperatorPrimitiveHint::String,
+            OperatorPrimitiveTarget::IntlSupportedValuesOf,
+            realm,
+            return_to,
+            origin,
+            execution_budget,
+        ),
+        StoredValue::Function(function) => begin_operator_primitive_conversion(
+            runtime,
+            StoredValue::Function(function),
+            OperatorPrimitiveHint::String,
+            OperatorPrimitiveTarget::IntlSupportedValuesOf,
+            realm,
+            return_to,
+            origin,
+            execution_budget,
+        ),
+        key => finish_intl_supported_values_of(runtime, key, realm, &origin),
+    }
+}
+
+pub(super) fn finish_intl_supported_values_of(
+    runtime: &mut Runtime,
+    key: StoredValue,
+    realm: RealmId,
+    origin: &JsStackFrame,
+) -> Result<NativeDispatch, NativeFailure> {
+    let key = operator_primitive_to_string(key, realm, origin)?;
+    let key = key.to_utf8_lossy()?;
+    let Some(values) = supported_values(&key) else {
+        return intl_locale_list_error(
+            realm,
+            origin.clone(),
+            ExceptionKind::RangeError,
+            "invalid key for Intl.supportedValuesOf",
+        );
+    };
+    intl_locale_string_array(runtime, realm, values)
 }
 
 pub(super) fn begin_intl_locale_constructor(

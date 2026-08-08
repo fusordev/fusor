@@ -2714,6 +2714,14 @@ pub(super) fn dispatch_native_call_with_frames(
             origin.unwrap_or_else(native_function_host_origin),
             execution_budget,
         ),
+        NativeFunctionKind::IntlSupportedValuesOf => begin_intl_supported_values_of(
+            runtime,
+            inputs.arguments.take_first_or_undefined(),
+            native.realm,
+            return_to,
+            origin.unwrap_or_else(native_function_host_origin),
+            execution_budget,
+        ),
         NativeFunctionKind::IntlLocaleConstructor => begin_intl_locale_constructor(
             runtime,
             inputs,
