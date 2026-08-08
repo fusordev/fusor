@@ -3724,11 +3724,17 @@ pub(super) fn dispatch_native_call_with_frames(
         ),
         NativeFunctionKind::IteratorPrototypeConsumer(kind) => {
             let callback = inputs.arguments.take_first_or_undefined();
+            let initial_value = if matches!(kind, crate::runtime::IteratorConsumer::Reduce) {
+                inputs.arguments.take_first()
+            } else {
+                None
+            };
             begin_iterator_consumer(
                 runtime,
                 kind,
                 inputs.receiver,
                 &callback,
+                initial_value,
                 native.realm,
                 return_to,
                 origin.unwrap_or_else(native_function_host_origin),

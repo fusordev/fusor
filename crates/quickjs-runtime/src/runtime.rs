@@ -748,11 +748,18 @@ pub(crate) enum IteratorConsumer {
     Every,
     Find,
     ForEach,
+    Reduce,
     Some,
 }
 
 impl IteratorConsumer {
-    pub(crate) const ALL: [Self; 4] = [Self::Every, Self::Find, Self::ForEach, Self::Some];
+    pub(crate) const ALL: [Self; 5] = [
+        Self::Every,
+        Self::Find,
+        Self::ForEach,
+        Self::Reduce,
+        Self::Some,
+    ];
 
     /// Returns the property name this consumer is installed under.
     pub(crate) const fn name(self) -> &'static str {
@@ -760,6 +767,7 @@ impl IteratorConsumer {
             Self::Every => "every",
             Self::Find => "find",
             Self::ForEach => "forEach",
+            Self::Reduce => "reduce",
             Self::Some => "some",
         }
     }

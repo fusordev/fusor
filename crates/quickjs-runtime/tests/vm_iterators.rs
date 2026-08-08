@@ -739,6 +739,76 @@ fn iterator_consumers_close_only_for_validation_callbacks_and_early_exit() {
 }
 
 #[test]
+fn iterator_reduce_distinguishes_missing_and_explicit_initial_values() {
+    let mut runtime = Runtime::try_new(RuntimeLimits::default()).expect("runtime");
+    let realm = runtime.create_realm().expect("realm");
+    let mut context = runtime.context(&realm).expect("context");
+    let function = dynamic_function(
+        &mut context,
+        "function source(){let value=0;return {next(){value++;return value<4\
+           ?{done:false,value}:{done:true};}};}\
+         let initialLog='',missingLog='',thisValues=[];\
+         let withInitial=Iterator.prototype.reduce.call(source(),function(memo,value,index){\
+           'use strict';initialLog+=memo+':'+value+':'+index+',';thisValues.push(this);\
+           return memo+value;},10);\
+         let withoutInitial=Iterator.prototype.reduce.call(source(),function(memo,value,index){\
+           'use strict';missingLog+=memo+':'+value+':'+index+',';thisValues.push(this);\
+           return memo+value;});\
+         let explicit=Iterator.prototype.reduce.call({\
+           next(){return this.done?{done:true}:(this.done=true,{done:false,value:7});}},\
+           function(memo,value,index){return [memo===undefined,value,index].join(':');},undefined);\
+         let token={},empty={next(){return {done:true};}};\
+         let retained=Iterator.prototype.reduce.call(empty,()=>0,token)===token;\
+         let emptyType=false;try{Iterator.prototype.reduce.call(empty,()=>0);}\
+         catch(error){emptyType=error instanceof TypeError;}\
+         return [withInitial,initialLog,withoutInitial,missingLog,explicit,retained,emptyType,\
+           thisValues.every(value=>value===undefined)].join('|');",
+    );
+
+    let result = context
+        .call(&function, &[], ExecutionLimits::default())
+        .expect("Iterator.prototype.reduce accumulator semantics");
+    assert_eq!(
+        string_value(&result),
+        "16|10:1:0,11:2:1,13:3:2,|6|1:2:1,3:3:2,|true:7:0|true|true|true"
+    );
+}
+
+#[test]
+fn iterator_reduce_closes_only_validation_and_reducer_failures() {
+    let mut runtime = Runtime::try_new(RuntimeLimits::default()).expect("runtime");
+    let realm = runtime.create_realm().expect("realm");
+    let mut context = runtime.context(&realm).expect("context");
+    let function = dynamic_function(
+        &mut context,
+        "let validationLog='',validationType=false;\
+         let validation={get next(){validationLog+='n';throw {};},\
+           return(){validationLog+='r';throw {};}};\
+         try{Iterator.prototype.reduce.call(validation,0);}catch(error){\
+           validationType=error instanceof TypeError;}\
+         let reducerError={},reducerCloses=0,reducerPreserved=false;\
+         try{Iterator.prototype.reduce.call({next(){return {done:false,value:1};},\
+           return(){reducerCloses++;throw {};}} ,function(){throw reducerError;},0);}\
+         catch(error){reducerPreserved=error===reducerError;}\
+         let stepError={},stepCloses=0,stepPreserved=false;\
+         try{Iterator.prototype.reduce.call({next(){return {get done(){throw stepError;}};},\
+           return(){stepCloses++;return {};}},()=>0,0);}\
+         catch(error){stepPreserved=error===stepError;}\
+         let emptyCloses=0,emptyType=false;\
+         try{Iterator.prototype.reduce.call({next(){return {done:true};},\
+           return(){emptyCloses++;return {};}},()=>0);}\
+         catch(error){emptyType=error instanceof TypeError;}\
+         return [validationLog,validationType,reducerPreserved,reducerCloses,\
+           stepPreserved,stepCloses,emptyType,emptyCloses].join('|');",
+    );
+
+    let result = context
+        .call(&function, &[], ExecutionLimits::default())
+        .expect("Iterator.prototype.reduce close ordering");
+    assert_eq!(string_value(&result), "r|true|true|1|true|0|true|0");
+}
+
+#[test]
 fn iterator_filter_is_lazy_and_indexes_every_examined_value() {
     let mut runtime = Runtime::try_new(RuntimeLimits::default()).expect("runtime");
     let realm = runtime.create_realm().expect("realm");

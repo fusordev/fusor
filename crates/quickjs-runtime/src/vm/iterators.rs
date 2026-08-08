@@ -146,6 +146,7 @@ pub(super) struct IteratorConsumerContinuation {
     counter: u64,
     result: Option<StoredValue>,
     candidate: Option<StoredValue>,
+    accumulator: Option<StoredValue>,
     outcome: Option<StoredValue>,
     realm: RealmId,
     stage: IteratorConsumerStage,
@@ -158,6 +159,7 @@ impl IteratorConsumerContinuation {
             .saturating_add(u64::from(self.next_method.is_some()))
             .saturating_add(u64::from(self.result.is_some()))
             .saturating_add(u64::from(self.candidate.is_some()))
+            .saturating_add(u64::from(self.accumulator.is_some()))
             .saturating_add(u64::from(self.outcome.is_some()))
     }
 
@@ -172,6 +174,9 @@ impl IteratorConsumerContinuation {
         }
         if let Some(candidate) = &self.candidate {
             trace_stored_value_root(candidate, mark);
+        }
+        if let Some(accumulator) = &self.accumulator {
+            trace_stored_value_root(accumulator, mark);
         }
         if let Some(outcome) = &self.outcome {
             trace_stored_value_root(outcome, mark);
@@ -657,13 +662,14 @@ pub(super) fn begin_iterator_to_array(
 
 #[allow(
     clippy::too_many_arguments,
-    reason = "native dispatch keeps the consumer kind, receiver, callback, realm, source origin, and shared budget explicit"
+    reason = "native dispatch keeps the consumer kind, receiver, callback, optional accumulator, realm, source origin, and shared budget explicit"
 )]
 pub(super) fn begin_iterator_consumer(
     runtime: &mut Runtime,
     kind: crate::runtime::IteratorConsumer,
     receiver: StoredValue,
     callback: &StoredValue,
+    initial_value: Option<StoredValue>,
     realm: RealmId,
     return_to: Option<CallReturn>,
     origin: JsStackFrame,
@@ -703,6 +709,7 @@ pub(super) fn begin_iterator_consumer(
         counter: 0,
         result: None,
         candidate: None,
+        accumulator: initial_value,
         outcome: None,
         realm,
         stage: IteratorConsumerStage::NextMethod,
@@ -2001,9 +2008,7 @@ pub(super) fn advance_iterator_consumer(
         }
         IteratorConsumerStage::Done => {
             if completion.is_truthy() {
-                return Ok(NativeDispatch::Immediate(iterator_consumer_exhausted(
-                    state.kind,
-                )));
+                return finish_iterator_consumer_exhausted(state);
             }
             state.stage = IteratorConsumerStage::Value;
             read_iterator_consumer_property(
@@ -2015,15 +2020,38 @@ pub(super) fn advance_iterator_consumer(
             )
         }
         IteratorConsumerStage::Value => {
+            if matches!(state.kind, crate::runtime::IteratorConsumer::Reduce)
+                && state.accumulator.is_none()
+            {
+                state.accumulator = Some(completion);
+                state.counter = 1;
+                state.result = None;
+                return call_iterator_consumer_next(state, return_to, execution_budget);
+            }
+            let argument_count = if matches!(state.kind, crate::runtime::IteratorConsumer::Reduce) {
+                3
+            } else {
+                2
+            };
             let mut arguments = Vec::new();
-            arguments
-                .try_reserve_exact(2)
-                .map_err(|_| ExecutionError::AllocationFailed {
+            arguments.try_reserve_exact(argument_count).map_err(|_| {
+                ExecutionError::AllocationFailed {
                     resource: RuntimeResource::FrameValues,
-                    additional: 2,
-                })?;
+                    additional: argument_count,
+                }
+            })?;
             if matches!(state.kind, crate::runtime::IteratorConsumer::Find) {
                 state.candidate = Some(completion.duplicate());
+            }
+            if matches!(state.kind, crate::runtime::IteratorConsumer::Reduce) {
+                arguments.push(
+                    state
+                        .accumulator
+                        .take()
+                        .ok_or(EngineFault::RuntimeInvariant {
+                            message: "Iterator.prototype.reduce lost its accumulator",
+                        })?,
+                );
             }
             arguments.push(completion);
             arguments.push(StoredValue::Number(iterator_counter_number(state.counter)));
@@ -2043,7 +2071,7 @@ pub(super) fn advance_iterator_consumer(
         IteratorConsumerStage::Callback => finish_iterator_consumer_callback(
             runtime,
             state,
-            &completion,
+            completion,
             return_to,
             execution_budget,
         ),
@@ -2091,16 +2119,24 @@ pub(super) fn advance_iterator_consumer(
 fn finish_iterator_consumer_callback(
     runtime: &mut Runtime,
     mut state: IteratorConsumerContinuation,
-    completion: &StoredValue,
+    completion: StoredValue,
     return_to: Option<CallReturn>,
     execution_budget: &mut ExecutionBudget,
 ) -> Result<NativeDispatch, NativeFailure> {
+    if matches!(state.kind, crate::runtime::IteratorConsumer::Reduce) {
+        state.accumulator = Some(completion);
+        state.counter = state.counter.saturating_add(1);
+        return call_iterator_consumer_next(state, return_to, execution_budget);
+    }
     let exits = match state.kind {
         crate::runtime::IteratorConsumer::Every => !completion.is_truthy(),
         crate::runtime::IteratorConsumer::Find | crate::runtime::IteratorConsumer::Some => {
             completion.is_truthy()
         }
         crate::runtime::IteratorConsumer::ForEach => false,
+        crate::runtime::IteratorConsumer::Reduce => unreachable!(
+            "Iterator.prototype.reduce returns before predicate-style consumer handling"
+        ),
     };
     if exits {
         let outcome = match state.kind {
@@ -2117,6 +2153,12 @@ fn finish_iterator_consumer_callback(
             crate::runtime::IteratorConsumer::ForEach => {
                 return Err(EngineFault::RuntimeInvariant {
                     message: "Iterator.prototype.forEach cannot exit from a callback result",
+                }
+                .into());
+            }
+            crate::runtime::IteratorConsumer::Reduce => {
+                return Err(EngineFault::RuntimeInvariant {
+                    message: "Iterator.prototype.reduce cannot exit through a predicate result",
                 }
                 .into());
             }
@@ -2137,14 +2179,28 @@ fn finish_iterator_consumer_callback(
     call_iterator_consumer_next(state, return_to, execution_budget)
 }
 
-fn iterator_consumer_exhausted(kind: crate::runtime::IteratorConsumer) -> StoredValue {
-    match kind {
+fn finish_iterator_consumer_exhausted(
+    mut state: IteratorConsumerContinuation,
+) -> Result<NativeDispatch, NativeFailure> {
+    let value = match state.kind {
         crate::runtime::IteratorConsumer::Every => StoredValue::Boolean(true),
         crate::runtime::IteratorConsumer::Some => StoredValue::Boolean(false),
         crate::runtime::IteratorConsumer::Find | crate::runtime::IteratorConsumer::ForEach => {
             StoredValue::Undefined
         }
-    }
+        crate::runtime::IteratorConsumer::Reduce => {
+            let Some(accumulator) = state.accumulator.take() else {
+                return Err(iterator_exception(
+                    state.realm,
+                    state.origin,
+                    ExceptionKind::TypeError,
+                    "Iterator.prototype.reduce cannot reduce an empty iterator without an initial value",
+                )?);
+            };
+            accumulator
+        }
+    };
+    Ok(NativeDispatch::Immediate(value))
 }
 
 fn finish_iterator_consumer_close(
