@@ -647,6 +647,10 @@ fn data_view_checked_element_index(
     })
 }
 
+#[allow(
+    clippy::too_many_lines,
+    reason = "one exhaustive decoder keeps every DataView element kind under the shared-block lock"
+)]
 fn data_view_read(
     runtime: &Runtime,
     buffer: ObjectId,
@@ -654,103 +658,108 @@ fn data_view_read(
     element: DataViewElementType,
     little_endian: bool,
 ) -> Result<NativeDispatch, NativeFailure> {
-    let data = runtime
+    let state = runtime
         .array_buffer_state(buffer)?
-        .and_then(|state| state.data())
         .ok_or(EngineFault::RuntimeInvariant {
             message: "DataView read lost a live backing store",
         })?;
-    let value = match element {
-        DataViewElementType::BigInt64 => {
-            let bytes = data_view_read_bytes::<8>(data, byte_index)?;
-            let value = if little_endian {
-                i64::from_le_bytes(bytes)
-            } else {
-                i64::from_be_bytes(bytes)
-            };
-            bigint_value(JsBigInt::from_i64(value))
-        }
-        DataViewElementType::BigUint64 => {
-            let bytes = data_view_read_bytes::<8>(data, byte_index)?;
-            let value = if little_endian {
-                u64::from_le_bytes(bytes)
-            } else {
-                u64::from_be_bytes(bytes)
-            };
-            bigint_value(JsBigInt::from_u64(value))
-        }
-        DataViewElementType::Float16 => {
-            let bytes = data_view_read_bytes::<2>(data, byte_index)?;
-            let bits = if little_endian {
-                u16::from_le_bytes(bytes)
-            } else {
-                u16::from_be_bytes(bytes)
-            };
-            StoredValue::Number(JsNumber::from_f64(data_view_f16_to_f64(bits)))
-        }
-        DataViewElementType::Float32 => {
-            let bytes = data_view_read_bytes::<4>(data, byte_index)?;
-            let bits = if little_endian {
-                u32::from_le_bytes(bytes)
-            } else {
-                u32::from_be_bytes(bytes)
-            };
-            StoredValue::Number(JsNumber::from_f64(f64::from(f32::from_bits(bits))))
-        }
-        DataViewElementType::Float64 => {
-            let bytes = data_view_read_bytes::<8>(data, byte_index)?;
-            let bits = if little_endian {
-                u64::from_le_bytes(bytes)
-            } else {
-                u64::from_be_bytes(bytes)
-            };
-            StoredValue::Number(JsNumber::from_f64(f64::from_bits(bits)))
-        }
-        DataViewElementType::Int8 => {
-            let byte = data_view_read_bytes::<1>(data, byte_index)?[0];
-            StoredValue::Number(JsNumber::from_i32(i32::from(i8::from_ne_bytes([byte]))))
-        }
-        DataViewElementType::Int16 => {
-            let bytes = data_view_read_bytes::<2>(data, byte_index)?;
-            let value = if little_endian {
-                i16::from_le_bytes(bytes)
-            } else {
-                i16::from_be_bytes(bytes)
-            };
-            StoredValue::Number(JsNumber::from_i32(i32::from(value)))
-        }
-        DataViewElementType::Int32 => {
-            let bytes = data_view_read_bytes::<4>(data, byte_index)?;
-            let value = if little_endian {
-                i32::from_le_bytes(bytes)
-            } else {
-                i32::from_be_bytes(bytes)
-            };
-            StoredValue::Number(JsNumber::from_i32(value))
-        }
-        DataViewElementType::Uint8 => {
-            let byte = data_view_read_bytes::<1>(data, byte_index)?[0];
-            StoredValue::Number(JsNumber::from_i32(i32::from(byte)))
-        }
-        DataViewElementType::Uint16 => {
-            let bytes = data_view_read_bytes::<2>(data, byte_index)?;
-            let value = if little_endian {
-                u16::from_le_bytes(bytes)
-            } else {
-                u16::from_be_bytes(bytes)
-            };
-            StoredValue::Number(JsNumber::from_i32(i32::from(value)))
-        }
-        DataViewElementType::Uint32 => {
-            let bytes = data_view_read_bytes::<4>(data, byte_index)?;
-            let value = if little_endian {
-                u32::from_le_bytes(bytes)
-            } else {
-                u32::from_be_bytes(bytes)
-            };
-            StoredValue::Number(JsNumber::from_u32(value))
-        }
-    };
+    let value = state
+        .with_data(|data| -> Result<StoredValue, NativeFailure> {
+            Ok(match element {
+                DataViewElementType::BigInt64 => {
+                    let bytes = data_view_read_bytes::<8>(data, byte_index)?;
+                    let value = if little_endian {
+                        i64::from_le_bytes(bytes)
+                    } else {
+                        i64::from_be_bytes(bytes)
+                    };
+                    bigint_value(JsBigInt::from_i64(value))
+                }
+                DataViewElementType::BigUint64 => {
+                    let bytes = data_view_read_bytes::<8>(data, byte_index)?;
+                    let value = if little_endian {
+                        u64::from_le_bytes(bytes)
+                    } else {
+                        u64::from_be_bytes(bytes)
+                    };
+                    bigint_value(JsBigInt::from_u64(value))
+                }
+                DataViewElementType::Float16 => {
+                    let bytes = data_view_read_bytes::<2>(data, byte_index)?;
+                    let bits = if little_endian {
+                        u16::from_le_bytes(bytes)
+                    } else {
+                        u16::from_be_bytes(bytes)
+                    };
+                    StoredValue::Number(JsNumber::from_f64(data_view_f16_to_f64(bits)))
+                }
+                DataViewElementType::Float32 => {
+                    let bytes = data_view_read_bytes::<4>(data, byte_index)?;
+                    let bits = if little_endian {
+                        u32::from_le_bytes(bytes)
+                    } else {
+                        u32::from_be_bytes(bytes)
+                    };
+                    StoredValue::Number(JsNumber::from_f64(f64::from(f32::from_bits(bits))))
+                }
+                DataViewElementType::Float64 => {
+                    let bytes = data_view_read_bytes::<8>(data, byte_index)?;
+                    let bits = if little_endian {
+                        u64::from_le_bytes(bytes)
+                    } else {
+                        u64::from_be_bytes(bytes)
+                    };
+                    StoredValue::Number(JsNumber::from_f64(f64::from_bits(bits)))
+                }
+                DataViewElementType::Int8 => {
+                    let byte = data_view_read_bytes::<1>(data, byte_index)?[0];
+                    StoredValue::Number(JsNumber::from_i32(i32::from(i8::from_ne_bytes([byte]))))
+                }
+                DataViewElementType::Int16 => {
+                    let bytes = data_view_read_bytes::<2>(data, byte_index)?;
+                    let value = if little_endian {
+                        i16::from_le_bytes(bytes)
+                    } else {
+                        i16::from_be_bytes(bytes)
+                    };
+                    StoredValue::Number(JsNumber::from_i32(i32::from(value)))
+                }
+                DataViewElementType::Int32 => {
+                    let bytes = data_view_read_bytes::<4>(data, byte_index)?;
+                    let value = if little_endian {
+                        i32::from_le_bytes(bytes)
+                    } else {
+                        i32::from_be_bytes(bytes)
+                    };
+                    StoredValue::Number(JsNumber::from_i32(value))
+                }
+                DataViewElementType::Uint8 => {
+                    let byte = data_view_read_bytes::<1>(data, byte_index)?[0];
+                    StoredValue::Number(JsNumber::from_i32(i32::from(byte)))
+                }
+                DataViewElementType::Uint16 => {
+                    let bytes = data_view_read_bytes::<2>(data, byte_index)?;
+                    let value = if little_endian {
+                        u16::from_le_bytes(bytes)
+                    } else {
+                        u16::from_be_bytes(bytes)
+                    };
+                    StoredValue::Number(JsNumber::from_i32(i32::from(value)))
+                }
+                DataViewElementType::Uint32 => {
+                    let bytes = data_view_read_bytes::<4>(data, byte_index)?;
+                    let value = if little_endian {
+                        u32::from_le_bytes(bytes)
+                    } else {
+                        u32::from_be_bytes(bytes)
+                    };
+                    StoredValue::Number(JsNumber::from_u32(value))
+                }
+            })
+        })
+        .ok_or(EngineFault::RuntimeInvariant {
+            message: "DataView read lost a live backing store",
+        })??;
     Ok(NativeDispatch::Immediate(value))
 }
 
@@ -912,20 +921,24 @@ fn data_view_write(
         .ok_or(EngineFault::RuntimeInvariant {
             message: "DataView write buffer lost ArrayBuffer slots",
         })?;
-    let data = state.data_mut().ok_or(EngineFault::RuntimeInvariant {
-        message: "DataView write buffer detached after bounds check",
-    })?;
-    let end = byte_index
-        .checked_add(bytes.len())
+    state
+        .with_data_mut(|data| {
+            let end = byte_index
+                .checked_add(bytes.len())
+                .ok_or(EngineFault::RuntimeInvariant {
+                    message: "DataView write byte range overflowed",
+                })?;
+            let target = data
+                .get_mut(byte_index..end)
+                .ok_or(EngineFault::RuntimeInvariant {
+                    message: "DataView write escaped validated backing-store bounds",
+                })?;
+            target.copy_from_slice(&bytes);
+            Ok::<(), EngineFault>(())
+        })
         .ok_or(EngineFault::RuntimeInvariant {
-            message: "DataView write byte range overflowed",
-        })?;
-    let target = data
-        .get_mut(byte_index..end)
-        .ok_or(EngineFault::RuntimeInvariant {
-            message: "DataView write escaped validated backing-store bounds",
-        })?;
-    target.copy_from_slice(&bytes);
+            message: "DataView write buffer detached after bounds check",
+        })??;
     Ok(NativeDispatch::Immediate(StoredValue::Undefined))
 }
 

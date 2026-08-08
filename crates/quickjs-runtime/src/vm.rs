@@ -88,7 +88,12 @@ use crate::{
         TypedArrayElementValue, TypedArrayOwnProperty, TypedArrayPropertyKey,
         TypedArrayPrototypeMethod, TypedArrayStoreOutcome, TypedArrayView, UriFunction,
         WeakMapMethod, WeakSetMethod, array_length_from_number, check_execution_limit,
-        global_declaration_error, usize_to_u64,
+        global_declaration_error, typed_array_element_byte_index, typed_array_read_element,
+        typed_array_write_element, usize_to_u64,
+    },
+    shared_array_buffer::{
+        AtomicsWaiterState, AtomicsWakeResult, BlockingWaiter, SharedDataBlock, SharedWaiter,
+        SharedWaiterWake, next_atomics_waiter_id, next_atomics_wake_token,
     },
     value::{HeapReference, SlotValue, StoredValue},
 };
@@ -153,6 +158,7 @@ mod weak_references;
 
 pub(crate) use array_from_async::ArrayFromAsyncRecord;
 use async_function::{begin_async_await, suspend_async_function};
+pub(crate) use promise::fulfill_promise_host;
 
 #[allow(
     clippy::wildcard_imports,
@@ -2231,7 +2237,7 @@ enum OperatorPrimitiveTarget {
     AtomicsValue(Box<AtomicsContinuation>),
     /// `Atomics.compareExchange`'s replacement value after conversion.
     AtomicsReplacement(Box<AtomicsContinuation>),
-    /// `Atomics.wait`'s timeout after validating the expected value.
+    /// `Atomics.wait` or `waitAsync` after converting the expected value and timeout.
     AtomicsTimeout(Box<AtomicsContinuation>),
     /// `ArrayBuffer.prototype.resize`'s new length, after the brand checks.
     ArrayBufferResize {
@@ -4219,6 +4225,7 @@ impl Context<'_> {
         }
 
         let mut execution_budget = ExecutionBudget::new(limits);
+        drain_host_jobs(self.runtime, compiler, &mut execution_budget)?;
         let mut function_id = function_id;
         let mut receiver = StoredValue::Undefined;
         let mut owned_arguments: Option<Vec<StoredValue>> = None;

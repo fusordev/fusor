@@ -1,8 +1,9 @@
-//! Synchronous `%Atomics%` operations over shared integer typed arrays.
+//! `%Atomics%` operations over integer typed arrays and shared waiter lists.
 //!
-//! The runtime is deliberately thread-affine, so each read-modify-write is a
-//! single interpreter operation. Observable index/value coercions still use
-//! the ordinary resumable `ToPrimitive` machinery before that operation.
+//! Observable coercions use the ordinary resumable `ToPrimitive` machinery.
+//! Shared bytes and waiters then enter one data-block critical section; Tokio
+//! supplies timeout signals only, while this runtime owns FIFO selection and
+//! Promise settlement order.
 
 #[allow(
     clippy::wildcard_imports,
@@ -70,8 +71,11 @@ pub(super) fn begin_atomics_method(
     let value = method
         .requires_value()
         .then(|| arguments.take_first_or_undefined());
-    let replacement = matches!(method, AtomicsMethod::CompareExchange | AtomicsMethod::Wait)
-        .then(|| arguments.take_first_or_undefined());
+    let replacement = matches!(
+        method,
+        AtomicsMethod::CompareExchange | AtomicsMethod::Wait | AtomicsMethod::WaitAsync
+    )
+    .then(|| arguments.take_first_or_undefined());
     let state = AtomicsContinuation {
         method,
         object,
@@ -144,9 +148,9 @@ pub(super) fn finish_atomics_value(
     execution_budget: &mut ExecutionBudget,
 ) -> Result<NativeDispatch, NativeFailure> {
     if state.method == AtomicsMethod::Notify {
-        return atomics_notify(&state, value);
+        return atomics_notify(runtime, &state, value);
     }
-    if state.method == AtomicsMethod::Wait {
+    if matches!(state.method, AtomicsMethod::Wait | AtomicsMethod::WaitAsync) {
         return atomics_wait_expected(runtime, state, value, return_to, execution_budget);
     }
     if state.method == AtomicsMethod::CompareExchange {
@@ -185,11 +189,12 @@ pub(super) fn finish_atomics_replacement(
 }
 
 pub(super) fn finish_atomics_timeout(
+    runtime: &mut Runtime,
     state: &AtomicsContinuation,
     value: StoredValue,
 ) -> Result<NativeDispatch, NativeFailure> {
     let timeout = operator_to_number(value, state.realm, &state.origin)?;
-    atomics_wait_timeout(timeout)
+    atomics_do_wait(runtime, state, timeout)
 }
 
 fn atomics_typed_array(
@@ -326,68 +331,72 @@ fn atomics_apply(
             message: "Atomics operation lost its typed-array state",
         })?
         .element();
-    let old = runtime.typed_array_read_index(state.object, index)?.ok_or(
-        EngineFault::RuntimeInvariant {
-            message: "validated Atomics operation lost its indexed element",
-        },
-    )?;
-    if element.is_bigint() {
-        atomics_apply_bigint(runtime, state, index, old, &value, replacement, element)
+    let result = if element.is_bigint() {
+        let input = to_bigint_from_primitive(&value, state.realm, &state.origin)?;
+        let replacement = replacement
+            .map(|replacement| to_bigint_from_primitive(&replacement, state.realm, &state.origin))
+            .transpose()?;
+        runtime.with_typed_array_element_mut(state.object, index, |data, byte_index, element| {
+            atomics_apply_bigint_locked(data, byte_index, element, state, input, replacement)
+        })?
     } else {
-        atomics_apply_number(runtime, state, index, &old, value, replacement, element)
+        let input = atomics_to_integer_number(value, state.realm, &state.origin)?;
+        let replacement = replacement
+            .map(|replacement| atomics_to_integer_number(replacement, state.realm, &state.origin))
+            .transpose()?;
+        runtime.with_typed_array_element_mut(state.object, index, |data, byte_index, element| {
+            atomics_apply_number_locked(data, byte_index, element, state, input, replacement)
+        })?
     }
+    .ok_or(EngineFault::RuntimeInvariant {
+        message: "validated Atomics operation lost its indexed element",
+    })??;
+    Ok(NativeDispatch::Immediate(result))
 }
 
-fn atomics_apply_number(
-    runtime: &mut Runtime,
-    state: &AtomicsContinuation,
-    index: usize,
-    old: &StoredValue,
-    value: StoredValue,
-    replacement: Option<StoredValue>,
+fn atomics_apply_number_locked(
+    data: &mut [u8],
+    byte_index: usize,
     element: TypedArrayElementType,
-) -> Result<NativeDispatch, NativeFailure> {
-    let StoredValue::Number(old) = old else {
+    state: &AtomicsContinuation,
+    input: JsNumber,
+    replacement: Option<JsNumber>,
+) -> Result<StoredValue, NativeFailure> {
+    let StoredValue::Number(old) = typed_array_read_element(data, byte_index, element)? else {
         return Err(EngineFault::RuntimeInvariant {
             message: "number Atomics operation read a BigInt element",
         }
         .into());
     };
-    let input = atomics_to_integer_number(value, state.realm, &state.origin)?;
-    let result = match state.method {
-        AtomicsMethod::Store => {
-            atomics_store_number(runtime, state.object, index, input)?;
-            StoredValue::Number(input)
-        }
-        AtomicsMethod::Exchange => {
-            atomics_store_number(runtime, state.object, index, input)?;
-            StoredValue::Number(*old)
-        }
+    let (result, stored) = match state.method {
+        AtomicsMethod::Store => (StoredValue::Number(input), Some(input)),
+        AtomicsMethod::Exchange => (StoredValue::Number(old), Some(input)),
         AtomicsMethod::CompareExchange => {
             let replacement = replacement.ok_or(EngineFault::RuntimeInvariant {
                 message: "Atomics.compareExchange missing replacement value",
             })?;
-            let replacement = atomics_to_integer_number(replacement, state.realm, &state.origin)?;
-            if atomics_normalize_number(element, *old)
+            let stored = if atomics_normalize_number(element, old)
                 .strict_equals(atomics_normalize_number(element, input))
             {
-                atomics_store_number(runtime, state.object, index, replacement)?;
-            }
-            StoredValue::Number(*old)
+                Some(replacement)
+            } else {
+                None
+            };
+            (StoredValue::Number(old), stored)
         }
         AtomicsMethod::Add
         | AtomicsMethod::And
         | AtomicsMethod::Or
         | AtomicsMethod::Sub
         | AtomicsMethod::Xor => {
-            let updated = atomics_number_update(state.method, element, *old, input);
-            atomics_store_number(runtime, state.object, index, updated)?;
-            StoredValue::Number(*old)
+            let updated = atomics_number_update(state.method, element, old, input);
+            (StoredValue::Number(old), Some(updated))
         }
         AtomicsMethod::IsLockFree
         | AtomicsMethod::Load
         | AtomicsMethod::Notify
         | AtomicsMethod::Wait
+        | AtomicsMethod::WaitAsync
         | AtomicsMethod::Pause => {
             return Err(EngineFault::RuntimeInvariant {
                 message: "non-mutating Atomics method reached value application",
@@ -395,58 +404,54 @@ fn atomics_apply_number(
             .into());
         }
     };
-    Ok(NativeDispatch::Immediate(result))
+    if let Some(stored) = stored {
+        atomics_write_locked(
+            data,
+            byte_index,
+            &typed_array_write_element(element, TypedArrayElementValue::Number(stored)),
+        )?;
+    }
+    Ok(result)
 }
 
-fn atomics_apply_bigint(
-    runtime: &mut Runtime,
-    state: &AtomicsContinuation,
-    index: usize,
-    old: StoredValue,
-    value: &StoredValue,
-    replacement: Option<StoredValue>,
+fn atomics_apply_bigint_locked(
+    data: &mut [u8],
+    byte_index: usize,
     element: TypedArrayElementType,
-) -> Result<NativeDispatch, NativeFailure> {
-    let StoredValue::BigInt(old) = old else {
+    state: &AtomicsContinuation,
+    input: Arc<JsBigInt>,
+    replacement: Option<Arc<JsBigInt>>,
+) -> Result<StoredValue, NativeFailure> {
+    let StoredValue::BigInt(old) = typed_array_read_element(data, byte_index, element)? else {
         return Err(EngineFault::RuntimeInvariant {
             message: "BigInt Atomics operation read a Number element",
         }
         .into());
     };
-    let value = to_bigint_from_primitive(value, state.realm, &state.origin)?;
-    let result = match state.method {
-        AtomicsMethod::Store => {
-            atomics_store_bigint(runtime, state.object, index, value.as_ref())?;
-            StoredValue::BigInt(value)
-        }
-        AtomicsMethod::Exchange => {
-            atomics_store_bigint(runtime, state.object, index, value.as_ref())?;
-            StoredValue::BigInt(old)
-        }
+    let (result, stored) = match state.method {
+        AtomicsMethod::Store => (StoredValue::BigInt(Arc::clone(&input)), Some(input)),
+        AtomicsMethod::Exchange => (StoredValue::BigInt(old), Some(input)),
         AtomicsMethod::CompareExchange => {
             let replacement = replacement.ok_or(EngineFault::RuntimeInvariant {
                 message: "Atomics.compareExchange missing replacement value",
             })?;
-            let replacement = to_bigint_from_primitive(&replacement, state.realm, &state.origin)?;
-            let expected = atomics_normalize_bigint(element, value.as_ref(), state)?;
-            if old.as_ref() == &expected {
-                atomics_store_bigint(runtime, state.object, index, replacement.as_ref())?;
-            }
-            StoredValue::BigInt(old)
+            let expected = atomics_normalize_bigint(element, input.as_ref(), state)?;
+            let stored = (old.as_ref() == &expected).then_some(replacement);
+            (StoredValue::BigInt(old), stored)
         }
         AtomicsMethod::Add
         | AtomicsMethod::And
         | AtomicsMethod::Or
         | AtomicsMethod::Sub
         | AtomicsMethod::Xor => {
-            let updated = atomics_bigint_update(state.method, old.as_ref(), value.as_ref(), state)?;
-            atomics_store_bigint(runtime, state.object, index, &updated)?;
-            StoredValue::BigInt(old)
+            let updated = atomics_bigint_update(state.method, old.as_ref(), input.as_ref(), state)?;
+            (StoredValue::BigInt(old), Some(Arc::new(updated)))
         }
         AtomicsMethod::IsLockFree
         | AtomicsMethod::Load
         | AtomicsMethod::Notify
         | AtomicsMethod::Wait
+        | AtomicsMethod::WaitAsync
         | AtomicsMethod::Pause => {
             return Err(EngineFault::RuntimeInvariant {
                 message: "non-mutating Atomics method reached value application",
@@ -454,40 +459,32 @@ fn atomics_apply_bigint(
             .into());
         }
     };
-    Ok(NativeDispatch::Immediate(result))
+    if let Some(stored) = stored {
+        atomics_write_locked(
+            data,
+            byte_index,
+            &typed_array_write_element(element, TypedArrayElementValue::BigInt(stored.as_ref())),
+        )?;
+    }
+    Ok(result)
 }
 
-fn atomics_store_number(
-    runtime: &mut Runtime,
-    object: ObjectId,
-    index: usize,
-    value: JsNumber,
+fn atomics_write_locked(
+    data: &mut [u8],
+    byte_index: usize,
+    bytes: &[u8],
 ) -> Result<(), NativeFailure> {
-    let outcome =
-        runtime.typed_array_store_index(object, index, TypedArrayElementValue::Number(value))?;
-    if outcome != TypedArrayStoreOutcome::Stored {
-        return Err(EngineFault::RuntimeInvariant {
-            message: "validated Atomics number store did not store",
-        }
-        .into());
-    }
-    Ok(())
-}
-
-fn atomics_store_bigint(
-    runtime: &mut Runtime,
-    object: ObjectId,
-    index: usize,
-    value: &JsBigInt,
-) -> Result<(), NativeFailure> {
-    let outcome =
-        runtime.typed_array_store_index(object, index, TypedArrayElementValue::BigInt(value))?;
-    if outcome != TypedArrayStoreOutcome::Stored {
-        return Err(EngineFault::RuntimeInvariant {
-            message: "validated Atomics BigInt store did not store",
-        }
-        .into());
-    }
+    let end = byte_index
+        .checked_add(bytes.len())
+        .ok_or(EngineFault::RuntimeInvariant {
+            message: "atomic element write range overflowed",
+        })?;
+    let target = data
+        .get_mut(byte_index..end)
+        .ok_or(EngineFault::RuntimeInvariant {
+            message: "atomic element write escaped its validated backing store",
+        })?;
+    target.copy_from_slice(bytes);
     Ok(())
 }
 
@@ -603,16 +600,74 @@ fn atomics_bigint_update(
 }
 
 fn atomics_notify(
+    runtime: &mut Runtime,
     state: &AtomicsContinuation,
     count: StoredValue,
 ) -> Result<NativeDispatch, NativeFailure> {
-    if !matches!(count, StoredValue::Undefined) {
-        let _ =
-            number_to_integer_or_infinity(operator_to_number(count, state.realm, &state.origin)?);
-    }
+    let count = atomics_notify_count(count, state)?;
+    let index = state.index.ok_or(EngineFault::RuntimeInvariant {
+        message: "Atomics.notify lost its validated index",
+    })?;
+    let typed_array =
+        runtime
+            .typed_array_state(state.object)?
+            .copied()
+            .ok_or(EngineFault::RuntimeInvariant {
+                message: "Atomics.notify lost its typed-array state",
+            })?;
+    let buffer =
+        runtime
+            .array_buffer_state(typed_array.buffer())?
+            .ok_or(EngineFault::RuntimeInvariant {
+                message: "Atomics.notify lost its backing buffer",
+            })?;
+    let Some(block) = buffer.shared_data_block().map(Arc::clone) else {
+        return Ok(NativeDispatch::Immediate(StoredValue::Number(
+            JsNumber::from_i32(0),
+        )));
+    };
+    let byte_index =
+        typed_array_element_byte_index(typed_array.byte_offset(), index, typed_array.element())?;
+    let direct_token = next_atomics_wake_token();
+    let notified = block.notify(byte_index, count, runtime.atomics_agent_id, direct_token);
+    // The current agent resolves its own async waiters during Notify rather
+    // than deferring settlement until the host checkpoint. Promise reactions
+    // remain queued normally, preserving their relative FIFO position.
+    runtime.settle_notified_atomics_waiters(direct_token)?;
     Ok(NativeDispatch::Immediate(StoredValue::Number(
-        JsNumber::from_i32(0),
+        atomics_waiter_count_number(notified),
     )))
+}
+
+#[expect(
+    clippy::cast_precision_loss,
+    reason = "ECMAScript reports a mathematical waiter count as the nearest binary64 Number"
+)]
+fn atomics_waiter_count_number(count: usize) -> JsNumber {
+    JsNumber::from_f64(count as f64)
+}
+
+#[allow(
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss,
+    reason = "ToIntegerOrInfinity is clamped to the host waiter-count domain"
+)]
+fn atomics_notify_count(
+    count: StoredValue,
+    state: &AtomicsContinuation,
+) -> Result<usize, NativeFailure> {
+    if matches!(count, StoredValue::Undefined) {
+        return Ok(usize::MAX);
+    }
+    let count =
+        number_to_integer_or_infinity(operator_to_number(count, state.realm, &state.origin)?);
+    if count <= 0.0 {
+        Ok(0)
+    } else if count.is_infinite() {
+        Ok(usize::MAX)
+    } else {
+        Ok(count as usize)
+    }
 }
 
 fn atomics_wait_expected(
@@ -622,9 +677,6 @@ fn atomics_wait_expected(
     return_to: Option<CallReturn>,
     execution_budget: &mut ExecutionBudget,
 ) -> Result<NativeDispatch, NativeFailure> {
-    let index = state.index.ok_or(EngineFault::RuntimeInvariant {
-        message: "Atomics.wait lost its validated index",
-    })?;
     let element = runtime
         .typed_array_state(state.object)?
         .copied()
@@ -632,14 +684,7 @@ fn atomics_wait_expected(
             message: "Atomics.wait lost its typed-array state",
         })?
         .element();
-    let actual = runtime.typed_array_read_index(state.object, index)?.ok_or(
-        EngineFault::RuntimeInvariant {
-            message: "Atomics.wait lost its validated indexed element",
-        },
-    )?;
-    if !atomics_wait_matches(element, actual, expected, &state)? {
-        return atomics_wait_result("not-equal");
-    }
+    state.value = Some(atomics_normalize_wait_expected(element, expected, &state)?);
     let timeout = state
         .replacement
         .take()
@@ -660,45 +705,243 @@ fn atomics_wait_expected(
     )
 }
 
-fn atomics_wait_matches(
+fn atomics_normalize_wait_expected(
     element: TypedArrayElementType,
-    actual: StoredValue,
     expected: StoredValue,
     state: &AtomicsContinuation,
-) -> Result<bool, NativeFailure> {
+) -> Result<StoredValue, NativeFailure> {
     if element.is_bigint() {
-        let StoredValue::BigInt(actual) = actual else {
-            return Err(EngineFault::RuntimeInvariant {
-                message: "BigInt Atomics.wait read a Number element",
-            }
-            .into());
-        };
         let expected = to_bigint_from_primitive(&expected, state.realm, &state.origin)?;
-        return Ok(actual.as_ref() == expected.as_ref());
+        let expected = atomics_normalize_bigint(element, expected.as_ref(), state)?;
+        return Ok(StoredValue::BigInt(Arc::new(expected)));
     }
-    let StoredValue::Number(actual) = actual else {
-        return Err(EngineFault::RuntimeInvariant {
-            message: "number Atomics.wait read a BigInt element",
-        }
-        .into());
-    };
-    let expected = JsNumber::from_f64(number_to_integer_or_infinity(operator_to_number(
-        expected,
-        state.realm,
-        &state.origin,
-    )?));
-    Ok(actual.strict_equals(expected))
+    let expected = number_to_int32(operator_to_number(expected, state.realm, &state.origin)?);
+    Ok(StoredValue::Number(JsNumber::from_i32(expected)))
 }
 
-fn atomics_wait_timeout(timeout: JsNumber) -> Result<NativeDispatch, NativeFailure> {
-    let milliseconds = timeout.as_f64();
-    if milliseconds.is_finite() && milliseconds > 0.0 {
-        let seconds = (milliseconds / 1_000.0).min(std::time::Duration::MAX.as_secs_f64() / 2.0);
-        std::thread::sleep(std::time::Duration::from_secs_f64(seconds));
-    } else if milliseconds.is_infinite() && milliseconds.is_sign_positive() {
-        std::thread::park();
+fn atomics_do_wait(
+    runtime: &mut Runtime,
+    state: &AtomicsContinuation,
+    timeout: JsNumber,
+) -> Result<NativeDispatch, NativeFailure> {
+    let (block, byte_index, element) = atomics_wait_location(runtime, state)?;
+    let expected = state.value.as_ref().ok_or(EngineFault::RuntimeInvariant {
+        message: "Atomics wait lost its converted expected value",
+    })?;
+    let expected_bytes = atomics_wait_expected_bytes(element, expected)?;
+    let timeout = AtomicsTimeout::from_number(timeout);
+    if timeout.is_zero() {
+        let equal = block.with_bytes(|bytes| {
+            byte_index
+                .checked_add(expected_bytes.len())
+                .and_then(|end| bytes.get(byte_index..end))
+                == Some(expected_bytes.as_slice())
+        });
+        return if equal {
+            atomics_wait_immediate(runtime, state, "timed-out")
+        } else {
+            atomics_wait_immediate(runtime, state, "not-equal")
+        };
     }
-    atomics_wait_result("timed-out")
+    match state.method {
+        AtomicsMethod::Wait => {
+            atomics_wait_blocking(block.as_ref(), byte_index, &expected_bytes, timeout)
+        }
+        AtomicsMethod::WaitAsync => {
+            atomics_wait_async(runtime, state, &block, byte_index, &expected_bytes, timeout)
+        }
+        _ => Err(EngineFault::RuntimeInvariant {
+            message: "non-wait Atomics method reached DoWait",
+        }
+        .into()),
+    }
+}
+
+fn atomics_wait_location(
+    runtime: &Runtime,
+    state: &AtomicsContinuation,
+) -> Result<(Arc<SharedDataBlock>, usize, TypedArrayElementType), NativeFailure> {
+    let index = state.index.ok_or(EngineFault::RuntimeInvariant {
+        message: "Atomics wait lost its validated index",
+    })?;
+    let typed_array =
+        runtime
+            .typed_array_state(state.object)?
+            .copied()
+            .ok_or(EngineFault::RuntimeInvariant {
+                message: "Atomics wait lost its typed-array state",
+            })?;
+    let buffer =
+        runtime
+            .array_buffer_state(typed_array.buffer())?
+            .ok_or(EngineFault::RuntimeInvariant {
+                message: "Atomics wait lost its backing buffer",
+            })?;
+    let block = buffer
+        .shared_data_block()
+        .cloned()
+        .ok_or(EngineFault::RuntimeInvariant {
+            message: "Atomics wait lost its Shared Data Block",
+        })?;
+    let byte_index =
+        typed_array_element_byte_index(typed_array.byte_offset(), index, typed_array.element())?;
+    Ok((block, byte_index, typed_array.element()))
+}
+
+fn atomics_wait_expected_bytes(
+    element: TypedArrayElementType,
+    expected: &StoredValue,
+) -> Result<Vec<u8>, NativeFailure> {
+    match expected {
+        StoredValue::Number(value) => Ok(typed_array_write_element(
+            element,
+            TypedArrayElementValue::Number(*value),
+        )),
+        StoredValue::BigInt(value) => Ok(typed_array_write_element(
+            element,
+            TypedArrayElementValue::BigInt(value.as_ref()),
+        )),
+        _ => Err(EngineFault::RuntimeInvariant {
+            message: "Atomics wait expected value was not normalized",
+        }
+        .into()),
+    }
+}
+
+fn atomics_wait_blocking(
+    block: &SharedDataBlock,
+    byte_index: usize,
+    expected: &[u8],
+    timeout: AtomicsTimeout,
+) -> Result<NativeDispatch, NativeFailure> {
+    let waiter_id = next_atomics_waiter_id();
+    let waiter_state = Arc::new(AtomicsWaiterState::pending());
+    let blocking = Arc::new(BlockingWaiter::new(Arc::clone(&waiter_state)));
+    let registered = block.register_waiter_if_equal(
+        byte_index,
+        expected,
+        SharedWaiter {
+            id: waiter_id,
+            byte_index,
+            state: waiter_state,
+            wake: SharedWaiterWake::Blocking(Arc::clone(&blocking)),
+        },
+    )?;
+    if !registered {
+        return atomics_wait_result("not-equal");
+    }
+    let outcome = blocking.wait(timeout.duration());
+    block.remove_waiter(byte_index, waiter_id);
+    atomics_wait_result(match outcome {
+        AtomicsWakeResult::Ok => "ok",
+        AtomicsWakeResult::TimedOut => "timed-out",
+    })
+}
+
+fn atomics_wait_async(
+    runtime: &mut Runtime,
+    state: &AtomicsContinuation,
+    block: &Arc<SharedDataBlock>,
+    byte_index: usize,
+    expected: &[u8],
+    timeout: AtomicsTimeout,
+) -> Result<NativeDispatch, NativeFailure> {
+    let registration = runtime.register_async_atomics_waiter(
+        block,
+        byte_index,
+        expected,
+        state.realm,
+        timeout.duration(),
+    )?;
+    let Some((waiter_id, promise)) = registration else {
+        return atomics_wait_async_result(
+            runtime,
+            state.realm,
+            false,
+            StoredValue::String(JsString::from_utf8("not-equal")?),
+        );
+    };
+    match atomics_wait_async_result(runtime, state.realm, true, StoredValue::Object(promise)) {
+        Ok(dispatch) => Ok(dispatch),
+        Err(error) => {
+            runtime.cancel_atomics_waiter(waiter_id);
+            Err(error)
+        }
+    }
+}
+
+fn atomics_wait_immediate(
+    runtime: &mut Runtime,
+    state: &AtomicsContinuation,
+    result: &str,
+) -> Result<NativeDispatch, NativeFailure> {
+    if state.method == AtomicsMethod::WaitAsync {
+        atomics_wait_async_result(
+            runtime,
+            state.realm,
+            false,
+            StoredValue::String(JsString::from_utf8(result)?),
+        )
+    } else {
+        atomics_wait_result(result)
+    }
+}
+
+fn atomics_wait_async_result(
+    runtime: &mut Runtime,
+    realm: RealmId,
+    asynchronous: bool,
+    value: StoredValue,
+) -> Result<NativeDispatch, NativeFailure> {
+    let result = runtime.allocate_ordinary_object(runtime.realm_object_prototype(realm)?)?;
+    let async_key = runtime.property_key_from_string(&JsString::from_utf8("async")?)?;
+    runtime.append_data_property(
+        HeapReference::Object(result),
+        async_key,
+        PropertyLayout::data(true, true, true),
+        StoredValue::Boolean(asynchronous),
+    )?;
+    runtime.append_data_property(
+        HeapReference::Object(result),
+        runtime.predefined_property_key(PredefinedAtom::Value),
+        PropertyLayout::data(true, true, true),
+        value,
+    )?;
+    Ok(NativeDispatch::Immediate(StoredValue::Object(result)))
+}
+
+#[derive(Clone, Copy)]
+enum AtomicsTimeout {
+    Zero,
+    Finite(std::time::Duration),
+    Infinite,
+}
+
+impl AtomicsTimeout {
+    fn from_number(timeout: JsNumber) -> Self {
+        let milliseconds = timeout.as_f64();
+        if milliseconds.is_nan() || (milliseconds.is_infinite() && milliseconds.is_sign_positive())
+        {
+            return Self::Infinite;
+        }
+        if milliseconds <= 0.0 {
+            return Self::Zero;
+        }
+        let seconds = (milliseconds / 1_000.0).min(std::time::Duration::MAX.as_secs_f64() / 2.0);
+        Self::Finite(std::time::Duration::from_secs_f64(seconds))
+    }
+
+    const fn is_zero(self) -> bool {
+        matches!(self, Self::Zero)
+    }
+
+    const fn duration(self) -> Option<std::time::Duration> {
+        match self {
+            Self::Finite(duration) => Some(duration),
+            Self::Zero => Some(std::time::Duration::ZERO),
+            Self::Infinite => None,
+        }
+    }
 }
 
 fn atomics_wait_result(value: &str) -> Result<NativeDispatch, NativeFailure> {

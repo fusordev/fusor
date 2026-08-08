@@ -365,13 +365,17 @@ impl Runtime {
             return Ok(None);
         }
         let byte_index = typed_array_element_byte_index(byte_offset, index, element)?;
-        let data = self
-            .array_buffer_state(buffer)?
-            .and_then(|state| state.data())
+        let state =
+            self.array_buffer_state(buffer)?
+                .ok_or(crate::EngineFault::RuntimeInvariant {
+                    message: "typed-array read lost its validated backing store",
+                })?;
+        let value = state
+            .with_data(|data| typed_array_read_element(data, byte_index, element))
             .ok_or(crate::EngineFault::RuntimeInvariant {
                 message: "typed-array read lost its validated backing store",
-            })?;
-        typed_array_read_element(data, byte_index, element).map(Some)
+            })??;
+        Ok(Some(value))
     }
 
     /// Stores a pre-converted element after taking a fresh view witness. The
@@ -418,24 +422,63 @@ impl Runtime {
             .ok_or(crate::EngineFault::RuntimeInvariant {
                 message: "typed-array write buffer lost ArrayBuffer slots",
             })?;
-        let data = state
-            .data_mut()
+        state
+            .with_data_mut(|data| {
+                let end = byte_index.checked_add(bytes.len()).ok_or(
+                    crate::EngineFault::RuntimeInvariant {
+                        message: "typed-array write byte range overflowed",
+                    },
+                )?;
+                let target =
+                    data.get_mut(byte_index..end)
+                        .ok_or(crate::EngineFault::RuntimeInvariant {
+                            message: "typed-array write escaped validated backing-store bounds",
+                        })?;
+                target.copy_from_slice(&bytes);
+                Ok::<(), crate::EngineFault>(())
+            })
             .ok_or(crate::EngineFault::RuntimeInvariant {
                 message: "typed-array write buffer detached after bounds check",
-            })?;
-        let end =
-            byte_index
-                .checked_add(bytes.len())
-                .ok_or(crate::EngineFault::RuntimeInvariant {
-                    message: "typed-array write byte range overflowed",
-                })?;
-        let target = data
-            .get_mut(byte_index..end)
-            .ok_or(crate::EngineFault::RuntimeInvariant {
-                message: "typed-array write escaped validated backing-store bounds",
-            })?;
-        target.copy_from_slice(&bytes);
+            })??;
         Ok(TypedArrayStoreOutcome::Stored)
+    }
+
+    /// Executes one already-validated atomic element transaction while
+    /// retaining the Shared Data Block lock across the read/modify/write
+    /// sequence. Local `ArrayBuffer` views use the same closure without a
+    /// cross-agent lock.
+    pub(crate) fn with_typed_array_element_mut<R, E>(
+        &mut self,
+        object: ObjectId,
+        index: usize,
+        operation: impl FnOnce(&mut [u8], usize, TypedArrayElementType) -> Result<R, E>,
+    ) -> Result<Option<Result<R, E>>, crate::EngineFault> {
+        let TypedArrayView::InBounds {
+            buffer,
+            byte_offset,
+            length,
+            element,
+        } = self.typed_array_view(object)?
+        else {
+            return Ok(None);
+        };
+        if index >= length {
+            return Ok(None);
+        }
+        let byte_index = typed_array_element_byte_index(byte_offset, index, element)?;
+        let state = self
+            .objects
+            .get_mut(buffer)
+            .ok_or(crate::EngineFault::StaleHeapEdge {
+                edge: "atomic typed-array buffer",
+                index: buffer.index(),
+                generation: buffer.generation(),
+            })?
+            .array_buffer_state_mut()
+            .ok_or(crate::EngineFault::RuntimeInvariant {
+                message: "atomic typed-array buffer lost ArrayBuffer slots",
+            })?;
+        Ok(state.with_data_mut(|data| operation(data, byte_index, element)))
     }
 
     /// Builds `[[OwnPropertyKeys]]` for a typed array without materializing
@@ -533,7 +576,7 @@ fn typed_array_property_key(key: &PropertyKey) -> Result<TypedArrayPropertyKey, 
     }
 }
 
-fn typed_array_element_byte_index(
+pub(crate) fn typed_array_element_byte_index(
     byte_offset: usize,
     index: usize,
     element: TypedArrayElementType,
@@ -551,7 +594,7 @@ fn typed_array_element_byte_index(
         })
 }
 
-fn typed_array_read_element(
+pub(crate) fn typed_array_read_element(
     data: &[u8],
     byte_index: usize,
     element: TypedArrayElementType,
@@ -605,7 +648,7 @@ fn typed_array_read_element(
     })
 }
 
-fn typed_array_write_element(
+pub(crate) fn typed_array_write_element(
     element: TypedArrayElementType,
     value: TypedArrayElementValue<'_>,
 ) -> Vec<u8> {

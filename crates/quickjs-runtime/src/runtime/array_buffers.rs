@@ -1,9 +1,10 @@
 //! `ArrayBuffer` allocation, byte-data ownership, and logical byte accounting.
 
 use super::{
-    ArrayBufferState, HeapObject, HeapReference, ObjectId, ObjectRecord, Runtime, RuntimeResource,
-    check_execution_limit, stale_heap_reference, usize_to_u64,
+    Arc, ArrayBufferState, HeapObject, HeapReference, ObjectId, ObjectRecord, Runtime,
+    RuntimeResource, check_execution_limit, stale_heap_reference, usize_to_u64,
 };
+use crate::shared_array_buffer::SharedDataBlock;
 
 impl Runtime {
     /// Allocates one zero-initialized ECMAScript `ArrayBuffer` data block.
@@ -21,8 +22,9 @@ impl Runtime {
     }
 
     /// Allocates one zero-initialized ECMAScript `SharedArrayBuffer` data
-    /// block. Shared buffers use the same view backing representation as
-    /// `ArrayBuffer`, but retain their distinct brand and are never detached.
+    /// block. Shared buffers retain a mutex-protected data block that can be
+    /// imported by another runtime; they keep a distinct brand and never
+    /// detach.
     pub(crate) fn allocate_shared_array_buffer(
         &mut self,
         prototype: HeapReference,
@@ -30,6 +32,76 @@ impl Runtime {
         max_byte_length: Option<usize>,
     ) -> Result<ObjectId, crate::ExecutionError> {
         self.allocate_buffer(prototype, byte_length, max_byte_length, true)
+    }
+
+    /// Creates a realm-local `SharedArrayBuffer` object for an existing Shared
+    /// Data Block imported from another runtime agent.
+    pub(crate) fn allocate_shared_array_buffer_block(
+        &mut self,
+        prototype: HeapReference,
+        block: Arc<SharedDataBlock>,
+    ) -> Result<ObjectId, crate::ExecutionError> {
+        if !self.heap_reference_is_live(prototype) {
+            return Err(stale_heap_reference(prototype).into());
+        }
+        let byte_length = block.byte_length();
+        let reservation = block.max_byte_length();
+        check_execution_limit(
+            RuntimeResource::HeapObjects,
+            self.limits.max_heap_objects,
+            usize_to_u64(self.objects.len()).saturating_add(1),
+        )?;
+        let observed_bytes = self
+            .array_buffer_bytes
+            .saturating_add(usize_to_u64(reservation));
+        check_execution_limit(
+            RuntimeResource::ArrayBufferBytes,
+            self.limits.max_array_buffer_bytes,
+            observed_bytes,
+        )?;
+        debug_assert!(byte_length <= reservation);
+        self.objects
+            .try_reserve(1)
+            .map_err(|_| crate::ExecutionError::AllocationFailed {
+                resource: RuntimeResource::HeapObjects,
+                additional: 1,
+            })?;
+        let object = self
+            .insert_heap_object(HeapObject::array_buffer(
+                ObjectRecord::empty(Some(prototype)),
+                ArrayBufferState::shared_block(block),
+            ))
+            .map_err(|_| crate::ExecutionError::AllocationFailed {
+                resource: RuntimeResource::HeapObjects,
+                additional: 1,
+            })?;
+        self.array_buffer_bytes = observed_bytes;
+        self.collection_pending = true;
+        Ok(object)
+    }
+
+    /// Atomically grows one Shared Data Block. The maximum backing-store
+    /// charge was reserved when this runtime's `SharedArrayBuffer` object was
+    /// allocated, so growth changes no local accounting.
+    pub(crate) fn grow_shared_array_buffer(
+        &mut self,
+        object: ObjectId,
+        new_byte_length: usize,
+    ) -> Result<bool, crate::ExecutionError> {
+        let block = self
+            .array_buffer_state(object)?
+            .and_then(|state| state.shared_data_block())
+            .cloned()
+            .ok_or(crate::EngineFault::RuntimeInvariant {
+                message: "SharedArrayBuffer grow lost its Shared Data Block",
+            })?;
+        let current = block.byte_length();
+        block
+            .grow(new_byte_length)
+            .map_err(|_| crate::ExecutionError::AllocationFailed {
+                resource: RuntimeResource::ArrayBufferBytes,
+                additional: new_byte_length.saturating_sub(current),
+            })
     }
 
     /// Allocates one fixed-length immutable `ArrayBuffer` from an already
@@ -107,9 +179,10 @@ impl Runtime {
             self.limits.max_array_buffer_bytes,
             observed_reservation,
         )?;
+        let charged_bytes = if shared { reservation } else { byte_length };
         let observed_bytes = self
             .array_buffer_bytes
-            .saturating_add(usize_to_u64(byte_length));
+            .saturating_add(usize_to_u64(charged_bytes));
         check_execution_limit(
             RuntimeResource::ArrayBufferBytes,
             self.limits.max_array_buffer_bytes,
@@ -303,29 +376,31 @@ impl Runtime {
                     .ok_or(crate::EngineFault::RuntimeInvariant {
                         message: "ArrayBuffer copy source lost its internal slots",
                     })?;
-            let data = state.data().ok_or(crate::EngineFault::RuntimeInvariant {
-                message: "ArrayBuffer copy source is detached",
-            })?;
-            let end =
-                source_offset
-                    .checked_add(count)
-                    .ok_or(crate::EngineFault::RuntimeInvariant {
-                        message: "ArrayBuffer copy source range overflowed",
+            state
+                .with_data(|data| {
+                    let end = source_offset.checked_add(count).ok_or(
+                        crate::EngineFault::RuntimeInvariant {
+                            message: "ArrayBuffer copy source range overflowed",
+                        },
+                    )?;
+                    let range = data.get(source_offset..end).ok_or(
+                        crate::EngineFault::RuntimeInvariant {
+                            message: "ArrayBuffer copy source range escaped its backing store",
+                        },
+                    )?;
+                    let mut copied = Vec::new();
+                    copied.try_reserve_exact(range.len()).map_err(|_| {
+                        crate::ExecutionError::AllocationFailed {
+                            resource: RuntimeResource::ArrayBufferBytes,
+                            additional: range.len(),
+                        }
                     })?;
-            let range =
-                data.get(source_offset..end)
-                    .ok_or(crate::EngineFault::RuntimeInvariant {
-                        message: "ArrayBuffer copy source range escaped its backing store",
-                    })?;
-            let mut copied = Vec::new();
-            copied.try_reserve_exact(range.len()).map_err(|_| {
-                crate::ExecutionError::AllocationFailed {
-                    resource: RuntimeResource::ArrayBufferBytes,
-                    additional: range.len(),
-                }
-            })?;
-            copied.extend_from_slice(range);
-            copied
+                    copied.extend_from_slice(range);
+                    Ok::<Vec<u8>, crate::ExecutionError>(copied)
+                })
+                .ok_or(crate::EngineFault::RuntimeInvariant {
+                    message: "ArrayBuffer copy source is detached",
+                })??
         };
         let state = self
             .objects
@@ -339,23 +414,24 @@ impl Runtime {
             .ok_or(crate::EngineFault::RuntimeInvariant {
                 message: "ArrayBuffer copy target lost its internal slots",
             })?;
-        let data = state
-            .data_mut()
+        state
+            .with_data_mut(|data| {
+                let target_end = target_offset.checked_add(count).ok_or(
+                    crate::EngineFault::RuntimeInvariant {
+                        message: "ArrayBuffer copy target range overflowed",
+                    },
+                )?;
+                let target = data.get_mut(target_offset..target_end).ok_or(
+                    crate::EngineFault::RuntimeInvariant {
+                        message: "ArrayBuffer copy target range escaped its backing store",
+                    },
+                )?;
+                target.copy_from_slice(&bytes);
+                Ok::<(), crate::EngineFault>(())
+            })
             .ok_or(crate::EngineFault::RuntimeInvariant {
                 message: "ArrayBuffer copy target is detached",
-            })?;
-        let target_end =
-            target_offset
-                .checked_add(count)
-                .ok_or(crate::EngineFault::RuntimeInvariant {
-                    message: "ArrayBuffer copy target range overflowed",
-                })?;
-        let target = data.get_mut(target_offset..target_end).ok_or(
-            crate::EngineFault::RuntimeInvariant {
-                message: "ArrayBuffer copy target range escaped its backing store",
-            },
-        )?;
-        target.copy_from_slice(&bytes);
+            })??;
         Ok(())
     }
 
@@ -396,33 +472,32 @@ impl Runtime {
             .ok_or(crate::EngineFault::RuntimeInvariant {
                 message: "ArrayBuffer forward copy lost its internal slots",
             })?;
-        let data = state
-            .data_mut()
+        state
+            .with_data_mut(|data| {
+                let source_end = source_offset.checked_add(count).ok_or(
+                    crate::EngineFault::RuntimeInvariant {
+                        message: "ArrayBuffer forward copy source range overflowed",
+                    },
+                )?;
+                let target_end = target_offset.checked_add(count).ok_or(
+                    crate::EngineFault::RuntimeInvariant {
+                        message: "ArrayBuffer forward copy target range overflowed",
+                    },
+                )?;
+                if source_end > data.len() || target_end > data.len() {
+                    return Err(crate::EngineFault::RuntimeInvariant {
+                        message: "ArrayBuffer forward copy range escaped its backing store",
+                    });
+                }
+                for index in 0..count {
+                    let byte = data[source_offset + index];
+                    data[target_offset + index] = byte;
+                }
+                Ok::<(), crate::EngineFault>(())
+            })
             .ok_or(crate::EngineFault::RuntimeInvariant {
                 message: "ArrayBuffer forward copy source is detached",
-            })?;
-        let source_end =
-            source_offset
-                .checked_add(count)
-                .ok_or(crate::EngineFault::RuntimeInvariant {
-                    message: "ArrayBuffer forward copy source range overflowed",
-                })?;
-        let target_end =
-            target_offset
-                .checked_add(count)
-                .ok_or(crate::EngineFault::RuntimeInvariant {
-                    message: "ArrayBuffer forward copy target range overflowed",
-                })?;
-        if source_end > data.len() || target_end > data.len() {
-            return Err(crate::EngineFault::RuntimeInvariant {
-                message: "ArrayBuffer forward copy range escaped its backing store",
-            }
-            .into());
-        }
-        for index in 0..count {
-            let byte = data[source_offset + index];
-            data[target_offset + index] = byte;
-        }
+            })??;
         Ok(())
     }
 
@@ -433,36 +508,50 @@ impl Runtime {
         object: ObjectId,
         new_byte_length: usize,
     ) -> Result<(), crate::ExecutionError> {
-        let (old_byte_length, maximum, source) = {
+        let (old_byte_length, old_charge, maximum, source) = {
             let state =
                 self.array_buffer_state(object)?
                     .ok_or(crate::EngineFault::RuntimeInvariant {
                         message: "ArrayBuffer resize lost its internal slots",
                     })?;
-            let source = state.data().ok_or(crate::EngineFault::RuntimeInvariant {
-                message: "ArrayBuffer resize received a detached buffer",
-            })?;
+            debug_assert!(!state.is_shared());
             let maximum =
                 state
                     .resizable_max_byte_length()
                     .ok_or(crate::EngineFault::RuntimeInvariant {
                         message: "ArrayBuffer resize received a fixed-length buffer",
                     })?;
-            let mut copied = Vec::new();
-            copied.try_reserve_exact(source.len()).map_err(|_| {
-                crate::ExecutionError::AllocationFailed {
-                    resource: RuntimeResource::ArrayBufferBytes,
-                    additional: source.len(),
-                }
-            })?;
-            copied.extend_from_slice(source);
-            (source.len(), maximum, copied)
+            let (old_byte_length, copied) = state
+                .with_data(|source| {
+                    let mut copied = Vec::new();
+                    copied.try_reserve_exact(source.len()).map_err(|_| {
+                        crate::ExecutionError::AllocationFailed {
+                            resource: RuntimeResource::ArrayBufferBytes,
+                            additional: source.len(),
+                        }
+                    })?;
+                    copied.extend_from_slice(source);
+                    Ok::<(usize, Vec<u8>), crate::ExecutionError>((source.len(), copied))
+                })
+                .ok_or(crate::EngineFault::RuntimeInvariant {
+                    message: "ArrayBuffer resize received a detached buffer",
+                })??;
+            (
+                old_byte_length,
+                state.accounted_byte_length(),
+                maximum,
+                copied,
+            )
         };
         debug_assert!(new_byte_length <= maximum);
         let observed_bytes = self
             .array_buffer_bytes
-            .saturating_sub(usize_to_u64(old_byte_length))
-            .saturating_add(usize_to_u64(new_byte_length));
+            .saturating_sub(usize_to_u64(old_charge))
+            .saturating_add(usize_to_u64(if old_charge == old_byte_length {
+                new_byte_length
+            } else {
+                old_charge
+            }));
         check_execution_limit(
             RuntimeResource::ArrayBufferBytes,
             self.limits.max_array_buffer_bytes,
@@ -515,24 +604,25 @@ impl Runtime {
                     .ok_or(crate::EngineFault::RuntimeInvariant {
                         message: "ArrayBuffer transfer lost its internal slots",
                     })?;
-            let data = state.data().ok_or(crate::EngineFault::RuntimeInvariant {
-                message: "ArrayBuffer transfer received a detached buffer",
-            })?;
-            let mut copied = Vec::new();
-            copied.try_reserve_exact(data.len()).map_err(|_| {
-                crate::ExecutionError::AllocationFailed {
-                    resource: RuntimeResource::ArrayBufferBytes,
-                    additional: data.len(),
-                }
-            })?;
-            copied.extend_from_slice(data);
-            (
-                data.len(),
-                preserve_resizability
-                    .then(|| state.resizable_max_byte_length())
-                    .flatten(),
-                copied,
-            )
+            let max_byte_length = preserve_resizability
+                .then(|| state.resizable_max_byte_length())
+                .flatten();
+            let (old_byte_length, copied) = state
+                .with_data(|data| {
+                    let mut copied = Vec::new();
+                    copied.try_reserve_exact(data.len()).map_err(|_| {
+                        crate::ExecutionError::AllocationFailed {
+                            resource: RuntimeResource::ArrayBufferBytes,
+                            additional: data.len(),
+                        }
+                    })?;
+                    copied.extend_from_slice(data);
+                    Ok::<(usize, Vec<u8>), crate::ExecutionError>((data.len(), copied))
+                })
+                .ok_or(crate::EngineFault::RuntimeInvariant {
+                    message: "ArrayBuffer transfer received a detached buffer",
+                })??;
+            (old_byte_length, max_byte_length, copied)
         };
         debug_assert!(max_byte_length.is_none_or(|maximum| new_byte_length <= maximum));
         let observed_bytes = self

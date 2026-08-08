@@ -2082,7 +2082,9 @@ fn finish_operator_primitive_target(
         OperatorPrimitiveTarget::AtomicsReplacement(state) => {
             finish_atomics_replacement(runtime, *state, value)
         }
-        OperatorPrimitiveTarget::AtomicsTimeout(state) => finish_atomics_timeout(&state, value),
+        OperatorPrimitiveTarget::AtomicsTimeout(state) => {
+            finish_atomics_timeout(runtime, state.as_ref(), value)
+        }
         OperatorPrimitiveTarget::ArrayBufferResize { object } => {
             finish_array_buffer_resize(runtime, object, value, realm, origin)
         }

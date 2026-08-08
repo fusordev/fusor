@@ -739,13 +739,20 @@ fn finish_array_buffer_slice_to_immutable(
                     .ok_or(EngineFault::RuntimeInvariant {
                         message: "ArrayBuffer.sliceToImmutable byte range overflowed",
                     })?;
-            let bytes = source
-                .data()
-                .and_then(|data| data.get(state.first..end))
+            source
+                .with_data(|data| {
+                    let bytes = data.get(state.first..end).ok_or(
+                        EngineFault::RuntimeInvariant {
+                            message:
+                                "ArrayBuffer.sliceToImmutable escaped its validated source range",
+                        },
+                    )?;
+                    copied.extend_from_slice(bytes);
+                    Ok::<(), EngineFault>(())
+                })
                 .ok_or(EngineFault::RuntimeInvariant {
-                    message: "ArrayBuffer.sliceToImmutable escaped its validated source range",
-                })?;
-            copied.extend_from_slice(bytes);
+                    message: "ArrayBuffer.sliceToImmutable source was detached",
+                })??;
         }
         copied
     };
@@ -1134,9 +1141,16 @@ pub(super) fn finish_shared_array_buffer_grow(
             "SharedArrayBuffer length is outside its growable range",
         );
     }
-    runtime
-        .resize_array_buffer(object, new_byte_length)
-        .map_err(NativeFailure::Execution)?;
+    if !runtime
+        .grow_shared_array_buffer(object, new_byte_length)
+        .map_err(NativeFailure::Execution)?
+    {
+        return array_buffer_range_error(
+            realm,
+            origin,
+            "SharedArrayBuffer was concurrently grown past the requested length",
+        );
+    }
     Ok(NativeDispatch::Immediate(StoredValue::Undefined))
 }
 

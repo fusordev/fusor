@@ -42,6 +42,7 @@ use crate::{
     PropertyLayoutKind,
     atom::WeakAtom,
     ids::{BindingCellId, FunctionId, RealmId},
+    shared_array_buffer::SharedDataBlock,
     value::{HeapReference, StoredValue},
 };
 
@@ -2363,10 +2364,15 @@ impl DateState {
 /// proposal's `[[ArrayBufferIsImmutable]]` slot and are always fixed-length,
 /// non-shared, and non-detachable.
 pub(crate) struct ArrayBufferState {
-    data: Option<Vec<u8>>,
+    data: Option<ArrayBufferData>,
     max_byte_length: Option<usize>,
     shared: bool,
     immutable: bool,
+}
+
+enum ArrayBufferData {
+    Local(Vec<u8>),
+    Shared(Arc<SharedDataBlock>),
 }
 
 /// The specification-level slots of an ECMAScript `DataView` object.
@@ -2564,27 +2570,31 @@ impl DataViewState {
 }
 
 impl ArrayBufferState {
-    pub(crate) const fn new(data: Vec<u8>, max_byte_length: Option<usize>) -> Self {
+    pub(crate) fn new(data: Vec<u8>, max_byte_length: Option<usize>) -> Self {
         Self {
-            data: Some(data),
+            data: Some(ArrayBufferData::Local(data)),
             max_byte_length,
             shared: false,
             immutable: false,
         }
     }
 
-    pub(crate) const fn shared(data: Vec<u8>, max_byte_length: Option<usize>) -> Self {
+    pub(crate) fn shared(data: Vec<u8>, max_byte_length: Option<usize>) -> Self {
+        Self::shared_block(Arc::new(SharedDataBlock::new(data, max_byte_length)))
+    }
+
+    pub(crate) fn shared_block(block: Arc<SharedDataBlock>) -> Self {
         Self {
-            data: Some(data),
-            max_byte_length,
+            max_byte_length: block.resizable_max_byte_length(),
+            data: Some(ArrayBufferData::Shared(block)),
             shared: true,
             immutable: false,
         }
     }
 
-    pub(crate) const fn immutable(data: Vec<u8>) -> Self {
+    pub(crate) fn immutable(data: Vec<u8>) -> Self {
         Self {
-            data: Some(data),
+            data: Some(ArrayBufferData::Local(data)),
             max_byte_length: None,
             shared: false,
             immutable: true,
@@ -2613,12 +2623,28 @@ impl ArrayBufferState {
 
     #[must_use]
     pub(crate) fn byte_length(&self) -> usize {
-        self.data.as_ref().map_or(0, Vec::len)
+        match &self.data {
+            Some(ArrayBufferData::Local(data)) => data.len(),
+            Some(ArrayBufferData::Shared(block)) => block.byte_length(),
+            None => 0,
+        }
     }
 
     #[must_use]
     pub(crate) fn max_byte_length(&self) -> usize {
         self.max_byte_length.unwrap_or_else(|| self.byte_length())
+    }
+
+    /// Returns the byte charge retained by this runtime object. Growable
+    /// shared blocks reserve their maximum up front because another agent can
+    /// grow the block without entering this runtime's limit boundary.
+    #[must_use]
+    pub(crate) fn accounted_byte_length(&self) -> usize {
+        if self.shared {
+            self.max_byte_length()
+        } else {
+            self.byte_length()
+        }
     }
 
     #[must_use]
@@ -2630,25 +2656,47 @@ impl ArrayBufferState {
         if self.immutable {
             return None;
         }
-        self.data.replace(data)
+        match self.data.as_mut()? {
+            ArrayBufferData::Local(current) => Some(std::mem::replace(current, data)),
+            ArrayBufferData::Shared(_) => None,
+        }
     }
 
     pub(crate) fn detach(&mut self) -> Option<Vec<u8>> {
+        if self.immutable || self.shared {
+            return None;
+        }
+        match self.data.take()? {
+            ArrayBufferData::Local(data) => Some(data),
+            ArrayBufferData::Shared(block) => {
+                self.data = Some(ArrayBufferData::Shared(block));
+                None
+            }
+        }
+    }
+
+    pub(crate) fn with_data<R>(&self, operation: impl FnOnce(&[u8]) -> R) -> Option<R> {
+        match self.data.as_ref()? {
+            ArrayBufferData::Local(data) => Some(operation(data)),
+            ArrayBufferData::Shared(block) => Some(block.with_bytes(operation)),
+        }
+    }
+
+    pub(crate) fn with_data_mut<R>(&mut self, operation: impl FnOnce(&mut [u8]) -> R) -> Option<R> {
         if self.immutable {
             return None;
         }
-        self.data.take()
-    }
-
-    pub(crate) fn data(&self) -> Option<&[u8]> {
-        self.data.as_deref()
-    }
-
-    pub(crate) fn data_mut(&mut self) -> Option<&mut [u8]> {
-        if self.immutable {
-            return None;
+        match self.data.as_mut()? {
+            ArrayBufferData::Local(data) => Some(operation(data)),
+            ArrayBufferData::Shared(block) => Some(block.with_bytes_mut(operation)),
         }
-        self.data.as_deref_mut()
+    }
+
+    pub(crate) fn shared_data_block(&self) -> Option<&Arc<SharedDataBlock>> {
+        match self.data.as_ref()? {
+            ArrayBufferData::Shared(block) => Some(block),
+            ArrayBufferData::Local(_) => None,
+        }
     }
 }
 

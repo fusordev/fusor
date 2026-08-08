@@ -1375,6 +1375,26 @@ pub(super) fn fulfill_promise(
     settle_promise(runtime, promise, value, PromiseReactionKind::Fulfill)
 }
 
+/// Settles an intrinsic promise from a runtime-owned host job. The supplied
+/// resolution is always a primitive, so an abrupt JavaScript completion would
+/// indicate an internal invariant failure rather than user-observable
+/// thenable assimilation.
+pub(crate) fn fulfill_promise_host(
+    runtime: &mut Runtime,
+    promise: ObjectId,
+    value: StoredValue,
+) -> Result<(), ExecutionError> {
+    fulfill_promise(runtime, promise, value).map_err(|failure| match failure {
+        NativeFailure::Execution(error) => error,
+        NativeFailure::Abrupt(_) | NativeFailure::AbruptAfterTransient(_) => {
+            EngineFault::RuntimeInvariant {
+                message: "primitive Atomics waiter settlement completed abruptly",
+            }
+            .into()
+        }
+    })
+}
+
 pub(super) fn reject_promise(
     runtime: &mut Runtime,
     promise: ObjectId,
@@ -2228,18 +2248,22 @@ pub(super) fn drain_promise_jobs(
     Ok(())
 }
 
-fn drain_host_jobs(
+pub(super) fn drain_host_jobs(
     runtime: &mut Runtime,
     compiler: Option<&Arc<dyn OrdinaryDynamicFunctionCompiler>>,
     execution_budget: &mut ExecutionBudget,
 ) -> Result<(), ExecutionError> {
     loop {
         drain_promise_jobs(runtime, compiler, execution_budget)?;
-        let Some(registry) = runtime.finalization_jobs.pop_front() else {
-            return Ok(());
-        };
-        drain_finalization_registry_job(runtime, registry, compiler, execution_budget)?;
-        runtime.kept_alive.clear();
+        if let Some(registry) = runtime.finalization_jobs.pop_front() {
+            drain_finalization_registry_job(runtime, registry, compiler, execution_budget)?;
+            runtime.kept_alive.clear();
+            continue;
+        }
+        if runtime.settle_next_ready_atomics_waiter()? {
+            continue;
+        }
+        return Ok(());
     }
 }
 
