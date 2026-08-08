@@ -199,6 +199,7 @@ pub(in crate::runtime) enum RealmNameId {
     ArraySplice,
     ArrayIsArray,
     ArrayFromAsync,
+    IteratorToArray,
     ArrayBufferIsView,
     ArrayBufferPrototype(ArrayBufferPrototypeMethod),
     SharedArrayBufferPrototype(SharedArrayBufferPrototypeMethod),

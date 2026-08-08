@@ -964,6 +964,9 @@ pub(super) fn resume_native_continuations(
             NativeContinuation::IteratorFrom(state) => {
                 advance_iterator_from(runtime, state, value, return_to, execution_budget)?
             }
+            NativeContinuation::IteratorToArray(state) => {
+                advance_iterator_to_array(runtime, state, value, return_to, execution_budget)?
+            }
             NativeContinuation::IteratorWrapperReturn(state) => advance_iterator_wrapper_return(
                 runtime,
                 state,
@@ -3677,6 +3680,14 @@ pub(super) fn dispatch_native_call_with_frames(
         NativeFunctionKind::IteratorFrom => begin_iterator_from(
             runtime,
             inputs.arguments.take_first_or_undefined(),
+            native.realm,
+            return_to,
+            origin.unwrap_or_else(native_function_host_origin),
+            execution_budget,
+        ),
+        NativeFunctionKind::IteratorPrototypeToArray => begin_iterator_to_array(
+            runtime,
+            inputs.receiver,
             native.realm,
             return_to,
             origin.unwrap_or_else(native_function_host_origin),

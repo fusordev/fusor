@@ -825,6 +825,7 @@ enum NativeContinuation {
     ErrorConstructor(ErrorConstructorContinuation),
     ErrorToString(ErrorToStringContinuation),
     IteratorFrom(IteratorFromContinuation),
+    IteratorToArray(IteratorToArrayContinuation),
     IteratorWrapperReturn(IteratorWrapperReturnContinuation),
     IteratorPrototypeSetter(IteratorPrototypeSetterContinuation),
     ArrayIteratorNext(ArrayIteratorNextContinuation),
@@ -1034,6 +1035,7 @@ impl NativeContinuation {
             Self::ErrorConstructor(state) => state.retained_values(),
             Self::ErrorToString(state) => state.retained_values(),
             Self::IteratorFrom(state) => state.retained_values(),
+            Self::IteratorToArray(state) => state.retained_values(),
             Self::IteratorWrapperReturn(_) => IteratorWrapperReturnContinuation::retained_values(),
             Self::IteratorPrototypeSetter(_) => {
                 IteratorPrototypeSetterContinuation::retained_values()
@@ -3403,6 +3405,7 @@ fn trace_native_continuation_roots(
         NativeContinuation::ErrorConstructor(state) => state.trace_roots(mark),
         NativeContinuation::ErrorToString(state) => state.trace_roots(mark),
         NativeContinuation::IteratorFrom(state) => state.trace_roots(mark),
+        NativeContinuation::IteratorToArray(state) => state.trace_roots(mark),
         NativeContinuation::IteratorWrapperReturn(state) => state.trace_roots(mark),
         NativeContinuation::IteratorPrototypeSetter(state) => state.trace_roots(mark),
         NativeContinuation::ArrayIteratorNext(state) => {

@@ -143,7 +143,7 @@ impl RealmIntrinsicSchema {
             FamilyCardinality {
                 family: "Realm native functions",
                 actual: self.specs.len(),
-                expected: 703,
+                expected: 704,
             },
         ];
         validate_intrinsic_schema(IntrinsicSchema {
@@ -288,6 +288,7 @@ pub(super) const fn is_declarative_function(id: IntrinsicFunctionId) -> bool {
             | NativeFunctionKind::RegExpPrototypeSymbol(_)
             | NativeFunctionKind::IteratorConstructor
             | NativeFunctionKind::IteratorFrom
+            | NativeFunctionKind::IteratorPrototypeToArray
             | NativeFunctionKind::IteratorPrototypeConstructorGetter
             | NativeFunctionKind::IteratorPrototypeConstructorSetter
             | NativeFunctionKind::IteratorPrototypeToStringTagGetter
@@ -905,6 +906,7 @@ const fn is_iterator_function(id: IntrinsicFunctionId) -> bool {
         id.0,
         NativeFunctionKind::IteratorConstructor
             | NativeFunctionKind::IteratorFrom
+            | NativeFunctionKind::IteratorPrototypeToArray
             | NativeFunctionKind::IteratorPrototypeConstructorGetter
             | NativeFunctionKind::IteratorPrototypeConstructorSetter
             | NativeFunctionKind::IteratorPrototypeToStringTagGetter
@@ -1190,7 +1192,7 @@ mod tests {
     #[test]
     fn complete_function_schema_has_characterized_cardinality_and_unique_ids() {
         let schema = RealmIntrinsicSchema::try_new().expect("function schema");
-        assert_eq!(schema.specs().len(), 703);
+        assert_eq!(schema.specs().len(), 704);
         assert_eq!(schema.constructor_prototypes.len(), 54);
         for (index, spec) in schema.specs().iter().enumerate() {
             assert!(

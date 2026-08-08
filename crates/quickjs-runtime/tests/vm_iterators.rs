@@ -359,6 +359,88 @@ fn rooted_iterator_from_wrapper_keeps_its_hidden_record_live_through_collection(
 }
 
 #[test]
+fn iterator_to_array_retains_next_and_observes_step_value_order() {
+    let mut runtime = Runtime::try_new(RuntimeLimits::default()).expect("runtime");
+    let realm = runtime.create_realm().expect("realm");
+    let mut context = runtime.context(&realm).expect("context");
+    let function = dynamic_function(
+        &mut context,
+        "let log='',nextGets=0,nextCalls=0,returnCalls=0;\
+         let iterator={\
+           get next(){nextGets++;log+='n';return function(){\
+             nextCalls++;log+='c';\
+             if(nextCalls>2)return {get done(){log+='D';return true;},\
+               get value(){throw new Error('must not read value');}};\
+             return {get done(){log+='d';return false;},\
+               get value(){log+='v';return nextCalls;}};};},\
+           return(){returnCalls++;return {done:true};}\
+         };\
+         let result=Iterator.prototype.toArray.call(iterator);\
+         return [log,result.join(','),result.length,\
+           Object.getPrototypeOf(result)===Array.prototype,\
+           nextGets,nextCalls,returnCalls].join('|');",
+    );
+
+    let result = context
+        .call(&function, &[], ExecutionLimits::default())
+        .expect("Iterator.prototype.toArray ordering");
+    assert_eq!(string_value(&result), "ncdvcdvcD|1,2|2|true|1|3|0");
+}
+
+#[test]
+fn iterator_to_array_propagates_step_abrupts_without_closing() {
+    let mut runtime = Runtime::try_new(RuntimeLimits::default()).expect("runtime");
+    let realm = runtime.create_realm().expect("realm");
+    let mut context = runtime.context(&realm).expect("context");
+    let function = dynamic_function(
+        &mut context,
+        "let doneError={},valueError={},doneReturns=0,valueReturns=0;\
+         let doneIterator={next(){return {get done(){throw doneError;}};},\
+           return(){doneReturns++;throw new Error('must not close');}};\
+         let valueIterator={next(){return {done:false,get value(){throw valueError;}};},\
+           return(){valueReturns++;throw new Error('must not close');}};\
+         let donePreserved=false,valuePreserved=false,nonObject=false,primitive=false;\
+         try{Iterator.prototype.toArray.call(doneIterator);}catch(error){donePreserved=error===doneError;}\
+         try{Iterator.prototype.toArray.call(valueIterator);}catch(error){valuePreserved=error===valueError;}\
+         try{Iterator.prototype.toArray.call({next(){return null;}});}catch(error){nonObject=error instanceof TypeError;}\
+         try{Iterator.prototype.toArray.call(0);}catch(error){primitive=error instanceof TypeError;}\
+         return [donePreserved,valuePreserved,doneReturns,valueReturns,nonObject,primitive].join('|');",
+    );
+
+    let result = context
+        .call(&function, &[], ExecutionLimits::default())
+        .expect("Iterator.prototype.toArray abrupt order");
+    assert_eq!(string_value(&result), "true|true|0|0|true|true");
+}
+
+#[test]
+fn iterator_to_array_infinite_input_is_stopped_by_uncatchable_fuel() {
+    let mut runtime = Runtime::try_new(RuntimeLimits::default()).expect("runtime");
+    let realm = runtime.create_realm().expect("realm");
+    let mut context = runtime.context(&realm).expect("context");
+    let function = dynamic_function(
+        &mut context,
+        "return Iterator.prototype.toArray.call({\
+           next(){return {done:false,value:1};}\
+         });",
+    );
+    let error = context
+        .call(
+            &function,
+            &[],
+            ExecutionLimits::default().with_instruction_fuel(128),
+        )
+        .expect_err("infinite toArray must exhaust fuel");
+    assert!(matches!(
+        error,
+        ExecutionError::InstructionLimitExceeded {
+            limit: 128,
+            executed: 128,
+        }
+    ));
+}
+
+#[test]
 fn array_spread_reads_iterator_twice_and_retains_next_once() {
     let mut runtime = Runtime::try_new(RuntimeLimits::default()).expect("runtime");
     let realm = runtime.create_realm().expect("realm");

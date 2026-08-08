@@ -55,6 +55,10 @@ pub(super) fn visit_objects(visit: ObjectSink<'_>) {
     }
 }
 
+#[allow(
+    clippy::too_many_lines,
+    reason = "the specification-ordered Iterator intrinsic functions are audited as one declaration list"
+)]
 pub(super) fn visit_functions(visit: FunctionSink<'_>) {
     for (kind, name, length) in [
         (
@@ -66,6 +70,11 @@ pub(super) fn visit_functions(visit: FunctionSink<'_>) {
             NativeFunctionKind::IteratorFrom,
             IntrinsicNameSpec::Predefined(PredefinedAtom::From),
             1,
+        ),
+        (
+            NativeFunctionKind::IteratorPrototypeToArray,
+            IntrinsicNameSpec::RealmName(RealmNameId::IteratorToArray),
+            0,
         ),
         (
             NativeFunctionKind::IteratorPrototypeConstructorGetter,
@@ -203,6 +212,11 @@ pub(super) fn visit_properties(visit: PropertySink<'_>) {
         prototype,
         IntrinsicKeySpec::WellKnownSymbol(PredefinedAtom::SymbolIterator),
         NativeFunctionKind::IteratorPrototypeIterator,
+    ));
+    visit(method(
+        prototype,
+        IntrinsicKeySpec::InternedString(RealmNameId::IteratorToArray),
+        NativeFunctionKind::IteratorPrototypeToArray,
     ));
     let wrapper = IntrinsicIdentity::Object(IntrinsicObjectId::WrapForValidIteratorPrototype);
     visit(method(

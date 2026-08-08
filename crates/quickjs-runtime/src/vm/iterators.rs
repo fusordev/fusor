@@ -87,6 +87,46 @@ impl IteratorFromContinuation {
     }
 }
 
+#[derive(Clone, Copy)]
+enum IteratorToArrayStage {
+    NextMethod,
+    NextResult,
+    Done,
+    Value,
+}
+
+pub(super) struct IteratorToArrayContinuation {
+    iterator: StoredValue,
+    next_method: Option<FunctionId>,
+    result: Option<StoredValue>,
+    items: Vec<StoredValue>,
+    realm: RealmId,
+    stage: IteratorToArrayStage,
+    origin: JsStackFrame,
+}
+
+impl IteratorToArrayContinuation {
+    pub(super) fn retained_values(&self) -> u64 {
+        1_u64
+            .saturating_add(u64::from(self.next_method.is_some()))
+            .saturating_add(u64::from(self.result.is_some()))
+            .saturating_add(usize_to_u64(self.items.len()))
+    }
+
+    pub(super) fn trace_roots(&self, mark: &mut dyn FnMut(CollectionRoot)) {
+        trace_stored_value_root(&self.iterator, mark);
+        if let Some(next_method) = self.next_method {
+            mark(CollectionRoot::Heap(HeapReference::Function(next_method)));
+        }
+        if let Some(result) = &self.result {
+            trace_stored_value_root(result, mark);
+        }
+        for item in &self.items {
+            trace_stored_value_root(item, mark);
+        }
+    }
+}
+
 pub(super) struct IteratorWrapperReturnContinuation {
     iterator: StoredValue,
     realm: RealmId,
@@ -391,6 +431,173 @@ pub(super) fn advance_iterator_from(
             )
         }
     }
+}
+
+pub(super) fn begin_iterator_to_array(
+    runtime: &mut Runtime,
+    receiver: StoredValue,
+    realm: RealmId,
+    return_to: Option<CallReturn>,
+    origin: JsStackFrame,
+    execution_budget: &mut ExecutionBudget,
+) -> Result<NativeDispatch, NativeFailure> {
+    if receiver.heap_reference().is_none() {
+        return Err(iterator_exception(
+            realm,
+            origin,
+            ExceptionKind::TypeError,
+            "Iterator.prototype.toArray receiver must be an object",
+        )?);
+    }
+    let state = IteratorToArrayContinuation {
+        iterator: receiver,
+        next_method: None,
+        result: None,
+        items: Vec::new(),
+        realm,
+        stage: IteratorToArrayStage::NextMethod,
+        origin,
+    };
+    read_iterator_to_array_property(
+        runtime,
+        state,
+        runtime.predefined_property_key(PredefinedAtom::Next),
+        return_to,
+        execution_budget,
+    )
+}
+
+pub(super) fn advance_iterator_to_array(
+    runtime: &mut Runtime,
+    mut state: IteratorToArrayContinuation,
+    completion: StoredValue,
+    return_to: Option<CallReturn>,
+    execution_budget: &mut ExecutionBudget,
+) -> Result<NativeDispatch, NativeFailure> {
+    match state.stage {
+        IteratorToArrayStage::NextMethod => {
+            let StoredValue::Function(next_method) = completion else {
+                return Err(iterator_exception(
+                    state.realm,
+                    state.origin,
+                    ExceptionKind::TypeError,
+                    "iterator next method is not callable",
+                )?);
+            };
+            state.next_method = Some(next_method);
+            call_iterator_to_array_next(state, return_to, execution_budget)
+        }
+        IteratorToArrayStage::NextResult => {
+            if completion.heap_reference().is_none() {
+                return Err(iterator_exception(
+                    state.realm,
+                    state.origin,
+                    ExceptionKind::TypeError,
+                    "iterator next method did not return an object",
+                )?);
+            }
+            state.result = Some(completion);
+            state.stage = IteratorToArrayStage::Done;
+            read_iterator_to_array_property(
+                runtime,
+                state,
+                runtime.predefined_property_key(PredefinedAtom::Done),
+                return_to,
+                execution_budget,
+            )
+        }
+        IteratorToArrayStage::Done => {
+            if completion.is_truthy() {
+                return Ok(NativeDispatch::Immediate(StoredValue::Object(
+                    runtime.allocate_array(state.realm, state.items)?,
+                )));
+            }
+            state.stage = IteratorToArrayStage::Value;
+            read_iterator_to_array_property(
+                runtime,
+                state,
+                runtime.predefined_property_key(PredefinedAtom::Value),
+                return_to,
+                execution_budget,
+            )
+        }
+        IteratorToArrayStage::Value => {
+            state
+                .items
+                .try_reserve(1)
+                .map_err(|_| ExecutionError::AllocationFailed {
+                    resource: RuntimeResource::FrameValues,
+                    additional: 1,
+                })?;
+            state.items.push(completion);
+            state.result = None;
+            call_iterator_to_array_next(state, return_to, execution_budget)
+        }
+    }
+}
+
+fn read_iterator_to_array_property(
+    runtime: &mut Runtime,
+    state: IteratorToArrayContinuation,
+    key: PropertyKey,
+    return_to: Option<CallReturn>,
+    execution_budget: &mut ExecutionBudget,
+) -> Result<NativeDispatch, NativeFailure> {
+    let base = match state.stage {
+        IteratorToArrayStage::NextMethod => &state.iterator,
+        IteratorToArrayStage::Done | IteratorToArrayStage::Value => {
+            state.result.as_ref().ok_or(EngineFault::RuntimeInvariant {
+                message: "Iterator.prototype.toArray result lookup has no result object",
+            })?
+        }
+        IteratorToArrayStage::NextResult => {
+            return Err(EngineFault::RuntimeInvariant {
+                message: "Iterator.prototype.toArray call stage attempted a property read",
+            }
+            .into());
+        }
+    };
+    charge_iterator_property_lookup(runtime, base, execution_budget)?;
+    let dispatch = begin_value_get(
+        runtime,
+        base,
+        key,
+        None,
+        state.realm,
+        return_to,
+        state.origin.clone(),
+        execution_budget,
+    )?;
+    continue_get_after(
+        dispatch,
+        state,
+        NativeContinuation::IteratorToArray,
+        |state, value| {
+            advance_iterator_to_array(runtime, state, value, return_to, execution_budget)
+        },
+        "Iterator.prototype.toArray Get produced a structured result",
+    )
+}
+
+fn call_iterator_to_array_next(
+    mut state: IteratorToArrayContinuation,
+    return_to: Option<CallReturn>,
+    execution_budget: &mut ExecutionBudget,
+) -> Result<NativeDispatch, NativeFailure> {
+    execution_budget.charge_instructions(1)?;
+    let next_method = state.next_method.ok_or(EngineFault::RuntimeInvariant {
+        message: "Iterator.prototype.toArray has no retained next method",
+    })?;
+    let receiver = state.iterator.duplicate();
+    state.stage = IteratorToArrayStage::NextResult;
+    let origin = state.origin.clone();
+    iterator_method_call(
+        next_method,
+        receiver,
+        NativeContinuation::IteratorToArray(state),
+        return_to,
+        origin,
+    )
 }
 
 fn read_iterator_from_property(
