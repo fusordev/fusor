@@ -324,6 +324,58 @@ fn zoned_date_time_constructor_and_string_from_preserve_branded_slots() {
 }
 
 #[test]
+fn zoned_date_time_constructor_rejects_non_identifier_time_zone_and_calendar() {
+    assert_eq!(
+        thrown("return new Temporal.ZonedDateTime(0n,1);"),
+        ExceptionKind::TypeError
+    );
+    assert_eq!(
+        thrown("return new Temporal.ZonedDateTime(0n,1n);"),
+        ExceptionKind::TypeError
+    );
+    assert_eq!(
+        thrown("return new Temporal.ZonedDateTime(0n,null);"),
+        ExceptionKind::TypeError
+    );
+    assert_eq!(
+        thrown("return new Temporal.ZonedDateTime(0n,Symbol());"),
+        ExceptionKind::TypeError
+    );
+    assert_eq!(
+        thrown("return new Temporal.ZonedDateTime(0n,'');"),
+        ExceptionKind::RangeError
+    );
+    assert_eq!(
+        thrown("return new Temporal.ZonedDateTime(0n,'1997-12-04T12:34[+01:00]','iso8601');"),
+        ExceptionKind::RangeError
+    );
+    assert_eq!(
+        thrown("return new Temporal.ZonedDateTime(0n,'UTC',1);"),
+        ExceptionKind::TypeError
+    );
+    assert_eq!(
+        thrown("return new Temporal.ZonedDateTime(0n,'UTC',{});"),
+        ExceptionKind::TypeError
+    );
+    assert_eq!(
+        thrown("return new Temporal.ZonedDateTime(0n,'UTC',new Temporal.Duration());"),
+        ExceptionKind::TypeError
+    );
+    assert_eq!(
+        thrown("return new Temporal.ZonedDateTime(0n,'UTC','notacal');"),
+        ExceptionKind::RangeError
+    );
+    assert_eq!(
+        rendered(
+            "var value=new Temporal.ZonedDateTime(0n,'uTc','iSo8601');
+             var fromZone=new Temporal.ZonedDateTime(0n,value,'iso8601');
+             return [value.timeZoneId,value.calendarId,fromZone.timeZoneId].join('|');"
+        ),
+        "UTC|iso8601|UTC"
+    );
+}
+
+#[test]
 fn zoned_date_time_accessors_expose_kernel_slots_and_getter_descriptors() {
     assert_eq!(
         rendered(

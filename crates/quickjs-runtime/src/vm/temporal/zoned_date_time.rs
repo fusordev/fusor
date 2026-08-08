@@ -316,36 +316,51 @@ pub(in crate::vm) fn advance_temporal_zoned_date_time_constructor(
                 );
             }
             TemporalZonedDateTimeConstructorStage::TimeZone => {
-                if let Some(value) = completion.take() {
-                    let source = operator_primitive_to_string(value, realm, origin)?;
-                    state.time_zone =
-                        Some(match TimeZone::try_from_str(&source.to_utf8_lossy()?) {
+                // ToTemporalTimeZoneIdentifier: no primitive conversion runs
+                // here; only a ZonedDateTime slot or a string holding a bare
+                // time-zone identifier is accepted.
+                let value = std::mem::replace(&mut state.arguments[1], StoredValue::Undefined);
+                state.time_zone = Some(match value {
+                    StoredValue::String(source) => {
+                        match TimeZone::try_from_identifier_str(&source.to_utf8_lossy()?) {
                             Ok(time_zone) => time_zone,
                             Err(error) => {
                                 return Err(NativeFailure::Abrupt(temporal_exception_from_error(
                                     realm, origin, error,
                                 )?));
                             }
-                        });
-                    state.stage = TemporalZonedDateTimeConstructorStage::Calendar;
-                    continue;
-                }
-                let value = std::mem::replace(&mut state.arguments[1], StoredValue::Undefined);
-                return begin_operator_primitive_conversion(
-                    runtime,
-                    value,
-                    OperatorPrimitiveHint::String,
-                    OperatorPrimitiveTarget::TemporalZonedDateTimeConstructor(Box::new(state)),
-                    realm,
-                    return_to,
-                    origin.clone(),
-                    execution_budget,
-                );
+                        }
+                    }
+                    StoredValue::Object(object) => {
+                        if let Some(date_time) = runtime.temporal_zoned_date_time(object)? {
+                            *date_time.time_zone()
+                        } else {
+                            return temporal_type_error(
+                                realm,
+                                origin,
+                                "Temporal.ZonedDateTime time zone must be a time zone identifier or Temporal.ZonedDateTime",
+                            );
+                        }
+                    }
+                    _ => {
+                        return temporal_type_error(
+                            realm,
+                            origin,
+                            "Temporal.ZonedDateTime time zone must be a time zone identifier or Temporal.ZonedDateTime",
+                        );
+                    }
+                });
+                state.stage = TemporalZonedDateTimeConstructorStage::Calendar;
+                continue;
             }
             TemporalZonedDateTimeConstructorStage::Calendar => {
-                if let Some(value) = completion.take() {
-                    let source = operator_primitive_to_string(value, realm, origin)?;
-                    state.calendar = Some(
+                // ToTemporalCalendarIdentifier: no primitive conversion runs
+                // here; only undefined (ISO 8601 default) or a string holding
+                // a bare calendar identifier is accepted.
+                let value = std::mem::replace(&mut state.arguments[2], StoredValue::Undefined);
+                state.calendar = Some(match value {
+                    StoredValue::Undefined => Calendar::default(),
+                    StoredValue::String(source) => {
                         match Calendar::try_from_utf8(source.to_utf8_lossy()?.as_bytes()) {
                             Ok(calendar) => calendar,
                             Err(error) => {
@@ -353,27 +368,16 @@ pub(in crate::vm) fn advance_temporal_zoned_date_time_constructor(
                                     realm, origin, error,
                                 )?));
                             }
-                        },
-                    );
-                } else {
-                    let value = std::mem::replace(&mut state.arguments[2], StoredValue::Undefined);
-                    if matches!(value, StoredValue::Undefined) {
-                        state.calendar = Some(Calendar::default());
-                    } else {
-                        return begin_operator_primitive_conversion(
-                            runtime,
-                            value,
-                            OperatorPrimitiveHint::String,
-                            OperatorPrimitiveTarget::TemporalZonedDateTimeConstructor(Box::new(
-                                state,
-                            )),
+                        }
+                    }
+                    _ => {
+                        return temporal_type_error(
                             realm,
-                            return_to,
-                            origin.clone(),
-                            execution_budget,
+                            origin,
+                            "Temporal.ZonedDateTime calendar must be a calendar identifier",
                         );
                     }
-                }
+                });
                 return complete_temporal_zoned_date_time_constructor(
                     runtime,
                     &state,
