@@ -309,9 +309,10 @@ impl<'compiler, 'unit, 'arena, 'scope> ExpressionPlanner<'compiler, 'unit, 'aren
                 ExpressionWork::VisitOptionalChain {
                     chain,
                     preserve_final_reference,
-                } => Self::plan_optional_chain(
+                } => self.plan_optional_chain(
                     chain,
                     preserve_final_reference,
+                    layout,
                     constants,
                     flow,
                     &mut work,
@@ -410,7 +411,9 @@ impl<'compiler, 'unit, 'arena, 'scope> ExpressionPlanner<'compiler, 'unit, 'aren
                             self.plan_private_in_expression(private_in, layout, &mut work)?;
                         }
                         Expression::ChainExpression(chain) => {
-                            Self::plan_optional_chain(chain, false, constants, flow, &mut work)?;
+                            self.plan_optional_chain(
+                                chain, false, layout, constants, flow, &mut work,
+                            )?;
                         }
                         Expression::AssignmentExpression(assignment) => {
                             self.plan_assignment_expression(
@@ -2699,8 +2702,10 @@ impl<'compiler, 'unit, 'arena, 'scope> ExpressionPlanner<'compiler, 'unit, 'aren
         reason = "the complete chain-level short-circuit schedule stays visible in execution order"
     )]
     fn plan_optional_chain<'expression>(
+        &self,
         chain: &'expression ChainExpression<'arena>,
         preserve_final_reference: bool,
+        layout: &FrameLayout,
         constants: &CompiledConstantPool,
         flow: &mut PlannedControlFlow,
         work: &mut Vec<ExpressionWork<'expression, 'arena>>,
@@ -2708,6 +2713,7 @@ impl<'compiler, 'unit, 'arena, 'scope> ExpressionPlanner<'compiler, 'unit, 'aren
         enum Step<'expression, 'arena> {
             Static(&'expression StaticMemberExpression<'arena>),
             Computed(&'expression ComputedMemberExpression<'arena>),
+            Private(&'expression PrivateFieldExpression<'arena>),
             Call(&'expression CallExpression<'arena>),
         }
 
@@ -2716,6 +2722,7 @@ impl<'compiler, 'unit, 'arena, 'scope> ExpressionPlanner<'compiler, 'unit, 'aren
                 match self {
                     Self::Static(member) => member.optional,
                     Self::Computed(member) => member.optional,
+                    Self::Private(member) => member.optional,
                     Self::Call(call) => call.optional,
                 }
             }
@@ -2724,12 +2731,13 @@ impl<'compiler, 'unit, 'arena, 'scope> ExpressionPlanner<'compiler, 'unit, 'aren
                 match self {
                     Self::Static(member) => member.span,
                     Self::Computed(member) => member.span,
+                    Self::Private(member) => member.span,
                     Self::Call(call) => call.span,
                 }
             }
 
             const fn is_member(&self) -> bool {
-                matches!(self, Self::Static(_) | Self::Computed(_))
+                matches!(self, Self::Static(_) | Self::Computed(_) | Self::Private(_))
             }
 
             const fn is_call(&self) -> bool {
@@ -2751,7 +2759,11 @@ impl<'compiler, 'unit, 'arena, 'scope> ExpressionPlanner<'compiler, 'unit, 'aren
                 steps.push(Step::Call(call));
                 &call.callee
             }
-            ChainElement::TSNonNullExpression(_) | ChainElement::PrivateFieldExpression(_) => {
+            ChainElement::PrivateFieldExpression(member) => {
+                steps.push(Step::Private(member));
+                &member.object
+            }
+            ChainElement::TSNonNullExpression(_) => {
                 return unsupported(UnsupportedLeafFeature::UnsupportedExpression, chain.span);
             }
         };
@@ -2768,6 +2780,10 @@ impl<'compiler, 'unit, 'arena, 'scope> ExpressionPlanner<'compiler, 'unit, 'aren
                 Expression::CallExpression(call) => {
                     steps.push(Step::Call(call));
                     root = &call.callee;
+                }
+                Expression::PrivateFieldExpression(member) => {
+                    steps.push(Step::Private(member));
+                    root = &member.object;
                 }
                 _ => break,
             }
@@ -2810,7 +2826,28 @@ impl<'compiler, 'unit, 'arena, 'scope> ExpressionPlanner<'compiler, 'unit, 'aren
                 });
             }
             Some(MemberCallee::Private(member)) => {
-                return unsupported(UnsupportedLeafFeature::UnsupportedExpression, member.span);
+                let (binding, slot) = self.private_name_binding_for_access(
+                    member.node_id.get(),
+                    member.field.name.as_str(),
+                    member.span,
+                    layout,
+                )?;
+                planned.push(ExpressionWork::Visit(&member.object));
+                planned.push(ExpressionWork::Emit(PlannedInstruction::new(
+                    FinalOpcode::Dup,
+                    Operands::None,
+                    member.object.span(),
+                )));
+                planned.push(ExpressionWork::Emit(self.plan_read_slot(
+                    binding,
+                    slot,
+                    member.field.span,
+                )?));
+                planned.push(ExpressionWork::Emit(PlannedInstruction::new(
+                    FinalOpcode::GetPrivateField,
+                    Operands::None,
+                    member.span,
+                )));
             }
             None => planned.push(ExpressionWork::Visit(root)),
         }
@@ -2857,6 +2894,33 @@ impl<'compiler, 'unit, 'arena, 'scope> ExpressionPlanner<'compiler, 'unit, 'aren
                         } else {
                             FinalOpcode::GetArrayEl
                         },
+                        Operands::None,
+                        member.span,
+                    )));
+                }
+                Step::Private(member) => {
+                    let preserve_receiver = steps.get(index + 1).is_some_and(Step::is_call)
+                        || (final_step && preserve_final_reference);
+                    let (binding, slot) = self.private_name_binding_for_access(
+                        member.node_id.get(),
+                        member.field.name.as_str(),
+                        member.span,
+                        layout,
+                    )?;
+                    if preserve_receiver {
+                        planned.push(ExpressionWork::Emit(PlannedInstruction::new(
+                            FinalOpcode::Dup,
+                            Operands::None,
+                            member.object.span(),
+                        )));
+                    }
+                    planned.push(ExpressionWork::Emit(self.plan_read_slot(
+                        binding,
+                        slot,
+                        member.field.span,
+                    )?));
+                    planned.push(ExpressionWork::Emit(PlannedInstruction::new(
+                        FinalOpcode::GetPrivateField,
                         Operands::None,
                         member.span,
                     )));

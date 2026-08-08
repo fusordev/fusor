@@ -76,6 +76,17 @@ fn named_class_members_retain_the_inner_name_after_outer_reassignment() {
 }
 
 #[test]
+fn private_fields_after_optional_chains_short_circuit_before_brand_checks() {
+    run_with(
+        "function run(){class Box{#value=7;#read(){return 9;}static direct(value){return value?.#value;}static nested(value){return value?.member.#value;}static directCall(value){return value?.#read();}static optionalCall(value){return value.#read?.();}}let box=new Box();let direct=Box.direct(box)===7&&Box.direct(null)===void 0&&Box.direct(void 0)===void 0;let nested=Box.nested({member:box})===7&&Box.nested(null)===void 0;let calls=Box.directCall(box)===9&&Box.directCall(null)===void 0&&Box.optionalCall(box)===9;let directBrand=false;try{Box.direct({});}catch(error){directBrand=error.name==='TypeError';}let nestedBrand=false;try{Box.nested({member:{}});}catch(error){nestedBrand=error.name==='TypeError';}return direct&&nested&&calls&&directBrand&&nestedBrand;}",
+        |result| {
+            let value = result.expect("private optional-chain execution");
+            assert_eq!(value.as_boolean().expect("live Boolean"), Some(true));
+        },
+    );
+}
+
+#[test]
 fn a_base_class_without_a_constructor_still_constructs_with_its_class_prototype() {
     run_with(
         "function run(){class Box{static answer(){return 7;}}let box=new Box(1,2,3);return box.constructor===Box&&Box.answer()===7;}",

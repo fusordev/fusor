@@ -121,6 +121,36 @@ fn public_private_instance_fields_receive_fresh_class_scope_names() {
 }
 
 #[test]
+fn private_fields_after_optional_chains_lower_with_brand_checked_reads() {
+    let tree = compile(
+        "function make(){return class Box{#value=7;#read(){return 9;}static direct(value){return value?.#value;}static nested(value){return value?.member.#value;}static directCall(value){return value?.#read();}static optionalCall(value){return value.#read?.();}}}",
+        "make",
+    );
+    let opcodes = tree
+        .functions()
+        .iter()
+        .flat_map(|function| function.control_flow().instructions())
+        .map(|instruction| instruction.decoded().instruction().opcode())
+        .collect::<Vec<_>>();
+
+    assert!(opcodes.contains(&FinalOpcode::IsUndefinedOrNull));
+    assert_eq!(
+        opcodes
+            .iter()
+            .filter(|&&opcode| opcode == FinalOpcode::GetPrivateField)
+            .count(),
+        4
+    );
+    assert_eq!(
+        opcodes
+            .iter()
+            .filter(|&&opcode| opcode == FinalOpcode::CallMethod)
+            .count(),
+        2
+    );
+}
+
+#[test]
 fn private_member_writes_lower_as_single_receiver_name_references() {
     let tree = compile(
         "function make(){class Box{#value=1;compound(next){return this.#value+=next;}or(next){return this.#value||=next;}and(next){return this.#value&&=next;}nullish(next){return this.#value??=next;}pre(){return ++this.#value;}post(){return this.#value--;}}return Box;}",
