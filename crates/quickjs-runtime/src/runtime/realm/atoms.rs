@@ -245,6 +245,7 @@ fn visit_realm_name_order(
     }
     visit(RealmNameId::ArrayIsArray)?;
     visit(RealmNameId::ArrayFromAsync)?;
+    visit(RealmNameId::IteratorDrop)?;
     visit(RealmNameId::IteratorFilter)?;
     visit(RealmNameId::IteratorMap)?;
     visit(RealmNameId::IteratorTake)?;
@@ -550,6 +551,7 @@ fn realm_name_description(id: RealmNameId) -> &'static str {
         RealmNameId::ArraySplice => "splice",
         RealmNameId::ArrayIsArray => "isArray",
         RealmNameId::ArrayFromAsync => "fromAsync",
+        RealmNameId::IteratorDrop => "drop",
         RealmNameId::IteratorFilter => "filter",
         RealmNameId::IteratorMap => "map",
         RealmNameId::IteratorTake => "take",
@@ -611,8 +613,8 @@ mod tests {
         let schema = RealmIntrinsicSchema::try_new().expect("Realm schema");
         let plan = RealmAtomPlan::try_new(&schema).expect("atom plan");
 
-        assert_eq!(plan.len(), 344);
-        assert_eq!(plan.description_code_units(), 2_961);
+        assert_eq!(plan.len(), 345);
+        assert_eq!(plan.description_code_units(), 2_965);
     }
 
     #[test]

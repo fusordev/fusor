@@ -698,6 +698,76 @@ fn iterator_take_accepts_finite_limits_above_max_safe_integer() {
 }
 
 #[test]
+fn iterator_drop_is_lazy_and_does_not_read_skipped_values() {
+    let mut runtime = Runtime::try_new(RuntimeLimits::default()).expect("runtime");
+    let realm = runtime.create_realm().expect("realm");
+    let mut context = runtime.context(&realm).expect("context");
+    let function = dynamic_function(
+        &mut context,
+        "let log='',nextCalls=0,valueGets=0;\
+         let iterator={get next(){log+='n';return function(){let current=++nextCalls;\
+           return {done:false,get value(){valueGets++;return current;}};};},\
+           return(){log+='r';return {};}};\
+         let limit={[Symbol.toPrimitive](){log+='c';return 2.9;}};\
+         let helper=Iterator.prototype.drop.call(iterator,limit);\
+         let before=[log,nextCalls,valueGets].join(',');\
+         let first=helper.next();let second=helper.next();helper.return();\
+         return [before,first.value,first.done,second.value,second.done,\
+           log,nextCalls,valueGets].join('|');",
+    );
+
+    let result = context
+        .call(&function, &[], ExecutionLimits::default())
+        .expect("Iterator.prototype.drop lazy skipping");
+    assert_eq!(string_value(&result), "cn,0,0|3|false|4|false|cnr|4|2");
+}
+
+#[test]
+fn iterator_drop_invalid_limits_close_before_reading_next() {
+    let mut runtime = Runtime::try_new(RuntimeLimits::default()).expect("runtime");
+    let realm = runtime.create_realm().expect("realm");
+    let mut context = runtime.context(&realm).expect("context");
+    let function = dynamic_function(
+        &mut context,
+        "let log='',range=false,negative=false,getterPreserved=false,\
+           preserved=false,original={};\
+         let iterator={get next(){log+='n';return function(){};},\
+           return(){log+='r';return {};}};\
+         try{Iterator.prototype.drop.call(iterator,NaN);}catch(error){range=error instanceof RangeError;}\
+         try{Iterator.prototype.drop.call(iterator,-1);}catch(error){negative=error instanceof RangeError;}\
+         try{Iterator.prototype.drop.call(iterator,{get valueOf(){throw original;}});}\
+         catch(error){getterPreserved=error===original;}\
+         try{Iterator.prototype.drop.call(iterator,{[Symbol.toPrimitive](){throw original;}});}\
+         catch(error){preserved=error===original;}\
+         return [log,range,negative,getterPreserved,preserved].join('|');",
+    );
+
+    let result = context
+        .call(&function, &[], ExecutionLimits::default())
+        .expect("Iterator.prototype.drop invalid limits");
+    assert_eq!(string_value(&result), "rrrr|true|true|true|true");
+}
+
+#[test]
+fn iterator_drop_accepts_finite_limits_above_max_safe_integer() {
+    let mut runtime = Runtime::try_new(RuntimeLimits::default()).expect("runtime");
+    let realm = runtime.create_realm().expect("realm");
+    let mut context = runtime.context(&realm).expect("context");
+    let function = dynamic_function(
+        &mut context,
+        "let nextGets=0;let iterator={get next(){nextGets++;return function(){\
+           return {done:true};};}};\
+         let helper=Iterator.prototype.drop.call(iterator,Number.MAX_SAFE_INTEGER+1);\
+         let done=helper.next();return [nextGets,done.done,done.value===undefined].join('|');",
+    );
+
+    let result = context
+        .call(&function, &[], ExecutionLimits::default())
+        .expect("current Iterator.prototype.drop large limit");
+    assert_eq!(string_value(&result), "1|true|true");
+}
+
+#[test]
 fn array_spread_reads_iterator_twice_and_retains_next_once() {
     let mut runtime = Runtime::try_new(RuntimeLimits::default()).expect("runtime");
     let realm = runtime.create_realm().expect("realm");

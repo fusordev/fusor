@@ -79,6 +79,11 @@ pub(super) fn visit_functions(visit: FunctionSink<'_>) {
             1,
         ),
         (
+            NativeFunctionKind::IteratorPrototypeDrop,
+            IntrinsicNameSpec::RealmName(RealmNameId::IteratorDrop),
+            1,
+        ),
+        (
             NativeFunctionKind::IteratorPrototypeFilter,
             IntrinsicNameSpec::RealmName(RealmNameId::IteratorFilter),
             1,
@@ -244,6 +249,11 @@ pub(super) fn visit_properties(visit: PropertySink<'_>) {
         prototype,
         IntrinsicKeySpec::WellKnownSymbol(PredefinedAtom::SymbolIterator),
         NativeFunctionKind::IteratorPrototypeIterator,
+    ));
+    visit(method(
+        prototype,
+        IntrinsicKeySpec::InternedString(RealmNameId::IteratorDrop),
+        NativeFunctionKind::IteratorPrototypeDrop,
     ));
     visit(method(
         prototype,

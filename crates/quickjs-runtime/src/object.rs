@@ -387,6 +387,7 @@ pub(crate) enum IteratorHelperLifecycle {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum IteratorHelperKind {
+    Drop,
     Map,
     Filter,
     Take,
@@ -414,9 +415,9 @@ impl IteratorHelperState {
     }
 
     #[must_use]
-    pub(crate) const fn new_take(remaining: f64) -> Self {
+    pub(crate) const fn new_limit(kind: IteratorHelperKind, remaining: f64) -> Self {
         Self {
-            kind: IteratorHelperKind::Take,
+            kind,
             callback: None,
             counter: 0,
             remaining,
@@ -460,13 +461,14 @@ impl IteratorHelperState {
         }
     }
 
-    pub(crate) fn begin_take_step(&mut self) {
+    pub(crate) fn consume_remaining(&mut self) -> f64 {
         if self.remaining.is_finite() {
             self.remaining -= 1.0;
         }
+        self.remaining
     }
 
-    pub(crate) const fn finish_take_yield(&mut self) {
+    pub(crate) const fn finish_limit_yield(&mut self) {
         self.lifecycle = IteratorHelperLifecycle::SuspendedYield;
     }
 }
@@ -504,15 +506,16 @@ impl IteratorRecord {
     }
 
     #[must_use]
-    pub(crate) const fn new_take_helper(
+    pub(crate) const fn new_limit_helper(
         iterator: StoredValue,
         next_method: StoredValue,
+        kind: IteratorHelperKind,
         remaining: f64,
     ) -> Self {
         Self {
             iterator,
             next_method,
-            helper: Some(IteratorHelperState::new_take(remaining)),
+            helper: Some(IteratorHelperState::new_limit(kind, remaining)),
         }
     }
 

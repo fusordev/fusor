@@ -1128,7 +1128,7 @@ impl NativeContinuation {
                     if matches!(
                         &state.target,
                         OperatorPrimitiveTarget::ArrayFromAsyncLength { .. }
-                            | OperatorPrimitiveTarget::IteratorTakeLimit(_)
+                            | OperatorPrimitiveTarget::IteratorLimit(_)
                     ) || matches!(
                         &state.target,
                         OperatorPrimitiveTarget::RegExpValue(state) if state.handles_abrupt()
@@ -2398,8 +2398,8 @@ enum OperatorPrimitiveTarget {
     ErrorToStringName(ErrorToStringContinuation),
     ErrorToStringMessage(ErrorToStringContinuation),
     ArrayIteratorLength(ArrayIteratorNextContinuation),
-    /// `Iterator.prototype.take`'s limit, awaiting `ToNumber`.
-    IteratorTakeLimit(Box<IteratorTakeLimitContinuation>),
+    /// An Iterator Helper limit, awaiting `ToNumber`.
+    IteratorLimit(Box<IteratorLimitContinuation>),
     FunctionApplyLength(FunctionApplyContinuation),
     ProxyOwnKeysLength(Box<ProxyOwnKeysContinuation>),
     /// `BigInt.prototype.toString`'s radix, awaiting `ToNumber`.
@@ -2730,7 +2730,7 @@ impl OperatorPrimitiveTarget {
                 state.retained_values()
             }
             Self::ArrayIteratorLength(state) => state.retained_values(),
-            Self::IteratorTakeLimit(_) => IteratorTakeLimitContinuation::retained_values(),
+            Self::IteratorLimit(_) => IteratorLimitContinuation::retained_values(),
             Self::FunctionApplyLength(state) => state.retained_values(),
             Self::ProxyOwnKeysLength(state) => state.retained_values(),
             Self::ArrayJoinSeparator(_) | Self::ArrayJoinElement(_) => {
@@ -3141,7 +3141,7 @@ fn trace_operator_primitive_target_roots(
             mark(CollectionRoot::Heap(HeapReference::Object(state.iterator)));
             trace_stored_value_root(&state.iterated, mark);
         }
-        OperatorPrimitiveTarget::IteratorTakeLimit(state) => state.trace_roots(mark),
+        OperatorPrimitiveTarget::IteratorLimit(state) => state.trace_roots(mark),
         OperatorPrimitiveTarget::FunctionApplyLength(state) => {
             trace_function_apply_roots(state, mark);
         }

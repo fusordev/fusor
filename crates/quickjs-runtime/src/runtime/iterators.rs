@@ -190,17 +190,18 @@ impl Runtime {
         ))
     }
 
-    pub(crate) fn allocate_iterator_take_helper(
+    pub(crate) fn allocate_iterator_limit_helper(
         &mut self,
         realm: RealmId,
         iterator: StoredValue,
         next_method: StoredValue,
+        kind: IteratorHelperKind,
         remaining: f64,
     ) -> Result<ObjectId, crate::ExecutionError> {
         let prototype = self.realm_iterator_helper_prototype(realm)?;
         self.allocate_iterator_object(HeapObject::iterator_wrapper(
             ObjectRecord::empty(Some(HeapReference::Object(prototype))),
-            IteratorRecord::new_take_helper(iterator, next_method, remaining),
+            IteratorRecord::new_limit_helper(iterator, next_method, kind, remaining),
         ))
     }
 
@@ -279,10 +280,10 @@ impl Runtime {
         Ok(())
     }
 
-    pub(crate) fn begin_iterator_take_step(
+    pub(crate) fn consume_iterator_helper_remaining(
         &mut self,
         helper: ObjectId,
-    ) -> Result<(), crate::EngineFault> {
+    ) -> Result<f64, crate::EngineFault> {
         let helper_state = self
             .objects
             .get_mut(helper)
@@ -292,11 +293,10 @@ impl Runtime {
             .ok_or(crate::EngineFault::RuntimeInvariant {
                 message: "Iterator Helper state disappeared",
             })?;
-        helper_state.begin_take_step();
-        Ok(())
+        Ok(helper_state.consume_remaining())
     }
 
-    pub(crate) fn finish_iterator_take_yield(
+    pub(crate) fn finish_iterator_limit_yield(
         &mut self,
         helper: ObjectId,
     ) -> Result<(), crate::EngineFault> {
@@ -309,7 +309,7 @@ impl Runtime {
             .ok_or(crate::EngineFault::RuntimeInvariant {
                 message: "Iterator Helper state disappeared",
             })?;
-        helper_state.finish_take_yield();
+        helper_state.finish_limit_yield();
         Ok(())
     }
 
