@@ -79,6 +79,8 @@ pub(crate) struct IteratorHelperSnapshot {
     pub(crate) counter: u64,
     pub(crate) remaining: f64,
     pub(crate) lifecycle: IteratorHelperLifecycle,
+    pub(crate) inner_iterator: Option<StoredValue>,
+    pub(crate) inner_next_method: Option<StoredValue>,
 }
 
 impl Runtime {
@@ -241,6 +243,8 @@ impl Runtime {
             counter: helper_state.counter(),
             remaining: helper_state.remaining(),
             lifecycle: helper_state.lifecycle(),
+            inner_iterator: helper_state.inner_iterator().map(StoredValue::duplicate),
+            inner_next_method: helper_state.inner_next_method().map(StoredValue::duplicate),
         }))
     }
 
@@ -310,6 +314,59 @@ impl Runtime {
                 message: "Iterator Helper state disappeared",
             })?;
         helper_state.finish_limit_yield();
+        Ok(())
+    }
+
+    pub(crate) fn install_iterator_helper_inner(
+        &mut self,
+        helper: ObjectId,
+        iterator: StoredValue,
+        next_method: StoredValue,
+    ) -> Result<(), crate::EngineFault> {
+        let helper_state = self
+            .objects
+            .get_mut(helper)
+            .ok_or_else(|| stale_heap_reference(HeapReference::Object(helper)))?
+            .iterator_wrapper_state_mut()
+            .and_then(IteratorRecord::helper_mut)
+            .ok_or(crate::EngineFault::RuntimeInvariant {
+                message: "Iterator Helper state disappeared",
+            })?;
+        helper_state.install_inner(iterator, next_method);
+        Ok(())
+    }
+
+    pub(crate) fn finish_iterator_flat_map_yield(
+        &mut self,
+        helper: ObjectId,
+    ) -> Result<(), crate::EngineFault> {
+        let helper_state = self
+            .objects
+            .get_mut(helper)
+            .ok_or_else(|| stale_heap_reference(HeapReference::Object(helper)))?
+            .iterator_wrapper_state_mut()
+            .and_then(IteratorRecord::helper_mut)
+            .ok_or(crate::EngineFault::RuntimeInvariant {
+                message: "Iterator Helper state disappeared",
+            })?;
+        helper_state.finish_flat_map_yield();
+        Ok(())
+    }
+
+    pub(crate) fn finish_iterator_flat_map_inner(
+        &mut self,
+        helper: ObjectId,
+    ) -> Result<(), crate::EngineFault> {
+        let helper_state = self
+            .objects
+            .get_mut(helper)
+            .ok_or_else(|| stale_heap_reference(HeapReference::Object(helper)))?
+            .iterator_wrapper_state_mut()
+            .and_then(IteratorRecord::helper_mut)
+            .ok_or(crate::EngineFault::RuntimeInvariant {
+                message: "Iterator Helper state disappeared",
+            })?;
+        helper_state.finish_flat_map_inner();
         Ok(())
     }
 

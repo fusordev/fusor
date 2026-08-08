@@ -1049,7 +1049,7 @@ impl NativeContinuation {
             Self::IteratorHelperCreation(state) => state.retained_values(),
             Self::IteratorToArray(state) => state.retained_values(),
             Self::IteratorHelperNext(state) => state.retained_values(),
-            Self::IteratorHelperReturn(_) => IteratorHelperReturnContinuation::retained_values(),
+            Self::IteratorHelperReturn(state) => state.retained_values(),
             Self::IteratorWrapperReturn(_) => IteratorWrapperReturnContinuation::retained_values(),
             Self::IteratorPrototypeSetter(_) => {
                 IteratorPrototypeSetterContinuation::retained_values()
@@ -1123,6 +1123,7 @@ impl NativeContinuation {
                 | Self::ArrayFromAsync(_)
                 | Self::PromiseCombinator(_)
                 | Self::IteratorHelperNext(_)
+                | Self::IteratorHelperReturn(_)
                 | Self::IteratorAppend(_)
                 | Self::IteratorClose(_)
                 | Self::AsyncFromSync(_)

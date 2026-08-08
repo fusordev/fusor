@@ -388,18 +388,20 @@ pub(crate) enum IteratorHelperLifecycle {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum IteratorHelperKind {
     Drop,
+    FlatMap,
     Map,
     Filter,
     Take,
 }
 
-#[derive(Clone, Copy)]
 pub(crate) struct IteratorHelperState {
     kind: IteratorHelperKind,
     callback: Option<FunctionId>,
     counter: u64,
     remaining: f64,
     lifecycle: IteratorHelperLifecycle,
+    inner_iterator: Option<StoredValue>,
+    inner_next_method: Option<StoredValue>,
 }
 
 impl IteratorHelperState {
@@ -411,6 +413,8 @@ impl IteratorHelperState {
             counter: 0,
             remaining: 0.0,
             lifecycle: IteratorHelperLifecycle::SuspendedStart,
+            inner_iterator: None,
+            inner_next_method: None,
         }
     }
 
@@ -422,6 +426,8 @@ impl IteratorHelperState {
             counter: 0,
             remaining,
             lifecycle: IteratorHelperLifecycle::SuspendedStart,
+            inner_iterator: None,
+            inner_next_method: None,
         }
     }
 
@@ -450,8 +456,22 @@ impl IteratorHelperState {
         self.remaining
     }
 
-    pub(crate) const fn set_lifecycle(&mut self, lifecycle: IteratorHelperLifecycle) {
+    #[must_use]
+    pub(crate) const fn inner_iterator(&self) -> Option<&StoredValue> {
+        self.inner_iterator.as_ref()
+    }
+
+    #[must_use]
+    pub(crate) const fn inner_next_method(&self) -> Option<&StoredValue> {
+        self.inner_next_method.as_ref()
+    }
+
+    pub(crate) fn set_lifecycle(&mut self, lifecycle: IteratorHelperLifecycle) {
         self.lifecycle = lifecycle;
+        if matches!(lifecycle, IteratorHelperLifecycle::Completed) {
+            self.inner_iterator = None;
+            self.inner_next_method = None;
+        }
     }
 
     pub(crate) const fn finish_callback(&mut self, yielded: bool) {
@@ -470,6 +490,34 @@ impl IteratorHelperState {
 
     pub(crate) const fn finish_limit_yield(&mut self) {
         self.lifecycle = IteratorHelperLifecycle::SuspendedYield;
+    }
+
+    pub(crate) fn install_inner(&mut self, iterator: StoredValue, next_method: StoredValue) {
+        self.inner_iterator = Some(iterator);
+        self.inner_next_method = Some(next_method);
+    }
+
+    pub(crate) const fn finish_flat_map_yield(&mut self) {
+        self.lifecycle = IteratorHelperLifecycle::SuspendedYield;
+    }
+
+    pub(crate) fn finish_flat_map_inner(&mut self) {
+        self.inner_iterator = None;
+        self.inner_next_method = None;
+        self.counter = self.counter.saturating_add(1);
+    }
+
+    #[must_use]
+    fn duplicate(&self) -> Self {
+        Self {
+            kind: self.kind,
+            callback: self.callback,
+            counter: self.counter,
+            remaining: self.remaining,
+            lifecycle: self.lifecycle,
+            inner_iterator: self.inner_iterator.as_ref().map(StoredValue::duplicate),
+            inner_next_method: self.inner_next_method.as_ref().map(StoredValue::duplicate),
+        }
     }
 }
 
@@ -524,7 +572,7 @@ impl IteratorRecord {
         Self {
             iterator: self.iterator.duplicate(),
             next_method: self.next_method.duplicate(),
-            helper: self.helper,
+            helper: self.helper.as_ref().map(IteratorHelperState::duplicate),
         }
     }
 

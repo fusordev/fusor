@@ -1133,6 +1133,20 @@ impl Runtime {
                                         &mut work,
                                     );
                                 }
+                                if let Some(helper) = iterator.helper() {
+                                    for value in
+                                        [helper.inner_iterator(), helper.inner_next_method()]
+                                            .into_iter()
+                                            .flatten()
+                                    {
+                                        mark_stored_value(
+                                            value,
+                                            &mut marked_functions,
+                                            &mut marked_objects,
+                                            &mut work,
+                                        );
+                                    }
+                                }
                             }
                             if let Some(view) = object.data_view_state() {
                                 mark_heap_reference(

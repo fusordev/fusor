@@ -172,6 +172,12 @@ enum IteratorHelperNextStage {
     Done,
     Value,
     Callback,
+    InnerIteratorMethod,
+    InnerIteratorCall,
+    InnerNextMethod,
+    InnerNextResult,
+    InnerDone,
+    InnerValue,
 }
 
 pub(super) struct IteratorHelperNextContinuation {
@@ -185,6 +191,8 @@ pub(super) struct IteratorHelperNextContinuation {
     dropping: bool,
     result: Option<StoredValue>,
     candidate: Option<StoredValue>,
+    inner_iterator: Option<StoredValue>,
+    inner_next_method: Option<StoredValue>,
     realm: RealmId,
     stage: IteratorHelperNextStage,
     origin: JsStackFrame,
@@ -196,6 +204,8 @@ impl IteratorHelperNextContinuation {
             .saturating_add(u64::from(self.callback.is_some()))
             .saturating_add(u64::from(self.result.is_some()))
             .saturating_add(u64::from(self.candidate.is_some()))
+            .saturating_add(u64::from(self.inner_iterator.is_some()))
+            .saturating_add(u64::from(self.inner_next_method.is_some()))
     }
 
     pub(super) fn trace_roots(&self, mark: &mut dyn FnMut(CollectionRoot)) {
@@ -211,6 +221,12 @@ impl IteratorHelperNextContinuation {
         if let Some(candidate) = &self.candidate {
             trace_stored_value_root(candidate, mark);
         }
+        if let Some(inner_iterator) = &self.inner_iterator {
+            trace_stored_value_root(inner_iterator, mark);
+        }
+        if let Some(inner_next_method) = &self.inner_next_method {
+            trace_stored_value_root(inner_next_method, mark);
+        }
     }
 }
 
@@ -223,19 +239,23 @@ enum IteratorHelperReturnStage {
 pub(super) struct IteratorHelperReturnContinuation {
     helper: ObjectId,
     iterator: StoredValue,
+    outer_iterator: Option<StoredValue>,
     realm: RealmId,
     stage: IteratorHelperReturnStage,
     origin: JsStackFrame,
 }
 
 impl IteratorHelperReturnContinuation {
-    pub(super) const fn retained_values() -> u64 {
-        2
+    pub(super) fn retained_values(&self) -> u64 {
+        2_u64.saturating_add(u64::from(self.outer_iterator.is_some()))
     }
 
     pub(super) fn trace_roots(&self, mark: &mut dyn FnMut(CollectionRoot)) {
         mark(CollectionRoot::Heap(HeapReference::Object(self.helper)));
         trace_stored_value_root(&self.iterator, mark);
+        if let Some(outer_iterator) = &self.outer_iterator {
+            trace_stored_value_root(outer_iterator, mark);
+        }
     }
 }
 
@@ -625,6 +645,29 @@ pub(super) fn begin_iterator_filter(
     )
 }
 
+pub(super) fn begin_iterator_flat_map(
+    runtime: &mut Runtime,
+    receiver: StoredValue,
+    callback: &StoredValue,
+    realm: RealmId,
+    return_to: Option<CallReturn>,
+    origin: JsStackFrame,
+    execution_budget: &mut ExecutionBudget,
+) -> Result<NativeDispatch, NativeFailure> {
+    begin_iterator_callback_helper(
+        runtime,
+        receiver,
+        callback,
+        crate::object::IteratorHelperKind::FlatMap,
+        "Iterator.prototype.flatMap receiver must be an object",
+        "Iterator.prototype.flatMap mapper must be callable",
+        realm,
+        return_to,
+        origin,
+        execution_budget,
+    )
+}
+
 #[allow(
     clippy::too_many_arguments,
     reason = "the resumable helper constructor keeps the observable method diagnostics and VM call state explicit"
@@ -864,7 +907,9 @@ pub(super) fn advance_iterator_helper_creation(
     next_method: StoredValue,
 ) -> Result<NativeDispatch, NativeFailure> {
     let helper = match state.kind {
-        crate::object::IteratorHelperKind::Map | crate::object::IteratorHelperKind::Filter => {
+        crate::object::IteratorHelperKind::Map
+        | crate::object::IteratorHelperKind::Filter
+        | crate::object::IteratorHelperKind::FlatMap => {
             let callback = state.callback.ok_or(EngineFault::RuntimeInvariant {
                 message: "callback Iterator Helper creation has no callback",
             })?;
@@ -889,6 +934,10 @@ pub(super) fn advance_iterator_helper_creation(
     Ok(NativeDispatch::Immediate(StoredValue::Object(helper)))
 }
 
+#[allow(
+    clippy::too_many_lines,
+    reason = "helper resume validates the branded lifecycle and retained inner record before selecting one auditable call boundary"
+)]
 pub(super) fn begin_iterator_helper_next(
     runtime: &mut Runtime,
     receiver: &StoredValue,
@@ -963,6 +1012,16 @@ pub(super) fn begin_iterator_helper_next(
         )?);
     };
     execution_budget.charge_instructions(1)?;
+    let has_inner = match (&snapshot.inner_iterator, &snapshot.inner_next_method) {
+        (Some(_), Some(_)) => true,
+        (None, None) => false,
+        (Some(_), None) | (None, Some(_)) => {
+            return Err(EngineFault::RuntimeInvariant {
+                message: "flatMap helper retained an incomplete inner iterator record",
+            }
+            .into());
+        }
+    };
     let state = IteratorHelperNextContinuation {
         helper,
         iterator: snapshot.iterator,
@@ -974,19 +1033,33 @@ pub(super) fn begin_iterator_helper_next(
         dropping,
         result: None,
         candidate: None,
+        inner_iterator: snapshot.inner_iterator,
+        inner_next_method: snapshot.inner_next_method,
         realm,
-        stage: IteratorHelperNextStage::NextResult,
+        stage: if matches!(snapshot.kind, crate::object::IteratorHelperKind::FlatMap) && has_inner {
+            IteratorHelperNextStage::InnerNextResult
+        } else {
+            IteratorHelperNextStage::NextResult
+        },
         origin: origin.clone(),
     };
-    iterator_method_call(
-        next_method,
-        state.iterator.duplicate(),
-        NativeContinuation::IteratorHelperNext(state),
-        return_to,
-        origin,
-    )
+    if has_inner {
+        call_iterator_helper_inner_next(runtime, state, return_to, execution_budget)
+    } else {
+        iterator_method_call(
+            next_method,
+            state.iterator.duplicate(),
+            NativeContinuation::IteratorHelperNext(state),
+            return_to,
+            origin,
+        )
+    }
 }
 
+#[allow(
+    clippy::too_many_lines,
+    reason = "the Iterator Helper generator stages stay explicit so each observable suspension and close boundary is auditable"
+)]
 pub(super) fn advance_iterator_helper_next(
     runtime: &mut Runtime,
     mut state: IteratorHelperNextContinuation,
@@ -1075,6 +1148,100 @@ pub(super) fn advance_iterator_helper_next(
             return_to,
             execution_budget,
         ),
+        IteratorHelperNextStage::InnerIteratorMethod => advance_iterator_flat_map_method(
+            runtime,
+            state,
+            &completion,
+            return_to,
+            execution_budget,
+        ),
+        IteratorHelperNextStage::InnerIteratorCall => {
+            if completion.heap_reference().is_none() {
+                return close_iterator_helper_with_type_error(
+                    runtime,
+                    state,
+                    "flatMap iterator method did not return an object",
+                    return_to,
+                    execution_budget,
+                );
+            }
+            state.inner_iterator = Some(completion);
+            state.stage = IteratorHelperNextStage::InnerNextMethod;
+            read_iterator_flat_map_property(
+                runtime,
+                state,
+                runtime.predefined_property_key(PredefinedAtom::Next),
+                return_to,
+                execution_budget,
+            )
+        }
+        IteratorHelperNextStage::InnerNextMethod => {
+            state.inner_next_method = Some(completion);
+            let inner_iterator = state
+                .inner_iterator
+                .as_ref()
+                .ok_or(EngineFault::RuntimeInvariant {
+                    message: "flatMap next lookup completed without an inner iterator",
+                })?
+                .duplicate();
+            let inner_next_method = state
+                .inner_next_method
+                .as_ref()
+                .ok_or(EngineFault::RuntimeInvariant {
+                    message: "flatMap next lookup lost its result",
+                })?
+                .duplicate();
+            runtime.install_iterator_helper_inner(
+                state.helper,
+                inner_iterator,
+                inner_next_method,
+            )?;
+            state.stage = IteratorHelperNextStage::InnerNextResult;
+            call_iterator_helper_inner_next(runtime, state, return_to, execution_budget)
+        }
+        IteratorHelperNextStage::InnerNextResult => {
+            if completion.heap_reference().is_none() {
+                return close_iterator_helper_with_type_error(
+                    runtime,
+                    state,
+                    "flatMap inner next method did not return an object",
+                    return_to,
+                    execution_budget,
+                );
+            }
+            state.result = Some(completion);
+            state.stage = IteratorHelperNextStage::InnerDone;
+            read_iterator_helper_next_property(
+                runtime,
+                state,
+                runtime.predefined_property_key(PredefinedAtom::Done),
+                return_to,
+                execution_budget,
+            )
+        }
+        IteratorHelperNextStage::InnerDone => {
+            if completion.is_truthy() {
+                runtime.finish_iterator_flat_map_inner(state.helper)?;
+                state.counter = state.counter.saturating_add(1);
+                state.inner_iterator = None;
+                state.inner_next_method = None;
+                state.result = None;
+                state.stage = IteratorHelperNextStage::NextResult;
+                return call_iterator_helper_outer_next(state, return_to, execution_budget);
+            }
+            state.stage = IteratorHelperNextStage::InnerValue;
+            read_iterator_helper_next_property(
+                runtime,
+                state,
+                runtime.predefined_property_key(PredefinedAtom::Value),
+                return_to,
+                execution_budget,
+            )
+        }
+        IteratorHelperNextStage::InnerValue => {
+            runtime.finish_iterator_flat_map_yield(state.helper)?;
+            iterator_result(runtime, state.realm, completion, false)
+        }
     }
 }
 
@@ -1152,6 +1319,34 @@ fn advance_iterator_helper_callback(
                 origin,
             )
         }
+        crate::object::IteratorHelperKind::FlatMap => {
+            if completion.heap_reference().is_none() {
+                return close_iterator_helper_with_type_error(
+                    runtime,
+                    state,
+                    "flatMap mapper result must be an object",
+                    return_to,
+                    execution_budget,
+                );
+            }
+            state.candidate = Some(completion);
+            state.stage = IteratorHelperNextStage::InnerIteratorMethod;
+            let mapped = state
+                .candidate
+                .as_ref()
+                .ok_or(EngineFault::RuntimeInvariant {
+                    message: "flatMap lost its mapped value",
+                })?
+                .duplicate();
+            read_iterator_flat_map_property_from(
+                runtime,
+                state,
+                &mapped,
+                runtime.predefined_symbol_property_key(PredefinedAtom::SymbolIterator),
+                return_to,
+                execution_budget,
+            )
+        }
         crate::object::IteratorHelperKind::Take | crate::object::IteratorHelperKind::Drop => {
             Err(EngineFault::RuntimeInvariant {
                 message: "limit Iterator Helper resumed from a callback",
@@ -1159,6 +1354,210 @@ fn advance_iterator_helper_callback(
             .into())
         }
     }
+}
+
+fn advance_iterator_flat_map_method(
+    runtime: &mut Runtime,
+    mut state: IteratorHelperNextContinuation,
+    completion: &StoredValue,
+    return_to: Option<CallReturn>,
+    execution_budget: &mut ExecutionBudget,
+) -> Result<NativeDispatch, NativeFailure> {
+    let mapped = state
+        .candidate
+        .take()
+        .ok_or(EngineFault::RuntimeInvariant {
+            message: "flatMap iterator-method lookup lost its mapped value",
+        })?;
+    match completion {
+        StoredValue::Undefined | StoredValue::Null => {
+            state.inner_iterator = Some(mapped);
+            state.stage = IteratorHelperNextStage::InnerNextMethod;
+            read_iterator_flat_map_property(
+                runtime,
+                state,
+                runtime.predefined_property_key(PredefinedAtom::Next),
+                return_to,
+                execution_budget,
+            )
+        }
+        StoredValue::Function(method) => {
+            state.stage = IteratorHelperNextStage::InnerIteratorCall;
+            execution_budget.charge_instructions(1)?;
+            let origin = state.origin.clone();
+            iterator_method_call(
+                *method,
+                mapped,
+                NativeContinuation::IteratorHelperNext(state),
+                return_to,
+                origin,
+            )
+        }
+        StoredValue::Boolean(_)
+        | StoredValue::Number(_)
+        | StoredValue::BigInt(_)
+        | StoredValue::String(_)
+        | StoredValue::Symbol(_)
+        | StoredValue::Object(_) => close_iterator_helper_with_type_error(
+            runtime,
+            state,
+            "flatMap Symbol.iterator method is not callable",
+            return_to,
+            execution_budget,
+        ),
+    }
+}
+
+fn call_iterator_helper_outer_next(
+    state: IteratorHelperNextContinuation,
+    return_to: Option<CallReturn>,
+    execution_budget: &mut ExecutionBudget,
+) -> Result<NativeDispatch, NativeFailure> {
+    execution_budget.charge_instructions(1)?;
+    let StoredValue::Function(next_method) = state.next_method else {
+        return Err(EngineFault::RuntimeInvariant {
+            message: "running Iterator Helper lost its callable next method",
+        }
+        .into());
+    };
+    let receiver = state.iterator.duplicate();
+    let origin = state.origin.clone();
+    iterator_method_call(
+        next_method,
+        receiver,
+        NativeContinuation::IteratorHelperNext(state),
+        return_to,
+        origin,
+    )
+}
+
+fn call_iterator_helper_inner_next(
+    runtime: &mut Runtime,
+    state: IteratorHelperNextContinuation,
+    return_to: Option<CallReturn>,
+    execution_budget: &mut ExecutionBudget,
+) -> Result<NativeDispatch, NativeFailure> {
+    let Some(inner_iterator) = state.inner_iterator.as_ref() else {
+        return Err(EngineFault::RuntimeInvariant {
+            message: "flatMap inner next call has no iterator",
+        }
+        .into());
+    };
+    let Some(StoredValue::Function(next_method)) = state.inner_next_method.as_ref() else {
+        return close_iterator_helper_with_type_error(
+            runtime,
+            state,
+            "flatMap inner next method is not callable",
+            return_to,
+            execution_budget,
+        );
+    };
+    let next_method = *next_method;
+    let receiver = inner_iterator.duplicate();
+    execution_budget.charge_instructions(1)?;
+    let origin = state.origin.clone();
+    iterator_method_call(
+        next_method,
+        receiver,
+        NativeContinuation::IteratorHelperNext(state),
+        return_to,
+        origin,
+    )
+}
+
+fn read_iterator_flat_map_property(
+    runtime: &mut Runtime,
+    state: IteratorHelperNextContinuation,
+    key: PropertyKey,
+    return_to: Option<CallReturn>,
+    execution_budget: &mut ExecutionBudget,
+) -> Result<NativeDispatch, NativeFailure> {
+    let base = state
+        .inner_iterator
+        .as_ref()
+        .ok_or(EngineFault::RuntimeInvariant {
+            message: "flatMap inner property lookup has no iterator",
+        })?
+        .duplicate();
+    read_iterator_flat_map_property_from(runtime, state, &base, key, return_to, execution_budget)
+}
+
+fn read_iterator_flat_map_property_from(
+    runtime: &mut Runtime,
+    state: IteratorHelperNextContinuation,
+    base: &StoredValue,
+    key: PropertyKey,
+    return_to: Option<CallReturn>,
+    execution_budget: &mut ExecutionBudget,
+) -> Result<NativeDispatch, NativeFailure> {
+    charge_iterator_property_lookup(runtime, base, execution_budget)?;
+    let dispatch = match begin_value_get(
+        runtime,
+        base,
+        key,
+        None,
+        state.realm,
+        return_to,
+        state.origin.clone(),
+        execution_budget,
+    ) {
+        Ok(dispatch) => dispatch,
+        Err(NativeFailure::Abrupt(pending) | NativeFailure::AbruptAfterTransient(pending)) => {
+            return close_iterator_helper_abrupt(
+                runtime,
+                state,
+                pending,
+                return_to,
+                execution_budget,
+            );
+        }
+        Err(error) => return Err(error),
+    };
+    continue_get_after(
+        dispatch,
+        state,
+        NativeContinuation::IteratorHelperNext,
+        |state, value| {
+            advance_iterator_helper_next(runtime, state, value, return_to, execution_budget)
+        },
+        "flatMap property Get produced a structured result",
+    )
+}
+
+fn close_iterator_helper_with_type_error(
+    runtime: &mut Runtime,
+    state: IteratorHelperNextContinuation,
+    message: &str,
+    return_to: Option<CallReturn>,
+    execution_budget: &mut ExecutionBudget,
+) -> Result<NativeDispatch, NativeFailure> {
+    let NativeFailure::Abrupt(pending) = iterator_exception(
+        state.realm,
+        state.origin.clone(),
+        ExceptionKind::TypeError,
+        message,
+    )?
+    else {
+        unreachable!("iterator_exception always returns an abrupt completion")
+    };
+    close_iterator_helper_abrupt(runtime, state, pending, return_to, execution_budget)
+}
+
+fn close_iterator_helper_abrupt(
+    runtime: &mut Runtime,
+    state: IteratorHelperNextContinuation,
+    pending: PendingException,
+    return_to: Option<CallReturn>,
+    execution_budget: &mut ExecutionBudget,
+) -> Result<NativeDispatch, NativeFailure> {
+    complete_iterator_helper(runtime, state.helper)?;
+    begin_exceptional_iterator_close(
+        runtime,
+        state.iterator,
+        pending,
+        return_to,
+        execution_budget,
+    )
 }
 
 fn read_iterator_helper_next_property(
@@ -1184,6 +1583,15 @@ fn read_iterator_helper_next_property(
     ) {
         Ok(dispatch) => dispatch,
         Err(NativeFailure::Abrupt(pending) | NativeFailure::AbruptAfterTransient(pending)) => {
+            if iterator_helper_stage_closes_outer(state.stage) {
+                return close_iterator_helper_abrupt(
+                    runtime,
+                    state,
+                    pending,
+                    return_to,
+                    execution_budget,
+                );
+            }
             complete_iterator_helper(runtime, state.helper)?;
             return Err(NativeFailure::Abrupt(pending));
         }
@@ -1197,6 +1605,19 @@ fn read_iterator_helper_next_property(
             advance_iterator_helper_next(runtime, state, value, return_to, execution_budget)
         },
         "Iterator Helper result Get produced a structured result",
+    )
+}
+
+const fn iterator_helper_stage_closes_outer(stage: IteratorHelperNextStage) -> bool {
+    matches!(
+        stage,
+        IteratorHelperNextStage::Callback
+            | IteratorHelperNextStage::InnerIteratorMethod
+            | IteratorHelperNextStage::InnerIteratorCall
+            | IteratorHelperNextStage::InnerNextMethod
+            | IteratorHelperNextStage::InnerNextResult
+            | IteratorHelperNextStage::InnerDone
+            | IteratorHelperNextStage::InnerValue
     )
 }
 
@@ -1241,9 +1662,20 @@ pub(super) fn begin_iterator_helper_return(
         | crate::object::IteratorHelperLifecycle::SuspendedYield => {}
     }
     complete_iterator_helper(runtime, helper)?;
+    let (iterator, outer_iterator) = match (snapshot.inner_iterator, snapshot.inner_next_method) {
+        (Some(inner_iterator), Some(_)) => (inner_iterator, Some(snapshot.iterator)),
+        (None, None) => (snapshot.iterator, None),
+        (Some(_), None) | (None, Some(_)) => {
+            return Err(EngineFault::RuntimeInvariant {
+                message: "flatMap helper retained an incomplete inner iterator record",
+            }
+            .into());
+        }
+    };
     let state = IteratorHelperReturnContinuation {
         helper,
-        iterator: snapshot.iterator,
+        iterator,
+        outer_iterator,
         realm,
         stage: IteratorHelperReturnStage::ReturnProperty,
         origin,
@@ -1258,7 +1690,7 @@ fn read_iterator_helper_return(
     execution_budget: &mut ExecutionBudget,
 ) -> Result<NativeDispatch, NativeFailure> {
     charge_iterator_property_lookup(runtime, &state.iterator, execution_budget)?;
-    let dispatch = begin_value_get(
+    let dispatch = match begin_value_get(
         runtime,
         &state.iterator,
         runtime.predefined_property_key(PredefinedAtom::Return),
@@ -1267,7 +1699,19 @@ fn read_iterator_helper_return(
         return_to,
         state.origin.clone(),
         execution_budget,
-    )?;
+    ) {
+        Ok(dispatch) => dispatch,
+        Err(NativeFailure::Abrupt(pending) | NativeFailure::AbruptAfterTransient(pending)) => {
+            return fail_iterator_helper_return(
+                runtime,
+                state,
+                pending,
+                return_to,
+                execution_budget,
+            );
+        }
+        Err(error) => return Err(error),
+    };
     continue_get_after(
         dispatch,
         state,
@@ -1289,7 +1733,7 @@ pub(super) fn advance_iterator_helper_return(
     match state.stage {
         IteratorHelperReturnStage::ReturnProperty => match completion {
             StoredValue::Undefined | StoredValue::Null => {
-                iterator_result(runtime, state.realm, StoredValue::Undefined, true)
+                continue_iterator_helper_outer_return(runtime, state, return_to, execution_budget)
             }
             StoredValue::Function(function) => {
                 execution_budget.charge_instructions(1)?;
@@ -1309,25 +1753,79 @@ pub(super) fn advance_iterator_helper_return(
             | StoredValue::BigInt(_)
             | StoredValue::String(_)
             | StoredValue::Symbol(_)
-            | StoredValue::Object(_) => Err(iterator_exception(
-                state.realm,
-                state.origin,
-                ExceptionKind::TypeError,
+            | StoredValue::Object(_) => fail_iterator_helper_return_with_type_error(
+                runtime,
+                state,
                 "iterator return method is not callable",
-            )?),
+                return_to,
+                execution_budget,
+            ),
         },
         IteratorHelperReturnStage::ReturnCall => {
             if completion.heap_reference().is_none() {
-                return Err(iterator_exception(
-                    state.realm,
-                    state.origin,
-                    ExceptionKind::TypeError,
+                return fail_iterator_helper_return_with_type_error(
+                    runtime,
+                    state,
                     "iterator return method did not return an object",
-                )?);
+                    return_to,
+                    execution_budget,
+                );
             }
-            iterator_result(runtime, state.realm, StoredValue::Undefined, true)
+            continue_iterator_helper_outer_return(runtime, state, return_to, execution_budget)
         }
     }
+}
+
+fn continue_iterator_helper_outer_return(
+    runtime: &mut Runtime,
+    mut state: IteratorHelperReturnContinuation,
+    return_to: Option<CallReturn>,
+    execution_budget: &mut ExecutionBudget,
+) -> Result<NativeDispatch, NativeFailure> {
+    let Some(outer_iterator) = state.outer_iterator.take() else {
+        return iterator_result(runtime, state.realm, StoredValue::Undefined, true);
+    };
+    state.iterator = outer_iterator;
+    state.stage = IteratorHelperReturnStage::ReturnProperty;
+    read_iterator_helper_return(runtime, state, return_to, execution_budget)
+}
+
+fn fail_iterator_helper_return_with_type_error(
+    runtime: &mut Runtime,
+    state: IteratorHelperReturnContinuation,
+    message: &str,
+    return_to: Option<CallReturn>,
+    execution_budget: &mut ExecutionBudget,
+) -> Result<NativeDispatch, NativeFailure> {
+    let NativeFailure::Abrupt(pending) = iterator_exception(
+        state.realm,
+        state.origin.clone(),
+        ExceptionKind::TypeError,
+        message,
+    )?
+    else {
+        unreachable!("iterator_exception always returns an abrupt completion")
+    };
+    fail_iterator_helper_return(runtime, state, pending, return_to, execution_budget)
+}
+
+fn fail_iterator_helper_return(
+    runtime: &mut Runtime,
+    state: IteratorHelperReturnContinuation,
+    pending: PendingException,
+    return_to: Option<CallReturn>,
+    execution_budget: &mut ExecutionBudget,
+) -> Result<NativeDispatch, NativeFailure> {
+    let Some(outer_iterator) = state.outer_iterator else {
+        return Err(NativeFailure::Abrupt(pending));
+    };
+    begin_exceptional_iterator_close(
+        runtime,
+        outer_iterator,
+        pending,
+        return_to,
+        execution_budget,
+    )
 }
 
 fn complete_iterator_helper(runtime: &mut Runtime, helper: ObjectId) -> Result<(), EngineFault> {
@@ -2996,7 +3494,7 @@ pub(super) fn resume_iterator_abrupt(
     match continuation {
         NativeContinuation::IteratorHelperNext(state) => {
             complete_iterator_helper(runtime, state.helper)?;
-            if matches!(state.stage, IteratorHelperNextStage::Callback) {
+            if iterator_helper_stage_closes_outer(state.stage) {
                 begin_exceptional_iterator_close(
                     runtime,
                     state.iterator,
@@ -3007,6 +3505,9 @@ pub(super) fn resume_iterator_abrupt(
             } else {
                 Err(NativeFailure::Abrupt(pending))
             }
+        }
+        NativeContinuation::IteratorHelperReturn(state) => {
+            fail_iterator_helper_return(runtime, state, pending, return_to, execution_budget)
         }
         NativeContinuation::IteratorAppend(state) => {
             if state.next_acquired {

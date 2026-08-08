@@ -247,6 +247,7 @@ fn visit_realm_name_order(
     visit(RealmNameId::ArrayFromAsync)?;
     visit(RealmNameId::IteratorDrop)?;
     visit(RealmNameId::IteratorFilter)?;
+    visit(RealmNameId::IteratorFlatMap)?;
     visit(RealmNameId::IteratorMap)?;
     visit(RealmNameId::IteratorTake)?;
     visit(RealmNameId::IteratorToArray)?;
@@ -553,6 +554,7 @@ fn realm_name_description(id: RealmNameId) -> &'static str {
         RealmNameId::ArrayFromAsync => "fromAsync",
         RealmNameId::IteratorDrop => "drop",
         RealmNameId::IteratorFilter => "filter",
+        RealmNameId::IteratorFlatMap => "flatMap",
         RealmNameId::IteratorMap => "map",
         RealmNameId::IteratorTake => "take",
         RealmNameId::IteratorToArray => "toArray",

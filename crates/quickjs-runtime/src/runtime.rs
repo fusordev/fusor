@@ -1342,6 +1342,7 @@ pub(crate) enum NativeFunctionKind {
     IteratorFrom,
     IteratorPrototypeDrop,
     IteratorPrototypeFilter,
+    IteratorPrototypeFlatMap,
     IteratorPrototypeMap,
     IteratorPrototypeTake,
     IteratorPrototypeToArray,

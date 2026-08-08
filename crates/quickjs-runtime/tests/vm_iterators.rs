@@ -394,6 +394,38 @@ fn rooted_iterator_map_helper_keeps_its_hidden_state_live_through_collection() {
 }
 
 #[test]
+fn rooted_iterator_flat_map_helper_keeps_its_active_inner_iterator_live() {
+    let mut runtime = Runtime::try_new(RuntimeLimits::default()).expect("runtime");
+    let realm = runtime.create_realm().expect("realm");
+    let helper = {
+        let mut context = runtime.context(&realm).expect("context");
+        let function = dynamic_function(
+            &mut context,
+            "let outerDone=false,state={value:40};\
+             let helper=Iterator.prototype.flatMap.call({next(){\
+               if(outerDone)return {done:true};outerDone=true;return {done:false,value:state};}},\
+               function(shared){let index=0;return {next(){index++;return index<3\
+                 ?{done:false,value:shared.value+index}:{done:true};}};});\
+             helper.next();return helper;",
+        );
+        context
+            .call(&function, &[], ExecutionLimits::default())
+            .expect("Iterator flatMap helper")
+    };
+
+    runtime
+        .collect_cycles()
+        .expect("active flatMap inner iterator survives collection");
+
+    let mut context = runtime.context(&realm).expect("context");
+    let next = dynamic_function(&mut context, "return arguments[0].next().value;");
+    let result = context
+        .call(&next, &[helper], ExecutionLimits::default())
+        .expect("hidden flatMap inner iterator remains live");
+    assert_number(&result, 42);
+}
+
+#[test]
 fn iterator_to_array_retains_next_and_observes_step_value_order() {
     let mut runtime = Runtime::try_new(RuntimeLimits::default()).expect("runtime");
     let realm = runtime.create_realm().expect("realm");
@@ -574,6 +606,68 @@ fn iterator_map_validation_and_step_abrupts_follow_spec_order() {
         .call(&function, &[], ExecutionLimits::default())
         .expect("Iterator.prototype.map validation and step abrupts");
     assert_eq!(string_value(&result), "returnreturn|true|true|0");
+}
+
+#[test]
+fn iterator_flat_map_is_lazy_and_reuses_each_inner_next_method() {
+    let mut runtime = Runtime::try_new(RuntimeLimits::default()).expect("runtime");
+    let realm = runtime.create_realm().expect("realm");
+    let mut context = runtime.context(&realm).expect("context");
+    let function = dynamic_function(
+        &mut context,
+        "let outerCalls=0,mapperLog='',iteratorCalls=0,nextGets=0;\
+         let outer={next(){outerCalls++;return outerCalls<3\
+           ?{done:false,value:outerCalls}:{done:true};}};\
+         let helper=Iterator.prototype.flatMap.call(outer,function(value,index){\
+           mapperLog+=value+':'+index+',';let innerCalls=0;return {\
+             [Symbol.iterator](){iteratorCalls++;return {get next(){nextGets++;return function(){\
+               innerCalls++;return innerCalls<3?{done:false,value:value*10+innerCalls}:{done:true};};}};}};});\
+         let before=[outerCalls,mapperLog,iteratorCalls,nextGets].join(',');\
+         let a=helper.next(),b=helper.next(),c=helper.next(),d=helper.next(),done=helper.next();\
+         return [before,a.value,b.value,c.value,d.value,done.value===undefined,done.done,\
+           outerCalls,mapperLog,iteratorCalls,nextGets,Iterator.prototype.flatMap.name,\
+           Iterator.prototype.flatMap.length].join('|');",
+    );
+
+    let result = context
+        .call(&function, &[], ExecutionLimits::default())
+        .expect("Iterator.prototype.flatMap lazy helper");
+    assert_eq!(
+        string_value(&result),
+        "0,,0,0|11|12|21|22|true|true|3|1:0,2:1,|2|2|flatMap|1"
+    );
+}
+
+#[test]
+fn iterator_flat_map_closes_inner_then_outer_and_preserves_abrupts() {
+    let mut runtime = Runtime::try_new(RuntimeLimits::default()).expect("runtime");
+    let realm = runtime.create_realm().expect("realm");
+    let mut context = runtime.context(&realm).expect("context");
+    let function = dynamic_function(
+        &mut context,
+        "let log='',innerError={},outerError={},preserved=false;\
+         let outer={next(){return {done:false,value:1};},return(){log+='O';throw outerError;}};\
+         let helper=Iterator.prototype.flatMap.call(outer,function(){let first=true;return {\
+           next(){if(first){first=false;return {done:false,value:1};}return {done:true};},\
+           return(){log+='I';throw innerError;}};});\
+         helper.next();try{helper.return();}catch(error){preserved=error===innerError;}\
+         let mapperError={},mapperPreserved=false,mapperCloses=0;\
+         let mapperHelper=Iterator.prototype.flatMap.call({\
+           next(){return {done:false,value:1};},return(){mapperCloses++;throw {};}} ,\
+           function(){throw mapperError;});\
+         try{mapperHelper.next();}catch(error){mapperPreserved=error===mapperError;}\
+         let stepError={},stepPreserved=false,innerCloses=0,outerCloses=0;\
+         let stepHelper=Iterator.prototype.flatMap.call({\
+           next(){return {done:false,value:1};},return(){outerCloses++;return {};}},\
+           function(){return {next(){throw stepError;},return(){innerCloses++;return {};}};});\
+         try{stepHelper.next();}catch(error){stepPreserved=error===stepError;}\
+         return [log,preserved,mapperPreserved,mapperCloses,stepPreserved,innerCloses,outerCloses].join('|');",
+    );
+
+    let result = context
+        .call(&function, &[], ExecutionLimits::default())
+        .expect("Iterator.prototype.flatMap close ordering");
+    assert_eq!(string_value(&result), "IO|true|true|1|true|0|1");
 }
 
 #[test]
