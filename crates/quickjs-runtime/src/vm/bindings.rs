@@ -259,6 +259,7 @@ pub(super) fn create_closure(
         }
         .into());
     }
+    let parent_home_object = parent.home_object;
     let (
         sources,
         expected,
@@ -660,7 +661,7 @@ pub(super) fn create_closure(
             environment,
             lexical_receiver: lexical.then(|| frame.receiver.duplicate()),
             lexical_new_target: if lexical { frame.new_target } else { None },
-            home_object: None,
+            home_object: if lexical { parent_home_object } else { None },
         }),
         object: function_record,
         public_roots: 0,

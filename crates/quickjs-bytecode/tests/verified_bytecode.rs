@@ -5806,6 +5806,42 @@ fn ordinary_arrow_profile_is_lexical_and_nonconstructable() {
 }
 
 #[test]
+fn ordinary_arrow_home_object_requires_a_verified_method_ancestor() {
+    let text = "()=>super.value";
+    let function_span = SourceByteSpan::new(0, u32::try_from(text.len()).expect("source length"));
+    let input = profiled_single_input(
+        &[
+            (FinalOpcode::SpecialObject, Operands::U8(5)),
+            (FinalOpcode::Drop, Operands::None),
+            (FinalOpcode::ReturnUndef, Operands::None),
+        ],
+        UnverifiedFunctionHeader::ordinary_arrow_with_variable_references(true, 0, 0),
+        CompilerExecutableKind::OrdinaryArrow,
+        &[],
+        None,
+        &[],
+        0,
+        0,
+        &[],
+        source(
+            text,
+            function_span,
+            None,
+            &[(0, function_span), (2, function_span), (3, function_span)],
+        ),
+    );
+    let error = verify_compiler_bytecode_graph(input, BytecodeGraphVerificationLimits::default())
+        .expect_err("an arrow without a method ancestor has no lexical home object");
+    assert!(matches!(
+        error.kind(),
+        BytecodeVerificationErrorKind::UnsupportedCompilerOpcode {
+            pc,
+            opcode: FinalOpcode::SpecialObject,
+        } if *pc == BytecodePc::ZERO
+    ));
+}
+
+#[test]
 fn dynamic_function_script_profile_rejects_names_and_every_argument_domain() {
     let named_text = "script";
     let named_span = SourceByteSpan::new(0, 6);

@@ -51,6 +51,17 @@ fn base_class_construction_public_methods_and_accessors_obey_the_class_topology(
 }
 
 #[test]
+fn field_initializer_arrows_capture_the_lexical_super_home_object() {
+    run_with(
+        "function run(){class Base{get value(){return this._value;}set value(next){this._value=next;}method(){return this._value+1;}static get staticValue(){return this._staticValue;}static set staticValue(next){this._staticValue=next;}}class Derived extends Base{read=()=>super.value;nested=()=>()=>super.method();write=next=>super.value=next;methodRead(){return (()=>()=>super.value)()();}static readStatic=()=>super.staticValue;static writeStatic=next=>super.staticValue=next;}let value=new Derived;value._value=3;Derived._staticValue=5;let read=value.read()===3&&value.nested()()===4&&value.methodRead()===3&&Derived.readStatic()===5;let write=value.write(7)===7&&value._value===7&&Derived.writeStatic(9)===9&&Derived._staticValue===9;return read&&write;}",
+        |result| {
+            let value = result.expect("field initializer arrow super execution");
+            assert_eq!(value.as_boolean().expect("live Boolean"), Some(true));
+        },
+    );
+}
+
+#[test]
 fn a_class_constructor_rejects_direct_calls_but_remains_constructable() {
     run_with(
         "function run(){class Box{constructor(){}}Box();}",

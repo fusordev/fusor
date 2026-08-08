@@ -545,8 +545,9 @@ pub(crate) struct BytecodeFunction {
     pub(crate) lexical_receiver: Option<StoredValue>,
     pub(crate) lexical_new_target: Option<FunctionId>,
     /// The ECMAScript `[[HomeObject]]` installed when this closure becomes a
-    /// class method, class constructor, or object-literal method.  It is an
-    /// internal GC edge, not a JavaScript-visible property.
+    /// class method, class constructor, or object-literal method, or inherited
+    /// lexically by an arrow created within one. It is an internal GC edge,
+    /// not a JavaScript-visible property.
     pub(crate) home_object: Option<HeapReference>,
 }
 

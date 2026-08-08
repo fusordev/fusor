@@ -2045,7 +2045,7 @@ pub fn verify_compiler_bytecode_graph(
     }
 
     let mut usage = preflight_usage(&graph, &metadata, limits)?;
-    verify_function_tree_ownership(&graph)?;
+    let function_parents = verify_function_tree_ownership(&graph)?;
     let mut verified = Vec::new();
     verified.try_reserve_exact(function_count).map_err(|_| {
         BytecodeVerificationError::graph(BytecodeVerificationErrorKind::AllocationFailed {
@@ -2097,6 +2097,7 @@ pub fn verify_compiler_bytecode_graph(
         verified.push(record);
     }
     verify_closure_metadata(&graph, &verified)?;
+    verify_lexical_arrow_home_objects(&graph, &verified, &function_parents)?;
     verify_class_field_key_bindings(&graph, &verified)?;
     verify_inferred_function_names(&graph, &verified)?;
     verify_method_definitions(&graph, &verified, limits, &mut usage)?;
@@ -2197,7 +2198,7 @@ fn preflight_usage(
 
 fn verify_function_tree_ownership(
     graph: &VerifiedCompilerFunctionGraph,
-) -> Result<(), BytecodeVerificationError> {
+) -> Result<Vec<Option<FunctionTemplateId>>, BytecodeVerificationError> {
     let functions = graph.functions();
     let mut incoming = try_filled_vec(
         graph.root_id(),
@@ -2205,14 +2206,21 @@ fn verify_function_tree_ownership(
         0_u64,
         BytecodeGraphResource::VerifiedMetadata,
     )?;
-    for parent in functions {
+    let mut parents = try_filled_vec(
+        graph.root_id(),
+        functions.len(),
+        None,
+        BytecodeGraphResource::VerifiedMetadata,
+    )?;
+    for (parent_index, parent) in functions.iter().enumerate() {
+        let parent_id = function_id(parent_index)?;
         for constant in parent.constants() {
             let crate::CompilerConstant::Function(child) = constant else {
                 continue;
             };
-            let Some(count) = usize::try_from(child.get())
+            let Some(child_index) = usize::try_from(child.get())
                 .ok()
-                .and_then(|index| incoming.get_mut(index))
+                .filter(|&index| index < incoming.len())
             else {
                 return Err(BytecodeVerificationError::function(
                     *child,
@@ -2222,7 +2230,9 @@ fn verify_function_tree_ownership(
                     },
                 ));
             };
+            let count = &mut incoming[child_index];
             *count = count.saturating_add(1);
+            parents[child_index] = Some(parent_id);
         }
     }
     for (index, &count) in incoming.iter().enumerate() {
@@ -2238,7 +2248,7 @@ fn verify_function_tree_ownership(
             ));
         }
     }
-    Ok(())
+    Ok(parents)
 }
 
 fn charge(
@@ -4174,6 +4184,101 @@ fn verify_closure_metadata(
                     ));
                 }
             }
+        }
+    }
+    Ok(())
+}
+
+/// Certifies that an arrow using the lexical `super` home-object path is
+/// nested only through arrows beneath a method or class constructor. Static
+/// field arrows instead carry the separately certified class-receiver cell.
+fn verify_lexical_arrow_home_objects(
+    graph: &VerifiedCompilerFunctionGraph,
+    metadata: &[VerifiedFunctionMetadata],
+    parents: &[Option<FunctionTemplateId>],
+) -> Result<(), BytecodeVerificationError> {
+    for (index, record) in metadata.iter().enumerate() {
+        if record.executable_kind != CompilerExecutableKind::OrdinaryArrow {
+            continue;
+        }
+        let id = function_id(index)?;
+        let flow = graph
+            .function(id)
+            .ok_or_else(|| {
+                BytecodeVerificationError::function(
+                    id,
+                    BytecodeVerificationErrorKind::FunctionTemplateOwnershipMismatch {
+                        child: id,
+                        incoming: 0,
+                    },
+                )
+            })?
+            .control_flow();
+        let static_field_super = record
+            .variables
+            .iter()
+            .map(VariableDefinition::policy)
+            .chain(
+                record
+                    .closures
+                    .iter()
+                    .map(ClosureVariableDefinition::policy),
+            )
+            .any(|policy| policy.kind() == CompilerBindingKind::ClassStaticReceiver);
+        let offending = flow.instructions().iter().find(|verified| {
+            let instruction = verified.decoded().instruction();
+            matches!(
+                (instruction.opcode(), instruction.operands()),
+                (FinalOpcode::SpecialObject, Operands::U8(5))
+            ) || (!static_field_super
+                && matches!(
+                    instruction.opcode(),
+                    FinalOpcode::GetSuper | FinalOpcode::GetSuperValue | FinalOpcode::PutSuperValue
+                ))
+        });
+        let Some(offending) = offending else {
+            continue;
+        };
+
+        let mut ancestor = id;
+        let authorized = loop {
+            let Some(parent) = usize::try_from(ancestor.get())
+                .ok()
+                .and_then(|ancestor_index| parents.get(ancestor_index))
+                .copied()
+                .flatten()
+            else {
+                break false;
+            };
+            let Some(parent_metadata) = usize::try_from(parent.get())
+                .ok()
+                .and_then(|parent_index| metadata.get(parent_index))
+            else {
+                break false;
+            };
+            match parent_metadata.executable_kind {
+                CompilerExecutableKind::OrdinaryArrow => ancestor = parent,
+                CompilerExecutableKind::OrdinaryMethod
+                | CompilerExecutableKind::GeneratorMethod
+                | CompilerExecutableKind::AsyncMethod
+                | CompilerExecutableKind::AsyncGeneratorMethod
+                | CompilerExecutableKind::ClassConstructor => break true,
+                CompilerExecutableKind::GlobalScript
+                | CompilerExecutableKind::OrdinaryFunction
+                | CompilerExecutableKind::GeneratorFunction
+                | CompilerExecutableKind::AsyncFunction
+                | CompilerExecutableKind::AsyncGeneratorFunction
+                | CompilerExecutableKind::DynamicFunctionScript => break false,
+            }
+        };
+        if !authorized {
+            return Err(BytecodeVerificationError::function(
+                id,
+                BytecodeVerificationErrorKind::UnsupportedCompilerOpcode {
+                    pc: offending.decoded().pc(),
+                    opcode: offending.decoded().instruction().opcode(),
+                },
+            ));
         }
     }
     Ok(())
@@ -7178,7 +7283,8 @@ fn verify_supported_opcodes(
                 FinalOpcode::GetSuper | FinalOpcode::GetSuperValue | FinalOpcode::PutSuperValue
             ) && !matches!(
                 executable_kind,
-                CompilerExecutableKind::OrdinaryMethod
+                CompilerExecutableKind::OrdinaryArrow
+                    | CompilerExecutableKind::OrdinaryMethod
                     | CompilerExecutableKind::GeneratorMethod
                     | CompilerExecutableKind::AsyncMethod
                     | CompilerExecutableKind::AsyncGeneratorMethod
@@ -7310,7 +7416,8 @@ fn compiler_special_object_is_authorized(
         }
         Operands::U8(5) => matches!(
             executable_kind,
-            CompilerExecutableKind::OrdinaryMethod
+            CompilerExecutableKind::OrdinaryArrow
+                | CompilerExecutableKind::OrdinaryMethod
                 | CompilerExecutableKind::GeneratorMethod
                 | CompilerExecutableKind::AsyncMethod
                 | CompilerExecutableKind::AsyncGeneratorMethod

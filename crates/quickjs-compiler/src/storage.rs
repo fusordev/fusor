@@ -2033,19 +2033,44 @@ impl<'unit, 'arena, 'scope> Planner<'unit, 'arena, 'scope> {
                 }
                 _ => false,
             };
-            let home_object_method =
-                self.executable_drafts
-                    .get(owner.index())
-                    .is_some_and(|candidate| {
-                        matches!(candidate.executable.kind, ExecutableKind::Function { .. })
-                            && is_home_object_method(nodes, candidate.node_id)
-                    });
-            if direct_super_property && home_object_method {
+            if direct_super_property && self.executable_lexically_has_home_object(owner, span)? {
                 continue;
             }
             return unsupported(UnsupportedFeature::FunctionSyntheticBinding, span);
         }
         Ok(())
+    }
+
+    fn executable_lexically_has_home_object(
+        &self,
+        mut executable: ExecutableId,
+        span: Span,
+    ) -> Result<bool, CompilerError> {
+        let nodes = self.unit.semantic().nodes();
+        loop {
+            let candidate = self.executable_drafts.get(executable.index()).ok_or(
+                CompilerError::SemanticInvariant {
+                    invariant: "super property owner executable exists",
+                    span: Some(span),
+                },
+            )?;
+            match candidate.executable.kind {
+                ExecutableKind::Arrow { .. } => {
+                    let Some(parent) = candidate.executable.parent else {
+                        return Err(CompilerError::SemanticInvariant {
+                            invariant: "arrow super property has an executable parent",
+                            span: Some(span),
+                        });
+                    };
+                    executable = parent;
+                }
+                ExecutableKind::Function { .. } => {
+                    return Ok(is_home_object_method(nodes, candidate.node_id));
+                }
+                ExecutableKind::ClassDefaultConstructor => return Ok(true),
+                ExecutableKind::Script { .. } | ExecutableKind::Module => return Ok(false),
+            }
+        }
     }
 
     #[allow(
