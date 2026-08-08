@@ -23,4 +23,12 @@ cargo xtask test262 --suite /path/to/test262 --inventory-only
 cargo xtask test262 --suite /path/to/test262 --filter built-ins/Array --report target/test262.json
 ```
 
+Run the complete configured suite with an optimized runner. Unfiltered,
+unlimited execution fails fast in a debug build because generated Unicode
+property tests make that profile impractically slow:
+
+```sh
+cargo run --release --quiet -p xtask -- test262 --suite /path/to/test262 --report target/test262.json
+```
+
 ECMA-402 paths are inventoried as low-priority skips.
