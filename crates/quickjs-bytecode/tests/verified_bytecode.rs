@@ -2797,7 +2797,7 @@ fn final_authority_rejects_mixed_define_method_target_provenance_at_a_join() {
 }
 
 #[test]
-fn push_this_authority_is_limited_to_strict_functions_and_script_roots() {
+fn push_this_authority_covers_normalized_functions_and_script_roots() {
     let instructions = [
         (FinalOpcode::PushThis, Operands::None),
         (FinalOpcode::Return, Operands::None),
@@ -2844,15 +2844,17 @@ fn push_this_authority_is_limited_to_strict_functions_and_script_roots() {
         ordinary_source(),
         false,
     );
-    let error = verify_compiler_bytecode_graph(sloppy, BytecodeGraphVerificationLimits::default())
-        .expect_err("sloppy this normalization remains fail-closed");
-    assert!(matches!(
-        error.kind(),
-        BytecodeVerificationErrorKind::UnsupportedCompilerOpcode {
-            pc,
-            opcode: FinalOpcode::PushThis,
-        } if *pc == BytecodePc::ZERO
-    ));
+    let verified =
+        verify_compiler_bytecode_graph(sloppy, BytecodeGraphVerificationLimits::default())
+            .expect("sloppy functions receive their normalized receiver at call entry");
+    assert_eq!(
+        verified.requirements(),
+        [
+            ExecutionRequirement::CoreValues,
+            ExecutionRequirement::Strings,
+            ExecutionRequirement::Calls,
+        ]
+    );
 
     let script_text = "return this";
     let script_span =
