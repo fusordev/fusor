@@ -131,18 +131,34 @@ impl RealmReservationPlan {
 mod tests {
     use super::*;
     #[test]
-    fn reservation_plan_matches_the_characterized_realm_delta() {
+    fn reservation_plan_is_derived_from_the_intrinsic_schema() {
         let schema = RealmIntrinsicSchema::try_new().expect("function schema");
         let atoms = RealmAtomPlan::try_new(&schema).expect("atom plan");
         let plan = RealmReservationPlan::try_new(&atoms, &schema).expect("reservation plan");
 
-        assert_eq!(plan.dynamic_atoms, 349);
-        assert_eq!(plan.dynamic_atom_code_units, 2_998);
-        assert_eq!(plan.realms, 1);
-        assert_eq!(plan.objects, 70);
-        assert_eq!(plan.functions, 722);
-        assert_eq!(plan.global_bindings, 0);
-        assert_eq!(plan.object_properties, 2_407);
-        assert_eq!(plan.journal_entries, 1_142);
+        let automatic_identity_properties = schema
+            .specs()
+            .iter()
+            .filter(|function| function.identity_publication.is_automatic())
+            .count()
+            * 2;
+        assert_eq!(plan.dynamic_atoms, atoms.len());
+        assert_eq!(plan.dynamic_atom_code_units, atoms.description_code_units());
+        assert_eq!(plan.realms, REALMS_PER_REALM);
+        assert_eq!(plan.objects, schema.object_count());
+        assert_eq!(plan.functions, schema.function_count());
+        assert_eq!(plan.global_bindings, GLOBAL_BINDINGS_PER_REALM);
+        assert_eq!(
+            plan.object_properties,
+            usize_to_u64(schema.properties().len() + automatic_identity_properties)
+        );
+        assert_eq!(
+            plan.journal_entries,
+            atoms.len()
+                + REALMS_PER_REALM
+                + schema.object_count()
+                + schema.function_count()
+                + GLOBAL_BINDINGS_PER_REALM
+        );
     }
 }

@@ -2264,6 +2264,33 @@ pub(super) fn dispatch_native_call_with_frames(
                 execution_budget,
             )
         }
+        NativeFunctionKind::Eval => {
+            let mut arguments = inputs.arguments;
+            let argument = arguments.take_first_or_undefined();
+            let StoredValue::String(source) = argument else {
+                return Ok(NativeDispatch::Immediate(argument));
+            };
+            let Some(compiler) = compiler else {
+                return Err(NativeFailure::Execution(
+                    DynamicFunctionCompileFailure::Engine {
+                        source: Arc::new(DynamicFunctionServiceUnavailable),
+                    }
+                    .into(),
+                ));
+            };
+            finish_indirect_eval(
+                runtime,
+                native.realm,
+                source,
+                return_to,
+                origin.unwrap_or_else(native_function_host_origin),
+                active_root_frames,
+                active_frames,
+                active_frame_values,
+                compiler,
+                execution_budget,
+            )
+        }
         NativeFunctionKind::OrdinaryFunctionConstructor
         | NativeFunctionKind::GeneratorFunctionConstructor
         | NativeFunctionKind::AsyncFunctionConstructor

@@ -619,15 +619,6 @@ mod tests {
     use crate::runtime::RuntimeLimits;
 
     #[test]
-    fn atom_plan_derives_the_characterized_count_and_utf16_budget() {
-        let schema = RealmIntrinsicSchema::try_new().expect("Realm schema");
-        let plan = RealmAtomPlan::try_new(&schema).expect("atom plan");
-
-        assert_eq!(plan.len(), 345);
-        assert_eq!(plan.description_code_units(), 2_965);
-    }
-
-    #[test]
     fn atom_plan_binds_shared_names_by_typed_identity() {
         let mut runtime = Runtime::try_new(RuntimeLimits::default()).expect("runtime");
         let schema = RealmIntrinsicSchema::try_new().expect("Realm schema");

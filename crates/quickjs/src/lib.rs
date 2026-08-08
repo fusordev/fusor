@@ -24,13 +24,14 @@ pub use quickjs_diagnostics::{
 use quickjs_frontend::{
     CompilationGoal, DiagnosticStage, DynamicFunctionError, DynamicFunctionKind,
     DynamicFunctionSource, FrontendError, FrontendLimits, FrontendOptions, GlobalScriptGoal,
-    PreparedDynamicFunctionSource, RegisteredFrontendError, SourceFragment,
+    IndirectEvalGoal, PreparedDynamicFunctionSource, RegisteredFrontendError, SourceFragment,
     with_dynamic_function_source_and_prepared, with_parsed_program, with_registered_program,
 };
 use quickjs_runtime::{
     Context, DynamicFunctionCompileFailure, DynamicFunctionCompileRequest, DynamicFunctionCompiler,
     DynamicFunctionFamily, DynamicFunctionScriptError, ExecutionError, ExecutionLimits, Function,
-    GlobalScriptError, InstallError, JsString, JsValue, RuntimeDiagnosticError,
+    GlobalScriptError, IndirectEvalCompileRequest, InstallError, JsString, JsValue,
+    RuntimeDiagnosticError,
 };
 
 /// Resource limits applied across Global Script parsing, compilation,
@@ -849,6 +850,7 @@ impl Error for OxcDynamicFunctionEngineError {
 enum RuntimeSourceFragment {
     Parameter(usize),
     Body,
+    IndirectEval,
 }
 
 impl fmt::Display for RuntimeSourceFragment {
@@ -856,6 +858,7 @@ impl fmt::Display for RuntimeSourceFragment {
         match self {
             Self::Parameter(index) => write!(formatter, "parameter fragment {index}"),
             Self::Body => formatter.write_str("body fragment"),
+            Self::IndirectEval => formatter.write_str("indirect eval source"),
         }
     }
 }
@@ -917,6 +920,82 @@ impl DynamicFunctionCompiler for OxcDynamicFunctionCompiler {
             .map(|compiled| compiled.authority)
             .map_err(map_service_compilation_error)
     }
+
+    fn compile_indirect_eval(
+        &self,
+        source: IndirectEvalCompileRequest,
+    ) -> Result<Arc<VerifiedBytecode>, DynamicFunctionCompileFailure> {
+        compile_indirect_eval_source(source.source(), self.limits)
+    }
+}
+
+fn compile_indirect_eval_source(
+    source: &JsString,
+    limits: DynamicFunctionLimits,
+) -> Result<Arc<VerifiedBytecode>, DynamicFunctionCompileFailure> {
+    let source = js_string_to_utf8(source, RuntimeSourceFragment::IndirectEval)?;
+    let compiled = with_parsed_program(
+        &source,
+        FrontendOptions::for_goal(CompilationGoal::IndirectEval(IndirectEvalGoal::new()))
+            .with_limits(limits.frontend),
+        |unit| {
+            let compiler = CompilationContext::new_with_source_name(unit, Arc::from("<eval>"))
+                .map_err(DynamicFunctionCompilerError::Planning)?;
+            compiler
+                .compile_indirect_eval_script_with_all_limits(
+                    limits.bytecode,
+                    limits.function_graph,
+                    limits.final_graph,
+                )
+                .map_err(DynamicFunctionCompilerError::Lowering)
+        },
+    )
+    .map_err(map_eval_frontend_error)?
+    .map_err(|source| {
+        let stage = match &source {
+            DynamicFunctionCompilerError::Planning(_) => {
+                DynamicFunctionEngineStage::CompilerPlanning
+            }
+            DynamicFunctionCompilerError::Lowering(_) => {
+                DynamicFunctionEngineStage::CompilerLowering
+            }
+        };
+        engine_failure_with_source(stage, source.to_string(), source)
+    })?;
+    Ok(Arc::new(compiled.verified_bytecode().clone()))
+}
+
+fn map_eval_frontend_error(source: FrontendError) -> DynamicFunctionCompileFailure {
+    if matches!(
+        source.stage(),
+        DiagnosticStage::Parser | DiagnosticStage::Profile | DiagnosticStage::Semantic
+    ) {
+        let Some(message) = source
+            .diagnostics()
+            .first()
+            .map(|diagnostic| diagnostic.message.as_str())
+        else {
+            return engine_failure_with_source(
+                DynamicFunctionEngineStage::Frontend(source.stage()),
+                "front end rejected eval source without a normalized diagnostic",
+                source,
+            );
+        };
+        return match JsString::from_utf8(message) {
+            Ok(message) => DynamicFunctionCompileFailure::Syntax { message },
+            Err(error) => engine_failure_with_source(
+                DynamicFunctionEngineStage::SyntaxMessageConversion,
+                "could not retain the normalized eval syntax diagnostic as a JavaScript string",
+                error,
+            ),
+        };
+    }
+    let stage = DynamicFunctionEngineStage::Frontend(source.stage());
+    let detail = source.diagnostics().first().map_or_else(
+        || source.to_string(),
+        |diagnostic| diagnostic.message.clone(),
+    );
+    engine_failure_with_source(stage, detail, source)
 }
 
 /// Compiler stage that rejected an already parsed dynamic-Function Script.

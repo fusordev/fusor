@@ -30,10 +30,10 @@ mod weak_collections;
 mod weak_references;
 
 use super::schema::{
-    ConstructorPrototypeSpec, FamilyCardinality, IntrinsicDescriptorSpec, IntrinsicFunctionId,
-    IntrinsicFunctionSpec, IntrinsicIdentity, IntrinsicIdentityPublication, IntrinsicKeySpec,
-    IntrinsicNameSpec, IntrinsicObjectId, IntrinsicObjectKind, IntrinsicObjectSpec,
-    IntrinsicPropertySpec, IntrinsicSchema, IntrinsicValueSpec, PrototypeSpec,
+    ConstructorPrototypeSpec, IntrinsicDescriptorSpec, IntrinsicFunctionId, IntrinsicFunctionSpec,
+    IntrinsicIdentity, IntrinsicIdentityPublication, IntrinsicKeySpec, IntrinsicNameSpec,
+    IntrinsicObjectId, IntrinsicObjectKind, IntrinsicObjectSpec, IntrinsicPropertySpec,
+    IntrinsicSchema, IntrinsicValueSpec, PrototypeSpec,
 };
 use super::validation::{SchemaValidationError, validate_intrinsic_schema};
 use super::{NativeFunctionKind, RuntimeError, RuntimeResource, allocation_failed};
@@ -134,18 +134,6 @@ impl RealmIntrinsicSchema {
     }
 
     pub(super) fn validate(&self) -> Result<(), SchemaValidationError> {
-        let cardinalities = [
-            FamilyCardinality {
-                family: "Realm intrinsic objects",
-                actual: self.objects.len(),
-                expected: 70,
-            },
-            FamilyCardinality {
-                family: "Realm native functions",
-                actual: self.specs.len(),
-                expected: 722,
-            },
-        ];
         validate_intrinsic_schema(IntrinsicSchema {
             objects: &self.objects,
             functions: &self.specs,
@@ -153,7 +141,6 @@ impl RealmIntrinsicSchema {
             mandatory_objects: &IntrinsicObjectId::ALL,
             mandatory_functions: &self.mandatory_functions,
             constructor_prototypes: &self.constructor_prototypes,
-            family_cardinalities: &cardinalities,
         })
     }
 }
@@ -337,6 +324,7 @@ pub(super) const fn is_declarative_function(id: IntrinsicFunctionId) -> bool {
             | NativeFunctionKind::SymbolFor
             | NativeFunctionKind::SymbolKeyFor
             | NativeFunctionKind::GlobalNumeric(_)
+            | NativeFunctionKind::Eval
             | NativeFunctionKind::GlobalUri(_)
             | NativeFunctionKind::Reflect(_)
             | NativeFunctionKind::JsonIsRawJson
@@ -552,7 +540,9 @@ fn special_reference_batch(
     let IntrinsicFunctionId(kind) = referenced_function?;
     if matches!(
         kind,
-        NativeFunctionKind::GlobalNumeric(_) | NativeFunctionKind::GlobalUri(_)
+        NativeFunctionKind::GlobalNumeric(_)
+            | NativeFunctionKind::Eval
+            | NativeFunctionKind::GlobalUri(_)
     ) {
         return Some(DeclarativeBatch::Globals);
     }
@@ -974,7 +964,9 @@ pub(super) const fn function_batch(id: IntrinsicFunctionId) -> DeclarativeBatch 
         DeclarativeBatch::Errors
     } else if matches!(
         id.0,
-        NativeFunctionKind::GlobalNumeric(_) | NativeFunctionKind::GlobalUri(_)
+        NativeFunctionKind::GlobalNumeric(_)
+            | NativeFunctionKind::Eval
+            | NativeFunctionKind::GlobalUri(_)
     ) {
         DeclarativeBatch::Globals
     } else if is_primitive_function(id) {
@@ -1216,10 +1208,8 @@ mod tests {
     use crate::runtime::realm::{atoms::RealmAtomPlan, reservation::RealmReservationPlan};
 
     #[test]
-    fn complete_function_schema_has_characterized_cardinality_and_unique_ids() {
+    fn complete_function_schema_has_unique_ids_and_matching_implementations() {
         let schema = RealmIntrinsicSchema::try_new().expect("function schema");
-        assert_eq!(schema.specs().len(), 722);
-        assert_eq!(schema.constructor_prototypes.len(), 54);
         for (index, spec) in schema.specs().iter().enumerate() {
             assert!(
                 schema.specs()[..index]

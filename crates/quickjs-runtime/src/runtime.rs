@@ -39,9 +39,9 @@ use quickjs_bytecode::{
 use crate::promise_rejection::PromiseRejectionState;
 use crate::{
     ArrayIndex, Atom, AtomError, AtomLimits, AtomTable, AtomUsage, DynamicFunctionScriptError,
-    ErrorObjectKind, ExceptionKind, ExecutionLimits, Function, GlobalScriptError, HandleError,
-    HandleKind, InstallError, JsBigInt, JsNumber, JsString, JsValue,
-    OrdinaryDynamicFunctionCompiler, PredefinedAtom, PropertyKey, PropertyLayout,
+    ErrorObjectKind, ExceptionKind, ExecutionLimits, Function, GlobalDeclarationRejectionKind,
+    GlobalScriptError, HandleError, HandleKind, InstallError, JsBigInt, JsNumber, JsString,
+    JsValue, OrdinaryDynamicFunctionCompiler, PredefinedAtom, PropertyKey, PropertyLayout,
     PropertyLayoutKind, RuntimeError, RuntimeResource,
     arena::{Arena, RuntimeIdentity},
     ids::{BindingCellId, FunctionId, InstalledCodeId, ObjectId, RealmGlobalBindingId, RealmId},
@@ -1333,6 +1333,8 @@ pub(crate) enum NativeFunctionKind {
     NumberPredicateStatic(NumberPredicate),
     /// One coercing numeric function on the realm's global object.
     GlobalNumeric(GlobalNumericFunction),
+    /// The Realm's `%eval%` intrinsic.
+    Eval,
     /// One global URI encoder or decoder.
     GlobalUri(UriFunction),
     /// `Array.isArray`.
@@ -4571,6 +4573,7 @@ fn rejected_global_declaration(
     authority: &VerifiedBytecode,
     closure: u32,
     name: &Atom,
+    kind: GlobalDeclarationRejectionKind,
 ) -> Result<InstallError, InstallError> {
     let root = authority.root();
     let constant = root
@@ -4627,6 +4630,7 @@ fn rejected_global_declaration(
         })?;
     Ok(InstallError::GlobalDeclarationRejected {
         name,
+        kind,
         function: authority.root_id(),
         pc: site.1,
         source_span,

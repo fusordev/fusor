@@ -44,8 +44,9 @@ use quickjs_bytecode::{
 use crate::runtime::ForInAdvance;
 use crate::{
     ArrayIndex, BigIntError, Context, DynamicFunctionCompileFailure, DynamicFunctionFamily,
-    EngineFault, ExceptionKind, ExecutionError, Function, HandleError, HandleKind, JsBigInt,
-    JsException, JsNumber, JsStackFrame, JsString, JsStringError, JsValue, MAX_STRING_CODE_UNITS,
+    EngineFault, ExceptionKind, ExecutionError, Function, GlobalDeclarationRejectionKind,
+    HandleError, HandleKind, IndirectEvalCompileRequest, JsBigInt, JsException, JsNumber,
+    JsStackFrame, JsString, JsStringError, JsValue, MAX_STRING_CODE_UNITS,
     OrdinaryDynamicFunctionCompiler, OrdinaryDynamicFunctionSource, PredefinedAtom, PropertyKey,
     PropertyLayout, Runtime, RuntimeError, RuntimeResource,
     conversion::{
@@ -269,6 +270,17 @@ impl ExecutionBudget {
         &mut self,
         source: &OrdinaryDynamicFunctionSource,
     ) -> Result<(), ExecutionError> {
+        self.charge_dynamic_source_units(dynamic_function_source_code_units(source))
+    }
+
+    fn charge_indirect_eval_compilation(
+        &mut self,
+        source: &JsString,
+    ) -> Result<(), ExecutionError> {
+        self.charge_dynamic_source_units(u64::from(source.len()))
+    }
+
+    fn charge_dynamic_source_units(&mut self, additional: u64) -> Result<(), ExecutionError> {
         let compilations = self.compilations.saturating_add(1);
         if compilations > self.compilation_limit {
             return Err(ExecutionError::LimitExceeded {
@@ -277,9 +289,7 @@ impl ExecutionBudget {
                 observed: compilations,
             });
         }
-        let source_code_units = self
-            .source_code_units
-            .saturating_add(dynamic_function_source_code_units(source));
+        let source_code_units = self.source_code_units.saturating_add(additional);
         if source_code_units > self.source_code_unit_limit {
             return Err(ExecutionError::LimitExceeded {
                 resource: RuntimeResource::DynamicSourceCodeUnits,
@@ -441,9 +451,15 @@ impl SyntheticNativeFrame {
 struct DynamicFunctionReturn {
     root: InstalledRoot,
     realm: RealmId,
-    family: DynamicFunctionFamily,
+    kind: DynamicRootKind,
     construction: Option<FunctionId>,
     origin: Option<JsStackFrame>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum DynamicRootKind {
+    Function(DynamicFunctionFamily),
+    IndirectEval,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

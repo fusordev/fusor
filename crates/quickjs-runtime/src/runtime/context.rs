@@ -345,6 +345,7 @@ impl Context<'_> {
             Ok(installed) => installed,
             Err(InstallError::GlobalDeclarationRejected {
                 name,
+                kind: _,
                 function,
                 pc,
                 source_span,
@@ -431,6 +432,7 @@ impl Context<'_> {
             Ok(installed) => installed,
             Err(InstallError::GlobalDeclarationRejected {
                 name,
+                kind: _,
                 function,
                 pc,
                 source_span,
@@ -844,6 +846,16 @@ impl Context<'_> {
         authority: Arc<VerifiedBytecode>,
     ) -> Result<InstalledRoot, InstallError> {
         require_root_kind(&authority, CompilerExecutableKind::DynamicFunctionScript)?;
+        self.install_root(authority, RootPublication::Internal, false)
+    }
+
+    /// Installs a verified indirect-eval Script while bytecode frames are
+    /// active.
+    pub(crate) fn install_indirect_eval_script_during_execution(
+        &mut self,
+        authority: Arc<VerifiedBytecode>,
+    ) -> Result<InstalledRoot, InstallError> {
+        require_root_kind(&authority, CompilerExecutableKind::IndirectEvalScript)?;
         self.install_root(authority, RootPublication::Internal, false)
     }
 }

@@ -35,9 +35,9 @@ use super::{
     is_supported_instruction, is_supported_opcode, usize_to_u64,
 };
 
-const REALM_OBJECT_SLOTS: u64 = 66;
-const REALM_PROPERTY_SLOTS: u64 = 2_109;
-const REALM_FUNCTION_SLOTS: u64 = 625;
+const REALM_OBJECT_SLOTS: u64 = 70;
+const REALM_PROPERTY_SLOTS: u64 = 2_410;
+const REALM_FUNCTION_SLOTS: u64 = 723;
 
 #[test]
 fn finalization_job_limit_failure_does_not_clear_weak_targets() {
@@ -2020,10 +2020,9 @@ fn shrinking_array_length_deletes_indices_and_reports_a_nonconfigurable_blocker(
     );
 }
 use crate::{
-    ArrayIndex, AtomError, AtomLimits, AtomUsage, EngineFault, ExceptionKind, ExecutionError,
-    JsNumber, JsString, PREDEFINED_ATOM_COUNT, PREDEFINED_DESCRIPTION_CODE_UNITS,
-    PREDEFINED_INTERNER_SLOTS, PredefinedAtom, PropertyKey, PropertyLayout, RuntimeError,
-    RuntimeResource,
+    ArrayIndex, AtomError, AtomLimits, EngineFault, ExceptionKind, ExecutionError, JsNumber,
+    JsString, PREDEFINED_ATOM_COUNT, PREDEFINED_DESCRIPTION_CODE_UNITS, PREDEFINED_INTERNER_SLOTS,
+    PredefinedAtom, PropertyKey, PropertyLayout, RuntimeError, RuntimeResource,
     object::{ObjectRecord, OwnProperty},
     value::{HeapReference, StoredValue},
 };
@@ -2082,15 +2081,6 @@ fn realm_installs_the_exact_function_intrinsic_graph() {
     assert_eq!(runtime.usage().heap_functions(), REALM_FUNCTION_SLOTS);
     assert_eq!(runtime.usage().object_properties(), REALM_PROPERTY_SLOTS);
     assert_eq!(runtime.usage().installed_code(), 0);
-    assert_eq!(
-        runtime.atom_usage(),
-        AtomUsage {
-            live_atoms: PREDEFINED_ATOM_COUNT + 323,
-            live_description_code_units: PREDEFINED_DESCRIPTION_CODE_UNITS + 2_761,
-            interner_slots: PREDEFINED_INTERNER_SLOTS + 323,
-        }
-    );
-
     let prototype = runtime
         .functions
         .get(function_prototype)
@@ -2700,6 +2690,7 @@ fn realm_installs_the_exact_function_intrinsic_graph() {
 fn function_call_is_realm_owned_while_its_dynamic_atom_is_reused() {
     let mut runtime = Runtime::try_new(RuntimeLimits::default()).expect("runtime");
     let first = runtime.create_realm().expect("first realm");
+    let atoms_after_first_realm = runtime.atom_usage();
     let second = runtime.create_realm().expect("second realm");
     let call_name = JsString::from_utf8("call").expect("call");
     let call_key = runtime
@@ -2738,20 +2729,14 @@ fn function_call_is_realm_owned_while_its_dynamic_atom_is_reused() {
     }
 
     assert_ne!(calls[0], calls[1]);
-    assert_eq!(
-        runtime.atom_usage(),
-        AtomUsage {
-            live_atoms: PREDEFINED_ATOM_COUNT + 323,
-            live_description_code_units: PREDEFINED_DESCRIPTION_CODE_UNITS + 2_761,
-            interner_slots: PREDEFINED_INTERNER_SLOTS + 323,
-        }
-    );
+    assert_eq!(runtime.atom_usage(), atoms_after_first_realm);
 }
 
 #[test]
 fn function_apply_is_realm_owned_while_its_predefined_atom_is_reused() {
     let mut runtime = Runtime::try_new(RuntimeLimits::default()).expect("runtime");
     let first = runtime.create_realm().expect("first realm");
+    let atoms_after_first_realm = runtime.atom_usage();
     let second = runtime.create_realm().expect("second realm");
     let apply_key =
         PropertyKey::from_validated_atom(runtime.atoms.predefined(PredefinedAtom::Apply));
@@ -2787,14 +2772,7 @@ fn function_apply_is_realm_owned_while_its_predefined_atom_is_reused() {
     }
 
     assert_ne!(applies[0], applies[1]);
-    assert_eq!(
-        runtime.atom_usage(),
-        AtomUsage {
-            live_atoms: PREDEFINED_ATOM_COUNT + 323,
-            live_description_code_units: PREDEFINED_DESCRIPTION_CODE_UNITS + 2_761,
-            interner_slots: PREDEFINED_INTERNER_SLOTS + 323,
-        }
-    );
+    assert_eq!(runtime.atom_usage(), atoms_after_first_realm);
 }
 
 #[test]

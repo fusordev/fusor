@@ -421,6 +421,10 @@ impl<'compiler, 'statement, 'unit, 'arena, 'scope, 'layout>
                         statements: &program.body,
                         next: 0,
                     },
+                    StatementWork::VisitDirectiveList {
+                        directives: &program.directives,
+                        next: 0,
+                    },
                     StatementWork::PushScope {
                         scope: program_scope,
                         creator: program.node_id.get(),

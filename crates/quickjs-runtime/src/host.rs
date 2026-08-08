@@ -1,6 +1,6 @@
 //! Dependency-neutral host services used by runtime execution.
 
-use std::sync::Arc;
+use std::{error::Error, fmt, sync::Arc};
 
 use quickjs_bytecode::VerifiedBytecode;
 
@@ -29,6 +29,26 @@ pub struct DynamicFunctionCompileRequest {
     family: DynamicFunctionFamily,
     parameters: Arc<[JsString]>,
     body: JsString,
+}
+
+/// Owned source for one indirect `%eval%` compilation.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct IndirectEvalCompileRequest {
+    source: JsString,
+}
+
+impl IndirectEvalCompileRequest {
+    /// Creates an owned indirect-eval request.
+    #[must_use]
+    pub const fn new(source: JsString) -> Self {
+        Self { source }
+    }
+
+    /// Returns the exact JavaScript source string.
+    #[must_use]
+    pub const fn source(&self) -> &JsString {
+        &self.source
+    }
 }
 
 impl DynamicFunctionCompileRequest {
@@ -73,7 +93,7 @@ impl DynamicFunctionCompileRequest {
     }
 }
 
-/// Host compiler for supported dynamic-function families.
+/// Host compiler for runtime-created ECMAScript source.
 ///
 /// Implementations must return only a fully verified, immutable bytecode
 /// authority. Parsing, semantic analysis, and compilation remain outside the
@@ -89,7 +109,36 @@ pub trait DynamicFunctionCompiler: Send + Sync + 'static {
         &self,
         source: DynamicFunctionCompileRequest,
     ) -> Result<Arc<VerifiedBytecode>, DynamicFunctionCompileFailure>;
+
+    /// Compiles one indirect-eval Script.
+    ///
+    /// The default keeps embedders that provide only dynamic-Function support
+    /// fail closed. Engines that expose `%eval%` override this method.
+    ///
+    /// # Errors
+    ///
+    /// Returns either an exact JavaScript syntax failure or a shared engine
+    /// failure.
+    fn compile_indirect_eval(
+        &self,
+        _source: IndirectEvalCompileRequest,
+    ) -> Result<Arc<VerifiedBytecode>, DynamicFunctionCompileFailure> {
+        Err(DynamicFunctionCompileFailure::Engine {
+            source: Arc::new(IndirectEvalCompilerUnavailable),
+        })
+    }
 }
+
+#[derive(Debug)]
+struct IndirectEvalCompilerUnavailable;
+
+impl fmt::Display for IndirectEvalCompilerUnavailable {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("the host compiler does not support indirect eval")
+    }
+}
+
+impl Error for IndirectEvalCompilerUnavailable {}
 
 /// Compatibility name for the pre-generator compiler-service contract.
 pub use DynamicFunctionCompiler as OrdinaryDynamicFunctionCompiler;
@@ -103,7 +152,10 @@ mod tests {
 
     use quickjs_bytecode::VerifiedBytecode;
 
-    use super::{DynamicFunctionCompileRequest, DynamicFunctionCompiler, DynamicFunctionFamily};
+    use super::{
+        DynamicFunctionCompileRequest, DynamicFunctionCompiler, DynamicFunctionFamily,
+        IndirectEvalCompileRequest,
+    };
     use crate::{JsString, error::DynamicFunctionCompileFailure};
 
     struct RejectingCompiler;
@@ -154,5 +206,10 @@ mod tests {
             error.syntax_message().expect("syntax message"),
             &string("rejected")
         );
+
+        let error = compiler
+            .compile_indirect_eval(IndirectEvalCompileRequest::new(string("1")))
+            .expect_err("default eval compiler is unavailable");
+        assert!(error.engine_source().is_some());
     }
 }

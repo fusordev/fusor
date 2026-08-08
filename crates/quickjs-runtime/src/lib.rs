@@ -45,12 +45,12 @@ pub use bigint::{BigIntError, JsBigInt};
 pub use diagnostic::RuntimeDiagnosticError;
 pub use error::{
     DynamicFunctionCompileFailure, DynamicFunctionScriptError, EngineFault, ErrorObjectKind,
-    ExceptionKind, ExecutionError, GlobalScriptError, HandleError, HandleKind, InstallError,
-    JsException, JsStackFrame, RuntimeError, RuntimeResource, ValueKind,
+    ExceptionKind, ExecutionError, GlobalDeclarationRejectionKind, GlobalScriptError, HandleError,
+    HandleKind, InstallError, JsException, JsStackFrame, RuntimeError, RuntimeResource, ValueKind,
 };
 pub use host::{
     DynamicFunctionCompileRequest, DynamicFunctionCompiler, DynamicFunctionFamily,
-    OrdinaryDynamicFunctionCompiler, OrdinaryDynamicFunctionSource,
+    IndirectEvalCompileRequest, OrdinaryDynamicFunctionCompiler, OrdinaryDynamicFunctionSource,
 };
 pub use interrupt::{INTERRUPT_POLL_INTERVAL, InterruptHandler};
 pub use number::JsNumber;

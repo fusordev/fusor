@@ -30,13 +30,14 @@ use std::sync::Arc;
 use super::{
     BindingCell, CompilerCaptureLayout, CompilerCapturedBinding, CompilerClosureBinding,
     CompilerConstant, CompilerConstantValue, EnvironmentBinding, FrameBindingAddress, FunctionId,
-    HashSet, HeapReference, InstallError, InstalledCodeId, InstalledConstant, InstalledRoot,
-    InstalledTemplate, InstalledTemplateElement, InstalledTemplateObject, JsBigInt, JsNumber,
-    JsValue, OwnProperty, PropertyKey, RealmGlobalBinding, RealmGlobalBindingState,
-    RealmGlobalRequest, RealmId, RootEnvironment, RootTarget, Runtime, RuntimeError,
-    RuntimeResource, SlotValue, StoredValue, VerifiedBytecode, check_execution_limit,
-    check_install_limit, global_declaration_property_layout, global_function_replacement_layout,
-    rejected_global_declaration, runtime_string, stale_heap_reference, usize_to_u64,
+    GlobalDeclarationRejectionKind, HashSet, HeapReference, InstallError, InstalledCodeId,
+    InstalledConstant, InstalledRoot, InstalledTemplate, InstalledTemplateElement,
+    InstalledTemplateObject, JsBigInt, JsNumber, JsValue, OwnProperty, PropertyKey,
+    RealmGlobalBinding, RealmGlobalBindingState, RealmGlobalRequest, RealmId, RootEnvironment,
+    RootTarget, Runtime, RuntimeError, RuntimeResource, SlotValue, StoredValue, VerifiedBytecode,
+    check_execution_limit, check_install_limit, global_declaration_property_layout,
+    global_function_replacement_layout, rejected_global_declaration, runtime_string,
+    stale_heap_reference, usize_to_u64,
 };
 
 fn stage_constant(constant: &CompilerConstant) -> Result<InstalledConstant, InstallError> {
@@ -507,7 +508,12 @@ impl Runtime {
                             Some(RealmGlobalBindingState::Lexical { .. })
                         )
                     {
-                        return Err(rejected_global_declaration(authority, *closure, name)?);
+                        return Err(rejected_global_declaration(
+                            authority,
+                            *closure,
+                            name,
+                            GlobalDeclarationRejectionKind::BindingConflict,
+                        )?);
                     }
                     if let Some(property) = global_record.record.own_property(&key) {
                         if matches!(request, RealmGlobalRequest::Function)
@@ -517,11 +523,21 @@ impl Runtime {
                             )
                             .is_none()
                         {
-                            return Err(rejected_global_declaration(authority, *closure, name)?);
+                            return Err(rejected_global_declaration(
+                                authority,
+                                *closure,
+                                name,
+                                GlobalDeclarationRejectionKind::ObjectDefinitionRejected,
+                            )?);
                         }
                     } else {
                         if !global_record.record.is_extensible() {
-                            return Err(rejected_global_declaration(authority, *closure, name)?);
+                            return Err(rejected_global_declaration(
+                                authority,
+                                *closure,
+                                name,
+                                GlobalDeclarationRejectionKind::ObjectDefinitionRejected,
+                            )?);
                         }
                         new_object_properties = new_object_properties.saturating_add(1);
                     }
@@ -535,14 +551,24 @@ impl Runtime {
                             Some(RealmGlobalBindingState::Unresolved)
                         )
                     {
-                        return Err(rejected_global_declaration(authority, *closure, name)?);
+                        return Err(rejected_global_declaration(
+                            authority,
+                            *closure,
+                            name,
+                            GlobalDeclarationRejectionKind::BindingConflict,
+                        )?);
                     }
                     if global_record
                         .record
                         .own_property(&key)
                         .is_some_and(|property| !property.layout().is_configurable())
                     {
-                        return Err(rejected_global_declaration(authority, *closure, name)?);
+                        return Err(rejected_global_declaration(
+                            authority,
+                            *closure,
+                            name,
+                            GlobalDeclarationRejectionKind::BindingConflict,
+                        )?);
                     }
                 }
             }

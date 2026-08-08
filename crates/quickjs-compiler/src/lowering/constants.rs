@@ -380,7 +380,9 @@ impl<'arena> CompilationContext<'_, 'arena, '_> {
                     });
             }
             AstKind::StringLiteral(literal)
-                if !matches!(nodes.parent_kind(node_id), AstKind::Directive(_))
+                if (!matches!(nodes.parent_kind(node_id), AstKind::Directive(_))
+                    || (owner.index() == 0
+                        && crate::is_supported_script_root_goal(self.unit.goal())))
                     && !is_noncomputed_static_property_key_node(self.unit, node_id) =>
             {
                 let value = decode_compiler_string(

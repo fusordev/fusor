@@ -116,6 +116,7 @@ pub(super) fn finish_dynamic_function_constructor(
         Ok(installed) => installed,
         Err(crate::InstallError::GlobalDeclarationRejected {
             name,
+            kind: _,
             function,
             pc,
             source_span,
@@ -182,9 +183,132 @@ pub(super) fn finish_dynamic_function_constructor(
     frame.dynamic_return = Some(DynamicFunctionReturn {
         root: installed,
         realm: native.realm,
-        family,
+        kind: DynamicRootKind::Function(family),
         construction,
         origin: Some(origin),
+    });
+    Ok(NativeDispatch::Frame(frame))
+}
+
+#[allow(
+    clippy::too_many_arguments,
+    clippy::too_many_lines,
+    reason = "eval compilation, installation, frame admission, and rollback form one audited boundary"
+)]
+pub(super) fn finish_indirect_eval(
+    runtime: &mut Runtime,
+    realm: RealmId,
+    source: JsString,
+    return_to: Option<CallReturn>,
+    origin: JsStackFrame,
+    active_root_frames: &[Frame],
+    active_frames: usize,
+    active_frame_values: u64,
+    compiler: &Arc<dyn OrdinaryDynamicFunctionCompiler>,
+    execution_budget: &mut ExecutionBudget,
+) -> Result<NativeDispatch, NativeFailure> {
+    execution_budget.charge_indirect_eval_compilation(&source)?;
+    let authority = match compiler.compile_indirect_eval(IndirectEvalCompileRequest::new(source)) {
+        Ok(authority) => authority,
+        Err(DynamicFunctionCompileFailure::Syntax { message }) => {
+            return Err(NativeFailure::Abrupt(PendingException {
+                realm,
+                payload: PendingExceptionPayload::EngineError {
+                    kind: ExceptionKind::SyntaxError,
+                    message,
+                },
+                origin,
+            }));
+        }
+        Err(error @ DynamicFunctionCompileFailure::Engine { .. }) => {
+            return Err(NativeFailure::Execution(error.into()));
+        }
+    };
+
+    let exception_authority = Arc::clone(&authority);
+    let installation = {
+        let mut context = Context { runtime, realm };
+        context.install_indirect_eval_script_during_execution(authority)
+    };
+    let mut installed = match installation {
+        Ok(installed) => installed,
+        Err(crate::InstallError::GlobalDeclarationRejected {
+            name,
+            kind,
+            function,
+            pc,
+            source_span,
+        }) => {
+            let (message, declaration_origin) =
+                global_declaration_error(&exception_authority, &name, function, pc, source_span)
+                    .map_err(NativeFailure::Execution)?;
+            let snapshot = capture_error_stack(runtime, active_root_frames, &origin)
+                .map_err(NativeFailure::Execution)?;
+            let stack = render_error_stack(runtime, &snapshot).map_err(NativeFailure::Execution)?;
+            let exception_kind = match kind {
+                GlobalDeclarationRejectionKind::BindingConflict => ExceptionKind::SyntaxError,
+                GlobalDeclarationRejectionKind::ObjectDefinitionRejected => {
+                    ExceptionKind::TypeError
+                }
+            };
+            return Err(NativeFailure::Abrupt(PendingException {
+                realm,
+                payload: PendingExceptionPayload::FrozenEngineError {
+                    kind: exception_kind,
+                    message,
+                    stack,
+                },
+                origin: declaration_origin,
+            }));
+        }
+        Err(error) => return Err(NativeFailure::Execution(error.into())),
+    };
+    let plan = match plan_frame(
+        runtime,
+        installed.function,
+        active_frames,
+        active_frame_values,
+        0,
+        false,
+    ) {
+        Ok(plan) => plan,
+        Err(error) => {
+            retire_failed_dynamic_root(runtime, installed)?;
+            return Err(NativeFailure::Execution(error));
+        }
+    };
+    let global = match runtime.realm_global_object(realm) {
+        Ok(global) => global,
+        Err(fault) => {
+            retire_failed_dynamic_root(runtime, installed)?;
+            return Err(NativeFailure::Execution(fault.into()));
+        }
+    };
+    let mut frame = match create_frame(
+        runtime,
+        plan,
+        StoredValue::Object(global),
+        None,
+        FrameArguments::Owned(CallArguments::empty()),
+        return_to,
+        None,
+    ) {
+        Ok(frame) => frame,
+        Err(error) => {
+            retire_failed_dynamic_root(runtime, installed)?;
+            return Err(NativeFailure::Execution(error));
+        }
+    };
+    if let Err(error) = installed.commit_environment() {
+        retire_failed_dynamic_root(runtime, installed)?;
+        return Err(NativeFailure::Execution(error.into()));
+    }
+    frame.dynamic_return = Some(DynamicFunctionReturn {
+        root: installed,
+        realm,
+        kind: DynamicRootKind::IndirectEval,
+        construction: None,
+        origin: None,
     });
     Ok(NativeDispatch::Frame(frame))
 }
@@ -802,10 +926,17 @@ pub(super) fn finish_dynamic_function_return(
     dynamic: DynamicFunctionReturn,
     value: StoredValue,
 ) -> Result<DynamicFunctionCompletion, ExecutionError> {
-    let completion = if let Some(new_target) = dynamic.construction {
-        apply_dynamic_constructor_prototype(runtime, new_target, dynamic.family, value)
-    } else {
-        Ok(value)
+    let completion = match (dynamic.kind, dynamic.construction) {
+        (DynamicRootKind::Function(family), Some(new_target)) => {
+            apply_dynamic_constructor_prototype(runtime, new_target, family, value)
+        }
+        (DynamicRootKind::Function(_) | DynamicRootKind::IndirectEval, None) => Ok(value),
+        (DynamicRootKind::IndirectEval, Some(_)) => Err(ConstructorCompletionError::Execution(
+            EngineFault::RuntimeInvariant {
+                message: "indirect eval root retained a construction target",
+            }
+            .into(),
+        )),
     };
     let retirement = runtime.retire_dynamic_root(dynamic.root);
     retirement?;

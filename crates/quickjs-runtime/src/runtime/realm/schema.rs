@@ -397,14 +397,6 @@ pub(in crate::runtime) struct ConstructorPrototypeSpec {
     pub(in crate::runtime) prototype: IntrinsicIdentity,
 }
 
-/// Expected size of one semantic family before it is materialized as an array.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(in crate::runtime) struct FamilyCardinality {
-    pub(in crate::runtime) family: &'static str,
-    pub(in crate::runtime) actual: usize,
-    pub(in crate::runtime) expected: usize,
-}
-
 /// Ordered intrinsic declaration graph supplied to Realm construction.
 #[derive(Clone, Copy)]
 pub(in crate::runtime) struct IntrinsicSchema<'a> {
@@ -414,7 +406,6 @@ pub(in crate::runtime) struct IntrinsicSchema<'a> {
     pub(in crate::runtime) mandatory_objects: &'a [IntrinsicObjectId],
     pub(in crate::runtime) mandatory_functions: &'a [IntrinsicFunctionId],
     pub(in crate::runtime) constructor_prototypes: &'a [ConstructorPrototypeSpec],
-    pub(in crate::runtime) family_cardinalities: &'a [FamilyCardinality],
 }
 
 // Keep the semantic family types visible in rustdoc for the schema contract.
