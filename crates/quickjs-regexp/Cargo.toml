@@ -6,6 +6,9 @@ rust-version.workspace = true
 license.workspace = true
 
 [dependencies]
+# Use the ICU4X facade while enabling baked data only for the two components
+# needed by the RegExp engine.
+icu.workspace = true
 icu_casemap.workspace = true
 icu_properties.workspace = true
 oxc_allocator.workspace = true
