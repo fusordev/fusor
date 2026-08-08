@@ -76,7 +76,8 @@ use error::unsupported;
 pub use error::{LeafCompilationError, UnsupportedLeafFeature};
 use function::FunctionPlanningContext;
 use function_graph::{
-    constructor_realm_lookup_policy, verified_storage_policy, verify_compiled_function_graph,
+    binding_has_scope, constructor_realm_lookup_policy, verified_storage_policy,
+    verify_compiled_function_graph,
 };
 use layouts::{
     ArgumentSlot, FrameLayout, FrameLayoutInput, FrameSlot, FunctionTreeLayout,

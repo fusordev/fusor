@@ -1,6 +1,6 @@
 use quickjs_compiler::{
     CaptureSource, CompilationUnitKind, CompilerError, DeclarationKind, ExecutableKind,
-    StoragePlacement, UnsupportedFeature, build_storage_plan,
+    StoragePlacement, build_storage_plan,
 };
 use quickjs_frontend::{
     DynamicFunctionKind, DynamicFunctionSource, FrontendLimits, SourceFragment,
@@ -96,17 +96,20 @@ fn dynamic_async_generator_is_a_script_with_an_async_generator_child() {
 }
 
 #[test]
-fn direct_eval_inside_dynamic_code_remains_rejected() {
-    let error = storage_result(DynamicFunctionKind::Function, "return eval('1');")
-        .expect_err("direct eval must remain fail closed");
-
-    assert!(matches!(
-        error,
-        CompilerError::Unsupported {
-            feature: UnsupportedFeature::DirectEval,
-            ..
-        }
-    ));
+fn direct_eval_inside_dynamic_code_retains_constructor_realm_eval_lookup() {
+    let plan = storage_result(DynamicFunctionKind::Function, "return eval('1');")
+        .expect("direct eval storage");
+    let wrapper = plan
+        .executables()
+        .iter()
+        .find(|executable| executable.name() == Some("anonymous"))
+        .expect("dynamic function wrapper");
+    assert!(
+        plan.unresolved_globals_for(wrapper.id())
+            .expect("wrapper globals")
+            .iter()
+            .any(|global| global.name() == "eval")
+    );
 }
 
 #[test]

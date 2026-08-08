@@ -1531,11 +1531,6 @@ impl<'unit, 'arena, 'scope> Planner<'unit, 'arena, 'scope> {
         let nodes = semantic.nodes();
         for (node_id, node) in nodes.iter_enumerated() {
             match node.kind() {
-                AstKind::CallExpression(call)
-                    if !call.optional && call.callee.is_specific_id("eval") =>
-                {
-                    return unsupported(UnsupportedFeature::DirectEval, call.span);
-                }
                 AstKind::WithStatement(statement) => {
                     return unsupported(UnsupportedFeature::WithStatement, statement.span);
                 }
@@ -1556,18 +1551,6 @@ impl<'unit, 'arena, 'scope> Planner<'unit, 'arena, 'scope> {
             }
         }
 
-        if semantic
-            .scoping()
-            .scope_descendants_from_root()
-            .any(|scope_id| {
-                semantic
-                    .scoping()
-                    .scope_flags(scope_id)
-                    .contains_direct_eval()
-            })
-        {
-            return unsupported(UnsupportedFeature::DirectEval, self.root_span);
-        }
         Ok(())
     }
 

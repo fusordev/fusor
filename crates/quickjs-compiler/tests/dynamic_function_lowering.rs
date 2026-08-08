@@ -334,6 +334,27 @@ fn unresolved_names_lower_through_constructor_realm_global_slots() {
 }
 
 #[test]
+fn dynamic_function_bare_eval_retains_constructor_realm_identity_lookup() {
+    let tree = compile_dynamic_function(&[], SourceFragment::new("return eval('1');"))
+        .expect("dynamic Function direct eval authority");
+    let wrapper = &tree.functions()[1];
+    assert!(
+        wrapper
+            .realm_globals()
+            .iter()
+            .any(|global| global.name() == "eval")
+    );
+    assert!(opcodes(wrapper).iter().any(|&(opcode, operands)| {
+        opcode == FinalOpcode::Eval
+            && operands
+                == Operands::NPopU16 {
+                    argument_count: 1,
+                    scope_index: 1,
+                }
+    }));
+}
+
+#[test]
 fn typeof_an_absent_constructor_realm_name_uses_get_var_undef() {
     let tree = compile_dynamic_function(
         &[],

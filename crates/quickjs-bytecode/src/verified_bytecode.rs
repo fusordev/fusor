@@ -1396,6 +1396,22 @@ pub enum BytecodeVerificationErrorKind {
         /// One local in the cycle.
         local: u32,
     },
+    /// An adjusted `eval` scope operand points past the local domain.
+    EvalScopeIndexOutOfBounds {
+        /// Final bytecode position of the eval operation.
+        pc: BytecodePc,
+        /// Rejected adjusted scope operand.
+        scope_index: u16,
+        /// Local-variable count.
+        locals: u32,
+    },
+    /// An adjusted `eval` scope operand selects a function-scoped local.
+    EvalScopeHeadNotLexical {
+        /// Final bytecode position of the eval operation.
+        pc: BytecodePc,
+        /// Rejected zero-based local index.
+        local: u32,
+    },
     /// A variable-reference index is out of range.
     VariableReferenceOutOfBounds {
         /// Definition containing the reference.
@@ -1842,6 +1858,18 @@ impl fmt::Display for BytecodeVerificationErrorKind {
                     "scope-link chain contains a cycle at local {local}"
                 )
             }
+            Self::EvalScopeIndexOutOfBounds {
+                pc,
+                scope_index,
+                locals,
+            } => write!(
+                formatter,
+                "eval scope index {scope_index} at PC {pc} is outside adjusted local count {locals}"
+            ),
+            Self::EvalScopeHeadNotLexical { pc, local } => write!(
+                formatter,
+                "eval scope head local {local} at PC {pc} is not lexical"
+            ),
             Self::VariableReferenceOutOfBounds {
                 definition,
                 reference,
@@ -2418,6 +2446,7 @@ fn verify_function_metadata(
         function,
     )?;
     verify_variables(id, function, &metadata.variables)?;
+    verify_eval_scope_operands(id, flow, &metadata.variables)?;
     verify_closures(
         id,
         graph.root_id(),
@@ -3563,6 +3592,54 @@ fn verify_scope_links(
         }
         for local in path.drain(..) {
             states[local] = 2;
+        }
+    }
+    Ok(())
+}
+
+/// Validates `QuickJS`'s adjusted direct-eval scope encoding.
+///
+/// `0` is `ARG_SCOPE_END`, `1` is the ordinary `-1` end sentinel, and every
+/// larger value is a zero-based local index plus two. A concrete head must be
+/// lexical; function-scoped arguments and locals are appended by direct-eval
+/// environment construction after walking this lexical chain.
+fn verify_eval_scope_operands(
+    id: FunctionTemplateId,
+    flow: &VerifiedControlFlow,
+    variables: &[VariableDefinition],
+) -> Result<(), BytecodeVerificationError> {
+    let arguments = flow.domains().argument_count() as usize;
+    let locals = &variables[arguments..];
+    for verified in flow.instructions() {
+        let decoded = verified.decoded();
+        let instruction = decoded.instruction();
+        let ((FinalOpcode::Eval, Operands::NPopU16 { scope_index, .. })
+        | (FinalOpcode::ApplyEval, Operands::U16(scope_index))) =
+            (instruction.opcode(), instruction.operands())
+        else {
+            continue;
+        };
+        let Some(local) = scope_index.checked_sub(2).map(u32::from) else {
+            continue;
+        };
+        let Some(definition) = locals.get(local as usize) else {
+            return Err(BytecodeVerificationError::function(
+                id,
+                BytecodeVerificationErrorKind::EvalScopeIndexOutOfBounds {
+                    pc: decoded.pc(),
+                    scope_index,
+                    locals: usize_to_u32(locals.len()),
+                },
+            ));
+        };
+        if !definition.has_scope {
+            return Err(BytecodeVerificationError::function(
+                id,
+                BytecodeVerificationErrorKind::EvalScopeHeadNotLexical {
+                    pc: decoded.pc(),
+                    local,
+                },
+            ));
         }
     }
     Ok(())
@@ -6209,6 +6286,8 @@ const fn supported_compiler_opcode(opcode: FinalOpcode) -> bool {
             | FinalOpcode::Call
             | FinalOpcode::CallMethod
             | FinalOpcode::Apply
+            | FinalOpcode::Eval
+            | FinalOpcode::ApplyEval
             | FinalOpcode::ArrayFrom
             | FinalOpcode::CheckCtorReturn
             | FinalOpcode::CheckCtor
@@ -10313,6 +10392,8 @@ fn collect_requirements(
             | FinalOpcode::Call3
             | FinalOpcode::CallMethod
             | FinalOpcode::Apply
+            | FinalOpcode::Eval
+            | FinalOpcode::ApplyEval
             | FinalOpcode::InitCtor
             | FinalOpcode::GetSuper
             | FinalOpcode::GetSuperValue

@@ -1210,10 +1210,7 @@ fn unsupported(source: &str, mode: ParseMode) -> (UnsupportedFeature, quickjs_fr
 
 #[test]
 fn unsupported_dynamic_binding_cases_fail_closed_at_exact_spans() {
-    let cases = [
-        ("eval('code')", UnsupportedFeature::DirectEval),
-        ("with (object) value;", UnsupportedFeature::WithStatement),
-    ];
+    let cases = [("with (object) value;", UnsupportedFeature::WithStatement)];
 
     for (source, expected) in cases {
         let (actual, span) = unsupported(source, ParseMode::Script);
@@ -1277,7 +1274,20 @@ fn host_forced_strict_block_function_is_a_single_local_binding() {
 }
 
 #[test]
-fn shadowed_bare_eval_still_fails_closed() {
-    let (feature, _) = unsupported("function f(eval) { eval('code'); }", ParseMode::Script);
-    assert_eq!(feature, UnsupportedFeature::DirectEval);
+fn shadowed_bare_eval_retains_ordinary_resolved_storage() {
+    let plan = script("function f(eval) { eval('code'); }");
+    let function = plan
+        .executables()
+        .iter()
+        .find(|executable| executable.name() == Some("f"))
+        .expect("function executable");
+    assert!(
+        plan.resolved_references_for(function.id())
+            .expect("function references")
+            .iter()
+            .any(|reference| {
+                plan.binding(reference.binding())
+                    .is_some_and(|binding| binding.name() == "eval")
+            })
+    );
 }

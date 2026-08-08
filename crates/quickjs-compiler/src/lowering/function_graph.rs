@@ -128,7 +128,7 @@ fn raw_parameter_definition(
     ))
 }
 
-const fn binding_has_scope(policy: DeclarationPolicy) -> bool {
+pub(in crate::lowering) const fn binding_has_scope(policy: DeclarationPolicy) -> bool {
     matches!(
         policy.kind(),
         DeclarationKind::Let

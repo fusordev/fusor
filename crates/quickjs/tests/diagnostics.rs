@@ -63,7 +63,7 @@ fn registered_frontend_diagnostics_render_at_the_chained_original_source() {
 
 #[test]
 fn registered_compiler_rejections_have_stable_codes_and_mapped_labels() {
-    let (sources, error) = evaluate_failure("eval('1');", "evaluate();");
+    let (sources, error) = evaluate_failure("with (object) value;", "with (object) value;");
     assert!(matches!(
         error.failure(),
         RegisteredScriptFailure::Compiler(_)
@@ -76,7 +76,7 @@ fn registered_compiler_rejections_have_stable_codes_and_mapped_labels() {
         report.primary().code().as_str(),
         "quickjs::compiler::planning::unsupported"
     );
-    assert!(report.primary().message().contains("DirectEval"));
+    assert!(report.primary().message().contains("WithStatement"));
     assert_eq!(
         report.primary().labels()[0].span().source_id(),
         &sources

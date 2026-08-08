@@ -1,11 +1,12 @@
 use quickjs::{
-    DynamicFunctionCompilerError, DynamicFunctionConstructionError, DynamicFunctionLimits,
-    call_with_dynamic_function_support, construct_dynamic_function,
+    DynamicFunctionConstructionError, DynamicFunctionLimits, call_with_dynamic_function_support,
+    construct_dynamic_function,
 };
+use quickjs_bytecode::FinalOpcode;
 use quickjs_frontend::{DynamicFunctionKind, DynamicFunctionSource, SourceFragment};
 use quickjs_runtime::{
-    DynamicFunctionScriptError, ExceptionKind, ExecutionError, ExecutionLimits, JsNumber, Runtime,
-    RuntimeLimits, ValueKind,
+    DynamicFunctionScriptError, ExceptionKind, ExecutionError, ExecutionLimits, InstallError,
+    JsNumber, Runtime, RuntimeLimits, ValueKind,
 };
 
 fn source<'source>(
@@ -859,8 +860,11 @@ fn direct_eval_remains_fail_closed_without_installing_code() {
         .expect_err("direct eval remains unsupported");
         assert!(matches!(
             &error,
-            DynamicFunctionConstructionError::Compiler {
-                source: DynamicFunctionCompilerError::Planning(_),
+            DynamicFunctionConstructionError::Runtime {
+                source: DynamicFunctionScriptError::Install(InstallError::UnsupportedOpcode {
+                    opcode: FinalOpcode::Eval,
+                    ..
+                }),
                 ..
             }
         ));
@@ -887,8 +891,11 @@ fn direct_eval_inside_an_object_method_rejects_the_whole_dynamic_function() {
         .expect_err("direct eval in a method remains unsupported");
         assert!(matches!(
             &error,
-            DynamicFunctionConstructionError::Compiler {
-                source: DynamicFunctionCompilerError::Planning(_),
+            DynamicFunctionConstructionError::Runtime {
+                source: DynamicFunctionScriptError::Install(InstallError::UnsupportedOpcode {
+                    opcode: FinalOpcode::Eval,
+                    ..
+                }),
                 ..
             }
         ));

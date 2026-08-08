@@ -3135,6 +3135,116 @@ fn typed_stack_input_with_captures(
 }
 
 #[test]
+fn compiler_eval_scope_operand_is_tied_to_verified_lexical_metadata() {
+    let definition = VariableDefinition::new(
+        Some(AtomPoolIndex::new(0)),
+        ScopeLink::End,
+        let_policy(),
+        true,
+        None,
+    );
+    let eval = |scope_index| {
+        typed_stack_input(
+            &[
+                (FinalOpcode::SetLocUninitialized, Operands::Loc(0)),
+                (FinalOpcode::Push1, Operands::NoneInt),
+                (FinalOpcode::PutLoc0, Operands::NoneLoc),
+                (FinalOpcode::Push7, Operands::NoneInt),
+                (
+                    FinalOpcode::Eval,
+                    Operands::NPopU16 {
+                        argument_count: 0,
+                        scope_index,
+                    },
+                ),
+                (FinalOpcode::Return, Operands::None),
+            ],
+            &[atom("lexical")],
+            std::slice::from_ref(&definition),
+        )
+    };
+
+    verify_compiler_bytecode_graph(eval(2), BytecodeGraphVerificationLimits::default())
+        .expect("adjusted scope index two selects lexical local zero");
+
+    let error = verify_compiler_bytecode_graph(eval(3), BytecodeGraphVerificationLimits::default())
+        .expect_err("an eval scope head cannot exceed the local metadata domain");
+    assert!(matches!(
+        error.kind(),
+        BytecodeVerificationErrorKind::EvalScopeIndexOutOfBounds {
+            scope_index: 3,
+            locals: 1,
+            ..
+        }
+    ));
+
+    let function_scoped = typed_stack_input(
+        &[
+            (FinalOpcode::Push7, Operands::NoneInt),
+            (
+                FinalOpcode::Eval,
+                Operands::NPopU16 {
+                    argument_count: 0,
+                    scope_index: 2,
+                },
+            ),
+            (FinalOpcode::Return, Operands::None),
+        ],
+        &[atom("local")],
+        &[VariableDefinition::new(
+            Some(AtomPoolIndex::new(0)),
+            ScopeLink::End,
+            var_policy(),
+            false,
+            None,
+        )],
+    );
+    let error =
+        verify_compiler_bytecode_graph(function_scoped, BytecodeGraphVerificationLimits::default())
+            .expect_err("the lexical scope chain cannot start at a function-scoped local");
+    assert!(matches!(
+        error.kind(),
+        BytecodeVerificationErrorKind::EvalScopeHeadNotLexical { local: 0, .. }
+    ));
+}
+
+#[test]
+fn compiler_eval_scope_accepts_both_adjusted_sentinels_and_apply_eval() {
+    for scope_index in [0, 1] {
+        let eval = typed_stack_input(
+            &[
+                (FinalOpcode::Push7, Operands::NoneInt),
+                (
+                    FinalOpcode::Eval,
+                    Operands::NPopU16 {
+                        argument_count: 0,
+                        scope_index,
+                    },
+                ),
+                (FinalOpcode::Return, Operands::None),
+            ],
+            &[],
+            &[],
+        );
+        verify_compiler_bytecode_graph(eval, BytecodeGraphVerificationLimits::default())
+            .expect("adjusted eval-scope sentinel");
+
+        let apply_eval = typed_stack_input(
+            &[
+                (FinalOpcode::Push7, Operands::NoneInt),
+                (FinalOpcode::Undefined, Operands::None),
+                (FinalOpcode::ApplyEval, Operands::U16(scope_index)),
+                (FinalOpcode::Return, Operands::None),
+            ],
+            &[],
+            &[],
+        );
+        verify_compiler_bytecode_graph(apply_eval, BytecodeGraphVerificationLimits::default())
+            .expect("apply_eval uses the same adjusted eval-scope sentinel");
+    }
+}
+
+#[test]
 fn catch_binding_requires_the_exact_handler_value_initialization() {
     let definition = VariableDefinition::new(
         Some(AtomPoolIndex::new(0)),
