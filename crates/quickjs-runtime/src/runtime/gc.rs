@@ -621,6 +621,7 @@ impl Runtime {
                 );
                 for prototype in [
                     iterators.iterator_prototype,
+                    iterators.wrapper_prototype,
                     iterators.async_iterator_prototype,
                     iterators.async_from_sync_iterator_prototype,
                     iterators.array_iterator_prototype,
@@ -639,6 +640,12 @@ impl Runtime {
                         &mut work,
                     );
                 }
+                mark_heap_reference(
+                    HeapReference::Function(iterators.constructor),
+                    &mut marked_functions,
+                    &mut marked_objects,
+                    &mut work,
+                );
                 mark_heap_reference(
                     HeapReference::Function(generators.function_constructor),
                     &mut marked_functions,
@@ -1104,6 +1111,16 @@ impl Runtime {
                                     &mut marked_objects,
                                     &mut work,
                                 );
+                            }
+                            if let Some(iterator) = object.iterator_wrapper_state() {
+                                for value in [iterator.iterator(), iterator.next_method()] {
+                                    mark_stored_value(
+                                        value,
+                                        &mut marked_functions,
+                                        &mut marked_objects,
+                                        &mut work,
+                                    );
+                                }
                             }
                             if let Some(view) = object.data_view_state() {
                                 mark_heap_reference(

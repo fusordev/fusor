@@ -194,6 +194,10 @@ impl RealmSnapshot {
             (symbol.prototype, "%Symbol.prototype%"),
             (iterators.iterator_prototype, "%Iterator.prototype%"),
             (
+                iterators.wrapper_prototype,
+                "%WrapForValidIteratorPrototype%",
+            ),
+            (
                 iterators.async_iterator_prototype,
                 "%AsyncIterator.prototype%",
             ),

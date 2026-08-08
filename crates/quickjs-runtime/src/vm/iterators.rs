@@ -47,6 +47,398 @@ fn iterator_exception(
     }))
 }
 
+#[derive(Clone, Copy)]
+enum IteratorFromStage {
+    IteratorMethod,
+    Iterator,
+    NextMethod,
+    PrototypeWalk,
+}
+
+pub(super) struct IteratorFromContinuation {
+    input: StoredValue,
+    iterator: Option<StoredValue>,
+    next_method: Option<StoredValue>,
+    current: Option<HeapReference>,
+    realm: RealmId,
+    stage: IteratorFromStage,
+    origin: JsStackFrame,
+}
+
+impl IteratorFromContinuation {
+    pub(super) fn retained_values(&self) -> u64 {
+        1_u64
+            .saturating_add(u64::from(self.iterator.is_some()))
+            .saturating_add(u64::from(self.next_method.is_some()))
+            .saturating_add(u64::from(self.current.is_some()))
+    }
+
+    pub(super) fn trace_roots(&self, mark: &mut dyn FnMut(CollectionRoot)) {
+        trace_stored_value_root(&self.input, mark);
+        if let Some(iterator) = &self.iterator {
+            trace_stored_value_root(iterator, mark);
+        }
+        if let Some(next_method) = &self.next_method {
+            trace_stored_value_root(next_method, mark);
+        }
+        if let Some(current) = self.current {
+            mark(CollectionRoot::Heap(current));
+        }
+    }
+}
+
+pub(super) struct IteratorWrapperReturnContinuation {
+    iterator: StoredValue,
+    realm: RealmId,
+    origin: JsStackFrame,
+}
+
+impl IteratorWrapperReturnContinuation {
+    pub(super) const fn retained_values() -> u64 {
+        1
+    }
+
+    pub(super) fn trace_roots(&self, mark: &mut dyn FnMut(CollectionRoot)) {
+        trace_stored_value_root(&self.iterator, mark);
+    }
+}
+
+#[derive(Clone, Copy)]
+enum IteratorPrototypeSetterStage {
+    OwnDescriptor,
+    Complete,
+}
+
+pub(super) struct IteratorPrototypeSetterContinuation {
+    receiver: StoredValue,
+    value: StoredValue,
+    key: PropertyKey,
+    name: JsString,
+    reference: HeapReference,
+    realm: RealmId,
+    stage: IteratorPrototypeSetterStage,
+    origin: JsStackFrame,
+}
+
+impl IteratorPrototypeSetterContinuation {
+    pub(super) const fn retained_values() -> u64 {
+        3
+    }
+
+    pub(super) fn trace_roots(&self, mark: &mut dyn FnMut(CollectionRoot)) {
+        trace_stored_value_root(&self.receiver, mark);
+        trace_stored_value_root(&self.value, mark);
+        mark(CollectionRoot::Heap(self.reference));
+    }
+}
+
+pub(super) fn begin_iterator_constructor(
+    runtime: &mut Runtime,
+    function: FunctionId,
+    new_target: Option<FunctionId>,
+    realm: RealmId,
+    return_to: Option<CallReturn>,
+    origin: JsStackFrame,
+    execution_budget: &mut ExecutionBudget,
+) -> Result<NativeDispatch, NativeFailure> {
+    let Some(new_target) = new_target else {
+        return Err(iterator_exception(
+            realm,
+            origin,
+            ExceptionKind::TypeError,
+            "Iterator must be subclassed",
+        )?);
+    };
+    if new_target == function {
+        return Err(iterator_exception(
+            realm,
+            origin,
+            ExceptionKind::TypeError,
+            "Iterator cannot be constructed directly",
+        )?);
+    }
+    let key = runtime.predefined_property_key(PredefinedAtom::Prototype);
+    begin_intrinsic_get(
+        runtime,
+        realm,
+        HeapReference::Function(new_target),
+        StoredValue::Function(new_target),
+        &key,
+        IntrinsicGetContinuation::IteratorConstructor { new_target },
+        return_to,
+        Some(origin),
+        execution_budget,
+    )
+}
+
+pub(super) fn finish_iterator_constructor_wrapper(
+    runtime: &mut Runtime,
+    new_target: FunctionId,
+    prototype: &StoredValue,
+) -> Result<NativeDispatch, NativeFailure> {
+    let prototype = match prototype {
+        StoredValue::Function(function) => HeapReference::Function(*function),
+        StoredValue::Object(object) => HeapReference::Object(*object),
+        StoredValue::Undefined
+        | StoredValue::Null
+        | StoredValue::Boolean(_)
+        | StoredValue::Number(_)
+        | StoredValue::BigInt(_)
+        | StoredValue::String(_)
+        | StoredValue::Symbol(_) => {
+            let realm = runtime.function_realm(new_target)?;
+            HeapReference::Object(runtime.realm_iterator_prototype(realm)?)
+        }
+    };
+    let object = runtime.allocate_ordinary_object_with_prototype(prototype)?;
+    Ok(NativeDispatch::Immediate(StoredValue::Object(object)))
+}
+
+pub(super) fn begin_iterator_from(
+    runtime: &mut Runtime,
+    input: StoredValue,
+    realm: RealmId,
+    return_to: Option<CallReturn>,
+    origin: JsStackFrame,
+    execution_budget: &mut ExecutionBudget,
+) -> Result<NativeDispatch, NativeFailure> {
+    if !matches!(
+        input,
+        StoredValue::String(_) | StoredValue::Function(_) | StoredValue::Object(_)
+    ) {
+        return Err(iterator_exception(
+            realm,
+            origin,
+            ExceptionKind::TypeError,
+            "Iterator.from requires an object or string",
+        )?);
+    }
+    let state = IteratorFromContinuation {
+        input,
+        iterator: None,
+        next_method: None,
+        current: None,
+        realm,
+        stage: IteratorFromStage::IteratorMethod,
+        origin,
+    };
+    read_iterator_from_property(
+        runtime,
+        state,
+        runtime.predefined_symbol_property_key(PredefinedAtom::SymbolIterator),
+        "Symbol.iterator",
+        return_to,
+        execution_budget,
+    )
+}
+
+#[allow(
+    clippy::too_many_lines,
+    reason = "GetIteratorFlattenable and OrdinaryHasInstance share one resumable, proxy-aware state machine"
+)]
+pub(super) fn advance_iterator_from(
+    runtime: &mut Runtime,
+    mut state: IteratorFromContinuation,
+    completion: StoredValue,
+    return_to: Option<CallReturn>,
+    execution_budget: &mut ExecutionBudget,
+) -> Result<NativeDispatch, NativeFailure> {
+    match state.stage {
+        IteratorFromStage::IteratorMethod => {
+            if matches!(completion, StoredValue::Undefined | StoredValue::Null) {
+                if !matches!(
+                    state.input,
+                    StoredValue::Function(_) | StoredValue::Object(_)
+                ) {
+                    return Err(iterator_exception(
+                        state.realm,
+                        state.origin,
+                        ExceptionKind::TypeError,
+                        "value is not iterator-like",
+                    )?);
+                }
+                state.iterator = Some(state.input.duplicate());
+                state.stage = IteratorFromStage::NextMethod;
+                return read_iterator_from_property(
+                    runtime,
+                    state,
+                    runtime.predefined_property_key(PredefinedAtom::Next),
+                    "next",
+                    return_to,
+                    execution_budget,
+                );
+            }
+            let StoredValue::Function(method) = completion else {
+                return Err(iterator_exception(
+                    state.realm,
+                    state.origin,
+                    ExceptionKind::TypeError,
+                    "Symbol.iterator is not callable",
+                )?);
+            };
+            let receiver = state.input.duplicate();
+            state.stage = IteratorFromStage::Iterator;
+            let origin = state.origin.clone();
+            iterator_method_call(
+                method,
+                receiver,
+                NativeContinuation::IteratorFrom(state),
+                return_to,
+                origin,
+            )
+        }
+        IteratorFromStage::Iterator => {
+            if !matches!(
+                completion,
+                StoredValue::Function(_) | StoredValue::Object(_)
+            ) {
+                return Err(iterator_exception(
+                    state.realm,
+                    state.origin,
+                    ExceptionKind::TypeError,
+                    "iterator method did not return an object",
+                )?);
+            }
+            state.iterator = Some(completion);
+            state.stage = IteratorFromStage::NextMethod;
+            read_iterator_from_property(
+                runtime,
+                state,
+                runtime.predefined_property_key(PredefinedAtom::Next),
+                "next",
+                return_to,
+                execution_budget,
+            )
+        }
+        IteratorFromStage::NextMethod => {
+            let iterator = state
+                .iterator
+                .as_ref()
+                .ok_or(EngineFault::RuntimeInvariant {
+                    message: "Iterator.from next lookup completed without an iterator",
+                })?;
+            let reference = iterator
+                .heap_reference()
+                .ok_or(EngineFault::RuntimeInvariant {
+                    message: "Iterator.from retained a non-object iterator",
+                })?;
+            state.next_method = Some(completion);
+            state.current = Some(reference);
+            state.stage = IteratorFromStage::PrototypeWalk;
+            execution_budget.charge_instructions(1)?;
+            let dispatch = begin_internal_get_prototype_of(
+                runtime,
+                reference,
+                state.realm,
+                return_to,
+                state.origin.clone(),
+                execution_budget,
+            )?;
+            continue_get_after(
+                dispatch,
+                state,
+                NativeContinuation::IteratorFrom,
+                |state, value| {
+                    advance_iterator_from(runtime, state, value, return_to, execution_budget)
+                },
+                "Iterator.from [[GetPrototypeOf]] produced a structured result",
+            )
+        }
+        IteratorFromStage::PrototypeWalk => {
+            let iterator_prototype = runtime.realm_iterator_prototype(state.realm)?;
+            if completion.heap_reference() == Some(HeapReference::Object(iterator_prototype)) {
+                return Ok(NativeDispatch::Immediate(state.iterator.ok_or(
+                    EngineFault::RuntimeInvariant {
+                        message: "Iterator.from prototype walk lost its iterator",
+                    },
+                )?));
+            }
+            let Some(reference) = completion.heap_reference() else {
+                if !matches!(completion, StoredValue::Null) {
+                    return Err(EngineFault::RuntimeInvariant {
+                        message: "Iterator.from [[GetPrototypeOf]] returned neither object nor null",
+                    }
+                    .into());
+                }
+                let iterator = state.iterator.ok_or(EngineFault::RuntimeInvariant {
+                    message: "Iterator.from wrapper allocation lost its iterator",
+                })?;
+                let next_method = state.next_method.ok_or(EngineFault::RuntimeInvariant {
+                    message: "Iterator.from wrapper allocation lost its next method",
+                })?;
+                let wrapper =
+                    runtime.allocate_iterator_wrapper(state.realm, iterator, next_method)?;
+                return Ok(NativeDispatch::Immediate(StoredValue::Object(wrapper)));
+            };
+            state.current = Some(reference);
+            execution_budget.charge_instructions(1)?;
+            let dispatch = begin_internal_get_prototype_of(
+                runtime,
+                reference,
+                state.realm,
+                return_to,
+                state.origin.clone(),
+                execution_budget,
+            )?;
+            continue_get_after(
+                dispatch,
+                state,
+                NativeContinuation::IteratorFrom,
+                |state, value| {
+                    advance_iterator_from(runtime, state, value, return_to, execution_budget)
+                },
+                "Iterator.from [[GetPrototypeOf]] produced a structured result",
+            )
+        }
+    }
+}
+
+fn read_iterator_from_property(
+    runtime: &mut Runtime,
+    state: IteratorFromContinuation,
+    key: PropertyKey,
+    property_name: &str,
+    return_to: Option<CallReturn>,
+    execution_budget: &mut ExecutionBudget,
+) -> Result<NativeDispatch, NativeFailure> {
+    let base = match state.stage {
+        IteratorFromStage::IteratorMethod => &state.input,
+        IteratorFromStage::NextMethod => {
+            state
+                .iterator
+                .as_ref()
+                .ok_or(EngineFault::RuntimeInvariant {
+                    message: "Iterator.from next lookup has no iterator",
+                })?
+        }
+        IteratorFromStage::Iterator | IteratorFromStage::PrototypeWalk => {
+            return Err(EngineFault::RuntimeInvariant {
+                message: "Iterator.from attempted a property read in the wrong stage",
+            }
+            .into());
+        }
+    };
+    charge_iterator_property_lookup(runtime, base, execution_budget)?;
+    let name = JsString::from_utf8(property_name)?;
+    let dispatch = begin_value_get(
+        runtime,
+        base,
+        key,
+        Some(&name),
+        state.realm,
+        return_to,
+        state.origin.clone(),
+        execution_budget,
+    )?;
+    continue_get_after(
+        dispatch,
+        state,
+        NativeContinuation::IteratorFrom,
+        |state, value| advance_iterator_from(runtime, state, value, return_to, execution_budget),
+        "Iterator.from Get produced a structured result",
+    )
+}
+
 pub(super) fn iterator_getter_call(
     function: FunctionId,
     receiver: StoredValue,
@@ -84,6 +476,25 @@ fn iterator_method_call(
     origin: JsStackFrame,
 ) -> Result<NativeDispatch, NativeFailure> {
     iterator_getter_call(function, receiver, continuation, return_to, origin, None)
+}
+
+fn iterator_terminal_call(
+    function: FunctionId,
+    receiver: StoredValue,
+    return_to: Option<CallReturn>,
+    origin: JsStackFrame,
+) -> NativeDispatch {
+    NativeDispatch::Call(NativeCall {
+        function,
+        receiver,
+        arguments: CallArguments::empty(),
+        return_to,
+        origin,
+        continuations: Vec::new(),
+        pre_call: None,
+        new_target: None,
+        native_caller: None,
+    })
 }
 
 pub(super) fn iterator_result(
@@ -509,6 +920,255 @@ pub(super) fn begin_string_iterator_next(
     };
     let result = runtime.commit_prepared_iterator_result(prepared, value, done)?;
     Ok(NativeDispatch::Immediate(StoredValue::Object(result)))
+}
+
+pub(super) fn begin_iterator_wrapper_next(
+    runtime: &mut Runtime,
+    receiver: &StoredValue,
+    realm: RealmId,
+    return_to: Option<CallReturn>,
+    origin: JsStackFrame,
+    execution_budget: &mut ExecutionBudget,
+) -> Result<NativeDispatch, NativeFailure> {
+    let StoredValue::Object(wrapper) = receiver else {
+        return Err(iterator_exception(
+            realm,
+            origin,
+            ExceptionKind::TypeError,
+            "Iterator wrapper expected",
+        )?);
+    };
+    let Some(record) = runtime.iterator_wrapper_record(*wrapper)? else {
+        return Err(iterator_exception(
+            realm,
+            origin,
+            ExceptionKind::TypeError,
+            "Iterator wrapper expected",
+        )?);
+    };
+    let StoredValue::Function(next) = record.next_method() else {
+        return Err(iterator_exception(
+            realm,
+            origin,
+            ExceptionKind::TypeError,
+            "iterator next method is not callable",
+        )?);
+    };
+    execution_budget.charge_instructions(1)?;
+    Ok(iterator_terminal_call(
+        *next,
+        record.iterator().duplicate(),
+        return_to,
+        origin,
+    ))
+}
+
+pub(super) fn begin_iterator_wrapper_return(
+    runtime: &mut Runtime,
+    receiver: &StoredValue,
+    realm: RealmId,
+    return_to: Option<CallReturn>,
+    origin: JsStackFrame,
+    execution_budget: &mut ExecutionBudget,
+) -> Result<NativeDispatch, NativeFailure> {
+    let StoredValue::Object(wrapper) = receiver else {
+        return Err(iterator_exception(
+            realm,
+            origin,
+            ExceptionKind::TypeError,
+            "Iterator wrapper expected",
+        )?);
+    };
+    let Some(record) = runtime.iterator_wrapper_record(*wrapper)? else {
+        return Err(iterator_exception(
+            realm,
+            origin,
+            ExceptionKind::TypeError,
+            "Iterator wrapper expected",
+        )?);
+    };
+    let iterator = record.iterator().duplicate();
+    charge_iterator_property_lookup(runtime, &iterator, execution_budget)?;
+    let key = runtime.predefined_property_key(PredefinedAtom::Return);
+    let name = JsString::from_utf8("return")?;
+    let state = IteratorWrapperReturnContinuation {
+        iterator,
+        realm,
+        origin,
+    };
+    let dispatch = begin_value_get(
+        runtime,
+        &state.iterator,
+        key,
+        Some(&name),
+        realm,
+        return_to,
+        state.origin.clone(),
+        execution_budget,
+    )?;
+    continue_get_after(
+        dispatch,
+        state,
+        NativeContinuation::IteratorWrapperReturn,
+        |state, value| {
+            advance_iterator_wrapper_return(runtime, state, &value, return_to, execution_budget)
+        },
+        "Iterator wrapper return Get produced a structured result",
+    )
+}
+
+pub(super) fn advance_iterator_wrapper_return(
+    runtime: &mut Runtime,
+    state: IteratorWrapperReturnContinuation,
+    completion: &StoredValue,
+    return_to: Option<CallReturn>,
+    execution_budget: &mut ExecutionBudget,
+) -> Result<NativeDispatch, NativeFailure> {
+    match completion {
+        StoredValue::Undefined | StoredValue::Null => {
+            iterator_result(runtime, state.realm, StoredValue::Undefined, true)
+        }
+        StoredValue::Function(function) => {
+            execution_budget.charge_instructions(1)?;
+            Ok(iterator_terminal_call(
+                *function,
+                state.iterator,
+                return_to,
+                state.origin,
+            ))
+        }
+        StoredValue::Boolean(_)
+        | StoredValue::Number(_)
+        | StoredValue::BigInt(_)
+        | StoredValue::String(_)
+        | StoredValue::Symbol(_)
+        | StoredValue::Object(_) => Err(iterator_exception(
+            state.realm,
+            state.origin,
+            ExceptionKind::TypeError,
+            "iterator return method is not callable",
+        )?),
+    }
+}
+
+#[allow(
+    clippy::too_many_arguments,
+    reason = "the intrinsic setter retains its descriptor key, receiver, value, realm, and caller continuation explicitly"
+)]
+pub(super) fn begin_iterator_prototype_setter(
+    runtime: &mut Runtime,
+    receiver: StoredValue,
+    value: StoredValue,
+    key: PropertyKey,
+    name: JsString,
+    realm: RealmId,
+    return_to: Option<CallReturn>,
+    origin: JsStackFrame,
+    execution_budget: &mut ExecutionBudget,
+) -> Result<NativeDispatch, NativeFailure> {
+    let Some(reference) = receiver.heap_reference() else {
+        return Err(iterator_exception(
+            realm,
+            origin,
+            ExceptionKind::TypeError,
+            "Iterator prototype setter receiver must be an object",
+        )?);
+    };
+    if reference == HeapReference::Object(runtime.realm_iterator_prototype(realm)?) {
+        return Err(iterator_exception(
+            realm,
+            origin,
+            ExceptionKind::TypeError,
+            "cannot replace an intrinsic Iterator prototype property",
+        )?);
+    }
+    execution_budget.charge_instructions(1)?;
+    let state = IteratorPrototypeSetterContinuation {
+        receiver,
+        value,
+        key: key.clone(),
+        name,
+        reference,
+        realm,
+        stage: IteratorPrototypeSetterStage::OwnDescriptor,
+        origin,
+    };
+    let dispatch = begin_internal_get_own_property(
+        runtime,
+        reference,
+        key,
+        realm,
+        return_to,
+        state.origin.clone(),
+        execution_budget,
+    )?;
+    continue_get_after(
+        dispatch,
+        state,
+        NativeContinuation::IteratorPrototypeSetter,
+        |state, value| {
+            advance_iterator_prototype_setter(runtime, state, &value, return_to, execution_budget)
+        },
+        "Iterator prototype setter [[GetOwnProperty]] produced a structured result",
+    )
+}
+
+pub(super) fn advance_iterator_prototype_setter(
+    runtime: &mut Runtime,
+    mut state: IteratorPrototypeSetterContinuation,
+    completion: &StoredValue,
+    return_to: Option<CallReturn>,
+    execution_budget: &mut ExecutionBudget,
+) -> Result<NativeDispatch, NativeFailure> {
+    match state.stage {
+        IteratorPrototypeSetterStage::Complete => {
+            Ok(NativeDispatch::Immediate(StoredValue::Undefined))
+        }
+        IteratorPrototypeSetterStage::OwnDescriptor => {
+            state.stage = IteratorPrototypeSetterStage::Complete;
+            let dispatch = if matches!(completion, StoredValue::Undefined) {
+                let definition = PropertyDefinition::data(
+                    Requested::Present(state.value.duplicate()),
+                    Requested::Present(true),
+                )
+                .with_enumerable(Requested::Present(true))
+                .with_configurable(Requested::Present(true));
+                begin_internal_define_own_property(
+                    runtime,
+                    state.reference,
+                    state.key.clone(),
+                    definition,
+                    state.realm,
+                    return_to,
+                    state.origin.clone(),
+                    execution_budget,
+                    DefinePropertyResult::Target,
+                )?
+            } else {
+                begin_internal_set(
+                    runtime,
+                    state.reference,
+                    state.key.clone(),
+                    state.name.clone(),
+                    state.value.duplicate(),
+                    state.receiver.duplicate(),
+                    true,
+                    false,
+                    state.realm,
+                    return_to,
+                    state.origin.clone(),
+                    execution_budget,
+                )?
+            };
+            continue_get_after(
+                dispatch,
+                state,
+                NativeContinuation::IteratorPrototypeSetter,
+                |_state, _value| Ok(NativeDispatch::Immediate(StoredValue::Undefined)),
+                "Iterator prototype setter internal write produced a structured result",
+            )
+        }
+    }
 }
 
 pub(super) fn begin_for_of_start(

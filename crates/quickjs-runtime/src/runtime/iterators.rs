@@ -26,12 +26,12 @@
 //! Realm-owned synchronous iterator state and iterator-result allocation.
 
 use super::{
-    ArrayIndex, ArrayIterator, ArrayIteratorKind, ArrayState, HeapObject, HeapReference, JsNumber,
-    JsString, ObjectId, ObjectRecord, PredefinedAtom, PropertyKey, PropertyLayout, RealmId,
-    RealmIntrinsics, RegExpStringIterator, Runtime, RuntimeResource, StoredValue, StringIterator,
-    check_execution_limit, stale_heap_reference, usize_to_u64,
+    ArrayIndex, ArrayIterator, ArrayIteratorKind, ArrayState, FunctionId, HeapObject,
+    HeapReference, JsNumber, JsString, ObjectId, ObjectRecord, PredefinedAtom, PropertyKey,
+    PropertyLayout, RealmId, RealmIntrinsics, RegExpStringIterator, Runtime, RuntimeResource,
+    StoredValue, StringIterator, check_execution_limit, stale_heap_reference, usize_to_u64,
 };
-use crate::object::OwnProperty;
+use crate::object::{IteratorRecord, OwnProperty};
 
 pub(crate) struct PreparedIteratorResultPlan {
     result: ObjectRecord,
@@ -72,6 +72,92 @@ pub(crate) struct RegExpStringIteratorSnapshot {
 }
 
 impl Runtime {
+    pub(crate) fn realm_iterator_constructor(
+        &self,
+        realm: RealmId,
+    ) -> Result<FunctionId, crate::EngineFault> {
+        let state = self
+            .realms
+            .get(realm)
+            .ok_or(crate::EngineFault::StaleHeapEdge {
+                edge: "realm",
+                index: realm.index(),
+                generation: realm.generation(),
+            })?;
+        let RealmIntrinsics::Ready { iterators, .. } = state.intrinsics else {
+            return Err(crate::EngineFault::RuntimeInvariant {
+                message: "realm iterator intrinsics are not initialized",
+            });
+        };
+        Ok(iterators.constructor)
+    }
+
+    pub(crate) fn realm_iterator_prototype(
+        &self,
+        realm: RealmId,
+    ) -> Result<ObjectId, crate::EngineFault> {
+        let state = self
+            .realms
+            .get(realm)
+            .ok_or(crate::EngineFault::StaleHeapEdge {
+                edge: "realm",
+                index: realm.index(),
+                generation: realm.generation(),
+            })?;
+        let RealmIntrinsics::Ready { iterators, .. } = state.intrinsics else {
+            return Err(crate::EngineFault::RuntimeInvariant {
+                message: "realm iterator intrinsics are not initialized",
+            });
+        };
+        Ok(iterators.iterator_prototype)
+    }
+
+    pub(crate) fn realm_iterator_wrapper_prototype(
+        &self,
+        realm: RealmId,
+    ) -> Result<ObjectId, crate::EngineFault> {
+        let state = self
+            .realms
+            .get(realm)
+            .ok_or(crate::EngineFault::StaleHeapEdge {
+                edge: "realm",
+                index: realm.index(),
+                generation: realm.generation(),
+            })?;
+        let RealmIntrinsics::Ready { iterators, .. } = state.intrinsics else {
+            return Err(crate::EngineFault::RuntimeInvariant {
+                message: "realm iterator intrinsics are not initialized",
+            });
+        };
+        Ok(iterators.wrapper_prototype)
+    }
+
+    pub(crate) fn allocate_iterator_wrapper(
+        &mut self,
+        realm: RealmId,
+        iterator: StoredValue,
+        next_method: StoredValue,
+    ) -> Result<ObjectId, crate::ExecutionError> {
+        let prototype = self.realm_iterator_wrapper_prototype(realm)?;
+        self.allocate_iterator_object(HeapObject::iterator_wrapper(
+            ObjectRecord::empty(Some(HeapReference::Object(prototype))),
+            IteratorRecord::new(iterator, next_method),
+        ))
+    }
+
+    pub(crate) fn iterator_wrapper_record(
+        &self,
+        wrapper: ObjectId,
+    ) -> Result<Option<IteratorRecord>, crate::EngineFault> {
+        let object = self
+            .objects
+            .get(wrapper)
+            .ok_or_else(|| stale_heap_reference(HeapReference::Object(wrapper)))?;
+        Ok(object
+            .iterator_wrapper_state()
+            .map(IteratorRecord::duplicate))
+    }
+
     pub(crate) fn allocate_async_from_sync_iterator(
         &mut self,
         realm: RealmId,

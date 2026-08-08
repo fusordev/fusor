@@ -138,12 +138,12 @@ impl RealmIntrinsicSchema {
             FamilyCardinality {
                 family: "Realm intrinsic objects",
                 actual: self.objects.len(),
-                expected: 68,
+                expected: 69,
             },
             FamilyCardinality {
                 family: "Realm native functions",
                 actual: self.specs.len(),
-                expected: 695,
+                expected: 703,
             },
         ];
         validate_intrinsic_schema(IntrinsicSchema {
@@ -184,6 +184,7 @@ pub(super) const fn is_declarative_object(id: IntrinsicObjectId) -> bool {
             | IntrinsicObjectId::TemporalZonedDateTimePrototype
             | IntrinsicObjectId::RegExpPrototype
             | IntrinsicObjectId::IteratorPrototype
+            | IntrinsicObjectId::WrapForValidIteratorPrototype
             | IntrinsicObjectId::AsyncIteratorPrototype
             | IntrinsicObjectId::AsyncFromSyncIteratorPrototype
             | IntrinsicObjectId::ArrayIteratorPrototype
@@ -285,7 +286,15 @@ pub(super) const fn is_declarative_function(id: IntrinsicFunctionId) -> bool {
             | NativeFunctionKind::RegExpPrototypeTest
             | NativeFunctionKind::RegExpPrototypeToString
             | NativeFunctionKind::RegExpPrototypeSymbol(_)
+            | NativeFunctionKind::IteratorConstructor
+            | NativeFunctionKind::IteratorFrom
+            | NativeFunctionKind::IteratorPrototypeConstructorGetter
+            | NativeFunctionKind::IteratorPrototypeConstructorSetter
+            | NativeFunctionKind::IteratorPrototypeToStringTagGetter
+            | NativeFunctionKind::IteratorPrototypeToStringTagSetter
             | NativeFunctionKind::IteratorPrototypeIterator
+            | NativeFunctionKind::IteratorWrapperNext
+            | NativeFunctionKind::IteratorWrapperReturn
             | NativeFunctionKind::AsyncIteratorPrototypeAsyncIterator
             | NativeFunctionKind::AsyncFromSyncIteratorNext
             | NativeFunctionKind::AsyncFromSyncIteratorReturn
@@ -739,6 +748,7 @@ const fn is_iterator_identity(id: IntrinsicIdentity) -> bool {
     match id {
         IntrinsicIdentity::Object(
             IntrinsicObjectId::IteratorPrototype
+            | IntrinsicObjectId::WrapForValidIteratorPrototype
             | IntrinsicObjectId::AsyncIteratorPrototype
             | IntrinsicObjectId::AsyncFromSyncIteratorPrototype
             | IntrinsicObjectId::ArrayIteratorPrototype
@@ -893,7 +903,15 @@ const fn is_date_function(id: IntrinsicFunctionId) -> bool {
 const fn is_iterator_function(id: IntrinsicFunctionId) -> bool {
     matches!(
         id.0,
-        NativeFunctionKind::IteratorPrototypeIterator
+        NativeFunctionKind::IteratorConstructor
+            | NativeFunctionKind::IteratorFrom
+            | NativeFunctionKind::IteratorPrototypeConstructorGetter
+            | NativeFunctionKind::IteratorPrototypeConstructorSetter
+            | NativeFunctionKind::IteratorPrototypeToStringTagGetter
+            | NativeFunctionKind::IteratorPrototypeToStringTagSetter
+            | NativeFunctionKind::IteratorPrototypeIterator
+            | NativeFunctionKind::IteratorWrapperNext
+            | NativeFunctionKind::IteratorWrapperReturn
             | NativeFunctionKind::AsyncIteratorPrototypeAsyncIterator
             | NativeFunctionKind::AsyncFromSyncIteratorNext
             | NativeFunctionKind::AsyncFromSyncIteratorReturn
@@ -1172,8 +1190,8 @@ mod tests {
     #[test]
     fn complete_function_schema_has_characterized_cardinality_and_unique_ids() {
         let schema = RealmIntrinsicSchema::try_new().expect("function schema");
-        assert_eq!(schema.specs().len(), 695);
-        assert_eq!(schema.constructor_prototypes.len(), 53);
+        assert_eq!(schema.specs().len(), 703);
+        assert_eq!(schema.constructor_prototypes.len(), 54);
         for (index, spec) in schema.specs().iter().enumerate() {
             assert!(
                 schema.specs()[..index]

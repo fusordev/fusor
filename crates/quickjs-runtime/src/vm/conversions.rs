@@ -594,6 +594,9 @@ pub(super) fn finish_intrinsic_get(
             new_target,
             value: string_value,
         } => finish_string_constructor_wrapper(runtime, new_target, string_value, &value),
+        IntrinsicGetContinuation::IteratorConstructor { new_target } => {
+            finish_iterator_constructor_wrapper(runtime, new_target, &value)
+        }
         IntrinsicGetContinuation::ArrayConstructor { .. } => Err(EngineFault::RuntimeInvariant {
             message: "Array prototype getter resumed without an execution budget",
         }

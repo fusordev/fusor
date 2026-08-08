@@ -218,6 +218,147 @@ fn iterator_prototype_symbol_iterator_returns_the_receiver() {
 }
 
 #[test]
+fn iterator_constructor_surface_and_subclassing_follow_ecma_262() {
+    let mut runtime = Runtime::try_new(RuntimeLimits::default()).expect("runtime");
+    let realm = runtime.create_realm().expect("realm");
+    let mut context = runtime.context(&realm).expect("context");
+    let function = dynamic_function(
+        &mut context,
+        "\
+            let prototype=Object.getOwnPropertyDescriptor(Iterator,'prototype');\
+            let constructor=Object.getOwnPropertyDescriptor(Iterator.prototype,'constructor');\
+            let tag=Object.getOwnPropertyDescriptor(Iterator.prototype,Symbol.toStringTag);\
+            class Derived extends Iterator{}\
+            let derived=new Derived();\
+            let directCall=false,directConstruct=false;\
+            try{Iterator();}catch(error){directCall=error instanceof TypeError;}\
+            try{new Iterator();}catch(error){directConstruct=error instanceof TypeError;}\
+            return [typeof Iterator,Iterator.name,Iterator.length,\
+                Object.getPrototypeOf(Iterator)===Function.prototype,\
+                prototype.writable,prototype.enumerable,prototype.configurable,\
+                typeof constructor.get,typeof constructor.set,\
+                constructor.enumerable,constructor.configurable,\
+                Iterator.prototype[Symbol.toStringTag],typeof tag.get,typeof tag.set,\
+                Object.getPrototypeOf(derived)===Derived.prototype,\
+                derived instanceof Derived,derived instanceof Iterator,\
+                directCall,directConstruct].join('|');",
+    );
+
+    let result = context
+        .call(&function, &[], ExecutionLimits::default())
+        .expect("Iterator constructor surface");
+    assert_eq!(
+        string_value(&result),
+        "function|Iterator|0|true|false|false|false|function|function|false|true|\
+         Iterator|function|function|true|true|true|true|true"
+    );
+}
+
+#[test]
+fn iterator_from_gets_the_protocol_once_and_wraps_only_plain_iterators() {
+    let mut runtime = Runtime::try_new(RuntimeLimits::default()).expect("runtime");
+    let realm = runtime.create_realm().expect("realm");
+    let mut context = runtime.context(&realm).expect("context");
+    let function = dynamic_function(
+        &mut context,
+        "\
+            let log='';let count=0;\
+            let iterator=new Proxy({},{get(target,key,receiver){\
+                if(key==='next'){log+='n';return function(){count++;return {done:count>1,value:7};};}\
+                return Reflect.get(target,key,receiver);}});\
+            let iterable=new Proxy({},{get(target,key,receiver){\
+                if(key===Symbol.iterator){log+='i';return function(){log+='m';return iterator;};}\
+                return Reflect.get(target,key,receiver);}});\
+            let wrapper=Iterator.from(iterable);let first=wrapper.next();let done=wrapper.next();\
+            function* values(){yield 1;}let generator=values();\
+            return [log,first.value,first.done,done.done,\
+                Object.getPrototypeOf(Object.getPrototypeOf(wrapper))===Iterator.prototype,\
+                Iterator.from(generator)===generator,\
+                Array.from(Iterator.from('A𐐷')).join(':'),\
+                Iterator.from.call(null,iterator)!==iterator].join('|');",
+    );
+
+    let result = context
+        .call(&function, &[], ExecutionLimits::default())
+        .expect("Iterator.from protocol");
+    assert_eq!(string_value(&result), "imn|7|false|true|true|true|A:𐐷|true");
+}
+
+#[test]
+fn iterator_from_wrapper_return_and_intrinsic_accessors_are_spec_ordered() {
+    let mut runtime = Runtime::try_new(RuntimeLimits::default()).expect("runtime");
+    let realm = runtime.create_realm().expect("realm");
+    let mut context = runtime.context(&realm).expect("context");
+    let function = dynamic_function(
+        &mut context,
+        "\
+            let log='';let result={done:true,value:9};\
+            let iterator=new Proxy({},{get(target,key,receiver){\
+                log+='get:'+String(key)+'|';\
+                if(key==='next')return function(){return result;};\
+                if(key==='return')return function(){log+='call:'+(this===iterator)+'|';return result;};\
+                return Reflect.get(target,key,receiver);}});\
+            let wrapper=Iterator.from(iterator);let returned=wrapper.return();\
+            let missing=Iterator.from({}).return();\
+            let constructor=Object.getOwnPropertyDescriptor(Iterator.prototype,'constructor');\
+            let tag=Object.getOwnPropertyDescriptor(Iterator.prototype,Symbol.toStringTag);\
+            let child=Object.create(Iterator.prototype);constructor.set.call(child,4);\
+            let tagChild=Object.create(Iterator.prototype);tag.set.call(tagChild,'custom');\
+            let homeConstructor=false,homeTag=false,primitive=false,invalidWrapper=false;\
+            try{constructor.set.call(Iterator.prototype,0);}catch(error){homeConstructor=error instanceof TypeError;}\
+            try{tag.set.call(Iterator.prototype,0);}catch(error){homeTag=error instanceof TypeError;}\
+            try{constructor.set.call(null,0);}catch(error){primitive=error instanceof TypeError;}\
+            try{Object.getPrototypeOf(wrapper).return.call({});}catch(error){invalidWrapper=error instanceof TypeError;}\
+            return [log,returned===result,missing.done,missing.value===undefined,\
+                child.constructor,tagChild[Symbol.toStringTag],homeConstructor,homeTag,primitive,invalidWrapper].join('|');",
+    );
+
+    let result = context
+        .call(&function, &[], ExecutionLimits::default())
+        .expect("Iterator wrapper return and accessors");
+    assert_eq!(
+        string_value(&result),
+        "get:Symbol(Symbol.iterator)|get:next|get:return|call:true||true|true|true|4|custom|\
+         true|true|true|true"
+    );
+}
+
+#[test]
+fn rooted_iterator_from_wrapper_keeps_its_hidden_record_live_through_collection() {
+    let mut runtime = Runtime::try_new(RuntimeLimits::default()).expect("runtime");
+    let realm = runtime.create_realm().expect("realm");
+    let wrapper = {
+        let mut context = runtime.context(&realm).expect("context");
+        let function = dynamic_function(
+            &mut context,
+            "let state={value:41};\
+             let iterator={next(){return {done:false,value:state.value};}};\
+             return Iterator.from(iterator);",
+        );
+        context
+            .call(&function, &[], ExecutionLimits::default())
+            .expect("Iterator.from wrapper")
+    };
+
+    runtime
+        .collect_cycles()
+        .expect("rooted Iterator wrapper survives collection");
+
+    let mut context = runtime.context(&realm).expect("context");
+    let next = dynamic_function(&mut context, "return arguments[0].next().value;");
+    let result = context
+        .call(&next, &[wrapper], ExecutionLimits::default())
+        .expect("hidden Iterator Record remains live");
+    assert!(
+        result
+            .as_number()
+            .expect("live value")
+            .expect("number")
+            .strict_equals(JsNumber::from_i32(41))
+    );
+}
+
+#[test]
 fn array_spread_reads_iterator_twice_and_retains_next_once() {
     let mut runtime = Runtime::try_new(RuntimeLimits::default()).expect("runtime");
     let realm = runtime.create_realm().expect("realm");

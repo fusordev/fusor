@@ -56,6 +56,7 @@ pub(in crate::runtime) enum IntrinsicObjectId {
     TemporalZonedDateTimePrototype,
     RegExpPrototype,
     IteratorPrototype,
+    WrapForValidIteratorPrototype,
     AsyncIteratorPrototype,
     AsyncFromSyncIteratorPrototype,
     ArrayIteratorPrototype,
@@ -83,7 +84,7 @@ pub(in crate::runtime) enum IntrinsicObjectId {
 }
 
 impl IntrinsicObjectId {
-    pub(in crate::runtime) const ALL: [Self; 68] = [
+    pub(in crate::runtime) const ALL: [Self; 69] = [
         Self::ObjectPrototype,
         Self::GlobalObject,
         Self::ErrorPrototype(ErrorIntrinsicKind::Error),
@@ -128,6 +129,7 @@ impl IntrinsicObjectId {
         Self::TemporalZonedDateTimePrototype,
         Self::RegExpPrototype,
         Self::IteratorPrototype,
+        Self::WrapForValidIteratorPrototype,
         Self::AsyncIteratorPrototype,
         Self::AsyncFromSyncIteratorPrototype,
         Self::ArrayIteratorPrototype,

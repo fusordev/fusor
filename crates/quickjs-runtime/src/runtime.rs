@@ -377,7 +377,9 @@ struct SymbolIntrinsics {
     reason = "the intrinsic names make each hidden iterator prototype ownership edge explicit"
 )]
 struct IteratorIntrinsics {
+    constructor: FunctionId,
     iterator_prototype: ObjectId,
+    wrapper_prototype: ObjectId,
     async_iterator_prototype: ObjectId,
     async_from_sync_iterator_prototype: ObjectId,
     async_from_sync_iterator_next: FunctionId,
@@ -1335,7 +1337,15 @@ pub(crate) enum NativeFunctionKind {
     SymbolPrototypeDescription,
     SymbolFor,
     SymbolKeyFor,
+    IteratorConstructor,
+    IteratorFrom,
+    IteratorPrototypeConstructorGetter,
+    IteratorPrototypeConstructorSetter,
+    IteratorPrototypeToStringTagGetter,
+    IteratorPrototypeToStringTagSetter,
     IteratorPrototypeIterator,
+    IteratorWrapperNext,
+    IteratorWrapperReturn,
     AsyncIteratorPrototypeAsyncIterator,
     AsyncFromSyncIteratorNext,
     AsyncFromSyncIteratorReturn,
@@ -3991,6 +4001,7 @@ impl NativeFunctionKind {
                 | Self::TemporalPlainYearMonthConstructor
                 | Self::TemporalZonedDateTimeConstructor
                 | Self::RegExpConstructor
+                | Self::IteratorConstructor
                 | Self::GeneratorFunctionConstructor
                 | Self::AsyncFunctionConstructor
                 | Self::AsyncGeneratorFunctionConstructor

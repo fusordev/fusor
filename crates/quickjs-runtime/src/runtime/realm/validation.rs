@@ -1,5 +1,6 @@
 //! Allocation-free validation for typed Realm intrinsic declarations.
 
+use crate::runtime::NativeFunctionKind;
 use crate::{PredefinedAtom, PropertyLayoutKind, predefined_atoms::PredefinedAtomKind};
 
 use super::schema::{
@@ -292,6 +293,21 @@ fn validate_constructor_prototypes(
                         ..
                     } if id == pair.constructor
                 )
+                || pair.constructor == IntrinsicFunctionId(NativeFunctionKind::IteratorConstructor)
+                    && pair.prototype
+                        == IntrinsicIdentity::Object(IntrinsicObjectId::IteratorPrototype)
+                    && property.holder == pair.prototype
+                    && property.key
+                        == IntrinsicKeySpec::PredefinedString(PredefinedAtom::Constructor)
+                    && matches!(
+                        property.descriptor,
+                        IntrinsicDescriptorSpec::Accessor {
+                            getter: Some(IntrinsicFunctionId(
+                                NativeFunctionKind::IteratorPrototypeConstructorGetter
+                            )),
+                            ..
+                        }
+                    )
         });
         if !constructor_property || !prototype_property {
             return Err(SchemaValidationError::ConstructorPrototypeMismatch(pair));

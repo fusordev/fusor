@@ -377,6 +377,41 @@ pub(crate) struct ArrayIterator {
     next: u32,
 }
 
+/// The iterator record retained by a `%WrapForValidIteratorPrototype%`
+/// instance. Both values remain opaque to JavaScript property reflection.
+pub(crate) struct IteratorRecord {
+    iterator: StoredValue,
+    next_method: StoredValue,
+}
+
+impl IteratorRecord {
+    #[must_use]
+    pub(crate) const fn new(iterator: StoredValue, next_method: StoredValue) -> Self {
+        Self {
+            iterator,
+            next_method,
+        }
+    }
+
+    #[must_use]
+    pub(crate) fn duplicate(&self) -> Self {
+        Self {
+            iterator: self.iterator.duplicate(),
+            next_method: self.next_method.duplicate(),
+        }
+    }
+
+    #[must_use]
+    pub(crate) const fn iterator(&self) -> &StoredValue {
+        &self.iterator
+    }
+
+    #[must_use]
+    pub(crate) const fn next_method(&self) -> &StoredValue {
+        &self.next_method
+    }
+}
+
 impl ArrayIterator {
     pub(crate) const fn new(iterated: StoredValue, kind: ArrayIteratorKind) -> Self {
         Self {
@@ -2469,6 +2504,8 @@ pub(crate) enum HeapObjectKind {
     BoxedPrimitive(BoxedPrimitive),
     ForInIterator(ForInIterator),
     ArrayIterator(ArrayIterator),
+    /// An ordinary object with the internal `[[Iterated]]` Iterator Record.
+    IteratorWrapper(IteratorRecord),
     StringIterator(StringIterator),
     RegExpStringIterator(RegExpStringIterator),
     /// An ECMAScript `RegExp` object with compiled `[[RegExpMatcher]]` state.
@@ -2634,6 +2671,7 @@ impl HeapObjectKind {
             | Self::Promise(_)
             | Self::ForInIterator(_)
             | Self::ArrayIterator(_)
+            | Self::IteratorWrapper(_)
             | Self::StringIterator(_)
             | Self::RegExpStringIterator(_)
             | Self::RegExp(_)
@@ -2673,6 +2711,7 @@ impl HeapObjectKind {
             | Self::BoxedPrimitive(_)
             | Self::ForInIterator(_)
             | Self::ArrayIterator(_)
+            | Self::IteratorWrapper(_)
             | Self::StringIterator(_)
             | Self::RegExpStringIterator(_)
             | Self::RegExp(_)
@@ -2711,6 +2750,7 @@ impl HeapObjectKind {
             | Self::BoxedPrimitive(_)
             | Self::ForInIterator(_)
             | Self::ArrayIterator(_)
+            | Self::IteratorWrapper(_)
             | Self::StringIterator(_)
             | Self::RegExpStringIterator(_)
             | Self::RegExp(_)
@@ -2749,6 +2789,7 @@ impl HeapObjectKind {
             | Self::Promise(_)
             | Self::BoxedPrimitive(_)
             | Self::ArrayIterator(_)
+            | Self::IteratorWrapper(_)
             | Self::StringIterator(_)
             | Self::RegExpStringIterator(_)
             | Self::RegExp(_)
@@ -2787,6 +2828,7 @@ impl HeapObjectKind {
             | Self::Promise(_)
             | Self::BoxedPrimitive(_)
             | Self::ArrayIterator(_)
+            | Self::IteratorWrapper(_)
             | Self::StringIterator(_)
             | Self::RegExpStringIterator(_)
             | Self::RegExp(_)
@@ -2825,6 +2867,7 @@ impl HeapObjectKind {
             | Self::Promise(_)
             | Self::BoxedPrimitive(_)
             | Self::ForInIterator(_)
+            | Self::IteratorWrapper(_)
             | Self::StringIterator(_)
             | Self::RegExpStringIterator(_)
             | Self::RegExp(_)
@@ -2863,6 +2906,7 @@ impl HeapObjectKind {
             | Self::Promise(_)
             | Self::BoxedPrimitive(_)
             | Self::ForInIterator(_)
+            | Self::IteratorWrapper(_)
             | Self::StringIterator(_)
             | Self::RegExpStringIterator(_)
             | Self::RegExp(_)
@@ -2889,6 +2933,13 @@ impl HeapObjectKind {
         }
     }
 
+    pub(crate) const fn iterator_wrapper(&self) -> Option<&IteratorRecord> {
+        match self {
+            Self::IteratorWrapper(iterator) => Some(iterator),
+            _ => None,
+        }
+    }
+
     pub(crate) const fn string_iterator(&self) -> Option<&StringIterator> {
         match self {
             Self::StringIterator(iterator) => Some(iterator),
@@ -2902,6 +2953,7 @@ impl HeapObjectKind {
             | Self::BoxedPrimitive(_)
             | Self::ForInIterator(_)
             | Self::ArrayIterator(_)
+            | Self::IteratorWrapper(_)
             | Self::RegExpStringIterator(_)
             | Self::RegExp(_)
             | Self::Date(_)
@@ -2940,6 +2992,7 @@ impl HeapObjectKind {
             | Self::BoxedPrimitive(_)
             | Self::ForInIterator(_)
             | Self::ArrayIterator(_)
+            | Self::IteratorWrapper(_)
             | Self::RegExpStringIterator(_)
             | Self::RegExp(_)
             | Self::Date(_)
@@ -3212,6 +3265,15 @@ impl HeapObject {
     pub(crate) const fn array_iterator(record: ObjectRecord, iterator: ArrayIterator) -> Self {
         Self {
             kind: HeapObjectKind::ArrayIterator(iterator),
+            record,
+            public_roots: 0,
+        }
+    }
+
+    #[must_use]
+    pub(crate) const fn iterator_wrapper(record: ObjectRecord, iterator: IteratorRecord) -> Self {
+        Self {
+            kind: HeapObjectKind::IteratorWrapper(iterator),
             record,
             public_roots: 0,
         }
@@ -3610,6 +3672,7 @@ impl HeapObject {
             | HeapObjectKind::BoxedPrimitive(_)
             | HeapObjectKind::ForInIterator(_)
             | HeapObjectKind::ArrayIterator(_)
+            | HeapObjectKind::IteratorWrapper(_)
             | HeapObjectKind::StringIterator(_)
             | HeapObjectKind::RegExpStringIterator(_)
             | HeapObjectKind::RegExp(_)
@@ -3648,6 +3711,7 @@ impl HeapObject {
             | HeapObjectKind::BoxedPrimitive(_)
             | HeapObjectKind::ForInIterator(_)
             | HeapObjectKind::ArrayIterator(_)
+            | HeapObjectKind::IteratorWrapper(_)
             | HeapObjectKind::StringIterator(_)
             | HeapObjectKind::RegExpStringIterator(_)
             | HeapObjectKind::RegExp(_)
@@ -3688,6 +3752,7 @@ impl HeapObject {
             | HeapObjectKind::BoxedPrimitive(_)
             | HeapObjectKind::ForInIterator(_)
             | HeapObjectKind::ArrayIterator(_)
+            | HeapObjectKind::IteratorWrapper(_)
             | HeapObjectKind::StringIterator(_)
             | HeapObjectKind::RegExpStringIterator(_)
             | HeapObjectKind::RegExp(_)
@@ -3877,6 +3942,11 @@ impl HeapObject {
     #[must_use]
     pub(crate) const fn array_iterator_state_mut(&mut self) -> Option<&mut ArrayIterator> {
         self.kind.array_iterator_mut()
+    }
+
+    #[must_use]
+    pub(crate) const fn iterator_wrapper_state(&self) -> Option<&IteratorRecord> {
+        self.kind.iterator_wrapper()
     }
 
     #[must_use]
