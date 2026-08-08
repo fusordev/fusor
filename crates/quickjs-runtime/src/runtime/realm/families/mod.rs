@@ -139,12 +139,12 @@ impl RealmIntrinsicSchema {
             FamilyCardinality {
                 family: "Realm intrinsic objects",
                 actual: self.objects.len(),
-                expected: 74,
+                expected: 75,
             },
             FamilyCardinality {
                 family: "Realm native functions",
                 actual: self.specs.len(),
-                expected: 758,
+                expected: 766,
             },
         ];
         validate_intrinsic_schema(IntrinsicSchema {
@@ -210,6 +210,7 @@ pub(super) const fn is_declarative_object(id: IntrinsicObjectId) -> bool {
             | IntrinsicObjectId::FinalizationRegistryPrototype
             | IntrinsicObjectId::Intl
             | IntrinsicObjectId::IntlCollatorPrototype
+            | IntrinsicObjectId::IntlNumberFormatPrototype
             | IntrinsicObjectId::IntlLocalePrototype
             | IntrinsicObjectId::Reflect
             | IntrinsicObjectId::Json
@@ -348,6 +349,10 @@ pub(super) const fn is_declarative_function(id: IntrinsicFunctionId) -> bool {
             | NativeFunctionKind::IntlCollatorSupportedLocalesOf
             | NativeFunctionKind::IntlCollatorPrototype(_)
             | NativeFunctionKind::IntlCollatorCompare
+            | NativeFunctionKind::IntlNumberFormatConstructor
+            | NativeFunctionKind::IntlNumberFormatSupportedLocalesOf
+            | NativeFunctionKind::IntlNumberFormatPrototype(_)
+            | NativeFunctionKind::IntlNumberFormatFormat
             | NativeFunctionKind::IntlLocaleConstructor
             | NativeFunctionKind::IntlLocalePrototype(_)
             | NativeFunctionKind::Math(_)
@@ -1224,8 +1229,8 @@ mod tests {
     #[test]
     fn complete_function_schema_has_characterized_cardinality_and_unique_ids() {
         let schema = RealmIntrinsicSchema::try_new().expect("function schema");
-        assert_eq!(schema.specs().len(), 758);
-        assert_eq!(schema.constructor_prototypes.len(), 56);
+        assert_eq!(schema.specs().len(), 766);
+        assert_eq!(schema.constructor_prototypes.len(), 57);
         for (index, spec) in schema.specs().iter().enumerate() {
             assert!(
                 schema.specs()[..index]

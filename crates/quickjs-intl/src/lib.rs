@@ -14,6 +14,7 @@ use icu::locale::{
 mod collator;
 mod locale;
 mod locale_info;
+mod number_format;
 mod supported_values;
 
 pub use collator::{
@@ -29,6 +30,15 @@ pub use locale_info::{
     LocaleWeekInfo, calendars_of_locale, collations_of_locale, hour_cycles_of_locale,
     numbering_systems_of_locale, text_direction_of_locale, time_zones_of_locale,
     week_info_of_locale,
+};
+pub use number_format::{
+    IntlMathematicalValue, NumberFormatCompactDisplay, NumberFormatCurrencyDisplay,
+    NumberFormatCurrencySign, NumberFormatError, NumberFormatNotation, NumberFormatPart,
+    NumberFormatRequestOptions, NumberFormatRoundingMode, NumberFormatRoundingPriority,
+    NumberFormatSignDisplay, NumberFormatState, NumberFormatStyle, NumberFormatTrailingZeroDisplay,
+    NumberFormatUnitDisplay, NumberFormatUseGrouping, format_number, format_number_to_parts,
+    intl_mathematical_value_from_f64, is_well_formed_currency_code, is_well_formed_unit_identifier,
+    number_format_supported_locales, parse_intl_mathematical_value, resolve_number_format,
 };
 pub use supported_values::supported_values;
 

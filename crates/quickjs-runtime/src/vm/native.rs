@@ -1268,6 +1268,31 @@ pub(super) fn resume_native_continuations(
                     execution_budget,
                 )?
             }
+            NativeContinuation::IntlNumberFormatConstructor(state) => {
+                advance_intl_number_format_constructor(
+                    runtime,
+                    *state,
+                    Some(value.duplicate()),
+                    return_to,
+                    execution_budget,
+                )?
+            }
+            NativeContinuation::IntlNumberFormatUnwrap(state) => advance_intl_number_format_unwrap(
+                runtime,
+                *state,
+                &value,
+                return_to,
+                execution_budget,
+            )?,
+            NativeContinuation::IntlNumberFormatSupportedLocalesOf(state) => {
+                advance_intl_number_format_supported_locales(
+                    runtime,
+                    *state,
+                    Some(value.duplicate()),
+                    return_to,
+                    execution_budget,
+                )?
+            }
             NativeContinuation::IntlLocaleConstructor(state) => advance_intl_locale_constructor(
                 runtime,
                 *state,
@@ -2775,6 +2800,46 @@ pub(super) fn dispatch_native_call_with_frames(
             origin.unwrap_or_else(native_function_host_origin),
             execution_budget,
         ),
+        NativeFunctionKind::IntlNumberFormatConstructor => begin_intl_number_format_constructor(
+            runtime,
+            function,
+            inputs,
+            native.realm,
+            return_to,
+            origin.unwrap_or_else(native_function_host_origin),
+            execution_budget,
+        ),
+        NativeFunctionKind::IntlNumberFormatSupportedLocalesOf => {
+            begin_intl_number_format_supported_locales_of(
+                runtime,
+                inputs.arguments,
+                native.realm,
+                return_to,
+                origin.unwrap_or_else(native_function_host_origin),
+                execution_budget,
+            )
+        }
+        NativeFunctionKind::IntlNumberFormatPrototype(method) => {
+            begin_intl_number_format_prototype(
+                runtime,
+                method,
+                &inputs.receiver,
+                inputs.arguments,
+                native.realm,
+                return_to,
+                origin.unwrap_or_else(native_function_host_origin),
+                execution_budget,
+            )
+        }
+        NativeFunctionKind::IntlNumberFormatFormat => begin_intl_number_format_format(
+            runtime,
+            &inputs.receiver,
+            inputs.arguments,
+            native.realm,
+            return_to,
+            origin.unwrap_or_else(native_function_host_origin),
+            execution_budget,
+        ),
         NativeFunctionKind::IntlLocaleConstructor => begin_intl_locale_constructor(
             runtime,
             inputs,
@@ -3584,6 +3649,7 @@ pub(super) fn dispatch_native_call_with_frames(
             method,
             native.realm,
             inputs.receiver,
+            inputs.arguments,
             return_to,
             origin.unwrap_or_else(native_function_host_origin),
             execution_budget,

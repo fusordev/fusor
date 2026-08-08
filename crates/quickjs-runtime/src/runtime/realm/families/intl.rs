@@ -13,12 +13,15 @@ use crate::runtime::realm::{
         RealmNameId,
     },
 };
-use crate::runtime::{IntlCollatorPrototypeMethod, IntlLocalePrototypeMethod};
+use crate::runtime::{
+    IntlCollatorPrototypeMethod, IntlLocalePrototypeMethod, IntlNumberFormatPrototypeMethod,
+};
 
 pub(super) fn visit_objects(visit: ObjectSink<'_>) {
     for id in [
         IntrinsicObjectId::Intl,
         IntrinsicObjectId::IntlCollatorPrototype,
+        IntrinsicObjectId::IntlNumberFormatPrototype,
         IntrinsicObjectId::IntlLocalePrototype,
     ] {
         visit(object(
@@ -68,6 +71,33 @@ pub(super) fn visit_functions(visit: FunctionSink<'_>) {
         2,
     ));
     visit(ordinary(
+        NativeFunctionKind::IntlNumberFormatConstructor,
+        IntrinsicNameSpec::RealmName(RealmNameId::IntlNumberFormat),
+        0,
+    ));
+    visit(ordinary(
+        NativeFunctionKind::IntlNumberFormatSupportedLocalesOf,
+        IntrinsicNameSpec::RealmName(RealmNameId::IntlNumberFormatSupportedLocalesOf),
+        1,
+    ));
+    for method in IntlNumberFormatPrototypeMethod::ALL {
+        let name = if method.is_accessor() {
+            IntrinsicNameSpec::Literal("get format")
+        } else {
+            IntrinsicNameSpec::RealmName(RealmNameId::IntlNumberFormatPrototype(method))
+        };
+        visit(ordinary(
+            NativeFunctionKind::IntlNumberFormatPrototype(method),
+            name,
+            method.length(),
+        ));
+    }
+    visit(ordinary(
+        NativeFunctionKind::IntlNumberFormatFormat,
+        IntrinsicNameSpec::Literal(""),
+        1,
+    ));
+    visit(ordinary(
         NativeFunctionKind::IntlLocaleConstructor,
         IntrinsicNameSpec::RealmName(RealmNameId::Locale),
         1,
@@ -98,6 +128,11 @@ pub(super) fn visit_properties(visit: PropertySink<'_>) {
         NativeFunctionKind::IntlCollatorConstructor,
     ));
     let collator_prototype = IntrinsicIdentity::Object(IntrinsicObjectId::IntlCollatorPrototype);
+    let number_format_constructor = IntrinsicIdentity::Function(IntrinsicFunctionId(
+        NativeFunctionKind::IntlNumberFormatConstructor,
+    ));
+    let number_format_prototype =
+        IntrinsicIdentity::Object(IntrinsicObjectId::IntlNumberFormatPrototype);
     let locale_constructor = IntrinsicIdentity::Function(IntrinsicFunctionId(
         NativeFunctionKind::IntlLocaleConstructor,
     ));
@@ -111,6 +146,11 @@ pub(super) fn visit_properties(visit: PropertySink<'_>) {
         intl,
         IntrinsicKeySpec::InternedString(RealmNameId::IntlGetCanonicalLocales),
         NativeFunctionKind::IntlGetCanonicalLocales,
+    ));
+    visit(method(
+        intl,
+        IntrinsicKeySpec::InternedString(RealmNameId::IntlNumberFormat),
+        NativeFunctionKind::IntlNumberFormatConstructor,
     ));
     visit(method(
         intl,
@@ -176,6 +216,50 @@ pub(super) fn visit_properties(visit: PropertySink<'_>) {
         IntrinsicKeySpec::WellKnownSymbol(PredefinedAtom::SymbolToStringTag),
         PropertyLayout::data(false, false, true),
         IntrinsicValueSpec::String(IntrinsicStringSpec::Literal("Intl.Collator")),
+    ));
+
+    visit(data(
+        number_format_constructor,
+        IntrinsicKeySpec::PredefinedString(PredefinedAtom::Prototype),
+        CONSTRUCTOR_PROTOTYPE_PROPERTY,
+        IntrinsicValueSpec::Object(IntrinsicObjectId::IntlNumberFormatPrototype),
+    ));
+    visit(method(
+        number_format_constructor,
+        IntrinsicKeySpec::InternedString(RealmNameId::IntlNumberFormatSupportedLocalesOf),
+        NativeFunctionKind::IntlNumberFormatSupportedLocalesOf,
+    ));
+    visit(method(
+        number_format_prototype,
+        IntrinsicKeySpec::PredefinedString(PredefinedAtom::Constructor),
+        NativeFunctionKind::IntlNumberFormatConstructor,
+    ));
+    for method_id in IntlNumberFormatPrototypeMethod::ALL {
+        let key =
+            IntrinsicKeySpec::InternedString(RealmNameId::IntlNumberFormatPrototype(method_id));
+        if method_id.is_accessor() {
+            visit(accessor(
+                number_format_prototype,
+                key,
+                PropertyLayout::accessor(false, true),
+                Some(IntrinsicFunctionId(
+                    NativeFunctionKind::IntlNumberFormatPrototype(method_id),
+                )),
+                None,
+            ));
+        } else {
+            visit(method(
+                number_format_prototype,
+                key,
+                NativeFunctionKind::IntlNumberFormatPrototype(method_id),
+            ));
+        }
+    }
+    visit(data(
+        number_format_prototype,
+        IntrinsicKeySpec::WellKnownSymbol(PredefinedAtom::SymbolToStringTag),
+        PropertyLayout::data(false, false, true),
+        IntrinsicValueSpec::String(IntrinsicStringSpec::Literal("Intl.NumberFormat")),
     ));
 
     visit(data(

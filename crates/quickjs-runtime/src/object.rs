@@ -23,7 +23,7 @@
  * THE SOFTWARE.
  */
 
-use quickjs_intl::CollatorState;
+use quickjs_intl::{CollatorState, NumberFormatState};
 use std::{
     cell::RefCell,
     collections::hash_map::DefaultHasher,
@@ -2653,6 +2653,8 @@ pub(crate) enum HeapObjectKind {
     IntlLocale(JsString),
     /// An ECMA-402 `Intl.Collator` object and its cached bound comparator.
     IntlCollator(IntlCollatorObjectState),
+    /// An ECMA-402 `Intl.NumberFormat` object and its cached bound formatter.
+    IntlNumberFormat(IntlNumberFormatObjectState),
     /// An ECMAScript `ArrayBuffer` object with its byte-data block slots.
     ArrayBuffer(ArrayBufferState),
     /// An ECMAScript `DataView` object with its view and buffer slots.
@@ -2698,6 +2700,11 @@ pub(crate) enum HeapObjectKind {
 pub(crate) struct IntlCollatorObjectState {
     pub(crate) resolved: CollatorState,
     pub(crate) bound_compare: Option<FunctionId>,
+}
+
+pub(crate) struct IntlNumberFormatObjectState {
+    pub(crate) resolved: NumberFormatState,
+    pub(crate) bound_format: Option<FunctionId>,
 }
 
 /// Specification-level Proxy slots shared by callable and non-callable proxy
@@ -2824,6 +2831,7 @@ impl HeapObjectKind {
             | Self::Date(_)
             | Self::IntlLocale(_)
             | Self::IntlCollator(_)
+            | Self::IntlNumberFormat(_)
             | Self::ArrayBuffer(_)
             | Self::DataView(_)
             | Self::TypedArray(_)
@@ -2866,6 +2874,7 @@ impl HeapObjectKind {
             | Self::Date(_)
             | Self::IntlLocale(_)
             | Self::IntlCollator(_)
+            | Self::IntlNumberFormat(_)
             | Self::ArrayBuffer(_)
             | Self::DataView(_)
             | Self::TypedArray(_)
@@ -2907,6 +2916,7 @@ impl HeapObjectKind {
             | Self::Date(_)
             | Self::IntlLocale(_)
             | Self::IntlCollator(_)
+            | Self::IntlNumberFormat(_)
             | Self::ArrayBuffer(_)
             | Self::DataView(_)
             | Self::TypedArray(_)
@@ -2948,6 +2958,7 @@ impl HeapObjectKind {
             | Self::Date(_)
             | Self::IntlLocale(_)
             | Self::IntlCollator(_)
+            | Self::IntlNumberFormat(_)
             | Self::ArrayBuffer(_)
             | Self::DataView(_)
             | Self::TypedArray(_)
@@ -2989,6 +3000,7 @@ impl HeapObjectKind {
             | Self::Date(_)
             | Self::IntlLocale(_)
             | Self::IntlCollator(_)
+            | Self::IntlNumberFormat(_)
             | Self::ArrayBuffer(_)
             | Self::DataView(_)
             | Self::TypedArray(_)
@@ -3030,6 +3042,7 @@ impl HeapObjectKind {
             | Self::Date(_)
             | Self::IntlLocale(_)
             | Self::IntlCollator(_)
+            | Self::IntlNumberFormat(_)
             | Self::ArrayBuffer(_)
             | Self::DataView(_)
             | Self::TypedArray(_)
@@ -3071,6 +3084,7 @@ impl HeapObjectKind {
             | Self::Date(_)
             | Self::IntlLocale(_)
             | Self::IntlCollator(_)
+            | Self::IntlNumberFormat(_)
             | Self::ArrayBuffer(_)
             | Self::DataView(_)
             | Self::TypedArray(_)
@@ -3126,6 +3140,7 @@ impl HeapObjectKind {
             | Self::Date(_)
             | Self::IntlLocale(_)
             | Self::IntlCollator(_)
+            | Self::IntlNumberFormat(_)
             | Self::ArrayBuffer(_)
             | Self::DataView(_)
             | Self::TypedArray(_)
@@ -3167,6 +3182,7 @@ impl HeapObjectKind {
             | Self::Date(_)
             | Self::IntlLocale(_)
             | Self::IntlCollator(_)
+            | Self::IntlNumberFormat(_)
             | Self::ArrayBuffer(_)
             | Self::DataView(_)
             | Self::TypedArray(_)
@@ -3511,6 +3527,21 @@ impl HeapObject {
     }
 
     #[must_use]
+    pub(crate) const fn intl_number_format(
+        record: ObjectRecord,
+        resolved: NumberFormatState,
+    ) -> Self {
+        Self {
+            kind: HeapObjectKind::IntlNumberFormat(IntlNumberFormatObjectState {
+                resolved,
+                bound_format: None,
+            }),
+            record,
+            public_roots: 0,
+        }
+    }
+
+    #[must_use]
     pub(crate) fn array_buffer(record: ObjectRecord, state: ArrayBufferState) -> Self {
         Self {
             kind: HeapObjectKind::ArrayBuffer(state),
@@ -3781,6 +3812,22 @@ impl HeapObject {
         }
     }
 
+    pub(crate) const fn intl_number_format_state(&self) -> Option<&IntlNumberFormatObjectState> {
+        match &self.kind {
+            HeapObjectKind::IntlNumberFormat(state) => Some(state),
+            _ => None,
+        }
+    }
+
+    pub(crate) const fn intl_number_format_state_mut(
+        &mut self,
+    ) -> Option<&mut IntlNumberFormatObjectState> {
+        match &mut self.kind {
+            HeapObjectKind::IntlNumberFormat(state) => Some(state),
+            _ => None,
+        }
+    }
+
     pub(crate) const fn array_buffer_state(&self) -> Option<&ArrayBufferState> {
         match &self.kind {
             HeapObjectKind::ArrayBuffer(state) => Some(state),
@@ -3892,6 +3939,7 @@ impl HeapObject {
             | HeapObjectKind::Date(_)
             | HeapObjectKind::IntlLocale(_)
             | HeapObjectKind::IntlCollator(_)
+            | HeapObjectKind::IntlNumberFormat(_)
             | HeapObjectKind::ArrayBuffer(_)
             | HeapObjectKind::DataView(_)
             | HeapObjectKind::TypedArray(_)
@@ -3933,6 +3981,7 @@ impl HeapObject {
             | HeapObjectKind::Date(_)
             | HeapObjectKind::IntlLocale(_)
             | HeapObjectKind::IntlCollator(_)
+            | HeapObjectKind::IntlNumberFormat(_)
             | HeapObjectKind::ArrayBuffer(_)
             | HeapObjectKind::DataView(_)
             | HeapObjectKind::TypedArray(_)
@@ -3976,6 +4025,7 @@ impl HeapObject {
             | HeapObjectKind::Date(_)
             | HeapObjectKind::IntlLocale(_)
             | HeapObjectKind::IntlCollator(_)
+            | HeapObjectKind::IntlNumberFormat(_)
             | HeapObjectKind::ArrayBuffer(_)
             | HeapObjectKind::DataView(_)
             | HeapObjectKind::TypedArray(_)

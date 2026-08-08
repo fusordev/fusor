@@ -15,15 +15,15 @@ use crate::object::TypedArrayElementType;
 use crate::runtime::{
     ArrayBufferPrototypeMethod, AtomicsMethod, DataViewPrototypeMethod, DatePrototypeMethod,
     DateStaticMethod, IntlCollatorPrototypeMethod, IntlLocalePrototypeMethod,
-    SharedArrayBufferPrototypeMethod, TemporalDurationPrototypeMethod,
-    TemporalDurationStaticMethod, TemporalInstantPrototypeMethod, TemporalInstantStaticMethod,
-    TemporalNowMethod, TemporalPlainDatePrototypeMethod, TemporalPlainDateStaticMethod,
-    TemporalPlainDateTimePrototypeMethod, TemporalPlainDateTimeStaticMethod,
-    TemporalPlainMonthDayPrototypeMethod, TemporalPlainMonthDayStaticMethod,
-    TemporalPlainTimePrototypeMethod, TemporalPlainTimeStaticMethod,
-    TemporalPlainYearMonthPrototypeMethod, TemporalPlainYearMonthStaticMethod,
-    TemporalZonedDateTimePrototypeMethod, TemporalZonedDateTimeStaticMethod,
-    TypedArrayPrototypeMethod,
+    IntlNumberFormatPrototypeMethod, SharedArrayBufferPrototypeMethod,
+    TemporalDurationPrototypeMethod, TemporalDurationStaticMethod, TemporalInstantPrototypeMethod,
+    TemporalInstantStaticMethod, TemporalNowMethod, TemporalPlainDatePrototypeMethod,
+    TemporalPlainDateStaticMethod, TemporalPlainDateTimePrototypeMethod,
+    TemporalPlainDateTimeStaticMethod, TemporalPlainMonthDayPrototypeMethod,
+    TemporalPlainMonthDayStaticMethod, TemporalPlainTimePrototypeMethod,
+    TemporalPlainTimeStaticMethod, TemporalPlainYearMonthPrototypeMethod,
+    TemporalPlainYearMonthStaticMethod, TemporalZonedDateTimePrototypeMethod,
+    TemporalZonedDateTimeStaticMethod, TypedArrayPrototypeMethod,
 };
 
 /// Stable identity of an object allocated by Realm bootstrap.
@@ -82,6 +82,7 @@ pub(in crate::runtime) enum IntrinsicObjectId {
     FinalizationRegistryPrototype,
     Intl,
     IntlCollatorPrototype,
+    IntlNumberFormatPrototype,
     IntlLocalePrototype,
     Reflect,
     Json,
@@ -90,7 +91,7 @@ pub(in crate::runtime) enum IntrinsicObjectId {
 }
 
 impl IntrinsicObjectId {
-    pub(in crate::runtime) const ALL: [Self; 74] = [
+    pub(in crate::runtime) const ALL: [Self; 75] = [
         Self::ObjectPrototype,
         Self::GlobalObject,
         Self::ErrorPrototype(ErrorIntrinsicKind::Error),
@@ -160,6 +161,7 @@ impl IntrinsicObjectId {
         Self::FinalizationRegistryPrototype,
         Self::Intl,
         Self::IntlCollatorPrototype,
+        Self::IntlNumberFormatPrototype,
         Self::IntlLocalePrototype,
         Self::Reflect,
         Self::Json,
@@ -192,6 +194,9 @@ pub(in crate::runtime) enum RealmNameId {
     Collator,
     IntlCollatorSupportedLocalesOf,
     IntlCollatorPrototype(IntlCollatorPrototypeMethod),
+    IntlNumberFormat,
+    IntlNumberFormatSupportedLocalesOf,
+    IntlNumberFormatPrototype(IntlNumberFormatPrototypeMethod),
     Locale,
     IntlLocalePrototype(IntlLocalePrototypeMethod),
     Reflect,

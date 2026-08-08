@@ -154,6 +154,10 @@ impl RealmSnapshot {
             (date.prototype, "%Date.prototype%"),
             (intl.namespace, "%Intl%"),
             (intl.collator_prototype, "%Intl.Collator.prototype%"),
+            (
+                intl.number_format_prototype,
+                "%Intl.NumberFormat.prototype%",
+            ),
             (intl.locale_prototype, "%Intl.Locale.prototype%"),
             (temporal.namespace, "%Temporal%"),
             (temporal.now, "%Temporal.Now%"),
@@ -525,9 +529,9 @@ mod tests {
 
     use crate::runtime::{RealmIntrinsics, RuntimeLimits, RuntimeUsage};
 
-    const REALM_NODES: usize = 832;
-    const REALM_PROPERTIES: u64 = 2_524;
-    const REALM_SNAPSHOT_FINGERPRINT: u64 = 4_695_442_633_894_477_719;
+    const REALM_NODES: usize = 841;
+    const REALM_PROPERTIES: u64 = 2_550;
+    const REALM_SNAPSHOT_FINGERPRINT: u64 = 13_794_435_914_977_660_842;
 
     #[test]
     fn complete_realm_snapshot_pins_the_installed_intrinsic_graph() {

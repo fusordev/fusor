@@ -315,3 +315,113 @@ fn collator_supported_locales_subclassing_and_default_options_are_spec_shaped() 
         "id,en-u-kn|get,string|true|true|variant|1|supportedLocalesOf"
     );
 }
+
+#[test]
+fn number_format_constructor_resolved_options_and_order_are_spec_shaped() {
+    assert_eq!(
+        rendered(
+            "var log=[];
+             var names=['localeMatcher','numberingSystem','style','currency','currencyDisplay',
+               'currencySign','unit','unitDisplay','notation','minimumIntegerDigits',
+               'minimumFractionDigits','maximumFractionDigits','minimumSignificantDigits',
+               'maximumSignificantDigits','roundingIncrement','roundingMode','roundingPriority',
+               'trailingZeroDisplay','compactDisplay','useGrouping','signDisplay'];
+             var values={localeMatcher:'lookup',numberingSystem:'latn',style:'decimal',
+               notation:'standard',minimumIntegerDigits:1,minimumFractionDigits:1,
+               maximumFractionDigits:2,roundingIncrement:1,roundingMode:'halfEven',
+               roundingPriority:'auto',trailingZeroDisplay:'auto',compactDisplay:'short',
+               useGrouping:false,signDisplay:'auto'};
+             var options={};names.forEach(function(name){Object.defineProperty(options,name,{get:function(){
+               log.push(name);return values[name]}})});
+             var nf=new Intl.NumberFormat('de-DE',options);var ro=nf.resolvedOptions();
+             var d=Object.getOwnPropertyDescriptor(Intl.NumberFormat.prototype,'format');
+             return [Intl.NumberFormat.length,Intl.NumberFormat.name,
+               Object.getPrototypeOf(nf)===Intl.NumberFormat.prototype,
+               Object.keys(ro).join(','),ro.locale,ro.numberingSystem,ro.roundingMode,
+               ro.useGrouping,nf.format(1234.25),d.get.name,d.enumerable,d.configurable,
+               log.join(',')].join('|');"
+        ),
+        "0|NumberFormat|true|locale,numberingSystem,style,minimumIntegerDigits,minimumFractionDigits,maximumFractionDigits,useGrouping,notation,signDisplay,roundingIncrement,roundingMode,roundingPriority,trailingZeroDisplay|de-DE|latn|halfEven|false|1234,25|get format|false|true|localeMatcher,numberingSystem,style,currency,currencyDisplay,currencySign,unit,unitDisplay,notation,minimumIntegerDigits,minimumFractionDigits,maximumFractionDigits,minimumSignificantDigits,maximumSignificantDigits,roundingIncrement,roundingMode,roundingPriority,trailingZeroDisplay,compactDisplay,useGrouping,signDisplay"
+    );
+}
+
+#[test]
+fn number_format_preserves_exact_values_rounding_and_parts() {
+    assert_eq!(
+        rendered(
+            "var nf=new Intl.NumberFormat('en-US',{useGrouping:false,minimumFractionDigits:2,
+               maximumFractionDigits:2,roundingIncrement:25,roundingMode:'halfExpand'});
+             var bound=nf.format;var parts=nf.formatToParts(1234.5);
+             var exact=new Intl.NumberFormat('en-US',{useGrouping:false,maximumFractionDigits:20});
+             return [bound===nf.format,bound.name,bound.length,nf.format(7.235),
+               exact.format('9007199254740993.1234567890123456789'),
+               parts.map(function(p){return p.type+':'+p.value}).join(','),
+               parts.map(function(p){return p.value}).join('')===nf.format(1234.5)].join('|');"
+        ),
+        "true||1|7.25|9007199254740993.1234567890123456789|integer:1234,decimal:.,fraction:50|true"
+    );
+}
+
+#[test]
+fn number_format_supported_locales_styles_and_ranges_are_available() {
+    assert_eq!(
+        rendered(
+            "var supported=Intl.NumberFormat.supportedLocalesOf(['tlh','de-DE','en-u-nu-arab'],{localeMatcher:'lookup'});
+             var currency=new Intl.NumberFormat('en-US',{style:'currency',currency:'USD',currencySign:'accounting'});
+             var unit=new Intl.NumberFormat('en-US',{style:'unit',unit:'kilometer-per-hour',unitDisplay:'long'});
+             var scientific=new Intl.NumberFormat('de-DE',{notation:'scientific',maximumFractionDigits:2});
+             var range=new Intl.NumberFormat('en-US',{style:'currency',currency:'USD',maximumFractionDigits:0});
+             return [supported.join(','),currency.format(-987),unit.format(987),scientific.format(12345),
+               range.formatRange(3,5),range.formatRange(3.1,3.4),
+               Intl.NumberFormat.supportedLocalesOf.length].join('|');"
+        ),
+        "de-DE,en-u-nu-arab|($987.00)|987 kilometers per hour|1,23E4|$3 – $5|~$3|1"
+    );
+}
+
+#[test]
+fn number_format_legacy_chain_uses_a_hidden_fallback_symbol() {
+    assert_eq!(
+        rendered(
+            "var receiver=Object.create(Intl.NumberFormat.prototype);
+             var chained=Intl.NumberFormat.call(receiver,'de-DE',{useGrouping:false});
+             var symbols=Object.getOwnPropertySymbols(chained);
+             var fallback=symbols.filter(function(symbol){return symbol.description==='IntlLegacyConstructedSymbol'})[0];
+             var descriptor=Object.getOwnPropertyDescriptor(chained,fallback);
+             var accessed;
+             var proxy=new Proxy(chained,{get:function(target,key){accessed=key;return target[key]}});
+             var resolved=Intl.NumberFormat.prototype.resolvedOptions.call(proxy);
+             var format=Object.getOwnPropertyDescriptor(Intl.NumberFormat.prototype,'format').get.call(proxy);
+             var strictBrand;
+             try{Intl.NumberFormat.prototype.formatToParts.call(proxy,1)}catch(error){strictBrand=error.name}
+             return [chained===receiver,chained[fallback] instanceof Intl.NumberFormat,
+               fallback.description,descriptor.writable,descriptor.enumerable,descriptor.configurable,
+               typeof accessed,accessed===fallback,resolved.locale,format(1234),strictBrand].join('|');"
+        ),
+        "true|true|IntlLegacyConstructedSymbol|false|false|false|symbol|true|de-DE|1234|TypeError"
+    );
+}
+
+#[test]
+fn number_format_notations_localized_specials_and_part_boundaries_are_spec_shaped() {
+    assert_eq!(
+        rendered(
+            "var parts=function(nf,value){return nf.formatToParts(value).map(function(p){return p.type+':'+p.value}).join(',')};
+             var engineering=new Intl.NumberFormat('en-US',{notation:'engineering'});
+             var scientific=new Intl.NumberFormat('en-US',{notation:'scientific'});
+             var fraction=new Intl.NumberFormat('en-US',{useGrouping:false,minimumIntegerDigits:3,minimumFractionDigits:1,maximumFractionDigits:3});
+             var compactZh=new Intl.NumberFormat('zh-TW',{notation:'compact'});
+             var compactLong=new Intl.NumberFormat('en-US',{notation:'compact',compactDisplay:'long'});
+             var percent=new Intl.NumberFormat('en-US',{style:'percent'});
+             var currencyDe=new Intl.NumberFormat('de-DE',{style:'currency',currency:'USD',signDisplay:'always'});
+             var unitJa=new Intl.NumberFormat('ja-JP',{style:'unit',unit:'kilometer-per-hour',unitDisplay:'long'});
+             var range=new Intl.NumberFormat('en-US',{style:'currency',currency:'USD',maximumFractionDigits:0});
+             var rangeParts=range.formatRangeToParts(3,5).map(function(p){return p.type+':'+p.value+':'+p.source}).join(',');
+             return [engineering.format(0.000345),scientific.format(543211.1),
+               fraction.format(-0.0001),compactZh.format(NaN),
+               parts(compactLong,987654321),parts(percent,-123),parts(currencyDe,987),
+               parts(unitJa,987),rangeParts].join('|');"
+        ),
+        "345E-6|5.432E5|-000.0|非數值|integer:988,literal: ,compact:million|minusSign:-,integer:12,group:,,integer:300,percentSign:%|plusSign:+,integer:987,decimal:,,fraction:00,literal: ,currency:$|unit:時速,literal: ,integer:987,literal: ,unit:キロメートル|currency:$:startRange,integer:3:startRange,literal: – :shared,currency:$:endRange,integer:5:endRange"
+    );
+}

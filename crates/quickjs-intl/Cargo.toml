@@ -8,7 +8,9 @@ license.workspace = true
 publish = false
 
 [dependencies]
-icu = { workspace = true, features = ["compiled_data"] }
+fixed_decimal.workspace = true
+icu = { workspace = true, features = ["compiled_data", "unstable"] }
+writeable.workspace = true
 
 [lints]
 workspace = true

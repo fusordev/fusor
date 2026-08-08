@@ -5,9 +5,10 @@ use crate::{
     runtime::{
         ArrayBufferPrototypeMethod, AtomicsMethod, DataViewPrototypeMethod, DatePrototypeMethod,
         DateStaticMethod, IntlCollatorPrototypeMethod, IntlLocalePrototypeMethod,
-        SharedArrayBufferPrototypeMethod, TemporalDurationPrototypeMethod,
-        TemporalDurationStaticMethod, TemporalInstantPrototypeMethod, TemporalInstantStaticMethod,
-        TemporalNowMethod, TemporalPlainDatePrototypeMethod, TemporalPlainDateStaticMethod,
+        IntlNumberFormatPrototypeMethod, SharedArrayBufferPrototypeMethod,
+        TemporalDurationPrototypeMethod, TemporalDurationStaticMethod,
+        TemporalInstantPrototypeMethod, TemporalInstantStaticMethod, TemporalNowMethod,
+        TemporalPlainDatePrototypeMethod, TemporalPlainDateStaticMethod,
         TemporalPlainDateTimePrototypeMethod, TemporalPlainDateTimeStaticMethod,
         TemporalPlainMonthDayPrototypeMethod, TemporalPlainMonthDayStaticMethod,
         TemporalPlainTimePrototypeMethod, TemporalPlainTimeStaticMethod,
@@ -438,6 +439,8 @@ fn visit_core_name_order(
         RealmNameId::IntlSupportedValuesOf,
         RealmNameId::Collator,
         RealmNameId::IntlCollatorSupportedLocalesOf,
+        RealmNameId::IntlNumberFormat,
+        RealmNameId::IntlNumberFormatSupportedLocalesOf,
         RealmNameId::Locale,
         RealmNameId::Deref,
         RealmNameId::Register,
@@ -448,6 +451,9 @@ fn visit_core_name_order(
     }
     for method in IntlCollatorPrototypeMethod::ALL {
         visit(RealmNameId::IntlCollatorPrototype(method))?;
+    }
+    for method in IntlNumberFormatPrototypeMethod::ALL {
+        visit(RealmNameId::IntlNumberFormatPrototype(method))?;
     }
     for method in IntlLocalePrototypeMethod::ALL {
         if !matches!(method, IntlLocalePrototypeMethod::ToString) {
@@ -513,8 +519,11 @@ fn realm_name_description(id: RealmNameId) -> &'static str {
         RealmNameId::IntlGetCanonicalLocales => "getCanonicalLocales",
         RealmNameId::IntlSupportedValuesOf => "supportedValuesOf",
         RealmNameId::Collator => "Collator",
-        RealmNameId::IntlCollatorSupportedLocalesOf => "supportedLocalesOf",
+        RealmNameId::IntlCollatorSupportedLocalesOf
+        | RealmNameId::IntlNumberFormatSupportedLocalesOf => "supportedLocalesOf",
         RealmNameId::IntlCollatorPrototype(method) => method.name(),
+        RealmNameId::IntlNumberFormat => "NumberFormat",
+        RealmNameId::IntlNumberFormatPrototype(method) => method.name(),
         RealmNameId::Locale => "Locale",
         RealmNameId::IntlLocalePrototype(method) => method.name(),
         RealmNameId::Deref => "deref",
@@ -643,8 +652,8 @@ mod tests {
         let schema = RealmIntrinsicSchema::try_new().expect("Realm schema");
         let plan = RealmAtomPlan::try_new(&schema).expect("atom plan");
 
-        assert_eq!(plan.len(), 383);
-        assert_eq!(plan.description_code_units(), 3_396);
+        assert_eq!(plan.len(), 388);
+        assert_eq!(plan.description_code_units(), 3_456);
     }
 
     #[test]

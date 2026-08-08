@@ -691,6 +691,11 @@ impl RealmBuildTransaction<'_> {
                 collator_prototype: object(IntrinsicObjectId::IntlCollatorPrototype),
                 collator_constructor: function(NativeFunctionKind::IntlCollatorConstructor),
                 collator_compare: function(NativeFunctionKind::IntlCollatorCompare),
+                number_format_prototype: object(IntrinsicObjectId::IntlNumberFormatPrototype),
+                number_format_constructor: function(
+                    NativeFunctionKind::IntlNumberFormatConstructor,
+                ),
+                number_format_format: function(NativeFunctionKind::IntlNumberFormatFormat),
                 locale_prototype: object(IntrinsicObjectId::IntlLocalePrototype),
                 locale_constructor: function(NativeFunctionKind::IntlLocaleConstructor),
             },

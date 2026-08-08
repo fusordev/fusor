@@ -1,5 +1,6 @@
 //! Resumable ECMA-402 locale-list canonicalization.
 
+use super::instanceof::begin_function_has_instance;
 #[allow(
     clippy::wildcard_imports,
     reason = "this private VM sibling participates in the shared interpreter implementation namespace"
@@ -7,12 +8,19 @@
 use super::*;
 
 use quickjs_intl::{
-    CollatorRequestOptions, CollatorSensitivity, CollatorState, CollatorUsage, LocaleComponents,
-    LocaleOptionKind, LocaleOptions, LocaleWeekInfo, apply_locale_options, calendars_of_locale,
-    canonicalize_locale, canonicalize_locale_option, collations_of_locale,
-    collator_supported_locales, compare_with_collator, hour_cycles_of_locale, locale_components,
-    maximize_locale, minimize_locale, numbering_systems_of_locale, resolve_collator,
-    supported_values, text_direction_of_locale, time_zones_of_locale, week_info_of_locale,
+    CollatorRequestOptions, CollatorSensitivity, CollatorState, CollatorUsage,
+    IntlMathematicalValue, LocaleComponents, LocaleOptionKind, LocaleOptions, LocaleWeekInfo,
+    NumberFormatCompactDisplay, NumberFormatCurrencyDisplay, NumberFormatCurrencySign,
+    NumberFormatError, NumberFormatNotation, NumberFormatRequestOptions, NumberFormatRoundingMode,
+    NumberFormatRoundingPriority, NumberFormatSignDisplay, NumberFormatState, NumberFormatStyle,
+    NumberFormatTrailingZeroDisplay, NumberFormatUnitDisplay, NumberFormatUseGrouping,
+    apply_locale_options, calendars_of_locale, canonicalize_locale, canonicalize_locale_option,
+    collations_of_locale, collator_supported_locales, compare_with_collator, format_number,
+    format_number_to_parts, hour_cycles_of_locale, intl_mathematical_value_from_f64,
+    is_well_formed_currency_code, is_well_formed_unit_identifier, locale_components,
+    maximize_locale, minimize_locale, number_format_supported_locales, numbering_systems_of_locale,
+    parse_intl_mathematical_value, resolve_collator, resolve_number_format, supported_values,
+    text_direction_of_locale, time_zones_of_locale, week_info_of_locale,
 };
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -145,6 +153,8 @@ enum IntlLocaleListTarget {
     ReturnArray,
     CollatorConstructor(Box<IntlCollatorConstructorContinuation>),
     CollatorSupportedLocalesOf(Box<IntlCollatorSupportedLocalesContinuation>),
+    NumberFormatConstructor(Box<IntlNumberFormatConstructorContinuation>),
+    NumberFormatSupportedLocalesOf(Box<IntlNumberFormatSupportedLocalesContinuation>),
 }
 
 impl IntlLocaleListTarget {
@@ -153,6 +163,8 @@ impl IntlLocaleListTarget {
             Self::ReturnArray => 0,
             Self::CollatorConstructor(state) => state.retained_values(),
             Self::CollatorSupportedLocalesOf(state) => state.retained_values(),
+            Self::NumberFormatConstructor(state) => state.retained_values(),
+            Self::NumberFormatSupportedLocalesOf(state) => state.retained_values(),
         }
     }
 
@@ -161,6 +173,8 @@ impl IntlLocaleListTarget {
             Self::ReturnArray => {}
             Self::CollatorConstructor(state) => state.trace_roots(mark),
             Self::CollatorSupportedLocalesOf(state) => state.trace_roots(mark),
+            Self::NumberFormatConstructor(state) => state.trace_roots(mark),
+            Self::NumberFormatSupportedLocalesOf(state) => state.trace_roots(mark),
         }
     }
 }
@@ -318,6 +332,243 @@ impl IntlCollatorCompareContinuation {
     pub(super) fn trace_roots(&self, mark: &mut dyn FnMut(CollectionRoot)) {
         mark(CollectionRoot::Heap(HeapReference::Object(self.collator)));
         trace_stored_value_root(&self.second, mark);
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum IntlNumberFormatConstructorStage {
+    ReadOption,
+    AwaitOption,
+    AwaitOptionPrimitive,
+    ConvertRawDigit,
+    AwaitRawDigitPrimitive,
+    AwaitPrototype,
+    AwaitLegacyInstance,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum IntlNumberFormatOption {
+    LocaleMatcher,
+    NumberingSystem,
+    Style,
+    Currency,
+    CurrencyDisplay,
+    CurrencySign,
+    Unit,
+    UnitDisplay,
+    Notation,
+    MinimumIntegerDigits,
+    MinimumFractionDigits,
+    MaximumFractionDigits,
+    MinimumSignificantDigits,
+    MaximumSignificantDigits,
+    RoundingIncrement,
+    RoundingMode,
+    RoundingPriority,
+    TrailingZeroDisplay,
+    CompactDisplay,
+    UseGrouping,
+    SignDisplay,
+}
+
+impl IntlNumberFormatOption {
+    const ALL: [Self; 21] = [
+        Self::LocaleMatcher,
+        Self::NumberingSystem,
+        Self::Style,
+        Self::Currency,
+        Self::CurrencyDisplay,
+        Self::CurrencySign,
+        Self::Unit,
+        Self::UnitDisplay,
+        Self::Notation,
+        Self::MinimumIntegerDigits,
+        Self::MinimumFractionDigits,
+        Self::MaximumFractionDigits,
+        Self::MinimumSignificantDigits,
+        Self::MaximumSignificantDigits,
+        Self::RoundingIncrement,
+        Self::RoundingMode,
+        Self::RoundingPriority,
+        Self::TrailingZeroDisplay,
+        Self::CompactDisplay,
+        Self::UseGrouping,
+        Self::SignDisplay,
+    ];
+
+    const fn name(self) -> &'static str {
+        match self {
+            Self::LocaleMatcher => "localeMatcher",
+            Self::NumberingSystem => "numberingSystem",
+            Self::Style => "style",
+            Self::Currency => "currency",
+            Self::CurrencyDisplay => "currencyDisplay",
+            Self::CurrencySign => "currencySign",
+            Self::Unit => "unit",
+            Self::UnitDisplay => "unitDisplay",
+            Self::Notation => "notation",
+            Self::MinimumIntegerDigits => "minimumIntegerDigits",
+            Self::MinimumFractionDigits => "minimumFractionDigits",
+            Self::MaximumFractionDigits => "maximumFractionDigits",
+            Self::MinimumSignificantDigits => "minimumSignificantDigits",
+            Self::MaximumSignificantDigits => "maximumSignificantDigits",
+            Self::RoundingIncrement => "roundingIncrement",
+            Self::RoundingMode => "roundingMode",
+            Self::RoundingPriority => "roundingPriority",
+            Self::TrailingZeroDisplay => "trailingZeroDisplay",
+            Self::CompactDisplay => "compactDisplay",
+            Self::UseGrouping => "useGrouping",
+            Self::SignDisplay => "signDisplay",
+        }
+    }
+
+    const fn raw_digit_index(self) -> Option<usize> {
+        match self {
+            Self::MinimumFractionDigits => Some(0),
+            Self::MaximumFractionDigits => Some(1),
+            Self::MinimumSignificantDigits => Some(2),
+            Self::MaximumSignificantDigits => Some(3),
+            _ => None,
+        }
+    }
+
+    const fn is_immediate_number(self) -> bool {
+        matches!(self, Self::MinimumIntegerDigits | Self::RoundingIncrement)
+    }
+}
+
+pub(super) struct IntlNumberFormatConstructorContinuation {
+    new_target: Option<FunctionId>,
+    format_value: Option<IntlMathematicalValue>,
+    legacy_receiver: Option<StoredValue>,
+    legacy_number_format: Option<ObjectId>,
+    options_argument: StoredValue,
+    options_object: Option<StoredValue>,
+    requested_locales: Vec<String>,
+    options: NumberFormatRequestOptions,
+    raw_digits: [Option<StoredValue>; 4],
+    resolved: Option<NumberFormatState>,
+    option_index: usize,
+    raw_digit_index: usize,
+    realm: RealmId,
+    stage: IntlNumberFormatConstructorStage,
+    origin: JsStackFrame,
+}
+
+impl IntlNumberFormatConstructorContinuation {
+    pub(super) fn retained_values(&self) -> u64 {
+        2_u64
+            .saturating_add(u64::from(self.options_object.is_some()))
+            .saturating_add(u64::from(self.legacy_receiver.is_some()))
+            .saturating_add(u64::from(self.legacy_number_format.is_some()))
+            .saturating_add(
+                self.raw_digits
+                    .iter()
+                    .filter(|value| value.is_some())
+                    .count() as u64,
+            )
+    }
+
+    pub(super) fn trace_roots(&self, mark: &mut dyn FnMut(CollectionRoot)) {
+        if let Some(new_target) = self.new_target {
+            mark(CollectionRoot::Heap(HeapReference::Function(new_target)));
+        }
+        trace_stored_value_root(&self.options_argument, mark);
+        if let Some(receiver) = &self.legacy_receiver {
+            trace_stored_value_root(receiver, mark);
+        }
+        if let Some(number_format) = self.legacy_number_format {
+            mark(CollectionRoot::Heap(HeapReference::Object(number_format)));
+        }
+        if let Some(options) = &self.options_object {
+            trace_stored_value_root(options, mark);
+        }
+        for value in self.raw_digits.iter().flatten() {
+            trace_stored_value_root(value, mark);
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum IntlNumberFormatSupportedLocalesStage {
+    ReadLocaleMatcher,
+    AwaitLocaleMatcher,
+    AwaitLocaleMatcherPrimitive,
+}
+
+pub(super) struct IntlNumberFormatSupportedLocalesContinuation {
+    options_argument: StoredValue,
+    options_object: Option<StoredValue>,
+    requested_locales: Vec<String>,
+    realm: RealmId,
+    stage: IntlNumberFormatSupportedLocalesStage,
+    origin: JsStackFrame,
+}
+
+impl IntlNumberFormatSupportedLocalesContinuation {
+    pub(super) fn retained_values(&self) -> u64 {
+        1_u64.saturating_add(u64::from(self.options_object.is_some()))
+    }
+
+    pub(super) fn trace_roots(&self, mark: &mut dyn FnMut(CollectionRoot)) {
+        trace_stored_value_root(&self.options_argument, mark);
+        if let Some(options) = &self.options_object {
+            trace_stored_value_root(options, mark);
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) enum IntlNumberFormatOperation {
+    Format,
+    FormatToParts,
+    FormatRange,
+    FormatRangeToParts,
+}
+
+pub(super) struct IntlNumberFormatValueContinuation {
+    formatter: ObjectId,
+    operation: IntlNumberFormatOperation,
+    second: Option<StoredValue>,
+    first: Option<IntlMathematicalValue>,
+    realm: RealmId,
+    origin: JsStackFrame,
+}
+
+impl IntlNumberFormatValueContinuation {
+    pub(super) fn retained_values(&self) -> u64 {
+        1_u64.saturating_add(u64::from(self.second.is_some()))
+    }
+
+    pub(super) fn trace_roots(&self, mark: &mut dyn FnMut(CollectionRoot)) {
+        mark(CollectionRoot::Heap(HeapReference::Object(self.formatter)));
+        if let Some(second) = &self.second {
+            trace_stored_value_root(second, mark);
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum IntlNumberFormatUnwrapStage {
+    AwaitInstance,
+    AwaitFallback,
+}
+
+pub(super) struct IntlNumberFormatUnwrapContinuation {
+    receiver: StoredValue,
+    method: IntlNumberFormatPrototypeMethod,
+    realm: RealmId,
+    stage: IntlNumberFormatUnwrapStage,
+    origin: JsStackFrame,
+}
+
+impl IntlNumberFormatUnwrapContinuation {
+    pub(super) const fn retained_values() -> u64 {
+        1
+    }
+
+    pub(super) fn trace_roots(&self, mark: &mut dyn FnMut(CollectionRoot)) {
+        trace_stored_value_root(&self.receiver, mark);
     }
 }
 
@@ -1689,6 +1940,1711 @@ pub(super) fn finish_intl_collator_compare_second(
     )))
 }
 
+pub(super) fn begin_intl_number_format_constructor(
+    runtime: &mut Runtime,
+    function: FunctionId,
+    mut inputs: CallInputs,
+    realm: RealmId,
+    return_to: Option<CallReturn>,
+    origin: JsStackFrame,
+    execution_budget: &mut ExecutionBudget,
+) -> Result<NativeDispatch, NativeFailure> {
+    let new_target = inputs.new_target.unwrap_or(function);
+    let legacy_receiver = inputs
+        .new_target
+        .is_none()
+        .then(|| inputs.receiver.duplicate());
+    let locales = inputs.arguments.take_first_or_undefined();
+    let options_argument = inputs.arguments.take_first_or_undefined();
+    let state = IntlNumberFormatConstructorContinuation {
+        new_target: Some(new_target),
+        format_value: None,
+        legacy_receiver,
+        legacy_number_format: None,
+        options_argument,
+        options_object: None,
+        requested_locales: Vec::new(),
+        options: NumberFormatRequestOptions::default(),
+        raw_digits: core::array::from_fn(|_| None),
+        resolved: None,
+        option_index: 0,
+        raw_digit_index: 0,
+        realm,
+        stage: IntlNumberFormatConstructorStage::ReadOption,
+        origin: origin.clone(),
+    };
+    begin_intl_locale_list(
+        runtime,
+        locales,
+        IntlLocaleListTarget::NumberFormatConstructor(Box::new(state)),
+        realm,
+        return_to,
+        origin,
+        execution_budget,
+    )
+}
+
+pub(super) fn begin_intl_number_to_locale_string(
+    runtime: &mut Runtime,
+    mut arguments: CallArguments,
+    value: IntlMathematicalValue,
+    realm: RealmId,
+    return_to: Option<CallReturn>,
+    origin: JsStackFrame,
+    execution_budget: &mut ExecutionBudget,
+) -> Result<NativeDispatch, NativeFailure> {
+    let locales = arguments.take_first_or_undefined();
+    let options_argument = arguments.take_first_or_undefined();
+    let state = IntlNumberFormatConstructorContinuation {
+        new_target: None,
+        format_value: Some(value),
+        legacy_receiver: None,
+        legacy_number_format: None,
+        options_argument,
+        options_object: None,
+        requested_locales: Vec::new(),
+        options: NumberFormatRequestOptions::default(),
+        raw_digits: core::array::from_fn(|_| None),
+        resolved: None,
+        option_index: 0,
+        raw_digit_index: 0,
+        realm,
+        stage: IntlNumberFormatConstructorStage::ReadOption,
+        origin: origin.clone(),
+    };
+    begin_intl_locale_list(
+        runtime,
+        locales,
+        IntlLocaleListTarget::NumberFormatConstructor(Box::new(state)),
+        realm,
+        return_to,
+        origin,
+        execution_budget,
+    )
+}
+
+fn begin_intl_number_format_options(
+    runtime: &mut Runtime,
+    mut state: IntlNumberFormatConstructorContinuation,
+    return_to: Option<CallReturn>,
+    execution_budget: &mut ExecutionBudget,
+) -> Result<NativeDispatch, NativeFailure> {
+    if matches!(state.options_argument, StoredValue::Undefined) {
+        state.stage = IntlNumberFormatConstructorStage::ConvertRawDigit;
+        return advance_intl_number_format_constructor(
+            runtime,
+            state,
+            None,
+            return_to,
+            execution_budget,
+        );
+    }
+    let options_argument = state.options_argument.duplicate();
+    state.options_object = Some(
+        match to_object_value(runtime, state.realm, options_argument, state.origin.clone())? {
+            Ok(options) => options,
+            Err(exception) => return Err(NativeFailure::Abrupt(exception)),
+        },
+    );
+    state.stage = IntlNumberFormatConstructorStage::ReadOption;
+    advance_intl_number_format_constructor(runtime, state, None, return_to, execution_budget)
+}
+
+#[allow(
+    clippy::too_many_lines,
+    reason = "NumberFormat option Gets and delayed digit conversions remain in normative observable order"
+)]
+pub(super) fn advance_intl_number_format_constructor(
+    runtime: &mut Runtime,
+    mut state: IntlNumberFormatConstructorContinuation,
+    completion: Option<StoredValue>,
+    return_to: Option<CallReturn>,
+    execution_budget: &mut ExecutionBudget,
+) -> Result<NativeDispatch, NativeFailure> {
+    let mut completion = completion;
+    loop {
+        match state.stage {
+            IntlNumberFormatConstructorStage::ReadOption => {
+                let Some(option) = IntlNumberFormatOption::ALL.get(state.option_index).copied()
+                else {
+                    state.stage = IntlNumberFormatConstructorStage::ConvertRawDigit;
+                    continue;
+                };
+                let base = state
+                    .options_object
+                    .as_ref()
+                    .ok_or(EngineFault::RuntimeInvariant {
+                        message: "Intl.NumberFormat option iteration lost its options object",
+                    })?
+                    .duplicate();
+                charge_heap_property_lookup(runtime, &base, execution_budget)?;
+                let name = JsString::from_utf8(option.name())?;
+                let key = runtime.property_key_from_string(&name)?;
+                state.stage = IntlNumberFormatConstructorStage::AwaitOption;
+                let dispatch = begin_value_get(
+                    runtime,
+                    &base,
+                    key,
+                    Some(&name),
+                    state.realm,
+                    return_to,
+                    state.origin.clone(),
+                    execution_budget,
+                )?;
+                return continue_intl_number_format_constructor_after(
+                    dispatch,
+                    state,
+                    runtime,
+                    return_to,
+                    execution_budget,
+                );
+            }
+            IntlNumberFormatConstructorStage::AwaitOption => {
+                let value = take_intl_number_format_constructor_completion(&mut completion)?;
+                let option = IntlNumberFormatOption::ALL[state.option_index];
+                if matches!(value, StoredValue::Undefined) {
+                    validate_required_number_format_option(&state, option)?;
+                    advance_intl_number_format_option(&mut state);
+                    continue;
+                }
+                if let Some(index) = option.raw_digit_index() {
+                    state.raw_digits[index] = Some(value);
+                    advance_intl_number_format_option(&mut state);
+                    continue;
+                }
+                if matches!(value, StoredValue::Function(_) | StoredValue::Object(_)) {
+                    state.stage = IntlNumberFormatConstructorStage::AwaitOptionPrimitive;
+                    let hint = if option.is_immediate_number() {
+                        OperatorPrimitiveHint::Number
+                    } else {
+                        OperatorPrimitiveHint::String
+                    };
+                    let realm = state.realm;
+                    let origin = state.origin.clone();
+                    return begin_operator_primitive_conversion(
+                        runtime,
+                        value,
+                        hint,
+                        OperatorPrimitiveTarget::IntlNumberFormatConstructor(Box::new(state)),
+                        realm,
+                        return_to,
+                        origin,
+                        execution_budget,
+                    );
+                }
+                store_intl_number_format_option(&mut state, option, value)?;
+                advance_intl_number_format_option(&mut state);
+            }
+            IntlNumberFormatConstructorStage::AwaitOptionPrimitive => {
+                let primitive = take_intl_number_format_constructor_completion(&mut completion)?;
+                let option = IntlNumberFormatOption::ALL[state.option_index];
+                store_intl_number_format_option(&mut state, option, primitive)?;
+                advance_intl_number_format_option(&mut state);
+            }
+            IntlNumberFormatConstructorStage::ConvertRawDigit => {
+                let Some(value) = state
+                    .raw_digits
+                    .get_mut(state.raw_digit_index)
+                    .and_then(Option::take)
+                else {
+                    state.raw_digit_index = state.raw_digit_index.saturating_add(1);
+                    if state.raw_digit_index >= state.raw_digits.len() {
+                        return finish_intl_number_format_options(
+                            runtime,
+                            state,
+                            return_to,
+                            execution_budget,
+                        );
+                    }
+                    continue;
+                };
+                if matches!(value, StoredValue::Function(_) | StoredValue::Object(_)) {
+                    state.stage = IntlNumberFormatConstructorStage::AwaitRawDigitPrimitive;
+                    let realm = state.realm;
+                    let origin = state.origin.clone();
+                    return begin_operator_primitive_conversion(
+                        runtime,
+                        value,
+                        OperatorPrimitiveHint::Number,
+                        OperatorPrimitiveTarget::IntlNumberFormatConstructor(Box::new(state)),
+                        realm,
+                        return_to,
+                        origin,
+                        execution_budget,
+                    );
+                }
+                store_intl_number_format_raw_digit(&mut state, value)?;
+                state.raw_digit_index = state.raw_digit_index.saturating_add(1);
+            }
+            IntlNumberFormatConstructorStage::AwaitRawDigitPrimitive => {
+                let primitive = take_intl_number_format_constructor_completion(&mut completion)?;
+                store_intl_number_format_raw_digit(&mut state, primitive)?;
+                state.raw_digit_index = state.raw_digit_index.saturating_add(1);
+                state.stage = IntlNumberFormatConstructorStage::ConvertRawDigit;
+            }
+            IntlNumberFormatConstructorStage::AwaitPrototype => {
+                let new_target = state.new_target.ok_or(EngineFault::RuntimeInvariant {
+                    message: "Intl.NumberFormat allocation lost its new target",
+                })?;
+                let requested = take_intl_number_format_constructor_completion(&mut completion)?;
+                let prototype = match requested {
+                    StoredValue::Function(function) => HeapReference::Function(function),
+                    StoredValue::Object(object) => HeapReference::Object(object),
+                    StoredValue::Undefined
+                    | StoredValue::Null
+                    | StoredValue::Boolean(_)
+                    | StoredValue::Number(_)
+                    | StoredValue::BigInt(_)
+                    | StoredValue::String(_)
+                    | StoredValue::Symbol(_) => {
+                        let target_realm = runtime.function_realm(new_target)?;
+                        HeapReference::Object(
+                            runtime.realm_intl_number_format_prototype(target_realm)?,
+                        )
+                    }
+                };
+                let resolved = state.resolved.take().ok_or(EngineFault::RuntimeInvariant {
+                    message: "Intl.NumberFormat allocation lost its resolved slots",
+                })?;
+                let object = runtime.allocate_intl_number_format(prototype, resolved)?;
+                if let Some(receiver) = state.legacy_receiver.as_ref().map(StoredValue::duplicate) {
+                    state.legacy_number_format = Some(object);
+                    state.stage = IntlNumberFormatConstructorStage::AwaitLegacyInstance;
+                    let constructor = runtime.realm_intl_number_format_constructor(state.realm)?;
+                    let dispatch = begin_function_has_instance(
+                        runtime,
+                        state.realm,
+                        receiver,
+                        StoredValue::Function(constructor),
+                        return_to,
+                        state.origin.clone(),
+                        execution_budget,
+                    )?;
+                    return continue_intl_number_format_constructor_after(
+                        dispatch,
+                        state,
+                        runtime,
+                        return_to,
+                        execution_budget,
+                    );
+                }
+                return Ok(NativeDispatch::Immediate(StoredValue::Object(object)));
+            }
+            IntlNumberFormatConstructorStage::AwaitLegacyInstance => {
+                let completion = take_intl_number_format_constructor_completion(&mut completion)?;
+                let number_format =
+                    state
+                        .legacy_number_format
+                        .ok_or(EngineFault::RuntimeInvariant {
+                            message: "Intl.NumberFormat legacy chain lost its initialized object",
+                        })?;
+                if !completion.is_truthy() {
+                    return Ok(NativeDispatch::Immediate(StoredValue::Object(
+                        number_format,
+                    )));
+                }
+                let receiver = state.legacy_receiver.ok_or(EngineFault::RuntimeInvariant {
+                    message: "Intl.NumberFormat legacy chain lost its receiver",
+                })?;
+                let reference = receiver.heap_reference().ok_or(EngineFault::RuntimeInvariant {
+                    message: "Intl.NumberFormat legacy receiver passed instanceof as a primitive",
+                })?;
+                let symbol = runtime.intl_number_format_fallback_symbol();
+                let key = runtime.property_key_from_symbol(&symbol)?;
+                let definition = PropertyDefinition::data(
+                    Requested::Present(StoredValue::Object(number_format)),
+                    Requested::Present(false),
+                )
+                .with_enumerable(Requested::Present(false))
+                .with_configurable(Requested::Present(false));
+                return begin_internal_define_own_property(
+                    runtime,
+                    reference,
+                    key,
+                    definition,
+                    state.realm,
+                    return_to,
+                    state.origin,
+                    execution_budget,
+                    DefinePropertyResult::Target,
+                );
+            }
+        }
+    }
+}
+
+fn advance_intl_number_format_option(state: &mut IntlNumberFormatConstructorContinuation) {
+    state.option_index = state.option_index.saturating_add(1);
+    state.stage = IntlNumberFormatConstructorStage::ReadOption;
+}
+
+fn validate_required_number_format_option(
+    state: &IntlNumberFormatConstructorContinuation,
+    option: IntlNumberFormatOption,
+) -> Result<(), NativeFailure> {
+    let style = state.options.style.unwrap_or_default();
+    if (option == IntlNumberFormatOption::Currency && style == NumberFormatStyle::Currency)
+        || (option == IntlNumberFormatOption::Unit && style == NumberFormatStyle::Unit)
+    {
+        return intl_locale_list_error(
+            state.realm,
+            state.origin.clone(),
+            ExceptionKind::TypeError,
+            if option == IntlNumberFormatOption::Currency {
+                "currency is required with currency style"
+            } else {
+                "unit is required with unit style"
+            },
+        );
+    }
+    Ok(())
+}
+
+#[allow(
+    clippy::too_many_lines,
+    reason = "the closed ECMA-402 NumberFormat option vocabulary is audited in one match"
+)]
+fn store_intl_number_format_option(
+    state: &mut IntlNumberFormatConstructorContinuation,
+    option: IntlNumberFormatOption,
+    value: StoredValue,
+) -> Result<(), NativeFailure> {
+    if option.is_immediate_number() {
+        let number = operator_to_number(value, state.realm, &state.origin)?.as_f64();
+        return match option {
+            IntlNumberFormatOption::MinimumIntegerDigits => {
+                state.options.minimum_integer_digits =
+                    Some(number_option_u8(state, option, number, 1, 21)?);
+                Ok(())
+            }
+            IntlNumberFormatOption::RoundingIncrement => {
+                let rounded = number_option_u16(state, option, number, 1, 5000)?;
+                if !ALLOWED_NUMBER_FORMAT_ROUNDING_INCREMENTS.contains(&rounded) {
+                    return invalid_intl_number_format_option(state, option);
+                }
+                state.options.rounding_increment = Some(rounded);
+                Ok(())
+            }
+            _ => Err(EngineFault::RuntimeInvariant {
+                message: "non-numeric NumberFormat option reached numeric storage",
+            }
+            .into()),
+        };
+    }
+
+    if option == IntlNumberFormatOption::UseGrouping {
+        state.options.use_grouping = Some(if value.is_truthy() {
+            match value {
+                StoredValue::Boolean(true) => NumberFormatUseGrouping::Always,
+                StoredValue::Boolean(false) => unreachable!("falsy Boolean handled below"),
+                value => {
+                    let text = operator_primitive_to_string(value, state.realm, &state.origin)?;
+                    let text = text.to_utf8_lossy()?;
+                    match text.as_str() {
+                        "min2" => NumberFormatUseGrouping::Min2,
+                        "auto" => NumberFormatUseGrouping::Auto,
+                        "always" => NumberFormatUseGrouping::Always,
+                        "true" | "false" => {
+                            if state.options.notation == Some(NumberFormatNotation::Compact) {
+                                NumberFormatUseGrouping::Min2
+                            } else {
+                                NumberFormatUseGrouping::Auto
+                            }
+                        }
+                        _ => return invalid_intl_number_format_option(state, option),
+                    }
+                }
+            }
+        } else {
+            NumberFormatUseGrouping::Never
+        });
+        return Ok(());
+    }
+
+    let text = operator_primitive_to_string(value, state.realm, &state.origin)?;
+    let text = text.to_utf8_lossy()?;
+    match option {
+        IntlNumberFormatOption::LocaleMatcher => {
+            if !matches!(text.as_str(), "lookup" | "best fit") {
+                return invalid_intl_number_format_option(state, option);
+            }
+        }
+        IntlNumberFormatOption::NumberingSystem => {
+            let Some(value) = canonical_unicode_locale_type(&text) else {
+                return invalid_intl_number_format_option(state, option);
+            };
+            state.options.numbering_system = Some(value);
+        }
+        IntlNumberFormatOption::Style => {
+            state.options.style = Some(match text.as_str() {
+                "decimal" => NumberFormatStyle::Decimal,
+                "percent" => NumberFormatStyle::Percent,
+                "currency" => NumberFormatStyle::Currency,
+                "unit" => NumberFormatStyle::Unit,
+                _ => return invalid_intl_number_format_option(state, option),
+            });
+        }
+        IntlNumberFormatOption::Currency => {
+            if !is_well_formed_currency_code(&text) {
+                return invalid_intl_number_format_option(state, option);
+            }
+            state.options.currency = Some(text.to_ascii_uppercase());
+        }
+        IntlNumberFormatOption::CurrencyDisplay => {
+            state.options.currency_display = Some(match text.as_str() {
+                "code" => NumberFormatCurrencyDisplay::Code,
+                "symbol" => NumberFormatCurrencyDisplay::Symbol,
+                "narrowSymbol" => NumberFormatCurrencyDisplay::NarrowSymbol,
+                "name" => NumberFormatCurrencyDisplay::Name,
+                _ => return invalid_intl_number_format_option(state, option),
+            });
+        }
+        IntlNumberFormatOption::CurrencySign => {
+            state.options.currency_sign = Some(match text.as_str() {
+                "standard" => NumberFormatCurrencySign::Standard,
+                "accounting" => NumberFormatCurrencySign::Accounting,
+                _ => return invalid_intl_number_format_option(state, option),
+            });
+        }
+        IntlNumberFormatOption::Unit => {
+            if !is_well_formed_unit_identifier(&text) {
+                return invalid_intl_number_format_option(state, option);
+            }
+            state.options.unit = Some(text);
+        }
+        IntlNumberFormatOption::UnitDisplay => {
+            state.options.unit_display = Some(match text.as_str() {
+                "short" => NumberFormatUnitDisplay::Short,
+                "narrow" => NumberFormatUnitDisplay::Narrow,
+                "long" => NumberFormatUnitDisplay::Long,
+                _ => return invalid_intl_number_format_option(state, option),
+            });
+        }
+        IntlNumberFormatOption::Notation => {
+            state.options.notation = Some(match text.as_str() {
+                "standard" => NumberFormatNotation::Standard,
+                "scientific" => NumberFormatNotation::Scientific,
+                "engineering" => NumberFormatNotation::Engineering,
+                "compact" => NumberFormatNotation::Compact,
+                _ => return invalid_intl_number_format_option(state, option),
+            });
+        }
+        IntlNumberFormatOption::RoundingMode => {
+            state.options.rounding_mode = Some(match text.as_str() {
+                "ceil" => NumberFormatRoundingMode::Ceil,
+                "floor" => NumberFormatRoundingMode::Floor,
+                "expand" => NumberFormatRoundingMode::Expand,
+                "trunc" => NumberFormatRoundingMode::Trunc,
+                "halfCeil" => NumberFormatRoundingMode::HalfCeil,
+                "halfFloor" => NumberFormatRoundingMode::HalfFloor,
+                "halfExpand" => NumberFormatRoundingMode::HalfExpand,
+                "halfTrunc" => NumberFormatRoundingMode::HalfTrunc,
+                "halfEven" => NumberFormatRoundingMode::HalfEven,
+                _ => return invalid_intl_number_format_option(state, option),
+            });
+        }
+        IntlNumberFormatOption::RoundingPriority => {
+            state.options.rounding_priority = Some(match text.as_str() {
+                "auto" => NumberFormatRoundingPriority::Auto,
+                "morePrecision" => NumberFormatRoundingPriority::MorePrecision,
+                "lessPrecision" => NumberFormatRoundingPriority::LessPrecision,
+                _ => return invalid_intl_number_format_option(state, option),
+            });
+        }
+        IntlNumberFormatOption::TrailingZeroDisplay => {
+            state.options.trailing_zero_display = Some(match text.as_str() {
+                "auto" => NumberFormatTrailingZeroDisplay::Auto,
+                "stripIfInteger" => NumberFormatTrailingZeroDisplay::StripIfInteger,
+                _ => return invalid_intl_number_format_option(state, option),
+            });
+        }
+        IntlNumberFormatOption::CompactDisplay => {
+            state.options.compact_display = Some(match text.as_str() {
+                "short" => NumberFormatCompactDisplay::Short,
+                "long" => NumberFormatCompactDisplay::Long,
+                _ => return invalid_intl_number_format_option(state, option),
+            });
+        }
+        IntlNumberFormatOption::SignDisplay => {
+            state.options.sign_display = Some(match text.as_str() {
+                "auto" => NumberFormatSignDisplay::Auto,
+                "never" => NumberFormatSignDisplay::Never,
+                "always" => NumberFormatSignDisplay::Always,
+                "exceptZero" => NumberFormatSignDisplay::ExceptZero,
+                "negative" => NumberFormatSignDisplay::Negative,
+                _ => return invalid_intl_number_format_option(state, option),
+            });
+        }
+        IntlNumberFormatOption::MinimumIntegerDigits
+        | IntlNumberFormatOption::MinimumFractionDigits
+        | IntlNumberFormatOption::MaximumFractionDigits
+        | IntlNumberFormatOption::MinimumSignificantDigits
+        | IntlNumberFormatOption::MaximumSignificantDigits
+        | IntlNumberFormatOption::RoundingIncrement
+        | IntlNumberFormatOption::UseGrouping => {
+            return Err(EngineFault::RuntimeInvariant {
+                message: "a non-string NumberFormat option reached string storage",
+            }
+            .into());
+        }
+    }
+    Ok(())
+}
+
+const ALLOWED_NUMBER_FORMAT_ROUNDING_INCREMENTS: &[u16] = &[
+    1, 2, 5, 10, 20, 25, 50, 100, 200, 250, 500, 1000, 2000, 2500, 5000,
+];
+
+fn store_intl_number_format_raw_digit(
+    state: &mut IntlNumberFormatConstructorContinuation,
+    value: StoredValue,
+) -> Result<(), NativeFailure> {
+    let number = operator_to_number(value, state.realm, &state.origin)?.as_f64();
+    let (minimum, maximum) = if state.raw_digit_index < 2 {
+        (0, 100)
+    } else {
+        (1, 21)
+    };
+    let value = number_option_u8(
+        state,
+        IntlNumberFormatOption::ALL[10 + state.raw_digit_index],
+        number,
+        minimum,
+        maximum,
+    )?;
+    match state.raw_digit_index {
+        0 => state.options.minimum_fraction_digits = Some(value),
+        1 => state.options.maximum_fraction_digits = Some(value),
+        2 => state.options.minimum_significant_digits = Some(value),
+        3 => state.options.maximum_significant_digits = Some(value),
+        _ => {
+            return Err(EngineFault::RuntimeInvariant {
+                message: "NumberFormat raw digit index is out of range",
+            }
+            .into());
+        }
+    }
+    Ok(())
+}
+
+fn number_option_u8(
+    state: &IntlNumberFormatConstructorContinuation,
+    option: IntlNumberFormatOption,
+    number: f64,
+    minimum: u8,
+    maximum: u8,
+) -> Result<u8, NativeFailure> {
+    if !number.is_finite() || number < f64::from(minimum) || number > f64::from(maximum) {
+        return invalid_intl_number_format_option(state, option);
+    }
+    #[allow(
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss,
+        reason = "the finite value is bounded to the inclusive u8 option range above"
+    )]
+    let integer = number.floor() as u8;
+    Ok(integer)
+}
+
+fn number_option_u16(
+    state: &IntlNumberFormatConstructorContinuation,
+    option: IntlNumberFormatOption,
+    number: f64,
+    minimum: u16,
+    maximum: u16,
+) -> Result<u16, NativeFailure> {
+    if !number.is_finite() || number < f64::from(minimum) || number > f64::from(maximum) {
+        return invalid_intl_number_format_option(state, option);
+    }
+    #[allow(
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss,
+        reason = "the finite value is bounded to the inclusive u16 option range above"
+    )]
+    let integer = number.floor() as u16;
+    Ok(integer)
+}
+
+fn canonical_unicode_locale_type(value: &str) -> Option<String> {
+    if value.is_empty()
+        || value.split('-').any(|subtag| {
+            !(3..=8).contains(&subtag.len())
+                || !subtag.is_ascii()
+                || !subtag.bytes().all(|byte| byte.is_ascii_alphanumeric())
+        })
+    {
+        return None;
+    }
+    Some(value.to_ascii_lowercase())
+}
+
+fn invalid_intl_number_format_option<T>(
+    state: &IntlNumberFormatConstructorContinuation,
+    option: IntlNumberFormatOption,
+) -> Result<T, NativeFailure> {
+    intl_locale_list_error(
+        state.realm,
+        state.origin.clone(),
+        ExceptionKind::RangeError,
+        &format!("invalid Intl.NumberFormat {} option", option.name()),
+    )
+}
+
+fn finish_intl_number_format_options(
+    runtime: &mut Runtime,
+    mut state: IntlNumberFormatConstructorContinuation,
+    return_to: Option<CallReturn>,
+    execution_budget: &mut ExecutionBudget,
+) -> Result<NativeDispatch, NativeFailure> {
+    if state.options.rounding_increment.unwrap_or(1) != 1
+        && (matches!(
+            state.options.rounding_priority,
+            Some(
+                NumberFormatRoundingPriority::MorePrecision
+                    | NumberFormatRoundingPriority::LessPrecision
+            )
+        ) || state.options.minimum_significant_digits.is_some()
+            || state.options.maximum_significant_digits.is_some())
+    {
+        return intl_locale_list_error(
+            state.realm,
+            state.origin.clone(),
+            ExceptionKind::TypeError,
+            "roundingIncrement is incompatible with significant-digit rounding",
+        );
+    }
+    execution_budget
+        .charge_instructions(usize_to_u64(state.requested_locales.len()).saturating_add(1))?;
+    let resolved = resolve_number_format(&state.requested_locales, state.options.clone()).map_err(
+        |error| {
+            let kind = match error {
+                NumberFormatError::InvalidCurrency | NumberFormatError::InvalidUnit => {
+                    ExceptionKind::TypeError
+                }
+                _ => ExceptionKind::RangeError,
+            };
+            NativeFailure::Abrupt(PendingException {
+                realm: state.realm,
+                payload: PendingExceptionPayload::EngineError {
+                    kind,
+                    message: JsString::from_utf8("invalid Intl.NumberFormat options")
+                        .expect("static Intl error message is valid"),
+                },
+                origin: state.origin.clone(),
+            })
+        },
+    )?;
+    if let Some(value) = state.format_value.take() {
+        let formatted =
+            format_number(&resolved, &value).map_err(|_| EngineFault::RuntimeInvariant {
+                message: "resolved Intl.NumberFormat slots failed locale formatting",
+            })?;
+        return Ok(NativeDispatch::Immediate(StoredValue::String(
+            JsString::from_utf8(&formatted)?,
+        )));
+    }
+    state.resolved = Some(resolved);
+    state.stage = IntlNumberFormatConstructorStage::AwaitPrototype;
+    let new_target = state.new_target.ok_or(EngineFault::RuntimeInvariant {
+        message: "Intl.NumberFormat allocation lost its new target",
+    })?;
+    let base = StoredValue::Function(new_target);
+    charge_heap_property_lookup(runtime, &base, execution_budget)?;
+    let key = runtime.predefined_property_key(PredefinedAtom::Prototype);
+    let dispatch = begin_value_get(
+        runtime,
+        &base,
+        key,
+        None,
+        state.realm,
+        return_to,
+        state.origin.clone(),
+        execution_budget,
+    )?;
+    continue_intl_number_format_constructor_after(
+        dispatch,
+        state,
+        runtime,
+        return_to,
+        execution_budget,
+    )
+}
+
+fn continue_intl_number_format_constructor_after(
+    dispatch: NativeDispatch,
+    state: IntlNumberFormatConstructorContinuation,
+    runtime: &mut Runtime,
+    return_to: Option<CallReturn>,
+    execution_budget: &mut ExecutionBudget,
+) -> Result<NativeDispatch, NativeFailure> {
+    continue_get_after(
+        dispatch,
+        state,
+        intl_number_format_constructor_continuation,
+        |state, value| {
+            advance_intl_number_format_constructor(
+                runtime,
+                state,
+                Some(value),
+                return_to,
+                execution_budget,
+            )
+        },
+        "Intl.NumberFormat property Get produced a structured result",
+    )
+}
+
+fn intl_number_format_constructor_continuation(
+    state: IntlNumberFormatConstructorContinuation,
+) -> NativeContinuation {
+    NativeContinuation::IntlNumberFormatConstructor(Box::new(state))
+}
+
+fn take_intl_number_format_constructor_completion(
+    completion: &mut Option<StoredValue>,
+) -> Result<StoredValue, EngineFault> {
+    completion.take().ok_or(EngineFault::RuntimeInvariant {
+        message: "Intl.NumberFormat constructor resumed without a completion",
+    })
+}
+
+pub(super) fn begin_intl_number_format_supported_locales_of(
+    runtime: &mut Runtime,
+    mut arguments: CallArguments,
+    realm: RealmId,
+    return_to: Option<CallReturn>,
+    origin: JsStackFrame,
+    execution_budget: &mut ExecutionBudget,
+) -> Result<NativeDispatch, NativeFailure> {
+    let locales = arguments.take_first_or_undefined();
+    let options_argument = arguments.take_first_or_undefined();
+    let state = IntlNumberFormatSupportedLocalesContinuation {
+        options_argument,
+        options_object: None,
+        requested_locales: Vec::new(),
+        realm,
+        stage: IntlNumberFormatSupportedLocalesStage::ReadLocaleMatcher,
+        origin: origin.clone(),
+    };
+    begin_intl_locale_list(
+        runtime,
+        locales,
+        IntlLocaleListTarget::NumberFormatSupportedLocalesOf(Box::new(state)),
+        realm,
+        return_to,
+        origin,
+        execution_budget,
+    )
+}
+
+fn begin_intl_number_format_supported_locales_options(
+    runtime: &mut Runtime,
+    mut state: IntlNumberFormatSupportedLocalesContinuation,
+    return_to: Option<CallReturn>,
+    execution_budget: &mut ExecutionBudget,
+) -> Result<NativeDispatch, NativeFailure> {
+    if matches!(state.options_argument, StoredValue::Undefined) {
+        return finish_intl_number_format_supported_locales(runtime, &state);
+    }
+    let options_argument = state.options_argument.duplicate();
+    state.options_object = Some(
+        match to_object_value(runtime, state.realm, options_argument, state.origin.clone())? {
+            Ok(options) => options,
+            Err(exception) => return Err(NativeFailure::Abrupt(exception)),
+        },
+    );
+    advance_intl_number_format_supported_locales(runtime, state, None, return_to, execution_budget)
+}
+
+pub(super) fn advance_intl_number_format_supported_locales(
+    runtime: &mut Runtime,
+    mut state: IntlNumberFormatSupportedLocalesContinuation,
+    completion: Option<StoredValue>,
+    return_to: Option<CallReturn>,
+    execution_budget: &mut ExecutionBudget,
+) -> Result<NativeDispatch, NativeFailure> {
+    let mut completion = completion;
+    match state.stage {
+        IntlNumberFormatSupportedLocalesStage::ReadLocaleMatcher => {
+            let base = state
+                .options_object
+                .as_ref()
+                .ok_or(EngineFault::RuntimeInvariant {
+                    message: "Intl.NumberFormat.supportedLocalesOf lost its options object",
+                })?
+                .duplicate();
+            charge_heap_property_lookup(runtime, &base, execution_budget)?;
+            let name = JsString::from_utf8("localeMatcher")?;
+            let key = runtime.property_key_from_string(&name)?;
+            state.stage = IntlNumberFormatSupportedLocalesStage::AwaitLocaleMatcher;
+            let dispatch = begin_value_get(
+                runtime,
+                &base,
+                key,
+                Some(&name),
+                state.realm,
+                return_to,
+                state.origin.clone(),
+                execution_budget,
+            )?;
+            continue_intl_number_format_supported_locales_after(
+                dispatch,
+                state,
+                runtime,
+                return_to,
+                execution_budget,
+            )
+        }
+        IntlNumberFormatSupportedLocalesStage::AwaitLocaleMatcher => {
+            let value = take_intl_number_format_supported_locales_completion(&mut completion)?;
+            if matches!(value, StoredValue::Undefined) {
+                return finish_intl_number_format_supported_locales(runtime, &state);
+            }
+            if matches!(value, StoredValue::Function(_) | StoredValue::Object(_)) {
+                state.stage = IntlNumberFormatSupportedLocalesStage::AwaitLocaleMatcherPrimitive;
+                let realm = state.realm;
+                let origin = state.origin.clone();
+                return begin_operator_primitive_conversion(
+                    runtime,
+                    value,
+                    OperatorPrimitiveHint::String,
+                    OperatorPrimitiveTarget::IntlNumberFormatSupportedLocalesOf(Box::new(state)),
+                    realm,
+                    return_to,
+                    origin,
+                    execution_budget,
+                );
+            }
+            validate_intl_number_format_locale_matcher(&state, value)?;
+            finish_intl_number_format_supported_locales(runtime, &state)
+        }
+        IntlNumberFormatSupportedLocalesStage::AwaitLocaleMatcherPrimitive => {
+            let value = take_intl_number_format_supported_locales_completion(&mut completion)?;
+            validate_intl_number_format_locale_matcher(&state, value)?;
+            finish_intl_number_format_supported_locales(runtime, &state)
+        }
+    }
+}
+
+fn validate_intl_number_format_locale_matcher(
+    state: &IntlNumberFormatSupportedLocalesContinuation,
+    value: StoredValue,
+) -> Result<(), NativeFailure> {
+    let text = operator_primitive_to_string(value, state.realm, &state.origin)?;
+    if matches!(text.to_utf8_lossy()?.as_str(), "lookup" | "best fit") {
+        return Ok(());
+    }
+    intl_locale_list_error(
+        state.realm,
+        state.origin.clone(),
+        ExceptionKind::RangeError,
+        "invalid Intl.NumberFormat localeMatcher option",
+    )
+}
+
+fn finish_intl_number_format_supported_locales(
+    runtime: &mut Runtime,
+    state: &IntlNumberFormatSupportedLocalesContinuation,
+) -> Result<NativeDispatch, NativeFailure> {
+    intl_locale_string_array(
+        runtime,
+        state.realm,
+        number_format_supported_locales(&state.requested_locales),
+    )
+}
+
+fn continue_intl_number_format_supported_locales_after(
+    dispatch: NativeDispatch,
+    state: IntlNumberFormatSupportedLocalesContinuation,
+    runtime: &mut Runtime,
+    return_to: Option<CallReturn>,
+    execution_budget: &mut ExecutionBudget,
+) -> Result<NativeDispatch, NativeFailure> {
+    continue_get_after(
+        dispatch,
+        state,
+        intl_number_format_supported_locales_continuation,
+        |state, value| {
+            advance_intl_number_format_supported_locales(
+                runtime,
+                state,
+                Some(value),
+                return_to,
+                execution_budget,
+            )
+        },
+        "Intl.NumberFormat.supportedLocalesOf Get produced a structured result",
+    )
+}
+
+fn intl_number_format_supported_locales_continuation(
+    state: IntlNumberFormatSupportedLocalesContinuation,
+) -> NativeContinuation {
+    NativeContinuation::IntlNumberFormatSupportedLocalesOf(Box::new(state))
+}
+
+fn take_intl_number_format_supported_locales_completion(
+    completion: &mut Option<StoredValue>,
+) -> Result<StoredValue, EngineFault> {
+    completion.take().ok_or(EngineFault::RuntimeInvariant {
+        message: "Intl.NumberFormat.supportedLocalesOf resumed without a completion",
+    })
+}
+
+#[allow(
+    clippy::too_many_arguments,
+    reason = "native dispatch keeps receiver, arguments, realm, return target, origin, and budget explicit"
+)]
+pub(super) fn begin_intl_number_format_prototype(
+    runtime: &mut Runtime,
+    method: IntlNumberFormatPrototypeMethod,
+    receiver: &StoredValue,
+    mut arguments: CallArguments,
+    realm: RealmId,
+    return_to: Option<CallReturn>,
+    origin: JsStackFrame,
+    execution_budget: &mut ExecutionBudget,
+) -> Result<NativeDispatch, NativeFailure> {
+    if matches!(
+        method,
+        IntlNumberFormatPrototypeMethod::Format | IntlNumberFormatPrototypeMethod::ResolvedOptions
+    ) {
+        return begin_intl_number_format_unwrap(
+            runtime,
+            method,
+            receiver,
+            realm,
+            return_to,
+            origin,
+            execution_budget,
+        );
+    }
+    let StoredValue::Object(formatter) = receiver else {
+        return intl_number_format_brand_error(realm, origin);
+    };
+    if runtime.intl_number_format_state(*formatter)?.is_none() {
+        return intl_number_format_brand_error(realm, origin);
+    }
+    match method {
+        IntlNumberFormatPrototypeMethod::Format
+        | IntlNumberFormatPrototypeMethod::ResolvedOptions => Err(EngineFault::RuntimeInvariant {
+            message: "unwrap-capable Intl.NumberFormat method bypassed UnwrapNumberFormat",
+        }
+        .into()),
+        IntlNumberFormatPrototypeMethod::FormatToParts => {
+            let value = arguments.take_first_or_undefined();
+            begin_intl_number_format_value(
+                runtime,
+                IntlNumberFormatValueContinuation {
+                    formatter: *formatter,
+                    operation: IntlNumberFormatOperation::FormatToParts,
+                    second: None,
+                    first: None,
+                    realm,
+                    origin,
+                },
+                value,
+                return_to,
+                execution_budget,
+            )
+        }
+        IntlNumberFormatPrototypeMethod::FormatRange
+        | IntlNumberFormatPrototypeMethod::FormatRangeToParts => {
+            let first = arguments.take_first_or_undefined();
+            let second = arguments.take_first_or_undefined();
+            if matches!(first, StoredValue::Undefined) || matches!(second, StoredValue::Undefined) {
+                return intl_locale_list_error(
+                    realm,
+                    origin,
+                    ExceptionKind::TypeError,
+                    "Intl.NumberFormat range arguments must not be undefined",
+                );
+            }
+            begin_intl_number_format_value(
+                runtime,
+                IntlNumberFormatValueContinuation {
+                    formatter: *formatter,
+                    operation: if method == IntlNumberFormatPrototypeMethod::FormatRange {
+                        IntlNumberFormatOperation::FormatRange
+                    } else {
+                        IntlNumberFormatOperation::FormatRangeToParts
+                    },
+                    second: Some(second),
+                    first: None,
+                    realm,
+                    origin,
+                },
+                first,
+                return_to,
+                execution_budget,
+            )
+        }
+    }
+}
+
+fn begin_intl_number_format_unwrap(
+    runtime: &mut Runtime,
+    method: IntlNumberFormatPrototypeMethod,
+    receiver: &StoredValue,
+    realm: RealmId,
+    return_to: Option<CallReturn>,
+    origin: JsStackFrame,
+    execution_budget: &mut ExecutionBudget,
+) -> Result<NativeDispatch, NativeFailure> {
+    if let StoredValue::Object(formatter) = receiver
+        && runtime.intl_number_format_state(*formatter)?.is_some()
+    {
+        return finish_intl_number_format_unwrap(runtime, method, *formatter, realm, origin);
+    }
+    if !matches!(receiver, StoredValue::Function(_) | StoredValue::Object(_)) {
+        return intl_number_format_brand_error(realm, origin);
+    }
+    let state = IntlNumberFormatUnwrapContinuation {
+        receiver: receiver.duplicate(),
+        method,
+        realm,
+        stage: IntlNumberFormatUnwrapStage::AwaitInstance,
+        origin: origin.clone(),
+    };
+    let constructor = runtime.realm_intl_number_format_constructor(realm)?;
+    let dispatch = begin_function_has_instance(
+        runtime,
+        realm,
+        receiver.duplicate(),
+        StoredValue::Function(constructor),
+        return_to,
+        origin,
+        execution_budget,
+    )?;
+    continue_intl_number_format_unwrap_after(dispatch, state, runtime, return_to, execution_budget)
+}
+
+pub(super) fn advance_intl_number_format_unwrap(
+    runtime: &mut Runtime,
+    mut state: IntlNumberFormatUnwrapContinuation,
+    completion: &StoredValue,
+    return_to: Option<CallReturn>,
+    execution_budget: &mut ExecutionBudget,
+) -> Result<NativeDispatch, NativeFailure> {
+    match state.stage {
+        IntlNumberFormatUnwrapStage::AwaitInstance => {
+            if !completion.is_truthy() {
+                return intl_number_format_brand_error(state.realm, state.origin);
+            }
+            let symbol = runtime.intl_number_format_fallback_symbol();
+            let key = runtime.property_key_from_symbol(&symbol)?;
+            charge_heap_property_lookup(runtime, &state.receiver, execution_budget)?;
+            state.stage = IntlNumberFormatUnwrapStage::AwaitFallback;
+            let dispatch = begin_value_get(
+                runtime,
+                &state.receiver,
+                key,
+                None,
+                state.realm,
+                return_to,
+                state.origin.clone(),
+                execution_budget,
+            )?;
+            continue_intl_number_format_unwrap_after(
+                dispatch,
+                state,
+                runtime,
+                return_to,
+                execution_budget,
+            )
+        }
+        IntlNumberFormatUnwrapStage::AwaitFallback => {
+            let StoredValue::Object(formatter) = completion else {
+                return intl_number_format_brand_error(state.realm, state.origin);
+            };
+            if runtime.intl_number_format_state(*formatter)?.is_none() {
+                return intl_number_format_brand_error(state.realm, state.origin);
+            }
+            finish_intl_number_format_unwrap(
+                runtime,
+                state.method,
+                *formatter,
+                state.realm,
+                state.origin,
+            )
+        }
+    }
+}
+
+fn finish_intl_number_format_unwrap(
+    runtime: &mut Runtime,
+    method: IntlNumberFormatPrototypeMethod,
+    formatter: ObjectId,
+    realm: RealmId,
+    origin: JsStackFrame,
+) -> Result<NativeDispatch, NativeFailure> {
+    match method {
+        IntlNumberFormatPrototypeMethod::Format => {
+            let function = match runtime.intl_number_format_bound_format(formatter)? {
+                Some(function) => function,
+                None => runtime.allocate_intl_number_format_bound_format(realm, formatter)?,
+            };
+            Ok(NativeDispatch::Immediate(StoredValue::Function(function)))
+        }
+        IntlNumberFormatPrototypeMethod::ResolvedOptions => {
+            let state = runtime
+                .intl_number_format_state(formatter)?
+                .cloned()
+                .ok_or(EngineFault::RuntimeInvariant {
+                    message: "unwrapped Intl.NumberFormat lost its internal slots",
+                })?;
+            intl_number_format_resolved_options(runtime, realm, &state)
+        }
+        IntlNumberFormatPrototypeMethod::FormatToParts
+        | IntlNumberFormatPrototypeMethod::FormatRange
+        | IntlNumberFormatPrototypeMethod::FormatRangeToParts => {
+            intl_number_format_brand_error(realm, origin)
+        }
+    }
+}
+
+fn continue_intl_number_format_unwrap_after(
+    dispatch: NativeDispatch,
+    state: IntlNumberFormatUnwrapContinuation,
+    runtime: &mut Runtime,
+    return_to: Option<CallReturn>,
+    execution_budget: &mut ExecutionBudget,
+) -> Result<NativeDispatch, NativeFailure> {
+    match dispatch {
+        NativeDispatch::Immediate(value) => {
+            advance_intl_number_format_unwrap(runtime, state, &value, return_to, execution_budget)
+        }
+        NativeDispatch::Call(mut call) => {
+            prepend_native_continuations(
+                &mut call,
+                vec![NativeContinuation::IntlNumberFormatUnwrap(Box::new(state))],
+            )?;
+            Ok(NativeDispatch::Call(call))
+        }
+        NativeDispatch::Frame(mut frame) => {
+            attach_native_continuations(
+                &mut frame,
+                vec![NativeContinuation::IntlNumberFormatUnwrap(Box::new(state))],
+            )?;
+            Ok(NativeDispatch::Frame(frame))
+        }
+        NativeDispatch::Pair(_, _)
+        | NativeDispatch::ForOfRecord { .. }
+        | NativeDispatch::ForOfStep { .. }
+        | NativeDispatch::ForOfClosed
+        | NativeDispatch::CopyDataPropertiesDone
+        | NativeDispatch::AsyncAwait { .. } => Err(EngineFault::RuntimeInvariant {
+            message: "UnwrapNumberFormat produced a structured result",
+        }
+        .into()),
+    }
+}
+
+pub(super) fn begin_intl_number_format_format(
+    runtime: &mut Runtime,
+    receiver: &StoredValue,
+    mut arguments: CallArguments,
+    realm: RealmId,
+    return_to: Option<CallReturn>,
+    origin: JsStackFrame,
+    execution_budget: &mut ExecutionBudget,
+) -> Result<NativeDispatch, NativeFailure> {
+    let StoredValue::Object(formatter) = receiver else {
+        return intl_number_format_brand_error(realm, origin);
+    };
+    if runtime.intl_number_format_state(*formatter)?.is_none() {
+        return intl_number_format_brand_error(realm, origin);
+    }
+    let value = arguments.take_first_or_undefined();
+    begin_intl_number_format_value(
+        runtime,
+        IntlNumberFormatValueContinuation {
+            formatter: *formatter,
+            operation: IntlNumberFormatOperation::Format,
+            second: None,
+            first: None,
+            realm,
+            origin,
+        },
+        value,
+        return_to,
+        execution_budget,
+    )
+}
+
+fn begin_intl_number_format_value(
+    runtime: &mut Runtime,
+    state: IntlNumberFormatValueContinuation,
+    value: StoredValue,
+    return_to: Option<CallReturn>,
+    execution_budget: &mut ExecutionBudget,
+) -> Result<NativeDispatch, NativeFailure> {
+    if matches!(value, StoredValue::Function(_) | StoredValue::Object(_)) {
+        let realm = state.realm;
+        let origin = state.origin.clone();
+        return begin_operator_primitive_conversion(
+            runtime,
+            value,
+            OperatorPrimitiveHint::Number,
+            OperatorPrimitiveTarget::IntlNumberFormatValue(Box::new(state)),
+            realm,
+            return_to,
+            origin,
+            execution_budget,
+        );
+    }
+    finish_intl_number_format_value_primitive(runtime, state, value, return_to, execution_budget)
+}
+
+pub(super) fn finish_intl_number_format_value_primitive(
+    runtime: &mut Runtime,
+    mut state: IntlNumberFormatValueContinuation,
+    value: StoredValue,
+    return_to: Option<CallReturn>,
+    execution_budget: &mut ExecutionBudget,
+) -> Result<NativeDispatch, NativeFailure> {
+    let value = to_intl_mathematical_value(value, state.realm, &state.origin)?;
+    if matches!(
+        state.operation,
+        IntlNumberFormatOperation::FormatRange | IntlNumberFormatOperation::FormatRangeToParts
+    ) && state.first.is_none()
+    {
+        state.first = Some(value);
+        let second = state.second.take().ok_or(EngineFault::RuntimeInvariant {
+            message: "Intl.NumberFormat range conversion lost its second operand",
+        })?;
+        return begin_intl_number_format_value(runtime, state, second, return_to, execution_budget);
+    }
+    finish_intl_number_format_operation(runtime, state, &value)
+}
+
+pub(super) fn to_intl_mathematical_value(
+    value: StoredValue,
+    realm: RealmId,
+    origin: &JsStackFrame,
+) -> Result<IntlMathematicalValue, NativeFailure> {
+    match value {
+        StoredValue::String(value) => Ok(parse_intl_mathematical_value(&value.to_utf8_lossy()?)),
+        StoredValue::BigInt(value) => Ok(parse_intl_mathematical_value(
+            &bigint_decimal_string(&value)?.to_utf8_lossy()?,
+        )),
+        value => Ok(intl_mathematical_value_from_f64(
+            operator_to_number(value, realm, origin)?.as_f64(),
+        )),
+    }
+}
+
+fn finish_intl_number_format_operation(
+    runtime: &mut Runtime,
+    state: IntlNumberFormatValueContinuation,
+    value: &IntlMathematicalValue,
+) -> Result<NativeDispatch, NativeFailure> {
+    let resolved = runtime.intl_number_format_state(state.formatter)?.ok_or(
+        EngineFault::RuntimeInvariant {
+            message: "Intl.NumberFormat operation lost its branded receiver",
+        },
+    )?;
+    match state.operation {
+        IntlNumberFormatOperation::Format => {
+            let formatted =
+                format_number(resolved, value).map_err(|_| EngineFault::RuntimeInvariant {
+                    message: "resolved Intl.NumberFormat slots failed formatting",
+                })?;
+            Ok(NativeDispatch::Immediate(StoredValue::String(
+                JsString::from_utf8(&formatted)?,
+            )))
+        }
+        IntlNumberFormatOperation::FormatToParts => {
+            let parts = format_number_to_parts(resolved, value).map_err(|_| {
+                EngineFault::RuntimeInvariant {
+                    message: "resolved Intl.NumberFormat slots failed parts formatting",
+                }
+            })?;
+            intl_number_format_parts_array(runtime, state.realm, parts, None)
+        }
+        IntlNumberFormatOperation::FormatRange | IntlNumberFormatOperation::FormatRangeToParts => {
+            let first = state.first.ok_or(EngineFault::RuntimeInvariant {
+                message: "Intl.NumberFormat range operation lost its first operand",
+            })?;
+            if matches!(first, IntlMathematicalValue::NaN)
+                || matches!(value, IntlMathematicalValue::NaN)
+            {
+                return intl_locale_list_error(
+                    state.realm,
+                    state.origin,
+                    ExceptionKind::RangeError,
+                    "Intl.NumberFormat range arguments must not be NaN",
+                );
+            }
+            let parts = intl_number_format_range_parts(resolved, &first, value)?;
+            let formatted = parts
+                .iter()
+                .map(|part| part.part.value.as_str())
+                .collect::<String>();
+            if state.operation == IntlNumberFormatOperation::FormatRange {
+                Ok(NativeDispatch::Immediate(StoredValue::String(
+                    JsString::from_utf8(&formatted)?,
+                )))
+            } else {
+                intl_number_format_sourced_parts_array(runtime, state.realm, parts)
+            }
+        }
+    }
+}
+
+struct SourcedNumberFormatPart {
+    part: quickjs_intl::NumberFormatPart,
+    source: &'static str,
+}
+
+#[allow(
+    clippy::too_many_lines,
+    reason = "range partitioning keeps prefix, suffix, separator, and source attribution together"
+)]
+fn intl_number_format_range_parts(
+    state: &NumberFormatState,
+    first: &IntlMathematicalValue,
+    second: &IntlMathematicalValue,
+) -> Result<Vec<SourcedNumberFormatPart>, NativeFailure> {
+    let first_parts =
+        format_number_to_parts(state, first).map_err(|_| EngineFault::RuntimeInvariant {
+            message: "resolved Intl.NumberFormat slots failed range formatting",
+        })?;
+    let second_parts =
+        format_number_to_parts(state, second).map_err(|_| EngineFault::RuntimeInvariant {
+            message: "resolved Intl.NumberFormat slots failed range formatting",
+        })?;
+    let first_text = first_parts
+        .iter()
+        .map(|part| part.value.as_str())
+        .collect::<String>();
+    let second_text = second_parts
+        .iter()
+        .map(|part| part.value.as_str())
+        .collect::<String>();
+    if first_text == second_text {
+        let mut result = Vec::new();
+        result.push(SourcedNumberFormatPart {
+            part: quickjs_intl::NumberFormatPart {
+                kind: "approximatelySign",
+                value: "~".to_owned(),
+            },
+            source: "shared",
+        });
+        result.extend(first_parts.into_iter().map(|part| SourcedNumberFormatPart {
+            part,
+            source: "shared",
+        }));
+        return Ok(result);
+    }
+
+    let mut shared_prefix = 0;
+    if matches!(
+        first_parts.first().map(|part| part.kind),
+        Some("plusSign" | "minusSign")
+    ) {
+        while shared_prefix < first_parts.len()
+            && shared_prefix < second_parts.len()
+            && first_parts[shared_prefix] == second_parts[shared_prefix]
+            && !is_number_format_numeric_part(first_parts[shared_prefix].kind)
+        {
+            shared_prefix += 1;
+        }
+    }
+
+    let mut shared_suffix = 0;
+    if state.locale.starts_with("pt") {
+        while shared_suffix + shared_prefix < first_parts.len()
+            && shared_suffix + shared_prefix < second_parts.len()
+        {
+            let first_index = first_parts.len() - shared_suffix - 1;
+            let second_index = second_parts.len() - shared_suffix - 1;
+            if first_parts[first_index] != second_parts[second_index]
+                || is_number_format_numeric_part(first_parts[first_index].kind)
+            {
+                break;
+            }
+            shared_suffix += 1;
+        }
+    }
+
+    let separator = if state.locale.starts_with("pt") {
+        " - "
+    } else if state.style == NumberFormatStyle::Currency && shared_prefix == 0 {
+        " – "
+    } else {
+        "–"
+    };
+    let mut result = Vec::new();
+    result.extend(first_parts[..shared_prefix].iter().cloned().map(|part| {
+        SourcedNumberFormatPart {
+            part,
+            source: "shared",
+        }
+    }));
+    result.extend(
+        first_parts[shared_prefix..first_parts.len() - shared_suffix]
+            .iter()
+            .cloned()
+            .map(|part| SourcedNumberFormatPart {
+                part,
+                source: "startRange",
+            }),
+    );
+    result.push(SourcedNumberFormatPart {
+        part: quickjs_intl::NumberFormatPart {
+            kind: "literal",
+            value: separator.to_owned(),
+        },
+        source: "shared",
+    });
+    result.extend(
+        second_parts[shared_prefix..second_parts.len() - shared_suffix]
+            .iter()
+            .cloned()
+            .map(|part| SourcedNumberFormatPart {
+                part,
+                source: "endRange",
+            }),
+    );
+    result.extend(
+        second_parts[second_parts.len() - shared_suffix..]
+            .iter()
+            .cloned()
+            .map(|part| SourcedNumberFormatPart {
+                part,
+                source: "shared",
+            }),
+    );
+    Ok(result)
+}
+
+fn is_number_format_numeric_part(kind: &str) -> bool {
+    matches!(
+        kind,
+        "integer"
+            | "group"
+            | "decimal"
+            | "fraction"
+            | "compact"
+            | "exponentInteger"
+            | "exponentMinusSign"
+            | "exponentSeparator"
+            | "infinity"
+            | "nan"
+    )
+}
+
+fn intl_number_format_parts_array(
+    runtime: &mut Runtime,
+    realm: RealmId,
+    parts: Vec<quickjs_intl::NumberFormatPart>,
+    source: Option<&'static str>,
+) -> Result<NativeDispatch, NativeFailure> {
+    intl_number_format_part_entries_array(
+        runtime,
+        realm,
+        parts.into_iter().map(|part| (part, source)).collect(),
+    )
+}
+
+fn intl_number_format_sourced_parts_array(
+    runtime: &mut Runtime,
+    realm: RealmId,
+    parts: Vec<SourcedNumberFormatPart>,
+) -> Result<NativeDispatch, NativeFailure> {
+    intl_number_format_part_entries_array(
+        runtime,
+        realm,
+        parts
+            .into_iter()
+            .map(|part| (part.part, Some(part.source)))
+            .collect(),
+    )
+}
+
+fn intl_number_format_part_entries_array(
+    runtime: &mut Runtime,
+    realm: RealmId,
+    parts: Vec<(quickjs_intl::NumberFormatPart, Option<&'static str>)>,
+) -> Result<NativeDispatch, NativeFailure> {
+    let mut values = Vec::new();
+    values
+        .try_reserve_exact(parts.len())
+        .map_err(|_| ExecutionError::AllocationFailed {
+            resource: RuntimeResource::FrameValues,
+            additional: parts.len(),
+        })?;
+    for (part, source) in parts {
+        let object = runtime.allocate_ordinary_object(runtime.realm_object_prototype(realm)?)?;
+        let mut properties = vec![
+            ("type", StoredValue::String(JsString::from_utf8(part.kind)?)),
+            (
+                "value",
+                StoredValue::String(JsString::from_utf8(&part.value)?),
+            ),
+        ];
+        if let Some(source) = source {
+            properties.push(("source", StoredValue::String(JsString::from_utf8(source)?)));
+        }
+        for (name, value) in properties {
+            let name = JsString::from_utf8(name)?;
+            let key = runtime.property_key_from_string(&name)?;
+            runtime.append_data_property(
+                HeapReference::Object(object),
+                key,
+                PropertyLayout::data(true, true, true),
+                value,
+            )?;
+        }
+        values.push(StoredValue::Object(object));
+    }
+    Ok(NativeDispatch::Immediate(StoredValue::Object(
+        runtime.allocate_array(realm, values)?,
+    )))
+}
+
+#[allow(
+    clippy::too_many_lines,
+    reason = "resolvedOptions property order mirrors the ECMA-402 algorithm"
+)]
+fn intl_number_format_resolved_options(
+    runtime: &mut Runtime,
+    realm: RealmId,
+    state: &NumberFormatState,
+) -> Result<NativeDispatch, NativeFailure> {
+    let object = runtime.allocate_ordinary_object(runtime.realm_object_prototype(realm)?)?;
+    let mut properties = Vec::new();
+    properties.push((
+        "locale",
+        StoredValue::String(JsString::from_utf8(&state.locale)?),
+    ));
+    properties.push((
+        "numberingSystem",
+        StoredValue::String(JsString::from_utf8(&state.numbering_system)?),
+    ));
+    properties.push((
+        "style",
+        StoredValue::String(JsString::from_utf8(state.style.as_str())?),
+    ));
+    if state.style == NumberFormatStyle::Currency {
+        properties.push((
+            "currency",
+            StoredValue::String(JsString::from_utf8(
+                state.currency.as_deref().unwrap_or(""),
+            )?),
+        ));
+        properties.push((
+            "currencyDisplay",
+            StoredValue::String(JsString::from_utf8(state.currency_display.as_str())?),
+        ));
+        properties.push((
+            "currencySign",
+            StoredValue::String(JsString::from_utf8(state.currency_sign.as_str())?),
+        ));
+    }
+    if state.style == NumberFormatStyle::Unit {
+        properties.push((
+            "unit",
+            StoredValue::String(JsString::from_utf8(state.unit.as_deref().unwrap_or(""))?),
+        ));
+        properties.push((
+            "unitDisplay",
+            StoredValue::String(JsString::from_utf8(state.unit_display.as_str())?),
+        ));
+    }
+    properties.push((
+        "minimumIntegerDigits",
+        StoredValue::Number(JsNumber::from_i32(i32::from(state.minimum_integer_digits))),
+    ));
+    if let (Some(minimum), Some(maximum)) =
+        (state.minimum_fraction_digits, state.maximum_fraction_digits)
+    {
+        properties.push((
+            "minimumFractionDigits",
+            StoredValue::Number(JsNumber::from_i32(i32::from(minimum))),
+        ));
+        properties.push((
+            "maximumFractionDigits",
+            StoredValue::Number(JsNumber::from_i32(i32::from(maximum))),
+        ));
+    }
+    if let (Some(minimum), Some(maximum)) = (
+        state.minimum_significant_digits,
+        state.maximum_significant_digits,
+    ) {
+        properties.push((
+            "minimumSignificantDigits",
+            StoredValue::Number(JsNumber::from_i32(i32::from(minimum))),
+        ));
+        properties.push((
+            "maximumSignificantDigits",
+            StoredValue::Number(JsNumber::from_i32(i32::from(maximum))),
+        ));
+    }
+    properties.push((
+        "useGrouping",
+        if state.use_grouping == NumberFormatUseGrouping::Never {
+            StoredValue::Boolean(false)
+        } else {
+            StoredValue::String(JsString::from_utf8(state.use_grouping.as_str())?)
+        },
+    ));
+    properties.push((
+        "notation",
+        StoredValue::String(JsString::from_utf8(state.notation.as_str())?),
+    ));
+    if state.notation == NumberFormatNotation::Compact {
+        properties.push((
+            "compactDisplay",
+            StoredValue::String(JsString::from_utf8(state.compact_display.as_str())?),
+        ));
+    }
+    properties.push((
+        "signDisplay",
+        StoredValue::String(JsString::from_utf8(state.sign_display.as_str())?),
+    ));
+    properties.push((
+        "roundingIncrement",
+        StoredValue::Number(JsNumber::from_i32(i32::from(state.rounding_increment))),
+    ));
+    properties.push((
+        "roundingMode",
+        StoredValue::String(JsString::from_utf8(state.rounding_mode.as_str())?),
+    ));
+    properties.push((
+        "roundingPriority",
+        StoredValue::String(JsString::from_utf8(state.rounding_priority.as_str())?),
+    ));
+    properties.push((
+        "trailingZeroDisplay",
+        StoredValue::String(JsString::from_utf8(state.trailing_zero_display.as_str())?),
+    ));
+    for (name, value) in properties {
+        let name = JsString::from_utf8(name)?;
+        let key = runtime.property_key_from_string(&name)?;
+        runtime.append_data_property(
+            HeapReference::Object(object),
+            key,
+            PropertyLayout::data(true, true, true),
+            value,
+        )?;
+    }
+    Ok(NativeDispatch::Immediate(StoredValue::Object(object)))
+}
+
+fn intl_number_format_brand_error<T>(
+    realm: RealmId,
+    origin: JsStackFrame,
+) -> Result<T, NativeFailure> {
+    intl_locale_list_error(
+        realm,
+        origin,
+        ExceptionKind::TypeError,
+        "Intl.NumberFormat method called on incompatible receiver",
+    )
+}
+
 pub(super) fn begin_intl_get_canonical_locales(
     runtime: &mut Runtime,
     locales: StoredValue,
@@ -2014,6 +3970,19 @@ fn finish_intl_locale_list(
         IntlLocaleListTarget::CollatorSupportedLocalesOf(mut state) => {
             state.requested_locales = intl_locale_strings(locales)?;
             begin_intl_collator_supported_locales_options(
+                runtime,
+                *state,
+                return_to,
+                execution_budget,
+            )
+        }
+        IntlLocaleListTarget::NumberFormatConstructor(mut state) => {
+            state.requested_locales = intl_locale_strings(locales)?;
+            begin_intl_number_format_options(runtime, *state, return_to, execution_budget)
+        }
+        IntlLocaleListTarget::NumberFormatSupportedLocalesOf(mut state) => {
+            state.requested_locales = intl_locale_strings(locales)?;
+            begin_intl_number_format_supported_locales_options(
                 runtime,
                 *state,
                 return_to,

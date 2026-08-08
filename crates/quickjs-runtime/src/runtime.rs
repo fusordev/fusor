@@ -302,6 +302,9 @@ struct IntlIntrinsics {
     collator_prototype: ObjectId,
     collator_constructor: FunctionId,
     collator_compare: FunctionId,
+    number_format_prototype: ObjectId,
+    number_format_constructor: FunctionId,
+    number_format_format: FunctionId,
     locale_prototype: ObjectId,
     locale_constructor: FunctionId,
 }
@@ -1245,6 +1248,14 @@ pub(crate) enum NativeFunctionKind {
     IntlCollatorPrototype(IntlCollatorPrototypeMethod),
     /// Hidden comparison target bound by the Collator `compare` getter.
     IntlCollatorCompare,
+    /// The `%Intl.NumberFormat%` constructor.
+    IntlNumberFormatConstructor,
+    /// `Intl.NumberFormat.supportedLocalesOf`.
+    IntlNumberFormatSupportedLocalesOf,
+    /// One `%Intl.NumberFormat.prototype%` accessor or method.
+    IntlNumberFormatPrototype(IntlNumberFormatPrototypeMethod),
+    /// Hidden formatting target bound by the `NumberFormat` `format` getter.
+    IntlNumberFormatFormat,
     /// The `%Intl.Locale%` constructor.
     IntlLocaleConstructor,
     /// One `%Intl.Locale.prototype%` accessor or method.
@@ -1620,6 +1631,47 @@ pub(crate) enum DatePrototypeMethod {
 pub(crate) enum IntlCollatorPrototypeMethod {
     Compare,
     ResolvedOptions,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum IntlNumberFormatPrototypeMethod {
+    Format,
+    FormatToParts,
+    ResolvedOptions,
+    FormatRange,
+    FormatRangeToParts,
+}
+
+impl IntlNumberFormatPrototypeMethod {
+    pub(crate) const ALL: [Self; 5] = [
+        Self::Format,
+        Self::FormatToParts,
+        Self::ResolvedOptions,
+        Self::FormatRange,
+        Self::FormatRangeToParts,
+    ];
+
+    pub(crate) const fn is_accessor(self) -> bool {
+        matches!(self, Self::Format)
+    }
+
+    pub(crate) const fn name(self) -> &'static str {
+        match self {
+            Self::Format => "format",
+            Self::FormatToParts => "formatToParts",
+            Self::ResolvedOptions => "resolvedOptions",
+            Self::FormatRange => "formatRange",
+            Self::FormatRangeToParts => "formatRangeToParts",
+        }
+    }
+
+    pub(crate) const fn length(self) -> i32 {
+        match self {
+            Self::Format | Self::ResolvedOptions => 0,
+            Self::FormatToParts => 1,
+            Self::FormatRange | Self::FormatRangeToParts => 2,
+        }
+    }
 }
 
 impl IntlCollatorPrototypeMethod {
@@ -4260,6 +4312,7 @@ impl NativeFunctionKind {
                 | Self::TypedArrayConstructor(_)
                 | Self::DateConstructor
                 | Self::IntlCollatorConstructor
+                | Self::IntlNumberFormatConstructor
                 | Self::IntlLocaleConstructor
                 | Self::TemporalDurationConstructor
                 | Self::TemporalInstantConstructor
