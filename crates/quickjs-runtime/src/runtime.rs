@@ -2299,7 +2299,9 @@ pub(crate) enum TemporalInstantPrototypeMethod {
     Round,
     Equals,
     ToString,
+    ToLocaleString,
     ToJson,
+    ToZonedDateTimeISO,
     ValueOf,
 }
 
@@ -2376,10 +2378,15 @@ pub(crate) enum TemporalZonedDateTimePrototypeMethod {
     StartOfDay,
     Equals,
     GetTimeZoneTransition,
+    With,
+    WithCalendar,
     WithPlainTime,
     WithTimeZone,
     Add,
     Subtract,
+    Until,
+    Since,
+    Round,
     ToString,
     ToJson,
     ToLocaleString,
@@ -2411,6 +2418,8 @@ pub(crate) enum TemporalPlainDatePrototypeMethod {
     Since,
     Equals,
     ToPlainDateTime,
+    ToPlainMonthDay,
+    ToPlainYearMonth,
     ToZonedDateTime,
     WithCalendar,
     ToString,
@@ -2681,7 +2690,7 @@ impl TemporalDurationPrototypeMethod {
 }
 
 impl TemporalInstantPrototypeMethod {
-    pub(crate) const ALL: [Self; 11] = [
+    pub(crate) const ALL: [Self; 13] = [
         Self::EpochMilliseconds,
         Self::EpochNanoseconds,
         Self::Add,
@@ -2691,7 +2700,9 @@ impl TemporalInstantPrototypeMethod {
         Self::Round,
         Self::Equals,
         Self::ToString,
+        Self::ToLocaleString,
         Self::ToJson,
+        Self::ToZonedDateTimeISO,
         Self::ValueOf,
     ];
 
@@ -2706,7 +2717,9 @@ impl TemporalInstantPrototypeMethod {
             Self::Round => "round",
             Self::Equals => "equals",
             Self::ToString => "toString",
+            Self::ToLocaleString => "toLocaleString",
             Self::ToJson => "toJSON",
+            Self::ToZonedDateTimeISO => "toZonedDateTimeISO",
             Self::ValueOf => "valueOf",
         }
     }
@@ -2722,19 +2735,26 @@ impl TemporalInstantPrototypeMethod {
             Self::Round => "round",
             Self::Equals => "equals",
             Self::ToString => "toString",
+            Self::ToLocaleString => "toLocaleString",
             Self::ToJson => "toJSON",
+            Self::ToZonedDateTimeISO => "toZonedDateTimeISO",
             Self::ValueOf => "valueOf",
         }
     }
 
     pub(crate) const fn length(self) -> i32 {
         match self {
-            Self::Add | Self::Subtract | Self::Until | Self::Since | Self::Round | Self::Equals => {
-                1
-            }
+            Self::Add
+            | Self::Subtract
+            | Self::Until
+            | Self::Since
+            | Self::Round
+            | Self::Equals
+            | Self::ToZonedDateTimeISO => 1,
             Self::EpochMilliseconds
             | Self::EpochNanoseconds
             | Self::ToString
+            | Self::ToLocaleString
             | Self::ToJson
             | Self::ValueOf => 0,
         }
@@ -2850,7 +2870,7 @@ impl TemporalZonedDateTimeStaticMethod {
 }
 
 impl TemporalZonedDateTimePrototypeMethod {
-    pub(crate) const ALL: [Self; 43] = [
+    pub(crate) const ALL: [Self; 48] = [
         Self::CalendarId,
         Self::TimeZoneId,
         Self::Year,
@@ -2886,10 +2906,15 @@ impl TemporalZonedDateTimePrototypeMethod {
         Self::StartOfDay,
         Self::Equals,
         Self::GetTimeZoneTransition,
+        Self::With,
+        Self::WithCalendar,
         Self::WithPlainTime,
         Self::WithTimeZone,
         Self::Add,
         Self::Subtract,
+        Self::Until,
+        Self::Since,
+        Self::Round,
         Self::ToString,
         Self::ToJson,
         Self::ToLocaleString,
@@ -2933,10 +2958,15 @@ impl TemporalZonedDateTimePrototypeMethod {
             Self::StartOfDay => "startOfDay",
             Self::Equals => "equals",
             Self::GetTimeZoneTransition => "getTimeZoneTransition",
+            Self::With => "with",
+            Self::WithCalendar => "withCalendar",
             Self::WithPlainTime => "withPlainTime",
             Self::WithTimeZone => "withTimeZone",
             Self::Add => "add",
             Self::Subtract => "subtract",
+            Self::Until => "until",
+            Self::Since => "since",
+            Self::Round => "round",
             Self::ToString => "toString",
             Self::ToJson => "toJSON",
             Self::ToLocaleString => "toLocaleString",
@@ -2988,10 +3018,15 @@ impl TemporalZonedDateTimePrototypeMethod {
                 | Self::StartOfDay
                 | Self::Equals
                 | Self::GetTimeZoneTransition
+                | Self::With
+                | Self::WithCalendar
                 | Self::WithPlainTime
                 | Self::WithTimeZone
                 | Self::Add
                 | Self::Subtract
+                | Self::Until
+                | Self::Since
+                | Self::Round
                 | Self::ToString
                 | Self::ToJson
                 | Self::ToLocaleString
@@ -3005,6 +3040,11 @@ impl TemporalZonedDateTimePrototypeMethod {
             | Self::GetTimeZoneTransition
             | Self::Add
             | Self::Subtract
+            | Self::Until
+            | Self::Since
+            | Self::Round
+            | Self::With
+            | Self::WithCalendar
             | Self::WithTimeZone => 1,
             _ => 0,
         }
@@ -3250,7 +3290,7 @@ impl TemporalPlainYearMonthPrototypeMethod {
 }
 
 impl TemporalPlainDatePrototypeMethod {
-    pub(crate) const ALL: [Self; 29] = [
+    pub(crate) const ALL: [Self; 31] = [
         Self::CalendarId,
         Self::Year,
         Self::Month,
@@ -3274,6 +3314,8 @@ impl TemporalPlainDatePrototypeMethod {
         Self::Since,
         Self::Equals,
         Self::ToPlainDateTime,
+        Self::ToPlainMonthDay,
+        Self::ToPlainYearMonth,
         Self::ToZonedDateTime,
         Self::WithCalendar,
         Self::ToString,
@@ -3307,6 +3349,8 @@ impl TemporalPlainDatePrototypeMethod {
             Self::Since => "since",
             Self::Equals => "equals",
             Self::ToPlainDateTime => "toPlainDateTime",
+            Self::ToPlainMonthDay => "toPlainMonthDay",
+            Self::ToPlainYearMonth => "toPlainYearMonth",
             Self::ToZonedDateTime => "toZonedDateTime",
             Self::WithCalendar => "withCalendar",
             Self::ToString => "toString",
@@ -3341,6 +3385,8 @@ impl TemporalPlainDatePrototypeMethod {
             Self::Since => "since",
             Self::Equals => "equals",
             Self::ToPlainDateTime => "toPlainDateTime",
+            Self::ToPlainMonthDay => "toPlainMonthDay",
+            Self::ToPlainYearMonth => "toPlainYearMonth",
             Self::ToZonedDateTime => "toZonedDateTime",
             Self::WithCalendar => "withCalendar",
             Self::ToString => "toString",

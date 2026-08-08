@@ -121,6 +121,9 @@ pub(super) fn visit_functions(visit: FunctionSink<'_>) {
             TemporalInstantPrototypeMethod::ToJson => {
                 IntrinsicNameSpec::Predefined(PredefinedAtom::ToJson)
             }
+            TemporalInstantPrototypeMethod::ToLocaleString => {
+                IntrinsicNameSpec::Predefined(PredefinedAtom::ToLocaleString)
+            }
             TemporalInstantPrototypeMethod::ValueOf => {
                 IntrinsicNameSpec::Predefined(PredefinedAtom::ValueOf)
             }
@@ -129,6 +132,7 @@ pub(super) fn visit_functions(visit: FunctionSink<'_>) {
             | TemporalInstantPrototypeMethod::Until
             | TemporalInstantPrototypeMethod::Since
             | TemporalInstantPrototypeMethod::Round
+            | TemporalInstantPrototypeMethod::ToZonedDateTimeISO
             | TemporalInstantPrototypeMethod::Equals => {
                 IntrinsicNameSpec::RealmName(RealmNameId::TemporalInstantPrototype(method))
             }
@@ -591,6 +595,11 @@ pub(super) fn visit_properties(visit: PropertySink<'_>) {
                 IntrinsicKeySpec::PredefinedString(PredefinedAtom::ToJson),
                 NativeFunctionKind::TemporalInstantPrototype(method_id),
             )),
+            TemporalInstantPrototypeMethod::ToLocaleString => visit(method(
+                prototype,
+                IntrinsicKeySpec::PredefinedString(PredefinedAtom::ToLocaleString),
+                NativeFunctionKind::TemporalInstantPrototype(method_id),
+            )),
             TemporalInstantPrototypeMethod::ValueOf => visit(method(
                 prototype,
                 IntrinsicKeySpec::PredefinedString(PredefinedAtom::ValueOf),
@@ -601,6 +610,7 @@ pub(super) fn visit_properties(visit: PropertySink<'_>) {
             | TemporalInstantPrototypeMethod::Until
             | TemporalInstantPrototypeMethod::Since
             | TemporalInstantPrototypeMethod::Round
+            | TemporalInstantPrototypeMethod::ToZonedDateTimeISO
             | TemporalInstantPrototypeMethod::Equals => visit(method(
                 prototype,
                 IntrinsicKeySpec::InternedString(RealmNameId::TemporalInstantPrototype(method_id)),

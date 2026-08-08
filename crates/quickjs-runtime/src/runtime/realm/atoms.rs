@@ -309,6 +309,7 @@ fn visit_realm_name_order(
         TemporalInstantPrototypeMethod::Since,
         TemporalInstantPrototypeMethod::Round,
         TemporalInstantPrototypeMethod::Equals,
+        TemporalInstantPrototypeMethod::ToZonedDateTimeISO,
     ] {
         visit(RealmNameId::TemporalInstantPrototype(method))?;
     }

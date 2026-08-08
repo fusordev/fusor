@@ -777,6 +777,24 @@ pub(super) fn resume_native_continuations(
                     execution_budget,
                 )?
             }
+            NativeContinuation::TemporalZonedDateTimeRoundOptions(state) => {
+                advance_temporal_zoned_date_time_round_options(
+                    runtime,
+                    *state,
+                    value,
+                    return_to,
+                    execution_budget,
+                )?
+            }
+            NativeContinuation::TemporalZonedDateTimeDifferenceOptions(state) => {
+                advance_temporal_zoned_date_time_difference_options(
+                    runtime,
+                    *state,
+                    value,
+                    return_to,
+                    execution_budget,
+                )?
+            }
             NativeContinuation::TemporalPlainDateTimeToStringOptions(state) => {
                 advance_temporal_plain_date_time_to_string_options(
                     runtime,
@@ -814,7 +832,13 @@ pub(super) fn resume_native_continuations(
                 )?
             }
             NativeContinuation::TemporalDurationCompareOptions(state) => {
-                finish_temporal_duration_compare_options(runtime, &state, &value)?
+                finish_temporal_duration_compare_options(
+                    runtime,
+                    state,
+                    value,
+                    return_to,
+                    execution_budget,
+                )?
             }
             NativeContinuation::TemporalDurationRoundOptions(state) => {
                 advance_temporal_duration_round_options(
