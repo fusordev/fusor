@@ -473,7 +473,6 @@ pub(in crate::vm) fn advance_temporal_zoned_date_time_constructor(
                     }
                 });
                 state.stage = TemporalZonedDateTimeConstructorStage::Calendar;
-                continue;
             }
             TemporalZonedDateTimeConstructorStage::Calendar => {
                 // ToTemporalCalendarIdentifier: no primitive conversion runs
@@ -1628,7 +1627,7 @@ fn temporal_zoned_date_time_from_bag_fields(
     }
 }
 
-/// Builds the PlainDate arm of `ToTemporalRelativeTo` from the observed
+/// Builds the `PlainDate` arm of `ToTemporalRelativeTo` from the observed
 /// property-bag fields. Time fields are range-checked for finiteness during
 /// their integer conversion and then dropped, per the specification.
 fn temporal_plain_date_from_relative_to_bag_fields(

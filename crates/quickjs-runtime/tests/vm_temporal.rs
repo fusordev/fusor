@@ -2979,3 +2979,41 @@ fn plain_date_arguments_accept_plain_date_time_and_zoned_date_time_slots() {
         "month,RangeError"
     );
 }
+
+#[test]
+fn plain_date_time_with_plain_time_and_constructor_validation_match_temporal() {
+    assert_eq!(
+        rendered(
+            "var value=new Temporal.PlainDateTime(2000,5,2,12,34,56,987,654,321);
+             var method=Object.getOwnPropertyDescriptor(Temporal.PlainDateTime.prototype,'withPlainTime');
+             var bag=value.withPlainTime({hour:2,minute:30});
+             var string=value.withPlainTime('12:34:56.987654321');
+             var defaulted=value.withPlainTime();
+             var branded=value.withPlainTime(new Temporal.ZonedDateTime(3600000000000n,'UTC'));
+             return [bag.toString(),string.toString(),defaulted.toString(),branded.toString(),
+               method.value.length,method.value.name,method.enumerable,
+               method.writable,method.configurable].join('|');"
+        ),
+        "2000-05-02T02:30:00|2000-05-02T12:34:56.987654321|2000-05-02T00:00:00|2000-05-02T01:00:00|0|withPlainTime|false|true|true"
+    );
+    assert_eq!(
+        thrown(
+            "return new Temporal.PlainDateTime(2000,5,2,12,34,56,987,654,321,'1997-12-04[u-ca=iso8601]');"
+        ),
+        ExceptionKind::RangeError
+    );
+    assert_eq!(
+        thrown("return new Temporal.PlainDateTime(2000,5,2,Infinity);"),
+        ExceptionKind::RangeError
+    );
+    assert_eq!(
+        rendered(
+            "var log=[];
+             try{new Temporal.PlainDateTime(0,
+               {valueOf:function(){log.push('month');return Infinity;}},
+               {valueOf:function(){log.push('day');return 1;}})}catch(error){log.push(error.name);}
+             return log.join(',');"
+        ),
+        "month,RangeError"
+    );
+}

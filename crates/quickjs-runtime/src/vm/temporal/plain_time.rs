@@ -6,7 +6,7 @@ use super::super::conversions::operator_primitive_to_string;
 use super::*;
 use core::str::FromStr;
 use temporal_rs::{
-    PlainDate, PlainTime, TimeZone, ZonedDateTime,
+    PlainDate, PlainDateTime, PlainTime, TimeZone, ZonedDateTime,
     options::{
         DifferenceSettings, Overflow, RoundingIncrement, RoundingMode, RoundingOptions,
         ToStringRoundingOptions, Unit,
@@ -58,6 +58,9 @@ pub(in crate::vm) enum TemporalPlainTimeLikeTarget {
     ZonedDateTimeWithPlainTime {
         receiver: ZonedDateTime,
     },
+    PlainDateTimeWithPlainTime {
+        receiver: PlainDateTime,
+    },
     PlainDateToZonedDateTime {
         receiver: PlainDate,
         time_zone: TimeZone,
@@ -76,6 +79,7 @@ impl TemporalPlainTimeLikeTarget {
             Self::CompareSecond { .. }
             | Self::Equals { .. }
             | Self::ZonedDateTimeWithPlainTime { .. }
+            | Self::PlainDateTimeWithPlainTime { .. }
             | Self::PlainDateToZonedDateTime { .. } => {}
         }
     }
@@ -625,6 +629,15 @@ fn continue_temporal_plain_time_like(
         )),
         TemporalPlainTimeLikeTarget::ZonedDateTimeWithPlainTime { receiver } => {
             finish_temporal_zoned_date_time_with_plain_time(
+                runtime,
+                &receiver,
+                Some(time),
+                realm,
+                &origin,
+            )
+        }
+        TemporalPlainTimeLikeTarget::PlainDateTimeWithPlainTime { receiver } => {
+            finish_temporal_plain_date_time_with_plain_time(
                 runtime,
                 &receiver,
                 Some(time),

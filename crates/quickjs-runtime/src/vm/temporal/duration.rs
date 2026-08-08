@@ -1738,7 +1738,7 @@ pub(in crate::vm) fn finish_temporal_duration_compare_options(
 
 /// The duration operation waiting on a `relativeTo` conversion.
 ///
-/// Plain-object `relativeTo` values go through the resumable ZonedDateTime
+/// Plain-object `relativeTo` values go through the resumable `ZonedDateTime`
 /// property-bag machinery; these targets resume the originating operation
 /// once the kernel `RelativeTo` is known.
 pub(in crate::vm) enum TemporalRelativeToTarget {
