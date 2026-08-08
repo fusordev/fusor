@@ -560,21 +560,7 @@ impl CompilationContext<'_, '_, '_> {
         }
         for global in realm_globals {
             let name = global.atom;
-            let source = match global.source {
-                CompiledRealmGlobalSource::ConstructorRealm => {
-                    CompilerGraphClosureSource::ConstructorRealmGlobal(name)
-                }
-                CompiledRealmGlobalSource::DirectEvalBinding {
-                    index,
-                    environment_size,
-                } => CompilerGraphClosureSource::DirectEvalBinding {
-                    index,
-                    environment_size,
-                },
-                CompiledRealmGlobalSource::ParentClosure(index) => {
-                    CompilerGraphClosureSource::ParentClosure(u32::from(index))
-                }
-            };
+            let source = compiler_graph_realm_global_source(global);
             let mut definition = match global.binding {
                 quickjs_bytecode::CompilerClosureBinding::Captured(policy) => {
                     VerifiedClosureVariableDefinition::new(Some(name), policy, source)
@@ -738,17 +724,25 @@ impl CompilationContext<'_, '_, '_> {
                     {
                         CompiledRealmGlobalSource::ConstructorRealm
                     }
-                    RealmGlobalRootSource::DirectEvalBinding {
-                        index,
-                        environment_size,
-                    } if crate::is_supported_direct_eval_goal(self.unit.goal()) => {
+                    RealmGlobalRootSource::DirectEvalBinding { index }
+                        if crate::is_supported_direct_eval_goal(self.unit.goal()) =>
+                    {
                         CompiledRealmGlobalSource::DirectEvalBinding {
                             index,
-                            environment_size,
+                            environment_size: tree_layout.realm_globals.direct_environment_size(),
+                        }
+                    }
+                    RealmGlobalRootSource::DirectEvalVariable { index }
+                        if crate::is_supported_direct_eval_goal(self.unit.goal()) =>
+                    {
+                        CompiledRealmGlobalSource::DirectEvalVariable {
+                            index,
+                            environment_size: tree_layout.realm_globals.direct_environment_size(),
                         }
                     }
                     RealmGlobalRootSource::ConstructorRealm
-                    | RealmGlobalRootSource::DirectEvalBinding { .. } => {
+                    | RealmGlobalRootSource::DirectEvalBinding { .. }
+                    | RealmGlobalRootSource::DirectEvalVariable { .. } => {
                         return Err(LeafCompilationError::SemanticInvariant {
                             invariant: "Script root external-binding source matches its compilation goal",
                             span: Some(metadata.span()),
@@ -886,21 +880,7 @@ fn build_unverified_graph_records(
                     span: None,
                 });
             }
-            closure_sources.push(match global.source() {
-                CompiledRealmGlobalSource::ConstructorRealm => {
-                    CompilerGraphClosureSource::ConstructorRealmGlobal(global.atom())
-                }
-                CompiledRealmGlobalSource::DirectEvalBinding {
-                    index,
-                    environment_size,
-                } => CompilerGraphClosureSource::DirectEvalBinding {
-                    index,
-                    environment_size,
-                },
-                CompiledRealmGlobalSource::ParentClosure(index) => {
-                    CompilerGraphClosureSource::ParentClosure(u32::from(index))
-                }
-            });
+            closure_sources.push(compiler_graph_realm_global_source(global));
         }
         records.push(
             UnverifiedCompilerFunction::new(
@@ -908,10 +888,46 @@ fn build_unverified_graph_records(
                 constants.into(),
                 closure_sources.into(),
             )
-            .with_atom_pool(Arc::clone(&function.atoms)),
+            .with_atom_pool(Arc::clone(&function.atoms))
+            .with_direct_eval(
+                function
+                    .storage_plan
+                    .executable(function.executable)
+                    .ok_or(LeafCompilationError::InvalidExecutable {
+                        executable: function.executable,
+                    })?
+                    .has_direct_eval(),
+            ),
         );
     }
     Ok((records, parent_counts))
+}
+
+const fn compiler_graph_realm_global_source(
+    global: &CompiledRealmGlobal,
+) -> CompilerGraphClosureSource {
+    match global.source() {
+        CompiledRealmGlobalSource::ConstructorRealm => {
+            CompilerGraphClosureSource::ConstructorRealmGlobal(global.atom())
+        }
+        CompiledRealmGlobalSource::DirectEvalBinding {
+            index,
+            environment_size,
+        } => CompilerGraphClosureSource::DirectEvalBinding {
+            index,
+            environment_size,
+        },
+        CompiledRealmGlobalSource::DirectEvalVariable {
+            index,
+            environment_size,
+        } => CompilerGraphClosureSource::DirectEvalVariable {
+            index,
+            environment_size,
+        },
+        CompiledRealmGlobalSource::ParentClosure(index) => {
+            CompilerGraphClosureSource::ParentClosure(index as u32)
+        }
+    }
 }
 
 fn checked_function_template_id(index: usize) -> Result<FunctionTemplateId, LeafCompilationError> {

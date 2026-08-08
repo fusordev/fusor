@@ -71,6 +71,7 @@ pub(super) struct DefineClassOperand {
 
 pub(super) struct GlobalReferenceOperand {
     binding: RealmGlobalBindingId,
+    eval_cell: Option<BindingCellId>,
     realm: RealmId,
     object: ObjectId,
     pub(super) key: PropertyKey,
@@ -305,13 +306,41 @@ pub(super) fn global_reference_operand(
             pool: "realm global atom description",
             index,
         })?;
+    let eval_cell = lookup_eval_variable_cell(frame, &name);
+    if let Some(cell) = eval_cell
+        && !runtime.cells.contains(cell)
+    {
+        return Err(EngineFault::StaleHeapEdge {
+            edge: "eval variable cell",
+            index: cell.index(),
+            generation: cell.generation(),
+        });
+    }
     Ok(GlobalReferenceOperand {
         binding: global,
+        eval_cell,
         realm,
         object: runtime.realm_global_object(realm)?,
         key: PropertyKey::from_validated_atom(record.name.clone()),
         name,
     })
+}
+
+fn lookup_eval_variable_cell(frame: &Frame, name: &JsString) -> Option<BindingCellId> {
+    let mut current = frame.eval_environment.as_ref().map(Rc::clone);
+    while let Some(environment) = current {
+        let record = environment.borrow();
+        if let Some(cell) = record
+            .bindings
+            .iter()
+            .find(|binding| binding.name.code_units().eq(name.code_units()))
+            .map(|binding| binding.cell)
+        {
+            return Some(cell);
+        }
+        current = record.parent.as_ref().map(Rc::clone);
+    }
+    None
 }
 
 /// Resolves the atom operand of verified `delete_var` back to its typed Realm
@@ -388,6 +417,9 @@ pub(super) fn delete_realm_global_binding(
     runtime: &mut Runtime,
     global: &GlobalReferenceOperand,
 ) -> Result<bool, ExecutionError> {
+    if global.eval_cell.is_some() {
+        return Ok(false);
+    }
     let state = runtime
         .global_bindings
         .get(global.binding)
@@ -410,6 +442,21 @@ pub(super) fn read_realm_global(
     runtime: &Runtime,
     global: &GlobalReferenceOperand,
 ) -> Result<RealmGlobalReadOutcome, ExecutionError> {
+    if let Some(cell) = global.eval_cell {
+        let value = &runtime
+            .cells
+            .get(cell)
+            .ok_or(EngineFault::StaleHeapEdge {
+                edge: "eval variable cell",
+                index: cell.index(),
+                generation: cell.generation(),
+            })?
+            .value;
+        return Ok(match value {
+            SlotValue::Uninitialized => RealmGlobalReadOutcome::Uninitialized,
+            SlotValue::Value(value) => RealmGlobalReadOutcome::Value(value.duplicate()),
+        });
+    }
     let binding =
         runtime
             .global_bindings
@@ -465,6 +512,9 @@ pub(super) fn write_realm_global(
     strict: bool,
     execution_budget: &mut ExecutionBudget,
 ) -> Result<RealmGlobalWriteOutcome, ExecutionError> {
+    if let Some(cell) = global.eval_cell {
+        return write_eval_variable(runtime, cell, value);
+    }
     let state = runtime
         .global_bindings
         .get(global.binding)
@@ -562,11 +612,35 @@ pub(super) fn write_realm_global(
     }
 }
 
+fn write_eval_variable(
+    runtime: &mut Runtime,
+    cell: BindingCellId,
+    value: StoredValue,
+) -> Result<RealmGlobalWriteOutcome, ExecutionError> {
+    runtime
+        .cells
+        .get_mut(cell)
+        .ok_or(EngineFault::StaleHeapEdge {
+            edge: "eval variable cell",
+            index: cell.index(),
+            generation: cell.generation(),
+        })?
+        .value = SlotValue::Value(value);
+    runtime.collection_pending = true;
+    Ok(RealmGlobalWriteOutcome::Complete)
+}
+
 pub(super) fn initialize_realm_global(
     runtime: &mut Runtime,
     global: &GlobalReferenceOperand,
     value: StoredValue,
 ) -> Result<(), ExecutionError> {
+    if global.eval_cell.is_some() {
+        return Err(EngineFault::RuntimeInvariant {
+            message: "put_var_init targeted an eval-created variable",
+        }
+        .into());
+    }
     let state = runtime
         .global_bindings
         .get(global.binding)

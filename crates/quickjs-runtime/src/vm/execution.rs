@@ -364,6 +364,7 @@ pub(super) fn create_frame(
         })?;
     let bytecode = function.bytecode()?;
     let environment = copy_environment(&bytecode.environment, RuntimeResource::FrameValues)?;
+    let inherited_eval_environment = bytecode.eval_environment.as_ref().map(Rc::clone);
     let lexical_receiver = bytecode
         .lexical_receiver
         .as_ref()
@@ -500,6 +501,24 @@ pub(super) fn create_frame(
                 function: plan.template,
             })?;
     let executable_kind = verified.metadata().executable_kind();
+    let eval_declaration_environment = if verified.function().has_direct_eval()
+        && !matches!(
+            executable_kind,
+            CompilerExecutableKind::GlobalScript
+                | CompilerExecutableKind::IndirectEvalScript
+                | CompilerExecutableKind::DirectEvalScript
+                | CompilerExecutableKind::DynamicFunctionScript
+        ) {
+        Some(EvalVariableEnvironment::shared(
+            inherited_eval_environment.as_ref().map(Rc::clone),
+        ))
+    } else {
+        None
+    };
+    let eval_environment = eval_declaration_environment
+        .as_ref()
+        .map(Rc::clone)
+        .or(inherited_eval_environment);
     let variable_count = plan.argument_count.checked_add(plan.local_count).ok_or(
         EngineFault::InvalidClosureEnvironment {
             function: plan.template,
@@ -657,6 +676,8 @@ pub(super) fn create_frame(
             | CompilerExecutableKind::AsyncGeneratorMethod
             | CompilerExecutableKind::ClassConstructor => DirectEvalVariableEnvironment::Function,
         },
+        eval_environment,
+        eval_declaration_environment,
         receiver,
         new_target,
         instruction: plan.instruction,

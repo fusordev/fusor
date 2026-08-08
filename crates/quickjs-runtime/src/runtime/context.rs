@@ -614,6 +614,10 @@ impl Context<'_> {
                 quickjs_bytecode::CompilerClosureSource::DirectEvalBinding {
                     index,
                     environment_size,
+                }
+                | quickjs_bytecode::CompilerClosureSource::DirectEvalVariable {
+                    index,
+                    environment_size,
                 } => {
                     let Some(environment) = external_environment else {
                         return Err(InstallError::AuthorityInvariant {
@@ -778,6 +782,7 @@ impl Context<'_> {
                 code,
                 template: root_template,
                 environment: root_bindings,
+                eval_environment: None,
                 lexical_receiver: None,
                 lexical_new_target: None,
                 lexical_derived_constructor: None,

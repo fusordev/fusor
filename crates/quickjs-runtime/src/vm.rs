@@ -72,15 +72,16 @@ use crate::{
         ArrayLengthWriteOutcome, ArrayMutator, ArrayReduction, ArraySearch, ArraySort, ArrayStatic,
         AtomicsMethod, BindingCell, BoundFunction, BytecodeFunction, CollectionRoot,
         DataViewElementType, DataViewPrototypeMethod, DatePrototypeMethod, DateStaticMethod,
-        EnvironmentBinding, FinalizationRegistryMethod, FrameBindingAddress,
-        FunctionImplementation, GlobalNumericFunction, HeapFunction, InstalledCode,
-        InstalledConstant, InstalledRoot, InstalledTemplate, LocaleStringMethod, MapMethod,
-        MathMethod, NativeFunction, NativeFunctionKind, NumberFormat, NumberPredicate,
-        PreparedIteratorResultPlan, PromiseCapabilityCapture, PromiseCapabilityExecutor,
-        PromiseCombinatorElementFunction, PromiseCombinatorElementKind, PromiseCombinatorKind,
-        PromiseCombinatorShared, PromiseFinallyFunction, PromiseFinallyThunkKind, PromiseJob,
-        PromiseResolvingFunction, PromiseResolvingKind, PromiseStatic, RealmGlobalBindingState,
-        ReflectMethod, RegExpFlag, RegExpSymbolMethod, SetMethod, SetPrototypeOutcome,
+        EnvironmentBinding, EvalVariableBinding, EvalVariableEnvironment,
+        FinalizationRegistryMethod, FrameBindingAddress, FunctionImplementation,
+        GlobalNumericFunction, HeapFunction, InstalledCode, InstalledConstant, InstalledRoot,
+        InstalledTemplate, LocaleStringMethod, MapMethod, MathMethod, NativeFunction,
+        NativeFunctionKind, NumberFormat, NumberPredicate, PreparedIteratorResultPlan,
+        PromiseCapabilityCapture, PromiseCapabilityExecutor, PromiseCombinatorElementFunction,
+        PromiseCombinatorElementKind, PromiseCombinatorKind, PromiseCombinatorShared,
+        PromiseFinallyFunction, PromiseFinallyThunkKind, PromiseJob, PromiseResolvingFunction,
+        PromiseResolvingKind, PromiseStatic, RealmGlobalBindingState, ReflectMethod, RegExpFlag,
+        RegExpSymbolMethod, SetMethod, SetPrototypeOutcome, SharedEvalVariableEnvironment,
         StringArgument, StringMethod, TemporalDurationPrototypeMethod,
         TemporalDurationStaticMethod, TemporalInstantPrototypeMethod, TemporalInstantStaticMethod,
         TemporalPlainDatePrototypeMethod, TemporalPlainDateStaticMethod,
@@ -91,7 +92,7 @@ use crate::{
         TypedArrayElementValue, TypedArrayOwnProperty, TypedArrayPropertyKey,
         TypedArrayPrototypeMethod, TypedArrayStoreOutcome, TypedArrayView, UriFunction,
         WeakMapMethod, WeakSetMethod, array_length_from_number, check_execution_limit,
-        global_declaration_error, usize_to_u64,
+        global_declaration_error, runtime_string, usize_to_u64,
     },
     value::{HeapReference, SlotValue, StoredValue},
 };
@@ -348,6 +349,8 @@ pub(crate) struct Frame {
     template: FunctionTemplateId,
     strict: bool,
     direct_eval_variable_environment: DirectEvalVariableEnvironment,
+    eval_environment: Option<SharedEvalVariableEnvironment>,
+    eval_declaration_environment: Option<SharedEvalVariableEnvironment>,
     receiver: StoredValue,
     new_target: Option<FunctionId>,
     instruction: InstructionIndex,
@@ -3743,6 +3746,11 @@ pub(crate) fn trace_frame_roots(frame: &Frame, mark: &mut dyn FnMut(CollectionRo
             mark(CollectionRoot::BindingCell(*cell));
         }
     }
+    if let Some(environment) = &frame.eval_environment {
+        EvalVariableEnvironment::trace_cells(environment, |cell| {
+            mark(CollectionRoot::BindingCell(cell));
+        });
+    }
     for entry in &frame.stack {
         if let OperandStackEntry::JavaScript(value) = entry {
             trace_stored_value_root(value, mark);
@@ -4142,6 +4150,11 @@ struct PendingDirectEvalCell {
     value: SlotValue,
 }
 
+struct PendingDirectEvalVariable {
+    external_index: usize,
+    name: JsString,
+}
+
 struct CreatedDirectEvalCell {
     location: DirectEvalCallerBindingLocation,
     own_index: Option<usize>,
@@ -4151,6 +4164,8 @@ struct CreatedDirectEvalCell {
 struct DirectEvalEnvironment {
     bindings: Vec<Option<EnvironmentBinding>>,
     created_cells: Vec<CreatedDirectEvalCell>,
+    created_variable_environment: Option<(SharedEvalVariableEnvironment, usize)>,
+    created_variable_cells: Vec<BindingCellId>,
 }
 
 impl DirectEvalEnvironment {

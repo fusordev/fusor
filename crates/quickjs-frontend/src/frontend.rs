@@ -317,6 +317,13 @@ pub enum DirectEvalBindingLocation {
         /// Zero-based closure slot.
         index: u16,
     },
+    /// A binding in a retained per-activation eval variable environment.
+    EvalVariable {
+        /// Zero-based environment depth from the current activation.
+        depth: u16,
+        /// Zero-based binding entry within that environment.
+        index: u16,
+    },
     /// A closure slot referencing a global variable.
     GlobalReference {
         /// Zero-based closure slot.

@@ -155,6 +155,13 @@ pub enum CompiledRealmGlobalSource {
         /// Exact caller-environment shape bound into the authority.
         environment_size: u32,
     },
+    /// A sloppy direct-eval declaration creates this caller function binding.
+    DirectEvalVariable {
+        /// Dense entry appended after the caller snapshot.
+        index: u32,
+        /// Exact combined caller and created-variable environment size.
+        environment_size: u32,
+    },
     /// A child forwards the same realm-owned handle from its parent.
     ParentClosure(u16),
 }

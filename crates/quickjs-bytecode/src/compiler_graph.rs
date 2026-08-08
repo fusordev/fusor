@@ -462,6 +462,18 @@ pub enum CompilerClosureSource {
         /// Exact number of entries required from that snapshot.
         environment_size: u32,
     },
+    /// One mutable binding created in the calling function's variable
+    /// environment by sloppy direct `eval`.
+    ///
+    /// The runtime appends these cells after the ordered caller snapshot.
+    /// `index` and `environment_size` bind the authority to that complete
+    /// installation environment exactly as for [`Self::DirectEvalBinding`].
+    DirectEvalVariable {
+        /// Zero-based entry in the complete direct-eval environment.
+        index: u32,
+        /// Exact number of caller and newly-created entries required.
+        environment_size: u32,
+    },
 }
 
 impl fmt::Display for CompilerClosureSource {
@@ -481,6 +493,13 @@ impl fmt::Display for CompilerClosureSource {
                 formatter,
                 "direct-eval binding {index} in environment of size {environment_size}"
             ),
+            Self::DirectEvalVariable {
+                index,
+                environment_size,
+            } => write!(
+                formatter,
+                "direct-eval variable {index} in environment of size {environment_size}"
+            ),
         }
     }
 }
@@ -492,6 +511,7 @@ pub struct UnverifiedCompilerFunction {
     atoms: Option<Arc<[CompilerAtom]>>,
     constants: Arc<[CompilerConstant]>,
     closure_sources: Arc<[CompilerClosureSource]>,
+    has_direct_eval: bool,
 }
 
 impl UnverifiedCompilerFunction {
@@ -507,6 +527,7 @@ impl UnverifiedCompilerFunction {
             atoms: None,
             constants,
             closure_sources,
+            has_direct_eval: false,
         }
     }
 
@@ -514,6 +535,17 @@ impl UnverifiedCompilerFunction {
     #[must_use]
     pub fn with_atom_pool(mut self, atoms: Arc<[CompilerAtom]>) -> Self {
         self.atoms = Some(atoms);
+        self
+    }
+
+    /// Declares whether this function contains a direct-eval callsite.
+    ///
+    /// Whole-graph verification ties this marker to the actual `eval` or
+    /// `apply_eval` instruction family before retaining it as runtime
+    /// authority.
+    #[must_use]
+    pub const fn with_direct_eval(mut self, has_direct_eval: bool) -> Self {
+        self.has_direct_eval = has_direct_eval;
         self
     }
 
@@ -539,6 +571,12 @@ impl UnverifiedCompilerFunction {
     #[must_use]
     pub fn closure_sources(&self) -> &[CompilerClosureSource] {
         &self.closure_sources
+    }
+
+    /// Returns the proposed direct-eval callsite marker.
+    #[must_use]
+    pub const fn has_direct_eval(&self) -> bool {
+        self.has_direct_eval
     }
 }
 
@@ -903,6 +941,7 @@ pub struct VerifiedCompilerFunction {
     atoms: Arc<[CompilerAtom]>,
     constants: Arc<[CompilerConstant]>,
     closure_sources: Arc<[CompilerClosureSource]>,
+    has_direct_eval: bool,
 }
 
 impl VerifiedCompilerFunction {
@@ -928,6 +967,12 @@ impl VerifiedCompilerFunction {
     #[must_use]
     pub fn closure_sources(&self) -> &[CompilerClosureSource] {
         &self.closure_sources
+    }
+
+    /// Returns whether the verified body contains a direct-eval callsite.
+    #[must_use]
+    pub const fn has_direct_eval(&self) -> bool {
+        self.has_direct_eval
     }
 }
 
@@ -1073,6 +1118,14 @@ pub enum FunctionGraphVerificationErrorKind {
     MissingCompilerCaptureLayout,
     /// A body did not retain explicit compiler constant metadata.
     MissingCompilerConstantLayout,
+    /// The compiler's direct-eval marker disagrees with the encoded callsite
+    /// family.
+    DirectEvalMarkerMismatch {
+        /// Marker supplied by the compiler planner.
+        declared: bool,
+        /// Whether the verified body contains `eval` or `apply_eval`.
+        encoded: bool,
+    },
     /// A nonempty body atom domain has no supplied atom table.
     MissingAtomPool {
         /// Declared atom entries.
@@ -1272,6 +1325,10 @@ impl fmt::Display for FunctionGraphVerificationErrorKind {
             Self::MissingCompilerConstantLayout => {
                 formatter.write_str("body has no explicit compiler constant layout")
             }
+            Self::DirectEvalMarkerMismatch { declared, encoded } => write!(
+                formatter,
+                "direct-eval marker {declared} disagrees with encoded callsite presence {encoded}"
+            ),
             Self::MissingAtomPool { declared } => write!(
                 formatter,
                 "body declares {declared} atoms, but the compiler graph has no atom pool"
@@ -1458,6 +1515,7 @@ pub fn verify_compiler_function_graph(
                 .map_or_else(|| Arc::from([]), Arc::clone),
             constants: Arc::clone(&function.constants),
             closure_sources: Arc::clone(&function.closure_sources),
+            has_direct_eval: function.has_direct_eval,
         }
     }));
 
@@ -1476,6 +1534,21 @@ fn validate_function_records(
     for (index, function) in functions.iter().enumerate() {
         let id = function_id(index)?;
         let flow = &function.control_flow;
+        let encoded_direct_eval = flow.instructions().iter().any(|instruction| {
+            matches!(
+                instruction.decoded().instruction().opcode(),
+                FinalOpcode::Eval | FinalOpcode::ApplyEval
+            )
+        });
+        if function.has_direct_eval != encoded_direct_eval {
+            return Err(FunctionGraphVerificationError::at_function(
+                id,
+                FunctionGraphVerificationErrorKind::DirectEvalMarkerMismatch {
+                    declared: function.has_direct_eval,
+                    encoded: encoded_direct_eval,
+                },
+            ));
+        }
         if flow.compiler_capture_layout().is_none() {
             return Err(FunctionGraphVerificationError::at_function(
                 id,
@@ -1599,7 +1672,8 @@ fn validate_root_closure_sources(
                         closure: usize_to_u32(closure),
                     },
                 ),
-                CompilerClosureSource::DirectEvalBinding { .. } => Some(
+                CompilerClosureSource::DirectEvalBinding { .. }
+                | CompilerClosureSource::DirectEvalVariable { .. } => Some(
                     FunctionGraphVerificationErrorKind::DirectEvalBindingSourceNotRoot {
                         closure: usize_to_u32(closure),
                     },
@@ -1622,6 +1696,10 @@ fn validate_root_closure_sources(
         match *source {
             CompilerClosureSource::ConstructorRealmGlobal(_) => {}
             CompilerClosureSource::DirectEvalBinding {
+                index,
+                environment_size,
+            }
+            | CompilerClosureSource::DirectEvalVariable {
                 index,
                 environment_size,
             } => {
@@ -1949,7 +2027,8 @@ fn validate_closure_edges(
                     CompilerClosureSource::ConstructorRealmGlobal(_) => {
                         continue;
                     }
-                    CompilerClosureSource::DirectEvalBinding { .. } => continue,
+                    CompilerClosureSource::DirectEvalBinding { .. }
+                    | CompilerClosureSource::DirectEvalVariable { .. } => continue,
                 };
                 if source_index >= len {
                     return Err(FunctionGraphVerificationError::at_function(

@@ -135,6 +135,62 @@ fn sloppy_direct_eval_var_without_initializer_preserves_an_existing_local() {
 }
 
 #[test]
+fn sloppy_direct_eval_creates_a_new_function_variable_binding() {
+    evaluate(
+        "var answer=1;function local(){eval('var answer=42;');return answer;}local()+answer;",
+        |value| assert!(number(value).strict_equals(JsNumber::from_i32(43))),
+    );
+}
+
+#[test]
+fn sloppy_direct_eval_creates_a_new_function_declaration_binding() {
+    evaluate(
+        "function local(){eval('function answer(){return 42;}');return answer();}local();",
+        |value| assert!(number(value).strict_equals(JsNumber::from_i32(42))),
+    );
+}
+
+#[test]
+fn caller_closure_created_before_eval_observes_a_new_variable() {
+    evaluate(
+        "function local(){let read=()=>answer;eval('var answer=42;');return read;}local()();",
+        |value| assert!(number(value).strict_equals(JsNumber::from_i32(42))),
+    );
+}
+
+#[test]
+fn eval_variable_environments_are_distinct_per_activation() {
+    evaluate(
+        "function local(value){eval('var answer=value;');return ()=>answer;}let one=local(1),two=local(2);one()*10+two();",
+        |value| assert!(number(value).strict_equals(JsNumber::from_i32(12))),
+    );
+}
+
+#[test]
+fn escaped_caller_closure_direct_eval_observes_an_outer_eval_variable() {
+    evaluate(
+        "function outer(){eval('var answer=42;');return function(){return eval('answer;');};}outer()();",
+        |value| assert!(number(value).strict_equals(JsNumber::from_i32(42))),
+    );
+}
+
+#[test]
+fn eval_created_variables_are_nondeletable_and_visible_to_typeof() {
+    evaluate(
+        "function local(){eval('var answer=42;');return delete answer===false&&typeof answer==='number'&&answer===42;}local();",
+        |value| assert_eq!(value.as_boolean(), Ok(Some(true))),
+    );
+}
+
+#[test]
+fn eval_declaration_instantiation_survives_an_eval_body_throw() {
+    evaluate(
+        "function local(){try{eval('var answer=42;throw 1;');}catch(error){}return answer;}local();",
+        |value| assert!(number(value).strict_equals(JsNumber::from_i32(42))),
+    );
+}
+
+#[test]
 fn nested_sloppy_direct_eval_reuses_the_same_function_variable_cell() {
     evaluate(
         "function local(){var answer=1;eval('answer=2;eval(\"answer=42;\");');return answer;}local();",
@@ -248,14 +304,14 @@ fn sloppy_global_direct_eval_function_preflight_is_atomic() {
 }
 
 #[test]
-fn failed_direct_eval_install_rolls_back_promoted_caller_cells() {
+fn failed_direct_eval_install_rolls_back_promoted_and_created_cells() {
     let mut runtime =
         Runtime::try_new(RuntimeLimits::default().with_max_installed_code(1)).expect("runtime");
     let realm = runtime.create_realm().expect("realm");
     let mut context = runtime.context(&realm).expect("context");
     let error = evaluate_script(
         &mut context,
-        "function local(){let value=1;return eval('value');}local();",
+        "function local(){let value=1;return eval('value;var created=2;created;');}local();",
         "direct-eval-rollback.js",
         ScriptLimits::default(),
     )

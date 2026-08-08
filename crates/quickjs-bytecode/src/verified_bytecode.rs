@@ -2608,7 +2608,7 @@ fn verify_executable_kind(
         | CompilerExecutableKind::AsyncFunction
         | CompilerExecutableKind::AsyncGeneratorFunction => Ok(()),
         CompilerExecutableKind::OrdinaryArrow => {
-            if metadata_has_function_name(metadata) {
+            if metadata_has_local_function_name(metadata) {
                 return Err(BytecodeVerificationError::function(
                     id,
                     BytecodeVerificationErrorKind::OrdinaryArrowHasFunctionName,
@@ -2621,7 +2621,7 @@ fn verify_executable_kind(
         | CompilerExecutableKind::AsyncMethod
         | CompilerExecutableKind::AsyncGeneratorMethod
         | CompilerExecutableKind::ClassConstructor => {
-            if metadata_has_function_name(metadata) {
+            if metadata_has_local_function_name(metadata) {
                 return Err(BytecodeVerificationError::function(
                     id,
                     BytecodeVerificationErrorKind::OrdinaryMethodHasFunctionName,
@@ -3920,6 +3920,7 @@ fn verify_closures(
         if matches!(
             staged_source,
             CompilerClosureSource::DirectEvalBinding { .. }
+                | CompilerClosureSource::DirectEvalVariable { .. }
         ) && (id != root || authority_kind != CompilerExecutableKind::DirectEvalScript)
         {
             return Err(BytecodeVerificationError::function(
@@ -3947,7 +3948,15 @@ fn verify_closures(
                         CompilerClosureSource::ParentVariableReference(_)
                             | CompilerClosureSource::ParentClosure(_)
                             | CompilerClosureSource::DirectEvalBinding { .. }
+                            | CompilerClosureSource::DirectEvalVariable { .. }
                     )
+                    && (!matches!(
+                        staged_source,
+                        CompilerClosureSource::DirectEvalVariable { .. }
+                    ) || (matches!(
+                        policy.kind(),
+                        CompilerBindingKind::Var | CompilerBindingKind::Function
+                    ) && closure.name.is_some()))
             }
             CompilerClosureBinding::RealmGlobal(_) => {
                 realm_global_policy_supported(policy)
@@ -3969,7 +3978,8 @@ fn verify_closures(
                         }
                         CompilerClosureSource::ParentClosure(_) => id != root,
                         CompilerClosureSource::ParentVariableReference(_)
-                        | CompilerClosureSource::DirectEvalBinding { .. } => false,
+                        | CompilerClosureSource::DirectEvalBinding { .. }
+                        | CompilerClosureSource::DirectEvalVariable { .. } => false,
                     }
             }
         };
@@ -4410,7 +4420,8 @@ fn verify_closure_metadata(
                         .and_then(|index| parent_metadata.closures.get(index))
                         .map(|definition| (definition.name, definition.binding, parent.atoms())),
                     CompilerClosureSource::ConstructorRealmGlobal(_)
-                    | CompilerClosureSource::DirectEvalBinding { .. } => None,
+                    | CompilerClosureSource::DirectEvalBinding { .. }
+                    | CompilerClosureSource::DirectEvalVariable { .. } => None,
                 };
                 let matches =
                     expected.is_some_and(|(expected_name, expected_binding, expected_atoms)| {

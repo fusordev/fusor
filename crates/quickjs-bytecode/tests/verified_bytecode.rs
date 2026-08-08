@@ -3088,6 +3088,9 @@ fn typed_stack_input_with_captures(
     variables: &[VariableDefinition],
     captures: &[CompilerCapturedBinding],
 ) -> UnverifiedCompilerBytecodeGraph {
+    let has_direct_eval = instructions
+        .iter()
+        .any(|(opcode, _)| matches!(opcode, FinalOpcode::Eval | FinalOpcode::ApplyEval));
     let locals = u32::try_from(variables.len()).expect("fixture local count");
     let flow = flow(
         instructions,
@@ -3117,7 +3120,8 @@ fn typed_stack_input_with_captures(
             FunctionTemplateId::new(0),
             Arc::from([
                 UnverifiedCompilerFunction::new(flow, Arc::from([]), Arc::from([]))
-                    .with_atom_pool(Arc::from(atoms)),
+                    .with_atom_pool(Arc::from(atoms))
+                    .with_direct_eval(has_direct_eval),
             ]),
         ),
         FunctionGraphVerificationLimits::default(),
@@ -6796,10 +6800,25 @@ fn direct_eval_binding_input(
     instructions: &[(FinalOpcode, Operands)],
     policy: CompilerBindingPolicy,
 ) -> UnverifiedCompilerBytecodeGraph {
-    let closure_source = CompilerClosureSource::DirectEvalBinding {
-        index: 1,
-        environment_size: 2,
-    };
+    direct_eval_source_input(
+        executable_kind,
+        instructions,
+        policy,
+        CompilerClosureSource::DirectEvalBinding {
+            index: 1,
+            environment_size: 2,
+        },
+        Some(AtomPoolIndex::new(0)),
+    )
+}
+
+fn direct_eval_source_input(
+    executable_kind: CompilerExecutableKind,
+    instructions: &[(FinalOpcode, Operands)],
+    policy: CompilerBindingPolicy,
+    closure_source: CompilerClosureSource,
+    name: Option<AtomPoolIndex>,
+) -> UnverifiedCompilerBytecodeGraph {
     let flow = flow_with_header(
         instructions,
         1,
@@ -6837,15 +6856,69 @@ fn direct_eval_binding_input(
         Arc::from([UnverifiedFunctionMetadata::new(
             None,
             Arc::from([]),
-            Arc::from([ClosureVariableDefinition::new(
-                Some(AtomPoolIndex::new(0)),
-                policy,
-                closure_source,
-            )]),
+            Arc::from([ClosureVariableDefinition::new(name, policy, closure_source)]),
             source(text, full_span, None, &mappings),
         )
         .with_executable_kind(executable_kind)]),
     )
+}
+
+#[test]
+fn direct_eval_new_variables_require_named_mutable_var_or_function_bindings() {
+    let source = CompilerClosureSource::DirectEvalVariable {
+        index: 1,
+        environment_size: 2,
+    };
+    let verified = verify_compiler_bytecode_graph(
+        direct_eval_source_input(
+            CompilerExecutableKind::DirectEvalScript,
+            &[(FinalOpcode::ReturnUndef, Operands::None)],
+            var_policy(),
+            source,
+            Some(AtomPoolIndex::new(0)),
+        ),
+        BytecodeGraphVerificationLimits::default(),
+    )
+    .expect("a named mutable var may be created in the caller variable environment");
+    assert_eq!(verified.root().function().closure_sources(), [source]);
+
+    let error = verify_compiler_bytecode_graph(
+        direct_eval_source_input(
+            CompilerExecutableKind::DirectEvalScript,
+            &[(FinalOpcode::ReturnUndef, Operands::None)],
+            const_policy(),
+            source,
+            Some(AtomPoolIndex::new(0)),
+        ),
+        BytecodeGraphVerificationLimits::default(),
+    )
+    .expect_err("new eval variables must retain mutable var/function policy");
+    assert_eq!(
+        error.kind(),
+        &BytecodeVerificationErrorKind::BindingPolicyViolation {
+            slot: BindingSlot::Closure(0),
+            pc: None,
+            reason: BindingPolicyViolationReason::InvalidDeclarationPolicy,
+        }
+    );
+
+    let error = verify_compiler_bytecode_graph(
+        direct_eval_source_input(
+            CompilerExecutableKind::DirectEvalScript,
+            &[(FinalOpcode::ReturnUndef, Operands::None)],
+            var_policy(),
+            source,
+            None,
+        ),
+        BytecodeGraphVerificationLimits::default(),
+    )
+    .expect_err("a new eval variable must retain its name");
+    assert_eq!(
+        error.kind(),
+        &BytecodeVerificationErrorKind::MissingMetadataAtom {
+            field: MetadataAtomField::ClosureName(0),
+        }
+    );
 }
 
 #[test]

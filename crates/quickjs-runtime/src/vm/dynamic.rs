@@ -434,6 +434,9 @@ pub(super) fn finish_direct_eval(
     } else {
         variable_environment
     };
+    frame.eval_environment = caller.eval_environment.as_ref().map(Rc::clone);
+    frame.eval_declaration_environment =
+        caller.eval_declaration_environment.as_ref().map(Rc::clone);
     if let Err(error) = installed.commit_environment() {
         let retirement = retire_failed_dynamic_root(runtime, installed);
         let rollback = rollback_direct_eval_environment(runtime, caller, environment);
@@ -1229,7 +1232,8 @@ pub(super) fn direct_eval_compile_request(
             function: frame.template,
         },
     )?;
-    let bindings = direct_eval_caller_bindings(&template, installed, frame.template, scope_index)?;
+    let bindings =
+        direct_eval_caller_bindings(&template, installed, frame, frame.template, scope_index)?;
     let function_code = runtime
         .functions
         .get(frame.function)
@@ -1272,6 +1276,7 @@ pub(super) fn direct_eval_compile_request(
 fn direct_eval_caller_bindings(
     template: &VerifiedBytecodeFunction,
     installed: &InstalledTemplate,
+    frame: &Frame,
     function: FunctionTemplateId,
     scope_index: u16,
 ) -> Result<Vec<DirectEvalCallerBinding>, ExecutionError> {
@@ -1280,6 +1285,7 @@ fn direct_eval_caller_bindings(
     let local_count = domains.local_count();
     let variables = template.metadata().variables();
     let closures = template.metadata().closures();
+    let dynamic_bindings = direct_eval_environment_binding_count(frame)?;
     let capacity = usize::try_from(argument_count)
         .ok()
         .and_then(|arguments| {
@@ -1288,6 +1294,7 @@ fn direct_eval_caller_bindings(
                 .and_then(|locals| arguments.checked_add(locals))
         })
         .and_then(|variables| variables.checked_add(closures.len()))
+        .and_then(|bindings| bindings.checked_add(dynamic_bindings))
         .ok_or(ExecutionError::AllocationFailed {
             resource: RuntimeResource::FrameValues,
             additional: usize::MAX,
@@ -1367,6 +1374,7 @@ fn direct_eval_caller_bindings(
                 )?;
             }
         }
+        push_direct_eval_declaration_environment_bindings(&mut bindings, frame)?;
         for local in 0..local_count {
             let variable = variables
                 .get(argument_count.saturating_add(local) as usize)
@@ -1449,7 +1457,112 @@ fn direct_eval_caller_bindings(
             DirectEvalCallerBindingScope::Outer,
         )?;
     }
+    push_direct_eval_outer_environment_bindings(&mut bindings, frame)?;
     Ok(bindings)
+}
+
+fn direct_eval_environment_binding_count(frame: &Frame) -> Result<usize, EngineFault> {
+    let mut count = 0_usize;
+    let mut current = frame.eval_environment.as_ref().map(Rc::clone);
+    while let Some(environment) = current {
+        let record = environment.borrow();
+        count = count
+            .checked_add(record.bindings.len())
+            .ok_or(EngineFault::RuntimeInvariant {
+                message: "direct-eval variable environment is too large",
+            })?;
+        current = record.parent.as_ref().map(Rc::clone);
+    }
+    Ok(count)
+}
+
+fn push_direct_eval_declaration_environment_bindings(
+    bindings: &mut Vec<DirectEvalCallerBinding>,
+    frame: &Frame,
+) -> Result<(), ExecutionError> {
+    let Some(target) = frame.eval_declaration_environment.as_ref() else {
+        return Ok(());
+    };
+    let mut depth = 0_u32;
+    let mut current = frame.eval_environment.as_ref().map(Rc::clone);
+    while let Some(environment) = current {
+        let record = environment.borrow();
+        if Rc::ptr_eq(&environment, target) {
+            for (index, binding) in record.bindings.iter().enumerate() {
+                push_direct_eval_environment_binding(
+                    bindings,
+                    binding,
+                    depth,
+                    index,
+                    DirectEvalCallerBindingScope::Variable,
+                )?;
+            }
+            return Ok(());
+        }
+        current = record.parent.as_ref().map(Rc::clone);
+        depth = depth.checked_add(1).ok_or(EngineFault::RuntimeInvariant {
+            message: "direct-eval variable environment depth overflowed",
+        })?;
+    }
+    Err(EngineFault::RuntimeInvariant {
+        message: "direct-eval declaration environment is outside the visible chain",
+    }
+    .into())
+}
+
+fn push_direct_eval_outer_environment_bindings(
+    bindings: &mut Vec<DirectEvalCallerBinding>,
+    frame: &Frame,
+) -> Result<(), ExecutionError> {
+    let target = frame.eval_declaration_environment.as_ref();
+    let mut depth = 0_u32;
+    let mut current = frame.eval_environment.as_ref().map(Rc::clone);
+    while let Some(environment) = current {
+        let record = environment.borrow();
+        if !target.is_some_and(|target| Rc::ptr_eq(&environment, target)) {
+            for (index, binding) in record.bindings.iter().enumerate() {
+                push_direct_eval_environment_binding(
+                    bindings,
+                    binding,
+                    depth,
+                    index,
+                    DirectEvalCallerBindingScope::Outer,
+                )?;
+            }
+        }
+        current = record.parent.as_ref().map(Rc::clone);
+        depth = depth.checked_add(1).ok_or(EngineFault::RuntimeInvariant {
+            message: "direct-eval variable environment depth overflowed",
+        })?;
+    }
+    Ok(())
+}
+
+fn push_direct_eval_environment_binding(
+    bindings: &mut Vec<DirectEvalCallerBinding>,
+    binding: &EvalVariableBinding,
+    depth: u32,
+    index: usize,
+    scope: DirectEvalCallerBindingScope,
+) -> Result<(), ExecutionError> {
+    let index = u32::try_from(index).map_err(|_| EngineFault::RuntimeInvariant {
+        message: "direct-eval variable binding index is not representable",
+    })?;
+    let policy = quickjs_bytecode::CompilerBindingPolicy::new(
+        CompilerBindingKind::Var,
+        quickjs_bytecode::CompilerInitializationPolicy::UndefinedAtInstantiation,
+        quickjs_bytecode::CompilerWritePolicy::Mutable,
+        false,
+    );
+    bindings.push(
+        DirectEvalCallerBinding::new(
+            binding.name.clone(),
+            policy,
+            DirectEvalCallerBindingLocation::EvalVariable { depth, index },
+        )
+        .with_scope(scope),
+    );
+    Ok(())
 }
 
 const fn direct_eval_local_scope(kind: CompilerBindingKind) -> DirectEvalCallerBindingScope {

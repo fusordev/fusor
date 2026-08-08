@@ -1119,26 +1119,33 @@ const fn frontend_direct_eval_variable_environment(
 fn frontend_direct_eval_location(
     location: DirectEvalCallerBindingLocation,
 ) -> Result<FrontendDirectEvalBindingLocation, DynamicFunctionCompileFailure> {
-    let (domain, index) = match location {
-        DirectEvalCallerBindingLocation::Argument(index) => ("argument", index),
-        DirectEvalCallerBindingLocation::Local(index) => ("local", index),
-        DirectEvalCallerBindingLocation::Closure(index) => ("closure", index),
+    let checked = |domain, index| {
+        u16::try_from(index).map_err(|_| {
+            engine_failure(
+                DynamicFunctionEngineStage::SourceConversion,
+                format!("direct-eval caller {domain} index is not representable"),
+            )
+        })
     };
-    let index = u16::try_from(index).map_err(|_| {
-        engine_failure(
-            DynamicFunctionEngineStage::SourceConversion,
-            format!("direct-eval caller {domain} index is not representable"),
-        )
-    })?;
     Ok(match location {
-        DirectEvalCallerBindingLocation::Argument(_) => {
-            FrontendDirectEvalBindingLocation::Argument { index }
+        DirectEvalCallerBindingLocation::Argument(index) => {
+            FrontendDirectEvalBindingLocation::Argument {
+                index: checked("argument", index)?,
+            }
         }
-        DirectEvalCallerBindingLocation::Local(_) => {
-            FrontendDirectEvalBindingLocation::Local { index }
+        DirectEvalCallerBindingLocation::Local(index) => FrontendDirectEvalBindingLocation::Local {
+            index: checked("local", index)?,
+        },
+        DirectEvalCallerBindingLocation::Closure(index) => {
+            FrontendDirectEvalBindingLocation::Closure {
+                index: checked("closure", index)?,
+            }
         }
-        DirectEvalCallerBindingLocation::Closure(_) => {
-            FrontendDirectEvalBindingLocation::Closure { index }
+        DirectEvalCallerBindingLocation::EvalVariable { depth, index } => {
+            FrontendDirectEvalBindingLocation::EvalVariable {
+                depth: checked("eval-variable environment", depth)?,
+                index: checked("eval-variable binding", index)?,
+            }
         }
     })
 }

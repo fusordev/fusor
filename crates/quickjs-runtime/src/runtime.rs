@@ -542,6 +542,9 @@ pub(crate) struct BytecodeFunction {
     pub(crate) code: InstalledCodeId,
     pub(crate) template: FunctionTemplateId,
     pub(crate) environment: Vec<EnvironmentBinding>,
+    /// Nearest per-activation function variable environment that may receive
+    /// bindings from sloppy direct eval.
+    pub(crate) eval_environment: Option<SharedEvalVariableEnvironment>,
     pub(crate) lexical_receiver: Option<StoredValue>,
     pub(crate) lexical_new_target: Option<FunctionId>,
     /// The derived constructor whose mutable `this` environment is retained
@@ -4432,6 +4435,44 @@ pub(crate) struct BindingCell {
     pub(crate) value: SlotValue,
 }
 
+#[derive(Clone)]
+pub(crate) struct EvalVariableBinding {
+    pub(crate) name: JsString,
+    pub(crate) cell: BindingCellId,
+}
+
+pub(crate) type SharedEvalVariableEnvironment = Rc<RefCell<EvalVariableEnvironment>>;
+
+pub(crate) struct EvalVariableEnvironment {
+    pub(crate) parent: Option<SharedEvalVariableEnvironment>,
+    pub(crate) bindings: Vec<EvalVariableBinding>,
+}
+
+impl EvalVariableEnvironment {
+    pub(crate) fn shared(
+        parent: Option<SharedEvalVariableEnvironment>,
+    ) -> SharedEvalVariableEnvironment {
+        Rc::new(RefCell::new(Self {
+            parent,
+            bindings: Vec::new(),
+        }))
+    }
+
+    pub(crate) fn trace_cells(
+        environment: &SharedEvalVariableEnvironment,
+        mut mark: impl FnMut(BindingCellId),
+    ) {
+        let mut current = Some(Rc::clone(environment));
+        while let Some(environment) = current {
+            let record = environment.borrow();
+            for binding in &record.bindings {
+                mark(binding.cell);
+            }
+            current = record.parent.as_ref().map(Rc::clone);
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum EnvironmentBinding {
     Captured(BindingCellId),
@@ -4839,7 +4880,7 @@ struct RootEnvironment {
     updated_global_properties: Vec<(PropertyKey, OwnProperty)>,
 }
 
-fn runtime_string(
+pub(crate) fn runtime_string(
     value: &quickjs_bytecode::CompilerString,
 ) -> Result<JsString, crate::JsStringError> {
     if let Some(units) = value.latin1_units() {

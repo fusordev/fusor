@@ -471,6 +471,10 @@ impl Runtime {
                 quickjs_bytecode::CompilerClosureSource::DirectEvalBinding {
                     index,
                     environment_size,
+                }
+                | quickjs_bytecode::CompilerClosureSource::DirectEvalVariable {
+                    index,
+                    environment_size,
                 } => {
                     if !matches!(definition.binding(), CompilerClosureBinding::Captured(_)) {
                         return Err(InstallError::AuthorityInvariant {

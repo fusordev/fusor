@@ -116,6 +116,13 @@ pub enum ExecutableKind {
     ClassDefaultConstructor,
 }
 
+/// Planner state for syntactic direct eval within one executable.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum DirectEvalCallsite {
+    Absent,
+    Present,
+}
+
 /// Compiler-owned metadata for one executable body.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Executable {
@@ -126,6 +133,7 @@ pub struct Executable {
     name: Option<Arc<str>>,
     name_span: Option<Span>,
     strict: bool,
+    direct_eval: DirectEvalCallsite,
     parameter_count: u32,
     defined_parameter_count: u32,
     simple_parameter_list: bool,
@@ -183,6 +191,13 @@ impl Executable {
     #[must_use]
     pub const fn is_strict(&self) -> bool {
         self.strict
+    }
+
+    /// Returns whether this executable contains a syntactic direct-eval
+    /// callsite whose runtime callee identity may select `%eval%`.
+    #[must_use]
+    pub const fn has_direct_eval(&self) -> bool {
+        matches!(self.direct_eval, DirectEvalCallsite::Present)
     }
 
     /// Returns the number of source parameter positions.
@@ -1059,6 +1074,7 @@ impl<'unit, 'arena, 'scope> Planner<'unit, 'arena, 'scope> {
         self.reject_preflight_features()?;
         self.inventory_executables()?;
         self.assign_scope_owners()?;
+        self.mark_direct_eval_executables()?;
         self.reject_synthetic_binding_uses()?;
 
         let mut binding_drafts = self.binding_drafts()?;
@@ -1409,6 +1425,35 @@ impl<'unit, 'arena, 'scope> Planner<'unit, 'arena, 'scope> {
             }
         }
         Ok(requests)
+    }
+
+    fn mark_direct_eval_executables(&mut self) -> Result<(), CompilerError> {
+        let semantic = self.unit.semantic();
+        let mut owners = Vec::new();
+        for (node_id, node) in semantic.nodes().iter_enumerated() {
+            let AstKind::CallExpression(call) = node.kind() else {
+                continue;
+            };
+            if call.optional || !call.callee.is_specific_id("eval") {
+                continue;
+            }
+            owners.push(
+                self.instance_field_initializer_owner(node_id)?
+                    .unwrap_or(self.scope_owner(node.scope_id(), Some(call.span))?),
+            );
+        }
+        owners.sort_unstable_by_key(|owner| owner.index());
+        owners.dedup();
+        for owner in owners {
+            let executable = self.executable_drafts.get_mut(owner.index()).ok_or(
+                CompilerError::SemanticInvariant {
+                    invariant: "direct eval owner executable exists",
+                    span: None,
+                },
+            )?;
+            executable.executable.direct_eval = DirectEvalCallsite::Present;
+        }
+        Ok(())
     }
 
     fn bind_class_field_key_scopes(
@@ -1806,6 +1851,7 @@ impl<'unit, 'arena, 'scope> Planner<'unit, 'arena, 'scope> {
             name,
             name_span,
             strict,
+            direct_eval: DirectEvalCallsite::Absent,
             parameter_count: parameters.count,
             defined_parameter_count: parameters.defined_count,
             simple_parameter_list: parameters.simple,

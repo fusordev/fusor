@@ -46,6 +46,13 @@ pub enum DirectEvalCallerBindingLocation {
     Local(u32),
     /// Imported closure slot in the calling function object.
     Closure(u32),
+    /// Binding in a retained per-activation eval variable-environment chain.
+    EvalVariable {
+        /// Zero-based environment depth from the current activation.
+        depth: u32,
+        /// Zero-based binding entry within that environment.
+        index: u32,
+    },
 }
 
 /// The caller-environment region that owns one direct-eval binding.

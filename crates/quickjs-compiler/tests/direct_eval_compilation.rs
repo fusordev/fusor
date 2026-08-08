@@ -124,35 +124,62 @@ fn caller_strictness_makes_direct_eval_var_declarations_local() {
 }
 
 #[test]
-fn sloppy_direct_eval_var_environment_remains_fail_closed() {
-    let error = compile("var answer = 42; answer;", false)
-        .expect_err("caller variable-environment mutation needs an external environment");
+fn sloppy_direct_eval_certifies_a_new_function_variable_binding() {
+    let tree = compile("var answer = 42; answer;", false)
+        .expect("new caller variable-environment binding authority");
+    let root = tree.verified_bytecode().root();
+
+    assert_eq!(
+        root.function().closure_sources(),
+        [CompilerClosureSource::DirectEvalVariable {
+            index: 0,
+            environment_size: 1,
+        }]
+    );
+    assert!(matches!(
+        root.metadata().closures()[0].binding(),
+        CompilerClosureBinding::Captured(_)
+    ));
+}
+
+#[test]
+fn sloppy_direct_eval_certifies_a_new_function_declaration_binding() {
+    let tree = compile("function answer() {} answer();", false)
+        .expect("new caller function declaration binding authority");
+    let root = tree.verified_bytecode().root();
+
+    assert_eq!(
+        root.function().closure_sources(),
+        [CompilerClosureSource::DirectEvalVariable {
+            index: 0,
+            environment_size: 1,
+        }]
+    );
     assert!(
-        matches!(
-            error,
-            LeafCompilationError::Unsupported {
-                feature: UnsupportedLeafFeature::DirectEvalVariableEnvironment,
-                ..
-            }
-        ),
-        "{error:?}"
+        root.function()
+            .control_flow()
+            .instructions()
+            .iter()
+            .any(|instruction| instruction.decoded().instruction().opcode()
+                == quickjs_bytecode::FinalOpcode::PutVarRef)
     );
 }
 
 #[test]
-fn sloppy_direct_eval_function_environment_remains_fail_closed() {
-    let error = compile("function answer() {} answer();", false)
-        .expect_err("caller function declaration instantiation needs a shared environment");
-    assert!(
-        matches!(
-            error,
-            LeafCompilationError::Unsupported {
-                feature: UnsupportedLeafFeature::DirectEvalVariableEnvironment,
-                ..
-            }
-        ),
-        "{error:?}"
-    );
+fn sloppy_direct_eval_parameter_initializer_environment_remains_fail_closed() {
+    let error = compile_in_variable_environment(
+        "var answer = 42; answer;",
+        false,
+        DirectEvalVariableEnvironment::FunctionParameterInitializer,
+    )
+    .expect_err("parameter-initializer variable environments remain a separate step");
+    assert!(matches!(
+        error,
+        LeafCompilationError::Unsupported {
+            feature: UnsupportedLeafFeature::DirectEvalVariableEnvironment,
+            ..
+        }
+    ));
 }
 
 #[test]
@@ -228,6 +255,40 @@ fn sloppy_direct_eval_reuses_an_existing_function_variable_binding() {
         root.metadata().closures()[0].binding(),
         CompilerClosureBinding::Captured(_)
     ));
+}
+
+#[test]
+fn sloppy_direct_eval_combines_existing_and_new_function_variable_bindings() {
+    let bindings = [DirectEvalBinding::new(
+        "existing",
+        DirectEvalBindingKind::Normal,
+        false,
+        false,
+        DirectEvalBindingLocation::Local { index: 2 },
+    )
+    .with_scope(DirectEvalBindingScope::Variable)];
+    let tree = compile_with_bindings_in_variable_environment(
+        "var existing = 1; var created = 2; existing + created;",
+        false,
+        &bindings,
+        DirectEvalVariableEnvironment::Function,
+    )
+    .expect("combined caller and created variable environment");
+    let root = tree.verified_bytecode().root();
+
+    assert_eq!(
+        root.function().closure_sources(),
+        [
+            CompilerClosureSource::DirectEvalBinding {
+                index: 0,
+                environment_size: 2,
+            },
+            CompilerClosureSource::DirectEvalVariable {
+                index: 1,
+                environment_size: 2,
+            },
+        ]
+    );
 }
 
 #[test]

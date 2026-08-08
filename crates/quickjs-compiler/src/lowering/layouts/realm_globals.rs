@@ -33,7 +33,8 @@ pub(in crate::lowering) struct RealmGlobalLayoutInput<'plan, 'scope> {
 #[derive(Clone, Copy)]
 pub(in crate::lowering) enum RealmGlobalRootSource {
     ConstructorRealm,
-    DirectEvalBinding { index: u32, environment_size: u32 },
+    DirectEvalBinding { index: u32 },
+    DirectEvalVariable { index: u32 },
 }
 
 pub(in crate::lowering) struct RealmGlobalBinding {
@@ -57,6 +58,7 @@ pub(in crate::lowering) struct RealmGlobalLayout {
     by_unresolved: Box<[Option<RealmGlobalId>]>,
     import_ranges: Box<[Range<usize>]>,
     imports: Box<[RealmGlobalId]>,
+    direct_environment_size: u32,
 }
 
 struct RealmGlobalLayoutBuilder<'plan> {
@@ -70,6 +72,7 @@ struct RealmGlobalLayoutBuilder<'plan> {
     direct_variable_by_name: HashMap<Arc<str>, DirectEvalCallerBinding>,
     direct_lexical_names: HashSet<Arc<str>>,
     direct_environment_size: u32,
+    direct_new_variable_count: u32,
     direct_variable_environment: Option<DirectEvalVariableEnvironment>,
 }
 
@@ -197,6 +200,7 @@ impl<'plan> RealmGlobalLayoutBuilder<'plan> {
             direct_variable_by_name,
             direct_lexical_names,
             direct_environment_size,
+            direct_new_variable_count: 0,
             direct_variable_environment,
         })
     }
@@ -217,7 +221,7 @@ impl<'plan> RealmGlobalLayoutBuilder<'plan> {
     }
 
     fn declaration_target(
-        &self,
+        &mut self,
         binding: &crate::storage::BindingStorage,
         name: &Arc<str>,
         first_span: Span,
@@ -234,12 +238,7 @@ impl<'plan> RealmGlobalLayoutBuilder<'plan> {
         } else if let Some(environment) = self.direct_variable_environment {
             match environment {
                 DirectEvalVariableEnvironment::Function => {
-                    Some(self.direct_variable_by_name.get(name).copied().ok_or(
-                        LeafCompilationError::Unsupported {
-                            feature: UnsupportedLeafFeature::DirectEvalVariableEnvironment,
-                            span: first_span,
-                        },
-                    )?)
+                    self.direct_variable_by_name.get(name).copied()
                 }
                 DirectEvalVariableEnvironment::Global => None,
                 _ => {
@@ -258,11 +257,30 @@ impl<'plan> RealmGlobalLayoutBuilder<'plan> {
                 CompilerClosureBinding::Captured(caller.policy),
                 RealmGlobalRootSource::DirectEvalBinding {
                     index: caller.index,
-                    environment_size: self.direct_environment_size,
                 },
             ));
         }
         let policy = verified_storage_policy(binding)?;
+        if self.direct_variable_environment == Some(DirectEvalVariableEnvironment::Function)
+            && binding.placement() == StoragePlacement::GlobalObject
+        {
+            let index = self
+                .direct_environment_size
+                .checked_add(self.direct_new_variable_count)
+                .ok_or(LeafCompilationError::CapacityExceeded {
+                    domain: "direct-eval variable environment",
+                })?;
+            self.direct_new_variable_count = self.direct_new_variable_count.checked_add(1).ok_or(
+                LeafCompilationError::CapacityExceeded {
+                    domain: "direct-eval variable environment",
+                },
+            )?;
+            return Ok((
+                policy,
+                CompilerClosureBinding::Captured(policy),
+                RealmGlobalRootSource::DirectEvalVariable { index },
+            ));
+        }
         Ok((
             policy,
             CompilerClosureBinding::RealmGlobal(policy),
@@ -392,7 +410,6 @@ impl<'plan> RealmGlobalLayoutBuilder<'plan> {
                             CompilerClosureBinding::Captured(policy),
                             RealmGlobalRootSource::DirectEvalBinding {
                                 index: caller.index,
-                                environment_size: self.direct_environment_size,
                             },
                         )
                     },
@@ -467,6 +484,12 @@ impl<'plan> RealmGlobalLayoutBuilder<'plan> {
     }
 
     fn finish(mut self) -> Result<RealmGlobalLayout, LeafCompilationError> {
+        let direct_environment_size = self
+            .direct_environment_size
+            .checked_add(self.direct_new_variable_count)
+            .ok_or(LeafCompilationError::CapacityExceeded {
+                domain: "direct-eval variable environment",
+            })?;
         for index in (0..self.needs.len()).rev() {
             self.needs[index].sort_unstable();
             self.needs[index].dedup();
@@ -496,6 +519,7 @@ impl<'plan> RealmGlobalLayoutBuilder<'plan> {
             by_unresolved: self.by_unresolved.into_boxed_slice(),
             import_ranges: import_ranges.into_boxed_slice(),
             imports: imports.into_boxed_slice(),
+            direct_environment_size,
         })
     }
 }
@@ -512,6 +536,7 @@ impl RealmGlobalLayout {
                 by_unresolved: vec![None; plan.unresolved_globals().len()].into_boxed_slice(),
                 import_ranges: vec![0..0; plan.executables().len()].into_boxed_slice(),
                 imports: Box::default(),
+                direct_environment_size: 0,
             });
         }
 
@@ -577,6 +602,10 @@ impl RealmGlobalLayout {
                     domain: "function closure variables",
                 })?;
         checked_function_index(index, "function closure variables")
+    }
+
+    pub(in crate::lowering) const fn direct_environment_size(&self) -> u32 {
+        self.direct_environment_size
     }
 }
 

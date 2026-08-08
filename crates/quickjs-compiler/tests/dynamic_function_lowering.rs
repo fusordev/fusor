@@ -339,6 +339,14 @@ fn dynamic_function_bare_eval_retains_constructor_realm_identity_lookup() {
         .expect("dynamic Function direct eval authority");
     let wrapper = &tree.functions()[1];
     assert!(
+        tree.verified_bytecode()
+            .functions()
+            .nth(1)
+            .expect("dynamic function wrapper authority")
+            .function()
+            .has_direct_eval()
+    );
+    assert!(
         wrapper
             .realm_globals()
             .iter()

@@ -143,6 +143,53 @@ fn rejects_empty_graphs_and_out_of_bounds_roots_structurally() {
 }
 
 #[test]
+fn direct_eval_marker_must_match_the_verified_callsite_family() {
+    let eval_flow = compiler_flow(
+        &[
+            (FinalOpcode::Push7, Operands::NoneInt),
+            (
+                FinalOpcode::Eval,
+                Operands::NPopU16 {
+                    argument_count: 0,
+                    scope_index: 1,
+                },
+            ),
+            (FinalOpcode::Return, Operands::None),
+        ],
+        0,
+        0,
+        &[],
+        0,
+        &[],
+    );
+    let error = verify_compiler_function_graph(
+        graph(vec![function(eval_flow, &[], &[])]),
+        FunctionGraphVerificationLimits::default(),
+    )
+    .expect_err("an encoded eval callsite requires the planner marker");
+    assert_eq!(
+        error.kind(),
+        &FunctionGraphVerificationErrorKind::DirectEvalMarkerMismatch {
+            declared: false,
+            encoded: true,
+        }
+    );
+
+    let error = verify_compiler_function_graph(
+        graph(vec![function(leaf_flow(), &[], &[]).with_direct_eval(true)]),
+        FunctionGraphVerificationLimits::default(),
+    )
+    .expect_err("a planner marker requires an encoded eval callsite");
+    assert_eq!(
+        error.kind(),
+        &FunctionGraphVerificationErrorKind::DirectEvalMarkerMismatch {
+            declared: true,
+            encoded: false,
+        }
+    );
+}
+
+#[test]
 fn accepts_a_nonzero_root_identity_without_reordering_records() {
     let parent = function(
         compiler_flow(
@@ -782,7 +829,11 @@ fn constructor_realm_global_sources_are_atom_bound_and_root_owned() {
 
 #[test]
 fn direct_eval_sources_are_shape_bound_and_root_owned() {
-    let direct = |index, environment_size| CompilerClosureSource::DirectEvalBinding {
+    let caller = |index, environment_size| CompilerClosureSource::DirectEvalBinding {
+        index,
+        environment_size,
+    };
+    let variable = |index, environment_size| CompilerClosureSource::DirectEvalVariable {
         index,
         environment_size,
     };
@@ -794,7 +845,7 @@ fn direct_eval_sources_are_shape_bound_and_root_owned() {
         2,
         &[],
     );
-    let root = function(Arc::clone(&root_flow), &[], &[direct(0, 3), direct(2, 3)]);
+    let root = function(Arc::clone(&root_flow), &[], &[caller(0, 3), variable(2, 3)]);
     let verified = verify_compiler_function_graph(
         graph(vec![root]),
         FunctionGraphVerificationLimits::default(),
@@ -802,10 +853,10 @@ fn direct_eval_sources_are_shape_bound_and_root_owned() {
     .expect("a root can bind a sparse subset of one exact caller environment");
     assert_eq!(
         verified.root().closure_sources(),
-        [direct(0, 3), direct(2, 3)]
+        [caller(0, 3), variable(2, 3)]
     );
 
-    let out_of_bounds = function(Arc::clone(&root_flow), &[], &[direct(3, 3), direct(0, 3)]);
+    let out_of_bounds = function(Arc::clone(&root_flow), &[], &[variable(3, 3), caller(0, 3)]);
     let error = verify_compiler_function_graph(
         graph(vec![out_of_bounds]),
         FunctionGraphVerificationLimits::default(),
@@ -820,7 +871,7 @@ fn direct_eval_sources_are_shape_bound_and_root_owned() {
         }
     );
 
-    let inconsistent = function(root_flow, &[], &[direct(0, 2), direct(1, 3)]);
+    let inconsistent = function(root_flow, &[], &[caller(0, 2), variable(1, 3)]);
     let error = verify_compiler_function_graph(
         graph(vec![inconsistent]),
         FunctionGraphVerificationLimits::default(),
@@ -860,7 +911,7 @@ fn direct_eval_sources_are_shape_bound_and_root_owned() {
             &[],
         ),
         &[],
-        &[direct(0, 1)],
+        &[variable(0, 1)],
     );
     let error = verify_compiler_function_graph(
         graph(vec![parent, child]),

@@ -26,10 +26,10 @@
 //! Runtime usage accounting, deferred root releases, and iterative cycle collection.
 
 use super::{
-    AtomUsage, BindingCellId, EnvironmentBinding, FunctionId, FunctionImplementation, HashMap,
-    HashSet, HeapReference, InstalledConstant, ObjectId, ObjectRecord, PromiseJob,
-    RealmGlobalBindingState, RealmIntrinsics, Runtime, RuntimeError, RuntimeResource, RuntimeUsage,
-    SlotValue, StoredValue, usize_to_u64,
+    AtomUsage, BindingCellId, EnvironmentBinding, EvalVariableEnvironment, FunctionId,
+    FunctionImplementation, HashMap, HashSet, HeapReference, InstalledConstant, ObjectId,
+    ObjectRecord, PromiseJob, RealmGlobalBindingState, RealmIntrinsics, Runtime, RuntimeError,
+    RuntimeResource, RuntimeUsage, SlotValue, StoredValue, usize_to_u64,
 };
 use crate::{
     atom::WeakAtom,
@@ -868,6 +868,13 @@ impl Runtime {
                                     {
                                         work.push(GraphNode::Cell(cell));
                                     }
+                                }
+                                if let Some(environment) = &bytecode.eval_environment {
+                                    EvalVariableEnvironment::trace_cells(environment, |cell| {
+                                        if marked_cells.insert(cell) {
+                                            work.push(GraphNode::Cell(cell));
+                                        }
+                                    });
                                 }
                                 if let Some(installed) = self.code.get(bytecode.code)
                                     && let Some(template) = usize::try_from(bytecode.template.get())

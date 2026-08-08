@@ -104,6 +104,8 @@ fn direct_eval_inside_dynamic_code_retains_constructor_realm_eval_lookup() {
         .iter()
         .find(|executable| executable.name() == Some("anonymous"))
         .expect("dynamic function wrapper");
+    assert!(wrapper.has_direct_eval());
+    assert!(!plan.executables()[0].has_direct_eval());
     assert!(
         plan.unresolved_globals_for(wrapper.id())
             .expect("wrapper globals")
