@@ -2311,6 +2311,15 @@ fn finish_operator_primitive_target(
                 execution_budget,
             )
         }
+        OperatorPrimitiveTarget::TemporalPlainDateTimeToZonedDateTime(state) => {
+            advance_temporal_plain_date_time_to_zoned_date_time(
+                runtime,
+                *state,
+                value,
+                return_to,
+                execution_budget,
+            )
+        }
         OperatorPrimitiveTarget::TemporalPlainTimeBag(state) => {
             advance_temporal_plain_time_property_bag(
                 runtime,

@@ -626,6 +626,24 @@ pub(super) fn resume_native_continuations(
                     execution_budget,
                 )?
             }
+            NativeContinuation::TemporalPlainDateToZonedDateTime(state) => {
+                advance_temporal_plain_date_to_zoned_date_time(
+                    runtime,
+                    *state,
+                    value,
+                    return_to,
+                    execution_budget,
+                )?
+            }
+            NativeContinuation::TemporalPlainDateTimeToZonedDateTime(state) => {
+                advance_temporal_plain_date_time_to_zoned_date_time(
+                    runtime,
+                    *state,
+                    value,
+                    return_to,
+                    execution_budget,
+                )?
+            }
             NativeContinuation::TemporalPlainTimeBag(state) => {
                 advance_temporal_plain_time_property_bag(
                     runtime,

@@ -171,6 +171,39 @@ fn plain_date_to_string_reads_calendar_name_resumably() {
 }
 
 #[test]
+fn plain_date_and_date_time_to_zoned_date_time_preserve_observable_order() {
+    assert_eq!(
+        rendered(
+            "var log=[];
+             var date=new Temporal.PlainDate(2020,3,8);
+             var item={
+               get timeZone(){log.push('timeZone');return 'America/New_York';},
+               get plainTime(){log.push('plainTime');return '12:34';}
+             };
+             var options={get disambiguation(){log.push('disambiguation');return {
+               toString:function(){log.push('disambiguation string');return 'later';}}}};
+             var dateTime=new Temporal.PlainDateTime(2020,11,1,1,30);
+             return [Temporal.PlainDate.prototype.toZonedDateTime.length,
+               Temporal.PlainDateTime.prototype.toZonedDateTime.length,
+               date.toZonedDateTime('UTC').toString(),
+               date.toZonedDateTime(item).toString(),
+               date.toZonedDateTime(new Temporal.ZonedDateTime(0n,'UTC')).toString(),
+               dateTime.toZonedDateTime('America/New_York',options).toString(),
+               log.join(',')].join('|');"
+        ),
+        "1|1|2020-03-08T00:00:00+00:00[UTC]|2020-03-08T12:34:00-04:00[America/New_York]|2020-03-08T00:00:00+00:00[UTC]|2020-11-01T01:30:00-05:00[America/New_York]|timeZone,plainTime,disambiguation,disambiguation string"
+    );
+    assert_eq!(
+        thrown("return new Temporal.PlainDate(2020,1,1).toZonedDateTime(1);"),
+        ExceptionKind::TypeError
+    );
+    assert_eq!(
+        thrown("return new Temporal.PlainDateTime(2020,1,1).toZonedDateTime('UTC',null);"),
+        ExceptionKind::TypeError
+    );
+}
+
+#[test]
 fn plain_month_day_converts_property_bags_and_preserves_observable_boundaries() {
     assert_eq!(
         rendered(
