@@ -2290,6 +2290,24 @@ fn finish_operator_primitive_target(
                 execution_budget,
             )
         }
+        OperatorPrimitiveTarget::TemporalZonedDateTimeBag(state) => {
+            advance_temporal_zoned_date_time_property_bag(
+                runtime,
+                *state,
+                Some(value),
+                return_to,
+                execution_budget,
+            )
+        }
+        OperatorPrimitiveTarget::TemporalZonedDateTimeOptions(state) => {
+            advance_temporal_zoned_date_time_from_options(
+                runtime,
+                *state,
+                Some(value),
+                return_to,
+                execution_budget,
+            )
+        }
         OperatorPrimitiveTarget::TemporalPlainTimeBag(state) => {
             advance_temporal_plain_time_property_bag(
                 runtime,

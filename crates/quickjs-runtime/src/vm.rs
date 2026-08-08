@@ -780,6 +780,8 @@ enum NativeContinuation {
     TemporalPlainYearMonthWith(Box<TemporalPlainYearMonthWithContinuation>),
     TemporalPlainYearMonthDifferenceOptions(Box<TemporalPlainYearMonthDifferenceContinuation>),
     TemporalPlainDateTimeBag(Box<TemporalPlainDateTimeBagContinuation>),
+    TemporalZonedDateTimeBag(Box<TemporalZonedDateTimeBagContinuation>),
+    TemporalZonedDateTimeOptions(Box<TemporalZonedDateTimeOptionsContinuation>),
     TemporalPlainTimeBag(Box<TemporalPlainTimeBagContinuation>),
     TemporalPlainTimeOptions(Box<TemporalPlainTimeOptionsContinuation>),
     TemporalPlainDateOptions(Box<TemporalPlainDateOptionsContinuation>),
@@ -934,6 +936,10 @@ impl NativeContinuation {
             Self::TemporalPlainDateTimeBag(_) => {
                 TemporalPlainDateTimeBagContinuation::retained_values()
             }
+            Self::TemporalZonedDateTimeBag(_) => {
+                TemporalZonedDateTimeBagContinuation::retained_values()
+            }
+            Self::TemporalZonedDateTimeOptions(state) => state.retained_values(),
             Self::TemporalPlainTimeBag(_) => TemporalPlainTimeBagContinuation::retained_values(),
             Self::TemporalPlainTimeOptions(_) => {
                 TemporalPlainTimeOptionsContinuation::retained_values()
@@ -2247,6 +2253,8 @@ enum OperatorPrimitiveTarget {
     TemporalPlainYearMonthDifferenceRoundingMode(Box<TemporalPlainYearMonthDifferenceContinuation>),
     TemporalPlainYearMonthDifferenceSmallestUnit(Box<TemporalPlainYearMonthDifferenceContinuation>),
     TemporalPlainDateTimeBag(Box<TemporalPlainDateTimeBagContinuation>),
+    TemporalZonedDateTimeBag(Box<TemporalZonedDateTimeBagContinuation>),
+    TemporalZonedDateTimeOptions(Box<TemporalZonedDateTimeOptionsContinuation>),
     TemporalPlainTimeBag(Box<TemporalPlainTimeBagContinuation>),
     TemporalPlainTimeOptions(Box<TemporalPlainTimeOptionsContinuation>),
     TemporalPlainDateOptions(Box<TemporalPlainDateOptionsContinuation>),
@@ -2574,6 +2582,10 @@ impl OperatorPrimitiveTarget {
             Self::TemporalPlainDateTimeBag(_) => {
                 TemporalPlainDateTimeBagContinuation::retained_values()
             }
+            Self::TemporalZonedDateTimeBag(_) => {
+                TemporalZonedDateTimeBagContinuation::retained_values()
+            }
+            Self::TemporalZonedDateTimeOptions(state) => state.retained_values(),
             Self::TemporalPlainTimeBag(_) => TemporalPlainTimeBagContinuation::retained_values(),
             Self::TemporalPlainTimeOptions(_) => {
                 TemporalPlainTimeOptionsContinuation::retained_values()
@@ -2935,6 +2947,8 @@ fn trace_operator_primitive_target_roots(
             state.trace_roots(mark);
         }
         OperatorPrimitiveTarget::TemporalPlainDateTimeBag(state) => state.trace_roots(mark),
+        OperatorPrimitiveTarget::TemporalZonedDateTimeBag(state) => state.trace_roots(mark),
+        OperatorPrimitiveTarget::TemporalZonedDateTimeOptions(state) => state.trace_roots(mark),
         OperatorPrimitiveTarget::TemporalPlainTimeBag(state) => state.trace_roots(mark),
         OperatorPrimitiveTarget::TemporalPlainTimeOptions(state) => state.trace_roots(mark),
         OperatorPrimitiveTarget::TemporalPlainDateOptions(state) => state.trace_roots(mark),
@@ -3258,6 +3272,8 @@ fn trace_native_continuation_roots(
             state.trace_roots(mark);
         }
         NativeContinuation::TemporalPlainDateTimeBag(state) => state.trace_roots(mark),
+        NativeContinuation::TemporalZonedDateTimeBag(state) => state.trace_roots(mark),
+        NativeContinuation::TemporalZonedDateTimeOptions(state) => state.trace_roots(mark),
         NativeContinuation::TemporalPlainTimeBag(state) => state.trace_roots(mark),
         NativeContinuation::TemporalPlainTimeOptions(state) => state.trace_roots(mark),
         NativeContinuation::TemporalPlainDateOptions(state) => state.trace_roots(mark),

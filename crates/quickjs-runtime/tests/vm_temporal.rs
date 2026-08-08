@@ -388,6 +388,70 @@ fn zoned_date_time_compare_accepts_branded_values_and_strings() {
 }
 
 #[test]
+fn zoned_date_time_property_bags_and_from_options_preserve_observable_order() {
+    assert_eq!(
+        rendered(
+            "var log=[];
+             function number(name,value){return {valueOf:function(){log.push(name);return value}}}
+             function string(name,value){return {toString:function(){log.push(name);return value}}}
+             var fields={
+               get calendar(){log.push('calendar');return 'iso8601'},
+               get day(){log.push('day');return number('day number',31.8)},
+               get hour(){log.push('hour');return number('hour number',23.8)},
+               get microsecond(){log.push('microsecond');return number('microsecond number',8.8)},
+               get millisecond(){log.push('millisecond');return number('millisecond number',7.8)},
+               get minute(){log.push('minute');return number('minute number',59.8)},
+               get month(){log.push('month');return number('month number',2.8)},
+               get monthCode(){log.push('monthCode');return string('monthCode string','M02')},
+               get nanosecond(){log.push('nanosecond');return number('nanosecond number',9.8)},
+               get offset(){log.push('offset');return string('offset string','+00:00')},
+               get second(){log.push('second');return number('second number',58.8)},
+               get timeZone(){log.push('timeZone');return 'UTC'},
+               get year(){log.push('year');return number('year number',2020.8)}
+             };
+             var options={
+               get disambiguation(){log.push('disambiguation');return string('disambiguation string','compatible')},
+               get offset(){log.push('option offset');return string('option offset string','reject')},
+               get overflow(){log.push('overflow');return string('overflow string','constrain')}
+             };
+             var from=Temporal.ZonedDateTime.from(fields,options);
+             var compare=Temporal.ZonedDateTime.compare(fields,{year:2021,month:1,day:1,timeZone:'UTC'});
+             var equal=from.equals({year:2020,month:2,day:29,hour:23,minute:59,second:58,millisecond:7,microsecond:8,nanosecond:9,offset:'+00:00',timeZone:'UTC'});
+             return [from.toString(),compare,equal,log.join(',')].join('|');"
+        ),
+        "2020-02-29T23:59:58.007008009+00:00[UTC]|-1|true|calendar,day,day number,hour,hour number,microsecond,microsecond number,millisecond,millisecond number,minute,minute number,month,month number,monthCode,monthCode string,nanosecond,nanosecond number,offset,offset string,second,second number,timeZone,year,year number,disambiguation,disambiguation string,option offset,option offset string,overflow,overflow string,calendar,day,day number,hour,hour number,microsecond,microsecond number,millisecond,millisecond number,minute,minute number,month,month number,monthCode,monthCode string,nanosecond,nanosecond number,offset,offset string,second,second number,timeZone,year,year number"
+    );
+    assert_eq!(
+        rendered(
+            "var log=[];
+             function option(name,value){return {get toString(){log.push('get '+name);return function(){log.push('call '+name);return value}}}}
+             var options={
+               get disambiguation(){log.push('disambiguation');return option('disambiguation','compatible')},
+               get offset(){log.push('offset');return option('offset','prefer')},
+               get overflow(){log.push('overflow');return option('overflow','constrain')}
+             };
+             try{Temporal.ZonedDateTime.from({year:2025,monthCode:'M08L',day:14,timeZone:'UTC'},options)}catch(error){return [error.name,log.join(',')].join('|')}"
+        ),
+        "RangeError|disambiguation,get disambiguation,call disambiguation,offset,get offset,call offset,overflow,get overflow,call overflow"
+    );
+    assert_eq!(
+        rendered(
+            "var zdt=new Temporal.ZonedDateTime(0n,'UTC');
+             var temporalCalendar=new Temporal.PlainDate(2000,5,2);
+             var from=Temporal.ZonedDateTime.from({year:2000,month:5,day:2,timeZone:zdt,calendar:temporalCalendar});
+             return [from.timeZoneId,from.calendarId].join('|');"
+        ),
+        "UTC|iso8601"
+    );
+    assert_eq!(
+        thrown(
+            "return Temporal.ZonedDateTime.from(new Temporal.ZonedDateTime(0n,'UTC'),{offset:Symbol()});"
+        ),
+        ExceptionKind::TypeError
+    );
+}
+
+#[test]
 fn zoned_date_time_json_and_non_intl_locale_rendering_are_ixdtf() {
     assert_eq!(
         rendered(
