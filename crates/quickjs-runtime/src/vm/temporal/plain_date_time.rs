@@ -279,6 +279,9 @@ pub(in crate::vm) fn advance_temporal_plain_date_time_constructor(
     execution_budget: &mut ExecutionBudget,
 ) -> Result<NativeDispatch, NativeFailure> {
     if let Some(value) = completion {
+        // Validate each component immediately after its own observable
+        // conversion so later arguments are not touched after a RangeError.
+        temporal_plain_date_time_integer(value, realm, origin)?;
         state.converted.push(value);
     }
     while state.converted.len() < 9 {
@@ -319,7 +322,9 @@ pub(in crate::vm) fn advance_temporal_plain_date_time_constructor(
             "Temporal.PlainDateTime calendar must be a string",
         );
     };
-    let calendar = match Calendar::from_str(&value.to_utf8_lossy()?) {
+    // ToTemporalCalendarIdentifier accepts a bare calendar identifier here,
+    // not an ISO date string carrying a calendar annotation.
+    let calendar = match Calendar::try_from_utf8(value.to_utf8_lossy()?.as_bytes()) {
         Ok(calendar) => calendar,
         Err(error) => {
             return Err(NativeFailure::Abrupt(temporal_exception_from_error(
@@ -1680,6 +1685,17 @@ pub(in crate::vm) fn dispatch_temporal_plain_date_time_prototype(
         TemporalPlainDateTimePrototypeMethod::ToPlainTime => {
             allocate_temporal_plain_time_result(runtime, realm, PlainTime::from(date_time))
         }
+        TemporalPlainDateTimePrototypeMethod::WithPlainTime => {
+            begin_temporal_plain_date_time_with_plain_time(
+                runtime,
+                date_time,
+                arguments.take_first_or_undefined(),
+                realm,
+                return_to,
+                origin.clone(),
+                execution_budget,
+            )
+        }
         TemporalPlainDateTimePrototypeMethod::WithCalendar => {
             let calendar = arguments.take_first_or_undefined();
             finish_temporal_plain_date_time_with_calendar(
@@ -1723,6 +1739,53 @@ pub(in crate::vm) fn dispatch_temporal_plain_date_time_prototype(
             "Temporal.PlainDateTime cannot be converted to a primitive value",
         ),
     }
+}
+
+#[allow(
+    clippy::too_many_arguments,
+    reason = "the shared ToTemporalTime conversion retains the PlainDateTime call context"
+)]
+fn begin_temporal_plain_date_time_with_plain_time(
+    runtime: &mut Runtime,
+    receiver: PlainDateTime,
+    value: StoredValue,
+    realm: RealmId,
+    return_to: Option<CallReturn>,
+    origin: JsStackFrame,
+    execution_budget: &mut ExecutionBudget,
+) -> Result<NativeDispatch, NativeFailure> {
+    if matches!(value, StoredValue::Undefined) {
+        return finish_temporal_plain_date_time_with_plain_time(
+            runtime, &receiver, None, realm, &origin,
+        );
+    }
+    begin_temporal_plain_time_like(
+        runtime,
+        value,
+        TemporalPlainTimeLikeTarget::PlainDateTimeWithPlainTime { receiver },
+        realm,
+        return_to,
+        origin,
+        execution_budget,
+    )
+}
+
+pub(in crate::vm) fn finish_temporal_plain_date_time_with_plain_time(
+    runtime: &mut Runtime,
+    receiver: &PlainDateTime,
+    time: Option<PlainTime>,
+    realm: RealmId,
+    origin: &JsStackFrame,
+) -> Result<NativeDispatch, NativeFailure> {
+    let date_time = match receiver.with_time(time) {
+        Ok(date_time) => date_time,
+        Err(error) => {
+            return Err(NativeFailure::Abrupt(temporal_exception_from_error(
+                realm, origin, error,
+            )?));
+        }
+    };
+    allocate_temporal_plain_date_time_result(runtime, realm, date_time)
 }
 
 #[allow(

@@ -6,7 +6,7 @@ use super::super::conversions::operator_primitive_to_string;
 use super::*;
 use core::str::FromStr;
 use temporal_rs::{
-    PlainDate, PlainTime, TimeZone, ZonedDateTime,
+    PlainDate, PlainDateTime, PlainTime, TimeZone, ZonedDateTime,
     options::{
         DifferenceSettings, Overflow, RoundingIncrement, RoundingMode, RoundingOptions,
         ToStringRoundingOptions, Unit,
@@ -20,7 +20,6 @@ use temporal_rs::{
 pub(in crate::vm) struct TemporalPlainTimeConstructorContinuation {
     arguments: Vec<StoredValue>,
     converted: Vec<JsNumber>,
-    provided: usize,
     new_target: FunctionId,
 }
 
@@ -58,6 +57,9 @@ pub(in crate::vm) enum TemporalPlainTimeLikeTarget {
     ZonedDateTimeWithPlainTime {
         receiver: ZonedDateTime,
     },
+    PlainDateTimeWithPlainTime {
+        receiver: PlainDateTime,
+    },
     PlainDateToZonedDateTime {
         receiver: PlainDate,
         time_zone: TimeZone,
@@ -76,6 +78,7 @@ impl TemporalPlainTimeLikeTarget {
             Self::CompareSecond { .. }
             | Self::Equals { .. }
             | Self::ZonedDateTimeWithPlainTime { .. }
+            | Self::PlainDateTimeWithPlainTime { .. }
             | Self::PlainDateToZonedDateTime { .. } => {}
         }
     }
@@ -195,7 +198,6 @@ pub(in crate::vm) fn begin_temporal_plain_time_constructor(
     };
     let mut arguments = inputs.arguments.into_remaining_values();
     arguments.truncate(6);
-    let provided = arguments.len();
     arguments
         .try_reserve(6_usize.saturating_sub(arguments.len()))
         .map_err(|_| ExecutionError::AllocationFailed {
@@ -217,7 +219,6 @@ pub(in crate::vm) fn begin_temporal_plain_time_constructor(
         TemporalPlainTimeConstructorContinuation {
             arguments,
             converted,
-            provided,
             new_target,
         },
         None,
@@ -243,14 +244,15 @@ pub(in crate::vm) fn advance_temporal_plain_time_constructor(
     execution_budget: &mut ExecutionBudget,
 ) -> Result<NativeDispatch, NativeFailure> {
     if let Some(value) = completion {
+        // ToIntegerWithTruncation rejects a non-finite component before the
+        // next argument's observable conversion begins.
+        temporal_plain_time_integer(value, realm, origin)?;
         state.converted.push(value);
     }
     while state.converted.len() < 6 {
         let index = state.converted.len();
         let argument = std::mem::replace(&mut state.arguments[index], StoredValue::Undefined);
-        if (index == 0 && state.provided == 0)
-            || (index > 0 && matches!(argument, StoredValue::Undefined))
-        {
+        if matches!(argument, StoredValue::Undefined) {
             state.converted.push(JsNumber::from_i32(0));
             continue;
         }
@@ -625,6 +627,15 @@ fn continue_temporal_plain_time_like(
         )),
         TemporalPlainTimeLikeTarget::ZonedDateTimeWithPlainTime { receiver } => {
             finish_temporal_zoned_date_time_with_plain_time(
+                runtime,
+                &receiver,
+                Some(time),
+                realm,
+                &origin,
+            )
+        }
+        TemporalPlainTimeLikeTarget::PlainDateTimeWithPlainTime { receiver } => {
+            finish_temporal_plain_date_time_with_plain_time(
                 runtime,
                 &receiver,
                 Some(time),
