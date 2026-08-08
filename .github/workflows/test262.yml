@@ -26,8 +26,12 @@ jobs:
         shell: bash
         run: |
           ulimit -s 65520
-          test262_jobs="$(getconf _NPROCESSORS_ONLN)"
-          echo "Test262 workers: $test262_jobs"
+          test262_cpus="$(getconf _NPROCESSORS_ONLN)"
+          test262_jobs="$test262_cpus"
+          if (( test262_jobs > 4 )); then
+            test262_jobs=4
+          fi
+          echo "Test262 workers: $test262_jobs (online CPUs: $test262_cpus; capped at 4 for memory)"
           cargo run --release --quiet -p xtask -- test262 --suite "$TEST262_PATH" --baseline tests/test262/upstream --instruction-fuel 50000000 --timeout-ms 5000 --jobs "$test262_jobs" --progress-every 1000 --report target/test262/report.json
       - name: Upload Test262 report
         if: always()
