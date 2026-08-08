@@ -5,7 +5,7 @@ use super::super::conversions::operator_primitive_to_string;
 )]
 use super::*;
 use temporal_rs::{
-    Instant, TimeZone,
+    Calendar, Instant, TimeZone, ZonedDateTime,
     options::{
         DifferenceSettings, RoundingIncrement, RoundingMode, RoundingOptions,
         ToStringRoundingOptions, Unit,
@@ -193,18 +193,39 @@ fn begin_temporal_instant_like(
     origin: JsStackFrame,
     execution_budget: &mut ExecutionBudget,
 ) -> Result<NativeDispatch, NativeFailure> {
-    if let StoredValue::Object(object) = value
-        && let Some(instant) = runtime.temporal_instant(object)?
-    {
-        return continue_temporal_instant_like(
-            runtime,
-            instant,
-            target,
-            realm,
-            return_to,
-            &origin,
-            execution_budget,
-        );
+    if let StoredValue::Object(object) = value {
+        if let Some(instant) = runtime.temporal_instant(object)? {
+            return continue_temporal_instant_like(
+                runtime,
+                instant,
+                target,
+                realm,
+                return_to,
+                &origin,
+                execution_budget,
+            );
+        }
+        // ToTemporalInstant: a branded ZonedDateTime contributes its exact
+        // epoch-nanoseconds slot without any observable property reads.
+        if let Some(date_time) = runtime.temporal_zoned_date_time(object)? {
+            let instant = match Instant::try_new(date_time.epoch_nanoseconds().as_i128()) {
+                Ok(instant) => instant,
+                Err(error) => {
+                    return Err(NativeFailure::Abrupt(temporal_range_exception_from_error(
+                        realm, &origin, error,
+                    )?));
+                }
+            };
+            return continue_temporal_instant_like(
+                runtime,
+                instant,
+                target,
+                realm,
+                return_to,
+                &origin,
+                execution_budget,
+            );
+        }
     }
     begin_operator_primitive_conversion(
         runtime,
@@ -517,15 +538,32 @@ pub(in crate::vm) fn dispatch_temporal_instant_prototype(
             origin.clone(),
             execution_budget,
         ),
-        TemporalInstantPrototypeMethod::ToJson => complete_temporal_instant_to_string(
-            instant,
-            Precision::Auto,
-            RoundingMode::Trunc,
-            None,
-            StoredValue::Undefined,
-            realm,
-            origin,
-        ),
+        TemporalInstantPrototypeMethod::ToJson | TemporalInstantPrototypeMethod::ToLocaleString => {
+            complete_temporal_instant_to_string(
+                instant,
+                Precision::Auto,
+                RoundingMode::Trunc,
+                None,
+                StoredValue::Undefined,
+                realm,
+                origin,
+            )
+        }
+        TemporalInstantPrototypeMethod::ToZonedDateTimeISO => {
+            let value = arguments.take_first_or_undefined();
+            let time_zone =
+                temporal_zoned_date_time_time_zone_from_value(runtime, value, realm, origin)?;
+            let date_time =
+                match ZonedDateTime::try_new(instant.as_i128(), time_zone, Calendar::default()) {
+                    Ok(date_time) => date_time,
+                    Err(error) => {
+                        return Err(NativeFailure::Abrupt(temporal_range_exception_from_error(
+                            realm, origin, error,
+                        )?));
+                    }
+                };
+            allocate_temporal_zoned_date_time_result(runtime, realm, date_time)
+        }
         TemporalInstantPrototypeMethod::ValueOf => temporal_type_error(
             realm,
             origin,

@@ -2826,3 +2826,70 @@ fn duration_constructor_rejects_infinite_fields_at_their_own_conversion() {
         "months,RangeError"
     );
 }
+
+#[test]
+fn instant_to_zoned_date_time_iso_uses_time_zone_slot_values() {
+    assert_eq!(
+        rendered(
+            "var instant=new Temporal.Instant(1000000000000000000n);
+             var method=Object.getOwnPropertyDescriptor(Temporal.Instant.prototype,'toZonedDateTimeISO');
+             var result=instant.toZonedDateTimeISO('UTC');
+             var offset=instant.toZonedDateTimeISO('-05:00');
+             var fromZoned=instant.toZonedDateTimeISO(new Temporal.ZonedDateTime(0n,'Europe/Berlin'));
+             return [result.toString(),result.calendarId,offset.timeZoneId,fromZoned.timeZoneId,
+               method.value.length,method.value.name,method.enumerable,
+               method.writable,method.configurable].join('|');"
+        ),
+        "2001-09-09T01:46:40+00:00[UTC]|iso8601|-05:00|Europe/Berlin|1|toZonedDateTimeISO|false|true|true"
+    );
+    assert_eq!(
+        rendered(
+            "var instant=new Temporal.Instant(0n);
+             return [instant.toZonedDateTimeISO('uTc').timeZoneId,
+               instant.toZonedDateTimeISO('1976-11-18T15:23+01:00[+01:00]').timeZoneId,
+               instant.toLocaleString()].join('|');"
+        ),
+        "UTC|+01:00|1970-01-01T00:00:00Z"
+    );
+    assert_eq!(
+        thrown("return new Temporal.Instant(0n).toZonedDateTimeISO();"),
+        ExceptionKind::TypeError
+    );
+    assert_eq!(
+        thrown("return new Temporal.Instant(0n).toZonedDateTimeISO(1);"),
+        ExceptionKind::TypeError
+    );
+    assert_eq!(
+        thrown("return new Temporal.Instant(0n).toZonedDateTimeISO({});"),
+        ExceptionKind::TypeError
+    );
+    assert_eq!(
+        thrown("return new Temporal.Instant(0n).toZonedDateTimeISO('');"),
+        ExceptionKind::RangeError
+    );
+    assert_eq!(
+        thrown("return Temporal.Instant.prototype.toLocaleString.call({});"),
+        ExceptionKind::TypeError
+    );
+    assert_eq!(
+        thrown(
+            "return Object.getOwnPropertyDescriptor(Temporal.Instant.prototype,'toZonedDateTimeISO').value.call({},'UTC');"
+        ),
+        ExceptionKind::TypeError
+    );
+}
+
+#[test]
+fn instant_arguments_accept_branded_zoned_date_time_values() {
+    assert_eq!(
+        rendered(
+            "var zdt=new Temporal.ZonedDateTime(1000000000000000000n,'UTC');
+             return [Temporal.Instant.from(zdt).epochNanoseconds,
+               Temporal.Instant.compare(zdt,new Temporal.Instant(1000000000000000001n)),
+               new Temporal.Instant(1000000000000000000n).equals(zdt),
+               zdt.toInstant().until(new Temporal.ZonedDateTime(1000000003600000000n,'UTC')).toString(),
+               zdt.toInstant().since(new Temporal.ZonedDateTime(999999999000000000n,'UTC')).toString()].join('|');"
+        ),
+        "1000000000000000000|-1|true|PT3.6S|PT1S"
+    );
+}

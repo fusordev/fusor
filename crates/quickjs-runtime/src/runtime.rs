@@ -2299,7 +2299,9 @@ pub(crate) enum TemporalInstantPrototypeMethod {
     Round,
     Equals,
     ToString,
+    ToLocaleString,
     ToJson,
+    ToZonedDateTimeISO,
     ValueOf,
 }
 
@@ -2686,7 +2688,7 @@ impl TemporalDurationPrototypeMethod {
 }
 
 impl TemporalInstantPrototypeMethod {
-    pub(crate) const ALL: [Self; 11] = [
+    pub(crate) const ALL: [Self; 13] = [
         Self::EpochMilliseconds,
         Self::EpochNanoseconds,
         Self::Add,
@@ -2696,7 +2698,9 @@ impl TemporalInstantPrototypeMethod {
         Self::Round,
         Self::Equals,
         Self::ToString,
+        Self::ToLocaleString,
         Self::ToJson,
+        Self::ToZonedDateTimeISO,
         Self::ValueOf,
     ];
 
@@ -2711,7 +2715,9 @@ impl TemporalInstantPrototypeMethod {
             Self::Round => "round",
             Self::Equals => "equals",
             Self::ToString => "toString",
+            Self::ToLocaleString => "toLocaleString",
             Self::ToJson => "toJSON",
+            Self::ToZonedDateTimeISO => "toZonedDateTimeISO",
             Self::ValueOf => "valueOf",
         }
     }
@@ -2727,19 +2733,26 @@ impl TemporalInstantPrototypeMethod {
             Self::Round => "round",
             Self::Equals => "equals",
             Self::ToString => "toString",
+            Self::ToLocaleString => "toLocaleString",
             Self::ToJson => "toJSON",
+            Self::ToZonedDateTimeISO => "toZonedDateTimeISO",
             Self::ValueOf => "valueOf",
         }
     }
 
     pub(crate) const fn length(self) -> i32 {
         match self {
-            Self::Add | Self::Subtract | Self::Until | Self::Since | Self::Round | Self::Equals => {
-                1
-            }
+            Self::Add
+            | Self::Subtract
+            | Self::Until
+            | Self::Since
+            | Self::Round
+            | Self::Equals
+            | Self::ToZonedDateTimeISO => 1,
             Self::EpochMilliseconds
             | Self::EpochNanoseconds
             | Self::ToString
+            | Self::ToLocaleString
             | Self::ToJson
             | Self::ValueOf => 0,
         }
