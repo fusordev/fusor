@@ -1370,6 +1370,7 @@ pub(crate) enum NativeFunctionKind {
     SymbolFor,
     SymbolKeyFor,
     IteratorConstructor,
+    IteratorConcat,
     IteratorFrom,
     IteratorPrototypeDispose,
     IteratorPrototypeDrop,

@@ -989,6 +989,13 @@ pub(super) fn resume_native_continuations(
             NativeContinuation::IteratorFrom(state) => {
                 advance_iterator_from(runtime, state, value, return_to, execution_budget)?
             }
+            NativeContinuation::IteratorConcatCreation(state) => advance_iterator_concat_creation(
+                runtime,
+                state,
+                &value,
+                return_to,
+                execution_budget,
+            )?,
             NativeContinuation::IteratorConsumer(state) => {
                 advance_iterator_consumer(runtime, state, value, return_to, execution_budget)?
             }
@@ -3720,6 +3727,14 @@ pub(super) fn dispatch_native_call_with_frames(
         NativeFunctionKind::IteratorFrom => begin_iterator_from(
             runtime,
             inputs.arguments.take_first_or_undefined(),
+            native.realm,
+            return_to,
+            origin.unwrap_or_else(native_function_host_origin),
+            execution_budget,
+        ),
+        NativeFunctionKind::IteratorConcat => begin_iterator_concat(
+            runtime,
+            inputs.arguments,
             native.realm,
             return_to,
             origin.unwrap_or_else(native_function_host_origin),

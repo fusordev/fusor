@@ -74,6 +74,11 @@ pub(super) fn visit_functions(visit: FunctionSink<'_>) {
             0,
         ),
         (
+            NativeFunctionKind::IteratorConcat,
+            IntrinsicNameSpec::Predefined(PredefinedAtom::Concat),
+            0,
+        ),
+        (
             NativeFunctionKind::IteratorFrom,
             IntrinsicNameSpec::Predefined(PredefinedAtom::From),
             1,
@@ -257,6 +262,11 @@ pub(super) fn visit_properties(visit: PropertySink<'_>) {
         constructor,
         IntrinsicKeySpec::PredefinedString(PredefinedAtom::From),
         NativeFunctionKind::IteratorFrom,
+    ));
+    visit(method(
+        constructor,
+        IntrinsicKeySpec::PredefinedString(PredefinedAtom::Concat),
+        NativeFunctionKind::IteratorConcat,
     ));
     visit(accessor(
         prototype,

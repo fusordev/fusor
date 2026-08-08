@@ -394,6 +394,35 @@ fn rooted_iterator_map_helper_keeps_its_hidden_state_live_through_collection() {
 }
 
 #[test]
+fn rooted_iterator_concat_helper_keeps_captured_records_live_through_collection() {
+    let mut runtime = Runtime::try_new(RuntimeLimits::default()).expect("runtime");
+    let realm = runtime.create_realm().expect("realm");
+    let helper = {
+        let mut context = runtime.context(&realm).expect("context");
+        let function = dynamic_function(
+            &mut context,
+            "return Iterator.concat({get [Symbol.iterator](){\
+               let state={value:42};return function(){return {\
+                 next(){return {done:false,value:state.value};}};};}});",
+        );
+        context
+            .call(&function, &[], ExecutionLimits::default())
+            .expect("Iterator concat helper")
+    };
+
+    runtime
+        .collect_cycles()
+        .expect("captured Iterator.concat records survive collection");
+
+    let mut context = runtime.context(&realm).expect("context");
+    let next = dynamic_function(&mut context, "return arguments[0].next().value;");
+    let result = context
+        .call(&next, &[helper], ExecutionLimits::default())
+        .expect("hidden Iterator.concat record remains live");
+    assert_number(&result, 42);
+}
+
+#[test]
 fn rooted_iterator_flat_map_helper_keeps_its_active_inner_iterator_live() {
     let mut runtime = Runtime::try_new(RuntimeLimits::default()).expect("runtime");
     let realm = runtime.create_realm().expect("realm");
@@ -835,6 +864,61 @@ fn iterator_symbol_dispose_invokes_return_and_ignores_its_result() {
         string_value(&result),
         "symbol|function|[Symbol.dispose]|0|1|true|0|true|true|true|true|true|true|true|true|true"
     );
+}
+
+#[test]
+fn iterator_concat_captures_methods_eagerly_and_opens_iterators_lazily() {
+    let mut runtime = Runtime::try_new(RuntimeLimits::default()).expect("runtime");
+    let realm = runtime.create_realm().expect("realm");
+    let mut context = runtime.context(&realm).expect("context");
+    let function = dynamic_function(
+        &mut context,
+        "let log='';\
+         function item(tag,values){return {get [Symbol.iterator](){log+='g'+tag;return function(){\
+           log+='o'+tag;let index=0;return {get next(){log+='n'+tag;return function(){\
+             return index<values.length?{done:false,value:values[index++]}:{done:true};};}};};}};}\
+         let helper=Iterator.concat(item('a',[1,2]),item('b',[3]));\
+         let before=log;let first=helper.next();let middle=log;\
+         let second=helper.next();let third=helper.next();let done=helper.next();\
+         return [before,first.value,first.done,middle,second.value,third.value,done.value===undefined,\
+           done.done,log,helper[Symbol.iterator]()===helper].join('|');",
+    );
+
+    let result = context
+        .call(&function, &[], ExecutionLimits::default())
+        .expect("Iterator.concat lazy sequencing");
+    assert_eq!(
+        string_value(&result),
+        "gagb|1|false|gagboana|2|3|true|true|gagboanaobnb|true"
+    );
+}
+
+#[test]
+fn iterator_concat_return_targets_only_the_active_iterator() {
+    let mut runtime = Runtime::try_new(RuntimeLimits::default()).expect("runtime");
+    let realm = runtime.create_realm().expect("realm");
+    let mut context = runtime.context(&realm).expect("context");
+    let function = dynamic_function(
+        &mut context,
+        "let unopened=0,opened=0,closed=0;\
+         let fresh=Iterator.concat({[Symbol.iterator](){unopened++;return {next(){return {done:false};},\
+           return(){closed++;return {};}};}});fresh.return();\
+         let helper=Iterator.concat({[Symbol.iterator](){opened++;return {\
+           next(){return {done:false,value:1};},return(){closed++;return {};}};}},\
+           {[Symbol.iterator](){unopened++;return {next(){return {done:true};}};}});\
+         helper.next();let returned=helper.return();let after=helper.next();\
+         let stepError={},stepClosed=0,preserved=false;\
+         let failing=Iterator.concat({[Symbol.iterator](){return {next(){throw stepError;},\
+           return(){stepClosed++;return {};}};}});\
+         try{failing.next();}catch(error){preserved=error===stepError;}\
+         return [opened,unopened,closed,returned.value===undefined,returned.done,\
+           after.value===undefined,after.done,preserved,stepClosed].join('|');",
+    );
+
+    let result = context
+        .call(&function, &[], ExecutionLimits::default())
+        .expect("Iterator.concat return forwarding");
+    assert_eq!(string_value(&result), "1|0|1|true|true|true|true|true|0");
 }
 
 #[test]

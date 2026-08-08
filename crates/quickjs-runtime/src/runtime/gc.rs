@@ -1146,6 +1146,20 @@ impl Runtime {
                                             &mut work,
                                         );
                                     }
+                                    for iterable in helper.concat_iterables() {
+                                        mark_stored_value(
+                                            iterable.iterable(),
+                                            &mut marked_functions,
+                                            &mut marked_objects,
+                                            &mut work,
+                                        );
+                                        mark_heap_reference(
+                                            HeapReference::Function(iterable.open_method()),
+                                            &mut marked_functions,
+                                            &mut marked_objects,
+                                            &mut work,
+                                        );
+                                    }
                                 }
                             }
                             if let Some(view) = object.data_view_state() {

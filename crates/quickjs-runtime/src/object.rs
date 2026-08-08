@@ -387,11 +387,42 @@ pub(crate) enum IteratorHelperLifecycle {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum IteratorHelperKind {
+    Concat,
     Drop,
     FlatMap,
     Map,
     Filter,
     Take,
+}
+
+pub(crate) struct IteratorConcatIterable {
+    iterable: StoredValue,
+    open_method: FunctionId,
+}
+
+impl IteratorConcatIterable {
+    #[must_use]
+    pub(crate) const fn new(iterable: StoredValue, open_method: FunctionId) -> Self {
+        Self {
+            iterable,
+            open_method,
+        }
+    }
+
+    #[must_use]
+    pub(crate) const fn iterable(&self) -> &StoredValue {
+        &self.iterable
+    }
+
+    #[must_use]
+    pub(crate) const fn open_method(&self) -> FunctionId {
+        self.open_method
+    }
+
+    #[must_use]
+    pub(crate) fn duplicate(&self) -> Self {
+        Self::new(self.iterable.duplicate(), self.open_method)
+    }
 }
 
 pub(crate) struct IteratorHelperState {
@@ -402,6 +433,8 @@ pub(crate) struct IteratorHelperState {
     lifecycle: IteratorHelperLifecycle,
     inner_iterator: Option<StoredValue>,
     inner_next_method: Option<StoredValue>,
+    concat_iterables: Vec<IteratorConcatIterable>,
+    concat_index: usize,
 }
 
 impl IteratorHelperState {
@@ -415,6 +448,8 @@ impl IteratorHelperState {
             lifecycle: IteratorHelperLifecycle::SuspendedStart,
             inner_iterator: None,
             inner_next_method: None,
+            concat_iterables: Vec::new(),
+            concat_index: 0,
         }
     }
 
@@ -428,6 +463,23 @@ impl IteratorHelperState {
             lifecycle: IteratorHelperLifecycle::SuspendedStart,
             inner_iterator: None,
             inner_next_method: None,
+            concat_iterables: Vec::new(),
+            concat_index: 0,
+        }
+    }
+
+    #[must_use]
+    pub(crate) fn new_concat(iterables: Vec<IteratorConcatIterable>) -> Self {
+        Self {
+            kind: IteratorHelperKind::Concat,
+            callback: None,
+            counter: 0,
+            remaining: 0.0,
+            lifecycle: IteratorHelperLifecycle::SuspendedStart,
+            inner_iterator: None,
+            inner_next_method: None,
+            concat_iterables: iterables,
+            concat_index: 0,
         }
     }
 
@@ -466,11 +518,22 @@ impl IteratorHelperState {
         self.inner_next_method.as_ref()
     }
 
+    #[must_use]
+    pub(crate) fn concat_iterables(&self) -> &[IteratorConcatIterable] {
+        &self.concat_iterables
+    }
+
+    #[must_use]
+    pub(crate) fn current_concat_iterable(&self) -> Option<&IteratorConcatIterable> {
+        self.concat_iterables.get(self.concat_index)
+    }
+
     pub(crate) fn set_lifecycle(&mut self, lifecycle: IteratorHelperLifecycle) {
         self.lifecycle = lifecycle;
         if matches!(lifecycle, IteratorHelperLifecycle::Completed) {
             self.inner_iterator = None;
             self.inner_next_method = None;
+            self.concat_iterables.clear();
         }
     }
 
@@ -507,17 +570,10 @@ impl IteratorHelperState {
         self.counter = self.counter.saturating_add(1);
     }
 
-    #[must_use]
-    fn duplicate(&self) -> Self {
-        Self {
-            kind: self.kind,
-            callback: self.callback,
-            counter: self.counter,
-            remaining: self.remaining,
-            lifecycle: self.lifecycle,
-            inner_iterator: self.inner_iterator.as_ref().map(StoredValue::duplicate),
-            inner_next_method: self.inner_next_method.as_ref().map(StoredValue::duplicate),
-        }
+    pub(crate) fn finish_concat_inner(&mut self) {
+        self.inner_iterator = None;
+        self.inner_next_method = None;
+        self.concat_index = self.concat_index.saturating_add(1);
     }
 }
 
@@ -568,11 +624,11 @@ impl IteratorRecord {
     }
 
     #[must_use]
-    pub(crate) fn duplicate(&self) -> Self {
+    pub(crate) fn new_concat_helper(iterables: Vec<IteratorConcatIterable>) -> Self {
         Self {
-            iterator: self.iterator.duplicate(),
-            next_method: self.next_method.duplicate(),
-            helper: self.helper.as_ref().map(IteratorHelperState::duplicate),
+            iterator: StoredValue::Undefined,
+            next_method: StoredValue::Undefined,
+            helper: Some(IteratorHelperState::new_concat(iterables)),
         }
     }
 

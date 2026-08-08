@@ -87,6 +87,33 @@ impl IteratorFromContinuation {
     }
 }
 
+pub(super) struct IteratorConcatCreationContinuation {
+    items: Vec<StoredValue>,
+    iterables: Vec<crate::object::IteratorConcatIterable>,
+    index: usize,
+    realm: RealmId,
+    origin: JsStackFrame,
+}
+
+impl IteratorConcatCreationContinuation {
+    pub(super) fn retained_values(&self) -> u64 {
+        usize_to_u64(self.items.len())
+            .saturating_add(usize_to_u64(self.iterables.len()).saturating_mul(2))
+    }
+
+    pub(super) fn trace_roots(&self, mark: &mut dyn FnMut(CollectionRoot)) {
+        for item in &self.items {
+            trace_stored_value_root(item, mark);
+        }
+        for iterable in &self.iterables {
+            trace_stored_value_root(iterable.iterable(), mark);
+            mark(CollectionRoot::Heap(HeapReference::Function(
+                iterable.open_method(),
+            )));
+        }
+    }
+}
+
 #[derive(Clone, Copy)]
 enum IteratorToArrayStage {
     NextMethod,
@@ -252,6 +279,11 @@ impl IteratorLimitContinuation {
 
 #[derive(Clone, Copy)]
 enum IteratorHelperNextStage {
+    ConcatIteratorCall,
+    ConcatNextMethod,
+    ConcatNextResult,
+    ConcatDone,
+    ConcatValue,
     NextResult,
     Done,
     Value,
@@ -277,6 +309,7 @@ pub(super) struct IteratorHelperNextContinuation {
     candidate: Option<StoredValue>,
     inner_iterator: Option<StoredValue>,
     inner_next_method: Option<StoredValue>,
+    concat_iterable: Option<crate::object::IteratorConcatIterable>,
     realm: RealmId,
     stage: IteratorHelperNextStage,
     origin: JsStackFrame,
@@ -290,6 +323,7 @@ impl IteratorHelperNextContinuation {
             .saturating_add(u64::from(self.candidate.is_some()))
             .saturating_add(u64::from(self.inner_iterator.is_some()))
             .saturating_add(u64::from(self.inner_next_method.is_some()))
+            .saturating_add(u64::from(self.concat_iterable.is_some()).saturating_mul(2))
     }
 
     pub(super) fn trace_roots(&self, mark: &mut dyn FnMut(CollectionRoot)) {
@@ -310,6 +344,12 @@ impl IteratorHelperNextContinuation {
         }
         if let Some(inner_next_method) = &self.inner_next_method {
             trace_stored_value_root(inner_next_method, mark);
+        }
+        if let Some(iterable) = &self.concat_iterable {
+            trace_stored_value_root(iterable.iterable(), mark);
+            mark(CollectionRoot::Heap(HeapReference::Function(
+                iterable.open_method(),
+            )));
         }
     }
 }
@@ -647,6 +687,107 @@ pub(super) fn advance_iterator_from(
             )
         }
     }
+}
+
+pub(super) fn begin_iterator_concat(
+    runtime: &mut Runtime,
+    arguments: CallArguments,
+    realm: RealmId,
+    return_to: Option<CallReturn>,
+    origin: JsStackFrame,
+    execution_budget: &mut ExecutionBudget,
+) -> Result<NativeDispatch, NativeFailure> {
+    let items = arguments.into_remaining_values();
+    let mut iterables = Vec::new();
+    iterables
+        .try_reserve_exact(items.len())
+        .map_err(|_| ExecutionError::AllocationFailed {
+            resource: RuntimeResource::FrameValues,
+            additional: items.len(),
+        })?;
+    continue_iterator_concat_creation(
+        runtime,
+        IteratorConcatCreationContinuation {
+            items,
+            iterables,
+            index: 0,
+            realm,
+            origin,
+        },
+        return_to,
+        execution_budget,
+    )
+}
+
+pub(super) fn advance_iterator_concat_creation(
+    runtime: &mut Runtime,
+    mut state: IteratorConcatCreationContinuation,
+    completion: &StoredValue,
+    return_to: Option<CallReturn>,
+    execution_budget: &mut ExecutionBudget,
+) -> Result<NativeDispatch, NativeFailure> {
+    let StoredValue::Function(open_method) = completion else {
+        return Err(iterator_exception(
+            state.realm,
+            state.origin,
+            ExceptionKind::TypeError,
+            "Iterator.concat argument has no callable Symbol.iterator method",
+        )?);
+    };
+    let item = state
+        .items
+        .get_mut(state.index)
+        .ok_or(EngineFault::RuntimeInvariant {
+            message: "Iterator.concat method lookup completed without an argument",
+        })?;
+    state
+        .iterables
+        .push(crate::object::IteratorConcatIterable::new(
+            std::mem::replace(item, StoredValue::Undefined),
+            *open_method,
+        ));
+    state.index = state.index.saturating_add(1);
+    continue_iterator_concat_creation(runtime, state, return_to, execution_budget)
+}
+
+fn continue_iterator_concat_creation(
+    runtime: &mut Runtime,
+    state: IteratorConcatCreationContinuation,
+    return_to: Option<CallReturn>,
+    execution_budget: &mut ExecutionBudget,
+) -> Result<NativeDispatch, NativeFailure> {
+    let Some(item) = state.items.get(state.index) else {
+        let helper = runtime.allocate_iterator_concat_helper(state.realm, state.iterables)?;
+        return Ok(NativeDispatch::Immediate(StoredValue::Object(helper)));
+    };
+    if item.heap_reference().is_none() {
+        return Err(iterator_exception(
+            state.realm,
+            state.origin,
+            ExceptionKind::TypeError,
+            "Iterator.concat arguments must be objects",
+        )?);
+    }
+    charge_iterator_property_lookup(runtime, item, execution_budget)?;
+    let dispatch = begin_value_get(
+        runtime,
+        item,
+        runtime.predefined_symbol_property_key(PredefinedAtom::SymbolIterator),
+        None,
+        state.realm,
+        return_to,
+        state.origin.clone(),
+        execution_budget,
+    )?;
+    continue_get_after(
+        dispatch,
+        state,
+        NativeContinuation::IteratorConcatCreation,
+        |state, value| {
+            advance_iterator_concat_creation(runtime, state, &value, return_to, execution_budget)
+        },
+        "Iterator.concat Symbol.iterator Get produced a structured result",
+    )
 }
 
 pub(super) fn begin_iterator_to_array(
@@ -1095,6 +1236,12 @@ pub(super) fn advance_iterator_helper_creation(
                 state.remaining,
             )?
         }
+        crate::object::IteratorHelperKind::Concat => {
+            return Err(EngineFault::RuntimeInvariant {
+                message: "Iterator.concat used the ordinary helper constructor",
+            }
+            .into());
+        }
     };
     Ok(NativeDispatch::Immediate(StoredValue::Object(helper)))
 }
@@ -1142,6 +1289,44 @@ pub(super) fn begin_iterator_helper_next(
         }
         crate::object::IteratorHelperLifecycle::SuspendedStart
         | crate::object::IteratorHelperLifecycle::SuspendedYield => {}
+    }
+    if matches!(snapshot.kind, crate::object::IteratorHelperKind::Concat) {
+        runtime.set_iterator_helper_lifecycle(
+            helper,
+            crate::object::IteratorHelperLifecycle::Executing,
+        )?;
+        let has_inner = match (&snapshot.inner_iterator, &snapshot.inner_next_method) {
+            (Some(_), Some(_)) => true,
+            (None, None) => false,
+            (Some(_), None) | (None, Some(_)) => {
+                return Err(EngineFault::RuntimeInvariant {
+                    message: "Iterator.concat retained an incomplete active iterator record",
+                }
+                .into());
+            }
+        };
+        let state = IteratorHelperNextContinuation {
+            helper,
+            iterator: snapshot.iterator,
+            next_method: snapshot.next_method,
+            kind: snapshot.kind,
+            callback: None,
+            counter: 0,
+            remaining: 0.0,
+            dropping: false,
+            result: None,
+            candidate: None,
+            inner_iterator: snapshot.inner_iterator,
+            inner_next_method: snapshot.inner_next_method,
+            concat_iterable: snapshot.concat_iterable,
+            realm,
+            stage: IteratorHelperNextStage::ConcatNextResult,
+            origin,
+        };
+        if has_inner {
+            return call_iterator_concat_inner_next(runtime, state, return_to, execution_budget);
+        }
+        return open_iterator_concat_iterable(runtime, state, return_to, execution_budget);
     }
     if matches!(snapshot.kind, crate::object::IteratorHelperKind::Take) && snapshot.remaining == 0.0
     {
@@ -1200,6 +1385,7 @@ pub(super) fn begin_iterator_helper_next(
         candidate: None,
         inner_iterator: snapshot.inner_iterator,
         inner_next_method: snapshot.inner_next_method,
+        concat_iterable: None,
         realm,
         stage: if matches!(snapshot.kind, crate::object::IteratorHelperKind::FlatMap) && has_inner {
             IteratorHelperNextStage::InnerNextResult
@@ -1233,6 +1419,88 @@ pub(super) fn advance_iterator_helper_next(
     execution_budget: &mut ExecutionBudget,
 ) -> Result<NativeDispatch, NativeFailure> {
     match state.stage {
+        IteratorHelperNextStage::ConcatIteratorCall => {
+            if completion.heap_reference().is_none() {
+                return fail_iterator_concat_with_type_error(
+                    runtime,
+                    state,
+                    "Iterator.concat iterable method did not return an object",
+                );
+            }
+            state.concat_iterable = None;
+            state.inner_iterator = Some(completion);
+            state.stage = IteratorHelperNextStage::ConcatNextMethod;
+            read_iterator_concat_inner_property(
+                runtime,
+                state,
+                runtime.predefined_property_key(PredefinedAtom::Next),
+                return_to,
+                execution_budget,
+            )
+        }
+        IteratorHelperNextStage::ConcatNextMethod => {
+            state.inner_next_method = Some(completion);
+            let iterator = state
+                .inner_iterator
+                .as_ref()
+                .ok_or(EngineFault::RuntimeInvariant {
+                    message: "Iterator.concat next lookup lost its iterator",
+                })?
+                .duplicate();
+            let next_method = state
+                .inner_next_method
+                .as_ref()
+                .ok_or(EngineFault::RuntimeInvariant {
+                    message: "Iterator.concat next lookup lost its result",
+                })?
+                .duplicate();
+            runtime.install_iterator_helper_inner(state.helper, iterator, next_method)?;
+            state.stage = IteratorHelperNextStage::ConcatNextResult;
+            call_iterator_concat_inner_next(runtime, state, return_to, execution_budget)
+        }
+        IteratorHelperNextStage::ConcatNextResult => {
+            if completion.heap_reference().is_none() {
+                return fail_iterator_concat_with_type_error(
+                    runtime,
+                    state,
+                    "Iterator.concat inner next method did not return an object",
+                );
+            }
+            state.result = Some(completion);
+            state.stage = IteratorHelperNextStage::ConcatDone;
+            read_iterator_helper_next_property(
+                runtime,
+                state,
+                runtime.predefined_property_key(PredefinedAtom::Done),
+                return_to,
+                execution_budget,
+            )
+        }
+        IteratorHelperNextStage::ConcatDone => {
+            if completion.is_truthy() {
+                runtime.finish_iterator_concat_inner(state.helper)?;
+                state.inner_iterator = None;
+                state.inner_next_method = None;
+                state.result = None;
+                state.concat_iterable = runtime.current_iterator_concat_iterable(state.helper)?;
+                return open_iterator_concat_iterable(runtime, state, return_to, execution_budget);
+            }
+            state.stage = IteratorHelperNextStage::ConcatValue;
+            read_iterator_helper_next_property(
+                runtime,
+                state,
+                runtime.predefined_property_key(PredefinedAtom::Value),
+                return_to,
+                execution_budget,
+            )
+        }
+        IteratorHelperNextStage::ConcatValue => {
+            runtime.set_iterator_helper_lifecycle(
+                state.helper,
+                crate::object::IteratorHelperLifecycle::SuspendedYield,
+            )?;
+            iterator_result(runtime, state.realm, completion, false)
+        }
         IteratorHelperNextStage::NextResult => {
             if completion.heap_reference().is_none() {
                 complete_iterator_helper(runtime, state.helper)?;
@@ -1410,6 +1678,124 @@ pub(super) fn advance_iterator_helper_next(
     }
 }
 
+fn open_iterator_concat_iterable(
+    runtime: &mut Runtime,
+    mut state: IteratorHelperNextContinuation,
+    return_to: Option<CallReturn>,
+    execution_budget: &mut ExecutionBudget,
+) -> Result<NativeDispatch, NativeFailure> {
+    let iterable = if let Some(iterable) = state.concat_iterable.take() {
+        iterable
+    } else {
+        let Some(iterable) = runtime.current_iterator_concat_iterable(state.helper)? else {
+            complete_iterator_helper(runtime, state.helper)?;
+            return iterator_result(runtime, state.realm, StoredValue::Undefined, true);
+        };
+        iterable
+    };
+    let open_method = iterable.open_method();
+    let receiver = iterable.iterable().duplicate();
+    state.concat_iterable = Some(iterable);
+    state.stage = IteratorHelperNextStage::ConcatIteratorCall;
+    execution_budget.charge_instructions(1)?;
+    let origin = state.origin.clone();
+    iterator_method_call(
+        open_method,
+        receiver,
+        NativeContinuation::IteratorHelperNext(state),
+        return_to,
+        origin,
+    )
+}
+
+fn read_iterator_concat_inner_property(
+    runtime: &mut Runtime,
+    state: IteratorHelperNextContinuation,
+    key: PropertyKey,
+    return_to: Option<CallReturn>,
+    execution_budget: &mut ExecutionBudget,
+) -> Result<NativeDispatch, NativeFailure> {
+    let iterator = state
+        .inner_iterator
+        .as_ref()
+        .ok_or(EngineFault::RuntimeInvariant {
+            message: "Iterator.concat inner property lookup has no iterator",
+        })?;
+    charge_iterator_property_lookup(runtime, iterator, execution_budget)?;
+    let dispatch = match begin_value_get(
+        runtime,
+        iterator,
+        key,
+        None,
+        state.realm,
+        return_to,
+        state.origin.clone(),
+        execution_budget,
+    ) {
+        Ok(dispatch) => dispatch,
+        Err(NativeFailure::Abrupt(pending) | NativeFailure::AbruptAfterTransient(pending)) => {
+            complete_iterator_helper(runtime, state.helper)?;
+            return Err(NativeFailure::Abrupt(pending));
+        }
+        Err(error) => return Err(error),
+    };
+    continue_get_after(
+        dispatch,
+        state,
+        NativeContinuation::IteratorHelperNext,
+        |state, value| {
+            advance_iterator_helper_next(runtime, state, value, return_to, execution_budget)
+        },
+        "Iterator.concat inner property Get produced a structured result",
+    )
+}
+
+fn call_iterator_concat_inner_next(
+    runtime: &mut Runtime,
+    state: IteratorHelperNextContinuation,
+    return_to: Option<CallReturn>,
+    execution_budget: &mut ExecutionBudget,
+) -> Result<NativeDispatch, NativeFailure> {
+    let Some(iterator) = state.inner_iterator.as_ref() else {
+        return Err(EngineFault::RuntimeInvariant {
+            message: "Iterator.concat next call has no iterator",
+        }
+        .into());
+    };
+    let Some(StoredValue::Function(next_method)) = state.inner_next_method.as_ref() else {
+        return fail_iterator_concat_with_type_error(
+            runtime,
+            state,
+            "Iterator.concat inner next method is not callable",
+        );
+    };
+    let next_method = *next_method;
+    let receiver = iterator.duplicate();
+    execution_budget.charge_instructions(1)?;
+    let origin = state.origin.clone();
+    iterator_method_call(
+        next_method,
+        receiver,
+        NativeContinuation::IteratorHelperNext(state),
+        return_to,
+        origin,
+    )
+}
+
+fn fail_iterator_concat_with_type_error(
+    runtime: &mut Runtime,
+    state: IteratorHelperNextContinuation,
+    message: &str,
+) -> Result<NativeDispatch, NativeFailure> {
+    complete_iterator_helper(runtime, state.helper)?;
+    Err(iterator_exception(
+        state.realm,
+        state.origin,
+        ExceptionKind::TypeError,
+        message,
+    )?)
+}
+
 fn continue_iterator_drop(
     runtime: &mut Runtime,
     mut state: IteratorHelperNextContinuation,
@@ -1518,6 +1904,10 @@ fn advance_iterator_helper_callback(
             }
             .into())
         }
+        crate::object::IteratorHelperKind::Concat => Err(EngineFault::RuntimeInvariant {
+            message: "Iterator.concat resumed from a callback",
+        }
+        .into()),
     }
 }
 
@@ -1826,21 +2216,27 @@ pub(super) fn begin_iterator_helper_return(
         crate::object::IteratorHelperLifecycle::SuspendedStart
         | crate::object::IteratorHelperLifecycle::SuspendedYield => {}
     }
-    complete_iterator_helper(runtime, helper)?;
+    let is_concat = matches!(snapshot.kind, crate::object::IteratorHelperKind::Concat);
     let (iterator, outer_iterator) = match (snapshot.inner_iterator, snapshot.inner_next_method) {
         (Some(inner_iterator), Some(_)) => (inner_iterator, Some(snapshot.iterator)),
+        (None, None) if is_concat => {
+            complete_iterator_helper(runtime, helper)?;
+            return iterator_result(runtime, realm, StoredValue::Undefined, true);
+        }
         (None, None) => (snapshot.iterator, None),
         (Some(_), None) | (None, Some(_)) => {
             return Err(EngineFault::RuntimeInvariant {
-                message: "flatMap helper retained an incomplete inner iterator record",
+                message: "Iterator Helper retained an incomplete inner iterator record",
             }
             .into());
         }
     };
+    runtime
+        .set_iterator_helper_lifecycle(helper, crate::object::IteratorHelperLifecycle::Executing)?;
     let state = IteratorHelperReturnContinuation {
         helper,
         iterator,
-        outer_iterator,
+        outer_iterator: if is_concat { None } else { outer_iterator },
         realm,
         stage: IteratorHelperReturnStage::ReturnProperty,
         origin,
@@ -1948,6 +2344,7 @@ fn continue_iterator_helper_outer_return(
     execution_budget: &mut ExecutionBudget,
 ) -> Result<NativeDispatch, NativeFailure> {
     let Some(outer_iterator) = state.outer_iterator.take() else {
+        complete_iterator_helper(runtime, state.helper)?;
         return iterator_result(runtime, state.realm, StoredValue::Undefined, true);
     };
     state.iterator = outer_iterator;
@@ -1982,8 +2379,10 @@ fn fail_iterator_helper_return(
     execution_budget: &mut ExecutionBudget,
 ) -> Result<NativeDispatch, NativeFailure> {
     let Some(outer_iterator) = state.outer_iterator else {
+        complete_iterator_helper(runtime, state.helper)?;
         return Err(NativeFailure::Abrupt(pending));
     };
+    complete_iterator_helper(runtime, state.helper)?;
     begin_exceptional_iterator_close(
         runtime,
         outer_iterator,

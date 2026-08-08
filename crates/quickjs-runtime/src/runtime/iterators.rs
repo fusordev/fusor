@@ -31,7 +31,10 @@ use super::{
     PropertyLayout, RealmId, RealmIntrinsics, RegExpStringIterator, Runtime, RuntimeResource,
     StoredValue, StringIterator, check_execution_limit, stale_heap_reference, usize_to_u64,
 };
-use crate::object::{IteratorHelperKind, IteratorHelperLifecycle, IteratorRecord, OwnProperty};
+use crate::object::{
+    IteratorConcatIterable, IteratorHelperKind, IteratorHelperLifecycle, IteratorRecord,
+    OwnProperty,
+};
 
 pub(crate) struct PreparedIteratorResultPlan {
     result: ObjectRecord,
@@ -81,6 +84,7 @@ pub(crate) struct IteratorHelperSnapshot {
     pub(crate) lifecycle: IteratorHelperLifecycle,
     pub(crate) inner_iterator: Option<StoredValue>,
     pub(crate) inner_next_method: Option<StoredValue>,
+    pub(crate) concat_iterable: Option<IteratorConcatIterable>,
 }
 
 impl Runtime {
@@ -207,6 +211,18 @@ impl Runtime {
         ))
     }
 
+    pub(crate) fn allocate_iterator_concat_helper(
+        &mut self,
+        realm: RealmId,
+        iterables: Vec<IteratorConcatIterable>,
+    ) -> Result<ObjectId, crate::ExecutionError> {
+        let prototype = self.realm_iterator_helper_prototype(realm)?;
+        self.allocate_iterator_object(HeapObject::iterator_wrapper(
+            ObjectRecord::empty(Some(HeapReference::Object(prototype))),
+            IteratorRecord::new_concat_helper(iterables),
+        ))
+    }
+
     pub(crate) fn iterator_wrapper_record(
         &self,
         wrapper: ObjectId,
@@ -218,7 +234,12 @@ impl Runtime {
         Ok(object
             .iterator_wrapper_state()
             .filter(|record| record.helper().is_none())
-            .map(IteratorRecord::duplicate))
+            .map(|record| {
+                IteratorRecord::new(
+                    record.iterator().duplicate(),
+                    record.next_method().duplicate(),
+                )
+            }))
     }
 
     pub(crate) fn iterator_helper_snapshot(
@@ -245,7 +266,28 @@ impl Runtime {
             lifecycle: helper_state.lifecycle(),
             inner_iterator: helper_state.inner_iterator().map(StoredValue::duplicate),
             inner_next_method: helper_state.inner_next_method().map(StoredValue::duplicate),
+            concat_iterable: helper_state
+                .current_concat_iterable()
+                .map(IteratorConcatIterable::duplicate),
         }))
+    }
+
+    pub(crate) fn current_iterator_concat_iterable(
+        &self,
+        helper: ObjectId,
+    ) -> Result<Option<IteratorConcatIterable>, crate::EngineFault> {
+        let helper_state = self
+            .objects
+            .get(helper)
+            .ok_or_else(|| stale_heap_reference(HeapReference::Object(helper)))?
+            .iterator_wrapper_state()
+            .and_then(IteratorRecord::helper)
+            .ok_or(crate::EngineFault::RuntimeInvariant {
+                message: "Iterator concat state disappeared",
+            })?;
+        Ok(helper_state
+            .current_concat_iterable()
+            .map(IteratorConcatIterable::duplicate))
     }
 
     pub(crate) fn set_iterator_helper_lifecycle(
@@ -367,6 +409,23 @@ impl Runtime {
                 message: "Iterator Helper state disappeared",
             })?;
         helper_state.finish_flat_map_inner();
+        Ok(())
+    }
+
+    pub(crate) fn finish_iterator_concat_inner(
+        &mut self,
+        helper: ObjectId,
+    ) -> Result<(), crate::EngineFault> {
+        let helper_state = self
+            .objects
+            .get_mut(helper)
+            .ok_or_else(|| stale_heap_reference(HeapReference::Object(helper)))?
+            .iterator_wrapper_state_mut()
+            .and_then(IteratorRecord::helper_mut)
+            .ok_or(crate::EngineFault::RuntimeInvariant {
+                message: "Iterator concat state disappeared",
+            })?;
+        helper_state.finish_concat_inner();
         Ok(())
     }
 
