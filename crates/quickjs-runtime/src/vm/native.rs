@@ -964,7 +964,9 @@ pub(super) fn resume_native_continuations(
             NativeContinuation::IteratorFrom(state) => {
                 advance_iterator_from(runtime, state, value, return_to, execution_budget)?
             }
-            NativeContinuation::IteratorMap(state) => advance_iterator_map(runtime, state, value)?,
+            NativeContinuation::IteratorHelperCreation(state) => {
+                advance_iterator_helper_creation(runtime, state, value)?
+            }
             NativeContinuation::IteratorToArray(state) => {
                 advance_iterator_to_array(runtime, state, value, return_to, execution_budget)?
             }
@@ -3692,6 +3694,18 @@ pub(super) fn dispatch_native_call_with_frames(
             origin.unwrap_or_else(native_function_host_origin),
             execution_budget,
         ),
+        NativeFunctionKind::IteratorPrototypeFilter => {
+            let predicate = inputs.arguments.take_first_or_undefined();
+            begin_iterator_filter(
+                runtime,
+                inputs.receiver,
+                &predicate,
+                native.realm,
+                return_to,
+                origin.unwrap_or_else(native_function_host_origin),
+                execution_budget,
+            )
+        }
         NativeFunctionKind::IteratorPrototypeMap => {
             let mapper = inputs.arguments.take_first_or_undefined();
             begin_iterator_map(

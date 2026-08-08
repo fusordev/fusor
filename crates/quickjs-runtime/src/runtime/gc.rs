@@ -1122,9 +1122,9 @@ impl Runtime {
                                         &mut work,
                                     );
                                 }
-                                if let Some(map) = iterator.map() {
+                                if let Some(helper) = iterator.helper() {
                                     mark_heap_reference(
-                                        HeapReference::Function(map.mapper()),
+                                        HeapReference::Function(helper.callback()),
                                         &mut marked_functions,
                                         &mut marked_objects,
                                         &mut work,

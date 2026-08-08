@@ -577,6 +577,55 @@ fn iterator_map_validation_and_step_abrupts_follow_spec_order() {
 }
 
 #[test]
+fn iterator_filter_is_lazy_and_indexes_every_examined_value() {
+    let mut runtime = Runtime::try_new(RuntimeLimits::default()).expect("runtime");
+    let realm = runtime.create_realm().expect("realm");
+    let mut context = runtime.context(&realm).expect("context");
+    let function = dynamic_function(
+        &mut context,
+        "let nextCalls=0,predicateLog='';\
+         let iterator={next(){nextCalls++;return nextCalls<4\
+           ?{done:false,value:nextCalls}:{done:true};}};\
+         let helper=Iterator.prototype.filter.call(iterator,function(value,index){\
+           predicateLog+=value+':'+index+',';return value%2;});\
+         let before=[nextCalls,predicateLog].join('|');\
+         let first=helper.next();let second=helper.next();let done=helper.next();\
+         return [before,first.value,first.done,second.value,second.done,\
+           done.value===undefined,done.done,nextCalls,predicateLog].join('|');",
+    );
+
+    let result = context
+        .call(&function, &[], ExecutionLimits::default())
+        .expect("Iterator.prototype.filter lazy helper");
+    assert_eq!(
+        string_value(&result),
+        "0||1|false|3|false|true|true|4|1:0,2:1,3:2,"
+    );
+}
+
+#[test]
+fn iterator_filter_predicate_abrupt_closes_and_preserves_the_original_error() {
+    let mut runtime = Runtime::try_new(RuntimeLimits::default()).expect("runtime");
+    let realm = runtime.create_realm().expect("realm");
+    let mut context = runtime.context(&realm).expect("context");
+    let function = dynamic_function(
+        &mut context,
+        "let original={},closes=0,preserved=false;\
+         let helper=Iterator.prototype.filter.call({\
+           next(){return {done:false,value:1};},\
+           return(){closes++;throw {};}} ,function(){throw original;});\
+         try{helper.next();}catch(error){preserved=error===original;}\
+         let done=helper.next();\
+         return [preserved,closes,done.value===undefined,done.done].join('|');",
+    );
+
+    let result = context
+        .call(&function, &[], ExecutionLimits::default())
+        .expect("Iterator.prototype.filter abrupt close");
+    assert_eq!(string_value(&result), "true|1|true|true");
+}
+
+#[test]
 fn array_spread_reads_iterator_twice_and_retains_next_once() {
     let mut runtime = Runtime::try_new(RuntimeLimits::default()).expect("runtime");
     let realm = runtime.create_realm().expect("realm");

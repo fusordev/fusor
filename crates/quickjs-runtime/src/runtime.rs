@@ -1340,6 +1340,7 @@ pub(crate) enum NativeFunctionKind {
     SymbolKeyFor,
     IteratorConstructor,
     IteratorFrom,
+    IteratorPrototypeFilter,
     IteratorPrototypeMap,
     IteratorPrototypeToArray,
     IteratorPrototypeConstructorGetter,

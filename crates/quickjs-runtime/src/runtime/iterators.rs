@@ -31,7 +31,7 @@ use super::{
     PropertyLayout, RealmId, RealmIntrinsics, RegExpStringIterator, Runtime, RuntimeResource,
     StoredValue, StringIterator, check_execution_limit, stale_heap_reference, usize_to_u64,
 };
-use crate::object::{IteratorHelperLifecycle, IteratorRecord, OwnProperty};
+use crate::object::{IteratorHelperKind, IteratorHelperLifecycle, IteratorRecord, OwnProperty};
 
 pub(crate) struct PreparedIteratorResultPlan {
     result: ObjectRecord,
@@ -71,10 +71,11 @@ pub(crate) struct RegExpStringIteratorSnapshot {
     pub(crate) phase: crate::object::RegExpStringIteratorPhase,
 }
 
-pub(crate) struct IteratorMapHelperSnapshot {
+pub(crate) struct IteratorHelperSnapshot {
     pub(crate) iterator: StoredValue,
     pub(crate) next_method: StoredValue,
-    pub(crate) mapper: FunctionId,
+    pub(crate) kind: IteratorHelperKind,
+    pub(crate) callback: FunctionId,
     pub(crate) counter: u64,
     pub(crate) lifecycle: IteratorHelperLifecycle,
 }
@@ -173,17 +174,18 @@ impl Runtime {
         ))
     }
 
-    pub(crate) fn allocate_iterator_map_helper(
+    pub(crate) fn allocate_iterator_helper(
         &mut self,
         realm: RealmId,
         iterator: StoredValue,
         next_method: StoredValue,
-        mapper: FunctionId,
+        kind: IteratorHelperKind,
+        callback: FunctionId,
     ) -> Result<ObjectId, crate::ExecutionError> {
         let prototype = self.realm_iterator_helper_prototype(realm)?;
         self.allocate_iterator_object(HeapObject::iterator_wrapper(
             ObjectRecord::empty(Some(HeapReference::Object(prototype))),
-            IteratorRecord::new_map(iterator, next_method, mapper),
+            IteratorRecord::new_helper(iterator, next_method, kind, callback),
         ))
     }
 
@@ -197,14 +199,14 @@ impl Runtime {
             .ok_or_else(|| stale_heap_reference(HeapReference::Object(wrapper)))?;
         Ok(object
             .iterator_wrapper_state()
-            .filter(|record| record.map().is_none())
+            .filter(|record| record.helper().is_none())
             .map(IteratorRecord::duplicate))
     }
 
-    pub(crate) fn iterator_map_helper_snapshot(
+    pub(crate) fn iterator_helper_snapshot(
         &self,
         helper: ObjectId,
-    ) -> Result<Option<IteratorMapHelperSnapshot>, crate::EngineFault> {
+    ) -> Result<Option<IteratorHelperSnapshot>, crate::EngineFault> {
         let object = self
             .objects
             .get(helper)
@@ -212,52 +214,52 @@ impl Runtime {
         let Some(record) = object.iterator_wrapper_state() else {
             return Ok(None);
         };
-        let Some(map) = record.map() else {
+        let Some(helper_state) = record.helper() else {
             return Ok(None);
         };
-        Ok(Some(IteratorMapHelperSnapshot {
+        Ok(Some(IteratorHelperSnapshot {
             iterator: record.iterator().duplicate(),
             next_method: record.next_method().duplicate(),
-            mapper: map.mapper(),
-            counter: map.counter(),
-            lifecycle: map.lifecycle(),
+            kind: helper_state.kind(),
+            callback: helper_state.callback(),
+            counter: helper_state.counter(),
+            lifecycle: helper_state.lifecycle(),
         }))
     }
 
-    pub(crate) fn set_iterator_map_helper_lifecycle(
+    pub(crate) fn set_iterator_helper_lifecycle(
         &mut self,
         helper: ObjectId,
         lifecycle: IteratorHelperLifecycle,
     ) -> Result<(), crate::EngineFault> {
-        let map = self
+        let helper_state = self
             .objects
             .get_mut(helper)
             .ok_or_else(|| stale_heap_reference(HeapReference::Object(helper)))?
             .iterator_wrapper_state_mut()
-            .and_then(IteratorRecord::map_mut)
+            .and_then(IteratorRecord::helper_mut)
             .ok_or(crate::EngineFault::RuntimeInvariant {
                 message: "Iterator Helper state disappeared",
             })?;
-        map.set_lifecycle(lifecycle);
-        self.collection_pending = true;
+        helper_state.set_lifecycle(lifecycle);
         Ok(())
     }
 
-    pub(crate) fn finish_iterator_map_helper_yield(
+    pub(crate) fn finish_iterator_helper_callback(
         &mut self,
         helper: ObjectId,
+        yielded: bool,
     ) -> Result<(), crate::EngineFault> {
-        let map = self
+        let helper_state = self
             .objects
             .get_mut(helper)
             .ok_or_else(|| stale_heap_reference(HeapReference::Object(helper)))?
             .iterator_wrapper_state_mut()
-            .and_then(IteratorRecord::map_mut)
+            .and_then(IteratorRecord::helper_mut)
             .ok_or(crate::EngineFault::RuntimeInvariant {
                 message: "Iterator Helper state disappeared",
             })?;
-        map.finish_yield();
-        self.collection_pending = true;
+        helper_state.finish_callback(yielded);
         Ok(())
     }
 

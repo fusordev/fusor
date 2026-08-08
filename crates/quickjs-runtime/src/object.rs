@@ -385,26 +385,39 @@ pub(crate) enum IteratorHelperLifecycle {
     Completed,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum IteratorHelperKind {
+    Map,
+    Filter,
+}
+
 #[derive(Clone, Copy)]
-pub(crate) struct IteratorMapState {
-    mapper: FunctionId,
+pub(crate) struct IteratorHelperState {
+    kind: IteratorHelperKind,
+    callback: FunctionId,
     counter: u64,
     lifecycle: IteratorHelperLifecycle,
 }
 
-impl IteratorMapState {
+impl IteratorHelperState {
     #[must_use]
-    pub(crate) const fn new(mapper: FunctionId) -> Self {
+    pub(crate) const fn new(kind: IteratorHelperKind, callback: FunctionId) -> Self {
         Self {
-            mapper,
+            kind,
+            callback,
             counter: 0,
             lifecycle: IteratorHelperLifecycle::SuspendedStart,
         }
     }
 
     #[must_use]
-    pub(crate) const fn mapper(&self) -> FunctionId {
-        self.mapper
+    pub(crate) const fn kind(&self) -> IteratorHelperKind {
+        self.kind
+    }
+
+    #[must_use]
+    pub(crate) const fn callback(&self) -> FunctionId {
+        self.callback
     }
 
     #[must_use]
@@ -421,9 +434,11 @@ impl IteratorMapState {
         self.lifecycle = lifecycle;
     }
 
-    pub(crate) const fn finish_yield(&mut self) {
+    pub(crate) const fn finish_callback(&mut self, yielded: bool) {
         self.counter = self.counter.saturating_add(1);
-        self.lifecycle = IteratorHelperLifecycle::SuspendedYield;
+        if yielded {
+            self.lifecycle = IteratorHelperLifecycle::SuspendedYield;
+        }
     }
 }
 
@@ -432,7 +447,7 @@ impl IteratorMapState {
 pub(crate) struct IteratorRecord {
     iterator: StoredValue,
     next_method: StoredValue,
-    map: Option<IteratorMapState>,
+    helper: Option<IteratorHelperState>,
 }
 
 impl IteratorRecord {
@@ -441,20 +456,21 @@ impl IteratorRecord {
         Self {
             iterator,
             next_method,
-            map: None,
+            helper: None,
         }
     }
 
     #[must_use]
-    pub(crate) const fn new_map(
+    pub(crate) const fn new_helper(
         iterator: StoredValue,
         next_method: StoredValue,
-        mapper: FunctionId,
+        kind: IteratorHelperKind,
+        callback: FunctionId,
     ) -> Self {
         Self {
             iterator,
             next_method,
-            map: Some(IteratorMapState::new(mapper)),
+            helper: Some(IteratorHelperState::new(kind, callback)),
         }
     }
 
@@ -463,7 +479,7 @@ impl IteratorRecord {
         Self {
             iterator: self.iterator.duplicate(),
             next_method: self.next_method.duplicate(),
-            map: self.map,
+            helper: self.helper,
         }
     }
 
@@ -478,12 +494,12 @@ impl IteratorRecord {
     }
 
     #[must_use]
-    pub(crate) const fn map(&self) -> Option<&IteratorMapState> {
-        self.map.as_ref()
+    pub(crate) const fn helper(&self) -> Option<&IteratorHelperState> {
+        self.helper.as_ref()
     }
 
-    pub(crate) const fn map_mut(&mut self) -> Option<&mut IteratorMapState> {
-        self.map.as_mut()
+    pub(crate) const fn helper_mut(&mut self) -> Option<&mut IteratorHelperState> {
+        self.helper.as_mut()
     }
 }
 

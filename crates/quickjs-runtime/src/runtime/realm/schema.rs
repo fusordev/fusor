@@ -201,6 +201,7 @@ pub(in crate::runtime) enum RealmNameId {
     ArraySplice,
     ArrayIsArray,
     ArrayFromAsync,
+    IteratorFilter,
     IteratorMap,
     IteratorToArray,
     ArrayBufferIsView,

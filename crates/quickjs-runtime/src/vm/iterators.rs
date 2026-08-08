@@ -127,21 +127,22 @@ impl IteratorToArrayContinuation {
     }
 }
 
-pub(super) struct IteratorMapContinuation {
+pub(super) struct IteratorHelperCreationContinuation {
     iterator: StoredValue,
-    mapper: FunctionId,
+    kind: crate::object::IteratorHelperKind,
+    callback: FunctionId,
     realm: RealmId,
     origin: JsStackFrame,
 }
 
-impl IteratorMapContinuation {
+impl IteratorHelperCreationContinuation {
     pub(super) const fn retained_values() -> u64 {
         2
     }
 
     pub(super) fn trace_roots(&self, mark: &mut dyn FnMut(CollectionRoot)) {
         trace_stored_value_root(&self.iterator, mark);
-        mark(CollectionRoot::Heap(HeapReference::Function(self.mapper)));
+        mark(CollectionRoot::Heap(HeapReference::Function(self.callback)));
     }
 }
 
@@ -150,16 +151,18 @@ enum IteratorHelperNextStage {
     NextResult,
     Done,
     Value,
-    Mapped,
+    Callback,
 }
 
 pub(super) struct IteratorHelperNextContinuation {
     helper: ObjectId,
     iterator: StoredValue,
     next_method: StoredValue,
-    mapper: FunctionId,
+    kind: crate::object::IteratorHelperKind,
+    callback: FunctionId,
     counter: u64,
     result: Option<StoredValue>,
+    candidate: Option<StoredValue>,
     realm: RealmId,
     stage: IteratorHelperNextStage,
     origin: JsStackFrame,
@@ -167,16 +170,21 @@ pub(super) struct IteratorHelperNextContinuation {
 
 impl IteratorHelperNextContinuation {
     pub(super) fn retained_values(&self) -> u64 {
-        4_u64.saturating_add(u64::from(self.result.is_some()))
+        4_u64
+            .saturating_add(u64::from(self.result.is_some()))
+            .saturating_add(u64::from(self.candidate.is_some()))
     }
 
     pub(super) fn trace_roots(&self, mark: &mut dyn FnMut(CollectionRoot)) {
         mark(CollectionRoot::Heap(HeapReference::Object(self.helper)));
         trace_stored_value_root(&self.iterator, mark);
         trace_stored_value_root(&self.next_method, mark);
-        mark(CollectionRoot::Heap(HeapReference::Function(self.mapper)));
+        mark(CollectionRoot::Heap(HeapReference::Function(self.callback)));
         if let Some(result) = &self.result {
             trace_stored_value_root(result, mark);
+        }
+        if let Some(candidate) = &self.candidate {
+            trace_stored_value_root(candidate, mark);
         }
     }
 }
@@ -549,7 +557,60 @@ pub(super) fn begin_iterator_to_array(
 pub(super) fn begin_iterator_map(
     runtime: &mut Runtime,
     receiver: StoredValue,
-    mapper: &StoredValue,
+    callback: &StoredValue,
+    realm: RealmId,
+    return_to: Option<CallReturn>,
+    origin: JsStackFrame,
+    execution_budget: &mut ExecutionBudget,
+) -> Result<NativeDispatch, NativeFailure> {
+    begin_iterator_callback_helper(
+        runtime,
+        receiver,
+        callback,
+        crate::object::IteratorHelperKind::Map,
+        "Iterator.prototype.map receiver must be an object",
+        "Iterator.prototype.map mapper must be callable",
+        realm,
+        return_to,
+        origin,
+        execution_budget,
+    )
+}
+
+pub(super) fn begin_iterator_filter(
+    runtime: &mut Runtime,
+    receiver: StoredValue,
+    callback: &StoredValue,
+    realm: RealmId,
+    return_to: Option<CallReturn>,
+    origin: JsStackFrame,
+    execution_budget: &mut ExecutionBudget,
+) -> Result<NativeDispatch, NativeFailure> {
+    begin_iterator_callback_helper(
+        runtime,
+        receiver,
+        callback,
+        crate::object::IteratorHelperKind::Filter,
+        "Iterator.prototype.filter receiver must be an object",
+        "Iterator.prototype.filter predicate must be callable",
+        realm,
+        return_to,
+        origin,
+        execution_budget,
+    )
+}
+
+#[allow(
+    clippy::too_many_arguments,
+    reason = "the resumable helper constructor keeps the observable method diagnostics and VM call state explicit"
+)]
+fn begin_iterator_callback_helper(
+    runtime: &mut Runtime,
+    receiver: StoredValue,
+    callback: &StoredValue,
+    kind: crate::object::IteratorHelperKind,
+    receiver_message: &str,
+    callback_message: &str,
     realm: RealmId,
     return_to: Option<CallReturn>,
     origin: JsStackFrame,
@@ -560,16 +621,12 @@ pub(super) fn begin_iterator_map(
             realm,
             origin,
             ExceptionKind::TypeError,
-            "Iterator.prototype.map receiver must be an object",
+            receiver_message,
         )?);
     }
-    let StoredValue::Function(mapper) = mapper else {
-        let NativeFailure::Abrupt(pending) = iterator_exception(
-            realm,
-            origin,
-            ExceptionKind::TypeError,
-            "Iterator.prototype.map mapper must be callable",
-        )?
+    let StoredValue::Function(callback) = callback else {
+        let NativeFailure::Abrupt(pending) =
+            iterator_exception(realm, origin, ExceptionKind::TypeError, callback_message)?
         else {
             unreachable!("iterator_exception always returns an abrupt completion")
         };
@@ -581,9 +638,10 @@ pub(super) fn begin_iterator_map(
             execution_budget,
         );
     };
-    let state = IteratorMapContinuation {
+    let state = IteratorHelperCreationContinuation {
         iterator: receiver,
-        mapper: *mapper,
+        kind,
+        callback: *callback,
         realm,
         origin,
     };
@@ -601,22 +659,23 @@ pub(super) fn begin_iterator_map(
     continue_get_after(
         dispatch,
         state,
-        NativeContinuation::IteratorMap,
-        |state, value| advance_iterator_map(runtime, state, value),
-        "Iterator.prototype.map next Get produced a structured result",
+        NativeContinuation::IteratorHelperCreation,
+        |state, value| advance_iterator_helper_creation(runtime, state, value),
+        "Iterator helper next Get produced a structured result",
     )
 }
 
-pub(super) fn advance_iterator_map(
+pub(super) fn advance_iterator_helper_creation(
     runtime: &mut Runtime,
-    state: IteratorMapContinuation,
+    state: IteratorHelperCreationContinuation,
     next_method: StoredValue,
 ) -> Result<NativeDispatch, NativeFailure> {
-    let helper = runtime.allocate_iterator_map_helper(
+    let helper = runtime.allocate_iterator_helper(
         state.realm,
         state.iterator,
         next_method,
-        state.mapper,
+        state.kind,
+        state.callback,
     )?;
     Ok(NativeDispatch::Immediate(StoredValue::Object(helper)))
 }
@@ -638,7 +697,7 @@ pub(super) fn begin_iterator_helper_next(
         )?);
     };
     let helper = *helper;
-    let Some(snapshot) = runtime.iterator_map_helper_snapshot(helper)? else {
+    let Some(snapshot) = runtime.iterator_helper_snapshot(helper)? else {
         return Err(iterator_exception(
             realm,
             origin,
@@ -661,12 +720,10 @@ pub(super) fn begin_iterator_helper_next(
         crate::object::IteratorHelperLifecycle::SuspendedStart
         | crate::object::IteratorHelperLifecycle::SuspendedYield => {}
     }
-    runtime.set_iterator_map_helper_lifecycle(
-        helper,
-        crate::object::IteratorHelperLifecycle::Executing,
-    )?;
+    runtime
+        .set_iterator_helper_lifecycle(helper, crate::object::IteratorHelperLifecycle::Executing)?;
     let StoredValue::Function(next_method) = snapshot.next_method else {
-        runtime.set_iterator_map_helper_lifecycle(
+        runtime.set_iterator_helper_lifecycle(
             helper,
             crate::object::IteratorHelperLifecycle::Completed,
         )?;
@@ -682,9 +739,11 @@ pub(super) fn begin_iterator_helper_next(
         helper,
         iterator: snapshot.iterator,
         next_method: StoredValue::Function(next_method),
-        mapper: snapshot.mapper,
+        kind: snapshot.kind,
+        callback: snapshot.callback,
         counter: snapshot.counter,
         result: None,
+        candidate: None,
         realm,
         stage: IteratorHelperNextStage::NextResult,
         origin: origin.clone(),
@@ -748,14 +807,17 @@ pub(super) fn advance_iterator_helper_next(
                     resource: RuntimeResource::FrameValues,
                     additional: 2,
                 })?;
+            if matches!(state.kind, crate::object::IteratorHelperKind::Filter) {
+                state.candidate = Some(completion.duplicate());
+            }
             arguments.push(completion);
             arguments.push(StoredValue::Number(iterator_counter_number(state.counter)));
             state.result = None;
-            state.stage = IteratorHelperNextStage::Mapped;
+            state.stage = IteratorHelperNextStage::Callback;
             execution_budget.charge_instructions(1)?;
             let origin = state.origin.clone();
             iterator_call_with_arguments(
-                state.mapper,
+                state.callback,
                 StoredValue::Undefined,
                 arguments,
                 NativeContinuation::IteratorHelperNext(state),
@@ -763,9 +825,58 @@ pub(super) fn advance_iterator_helper_next(
                 origin,
             )
         }
-        IteratorHelperNextStage::Mapped => {
-            runtime.finish_iterator_map_helper_yield(state.helper)?;
+        IteratorHelperNextStage::Callback => advance_iterator_helper_callback(
+            runtime,
+            state,
+            completion,
+            return_to,
+            execution_budget,
+        ),
+    }
+}
+
+fn advance_iterator_helper_callback(
+    runtime: &mut Runtime,
+    mut state: IteratorHelperNextContinuation,
+    completion: StoredValue,
+    return_to: Option<CallReturn>,
+    execution_budget: &mut ExecutionBudget,
+) -> Result<NativeDispatch, NativeFailure> {
+    match state.kind {
+        crate::object::IteratorHelperKind::Map => {
+            runtime.finish_iterator_helper_callback(state.helper, true)?;
             iterator_result(runtime, state.realm, completion, false)
+        }
+        crate::object::IteratorHelperKind::Filter => {
+            let selected = completion.is_truthy();
+            runtime.finish_iterator_helper_callback(state.helper, selected)?;
+            let candidate = state
+                .candidate
+                .take()
+                .ok_or(EngineFault::RuntimeInvariant {
+                    message: "Iterator filter callback has no candidate value",
+                })?;
+            if selected {
+                return iterator_result(runtime, state.realm, candidate, false);
+            }
+            state.counter = state.counter.saturating_add(1);
+            state.stage = IteratorHelperNextStage::NextResult;
+            execution_budget.charge_instructions(1)?;
+            let StoredValue::Function(next_method) = state.next_method else {
+                return Err(EngineFault::RuntimeInvariant {
+                    message: "running Iterator Helper lost its callable next method",
+                }
+                .into());
+            };
+            let receiver = state.iterator.duplicate();
+            let origin = state.origin.clone();
+            iterator_method_call(
+                next_method,
+                receiver,
+                NativeContinuation::IteratorHelperNext(state),
+                return_to,
+                origin,
+            )
         }
     }
 }
@@ -826,7 +937,7 @@ pub(super) fn begin_iterator_helper_return(
         )?);
     };
     let helper = *helper;
-    let Some(snapshot) = runtime.iterator_map_helper_snapshot(helper)? else {
+    let Some(snapshot) = runtime.iterator_helper_snapshot(helper)? else {
         return Err(iterator_exception(
             realm,
             origin,
@@ -940,10 +1051,7 @@ pub(super) fn advance_iterator_helper_return(
 }
 
 fn complete_iterator_helper(runtime: &mut Runtime, helper: ObjectId) -> Result<(), EngineFault> {
-    runtime.set_iterator_map_helper_lifecycle(
-        helper,
-        crate::object::IteratorHelperLifecycle::Completed,
-    )
+    runtime.set_iterator_helper_lifecycle(helper, crate::object::IteratorHelperLifecycle::Completed)
 }
 
 fn iterator_counter_number(counter: u64) -> JsNumber {
@@ -2608,7 +2716,7 @@ pub(super) fn resume_iterator_abrupt(
     match continuation {
         NativeContinuation::IteratorHelperNext(state) => {
             complete_iterator_helper(runtime, state.helper)?;
-            if matches!(state.stage, IteratorHelperNextStage::Mapped) {
+            if matches!(state.stage, IteratorHelperNextStage::Callback) {
                 begin_exceptional_iterator_close(
                     runtime,
                     state.iterator,
