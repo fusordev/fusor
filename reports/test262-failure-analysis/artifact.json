@@ -1,0 +1,927 @@
+{
+  "surface": "report",
+  "manifest": {
+    "version": 1,
+    "surface": "report",
+    "title": "Fusor Test262 Failure Analysis",
+    "description": "Technical decomposition of the full custom-policy Test262 report.",
+    "generatedAt": "2026-08-08T07:53:04.825Z",
+    "sources": [
+      {
+        "id": "report-file",
+        "label": "fusor-test262-full-fixed.json",
+        "path": "fusor-test262-full-fixed.json"
+      },
+      {
+        "id": "summary-source",
+        "label": "fusor-test262-full-fixed.json",
+        "path": "fusor-test262-full-fixed.json",
+        "query": {
+          "engine": "SQLite JSON1",
+          "language": "sql",
+          "description": "Reproduces headline accounting, unique-path, opaque-detail, and strict/non-strict pairing metrics.",
+          "sql": "WITH raw(doc) AS (\n  SELECT json(readfile('fusor-test262-full-fixed.json'))\n), failures AS (\n  SELECT json_extract(value, '$.path') AS path,\n         json_extract(value, '$.detail') AS detail\n  FROM raw, json_each(doc, '$.execution.failures')\n), path_counts AS (\n  SELECT path, count(*) AS n FROM failures GROUP BY path\n)\nSELECT\n  CAST(json_extract(doc, '$.execution.passed') AS REAL)\n    / json_extract(doc, '$.inventory.admitted_cases') AS pass_rate,\n  json_extract(doc, '$.execution.passed') AS passed,\n  json_extract(doc, '$.execution.failed') AS admitted_failures,\n  json_extract(doc, '$.inventory.admitted_cases') AS admitted_cases,\n  (SELECT count(*) FROM path_counts) AS unique_failure_paths,\n  json_extract(doc, '$.inventory.skipped_cases') AS skipped_cases,\n  json_extract(doc, '$.inventory.admitted_cases')\n    + json_extract(doc, '$.inventory.skipped_cases') AS total_planned_cases,\n  CAST(json_extract(doc, '$.inventory.skipped_cases') AS REAL)\n    / (json_extract(doc, '$.inventory.admitted_cases')\n       + json_extract(doc, '$.inventory.skipped_cases')) AS skipped_share,\n  (SELECT count(*) FROM failures\n   WHERE detail = 'uncaught JavaScript value') AS opaque_failures,\n  CAST((SELECT count(*) FROM failures\n        WHERE detail = 'uncaught JavaScript value') AS REAL)\n    / json_extract(doc, '$.execution.failed') AS opaque_share,\n  CAST((SELECT sum(n) FROM path_counts WHERE n = 2) AS REAL)\n    / json_extract(doc, '$.execution.failed') AS paired_failure_share\nFROM raw;",
+          "filters": [
+            "Test262 revision be13516fb6441b950ba8a3df97eb34062c186972",
+            "Policy fingerprint 84d947e4c80827a1",
+            "All admitted failure records; no sampling"
+          ],
+          "metric_definitions": [
+            "Pass rate = passed / admitted cases",
+            "Unique failing paths deduplicate strict and non-strict modes by path",
+            "Opaque failures have detail exactly equal to uncaught JavaScript value"
+          ],
+          "tables_used": [
+            "fusor-test262-full-fixed.json"
+          ]
+        }
+      },
+      {
+        "id": "cohort-source",
+        "label": "fusor-test262-full-fixed.json",
+        "path": "fusor-test262-full-fixed.json",
+        "query": {
+          "engine": "SQLite JSON1",
+          "language": "sql",
+          "description": "Groups admitted failures by top-level language/staging cohort or built-in family.",
+          "sql": "WITH raw(doc) AS (\n  SELECT json(readfile('fusor-test262-full-fixed.json'))\n), failures AS (\n  SELECT json_extract(value, '$.path') AS path\n  FROM raw, json_each(doc, '$.execution.failures')\n), labeled AS (\n  SELECT path,\n    CASE WHEN path LIKE 'built-ins/%'\n      THEN 'built-ins/' || substr(substr(path, 11), 1,\n        instr(substr(path, 11), '/') - 1)\n      ELSE substr(path, 1, instr(path, '/') - 1)\n    END AS cohort\n  FROM failures\n), grouped AS (\n  SELECT cohort, count(*) AS cases, count(DISTINCT path) AS unique_paths\n  FROM labeled GROUP BY cohort\n), ranked AS (\n  SELECT *, row_number() OVER (ORDER BY cases DESC) AS rank FROM grouped\n)\nSELECT rank, cohort, cases, unique_paths,\n       CAST(cases AS REAL) / 9216 AS failure_share,\n       CAST(cases AS REAL) / 79779 * 100 AS uplift_pp\nFROM ranked WHERE rank <= 12\nUNION ALL\nSELECT 13, 'Other', sum(cases), sum(unique_paths),\n       CAST(sum(cases) AS REAL) / 9216,\n       CAST(sum(cases) AS REAL) / 79779 * 100\nFROM ranked WHERE rank > 12\nORDER BY rank;",
+          "filters": [
+            "Test262 revision be13516fb6441b950ba8a3df97eb34062c186972",
+            "Policy fingerprint 84d947e4c80827a1",
+            "All admitted failure records; no sampling"
+          ],
+          "metric_definitions": [
+            "Failure share = cohort cases / 9,216",
+            "Potential uplift in percentage points = cohort cases / 79,779 * 100"
+          ],
+          "tables_used": [
+            "fusor-test262-full-fixed.json"
+          ]
+        }
+      },
+      {
+        "id": "phase-source",
+        "label": "fusor-test262-full-fixed.json",
+        "path": "fusor-test262-full-fixed.json",
+        "query": {
+          "engine": "SQLite JSON1",
+          "language": "sql",
+          "description": "Groups admitted failures by the report actual field.",
+          "sql": "WITH raw(doc) AS (\n  SELECT json(readfile('fusor-test262-full-fixed.json'))\n), failures AS (\n  SELECT json_extract(value, '$.actual') AS phase,\n         json_extract(value, '$.path') AS path\n  FROM raw, json_each(doc, '$.execution.failures')\n)\nSELECT phase, count(*) AS cases, count(DISTINCT path) AS unique_paths,\n       CAST(count(*) AS REAL) / 9216 AS failure_share\nFROM failures\nGROUP BY phase\nORDER BY cases DESC;",
+          "filters": [
+            "Test262 revision be13516fb6441b950ba8a3df97eb34062c186972",
+            "Policy fingerprint 84d947e4c80827a1",
+            "All admitted failure records; no sampling"
+          ],
+          "metric_definitions": [
+            "Failure share = phase cases / 9,216"
+          ],
+          "tables_used": [
+            "fusor-test262-full-fixed.json"
+          ]
+        }
+      },
+      {
+        "id": "root-source",
+        "label": "fusor-test262-full-fixed.json",
+        "path": "fusor-test262-full-fixed.json",
+        "query": {
+          "engine": "SQLite JSON1",
+          "language": "sql",
+          "description": "Counts overlapping stable diagnostic signatures used to prioritize implementation.",
+          "sql": "WITH raw(doc) AS (\n  SELECT json(readfile('fusor-test262-full-fixed.json'))\n), failures AS (\n  SELECT json_extract(value, '$.actual') AS actual,\n         json_extract(value, '$.detail') AS detail,\n         json_extract(value, '$.path') AS path\n  FROM raw, json_each(doc, '$.execution.failures')\n), clusters(priority, cluster, path) AS (\n  SELECT 1, 'Class statement/expression semantics', path FROM failures\n   WHERE path LIKE 'language/statements/class/%'\n      OR path LIKE 'language/expressions/class/%'\n  UNION ALL\n  SELECT 2, 'Direct and indirect eval', path FROM failures\n   WHERE instr(detail, 'DirectEval') > 0\n      OR detail = 'ReferenceError: ''eval'' is not defined'\n  UNION ALL\n  SELECT 3, 'Iterator intrinsic and helpers', path FROM failures\n   WHERE path LIKE 'built-ins/Iterator/%'\n  UNION ALL\n  SELECT 4, 'Temporal completion', path FROM failures\n   WHERE path LIKE 'built-ins/Temporal/%'\n  UNION ALL\n  SELECT 5, 'with statement', path FROM failures\n   WHERE instr(detail, 'unsupported compiler feature WithStatement') > 0\n  UNION ALL\n  SELECT 6, 'Compiler/verifier disagreements', path FROM failures\n   WHERE actual = 'compiler'\n     AND (detail LIKE 'function %'\n       OR detail LIKE 'bytecode verification failed%')\n  UNION ALL\n  SELECT 7, 'Unsupported expression leaves', path FROM failures\n   WHERE actual = 'compiler'\n     AND detail LIKE 'unsupported leaf feature UnsupportedExpression%'\n  UNION ALL\n  SELECT 8, 'Unsupported binding leaves', path FROM failures\n   WHERE actual = 'compiler'\n     AND detail LIKE 'unsupported leaf feature UnsupportedBinding%'\n  UNION ALL\n  SELECT 9, 'Runtime invariants', path FROM failures\n   WHERE actual = 'host-execution'\n     AND detail LIKE 'runtime invariant failed%'\n  UNION ALL\n  SELECT 10, 'Instruction fuel exhaustion', path FROM failures\n   WHERE detail LIKE 'instruction limit %'\n  UNION ALL\n  SELECT 11, 'Staging-only failures', path FROM failures\n   WHERE path LIKE 'staging/%'\n)\nSELECT priority, cluster, count(*) AS cases,\n       count(DISTINCT path) AS unique_paths\nFROM clusters\nGROUP BY priority, cluster\nORDER BY priority;",
+          "filters": [
+            "Test262 revision be13516fb6441b950ba8a3df97eb34062c186972",
+            "Policy fingerprint 84d947e4c80827a1",
+            "All admitted failure records; no sampling"
+          ],
+          "metric_definitions": [
+            "Clusters overlap and are not an additive decomposition",
+            "Unique paths deduplicate execution modes inside each cluster"
+          ],
+          "tables_used": [
+            "fusor-test262-full-fixed.json"
+          ]
+        }
+      },
+      {
+        "id": "skip-source",
+        "label": "fusor-test262-full-fixed.json",
+        "path": "fusor-test262-full-fixed.json",
+        "query": {
+          "engine": "SQLite JSON1",
+          "language": "sql",
+          "description": "Groups explicit skip reasons and combines the long tail as Other skips.",
+          "sql": "WITH raw(doc) AS (\n  SELECT json(readfile('fusor-test262-full-fixed.json'))\n), skips AS (\n  SELECT key AS reason, CAST(value AS INTEGER) AS cases\n  FROM raw, json_each(doc, '$.inventory.skip_counts')\n), labeled AS (\n  SELECT CASE reason\n    WHEN 'unsupported-async-host-print' THEN 'Unsupported async host completion'\n    WHEN 'low-priority-intl402' THEN 'Low-priority ECMA-402'\n    WHEN 'quickjs-baseline-exclude' THEN 'QuickJS baseline exclusions'\n    WHEN 'unsupported-test262-host-api' THEN 'Unsupported Test262 host API'\n    WHEN 'quickjs-skipped-feature:explicit-resource-management'\n      THEN 'Explicit resource management'\n    WHEN 'unsupported-module-goal' THEN 'Unsupported module goal'\n    ELSE 'Other skips'\n  END AS reason, cases\n  FROM skips\n), totals AS (\n  SELECT sum(cases) AS total FROM labeled\n)\nSELECT reason, sum(cases) AS cases,\n       CAST(sum(cases) AS REAL) / total AS skip_share\nFROM labeled, totals\nGROUP BY reason, total\nORDER BY cases DESC;",
+          "filters": [
+            "Test262 revision be13516fb6441b950ba8a3df97eb34062c186972",
+            "Policy fingerprint 84d947e4c80827a1",
+            "All admitted failure records; no sampling"
+          ],
+          "metric_definitions": [
+            "Skip share = reason cases / 23,133"
+          ],
+          "tables_used": [
+            "fusor-test262-full-fixed.json"
+          ]
+        }
+      }
+    ],
+    "cards": [
+      {
+        "id": "pass-rate",
+        "dataset": "summary",
+        "sourceId": "summary-source",
+        "description": "Passing share of admitted cases only.",
+        "metrics": [
+          {
+            "label": "Admitted pass rate",
+            "field": "pass_rate",
+            "format": "percent"
+          },
+          {
+            "label": "Passed",
+            "field": "passed",
+            "format": "compact"
+          }
+        ]
+      },
+      {
+        "id": "failures",
+        "dataset": "summary",
+        "sourceId": "summary-source",
+        "description": "Failure records include strict/non-strict mode duplication.",
+        "metrics": [
+          {
+            "label": "Failure records",
+            "field": "admitted_failures",
+            "format": "compact"
+          },
+          {
+            "label": "Unique paths",
+            "field": "unique_failure_paths",
+            "format": "compact"
+          }
+        ]
+      },
+      {
+        "id": "skips",
+        "dataset": "summary",
+        "sourceId": "summary-source",
+        "description": "Explicit policy and host-capability skips.",
+        "metrics": [
+          {
+            "label": "Skipped cases",
+            "field": "skipped_cases",
+            "format": "compact"
+          },
+          {
+            "label": "Planned share",
+            "field": "skipped_share",
+            "format": "percent"
+          }
+        ]
+      },
+      {
+        "id": "opaque",
+        "dataset": "summary",
+        "sourceId": "summary-source",
+        "description": "Failures whose report detail is only an untyped thrown JavaScript value.",
+        "metrics": [
+          {
+            "label": "Opaque failures",
+            "field": "opaque_failures",
+            "format": "compact"
+          },
+          {
+            "label": "Failure share",
+            "field": "opaque_share",
+            "format": "percent"
+          }
+        ]
+      }
+    ],
+    "charts": [
+      {
+        "id": "failure-cohorts",
+        "title": "Admitted Test262 failures by cohort",
+        "subtitle": "Language semantics account for 47.7%; staging is shown separately because it is not the normative core.",
+        "type": "bar",
+        "dataset": "cohorts",
+        "sourceId": "cohort-source",
+        "encodings": {
+          "x": {
+            "field": "cohort",
+            "type": "nominal",
+            "label": "Cohort"
+          },
+          "y": {
+            "field": "cases",
+            "type": "quantitative",
+            "label": "Failure records",
+            "format": "compact"
+          },
+          "tooltip": [
+            {
+              "field": "unique_paths",
+              "type": "quantitative",
+              "label": "Unique paths",
+              "format": "compact"
+            },
+            {
+              "field": "failure_share",
+              "type": "quantitative",
+              "label": "Failure share",
+              "format": "percent"
+            },
+            {
+              "field": "uplift_pp",
+              "type": "quantitative",
+              "label": "Maximum pass-rate uplift",
+              "format": "number",
+              "unit": "pp"
+            }
+          ]
+        },
+        "valueFormat": "compact",
+        "labels": {
+          "values": "all"
+        },
+        "palette": {
+          "kind": "sequential"
+        },
+        "settings": {
+          "orientation": "horizontal",
+          "sort": "descending",
+          "showValues": true
+        },
+        "layout": "full"
+      }
+    ],
+    "tables": [
+      {
+        "id": "failure-phases",
+        "title": "Failure records by engine phase",
+        "subtitle": "Phase labels come directly from the JSON report's actual field.",
+        "dataset": "phases",
+        "sourceId": "phase-source",
+        "defaultSort": {
+          "field": "cases",
+          "direction": "desc"
+        },
+        "density": "dense",
+        "layout": "full",
+        "columns": [
+          {
+            "field": "phase",
+            "label": "Phase",
+            "type": "text"
+          },
+          {
+            "field": "cases",
+            "label": "Cases",
+            "format": "number"
+          },
+          {
+            "field": "unique_paths",
+            "label": "Unique paths",
+            "format": "number"
+          },
+          {
+            "field": "failure_share",
+            "label": "Failure share",
+            "format": "percent"
+          }
+        ]
+      },
+      {
+        "id": "root-clusters",
+        "title": "Root-cause clusters and implementation order",
+        "subtitle": "Clusters are diagnostic signatures and may overlap; priority follows ES-spec impact before proposal and staging breadth.",
+        "dataset": "root_clusters",
+        "sourceId": "root-source",
+        "defaultSort": {
+          "field": "priority",
+          "direction": "asc"
+        },
+        "density": "spacious",
+        "layout": "full",
+        "columns": [
+          {
+            "field": "priority",
+            "label": "Priority",
+            "format": "number"
+          },
+          {
+            "field": "cluster",
+            "label": "Cluster",
+            "type": "text"
+          },
+          {
+            "field": "cases",
+            "label": "Cases",
+            "format": "number"
+          },
+          {
+            "field": "unique_paths",
+            "label": "Paths",
+            "format": "number"
+          },
+          {
+            "field": "confidence",
+            "label": "Confidence",
+            "type": "text"
+          },
+          {
+            "field": "evidence",
+            "label": "Evidence",
+            "type": "text"
+          },
+          {
+            "field": "action",
+            "label": "Next action",
+            "type": "text"
+          }
+        ]
+      },
+      {
+        "id": "skip-profile",
+        "title": "Largest explicit skip reasons",
+        "subtitle": "Skipped cases are outside the 88.45% admitted-case denominator.",
+        "dataset": "skips",
+        "sourceId": "skip-source",
+        "defaultSort": {
+          "field": "cases",
+          "direction": "desc"
+        },
+        "density": "dense",
+        "layout": "full",
+        "columns": [
+          {
+            "field": "reason",
+            "label": "Reason",
+            "type": "text"
+          },
+          {
+            "field": "cases",
+            "label": "Cases",
+            "format": "number"
+          },
+          {
+            "field": "skip_share",
+            "label": "Share of skips",
+            "format": "percent"
+          }
+        ]
+      }
+    ],
+    "blocks": [
+      {
+        "id": "title",
+        "type": "markdown",
+        "body": "# Fusor Test262 Failure Analysis",
+        "layout": "full"
+      },
+      {
+        "id": "summary-text",
+        "type": "markdown",
+        "sourceId": "report-file",
+        "layout": "full",
+        "body": "## Technical summary\n\nThe 88.45% headline is accurate for admitted cases, but the 9,216 failures are highly concentrated. There are 5,045 unique failing paths; 4,171 paths fail in both strict and non-strict modes, producing 90.5% of all failure records. Core `language/` tests contribute 4,394 failures (47.7%), and class statements/expressions alone contribute 2,116. The clearest missing language feature is eval: 1,809 failure records directly identify `DirectEval` or a missing `eval` global. Iterator (1,094 main-suite failures) and Temporal (1,254) are the largest built-in families.\n\n`UnsupportedExpression` is no longer a broad dominant category: it accounts for 246 failures, of which 192 are dynamic import. The immediate risk is diagnostic opacity—3,243 records (35.2%) say only `uncaught JavaScript value`, especially across class tests—so those cannot yet be assigned to precise semantic defects from this report alone."
+      },
+      {
+        "id": "metrics",
+        "type": "metric-strip",
+        "cardIds": [
+          "pass-rate",
+          "failures",
+          "skips",
+          "opaque"
+        ],
+        "layout": "full"
+      },
+      {
+        "id": "cohort-text",
+        "type": "markdown",
+        "sourceId": "report-file",
+        "layout": "full",
+        "body": "## Nearly half of admitted failures are core language semantics\n\nThe distribution is not a long tail of unrelated built-ins. Language semantics, Temporal, Iterator, and staging account for 84.3% of failure records. For ES-spec-first work, staging should be isolated from normative prioritization; its 1,027 failures include 131 SpiderMonkey harness failures."
+      },
+      {
+        "id": "cohort-chart",
+        "type": "chart",
+        "chartId": "failure-cohorts",
+        "layout": "full"
+      },
+      {
+        "id": "phase-text",
+        "type": "markdown",
+        "sourceId": "report-file",
+        "layout": "full",
+        "body": "## Compiler gates and opaque runtime throws dominate the failure modes\n\nCompiler rejections contribute 3,033 failures: 1,946 are named compiler features, 544 are unsupported leaf kinds, 491 are compiler/verifier certificate disagreements, 36 are compiler resource limits, and 16 are unsupported RegExp execution. Runtime records are less actionable because 3,243 failures preserve no thrown type or message."
+      },
+      {
+        "id": "phase-table",
+        "type": "table",
+        "tableId": "failure-phases",
+        "layout": "full"
+      },
+      {
+        "id": "root-text",
+        "type": "markdown",
+        "sourceId": "report-file",
+        "layout": "full",
+        "body": "## The highest-leverage fixes are class semantics, eval, Iterator, and Temporal\n\nClass is the largest path cohort but needs better thrown-value diagnostics before its 1,644 opaque failures can be split safely. Eval is the largest concrete single feature gate. Iterator is the cleanest built-in win: 924 failures are directly caused by the absent global, with the rest concentrated in helper methods. Temporal is broad but still concentrated in ZonedDateTime and shared conversion dependencies. The table below is an implementation queue, not an additive decomposition."
+      },
+      {
+        "id": "root-table",
+        "type": "table",
+        "tableId": "root-clusters",
+        "layout": "full"
+      },
+      {
+        "id": "scope-text",
+        "type": "markdown",
+        "sourceId": "report-file",
+        "layout": "full",
+        "body": "## Scope, denominator, and policy\n\nSource revision: `be13516fb6441b950ba8a3df97eb34062c186972`; policy fingerprint: `84d947e4c80827a1`. The runner planned 102,912 mode-expanded cases, admitted 79,779, passed 70,563, failed 9,216, and skipped 23,133. Therefore 68.57% of the planned inventory is a confirmed pass, 8.96% is an admitted failure, and 22.48% is unexecuted by policy or host capability. The latter is coverage debt, not a failure count."
+      },
+      {
+        "id": "skip-table",
+        "type": "table",
+        "tableId": "skip-profile",
+        "layout": "full"
+      },
+      {
+        "id": "method-text",
+        "type": "markdown",
+        "sourceId": "report-file",
+        "layout": "full",
+        "body": "## Method\n\nThe analysis validated that `passed + failed = admitted` and that skip-reason counts sum to the reported skipped total. Failure records were grouped independently by engine phase, path cohort, stable detail signature, and unique test path. Strict/non-strict records were retained for pass-rate accounting but deduplicated when estimating the number of affected files. Potential pass-rate uplifts are upper bounds, because one test may expose multiple dependencies and root-cause clusters intentionally overlap."
+      },
+      {
+        "id": "limits-text",
+        "type": "markdown",
+        "sourceId": "report-file",
+        "layout": "full",
+        "body": "## Limitations and robustness checks\n\n- The report stores only `uncaught JavaScript value` for 3,243 failures, so assertion failures and engine-thrown values cannot be separated.\n- `staging/` contributes 1,027 failures and includes non-normative SpiderMonkey tests and shell harness dependencies; it should not drive ECMA-262 priorities.\n- Ninety-four failures exhaust 50 million instructions; 84 are generated RegExp property-escape stress cases, so they are performance/fuel findings until a semantic mismatch is reproduced.\n- The report contains failure records but not a path-level inventory of passes, so cohort-specific pass rates cannot be computed.\n- This is one revision and one policy snapshot; there is no prior baseline in the supplied artifact for regression attribution."
+      },
+      {
+        "id": "next-text",
+        "type": "markdown",
+        "sourceId": "report-file",
+        "layout": "full",
+        "body": "## Recommended next steps\n\n1. Extend failure records with thrown value type, message, and stack, and report staging separately.\n2. Run a focused class cohort after that diagnostic change; split the 1,644 opaque class failures by private elements, fields, `super`, constructor initialization, and descriptors.\n3. Implement direct/indirect eval with realm and lexical-environment semantics; it is the largest concrete language gate.\n4. Implement the `Iterator` intrinsic and synchronous helpers, then finish Temporal ZonedDateTime/Now and shared conversions.\n5. Close normative `with`, dynamic import/module execution, catch-binding lowering, and the 491 compiler/verifier disagreements.\n6. Treat the 97 runtime-invariant failures as focused correctness P0s; profile the 94 fuel failures before increasing limits.\n7. Add the async host completion driver to expose the 9,986 currently skipped async cases. Expect the admitted pass rate to move downward initially as coverage becomes more honest."
+      },
+      {
+        "id": "questions-text",
+        "type": "markdown",
+        "layout": "full",
+        "body": "## Further questions\n\n- Which class subfamilies dominate after thrown values become observable?\n- How many of the 9,986 async-host skips pass once the host completion channel exists?\n- Which staging tests should remain in the compatibility lane rather than the ES conformance lane?\n- Should later Iterator proposals be reported separately from the ES2025 Iterator Helpers baseline?"
+      }
+    ]
+  },
+  "snapshot": {
+    "version": 1,
+    "generatedAt": "2026-08-08T07:53:04.825Z",
+    "status": "ready",
+    "datasets": {
+      "summary": [
+        {
+          "pass_rate": 0.8844808784266537,
+          "passed": 70563,
+          "admitted_failures": 9216,
+          "admitted_cases": 79779,
+          "unique_failure_paths": 5045,
+          "skipped_cases": 23133,
+          "total_planned_cases": 102912,
+          "skipped_share": 0.2247842817164179,
+          "opaque_failures": 3243,
+          "opaque_share": 0.3518880208333333,
+          "paired_failure_share": 0.9051649305555556
+        }
+      ],
+      "cohorts": [
+        {
+          "rank": 1,
+          "cohort": "Language semantics",
+          "cases": 4394,
+          "unique_paths": 2549,
+          "failure_share": 0.4767795138888889,
+          "uplift_pp": 5.507715062861154
+        },
+        {
+          "rank": 2,
+          "cohort": "Temporal",
+          "cases": 1254,
+          "unique_paths": 627,
+          "failure_share": 0.13606770833333334,
+          "uplift_pp": 1.5718422141164967
+        },
+        {
+          "rank": 3,
+          "cohort": "Iterator",
+          "cases": 1094,
+          "unique_paths": 547,
+          "failure_share": 0.11870659722222222,
+          "uplift_pp": 1.3712881836072148
+        },
+        {
+          "rank": 4,
+          "cohort": "Staging",
+          "cases": 1027,
+          "unique_paths": 566,
+          "failure_share": 0.11143663194444445,
+          "uplift_pp": 1.2873061833314532
+        },
+        {
+          "rank": 5,
+          "cohort": "Object",
+          "cases": 330,
+          "unique_paths": 165,
+          "failure_share": 0.035807291666666664,
+          "uplift_pp": 0.41364268792539394
+        },
+        {
+          "rank": 6,
+          "cohort": "RegExp",
+          "cases": 170,
+          "unique_paths": 85,
+          "failure_share": 0.018446180555555556,
+          "uplift_pp": 0.213088657416112
+        },
+        {
+          "rank": 7,
+          "cohort": "TypedArray",
+          "cases": 165,
+          "unique_paths": 88,
+          "failure_share": 0.017903645833333332,
+          "uplift_pp": 0.20682134396269697
+        },
+        {
+          "rank": 8,
+          "cohort": "Array",
+          "cases": 163,
+          "unique_paths": 88,
+          "failure_share": 0.017686631944444444,
+          "uplift_pp": 0.20431441858133093
+        },
+        {
+          "rank": 9,
+          "cohort": "TypedArray constructors",
+          "cases": 126,
+          "unique_paths": 65,
+          "failure_share": 0.013671875,
+          "uplift_pp": 0.1579362990260595
+        },
+        {
+          "rank": 10,
+          "cohort": "Uint8Array",
+          "cases": 116,
+          "unique_paths": 58,
+          "failure_share": 0.012586805555555556,
+          "uplift_pp": 0.14540167211922936
+        },
+        {
+          "rank": 11,
+          "cohort": "String",
+          "cases": 87,
+          "unique_paths": 44,
+          "failure_share": 0.009440104166666666,
+          "uplift_pp": 0.10905125408942204
+        },
+        {
+          "rank": 12,
+          "cohort": "Error",
+          "cases": 66,
+          "unique_paths": 33,
+          "failure_share": 0.007161458333333333,
+          "uplift_pp": 0.08272853758507878
+        },
+        {
+          "rank": 13,
+          "cohort": "Other",
+          "cases": 224,
+          "unique_paths": 130,
+          "failure_share": 0.024305555555555556,
+          "uplift_pp": 0.28077564271299466
+        }
+      ],
+      "phases": [
+        {
+          "phase": "Runtime throw (untyped)",
+          "cases": 3175,
+          "unique_paths": 1592,
+          "failure_share": 0.3445
+        },
+        {
+          "phase": "Compiler",
+          "cases": 3033,
+          "unique_paths": 1904,
+          "failure_share": 0.3291
+        },
+        {
+          "phase": "Runtime TypeError",
+          "cases": 1512,
+          "unique_paths": 770,
+          "failure_share": 0.1641
+        },
+        {
+          "phase": "Runtime ReferenceError",
+          "cases": 1092,
+          "unique_paths": 564,
+          "failure_share": 0.1185
+        },
+        {
+          "phase": "Host execution",
+          "cases": 221,
+          "unique_paths": 114,
+          "failure_share": 0.024
+        },
+        {
+          "phase": "Harness",
+          "cases": 131,
+          "unique_paths": 66,
+          "failure_share": 0.0142
+        },
+        {
+          "phase": "Frontend profile",
+          "cases": 33,
+          "unique_paths": 32,
+          "failure_share": 0.0036
+        },
+        {
+          "phase": "Runtime RangeError",
+          "cases": 18,
+          "unique_paths": 9,
+          "failure_share": 0.002
+        },
+        {
+          "phase": "Unexpected normal completion",
+          "cases": 1,
+          "unique_paths": 1,
+          "failure_share": 0.0001
+        }
+      ],
+      "root_clusters": [
+        {
+          "priority": 1,
+          "cluster": "Class statement/expression semantics",
+          "cases": 2116,
+          "unique_paths": 1069,
+          "confidence": "Medium",
+          "evidence": "1,644 opaque runtime throws; 439 compiler failures",
+          "action": "Improve thrown-value diagnostics, then split private/class-field/super/constructor failures"
+        },
+        {
+          "priority": 2,
+          "cluster": "Direct and indirect eval",
+          "cases": 1809,
+          "unique_paths": 1124,
+          "confidence": "High",
+          "evidence": "1,555 compiler DirectEval; 162 missing eval global; 92 harness/host",
+          "action": "Implement realm-correct direct and indirect eval before chasing dependent suites"
+        },
+        {
+          "priority": 3,
+          "cluster": "Iterator intrinsic and helpers",
+          "cases": 1094,
+          "unique_paths": 547,
+          "confidence": "High",
+          "evidence": "924 missing Iterator global; remaining helper methods/semantics",
+          "action": "Install Iterator intrinsic, Iterator.from, helper records, close semantics"
+        },
+        {
+          "priority": 4,
+          "cluster": "Temporal completion",
+          "cases": 1254,
+          "unique_paths": 627,
+          "confidence": "High",
+          "evidence": "596 ZonedDateTime; 178 PlainDate; 152 Duration; 134 PlainDateTime; 132 Now",
+          "action": "Finish ZonedDateTime/Now first, then shared conversions and missing methods"
+        },
+        {
+          "priority": 5,
+          "cluster": "with statement",
+          "cases": 291,
+          "unique_paths": 291,
+          "confidence": "High",
+          "evidence": "290 non-strict and one raw WithStatement compiler rejection",
+          "action": "Implement normative non-strict with environment semantics"
+        },
+        {
+          "priority": 6,
+          "cluster": "Compiler/verifier disagreements",
+          "cases": 491,
+          "unique_paths": 254,
+          "confidence": "High",
+          "evidence": "268 function-certificate errors plus 223 bytecode verification errors",
+          "action": "Cluster by verifier invariant and fix lowering/certificate ownership"
+        },
+        {
+          "priority": 7,
+          "cluster": "Unsupported expression leaves",
+          "cases": 246,
+          "unique_paths": 123,
+          "confidence": "High",
+          "evidence": "192 cases are dynamic import",
+          "action": "Treat mainly as the module/dynamic-import vertical, not a generic expression backlog"
+        },
+        {
+          "priority": 8,
+          "cluster": "Unsupported binding leaves",
+          "cases": 180,
+          "unique_paths": 90,
+          "confidence": "High",
+          "evidence": "178 cases are try/catch",
+          "action": "Fix catch binding/lowering edge rather than broad binding support"
+        },
+        {
+          "priority": 9,
+          "cluster": "Runtime invariants",
+          "cases": 97,
+          "unique_paths": 50,
+          "confidence": "High",
+          "evidence": "Property mutation, array index, BigInt conversion, super-frame invariants",
+          "action": "Handle as correctness P0s with focused reproductions"
+        },
+        {
+          "priority": 10,
+          "cluster": "Instruction fuel exhaustion",
+          "cases": 94,
+          "unique_paths": 47,
+          "confidence": "Medium",
+          "evidence": "84 cases are generated RegExp property-escape stress tests",
+          "action": "Profile RegExp execution before changing the 50M fuel limit"
+        },
+        {
+          "priority": 11,
+          "cluster": "Staging-only failures",
+          "cases": 1027,
+          "unique_paths": 566,
+          "confidence": "High",
+          "evidence": "Includes 131 SpiderMonkey harness failures",
+          "action": "Report separately; do not outrank normative ECMA-262 failures"
+        }
+      ],
+      "skips": [
+        {
+          "reason": "Unsupported async host completion",
+          "cases": 9986,
+          "skip_share": 0.4316776898802576
+        },
+        {
+          "reason": "Low-priority ECMA-402",
+          "cases": 6714,
+          "skip_share": 0.2902347296070549
+        },
+        {
+          "reason": "QuickJS baseline exclusions",
+          "cases": 1507,
+          "skip_share": 0.06514503090822635
+        },
+        {
+          "reason": "Unsupported Test262 host API",
+          "cases": 1319,
+          "skip_share": 0.05701811265292007
+        },
+        {
+          "reason": "Explicit resource management",
+          "cases": 947,
+          "skip_share": 0.04093718929667575
+        },
+        {
+          "reason": "Unsupported module goal",
+          "cases": 683,
+          "skip_share": 0.02952492110837332
+        },
+        {
+          "reason": "Other skips",
+          "cases": 1977,
+          "skip_share": 0.08546232654649202
+        }
+      ]
+    }
+  },
+  "sources": [
+    {
+      "id": "report-file",
+      "label": "fusor-test262-full-fixed.json",
+      "path": "fusor-test262-full-fixed.json"
+    },
+    {
+      "id": "summary-source",
+      "label": "fusor-test262-full-fixed.json",
+      "path": "fusor-test262-full-fixed.json",
+      "query": {
+        "engine": "SQLite JSON1",
+        "language": "sql",
+        "description": "Reproduces headline accounting, unique-path, opaque-detail, and strict/non-strict pairing metrics.",
+        "sql": "WITH raw(doc) AS (\n  SELECT json(readfile('fusor-test262-full-fixed.json'))\n), failures AS (\n  SELECT json_extract(value, '$.path') AS path,\n         json_extract(value, '$.detail') AS detail\n  FROM raw, json_each(doc, '$.execution.failures')\n), path_counts AS (\n  SELECT path, count(*) AS n FROM failures GROUP BY path\n)\nSELECT\n  CAST(json_extract(doc, '$.execution.passed') AS REAL)\n    / json_extract(doc, '$.inventory.admitted_cases') AS pass_rate,\n  json_extract(doc, '$.execution.passed') AS passed,\n  json_extract(doc, '$.execution.failed') AS admitted_failures,\n  json_extract(doc, '$.inventory.admitted_cases') AS admitted_cases,\n  (SELECT count(*) FROM path_counts) AS unique_failure_paths,\n  json_extract(doc, '$.inventory.skipped_cases') AS skipped_cases,\n  json_extract(doc, '$.inventory.admitted_cases')\n    + json_extract(doc, '$.inventory.skipped_cases') AS total_planned_cases,\n  CAST(json_extract(doc, '$.inventory.skipped_cases') AS REAL)\n    / (json_extract(doc, '$.inventory.admitted_cases')\n       + json_extract(doc, '$.inventory.skipped_cases')) AS skipped_share,\n  (SELECT count(*) FROM failures\n   WHERE detail = 'uncaught JavaScript value') AS opaque_failures,\n  CAST((SELECT count(*) FROM failures\n        WHERE detail = 'uncaught JavaScript value') AS REAL)\n    / json_extract(doc, '$.execution.failed') AS opaque_share,\n  CAST((SELECT sum(n) FROM path_counts WHERE n = 2) AS REAL)\n    / json_extract(doc, '$.execution.failed') AS paired_failure_share\nFROM raw;",
+        "filters": [
+          "Test262 revision be13516fb6441b950ba8a3df97eb34062c186972",
+          "Policy fingerprint 84d947e4c80827a1",
+          "All admitted failure records; no sampling"
+        ],
+        "metric_definitions": [
+          "Pass rate = passed / admitted cases",
+          "Unique failing paths deduplicate strict and non-strict modes by path",
+          "Opaque failures have detail exactly equal to uncaught JavaScript value"
+        ],
+        "tables_used": [
+          "fusor-test262-full-fixed.json"
+        ]
+      }
+    },
+    {
+      "id": "cohort-source",
+      "label": "fusor-test262-full-fixed.json",
+      "path": "fusor-test262-full-fixed.json",
+      "query": {
+        "engine": "SQLite JSON1",
+        "language": "sql",
+        "description": "Groups admitted failures by top-level language/staging cohort or built-in family.",
+        "sql": "WITH raw(doc) AS (\n  SELECT json(readfile('fusor-test262-full-fixed.json'))\n), failures AS (\n  SELECT json_extract(value, '$.path') AS path\n  FROM raw, json_each(doc, '$.execution.failures')\n), labeled AS (\n  SELECT path,\n    CASE WHEN path LIKE 'built-ins/%'\n      THEN 'built-ins/' || substr(substr(path, 11), 1,\n        instr(substr(path, 11), '/') - 1)\n      ELSE substr(path, 1, instr(path, '/') - 1)\n    END AS cohort\n  FROM failures\n), grouped AS (\n  SELECT cohort, count(*) AS cases, count(DISTINCT path) AS unique_paths\n  FROM labeled GROUP BY cohort\n), ranked AS (\n  SELECT *, row_number() OVER (ORDER BY cases DESC) AS rank FROM grouped\n)\nSELECT rank, cohort, cases, unique_paths,\n       CAST(cases AS REAL) / 9216 AS failure_share,\n       CAST(cases AS REAL) / 79779 * 100 AS uplift_pp\nFROM ranked WHERE rank <= 12\nUNION ALL\nSELECT 13, 'Other', sum(cases), sum(unique_paths),\n       CAST(sum(cases) AS REAL) / 9216,\n       CAST(sum(cases) AS REAL) / 79779 * 100\nFROM ranked WHERE rank > 12\nORDER BY rank;",
+        "filters": [
+          "Test262 revision be13516fb6441b950ba8a3df97eb34062c186972",
+          "Policy fingerprint 84d947e4c80827a1",
+          "All admitted failure records; no sampling"
+        ],
+        "metric_definitions": [
+          "Failure share = cohort cases / 9,216",
+          "Potential uplift in percentage points = cohort cases / 79,779 * 100"
+        ],
+        "tables_used": [
+          "fusor-test262-full-fixed.json"
+        ]
+      }
+    },
+    {
+      "id": "phase-source",
+      "label": "fusor-test262-full-fixed.json",
+      "path": "fusor-test262-full-fixed.json",
+      "query": {
+        "engine": "SQLite JSON1",
+        "language": "sql",
+        "description": "Groups admitted failures by the report actual field.",
+        "sql": "WITH raw(doc) AS (\n  SELECT json(readfile('fusor-test262-full-fixed.json'))\n), failures AS (\n  SELECT json_extract(value, '$.actual') AS phase,\n         json_extract(value, '$.path') AS path\n  FROM raw, json_each(doc, '$.execution.failures')\n)\nSELECT phase, count(*) AS cases, count(DISTINCT path) AS unique_paths,\n       CAST(count(*) AS REAL) / 9216 AS failure_share\nFROM failures\nGROUP BY phase\nORDER BY cases DESC;",
+        "filters": [
+          "Test262 revision be13516fb6441b950ba8a3df97eb34062c186972",
+          "Policy fingerprint 84d947e4c80827a1",
+          "All admitted failure records; no sampling"
+        ],
+        "metric_definitions": [
+          "Failure share = phase cases / 9,216"
+        ],
+        "tables_used": [
+          "fusor-test262-full-fixed.json"
+        ]
+      }
+    },
+    {
+      "id": "root-source",
+      "label": "fusor-test262-full-fixed.json",
+      "path": "fusor-test262-full-fixed.json",
+      "query": {
+        "engine": "SQLite JSON1",
+        "language": "sql",
+        "description": "Counts overlapping stable diagnostic signatures used to prioritize implementation.",
+        "sql": "WITH raw(doc) AS (\n  SELECT json(readfile('fusor-test262-full-fixed.json'))\n), failures AS (\n  SELECT json_extract(value, '$.actual') AS actual,\n         json_extract(value, '$.detail') AS detail,\n         json_extract(value, '$.path') AS path\n  FROM raw, json_each(doc, '$.execution.failures')\n), clusters(priority, cluster, path) AS (\n  SELECT 1, 'Class statement/expression semantics', path FROM failures\n   WHERE path LIKE 'language/statements/class/%'\n      OR path LIKE 'language/expressions/class/%'\n  UNION ALL\n  SELECT 2, 'Direct and indirect eval', path FROM failures\n   WHERE instr(detail, 'DirectEval') > 0\n      OR detail = 'ReferenceError: ''eval'' is not defined'\n  UNION ALL\n  SELECT 3, 'Iterator intrinsic and helpers', path FROM failures\n   WHERE path LIKE 'built-ins/Iterator/%'\n  UNION ALL\n  SELECT 4, 'Temporal completion', path FROM failures\n   WHERE path LIKE 'built-ins/Temporal/%'\n  UNION ALL\n  SELECT 5, 'with statement', path FROM failures\n   WHERE instr(detail, 'unsupported compiler feature WithStatement') > 0\n  UNION ALL\n  SELECT 6, 'Compiler/verifier disagreements', path FROM failures\n   WHERE actual = 'compiler'\n     AND (detail LIKE 'function %'\n       OR detail LIKE 'bytecode verification failed%')\n  UNION ALL\n  SELECT 7, 'Unsupported expression leaves', path FROM failures\n   WHERE actual = 'compiler'\n     AND detail LIKE 'unsupported leaf feature UnsupportedExpression%'\n  UNION ALL\n  SELECT 8, 'Unsupported binding leaves', path FROM failures\n   WHERE actual = 'compiler'\n     AND detail LIKE 'unsupported leaf feature UnsupportedBinding%'\n  UNION ALL\n  SELECT 9, 'Runtime invariants', path FROM failures\n   WHERE actual = 'host-execution'\n     AND detail LIKE 'runtime invariant failed%'\n  UNION ALL\n  SELECT 10, 'Instruction fuel exhaustion', path FROM failures\n   WHERE detail LIKE 'instruction limit %'\n  UNION ALL\n  SELECT 11, 'Staging-only failures', path FROM failures\n   WHERE path LIKE 'staging/%'\n)\nSELECT priority, cluster, count(*) AS cases,\n       count(DISTINCT path) AS unique_paths\nFROM clusters\nGROUP BY priority, cluster\nORDER BY priority;",
+        "filters": [
+          "Test262 revision be13516fb6441b950ba8a3df97eb34062c186972",
+          "Policy fingerprint 84d947e4c80827a1",
+          "All admitted failure records; no sampling"
+        ],
+        "metric_definitions": [
+          "Clusters overlap and are not an additive decomposition",
+          "Unique paths deduplicate execution modes inside each cluster"
+        ],
+        "tables_used": [
+          "fusor-test262-full-fixed.json"
+        ]
+      }
+    },
+    {
+      "id": "skip-source",
+      "label": "fusor-test262-full-fixed.json",
+      "path": "fusor-test262-full-fixed.json",
+      "query": {
+        "engine": "SQLite JSON1",
+        "language": "sql",
+        "description": "Groups explicit skip reasons and combines the long tail as Other skips.",
+        "sql": "WITH raw(doc) AS (\n  SELECT json(readfile('fusor-test262-full-fixed.json'))\n), skips AS (\n  SELECT key AS reason, CAST(value AS INTEGER) AS cases\n  FROM raw, json_each(doc, '$.inventory.skip_counts')\n), labeled AS (\n  SELECT CASE reason\n    WHEN 'unsupported-async-host-print' THEN 'Unsupported async host completion'\n    WHEN 'low-priority-intl402' THEN 'Low-priority ECMA-402'\n    WHEN 'quickjs-baseline-exclude' THEN 'QuickJS baseline exclusions'\n    WHEN 'unsupported-test262-host-api' THEN 'Unsupported Test262 host API'\n    WHEN 'quickjs-skipped-feature:explicit-resource-management'\n      THEN 'Explicit resource management'\n    WHEN 'unsupported-module-goal' THEN 'Unsupported module goal'\n    ELSE 'Other skips'\n  END AS reason, cases\n  FROM skips\n), totals AS (\n  SELECT sum(cases) AS total FROM labeled\n)\nSELECT reason, sum(cases) AS cases,\n       CAST(sum(cases) AS REAL) / total AS skip_share\nFROM labeled, totals\nGROUP BY reason, total\nORDER BY cases DESC;",
+        "filters": [
+          "Test262 revision be13516fb6441b950ba8a3df97eb34062c186972",
+          "Policy fingerprint 84d947e4c80827a1",
+          "All admitted failure records; no sampling"
+        ],
+        "metric_definitions": [
+          "Skip share = reason cases / 23,133"
+        ],
+        "tables_used": [
+          "fusor-test262-full-fixed.json"
+        ]
+      }
+    }
+  ]
+}
