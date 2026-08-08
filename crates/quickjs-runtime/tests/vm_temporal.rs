@@ -3027,3 +3027,41 @@ fn plain_date_time_with_plain_time_and_constructor_validation_match_temporal() {
         "month,RangeError"
     );
 }
+
+#[test]
+fn temporal_now_namespace_and_current_values_are_spec_shaped() {
+    assert_eq!(
+        rendered(
+            "var before=Date.now();
+             var first=Temporal.Now.instant();
+             var second=Temporal.Now.instant();
+             var after=Date.now();
+             var zone=Temporal.Now.timeZoneId();
+             var zoned=Temporal.Now.zonedDateTimeISO('UTC');
+             var dateTime=Temporal.Now.plainDateTimeISO('UTC');
+             var date=Temporal.Now.plainDateISO('UTC');
+             var time=Temporal.Now.plainTimeISO('UTC');
+             var nowDesc=Object.getOwnPropertyDescriptor(Temporal,'Now');
+             return [String(Temporal),Object.prototype.toString.call(Temporal.Now),
+               Object.getPrototypeOf(Temporal.Now)===Object.prototype,Temporal.Now.prototype,
+               typeof zone,first instanceof Temporal.Instant,first!==second,
+               Number(first.epochNanoseconds/1000000n)>=before,
+               Number(first.epochNanoseconds/1000000n)<=after,
+               zoned.timeZoneId,zoned.calendarId,dateTime.calendarId,date.calendarId,
+               time instanceof Temporal.PlainTime,
+               Temporal.Now.instant.length,Temporal.Now.plainDateISO.length,
+               Temporal.Now.plainDateTimeISO.length,Temporal.Now.plainTimeISO.length,
+               Temporal.Now.timeZoneId.length,Temporal.Now.zonedDateTimeISO.length,
+               nowDesc.enumerable,nowDesc.writable,nowDesc.configurable].join('|');"
+        ),
+        "[object Temporal]|[object Temporal.Now]|true||string|true|true|true|true|UTC|iso8601|iso8601|iso8601|true|0|0|0|0|0|0|false|true|true"
+    );
+    assert_eq!(
+        thrown("return Temporal.Now.plainTimeISO(1);"),
+        ExceptionKind::TypeError
+    );
+    assert_eq!(
+        thrown("return Temporal.Now.zonedDateTimeISO('');"),
+        ExceptionKind::RangeError
+    );
+}

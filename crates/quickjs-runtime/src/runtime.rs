@@ -297,6 +297,7 @@ struct DateIntrinsics {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 struct TemporalIntrinsics {
     namespace: ObjectId,
+    now: ObjectId,
     duration_prototype: ObjectId,
     duration_constructor: FunctionId,
     instant_prototype: ObjectId,
@@ -1243,6 +1244,7 @@ pub(crate) enum NativeFunctionKind {
     DateConstructor,
     DateStatic(DateStaticMethod),
     DatePrototype(DatePrototypeMethod),
+    TemporalNow(TemporalNowMethod),
     TemporalDurationConstructor,
     TemporalDurationStatic(TemporalDurationStaticMethod),
     TemporalDurationPrototype(TemporalDurationPrototypeMethod),
@@ -2252,6 +2254,38 @@ impl ArrayBufferPrototypeMethod {
             self,
             Self::ByteLength | Self::Detached | Self::MaxByteLength | Self::Resizable
         )
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum TemporalNowMethod {
+    Instant,
+    PlainDateIso,
+    PlainDateTimeIso,
+    PlainTimeIso,
+    TimeZoneId,
+    ZonedDateTimeIso,
+}
+
+impl TemporalNowMethod {
+    pub(crate) const ALL: [Self; 6] = [
+        Self::Instant,
+        Self::PlainDateIso,
+        Self::PlainDateTimeIso,
+        Self::PlainTimeIso,
+        Self::TimeZoneId,
+        Self::ZonedDateTimeIso,
+    ];
+
+    pub(crate) const fn name(self) -> &'static str {
+        match self {
+            Self::Instant => "instant",
+            Self::PlainDateIso => "plainDateISO",
+            Self::PlainDateTimeIso => "plainDateTimeISO",
+            Self::PlainTimeIso => "plainTimeISO",
+            Self::TimeZoneId => "timeZoneId",
+            Self::ZonedDateTimeIso => "zonedDateTimeISO",
+        }
     }
 }
 
