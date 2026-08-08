@@ -315,6 +315,7 @@ pub(super) fn finish_indirect_eval(
 
 #[allow(
     clippy::too_many_arguments,
+    clippy::too_many_lines,
     reason = "direct eval compilation and caller-frame admission form one audited boundary"
 )]
 pub(super) fn finish_direct_eval(
@@ -332,6 +333,7 @@ pub(super) fn finish_direct_eval(
 ) -> Result<Frame, NativeFailure> {
     execution_budget.charge_indirect_eval_compilation(request.source())?;
     let caller_bindings = request.shared_bindings();
+    let variable_environment = request.variable_environment();
     let authority = match compiler.compile_direct_eval(request) {
         Ok(authority) => authority,
         Err(DynamicFunctionCompileFailure::Syntax { message }) => {
@@ -348,6 +350,7 @@ pub(super) fn finish_direct_eval(
             return Err(NativeFailure::Execution(error.into()));
         }
     };
+    let exception_authority = Arc::clone(&authority);
     let environment =
         materialize_direct_eval_environment(runtime, caller, &authority, &caller_bindings)
             .map_err(NativeFailure::Execution)?;
@@ -358,6 +361,33 @@ pub(super) fn finish_direct_eval(
     };
     let mut installed = match installation {
         Ok(installed) => installed,
+        Err(crate::InstallError::GlobalDeclarationRejected {
+            name,
+            kind,
+            function,
+            pc,
+            source_span,
+        }) => {
+            rollback_direct_eval_environment(runtime, caller, environment)
+                .map_err(|fault| NativeFailure::Execution(fault.into()))?;
+            let (message, declaration_origin) =
+                global_declaration_error(&exception_authority, &name, function, pc, source_span)
+                    .map_err(NativeFailure::Execution)?;
+            let exception_kind = match kind {
+                GlobalDeclarationRejectionKind::BindingConflict => ExceptionKind::SyntaxError,
+                GlobalDeclarationRejectionKind::ObjectDefinitionRejected => {
+                    ExceptionKind::TypeError
+                }
+            };
+            return Err(NativeFailure::Abrupt(PendingException {
+                realm,
+                payload: PendingExceptionPayload::EngineError {
+                    kind: exception_kind,
+                    message,
+                },
+                origin: declaration_origin,
+            }));
+        }
         Err(error) => {
             rollback_direct_eval_environment(runtime, caller, environment)
                 .map_err(|fault| NativeFailure::Execution(fault.into()))?;
@@ -398,6 +428,11 @@ pub(super) fn finish_direct_eval(
             rollback.map_err(|fault| NativeFailure::Execution(fault.into()))?;
             return Err(NativeFailure::Execution(error));
         }
+    };
+    frame.direct_eval_variable_environment = if frame.strict {
+        DirectEvalVariableEnvironment::Function
+    } else {
+        variable_environment
     };
     if let Err(error) = installed.commit_environment() {
         let retirement = retire_failed_dynamic_root(runtime, installed);
@@ -1212,9 +1247,15 @@ pub(super) fn direct_eval_compile_request(
             | CompilerExecutableKind::DirectEvalScript
             | CompilerExecutableKind::DynamicFunctionScript
     );
+    let variable_environment = if function_context && scope_index == 0 {
+        DirectEvalVariableEnvironment::FunctionParameterInitializer
+    } else {
+        frame.direct_eval_variable_environment
+    };
     Ok(DirectEvalCompileRequest::new(source, frame.strict)
         .with_bindings(bindings.into())
         .with_scope_index(scope_index)
+        .with_variable_environment(variable_environment)
         .with_new_target(function_context)
         .with_super_property(function_code.home_object.is_some())
         .with_super_call(matches!(
@@ -1277,6 +1318,7 @@ fn direct_eval_caller_bindings(
             variable.name(),
             variable.policy(),
             DirectEvalCallerBindingLocation::Local(local),
+            DirectEvalCallerBindingScope::Lexical,
         )?;
         lexical_local = match variable.scope_next() {
             ScopeLink::Local(parent) => Some(parent),
@@ -1302,6 +1344,7 @@ fn direct_eval_caller_bindings(
                     variable.name(),
                     variable.policy(),
                     DirectEvalCallerBindingLocation::Local(local),
+                    DirectEvalCallerBindingScope::Outer,
                 )?;
             }
         }
@@ -1316,6 +1359,7 @@ fn direct_eval_caller_bindings(
                 variable.name(),
                 variable.policy(),
                 DirectEvalCallerBindingLocation::Argument(argument),
+                DirectEvalCallerBindingScope::Variable,
             )?;
         }
         for local in 0..local_count {
@@ -1323,12 +1367,29 @@ fn direct_eval_caller_bindings(
                 .get(argument_count.saturating_add(local) as usize)
                 .ok_or(EngineFault::InvalidClosureEnvironment { function })?;
             if !variable.has_scope() {
+                let scope = match variable.policy().kind() {
+                    CompilerBindingKind::Let
+                    | CompilerBindingKind::Const
+                    | CompilerBindingKind::ClassName => DirectEvalCallerBindingScope::Lexical,
+                    CompilerBindingKind::FunctionName => DirectEvalCallerBindingScope::Outer,
+                    CompilerBindingKind::Parameter
+                    | CompilerBindingKind::Var
+                    | CompilerBindingKind::Function
+                    | CompilerBindingKind::Catch
+                    | CompilerBindingKind::ClassFieldKey
+                    | CompilerBindingKind::ClassPrivateName
+                    | CompilerBindingKind::ClassStaticReceiver
+                    | CompilerBindingKind::GlobalReference => {
+                        DirectEvalCallerBindingScope::Variable
+                    }
+                };
                 push_direct_eval_caller_binding(
                     &mut bindings,
                     installed,
                     variable.name(),
                     variable.policy(),
                     DirectEvalCallerBindingLocation::Local(local),
+                    scope,
                 )?;
             }
         }
@@ -1346,6 +1407,7 @@ fn direct_eval_caller_bindings(
             definition.name(),
             definition.policy(),
             DirectEvalCallerBindingLocation::Closure(closure),
+            DirectEvalCallerBindingScope::Outer,
         )?;
     }
     Ok(bindings)
@@ -1357,6 +1419,7 @@ fn push_direct_eval_caller_binding(
     name: Option<quickjs_bytecode::AtomPoolIndex>,
     policy: quickjs_bytecode::CompilerBindingPolicy,
     location: DirectEvalCallerBindingLocation,
+    scope: DirectEvalCallerBindingScope,
 ) -> Result<(), ExecutionError> {
     if matches!(
         policy.kind(),
@@ -1386,7 +1449,7 @@ fn push_direct_eval_caller_binding(
     if name.code_units().eq("_ret_".encode_utf16()) {
         return Ok(());
     }
-    bindings.push(DirectEvalCallerBinding::new(name, policy, location));
+    bindings.push(DirectEvalCallerBinding::new(name, policy, location).with_scope(scope));
     Ok(())
 }
 

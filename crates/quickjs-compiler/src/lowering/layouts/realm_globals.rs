@@ -1,11 +1,16 @@
-use std::{collections::HashMap, ops::Range, sync::Arc};
+use std::{
+    collections::{HashMap, HashSet},
+    ops::Range,
+    sync::Arc,
+};
 
 use quickjs_bytecode::{
     CompilerBindingKind, CompilerBindingPolicy, CompilerClosureBinding,
     CompilerInitializationPolicy, CompilerWritePolicy,
 };
 use quickjs_frontend::{
-    DirectEvalBinding, DirectEvalBindingKind, DirectEvalBindingLocation, DirectEvalContext, Span,
+    DirectEvalBinding, DirectEvalBindingKind, DirectEvalBindingLocation, DirectEvalBindingScope,
+    DirectEvalContext, Span,
 };
 
 use crate::storage::{
@@ -62,6 +67,7 @@ struct RealmGlobalLayoutBuilder<'plan> {
     by_unresolved: Vec<Option<RealmGlobalId>>,
     needs: Vec<Vec<RealmGlobalId>>,
     direct_by_name: HashMap<Arc<str>, DirectEvalCallerBinding>,
+    direct_lexical_names: HashSet<Arc<str>>,
     direct_environment_size: u32,
 }
 
@@ -145,6 +151,7 @@ impl<'plan> RealmGlobalLayoutBuilder<'plan> {
     fn new(input: RealmGlobalLayoutInput<'plan, '_>) -> Result<Self, LeafCompilationError> {
         let plan = input.plan;
         let mut direct_by_name = HashMap::new();
+        let mut direct_lexical_names = HashSet::new();
         let mut direct_environment_size = 0_u32;
         if let Some(context) = input.direct_eval {
             for frame in context.scope_snapshot().frames() {
@@ -161,6 +168,9 @@ impl<'plan> RealmGlobalLayoutBuilder<'plan> {
                             policy: direct_eval_binding_policy(*binding)?,
                         },
                     );
+                    if binding.scope() == DirectEvalBindingScope::Lexical {
+                        direct_lexical_names.insert(Arc::from(binding.name()));
+                    }
                 }
             }
         }
@@ -172,6 +182,7 @@ impl<'plan> RealmGlobalLayoutBuilder<'plan> {
             by_unresolved: vec![None; plan.unresolved_globals().len()],
             needs: (0..plan.executables().len()).map(|_| Vec::new()).collect(),
             direct_by_name,
+            direct_lexical_names,
             direct_environment_size,
         })
     }
@@ -254,6 +265,14 @@ impl<'plan> RealmGlobalLayoutBuilder<'plan> {
         }
 
         let name: Arc<str> = Arc::from(binding.name());
+        if binding.placement() == StoragePlacement::GlobalObject
+            && self.direct_lexical_names.contains(&name)
+        {
+            return Err(LeafCompilationError::EvalDeclarationConflict {
+                name,
+                span: first_span,
+            });
+        }
         if self.by_name.contains_key(&name) {
             return Err(LeafCompilationError::SemanticInvariant {
                 invariant: "one declared constructor-realm binding per name",

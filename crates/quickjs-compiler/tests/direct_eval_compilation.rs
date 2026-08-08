@@ -2,22 +2,37 @@ use quickjs_bytecode::{
     CompilerClosureBinding, CompilerClosureSource, CompilerExecutableKind, VerificationLimits,
 };
 use quickjs_compiler::{
-    CompilationContext, CompiledFunctionTree, LeafCompilationError, UnsupportedLeafFeature,
+    CompilationContext, CompiledFunctionTree, CompiledRealmGlobalSource, LeafCompilationError,
+    UnsupportedLeafFeature,
 };
 use quickjs_frontend::{
     CompilationGoal, DirectEvalBinding, DirectEvalBindingKind, DirectEvalBindingLocation,
-    DirectEvalCapabilities, DirectEvalContext, DirectEvalScopeFrame, DirectEvalScopeKind,
-    DirectEvalScopeSnapshot, FrontendOptions, with_parsed_program,
+    DirectEvalBindingScope, DirectEvalCapabilities, DirectEvalContext, DirectEvalScopeFrame,
+    DirectEvalScopeKind, DirectEvalScopeSnapshot, DirectEvalVariableEnvironment, FrontendOptions,
+    with_parsed_program,
 };
 
 fn compile(
     source: &str,
     caller_strict: bool,
 ) -> Result<CompiledFunctionTree, LeafCompilationError> {
+    compile_in_variable_environment(
+        source,
+        caller_strict,
+        DirectEvalVariableEnvironment::Function,
+    )
+}
+
+fn compile_in_variable_environment(
+    source: &str,
+    caller_strict: bool,
+    variable_environment: DirectEvalVariableEnvironment,
+) -> Result<CompiledFunctionTree, LeafCompilationError> {
     let context = DirectEvalContext::new(
         DirectEvalCapabilities::new().with_strict(caller_strict),
         DirectEvalScopeSnapshot::default(),
-    );
+    )
+    .with_variable_environment(variable_environment);
     with_parsed_program(
         source,
         FrontendOptions::for_goal(CompilationGoal::DirectEval(context)),
@@ -35,6 +50,20 @@ fn compile_with_bindings(
     caller_strict: bool,
     bindings: &[DirectEvalBinding<'_>],
 ) -> Result<CompiledFunctionTree, LeafCompilationError> {
+    compile_with_bindings_in_variable_environment(
+        source,
+        caller_strict,
+        bindings,
+        DirectEvalVariableEnvironment::Function,
+    )
+}
+
+fn compile_with_bindings_in_variable_environment(
+    source: &str,
+    caller_strict: bool,
+    bindings: &[DirectEvalBinding<'_>],
+    variable_environment: DirectEvalVariableEnvironment,
+) -> Result<CompiledFunctionTree, LeafCompilationError> {
     let frames = [DirectEvalScopeFrame::new(
         DirectEvalScopeKind::Pseudo,
         bindings,
@@ -43,7 +72,8 @@ fn compile_with_bindings(
     let context = DirectEvalContext::new(
         DirectEvalCapabilities::new().with_strict(caller_strict),
         DirectEvalScopeSnapshot::new(&frames),
-    );
+    )
+    .with_variable_environment(variable_environment);
     with_parsed_program(
         source,
         FrontendOptions::for_goal(CompilationGoal::DirectEval(context)),
@@ -107,6 +137,65 @@ fn sloppy_direct_eval_var_environment_remains_fail_closed() {
         ),
         "{error:?}"
     );
+}
+
+#[test]
+fn sloppy_direct_eval_function_environment_remains_fail_closed() {
+    let error = compile("function answer() {} answer();", false)
+        .expect_err("caller function declaration instantiation needs a shared environment");
+    assert!(
+        matches!(
+            error,
+            LeafCompilationError::Unsupported {
+                feature: UnsupportedLeafFeature::DirectEvalVariableEnvironment,
+                ..
+            }
+        ),
+        "{error:?}"
+    );
+}
+
+#[test]
+fn sloppy_direct_eval_certifies_global_variable_environment_declarations() {
+    let tree = compile_in_variable_environment(
+        "var answer = 42; function read() { return answer; } read();",
+        false,
+        DirectEvalVariableEnvironment::Global,
+    )
+    .expect("global direct-eval declarations");
+    let globals = tree.root().realm_globals();
+
+    assert!(globals.iter().any(|global| {
+        global.name() == "answer" && global.source() == CompiledRealmGlobalSource::ConstructorRealm
+    }));
+    assert!(globals.iter().any(|global| {
+        global.name() == "read" && global.source() == CompiledRealmGlobalSource::ConstructorRealm
+    }));
+}
+
+#[test]
+fn sloppy_direct_eval_rejects_an_intervening_lexical_collision() {
+    let bindings = [DirectEvalBinding::new(
+        "collision",
+        DirectEvalBindingKind::Normal,
+        true,
+        false,
+        DirectEvalBindingLocation::Local { index: 0 },
+    )
+    .with_scope(DirectEvalBindingScope::Lexical)];
+    let error = compile_with_bindings_in_variable_environment(
+        "var collision;",
+        false,
+        &bindings,
+        DirectEvalVariableEnvironment::Global,
+    )
+    .expect_err("caller lexical bindings reject sloppy eval var declarations");
+
+    assert!(matches!(
+        error,
+        LeafCompilationError::EvalDeclarationConflict { ref name, .. }
+            if name.as_ref() == "collision"
+    ));
 }
 
 #[test]

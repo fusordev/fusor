@@ -499,6 +499,7 @@ pub(super) fn create_frame(
             .ok_or(EngineFault::InvalidClosureEnvironment {
                 function: plan.template,
             })?;
+    let executable_kind = verified.metadata().executable_kind();
     let variable_count = plan.argument_count.checked_add(plan.local_count).ok_or(
         EngineFault::InvalidClosureEnvironment {
             function: plan.template,
@@ -637,6 +638,25 @@ pub(super) fn create_frame(
         code: plan.code,
         template: plan.template,
         strict: plan.strict,
+        direct_eval_variable_environment: match executable_kind {
+            CompilerExecutableKind::GlobalScript => DirectEvalVariableEnvironment::Global,
+            CompilerExecutableKind::IndirectEvalScript if !plan.strict => {
+                DirectEvalVariableEnvironment::Global
+            }
+            CompilerExecutableKind::IndirectEvalScript
+            | CompilerExecutableKind::DirectEvalScript
+            | CompilerExecutableKind::DynamicFunctionScript
+            | CompilerExecutableKind::OrdinaryFunction
+            | CompilerExecutableKind::OrdinaryArrow
+            | CompilerExecutableKind::OrdinaryMethod
+            | CompilerExecutableKind::GeneratorFunction
+            | CompilerExecutableKind::GeneratorMethod
+            | CompilerExecutableKind::AsyncFunction
+            | CompilerExecutableKind::AsyncMethod
+            | CompilerExecutableKind::AsyncGeneratorFunction
+            | CompilerExecutableKind::AsyncGeneratorMethod
+            | CompilerExecutableKind::ClassConstructor => DirectEvalVariableEnvironment::Function,
+        },
         receiver,
         new_target,
         instruction: plan.instruction,

@@ -344,6 +344,22 @@ pub enum DirectEvalBindingLocation {
     },
 }
 
+/// The caller-environment region that owns one direct-eval binding.
+///
+/// Eval declaration instantiation distinguishes lexical environments between
+/// the callsite and its variable environment from bindings owned by that
+/// variable environment and from still-outer bindings.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[non_exhaustive]
+pub enum DirectEvalBindingScope {
+    /// A lexical environment between the callsite and the variable environment.
+    Lexical,
+    /// The caller variable environment inherited by sloppy direct eval.
+    Variable,
+    /// An environment outside the caller variable environment.
+    Outer,
+}
+
 /// An ordinary binding visible in one direct-eval scope frame.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct DirectEvalBinding<'scope> {
@@ -352,14 +368,16 @@ pub struct DirectEvalBinding<'scope> {
     is_lexical: bool,
     is_const: bool,
     location: DirectEvalBindingLocation,
+    scope: DirectEvalBindingScope,
 }
 
 impl<'scope> DirectEvalBinding<'scope> {
-    /// Creates a lossless binding snapshot.
+    /// Creates a binding snapshot owned by an outer caller environment.
     ///
     /// `kind`, `is_lexical`, and `is_const` retain independent semantic
     /// metadata. `location` identifies storage without changing those
-    /// semantics.
+    /// semantics. Call [`Self::with_scope`] when the binding belongs to an
+    /// intervening lexical or inherited variable environment.
     #[must_use]
     pub const fn new(
         name: &'scope str,
@@ -374,7 +392,15 @@ impl<'scope> DirectEvalBinding<'scope> {
             is_lexical,
             is_const,
             location,
+            scope: DirectEvalBindingScope::Outer,
         }
+    }
+
+    /// Attaches the caller-environment region that owns this binding.
+    #[must_use]
+    pub const fn with_scope(mut self, scope: DirectEvalBindingScope) -> Self {
+        self.scope = scope;
+        self
     }
 
     /// Returns the JavaScript binding name.
@@ -405,6 +431,12 @@ impl<'scope> DirectEvalBinding<'scope> {
     #[must_use]
     pub const fn location(self) -> DirectEvalBindingLocation {
         self.location
+    }
+
+    /// Returns the caller-environment region that owns this binding.
+    #[must_use]
+    pub const fn scope(self) -> DirectEvalBindingScope {
+        self.scope
     }
 }
 
@@ -585,15 +617,31 @@ impl<'scope> DirectEvalScopeSnapshot<'scope> {
     }
 }
 
+/// The variable environment inherited by sloppy direct eval.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[non_exhaustive]
+pub enum DirectEvalVariableEnvironment {
+    /// The Realm global environment record.
+    Global,
+    /// A function or eval-owned declarative environment.
+    Function,
+    /// A function environment outside an active parameter-initializer scope.
+    FunctionParameterInitializer,
+}
+
 /// Caller context needed to parse and resolve direct `eval`.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct DirectEvalContext<'scope> {
     capabilities: DirectEvalCapabilities,
     scope_snapshot: DirectEvalScopeSnapshot<'scope>,
+    variable_environment: DirectEvalVariableEnvironment,
 }
 
 impl<'scope> DirectEvalContext<'scope> {
-    /// Creates a direct-eval context.
+    /// Creates a direct-eval context with a function-owned variable environment.
+    ///
+    /// Global and parameter-initializer callsites must select their exact
+    /// environment through [`Self::with_variable_environment`].
     #[must_use]
     pub const fn new(
         capabilities: DirectEvalCapabilities,
@@ -602,7 +650,18 @@ impl<'scope> DirectEvalContext<'scope> {
         Self {
             capabilities,
             scope_snapshot,
+            variable_environment: DirectEvalVariableEnvironment::Function,
         }
+    }
+
+    /// Attaches the variable environment inherited by sloppy eval code.
+    #[must_use]
+    pub const fn with_variable_environment(
+        mut self,
+        variable_environment: DirectEvalVariableEnvironment,
+    ) -> Self {
+        self.variable_environment = variable_environment;
+        self
     }
 
     /// Returns the syntax capabilities inherited from the caller.
@@ -615,6 +674,12 @@ impl<'scope> DirectEvalContext<'scope> {
     #[must_use]
     pub const fn scope_snapshot(self) -> DirectEvalScopeSnapshot<'scope> {
         self.scope_snapshot
+    }
+
+    /// Returns the variable environment inherited by sloppy eval code.
+    #[must_use]
+    pub const fn variable_environment(self) -> DirectEvalVariableEnvironment {
+        self.variable_environment
     }
 }
 

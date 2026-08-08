@@ -48,16 +48,42 @@ pub enum DirectEvalCallerBindingLocation {
     Closure(u32),
 }
 
+/// The caller-environment region that owns one direct-eval binding.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum DirectEvalCallerBindingScope {
+    /// A lexical environment between the callsite and the variable environment.
+    Lexical,
+    /// The caller variable environment inherited by sloppy direct eval.
+    Variable,
+    /// An environment outside the caller variable environment.
+    Outer,
+}
+
+/// The variable environment inherited by sloppy direct eval.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum DirectEvalVariableEnvironment {
+    /// The Realm global environment record.
+    Global,
+    /// A function or eval-owned declarative environment.
+    Function,
+    /// A function environment outside an active parameter-initializer scope.
+    FunctionParameterInitializer,
+}
+
 /// One named live caller binding visible to direct `eval`.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct DirectEvalCallerBinding {
     name: JsString,
     policy: CompilerBindingPolicy,
     location: DirectEvalCallerBindingLocation,
+    scope: DirectEvalCallerBindingScope,
 }
 
 impl DirectEvalCallerBinding {
-    /// Creates one caller-environment snapshot entry.
+    /// Creates one outer caller-environment snapshot entry.
+    ///
+    /// Call [`Self::with_scope`] for intervening lexical or inherited
+    /// variable-environment bindings.
     #[must_use]
     pub const fn new(
         name: JsString,
@@ -68,7 +94,15 @@ impl DirectEvalCallerBinding {
             name,
             policy,
             location,
+            scope: DirectEvalCallerBindingScope::Outer,
         }
+    }
+
+    /// Attaches the caller-environment region that owns this binding.
+    #[must_use]
+    pub const fn with_scope(mut self, scope: DirectEvalCallerBindingScope) -> Self {
+        self.scope = scope;
+        self
     }
 
     /// Returns the exact identifier name.
@@ -88,6 +122,12 @@ impl DirectEvalCallerBinding {
     pub const fn location(&self) -> DirectEvalCallerBindingLocation {
         self.location
     }
+
+    /// Returns the caller-environment region that owns this binding.
+    #[must_use]
+    pub const fn scope(&self) -> DirectEvalCallerBindingScope {
+        self.scope
+    }
 }
 
 /// Owned source and caller grammar capabilities for one direct `eval`.
@@ -97,6 +137,7 @@ pub struct DirectEvalCompileRequest {
     scope_index: u16,
     capabilities: u8,
     bindings: Arc<[DirectEvalCallerBinding]>,
+    variable_environment: DirectEvalVariableEnvironment,
 }
 
 impl DirectEvalCompileRequest {
@@ -106,7 +147,11 @@ impl DirectEvalCompileRequest {
     const SUPER_CALL: u8 = 1 << 3;
     const ARGUMENTS_ALLOWED: u8 = 1 << 4;
 
-    /// Creates a direct-eval request with the caller's strictness.
+    /// Creates a direct-eval request with the caller's strictness and a
+    /// function-owned variable environment.
+    ///
+    /// Global and parameter-initializer callsites must select their exact
+    /// environment through [`Self::with_variable_environment`].
     #[must_use]
     pub fn new(source: JsString, strict: bool) -> Self {
         Self {
@@ -114,6 +159,7 @@ impl DirectEvalCompileRequest {
             scope_index: 1,
             capabilities: if strict { Self::STRICT } else { 0 },
             bindings: Arc::from([]),
+            variable_environment: DirectEvalVariableEnvironment::Function,
         }
     }
 
@@ -128,6 +174,16 @@ impl DirectEvalCompileRequest {
     #[must_use]
     pub const fn with_scope_index(mut self, scope_index: u16) -> Self {
         self.scope_index = scope_index;
+        self
+    }
+
+    /// Attaches the variable environment inherited by sloppy eval code.
+    #[must_use]
+    pub const fn with_variable_environment(
+        mut self,
+        variable_environment: DirectEvalVariableEnvironment,
+    ) -> Self {
+        self.variable_environment = variable_environment;
         self
     }
 
@@ -175,6 +231,12 @@ impl DirectEvalCompileRequest {
     #[must_use]
     pub const fn scope_index(&self) -> u16 {
         self.scope_index
+    }
+
+    /// Returns the variable environment inherited by sloppy eval code.
+    #[must_use]
+    pub const fn variable_environment(&self) -> DirectEvalVariableEnvironment {
+        self.variable_environment
     }
 
     /// Returns caller bindings from innermost to outermost resolution order.
@@ -374,9 +436,9 @@ mod tests {
     };
 
     use super::{
-        DirectEvalCallerBinding, DirectEvalCallerBindingLocation, DirectEvalCompileRequest,
-        DynamicFunctionCompileRequest, DynamicFunctionCompiler, DynamicFunctionFamily,
-        IndirectEvalCompileRequest,
+        DirectEvalCallerBinding, DirectEvalCallerBindingLocation, DirectEvalCallerBindingScope,
+        DirectEvalCompileRequest, DirectEvalVariableEnvironment, DynamicFunctionCompileRequest,
+        DynamicFunctionCompiler, DynamicFunctionFamily, IndirectEvalCompileRequest,
     };
     use crate::{JsString, error::DynamicFunctionCompileFailure};
 
@@ -423,21 +485,28 @@ mod tests {
                 false,
             ),
             DirectEvalCallerBindingLocation::Local(3),
-        );
+        )
+        .with_scope(DirectEvalCallerBindingScope::Variable);
         let bindings: Arc<[DirectEvalCallerBinding]> = Arc::from([binding.clone()]);
         let request = DirectEvalCompileRequest::new(source.clone(), true)
             .with_bindings(Arc::clone(&bindings))
             .with_scope_index(7)
+            .with_variable_environment(DirectEvalVariableEnvironment::Global)
             .with_new_target(true)
             .with_super_property(true)
             .with_super_call(true)
             .with_arguments_allowed(true);
 
         assert_eq!(request.source(), &source);
-        assert_eq!(request.bindings(), &[binding]);
+        assert_eq!(request.bindings(), std::slice::from_ref(&binding));
         assert!(Arc::ptr_eq(&request.shared_bindings(), &bindings));
         assert!(request.is_strict());
         assert_eq!(request.scope_index(), 7);
+        assert_eq!(binding.scope(), DirectEvalCallerBindingScope::Variable);
+        assert_eq!(
+            request.variable_environment(),
+            DirectEvalVariableEnvironment::Global
+        );
         assert!(request.allows_new_target());
         assert!(request.allows_super_property());
         assert!(request.allows_super_call());

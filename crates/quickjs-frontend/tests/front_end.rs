@@ -6,11 +6,12 @@ use std::{
 use quickjs_diagnostics::{SourceError, SourceRegistry, render_pretty};
 use quickjs_frontend::{
     Allocator, CompilationGoal, DiagnosticStage, DirectEvalBinding, DirectEvalBindingKind,
-    DirectEvalBindingLocation, DirectEvalCapabilities, DirectEvalContext, DirectEvalPrivateName,
-    DirectEvalPrivateNameKind, DirectEvalScopeFrame, DirectEvalScopeKind, DirectEvalScopeSnapshot,
-    DynamicFunctionKind, DynamicFunctionSource, FrontendDiagnosticCode, FrontendLimitError,
-    FrontendLimits, FrontendOptions, FrontendSourceError, GlobalScriptGoal, IndirectEvalGoal,
-    ParseMode, RegisteredFrontendError, SourceFragment, Span, UnsupportedCompilationGoal, parse,
+    DirectEvalBindingLocation, DirectEvalBindingScope, DirectEvalCapabilities, DirectEvalContext,
+    DirectEvalPrivateName, DirectEvalPrivateNameKind, DirectEvalScopeFrame, DirectEvalScopeKind,
+    DirectEvalScopeSnapshot, DirectEvalVariableEnvironment, DynamicFunctionKind,
+    DynamicFunctionSource, FrontendDiagnosticCode, FrontendLimitError, FrontendLimits,
+    FrontendOptions, FrontendSourceError, GlobalScriptGoal, IndirectEvalGoal, ParseMode,
+    RegisteredFrontendError, SourceFragment, Span, UnsupportedCompilationGoal, parse,
     with_dynamic_function_source, with_parsed_program, with_registered_program,
 };
 
@@ -289,7 +290,8 @@ fn compilation_goals_preserve_lossless_direct_eval_context() {
         true,
         false,
         DirectEvalBindingLocation::Closure { index: 3 },
-    )];
+    )
+    .with_scope(DirectEvalBindingScope::Lexical)];
     let private_names = [DirectEvalPrivateName::new(
         "value",
         DirectEvalPrivateNameKind::Field,
@@ -311,7 +313,8 @@ fn compilation_goals_preserve_lossless_direct_eval_context() {
             .with_super_property(true)
             .with_arguments_allowed(true),
         DirectEvalScopeSnapshot::new(&frames),
-    );
+    )
+    .with_variable_environment(DirectEvalVariableEnvironment::Global);
 
     let goals = [
         CompilationGoal::GlobalScript(GlobalScriptGoal::new()),
@@ -338,6 +341,7 @@ fn compilation_goals_preserve_lossless_direct_eval_context() {
         binding.location(),
         DirectEvalBindingLocation::Closure { index: 3 }
     );
+    assert_eq!(binding.scope(), DirectEvalBindingScope::Lexical);
     let private_name = direct_eval.scope_snapshot().frames()[0].private_names()[0];
     assert_eq!(private_name.kind(), DirectEvalPrivateNameKind::Field);
     assert!(private_name.is_lexical());
@@ -362,6 +366,10 @@ fn compilation_goals_preserve_lossless_direct_eval_context() {
     assert!(direct_eval.capabilities().allows_new_target());
     assert!(!direct_eval.capabilities().allows_super_call());
     assert!(direct_eval.capabilities().allows_arguments());
+    assert_eq!(
+        direct_eval.variable_environment(),
+        DirectEvalVariableEnvironment::Global
+    );
 }
 
 #[test]

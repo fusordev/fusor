@@ -4551,6 +4551,7 @@ const fn global_declaration_property_layout(
         matches!(
             executable_kind,
             CompilerExecutableKind::IndirectEvalScript
+                | CompilerExecutableKind::DirectEvalScript
                 | CompilerExecutableKind::DynamicFunctionScript
         ),
     )

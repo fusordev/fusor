@@ -642,7 +642,9 @@ impl<'arena> CompilationContext<'_, 'arena, '_> {
         constants: &CompiledConstantPool,
         flow: &mut PlannedControlFlow,
     ) -> Result<(), LeafCompilationError> {
-        if !crate::is_supported_script_root_goal(self.unit.goal()) || executable.index() != 0 {
+        if !crate::is_supported_realm_global_binding_goal(self.unit.goal())
+            || executable.index() != 0
+        {
             return Ok(());
         }
         let root = self
@@ -891,6 +893,17 @@ impl<'arena> CompilationContext<'_, 'arena, '_> {
                     invariant: "function declaration binding has compiler storage",
                     span: Some(identifier.span),
                 })?;
+        if storage.placement() == StoragePlacement::GlobalObject
+            && !crate::is_supported_realm_global_binding_goal(self.unit.goal())
+        {
+            if crate::is_supported_direct_eval_goal(self.unit.goal()) {
+                return unsupported(
+                    UnsupportedLeafFeature::DirectEvalVariableEnvironment,
+                    identifier.span,
+                );
+            }
+            return unsupported(UnsupportedLeafFeature::GlobalEnvironment, identifier.span);
+        }
         if storage.executable() != parent
             || storage.policy().kind() != DeclarationKind::Function
             || !matches!(

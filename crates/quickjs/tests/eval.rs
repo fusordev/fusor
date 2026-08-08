@@ -135,6 +135,71 @@ fn direct_eval_unmatched_names_fall_back_to_the_realm_global() {
 }
 
 #[test]
+fn sloppy_global_direct_eval_publishes_configurable_vars_and_functions() {
+    evaluate(
+        "eval('var evalVar=40;function evalFunction(){return 2;}');let descriptor=Object.getOwnPropertyDescriptor(globalThis,'evalVar');evalVar+evalFunction()+'|'+descriptor.configurable;",
+        |value| assert_eq!(string(value), "42|true"),
+    );
+}
+
+#[test]
+fn nested_sloppy_global_direct_eval_inherits_the_global_variable_environment() {
+    evaluate(
+        "eval(\"eval('var nestedEvalVar=42;')\");nestedEvalVar;",
+        |value| {
+            assert!(number(value).strict_equals(JsNumber::from_i32(42)));
+        },
+    );
+}
+
+#[test]
+fn source_strict_global_direct_eval_keeps_var_declarations_local() {
+    evaluate(
+        "eval(\"'use strict';var strictDirectEvalVar=1;\");typeof strictDirectEvalVar;",
+        |value| assert_eq!(string(value), "undefined"),
+    );
+}
+
+#[test]
+fn sloppy_global_direct_eval_var_statement_has_empty_completion() {
+    evaluate("eval('var evalOnly;');", |value| {
+        assert_eq!(value.kind(), Ok(ValueKind::Undefined));
+    });
+}
+
+#[test]
+fn sloppy_global_direct_eval_rejects_active_block_lexical_collisions() {
+    evaluate(
+        "{let collision;try{eval('var collision;');false;}catch(error){error.constructor===SyntaxError;}}",
+        |value| assert_eq!(value.as_boolean(), Ok(Some(true))),
+    );
+}
+
+#[test]
+fn sloppy_global_direct_eval_rejects_global_lexical_collisions() {
+    evaluate(
+        "let collision;try{eval('var collision;');false;}catch(error){error.constructor===SyntaxError;}",
+        |value| assert_eq!(value.as_boolean(), Ok(Some(true))),
+    );
+}
+
+#[test]
+fn sloppy_global_direct_eval_rejected_properties_throw_type_error() {
+    evaluate(
+        "Object.preventExtensions(globalThis);try{eval('var unavailable;');false;}catch(error){error.constructor===TypeError;}",
+        |value| assert_eq!(value.as_boolean(), Ok(Some(true))),
+    );
+}
+
+#[test]
+fn sloppy_global_direct_eval_function_preflight_is_atomic() {
+    evaluate(
+        "Object.defineProperty(globalThis,'blocked',{value:1,writable:false,enumerable:false,configurable:false});try{eval('var unpublished;function blocked(){}');}catch(error){}typeof unpublished==='undefined'&&blocked===1;",
+        |value| assert_eq!(value.as_boolean(), Ok(Some(true))),
+    );
+}
+
+#[test]
 fn failed_direct_eval_install_rolls_back_promoted_caller_cells() {
     let mut runtime =
         Runtime::try_new(RuntimeLimits::default().with_max_installed_code(1)).expect("runtime");

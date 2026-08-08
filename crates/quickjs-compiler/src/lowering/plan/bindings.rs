@@ -1309,7 +1309,7 @@ impl CompilationContext<'_, '_, '_> {
         layout: &FrameLayout,
         tree_layout: &FunctionTreeLayout,
     ) -> Result<LoweredReference, LeafCompilationError> {
-        if !crate::is_supported_script_root_goal(self.unit.goal()) {
+        if !crate::is_supported_realm_global_binding_goal(self.unit.goal()) {
             return unsupported(UnsupportedLeafFeature::GlobalEnvironment, span);
         }
         let global = tree_layout.realm_globals.for_binding(binding).ok_or(

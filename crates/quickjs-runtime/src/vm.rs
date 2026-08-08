@@ -44,10 +44,11 @@ use quickjs_bytecode::{
 use crate::runtime::ForInAdvance;
 use crate::{
     ArrayIndex, BigIntError, Context, DirectEvalCallerBinding, DirectEvalCallerBindingLocation,
-    DirectEvalCompileRequest, DynamicFunctionCompileFailure, DynamicFunctionFamily, EngineFault,
-    ExceptionKind, ExecutionError, Function, GlobalDeclarationRejectionKind, HandleError,
-    HandleKind, IndirectEvalCompileRequest, JsBigInt, JsException, JsNumber, JsStackFrame,
-    JsString, JsStringError, JsValue, MAX_STRING_CODE_UNITS, OrdinaryDynamicFunctionCompiler,
+    DirectEvalCallerBindingScope, DirectEvalCompileRequest, DirectEvalVariableEnvironment,
+    DynamicFunctionCompileFailure, DynamicFunctionFamily, EngineFault, ExceptionKind,
+    ExecutionError, Function, GlobalDeclarationRejectionKind, HandleError, HandleKind,
+    IndirectEvalCompileRequest, JsBigInt, JsException, JsNumber, JsStackFrame, JsString,
+    JsStringError, JsValue, MAX_STRING_CODE_UNITS, OrdinaryDynamicFunctionCompiler,
     OrdinaryDynamicFunctionSource, PredefinedAtom, PropertyKey, PropertyLayout, Runtime,
     RuntimeError, RuntimeResource,
     conversion::{
@@ -346,6 +347,7 @@ pub(crate) struct Frame {
     code: InstalledCodeId,
     template: FunctionTemplateId,
     strict: bool,
+    direct_eval_variable_environment: DirectEvalVariableEnvironment,
     receiver: StoredValue,
     new_target: Option<FunctionId>,
     instruction: InstructionIndex,

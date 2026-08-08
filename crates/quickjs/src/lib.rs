@@ -26,20 +26,22 @@ use quickjs_frontend::{
     CompilationGoal, DiagnosticStage, DirectEvalBinding as FrontendDirectEvalBinding,
     DirectEvalBindingKind as FrontendDirectEvalBindingKind,
     DirectEvalBindingLocation as FrontendDirectEvalBindingLocation,
+    DirectEvalBindingScope as FrontendDirectEvalBindingScope,
     DirectEvalCapabilities as FrontendDirectEvalCapabilities, DirectEvalContext,
     DirectEvalScopeFrame as FrontendDirectEvalScopeFrame,
     DirectEvalScopeKind as FrontendDirectEvalScopeKind, DirectEvalScopeSnapshot,
-    DynamicFunctionError, DynamicFunctionKind, DynamicFunctionSource, FrontendError,
-    FrontendLimits, FrontendOptions, GlobalScriptGoal, IndirectEvalGoal,
-    PreparedDynamicFunctionSource, RegisteredFrontendError, SourceFragment,
-    with_dynamic_function_source_and_prepared, with_parsed_program, with_registered_program,
+    DirectEvalVariableEnvironment as FrontendDirectEvalVariableEnvironment, DynamicFunctionError,
+    DynamicFunctionKind, DynamicFunctionSource, FrontendError, FrontendLimits, FrontendOptions,
+    GlobalScriptGoal, IndirectEvalGoal, PreparedDynamicFunctionSource, RegisteredFrontendError,
+    SourceFragment, with_dynamic_function_source_and_prepared, with_parsed_program,
+    with_registered_program,
 };
 use quickjs_runtime::{
-    Context, DirectEvalCallerBindingLocation, DirectEvalCompileRequest,
-    DynamicFunctionCompileFailure, DynamicFunctionCompileRequest, DynamicFunctionCompiler,
-    DynamicFunctionFamily, DynamicFunctionScriptError, ExecutionError, ExecutionLimits, Function,
-    GlobalScriptError, IndirectEvalCompileRequest, InstallError, JsString, JsValue,
-    RuntimeDiagnosticError,
+    Context, DirectEvalCallerBindingLocation, DirectEvalCallerBindingScope,
+    DirectEvalCompileRequest, DirectEvalVariableEnvironment, DynamicFunctionCompileFailure,
+    DynamicFunctionCompileRequest, DynamicFunctionCompiler, DynamicFunctionFamily,
+    DynamicFunctionScriptError, ExecutionError, ExecutionLimits, Function, GlobalScriptError,
+    IndirectEvalCompileRequest, InstallError, JsString, JsValue, RuntimeDiagnosticError,
 };
 
 /// Resource limits applied across Global Script parsing, compilation,
@@ -447,6 +449,9 @@ fn lowering_code(error: &LeafCompilationError) -> &'static str {
         LeafCompilationError::SemanticInvariant { .. } => {
             "quickjs::compiler::lowering::semantic_invariant"
         }
+        LeafCompilationError::EvalDeclarationConflict { .. } => {
+            "quickjs::compiler::lowering::eval_declaration_conflict"
+        }
         LeafCompilationError::CapacityExceeded { .. } => {
             "quickjs::compiler::lowering::capacity_exceeded"
         }
@@ -498,7 +503,8 @@ fn lowering_spans(
         | LeafCompilationError::CompilerTemplateObject { span, .. }
         | LeafCompilationError::RegExp { span, .. }
         | LeafCompilationError::BytecodeEncoding { span, .. }
-        | LeafCompilationError::BytecodeStackInvariant { span, .. } => (Some(*span), None),
+        | LeafCompilationError::BytecodeStackInvariant { span, .. }
+        | LeafCompilationError::EvalDeclarationConflict { span, .. } => (Some(*span), None),
         LeafCompilationError::SemanticInvariant { span, .. }
         | LeafCompilationError::BytecodeAssembly { span, .. }
         | LeafCompilationError::FunctionGraphVerification { span, .. }
@@ -1022,9 +1028,10 @@ fn compile_direct_eval_source(
     for (binding, name) in request.bindings().iter().zip(&binding_names) {
         let (kind, is_lexical, is_const) = frontend_direct_eval_policy(binding.policy())?;
         let location = frontend_direct_eval_location(binding.location())?;
-        bindings.push(FrontendDirectEvalBinding::new(
-            name, kind, is_lexical, is_const, location,
-        ));
+        bindings.push(
+            FrontendDirectEvalBinding::new(name, kind, is_lexical, is_const, location)
+                .with_scope(frontend_direct_eval_scope(binding.scope())),
+        );
     }
     let frames = [FrontendDirectEvalScopeFrame::new(
         FrontendDirectEvalScopeKind::Pseudo,
@@ -1037,7 +1044,10 @@ fn compile_direct_eval_source(
         .with_super_property(request.allows_super_property())
         .with_super_call(request.allows_super_call())
         .with_arguments_allowed(request.allows_arguments());
-    let context = DirectEvalContext::new(capabilities, DirectEvalScopeSnapshot::new(&frames));
+    let context = DirectEvalContext::new(capabilities, DirectEvalScopeSnapshot::new(&frames))
+        .with_variable_environment(frontend_direct_eval_variable_environment(
+            request.variable_environment(),
+        ));
     let compiled = with_parsed_program(
         &source,
         FrontendOptions::for_goal(CompilationGoal::DirectEval(context))
@@ -1055,18 +1065,55 @@ fn compile_direct_eval_source(
         },
     )
     .map_err(map_eval_frontend_error)?
-    .map_err(|source| {
-        let stage = match &source {
-            DynamicFunctionCompilerError::Planning(_) => {
-                DynamicFunctionEngineStage::CompilerPlanning
-            }
-            DynamicFunctionCompilerError::Lowering(_) => {
-                DynamicFunctionEngineStage::CompilerLowering
-            }
-        };
-        engine_failure_with_source(stage, source.to_string(), source)
-    })?;
+    .map_err(map_direct_eval_compiler_error)?;
     Ok(Arc::new(compiled.verified_bytecode().clone()))
+}
+
+fn map_direct_eval_compiler_error(
+    source: DynamicFunctionCompilerError,
+) -> DynamicFunctionCompileFailure {
+    if let DynamicFunctionCompilerError::Lowering(LeafCompilationError::EvalDeclarationConflict {
+        name,
+        ..
+    }) = &source
+    {
+        let message = format!("Identifier '{name}' has already been declared");
+        return match JsString::from_utf8(&message) {
+            Ok(message) => DynamicFunctionCompileFailure::Syntax { message },
+            Err(error) => engine_failure_with_source(
+                DynamicFunctionEngineStage::SyntaxMessageConversion,
+                "could not retain the eval declaration-conflict diagnostic as a JavaScript string",
+                error,
+            ),
+        };
+    }
+    let stage = match &source {
+        DynamicFunctionCompilerError::Planning(_) => DynamicFunctionEngineStage::CompilerPlanning,
+        DynamicFunctionCompilerError::Lowering(_) => DynamicFunctionEngineStage::CompilerLowering,
+    };
+    engine_failure_with_source(stage, source.to_string(), source)
+}
+
+const fn frontend_direct_eval_scope(
+    scope: DirectEvalCallerBindingScope,
+) -> FrontendDirectEvalBindingScope {
+    match scope {
+        DirectEvalCallerBindingScope::Lexical => FrontendDirectEvalBindingScope::Lexical,
+        DirectEvalCallerBindingScope::Variable => FrontendDirectEvalBindingScope::Variable,
+        DirectEvalCallerBindingScope::Outer => FrontendDirectEvalBindingScope::Outer,
+    }
+}
+
+const fn frontend_direct_eval_variable_environment(
+    environment: DirectEvalVariableEnvironment,
+) -> FrontendDirectEvalVariableEnvironment {
+    match environment {
+        DirectEvalVariableEnvironment::Global => FrontendDirectEvalVariableEnvironment::Global,
+        DirectEvalVariableEnvironment::Function => FrontendDirectEvalVariableEnvironment::Function,
+        DirectEvalVariableEnvironment::FunctionParameterInitializer => {
+            FrontendDirectEvalVariableEnvironment::FunctionParameterInitializer
+        }
+    }
 }
 
 fn frontend_direct_eval_location(

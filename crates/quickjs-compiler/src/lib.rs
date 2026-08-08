@@ -63,6 +63,20 @@ pub(crate) const fn is_supported_script_compilation_goal(
     is_supported_script_root_goal(goal) || is_supported_direct_eval_goal(goal)
 }
 
+pub(crate) const fn is_supported_realm_global_binding_goal(
+    goal: quickjs_frontend::CompilationGoal<'_>,
+) -> bool {
+    is_supported_script_root_goal(goal)
+        || matches!(
+            goal,
+            quickjs_frontend::CompilationGoal::DirectEval(context)
+                if matches!(
+                    context.variable_environment(),
+                    quickjs_frontend::DirectEvalVariableEnvironment::Global
+                )
+        )
+}
+
 pub use lowering::{
     CompilationContext, CompilationExecutable, CompiledClosureSource, CompiledClosureVariable,
     CompiledConstant, CompiledFunction, CompiledFunctionConstant, CompiledFunctionTree,
