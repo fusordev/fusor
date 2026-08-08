@@ -188,6 +188,29 @@ impl IteratorConsumerContinuation {
     }
 }
 
+#[derive(Clone, Copy)]
+enum IteratorDisposeStage {
+    ReturnProperty,
+    ReturnCall,
+}
+
+pub(super) struct IteratorDisposeContinuation {
+    iterator: StoredValue,
+    realm: RealmId,
+    stage: IteratorDisposeStage,
+    origin: JsStackFrame,
+}
+
+impl IteratorDisposeContinuation {
+    pub(super) const fn retained_values() -> u64 {
+        1
+    }
+
+    pub(super) fn trace_roots(&self, mark: &mut dyn FnMut(CollectionRoot)) {
+        trace_stored_value_root(&self.iterator, mark);
+    }
+}
+
 pub(super) struct IteratorHelperCreationContinuation {
     iterator: StoredValue,
     kind: crate::object::IteratorHelperKind,
@@ -722,6 +745,23 @@ pub(super) fn begin_iterator_consumer(
         return_to,
         execution_budget,
     )
+}
+
+pub(super) fn begin_iterator_dispose(
+    runtime: &mut Runtime,
+    receiver: StoredValue,
+    realm: RealmId,
+    return_to: Option<CallReturn>,
+    origin: JsStackFrame,
+    execution_budget: &mut ExecutionBudget,
+) -> Result<NativeDispatch, NativeFailure> {
+    let state = IteratorDisposeContinuation {
+        iterator: receiver,
+        realm,
+        stage: IteratorDisposeStage::ReturnProperty,
+        origin,
+    };
+    read_iterator_dispose_return(runtime, state, return_to, execution_budget)
 }
 
 pub(super) fn begin_iterator_map(
@@ -2301,6 +2341,80 @@ pub(super) fn resume_iterator_consumer_abrupt(
         pending,
         return_to,
         execution_budget,
+    )
+}
+
+pub(super) fn advance_iterator_dispose(
+    state: IteratorDisposeContinuation,
+    completion: &StoredValue,
+    return_to: Option<CallReturn>,
+    execution_budget: &mut ExecutionBudget,
+) -> Result<NativeDispatch, NativeFailure> {
+    match state.stage {
+        IteratorDisposeStage::ReturnProperty => match completion {
+            StoredValue::Undefined | StoredValue::Null => {
+                Ok(NativeDispatch::Immediate(StoredValue::Undefined))
+            }
+            StoredValue::Function(return_method) => {
+                execution_budget.charge_instructions(1)?;
+                let receiver = state.iterator.duplicate();
+                let origin = state.origin.clone();
+                let mut state = state;
+                state.stage = IteratorDisposeStage::ReturnCall;
+                iterator_method_call(
+                    *return_method,
+                    receiver,
+                    NativeContinuation::IteratorDispose(state),
+                    return_to,
+                    origin,
+                )
+            }
+            StoredValue::Boolean(_)
+            | StoredValue::Number(_)
+            | StoredValue::BigInt(_)
+            | StoredValue::String(_)
+            | StoredValue::Symbol(_)
+            | StoredValue::Object(_) => Err(iterator_exception(
+                state.realm,
+                state.origin,
+                ExceptionKind::TypeError,
+                "iterator return method is not callable",
+            )?),
+        },
+        IteratorDisposeStage::ReturnCall => Ok(NativeDispatch::Immediate(StoredValue::Undefined)),
+    }
+}
+
+fn read_iterator_dispose_return(
+    runtime: &mut Runtime,
+    state: IteratorDisposeContinuation,
+    return_to: Option<CallReturn>,
+    execution_budget: &mut ExecutionBudget,
+) -> Result<NativeDispatch, NativeFailure> {
+    if !matches!(state.stage, IteratorDisposeStage::ReturnProperty) {
+        return Err(EngineFault::RuntimeInvariant {
+            message: "Iterator.prototype[Symbol.dispose] attempted a property lookup after its return call",
+        }
+        .into());
+    }
+    charge_iterator_property_lookup(runtime, &state.iterator, execution_budget)?;
+    let name = JsString::from_utf8("return")?;
+    let dispatch = begin_value_get(
+        runtime,
+        &state.iterator,
+        runtime.predefined_property_key(PredefinedAtom::Return),
+        Some(&name),
+        state.realm,
+        return_to,
+        state.origin.clone(),
+        execution_budget,
+    )?;
+    continue_get_after(
+        dispatch,
+        state,
+        NativeContinuation::IteratorDispose,
+        |state, value| advance_iterator_dispose(state, &value, return_to, execution_budget),
+        "Iterator.prototype[Symbol.dispose] return Get produced a structured result",
     )
 }
 

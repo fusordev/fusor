@@ -992,6 +992,9 @@ pub(super) fn resume_native_continuations(
             NativeContinuation::IteratorConsumer(state) => {
                 advance_iterator_consumer(runtime, state, value, return_to, execution_budget)?
             }
+            NativeContinuation::IteratorDispose(state) => {
+                advance_iterator_dispose(state, &value, return_to, execution_budget)?
+            }
             NativeContinuation::IteratorHelperCreation(state) => {
                 advance_iterator_helper_creation(runtime, state, value)?
             }
@@ -3741,6 +3744,14 @@ pub(super) fn dispatch_native_call_with_frames(
                 execution_budget,
             )
         }
+        NativeFunctionKind::IteratorPrototypeDispose => begin_iterator_dispose(
+            runtime,
+            inputs.receiver,
+            native.realm,
+            return_to,
+            origin.unwrap_or_else(native_function_host_origin),
+            execution_budget,
+        ),
         NativeFunctionKind::IteratorPrototypeDrop => begin_iterator_drop(
             runtime,
             inputs.receiver,

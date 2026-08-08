@@ -446,7 +446,7 @@ impl ObjectStaticMethod {
     }
 }
 
-const DYNAMIC_SYMBOL_STATIC_PROPERTIES: [(&str, PredefinedAtom); 12] = [
+const DYNAMIC_SYMBOL_STATIC_PROPERTIES: [(&str, PredefinedAtom); 13] = [
     ("toPrimitive", PredefinedAtom::SymbolToPrimitive),
     ("iterator", PredefinedAtom::SymbolIterator),
     ("match", PredefinedAtom::SymbolMatch),
@@ -462,6 +462,7 @@ const DYNAMIC_SYMBOL_STATIC_PROPERTIES: [(&str, PredefinedAtom); 12] = [
     ("species", PredefinedAtom::SymbolSpecies),
     ("unscopables", PredefinedAtom::SymbolUnscopables),
     ("asyncIterator", PredefinedAtom::SymbolAsyncIterator),
+    ("dispose", PredefinedAtom::SymbolDispose),
 ];
 
 const METHOD_PROPERTY: PropertyLayout = PropertyLayout::data(true, false, true);

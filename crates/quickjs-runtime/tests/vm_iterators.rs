@@ -809,6 +809,35 @@ fn iterator_reduce_closes_only_validation_and_reducer_failures() {
 }
 
 #[test]
+fn iterator_symbol_dispose_invokes_return_and_ignores_its_result() {
+    let mut runtime = Runtime::try_new(RuntimeLimits::default()).expect("runtime");
+    let realm = runtime.create_realm().expect("realm");
+    let mut context = runtime.context(&realm).expect("context");
+    let function = dynamic_function(
+        &mut context,
+        "let method=Iterator.prototype[Symbol.dispose],calls=0,receiver=false,args=-1;\
+         let iterator={return(){calls++;receiver=this===iterator;args=arguments.length;return 99;}};\
+         let result=method.call(iterator);\
+         let absent=method.call({})===undefined;\
+         let type=false;try{method.call({return:0});}catch(error){type=error instanceof TypeError;}\
+         let descriptor=Object.getOwnPropertyDescriptor(Iterator.prototype,Symbol.dispose);\
+         let symbolDescriptor=Object.getOwnPropertyDescriptor(Symbol,'dispose');\
+         return [typeof Symbol.dispose,typeof method,method.name,method.length,calls,receiver,args,\
+           result===undefined,absent,type,descriptor.writable,!descriptor.enumerable,\
+           descriptor.configurable,!symbolDescriptor.writable,!symbolDescriptor.enumerable,\
+           !symbolDescriptor.configurable].join('|');",
+    );
+
+    let result = context
+        .call(&function, &[], ExecutionLimits::default())
+        .expect("Iterator.prototype[Symbol.dispose]");
+    assert_eq!(
+        string_value(&result),
+        "symbol|function|[Symbol.dispose]|0|1|true|0|true|true|true|true|true|true|true|true|true"
+    );
+}
+
+#[test]
 fn iterator_filter_is_lazy_and_indexes_every_examined_value() {
     let mut runtime = Runtime::try_new(RuntimeLimits::default()).expect("runtime");
     let realm = runtime.create_realm().expect("realm");

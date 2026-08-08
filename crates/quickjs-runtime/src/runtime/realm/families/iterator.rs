@@ -134,6 +134,11 @@ pub(super) fn visit_functions(visit: FunctionSink<'_>) {
             0,
         ),
         (
+            NativeFunctionKind::IteratorPrototypeDispose,
+            IntrinsicNameSpec::Literal("[Symbol.dispose]"),
+            0,
+        ),
+        (
             NativeFunctionKind::IteratorPrototypeConstructorGetter,
             IntrinsicNameSpec::Literal("get constructor"),
             0,
@@ -279,6 +284,11 @@ pub(super) fn visit_properties(visit: PropertySink<'_>) {
         prototype,
         IntrinsicKeySpec::WellKnownSymbol(PredefinedAtom::SymbolIterator),
         NativeFunctionKind::IteratorPrototypeIterator,
+    ));
+    visit(method(
+        prototype,
+        IntrinsicKeySpec::WellKnownSymbol(PredefinedAtom::SymbolDispose),
+        NativeFunctionKind::IteratorPrototypeDispose,
     ));
     visit(method(
         prototype,
