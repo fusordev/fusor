@@ -4,9 +4,10 @@ use crate::{
     Atom,
     runtime::{
         ArrayBufferPrototypeMethod, AtomicsMethod, DataViewPrototypeMethod, DatePrototypeMethod,
-        DateStaticMethod, SharedArrayBufferPrototypeMethod, TemporalDurationPrototypeMethod,
-        TemporalDurationStaticMethod, TemporalInstantPrototypeMethod, TemporalInstantStaticMethod,
-        TemporalNowMethod, TemporalPlainDatePrototypeMethod, TemporalPlainDateStaticMethod,
+        DateStaticMethod, IntlLocalePrototypeMethod, SharedArrayBufferPrototypeMethod,
+        TemporalDurationPrototypeMethod, TemporalDurationStaticMethod,
+        TemporalInstantPrototypeMethod, TemporalInstantStaticMethod, TemporalNowMethod,
+        TemporalPlainDatePrototypeMethod, TemporalPlainDateStaticMethod,
         TemporalPlainDateTimePrototypeMethod, TemporalPlainDateTimeStaticMethod,
         TemporalPlainMonthDayPrototypeMethod, TemporalPlainMonthDayStaticMethod,
         TemporalPlainTimePrototypeMethod, TemporalPlainTimeStaticMethod,
@@ -434,12 +435,18 @@ fn visit_core_name_order(
         RealmNameId::Bind,
         RealmNameId::Intl,
         RealmNameId::IntlGetCanonicalLocales,
+        RealmNameId::Locale,
         RealmNameId::Deref,
         RealmNameId::Register,
         RealmNameId::Unregister,
         RealmNameId::ProxyRevocable,
     ] {
         visit(id)?;
+    }
+    for method in IntlLocalePrototypeMethod::ALL {
+        if !matches!(method, IntlLocalePrototypeMethod::ToString) {
+            visit(RealmNameId::IntlLocalePrototype(method))?;
+        }
     }
     Ok(())
 }
@@ -498,6 +505,8 @@ fn realm_name_description(id: RealmNameId) -> &'static str {
         RealmNameId::Bind => "bind",
         RealmNameId::Intl => "Intl",
         RealmNameId::IntlGetCanonicalLocales => "getCanonicalLocales",
+        RealmNameId::Locale => "Locale",
+        RealmNameId::IntlLocalePrototype(method) => method.name(),
         RealmNameId::Deref => "deref",
         RealmNameId::Register => "register",
         RealmNameId::Unregister => "unregister",
@@ -624,8 +633,8 @@ mod tests {
         let schema = RealmIntrinsicSchema::try_new().expect("Realm schema");
         let plan = RealmAtomPlan::try_new(&schema).expect("atom plan");
 
-        assert_eq!(plan.len(), 357);
-        assert_eq!(plan.description_code_units(), 3_118);
+        assert_eq!(plan.len(), 379);
+        assert_eq!(plan.description_code_units(), 3_338);
     }
 
     #[test]

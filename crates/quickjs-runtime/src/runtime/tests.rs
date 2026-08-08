@@ -2067,6 +2067,7 @@ fn realm_installs_the_exact_function_intrinsic_graph() {
         finalization_registry: _,
         regexp: _,
         date: _,
+        intl: _,
         temporal: _,
         array_buffer: _,
         shared_array_buffer: _,

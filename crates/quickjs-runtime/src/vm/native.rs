@@ -1250,6 +1250,13 @@ pub(super) fn resume_native_continuations(
                 return_to,
                 execution_budget,
             )?,
+            NativeContinuation::IntlLocaleConstructor(state) => advance_intl_locale_constructor(
+                runtime,
+                *state,
+                Some(value.duplicate()),
+                return_to,
+                execution_budget,
+            )?,
             NativeContinuation::InstanceOf(state) => {
                 advance_instance_of(runtime, state, &value, return_to, execution_budget)?
             }
@@ -2706,6 +2713,21 @@ pub(super) fn dispatch_native_call_with_frames(
             return_to,
             origin.unwrap_or_else(native_function_host_origin),
             execution_budget,
+        ),
+        NativeFunctionKind::IntlLocaleConstructor => begin_intl_locale_constructor(
+            runtime,
+            inputs,
+            native.realm,
+            return_to,
+            origin.unwrap_or_else(native_function_host_origin),
+            execution_budget,
+        ),
+        NativeFunctionKind::IntlLocalePrototype(method) => begin_intl_locale_prototype(
+            runtime,
+            method,
+            &inputs.receiver,
+            native.realm,
+            origin.unwrap_or_else(native_function_host_origin),
         ),
         NativeFunctionKind::Math(method) => begin_math_method(
             runtime,

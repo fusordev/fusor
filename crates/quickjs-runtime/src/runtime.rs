@@ -60,6 +60,7 @@ mod array_buffers;
 mod async_functions;
 mod data_views;
 mod dates;
+mod intls;
 mod iterators;
 mod limits;
 mod maps;
@@ -111,6 +112,7 @@ enum RealmIntrinsics {
         data_view: DataViewIntrinsics,
         typed_array: TypedArrayIntrinsics,
         date: DateIntrinsics,
+        intl: IntlIntrinsics,
         temporal: TemporalIntrinsics,
         map: MapIntrinsics,
         set: SetIntrinsics,
@@ -292,6 +294,13 @@ struct TypedArrayIntrinsics {
 struct DateIntrinsics {
     prototype: ObjectId,
     constructor: FunctionId,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct IntlIntrinsics {
+    namespace: ObjectId,
+    locale_prototype: ObjectId,
+    locale_constructor: FunctionId,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -1223,6 +1232,10 @@ pub(crate) enum NativeFunctionKind {
     JsonStringify,
     /// `Intl.getCanonicalLocales`.
     IntlGetCanonicalLocales,
+    /// The `%Intl.Locale%` constructor.
+    IntlLocaleConstructor,
+    /// One `%Intl.Locale.prototype%` accessor or method.
+    IntlLocalePrototype(IntlLocalePrototypeMethod),
     /// One method on the ordinary `%Math%` object.
     Math(MathMethod),
     /// One method on the ordinary `%Atomics%` object.
@@ -1588,6 +1601,122 @@ pub(crate) enum DatePrototypeMethod {
     ToTemporalInstant,
     ToJson,
     SymbolToPrimitive,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum IntlLocalePrototypeMethod {
+    BaseName,
+    Calendar,
+    CaseFirst,
+    Collation,
+    FirstDayOfWeek,
+    HourCycle,
+    Language,
+    NumberingSystem,
+    Numeric,
+    Region,
+    Script,
+    Variants,
+    Maximize,
+    Minimize,
+    ToString,
+    GetCalendars,
+    GetCollations,
+    GetHourCycles,
+    GetNumberingSystems,
+    GetTextInfo,
+    GetTimeZones,
+    GetWeekInfo,
+}
+
+impl IntlLocalePrototypeMethod {
+    pub(crate) const ALL: [Self; 22] = [
+        Self::BaseName,
+        Self::Calendar,
+        Self::CaseFirst,
+        Self::Collation,
+        Self::FirstDayOfWeek,
+        Self::HourCycle,
+        Self::Language,
+        Self::NumberingSystem,
+        Self::Numeric,
+        Self::Region,
+        Self::Script,
+        Self::Variants,
+        Self::Maximize,
+        Self::Minimize,
+        Self::ToString,
+        Self::GetCalendars,
+        Self::GetCollations,
+        Self::GetHourCycles,
+        Self::GetNumberingSystems,
+        Self::GetTextInfo,
+        Self::GetTimeZones,
+        Self::GetWeekInfo,
+    ];
+
+    pub(crate) const fn is_accessor(self) -> bool {
+        matches!(
+            self,
+            Self::BaseName
+                | Self::Calendar
+                | Self::CaseFirst
+                | Self::Collation
+                | Self::FirstDayOfWeek
+                | Self::HourCycle
+                | Self::Language
+                | Self::NumberingSystem
+                | Self::Numeric
+                | Self::Region
+                | Self::Script
+                | Self::Variants
+        )
+    }
+
+    pub(crate) const fn name(self) -> &'static str {
+        match self {
+            Self::BaseName => "baseName",
+            Self::Calendar => "calendar",
+            Self::CaseFirst => "caseFirst",
+            Self::Collation => "collation",
+            Self::FirstDayOfWeek => "firstDayOfWeek",
+            Self::HourCycle => "hourCycle",
+            Self::Language => "language",
+            Self::NumberingSystem => "numberingSystem",
+            Self::Numeric => "numeric",
+            Self::Region => "region",
+            Self::Script => "script",
+            Self::Variants => "variants",
+            Self::Maximize => "maximize",
+            Self::Minimize => "minimize",
+            Self::ToString => "toString",
+            Self::GetCalendars => "getCalendars",
+            Self::GetCollations => "getCollations",
+            Self::GetHourCycles => "getHourCycles",
+            Self::GetNumberingSystems => "getNumberingSystems",
+            Self::GetTextInfo => "getTextInfo",
+            Self::GetTimeZones => "getTimeZones",
+            Self::GetWeekInfo => "getWeekInfo",
+        }
+    }
+
+    pub(crate) const fn function_name(self) -> &'static str {
+        match self {
+            Self::BaseName => "get baseName",
+            Self::Calendar => "get calendar",
+            Self::CaseFirst => "get caseFirst",
+            Self::Collation => "get collation",
+            Self::FirstDayOfWeek => "get firstDayOfWeek",
+            Self::HourCycle => "get hourCycle",
+            Self::Language => "get language",
+            Self::NumberingSystem => "get numberingSystem",
+            Self::Numeric => "get numeric",
+            Self::Region => "get region",
+            Self::Script => "get script",
+            Self::Variants => "get variants",
+            method => method.name(),
+        }
+    }
 }
 
 impl DatePrototypeMethod {
@@ -4096,6 +4225,7 @@ impl NativeFunctionKind {
                 | Self::DataViewConstructor
                 | Self::TypedArrayConstructor(_)
                 | Self::DateConstructor
+                | Self::IntlLocaleConstructor
                 | Self::TemporalDurationConstructor
                 | Self::TemporalInstantConstructor
                 | Self::TemporalPlainDateConstructor

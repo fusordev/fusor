@@ -41,16 +41,17 @@ use super::{
     BooleanIntrinsics, Context, DataViewIntrinsics, DateIntrinsics, ErrorIntrinsic,
     ErrorIntrinsicKind, ErrorIntrinsics, FinalizationRegistryIntrinsics, FunctionId,
     FunctionImplementation, GeneratorIntrinsics, GlobalNumericFunction, HandleError, HandleKind,
-    HashMap, HeapFunction, HeapObject, HeapReference, InterruptState, IteratorIntrinsics, JsNumber,
-    JsString, LocaleStringMethod, MapIntrinsics, MapMethod, MathMethod, NativeFunction,
-    NativeFunctionKind, NumberFormat, NumberIntrinsics, NumberPredicate, ObjectId, ObjectRecord,
-    PredefinedAtom, PromiseIntrinsics, PromiseRejectionState, PromiseStatic, PropertyKey,
-    PropertyLayout, Rc, Realm, RealmHandle, RealmId, RealmIntrinsics, RealmState, RefCell,
-    ReflectMethod, RegExpIntrinsics, ReleaseMailbox, Runtime, RuntimeError, RuntimeIdentity,
-    RuntimeLimits, RuntimeResource, SetIntrinsics, SetMethod, ShapeInterner,
-    SharedArrayBufferIntrinsics, StoredValue, StringIntrinsics, StringMethod, SymbolIntrinsics,
-    TemporalIntrinsics, TypedArrayIntrinsics, UriFunction, VecDeque, WeakMapIntrinsics,
-    WeakRefIntrinsics, WeakSetIntrinsics, check_limit, predefined_string, usize_to_u64,
+    HashMap, HeapFunction, HeapObject, HeapReference, InterruptState, IntlIntrinsics,
+    IteratorIntrinsics, JsNumber, JsString, LocaleStringMethod, MapIntrinsics, MapMethod,
+    MathMethod, NativeFunction, NativeFunctionKind, NumberFormat, NumberIntrinsics,
+    NumberPredicate, ObjectId, ObjectRecord, PredefinedAtom, PromiseIntrinsics,
+    PromiseRejectionState, PromiseStatic, PropertyKey, PropertyLayout, Rc, Realm, RealmHandle,
+    RealmId, RealmIntrinsics, RealmState, RefCell, ReflectMethod, RegExpIntrinsics, ReleaseMailbox,
+    Runtime, RuntimeError, RuntimeIdentity, RuntimeLimits, RuntimeResource, SetIntrinsics,
+    SetMethod, ShapeInterner, SharedArrayBufferIntrinsics, StoredValue, StringIntrinsics,
+    StringMethod, SymbolIntrinsics, TemporalIntrinsics, TypedArrayIntrinsics, UriFunction,
+    VecDeque, WeakMapIntrinsics, WeakRefIntrinsics, WeakSetIntrinsics, check_limit,
+    predefined_string, usize_to_u64,
 };
 use crate::object::TypedArrayElementType;
 
@@ -684,6 +685,11 @@ impl RealmBuildTransaction<'_> {
             date: DateIntrinsics {
                 prototype: object(IntrinsicObjectId::DatePrototype),
                 constructor: function(NativeFunctionKind::DateConstructor),
+            },
+            intl: IntlIntrinsics {
+                namespace: object(IntrinsicObjectId::Intl),
+                locale_prototype: object(IntrinsicObjectId::IntlLocalePrototype),
+                locale_constructor: function(NativeFunctionKind::IntlLocaleConstructor),
             },
             temporal: TemporalIntrinsics {
                 namespace: object(IntrinsicObjectId::Temporal),

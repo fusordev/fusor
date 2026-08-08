@@ -3108,6 +3108,13 @@ fn finish_operator_primitive_target(
             let locale = operator_primitive_to_string(value, realm, origin)?;
             finish_intl_locale_list_element(runtime, *state, &locale, return_to, execution_budget)
         }
+        OperatorPrimitiveTarget::IntlLocaleConstructor(state) => advance_intl_locale_constructor(
+            runtime,
+            *state,
+            Some(value),
+            return_to,
+            execution_budget,
+        ),
         OperatorPrimitiveTarget::ArrayFromAsyncLength { operation } => {
             resume_array_from_async_length_conversion(
                 runtime,

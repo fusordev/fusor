@@ -353,6 +353,7 @@ impl Runtime {
                 promise,
                 regexp,
                 date,
+                intl,
                 temporal,
                 symbol,
                 iterators,
@@ -387,6 +388,24 @@ impl Runtime {
                 );
                 mark_heap_reference(
                     HeapReference::Function(date.constructor),
+                    &mut marked_functions,
+                    &mut marked_objects,
+                    &mut work,
+                );
+                mark_heap_reference(
+                    HeapReference::Object(intl.namespace),
+                    &mut marked_functions,
+                    &mut marked_objects,
+                    &mut work,
+                );
+                mark_heap_reference(
+                    HeapReference::Object(intl.locale_prototype),
+                    &mut marked_functions,
+                    &mut marked_objects,
+                    &mut work,
+                );
+                mark_heap_reference(
+                    HeapReference::Function(intl.locale_constructor),
                     &mut marked_functions,
                     &mut marked_objects,
                     &mut work,

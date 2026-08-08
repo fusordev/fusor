@@ -11,6 +11,19 @@ use icu::locale::{
     extensions::{transform, unicode},
 };
 
+mod locale;
+mod locale_info;
+
+pub use locale::{
+    LocaleComponents, LocaleOptionKind, LocaleOptions, apply_locale_options,
+    canonicalize_locale_option, locale_components, maximize_locale, minimize_locale,
+};
+pub use locale_info::{
+    LocaleWeekInfo, calendars_of_locale, collations_of_locale, hour_cycles_of_locale,
+    numbering_systems_of_locale, text_direction_of_locale, time_zones_of_locale,
+    week_info_of_locale,
+};
+
 /// A locale identifier that is not structurally valid under UTS #35.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct InvalidLocale;

@@ -107,6 +107,7 @@ impl RealmSnapshot {
             data_view,
             typed_array,
             date,
+            intl,
             temporal,
             map,
             set,
@@ -151,6 +152,8 @@ impl RealmSnapshot {
             (data_view.prototype, "%DataView.prototype%"),
             (typed_array.prototype, "%TypedArray.prototype%"),
             (date.prototype, "%Date.prototype%"),
+            (intl.namespace, "%Intl%"),
+            (intl.locale_prototype, "%Intl.Locale.prototype%"),
             (temporal.namespace, "%Temporal%"),
             (temporal.now, "%Temporal.Now%"),
             (temporal.duration_prototype, "%Temporal.Duration.prototype%"),
@@ -261,7 +264,7 @@ impl RealmSnapshot {
             .objects
             .get(state.global_object)
             .expect("snapshot global is live");
-        for name in ["Reflect", "Intl", "JSON", "Math", "Atomics"] {
+        for name in ["Reflect", "JSON", "Math", "Atomics"] {
             register_identity(
                 HeapReference::Object(global_object_property(&global.record, name)),
                 format!("%{name}%"),
@@ -521,9 +524,9 @@ mod tests {
 
     use crate::runtime::{RealmIntrinsics, RuntimeLimits, RuntimeUsage};
 
-    const REALM_NODES: usize = 801;
-    const REALM_PROPERTIES: u64 = 2_432;
-    const REALM_SNAPSHOT_FINGERPRINT: u64 = 13_888_418_631_905_877_360;
+    const REALM_NODES: usize = 825;
+    const REALM_PROPERTIES: u64 = 2_504;
+    const REALM_SNAPSHOT_FINGERPRINT: u64 = 5_341_509_629_209_181_091;
 
     #[test]
     fn complete_realm_snapshot_pins_the_installed_intrinsic_graph() {

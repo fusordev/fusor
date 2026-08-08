@@ -2648,6 +2648,8 @@ pub(crate) enum HeapObjectKind {
     RegExp(RegExpState),
     /// An ECMAScript Date object with a `[[DateValue]]` Number.
     Date(DateState),
+    /// An ECMA-402 `Intl.Locale` object with its canonical `[[Locale]]` string.
+    IntlLocale(JsString),
     /// An ECMAScript `ArrayBuffer` object with its byte-data block slots.
     ArrayBuffer(ArrayBufferState),
     /// An ECMAScript `DataView` object with its view and buffer slots.
@@ -2812,6 +2814,7 @@ impl HeapObjectKind {
             | Self::RegExpStringIterator(_)
             | Self::RegExp(_)
             | Self::Date(_)
+            | Self::IntlLocale(_)
             | Self::ArrayBuffer(_)
             | Self::DataView(_)
             | Self::TypedArray(_)
@@ -2852,6 +2855,7 @@ impl HeapObjectKind {
             | Self::RegExpStringIterator(_)
             | Self::RegExp(_)
             | Self::Date(_)
+            | Self::IntlLocale(_)
             | Self::ArrayBuffer(_)
             | Self::DataView(_)
             | Self::TypedArray(_)
@@ -2891,6 +2895,7 @@ impl HeapObjectKind {
             | Self::RegExpStringIterator(_)
             | Self::RegExp(_)
             | Self::Date(_)
+            | Self::IntlLocale(_)
             | Self::ArrayBuffer(_)
             | Self::DataView(_)
             | Self::TypedArray(_)
@@ -2930,6 +2935,7 @@ impl HeapObjectKind {
             | Self::RegExpStringIterator(_)
             | Self::RegExp(_)
             | Self::Date(_)
+            | Self::IntlLocale(_)
             | Self::ArrayBuffer(_)
             | Self::DataView(_)
             | Self::TypedArray(_)
@@ -2969,6 +2975,7 @@ impl HeapObjectKind {
             | Self::RegExpStringIterator(_)
             | Self::RegExp(_)
             | Self::Date(_)
+            | Self::IntlLocale(_)
             | Self::ArrayBuffer(_)
             | Self::DataView(_)
             | Self::TypedArray(_)
@@ -3008,6 +3015,7 @@ impl HeapObjectKind {
             | Self::RegExpStringIterator(_)
             | Self::RegExp(_)
             | Self::Date(_)
+            | Self::IntlLocale(_)
             | Self::ArrayBuffer(_)
             | Self::DataView(_)
             | Self::TypedArray(_)
@@ -3047,6 +3055,7 @@ impl HeapObjectKind {
             | Self::RegExpStringIterator(_)
             | Self::RegExp(_)
             | Self::Date(_)
+            | Self::IntlLocale(_)
             | Self::ArrayBuffer(_)
             | Self::DataView(_)
             | Self::TypedArray(_)
@@ -3100,6 +3109,7 @@ impl HeapObjectKind {
             | Self::RegExpStringIterator(_)
             | Self::RegExp(_)
             | Self::Date(_)
+            | Self::IntlLocale(_)
             | Self::ArrayBuffer(_)
             | Self::DataView(_)
             | Self::TypedArray(_)
@@ -3139,6 +3149,7 @@ impl HeapObjectKind {
             | Self::RegExpStringIterator(_)
             | Self::RegExp(_)
             | Self::Date(_)
+            | Self::IntlLocale(_)
             | Self::ArrayBuffer(_)
             | Self::DataView(_)
             | Self::TypedArray(_)
@@ -3462,6 +3473,15 @@ impl HeapObject {
     }
 
     #[must_use]
+    pub(crate) const fn intl_locale(record: ObjectRecord, locale: JsString) -> Self {
+        Self {
+            kind: HeapObjectKind::IntlLocale(locale),
+            record,
+            public_roots: 0,
+        }
+    }
+
+    #[must_use]
     pub(crate) fn array_buffer(record: ObjectRecord, state: ArrayBufferState) -> Self {
         Self {
             kind: HeapObjectKind::ArrayBuffer(state),
@@ -3711,6 +3731,13 @@ impl HeapObject {
         }
     }
 
+    pub(crate) const fn intl_locale_value(&self) -> Option<&JsString> {
+        match &self.kind {
+            HeapObjectKind::IntlLocale(locale) => Some(locale),
+            _ => None,
+        }
+    }
+
     pub(crate) const fn array_buffer_state(&self) -> Option<&ArrayBufferState> {
         match &self.kind {
             HeapObjectKind::ArrayBuffer(state) => Some(state),
@@ -3820,6 +3847,7 @@ impl HeapObject {
             | HeapObjectKind::RegExpStringIterator(_)
             | HeapObjectKind::RegExp(_)
             | HeapObjectKind::Date(_)
+            | HeapObjectKind::IntlLocale(_)
             | HeapObjectKind::ArrayBuffer(_)
             | HeapObjectKind::DataView(_)
             | HeapObjectKind::TypedArray(_)
@@ -3859,6 +3887,7 @@ impl HeapObject {
             | HeapObjectKind::RegExpStringIterator(_)
             | HeapObjectKind::RegExp(_)
             | HeapObjectKind::Date(_)
+            | HeapObjectKind::IntlLocale(_)
             | HeapObjectKind::ArrayBuffer(_)
             | HeapObjectKind::DataView(_)
             | HeapObjectKind::TypedArray(_)
@@ -3900,6 +3929,7 @@ impl HeapObject {
             | HeapObjectKind::RegExpStringIterator(_)
             | HeapObjectKind::RegExp(_)
             | HeapObjectKind::Date(_)
+            | HeapObjectKind::IntlLocale(_)
             | HeapObjectKind::ArrayBuffer(_)
             | HeapObjectKind::DataView(_)
             | HeapObjectKind::TypedArray(_)
