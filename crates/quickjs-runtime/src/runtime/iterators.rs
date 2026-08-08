@@ -31,7 +31,7 @@ use super::{
     PropertyLayout, RealmId, RealmIntrinsics, RegExpStringIterator, Runtime, RuntimeResource,
     StoredValue, StringIterator, check_execution_limit, stale_heap_reference, usize_to_u64,
 };
-use crate::object::{IteratorRecord, OwnProperty};
+use crate::object::{IteratorHelperLifecycle, IteratorRecord, OwnProperty};
 
 pub(crate) struct PreparedIteratorResultPlan {
     result: ObjectRecord,
@@ -69,6 +69,14 @@ pub(crate) struct RegExpStringIteratorSnapshot {
     pub(crate) global: bool,
     pub(crate) full_unicode: bool,
     pub(crate) phase: crate::object::RegExpStringIteratorPhase,
+}
+
+pub(crate) struct IteratorMapHelperSnapshot {
+    pub(crate) iterator: StoredValue,
+    pub(crate) next_method: StoredValue,
+    pub(crate) mapper: FunctionId,
+    pub(crate) counter: u64,
+    pub(crate) lifecycle: IteratorHelperLifecycle,
 }
 
 impl Runtime {
@@ -132,6 +140,26 @@ impl Runtime {
         Ok(iterators.wrapper_prototype)
     }
 
+    pub(crate) fn realm_iterator_helper_prototype(
+        &self,
+        realm: RealmId,
+    ) -> Result<ObjectId, crate::EngineFault> {
+        let state = self
+            .realms
+            .get(realm)
+            .ok_or(crate::EngineFault::StaleHeapEdge {
+                edge: "realm",
+                index: realm.index(),
+                generation: realm.generation(),
+            })?;
+        let RealmIntrinsics::Ready { iterators, .. } = state.intrinsics else {
+            return Err(crate::EngineFault::RuntimeInvariant {
+                message: "realm iterator intrinsics are not initialized",
+            });
+        };
+        Ok(iterators.helper_prototype)
+    }
+
     pub(crate) fn allocate_iterator_wrapper(
         &mut self,
         realm: RealmId,
@@ -145,6 +173,20 @@ impl Runtime {
         ))
     }
 
+    pub(crate) fn allocate_iterator_map_helper(
+        &mut self,
+        realm: RealmId,
+        iterator: StoredValue,
+        next_method: StoredValue,
+        mapper: FunctionId,
+    ) -> Result<ObjectId, crate::ExecutionError> {
+        let prototype = self.realm_iterator_helper_prototype(realm)?;
+        self.allocate_iterator_object(HeapObject::iterator_wrapper(
+            ObjectRecord::empty(Some(HeapReference::Object(prototype))),
+            IteratorRecord::new_map(iterator, next_method, mapper),
+        ))
+    }
+
     pub(crate) fn iterator_wrapper_record(
         &self,
         wrapper: ObjectId,
@@ -155,7 +197,68 @@ impl Runtime {
             .ok_or_else(|| stale_heap_reference(HeapReference::Object(wrapper)))?;
         Ok(object
             .iterator_wrapper_state()
+            .filter(|record| record.map().is_none())
             .map(IteratorRecord::duplicate))
+    }
+
+    pub(crate) fn iterator_map_helper_snapshot(
+        &self,
+        helper: ObjectId,
+    ) -> Result<Option<IteratorMapHelperSnapshot>, crate::EngineFault> {
+        let object = self
+            .objects
+            .get(helper)
+            .ok_or_else(|| stale_heap_reference(HeapReference::Object(helper)))?;
+        let Some(record) = object.iterator_wrapper_state() else {
+            return Ok(None);
+        };
+        let Some(map) = record.map() else {
+            return Ok(None);
+        };
+        Ok(Some(IteratorMapHelperSnapshot {
+            iterator: record.iterator().duplicate(),
+            next_method: record.next_method().duplicate(),
+            mapper: map.mapper(),
+            counter: map.counter(),
+            lifecycle: map.lifecycle(),
+        }))
+    }
+
+    pub(crate) fn set_iterator_map_helper_lifecycle(
+        &mut self,
+        helper: ObjectId,
+        lifecycle: IteratorHelperLifecycle,
+    ) -> Result<(), crate::EngineFault> {
+        let map = self
+            .objects
+            .get_mut(helper)
+            .ok_or_else(|| stale_heap_reference(HeapReference::Object(helper)))?
+            .iterator_wrapper_state_mut()
+            .and_then(IteratorRecord::map_mut)
+            .ok_or(crate::EngineFault::RuntimeInvariant {
+                message: "Iterator Helper state disappeared",
+            })?;
+        map.set_lifecycle(lifecycle);
+        self.collection_pending = true;
+        Ok(())
+    }
+
+    pub(crate) fn finish_iterator_map_helper_yield(
+        &mut self,
+        helper: ObjectId,
+    ) -> Result<(), crate::EngineFault> {
+        let map = self
+            .objects
+            .get_mut(helper)
+            .ok_or_else(|| stale_heap_reference(HeapReference::Object(helper)))?
+            .iterator_wrapper_state_mut()
+            .and_then(IteratorRecord::map_mut)
+            .ok_or(crate::EngineFault::RuntimeInvariant {
+                message: "Iterator Helper state disappeared",
+            })?;
+        map.finish_yield();
+        self.collection_pending = true;
+        Ok(())
     }
 
     pub(crate) fn allocate_async_from_sync_iterator(

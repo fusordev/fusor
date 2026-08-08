@@ -761,6 +761,7 @@ impl RealmBuildTransaction<'_> {
             iterators: IteratorIntrinsics {
                 constructor: function(NativeFunctionKind::IteratorConstructor),
                 iterator_prototype: object(IntrinsicObjectId::IteratorPrototype),
+                helper_prototype: object(IntrinsicObjectId::IteratorHelperPrototype),
                 wrapper_prototype: object(IntrinsicObjectId::WrapForValidIteratorPrototype),
                 async_iterator_prototype: object(IntrinsicObjectId::AsyncIteratorPrototype),
                 async_from_sync_iterator_prototype: object(

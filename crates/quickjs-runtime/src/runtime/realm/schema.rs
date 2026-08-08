@@ -56,6 +56,7 @@ pub(in crate::runtime) enum IntrinsicObjectId {
     TemporalZonedDateTimePrototype,
     RegExpPrototype,
     IteratorPrototype,
+    IteratorHelperPrototype,
     WrapForValidIteratorPrototype,
     AsyncIteratorPrototype,
     AsyncFromSyncIteratorPrototype,
@@ -84,7 +85,7 @@ pub(in crate::runtime) enum IntrinsicObjectId {
 }
 
 impl IntrinsicObjectId {
-    pub(in crate::runtime) const ALL: [Self; 69] = [
+    pub(in crate::runtime) const ALL: [Self; 70] = [
         Self::ObjectPrototype,
         Self::GlobalObject,
         Self::ErrorPrototype(ErrorIntrinsicKind::Error),
@@ -129,6 +130,7 @@ impl IntrinsicObjectId {
         Self::TemporalZonedDateTimePrototype,
         Self::RegExpPrototype,
         Self::IteratorPrototype,
+        Self::IteratorHelperPrototype,
         Self::WrapForValidIteratorPrototype,
         Self::AsyncIteratorPrototype,
         Self::AsyncFromSyncIteratorPrototype,
@@ -199,6 +201,7 @@ pub(in crate::runtime) enum RealmNameId {
     ArraySplice,
     ArrayIsArray,
     ArrayFromAsync,
+    IteratorMap,
     IteratorToArray,
     ArrayBufferIsView,
     ArrayBufferPrototype(ArrayBufferPrototypeMethod),

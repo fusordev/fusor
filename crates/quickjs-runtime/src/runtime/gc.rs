@@ -621,6 +621,7 @@ impl Runtime {
                 );
                 for prototype in [
                     iterators.iterator_prototype,
+                    iterators.helper_prototype,
                     iterators.wrapper_prototype,
                     iterators.async_iterator_prototype,
                     iterators.async_from_sync_iterator_prototype,
@@ -1116,6 +1117,14 @@ impl Runtime {
                                 for value in [iterator.iterator(), iterator.next_method()] {
                                     mark_stored_value(
                                         value,
+                                        &mut marked_functions,
+                                        &mut marked_objects,
+                                        &mut work,
+                                    );
+                                }
+                                if let Some(map) = iterator.map() {
+                                    mark_heap_reference(
+                                        HeapReference::Function(map.mapper()),
                                         &mut marked_functions,
                                         &mut marked_objects,
                                         &mut work,

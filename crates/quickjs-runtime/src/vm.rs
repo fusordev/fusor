@@ -825,7 +825,10 @@ enum NativeContinuation {
     ErrorConstructor(ErrorConstructorContinuation),
     ErrorToString(ErrorToStringContinuation),
     IteratorFrom(IteratorFromContinuation),
+    IteratorMap(IteratorMapContinuation),
     IteratorToArray(IteratorToArrayContinuation),
+    IteratorHelperNext(IteratorHelperNextContinuation),
+    IteratorHelperReturn(IteratorHelperReturnContinuation),
     IteratorWrapperReturn(IteratorWrapperReturnContinuation),
     IteratorPrototypeSetter(IteratorPrototypeSetterContinuation),
     ArrayIteratorNext(ArrayIteratorNextContinuation),
@@ -1035,7 +1038,10 @@ impl NativeContinuation {
             Self::ErrorConstructor(state) => state.retained_values(),
             Self::ErrorToString(state) => state.retained_values(),
             Self::IteratorFrom(state) => state.retained_values(),
+            Self::IteratorMap(_) => IteratorMapContinuation::retained_values(),
             Self::IteratorToArray(state) => state.retained_values(),
+            Self::IteratorHelperNext(state) => state.retained_values(),
+            Self::IteratorHelperReturn(_) => IteratorHelperReturnContinuation::retained_values(),
             Self::IteratorWrapperReturn(_) => IteratorWrapperReturnContinuation::retained_values(),
             Self::IteratorPrototypeSetter(_) => {
                 IteratorPrototypeSetterContinuation::retained_values()
@@ -1108,6 +1114,7 @@ impl NativeContinuation {
                 | Self::ArrayStatic(_)
                 | Self::ArrayFromAsync(_)
                 | Self::PromiseCombinator(_)
+                | Self::IteratorHelperNext(_)
                 | Self::IteratorAppend(_)
                 | Self::IteratorClose(_)
                 | Self::AsyncFromSync(_)
@@ -3405,7 +3412,10 @@ fn trace_native_continuation_roots(
         NativeContinuation::ErrorConstructor(state) => state.trace_roots(mark),
         NativeContinuation::ErrorToString(state) => state.trace_roots(mark),
         NativeContinuation::IteratorFrom(state) => state.trace_roots(mark),
+        NativeContinuation::IteratorMap(state) => state.trace_roots(mark),
         NativeContinuation::IteratorToArray(state) => state.trace_roots(mark),
+        NativeContinuation::IteratorHelperNext(state) => state.trace_roots(mark),
+        NativeContinuation::IteratorHelperReturn(state) => state.trace_roots(mark),
         NativeContinuation::IteratorWrapperReturn(state) => state.trace_roots(mark),
         NativeContinuation::IteratorPrototypeSetter(state) => state.trace_roots(mark),
         NativeContinuation::ArrayIteratorNext(state) => {

@@ -377,11 +377,62 @@ pub(crate) struct ArrayIterator {
     next: u32,
 }
 
-/// The iterator record retained by a `%WrapForValidIteratorPrototype%`
-/// instance. Both values remain opaque to JavaScript property reflection.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum IteratorHelperLifecycle {
+    SuspendedStart,
+    SuspendedYield,
+    Executing,
+    Completed,
+}
+
+#[derive(Clone, Copy)]
+pub(crate) struct IteratorMapState {
+    mapper: FunctionId,
+    counter: u64,
+    lifecycle: IteratorHelperLifecycle,
+}
+
+impl IteratorMapState {
+    #[must_use]
+    pub(crate) const fn new(mapper: FunctionId) -> Self {
+        Self {
+            mapper,
+            counter: 0,
+            lifecycle: IteratorHelperLifecycle::SuspendedStart,
+        }
+    }
+
+    #[must_use]
+    pub(crate) const fn mapper(&self) -> FunctionId {
+        self.mapper
+    }
+
+    #[must_use]
+    pub(crate) const fn counter(&self) -> u64 {
+        self.counter
+    }
+
+    #[must_use]
+    pub(crate) const fn lifecycle(&self) -> IteratorHelperLifecycle {
+        self.lifecycle
+    }
+
+    pub(crate) const fn set_lifecycle(&mut self, lifecycle: IteratorHelperLifecycle) {
+        self.lifecycle = lifecycle;
+    }
+
+    pub(crate) const fn finish_yield(&mut self) {
+        self.counter = self.counter.saturating_add(1);
+        self.lifecycle = IteratorHelperLifecycle::SuspendedYield;
+    }
+}
+
+/// The iterator record retained by a wrapper or Iterator Helper instance.
+/// All values remain opaque to JavaScript property reflection.
 pub(crate) struct IteratorRecord {
     iterator: StoredValue,
     next_method: StoredValue,
+    map: Option<IteratorMapState>,
 }
 
 impl IteratorRecord {
@@ -390,6 +441,20 @@ impl IteratorRecord {
         Self {
             iterator,
             next_method,
+            map: None,
+        }
+    }
+
+    #[must_use]
+    pub(crate) const fn new_map(
+        iterator: StoredValue,
+        next_method: StoredValue,
+        mapper: FunctionId,
+    ) -> Self {
+        Self {
+            iterator,
+            next_method,
+            map: Some(IteratorMapState::new(mapper)),
         }
     }
 
@@ -398,6 +463,7 @@ impl IteratorRecord {
         Self {
             iterator: self.iterator.duplicate(),
             next_method: self.next_method.duplicate(),
+            map: self.map,
         }
     }
 
@@ -409,6 +475,15 @@ impl IteratorRecord {
     #[must_use]
     pub(crate) const fn next_method(&self) -> &StoredValue {
         &self.next_method
+    }
+
+    #[must_use]
+    pub(crate) const fn map(&self) -> Option<&IteratorMapState> {
+        self.map.as_ref()
+    }
+
+    pub(crate) const fn map_mut(&mut self) -> Option<&mut IteratorMapState> {
+        self.map.as_mut()
     }
 }
 
@@ -2940,6 +3015,13 @@ impl HeapObjectKind {
         }
     }
 
+    pub(crate) const fn iterator_wrapper_mut(&mut self) -> Option<&mut IteratorRecord> {
+        match self {
+            Self::IteratorWrapper(iterator) => Some(iterator),
+            _ => None,
+        }
+    }
+
     pub(crate) const fn string_iterator(&self) -> Option<&StringIterator> {
         match self {
             Self::StringIterator(iterator) => Some(iterator),
@@ -3947,6 +4029,10 @@ impl HeapObject {
     #[must_use]
     pub(crate) const fn iterator_wrapper_state(&self) -> Option<&IteratorRecord> {
         self.kind.iterator_wrapper()
+    }
+
+    pub(crate) const fn iterator_wrapper_state_mut(&mut self) -> Option<&mut IteratorRecord> {
+        self.kind.iterator_wrapper_mut()
     }
 
     #[must_use]

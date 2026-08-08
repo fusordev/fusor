@@ -964,8 +964,15 @@ pub(super) fn resume_native_continuations(
             NativeContinuation::IteratorFrom(state) => {
                 advance_iterator_from(runtime, state, value, return_to, execution_budget)?
             }
+            NativeContinuation::IteratorMap(state) => advance_iterator_map(runtime, state, value)?,
             NativeContinuation::IteratorToArray(state) => {
                 advance_iterator_to_array(runtime, state, value, return_to, execution_budget)?
+            }
+            NativeContinuation::IteratorHelperNext(state) => {
+                advance_iterator_helper_next(runtime, state, value, return_to, execution_budget)?
+            }
+            NativeContinuation::IteratorHelperReturn(state) => {
+                advance_iterator_helper_return(runtime, state, &value, return_to, execution_budget)?
             }
             NativeContinuation::IteratorWrapperReturn(state) => advance_iterator_wrapper_return(
                 runtime,
@@ -3685,6 +3692,18 @@ pub(super) fn dispatch_native_call_with_frames(
             origin.unwrap_or_else(native_function_host_origin),
             execution_budget,
         ),
+        NativeFunctionKind::IteratorPrototypeMap => {
+            let mapper = inputs.arguments.take_first_or_undefined();
+            begin_iterator_map(
+                runtime,
+                inputs.receiver,
+                &mapper,
+                native.realm,
+                return_to,
+                origin.unwrap_or_else(native_function_host_origin),
+                execution_budget,
+            )
+        }
         NativeFunctionKind::IteratorPrototypeToArray => begin_iterator_to_array(
             runtime,
             inputs.receiver,
@@ -3734,6 +3753,22 @@ pub(super) fn dispatch_native_call_with_frames(
             execution_budget,
         ),
         NativeFunctionKind::IteratorWrapperReturn => begin_iterator_wrapper_return(
+            runtime,
+            &inputs.receiver,
+            native.realm,
+            return_to,
+            origin.unwrap_or_else(native_function_host_origin),
+            execution_budget,
+        ),
+        NativeFunctionKind::IteratorHelperNext => begin_iterator_helper_next(
+            runtime,
+            &inputs.receiver,
+            native.realm,
+            return_to,
+            origin.unwrap_or_else(native_function_host_origin),
+            execution_budget,
+        ),
+        NativeFunctionKind::IteratorHelperReturn => begin_iterator_helper_return(
             runtime,
             &inputs.receiver,
             native.realm,

@@ -359,6 +359,41 @@ fn rooted_iterator_from_wrapper_keeps_its_hidden_record_live_through_collection(
 }
 
 #[test]
+fn rooted_iterator_map_helper_keeps_its_hidden_state_live_through_collection() {
+    let mut runtime = Runtime::try_new(RuntimeLimits::default()).expect("runtime");
+    let realm = runtime.create_realm().expect("realm");
+    let helper = {
+        let mut context = runtime.context(&realm).expect("context");
+        let function = dynamic_function(
+            &mut context,
+            "let state={value:41};\
+             let iterator={next(){return {done:false,value:state.value};}};\
+             return Iterator.prototype.map.call(iterator,value=>value+1);",
+        );
+        context
+            .call(&function, &[], ExecutionLimits::default())
+            .expect("Iterator map helper")
+    };
+
+    runtime
+        .collect_cycles()
+        .expect("rooted Iterator map helper survives collection");
+
+    let mut context = runtime.context(&realm).expect("context");
+    let next = dynamic_function(&mut context, "return arguments[0].next().value;");
+    let result = context
+        .call(&next, &[helper], ExecutionLimits::default())
+        .expect("hidden Iterator helper state remains live");
+    assert!(
+        result
+            .as_number()
+            .expect("live value")
+            .expect("number")
+            .strict_equals(JsNumber::from_i32(42))
+    );
+}
+
+#[test]
 fn iterator_to_array_retains_next_and_observes_step_value_order() {
     let mut runtime = Runtime::try_new(RuntimeLimits::default()).expect("runtime");
     let realm = runtime.create_realm().expect("realm");
@@ -438,6 +473,107 @@ fn iterator_to_array_infinite_input_is_stopped_by_uncatchable_fuel() {
             executed: 128,
         }
     ));
+}
+
+#[test]
+fn iterator_map_is_lazy_and_exposes_the_iterator_helper_protocol() {
+    let mut runtime = Runtime::try_new(RuntimeLimits::default()).expect("runtime");
+    let realm = runtime.create_realm().expect("realm");
+    let mut context = runtime.context(&realm).expect("context");
+    let function = dynamic_function(
+        &mut context,
+        "let log='',nextGets=0,nextCalls=0,mapperCalls=0;\
+         let iterator={\
+           get next(){nextGets++;log+='g';return function(){\
+             nextCalls++;log+='n';return nextCalls<3\
+               ?{get done(){log+='d';return false;},get value(){log+='v';return nextCalls;}}\
+               :{get done(){log+='D';return true;},get value(){throw new Error('unread');}};};}};\
+         let helper=Iterator.prototype.map.call(iterator,function(value,index){\
+           mapperCalls++;log+='m'+index;return value*10+index;});\
+         let helperPrototype=Object.getPrototypeOf(helper);\
+         let before=[log,nextGets,nextCalls,mapperCalls].join(',');\
+         let first=helper.next();let second=helper.next();let done=helper.next();\
+         return [before,log,first.value,first.done,second.value,second.done,\
+           done.value===undefined,done.done,nextGets,nextCalls,mapperCalls,\
+           Object.getPrototypeOf(helperPrototype)===Iterator.prototype,\
+           helperPrototype[Symbol.toStringTag],Iterator.prototype.map.name,\
+           Iterator.prototype.map.length,typeof helperPrototype.next,\
+           typeof helperPrototype.return,helper[Symbol.iterator]()===helper].join('|');",
+    );
+
+    let result = context
+        .call(&function, &[], ExecutionLimits::default())
+        .expect("Iterator.prototype.map lazy helper");
+    assert_eq!(
+        string_value(&result),
+        "g,1,0,0|gndvm0ndvm1nD|10|false|21|false|true|true|1|3|2|true|\
+         Iterator Helper|map|1|function|function|true"
+    );
+}
+
+#[test]
+fn iterator_map_return_and_mapper_abrupts_close_exactly_once() {
+    let mut runtime = Runtime::try_new(RuntimeLimits::default()).expect("runtime");
+    let realm = runtime.create_realm().expect("realm");
+    let mut context = runtime.context(&realm).expect("context");
+    let function = dynamic_function(
+        &mut context,
+        "let startCloses=0,yieldCloses=0,abruptCloses=0,reentrantCloses=0;\
+         let start=Iterator.prototype.map.call({next(){return {done:false,value:1};},\
+           return(){startCloses++;return {};}},x=>x);\
+         let startResult=start.return();start.return();\
+         let yielded=Iterator.prototype.map.call({next(){return {done:false,value:2};},\
+           return(){yieldCloses++;return {};}},x=>x);\
+         yielded.next();let yieldResult=yielded.return();yielded.return();\
+         let original={};let preserved=false;\
+         let abrupt=Iterator.prototype.map.call({next(){return {done:false,value:3};},\
+           return(){abruptCloses++;throw {};}},function(){throw original;});\
+         try{abrupt.next();}catch(error){preserved=error===original;}\
+         let helper;let reentrant=false;\
+         helper=Iterator.prototype.map.call({next(){return {done:false,value:4};},\
+           return(){reentrantCloses++;return {};}},function(){\
+             try{helper.next();}catch(error){reentrant=error instanceof TypeError;}\
+             throw original;});\
+         try{helper.next();}catch(error){}\
+         return [startResult.value===undefined,startResult.done,startCloses,\
+           yieldResult.value===undefined,yieldResult.done,yieldCloses,\
+           preserved,abruptCloses,reentrant,reentrantCloses].join('|');",
+    );
+
+    let result = context
+        .call(&function, &[], ExecutionLimits::default())
+        .expect("Iterator.prototype.map closing");
+    assert_eq!(
+        string_value(&result),
+        "true|true|1|true|true|1|true|1|true|1"
+    );
+}
+
+#[test]
+fn iterator_map_validation_and_step_abrupts_follow_spec_order() {
+    let mut runtime = Runtime::try_new(RuntimeLimits::default()).expect("runtime");
+    let realm = runtime.create_realm().expect("realm");
+    let mut context = runtime.context(&realm).expect("context");
+    let function = dynamic_function(
+        &mut context,
+        "let validationLog='',stepCloses=0,validationType=false,stepPreserved=false;\
+         class ValidationIterator extends Iterator {\
+           get next(){validationLog+='next';throw {}}\
+           return(){validationLog+='return';return {};}}\
+         let validation=new ValidationIterator();\
+         try{validation.map();}catch(error){validationType=error instanceof TypeError;}\
+         try{validation.map({});}catch(error){validationType=validationType&&(error instanceof TypeError);}\
+         let original={};\
+         let helper=Iterator.prototype.map.call({next(){return {\
+           get done(){throw original;}};},return(){stepCloses++;return {};}},x=>x);\
+         try{helper.next();}catch(error){stepPreserved=error===original;}\
+         return [validationLog,validationType,stepPreserved,stepCloses].join('|');",
+    );
+
+    let result = context
+        .call(&function, &[], ExecutionLimits::default())
+        .expect("Iterator.prototype.map validation and step abrupts");
+    assert_eq!(string_value(&result), "returnreturn|true|true|0");
 }
 
 #[test]

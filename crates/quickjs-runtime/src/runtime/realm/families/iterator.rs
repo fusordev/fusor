@@ -21,6 +21,13 @@ pub(super) fn visit_objects(visit: ObjectSink<'_>) {
         IntrinsicObjectKind::Ordinary,
     ));
     visit(object(
+        IntrinsicObjectId::IteratorHelperPrototype,
+        PrototypeSpec::Intrinsic(IntrinsicIdentity::Object(
+            IntrinsicObjectId::IteratorPrototype,
+        )),
+        IntrinsicObjectKind::Ordinary,
+    ));
+    visit(object(
         IntrinsicObjectId::AsyncIteratorPrototype,
         object_prototype(),
         IntrinsicObjectKind::Ordinary,
@@ -72,6 +79,11 @@ pub(super) fn visit_functions(visit: FunctionSink<'_>) {
             1,
         ),
         (
+            NativeFunctionKind::IteratorPrototypeMap,
+            IntrinsicNameSpec::RealmName(RealmNameId::IteratorMap),
+            1,
+        ),
+        (
             NativeFunctionKind::IteratorPrototypeToArray,
             IntrinsicNameSpec::RealmName(RealmNameId::IteratorToArray),
             0,
@@ -103,6 +115,16 @@ pub(super) fn visit_functions(visit: FunctionSink<'_>) {
         ),
         (
             NativeFunctionKind::IteratorWrapperReturn,
+            IntrinsicNameSpec::Predefined(PredefinedAtom::Return),
+            0,
+        ),
+        (
+            NativeFunctionKind::IteratorHelperNext,
+            IntrinsicNameSpec::Predefined(PredefinedAtom::Next),
+            0,
+        ),
+        (
+            NativeFunctionKind::IteratorHelperReturn,
             IntrinsicNameSpec::Predefined(PredefinedAtom::Return),
             0,
         ),
@@ -215,8 +237,30 @@ pub(super) fn visit_properties(visit: PropertySink<'_>) {
     ));
     visit(method(
         prototype,
+        IntrinsicKeySpec::InternedString(RealmNameId::IteratorMap),
+        NativeFunctionKind::IteratorPrototypeMap,
+    ));
+    visit(method(
+        prototype,
         IntrinsicKeySpec::InternedString(RealmNameId::IteratorToArray),
         NativeFunctionKind::IteratorPrototypeToArray,
+    ));
+    let helper = IntrinsicIdentity::Object(IntrinsicObjectId::IteratorHelperPrototype);
+    visit(method(
+        helper,
+        IntrinsicKeySpec::PredefinedString(PredefinedAtom::Next),
+        NativeFunctionKind::IteratorHelperNext,
+    ));
+    visit(method(
+        helper,
+        IntrinsicKeySpec::PredefinedString(PredefinedAtom::Return),
+        NativeFunctionKind::IteratorHelperReturn,
+    ));
+    visit(data(
+        helper,
+        IntrinsicKeySpec::WellKnownSymbol(PredefinedAtom::SymbolToStringTag),
+        IDENTITY_PROPERTY,
+        IntrinsicValueSpec::String(IntrinsicStringSpec::Literal("Iterator Helper")),
     ));
     let wrapper = IntrinsicIdentity::Object(IntrinsicObjectId::WrapForValidIteratorPrototype);
     visit(method(
