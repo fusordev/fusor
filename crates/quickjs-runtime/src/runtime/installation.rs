@@ -397,6 +397,7 @@ impl Runtime {
         realm: RealmId,
         authority: &VerifiedBytecode,
         templates: &[InstalledTemplate],
+        external_environment: Option<&[Option<EnvironmentBinding>]>,
     ) -> Result<RootEnvironment, InstallError> {
         let root = authority.root();
         let executable_kind = root.metadata().executable_kind();
@@ -424,6 +425,14 @@ impl Runtime {
                 resource: RuntimeResource::RealmGlobalBindings,
                 additional: sources.len(),
             })?;
+        let mut binding_slots = Vec::new();
+        binding_slots
+            .try_reserve_exact(sources.len())
+            .map_err(|_| InstallError::AllocationFailed {
+                resource: RuntimeResource::RealmGlobalBindings,
+                additional: sources.len(),
+            })?;
+        binding_slots.resize(sources.len(), None);
         let mut requested_names = HashSet::new();
         requested_names
             .try_reserve(sources.len())
@@ -434,34 +443,73 @@ impl Runtime {
         for (closure, (source, definition)) in
             sources.iter().zip(root.metadata().closures()).enumerate()
         {
-            let quickjs_bytecode::CompilerClosureSource::ConstructorRealmGlobal(atom) = *source
-            else {
-                return Err(InstallError::AuthorityInvariant {
-                    message: "root closure source is not constructor-realm global",
-                });
-            };
-            let CompilerClosureBinding::RealmGlobal(policy) = definition.binding() else {
-                return Err(InstallError::AuthorityInvariant {
-                    message: "root constructor-realm source has captured-cell metadata",
-                });
-            };
-            let name = installed.atoms.get(atom.get() as usize).cloned().ok_or(
-                InstallError::AuthorityInvariant {
-                    message: "constructor-realm global atom is missing",
-                },
-            )?;
-            if !requested_names.insert(name.clone()) {
-                return Err(InstallError::AuthorityInvariant {
-                    message: "constructor-realm global names are not unique",
-                });
+            match *source {
+                quickjs_bytecode::CompilerClosureSource::ConstructorRealmGlobal(atom) => {
+                    let CompilerClosureBinding::RealmGlobal(policy) = definition.binding() else {
+                        return Err(InstallError::AuthorityInvariant {
+                            message: "root constructor-realm source has captured-cell metadata",
+                        });
+                    };
+                    let name = installed.atoms.get(atom.get() as usize).cloned().ok_or(
+                        InstallError::AuthorityInvariant {
+                            message: "constructor-realm global atom is missing",
+                        },
+                    )?;
+                    if !requested_names.insert(name.clone()) {
+                        return Err(InstallError::AuthorityInvariant {
+                            message: "constructor-realm global names are not unique",
+                        });
+                    }
+                    requests.push((
+                        name,
+                        RealmGlobalRequest::from_policy(policy)?,
+                        u32::try_from(closure).map_err(|_| InstallError::AuthorityInvariant {
+                            message: "constructor-realm global index is not representable",
+                        })?,
+                    ));
+                }
+                quickjs_bytecode::CompilerClosureSource::DirectEvalBinding {
+                    index,
+                    environment_size,
+                } => {
+                    if !matches!(definition.binding(), CompilerClosureBinding::Captured(_)) {
+                        return Err(InstallError::AuthorityInvariant {
+                            message: "direct-eval source has Realm-global metadata",
+                        });
+                    }
+                    let environment =
+                        external_environment.ok_or(InstallError::AuthorityInvariant {
+                            message: "direct-eval caller environment is missing",
+                        })?;
+                    if environment.len() != environment_size as usize {
+                        return Err(InstallError::AuthorityInvariant {
+                            message: "direct-eval caller environment has the wrong shape",
+                        });
+                    }
+                    let binding = environment.get(index as usize).copied().flatten().ok_or(
+                        InstallError::AuthorityInvariant {
+                            message: "direct-eval caller binding is missing",
+                        },
+                    )?;
+                    let EnvironmentBinding::Captured(cell) = binding else {
+                        return Err(InstallError::AuthorityInvariant {
+                            message: "direct-eval caller binding is not a captured cell",
+                        });
+                    };
+                    if !self.cells.contains(cell) {
+                        return Err(InstallError::AuthorityInvariant {
+                            message: "direct-eval caller binding cell is stale",
+                        });
+                    }
+                    binding_slots[closure] = Some(binding);
+                }
+                quickjs_bytecode::CompilerClosureSource::ParentVariableReference(_)
+                | quickjs_bytecode::CompilerClosureSource::ParentClosure(_) => {
+                    return Err(InstallError::AuthorityInvariant {
+                        message: "root closure source requires an omitted parent",
+                    });
+                }
             }
-            requests.push((
-                name,
-                RealmGlobalRequest::from_policy(policy)?,
-                u32::try_from(closure).map_err(|_| InstallError::AuthorityInvariant {
-                    message: "constructor-realm global index is not representable",
-                })?,
-            ));
         }
 
         let realm_state = self
@@ -672,7 +720,7 @@ impl Runtime {
                 additional: requests.len(),
             })?;
 
-        for (name, request, _) in requests {
+        for (name, request, closure) in requests {
             let lexical_state = if let Some(mutable) = request.lexical_mutability() {
                 let Ok(cell) = self.cells.try_insert(BindingCell {
                     value: SlotValue::Uninitialized,
@@ -915,7 +963,25 @@ impl Runtime {
                     inserted_global_properties.push(key);
                 }
             }
-            bindings.push(EnvironmentBinding::RealmGlobal(global));
+            binding_slots[closure as usize] = Some(EnvironmentBinding::RealmGlobal(global));
+        }
+
+        for binding in binding_slots {
+            let Some(binding) = binding else {
+                let partial = RootEnvironment {
+                    bindings,
+                    inserted_globals,
+                    updated_globals,
+                    inserted_cells,
+                    inserted_global_properties,
+                    updated_global_properties,
+                };
+                self.rollback_root_environment(realm, &partial);
+                return Err(InstallError::AuthorityInvariant {
+                    message: "root environment has an unresolved closure slot",
+                });
+            };
+            bindings.push(binding);
         }
 
         Ok(RootEnvironment {

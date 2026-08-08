@@ -135,7 +135,7 @@ impl<'arena> CompilationContext<'_, 'arena, '_> {
                 arrow.span,
             );
         }
-        if !crate::is_supported_script_root_goal(self.unit.goal())
+        if !crate::is_supported_script_compilation_goal(self.unit.goal())
             && let Some(reference) = self
                 .planned
                 .plan
@@ -230,7 +230,7 @@ impl<'arena> CompilationContext<'_, 'arena, '_> {
                 function.span,
             );
         }
-        if !crate::is_supported_script_root_goal(self.unit.goal())
+        if !crate::is_supported_script_compilation_goal(self.unit.goal())
             && let Some(reference) = self
                 .planned
                 .plan

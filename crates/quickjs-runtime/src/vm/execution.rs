@@ -296,11 +296,17 @@ fn duplicate_arguments_snapshot(frame: &Frame) -> Result<Vec<StoredValue>, Execu
     Ok(duplicate)
 }
 
-fn is_class_name_capture_write(
+enum CapturedWriteAction {
+    Write,
+    Ignore,
+    Throw,
+}
+
+fn captured_write_action(
     runtime: &Runtime,
     frame: &Frame,
     index: u32,
-) -> Result<bool, EngineFault> {
+) -> Result<CapturedWriteAction, EngineFault> {
     let code = code(runtime, frame.code)?;
     let function =
         code.authority
@@ -314,11 +320,19 @@ fn is_class_name_capture_write(
             index,
         },
     )?;
-    Ok(matches!(
-        definition.binding(),
-        CompilerClosureBinding::Captured(policy)
-            if policy.kind() == CompilerBindingKind::ClassName
-    ))
+    let CompilerClosureBinding::Captured(policy) = definition.binding() else {
+        return Err(EngineFault::InvalidClosureEnvironment {
+            function: frame.template,
+        });
+    };
+    Ok(match policy.writes() {
+        quickjs_bytecode::CompilerWritePolicy::Mutable => CapturedWriteAction::Write,
+        quickjs_bytecode::CompilerWritePolicy::Immutable => CapturedWriteAction::Throw,
+        quickjs_bytecode::CompilerWritePolicy::ImmutableInStrictCode if frame.strict => {
+            CapturedWriteAction::Throw
+        }
+        quickjs_bytecode::CompilerWritePolicy::ImmutableInStrictCode => CapturedWriteAction::Ignore,
+    })
 }
 
 #[allow(
@@ -2808,16 +2822,23 @@ pub(super) fn execute_one(
         | FinalOpcode::PutVarRef2
         | FinalOpcode::PutVarRef3 => {
             let index = closure_index(opcode, operands)?;
-            if is_class_name_capture_write(runtime, frame, index)? {
-                return Ok(Step::Abrupt(immutable_binding_exception(
-                    runtime,
-                    frame,
-                    BindingName::Closure(index),
-                    source_pc,
-                )?));
+            match captured_write_action(runtime, frame, index)? {
+                CapturedWriteAction::Throw => {
+                    return Ok(Step::Abrupt(immutable_binding_exception(
+                        runtime,
+                        frame,
+                        BindingName::Closure(index),
+                        source_pc,
+                    )?));
+                }
+                CapturedWriteAction::Ignore => {
+                    pop(frame)?;
+                }
+                CapturedWriteAction::Write => {
+                    let value = pop(frame)?;
+                    write_environment(runtime, frame, index, SlotValue::Value(value))?;
+                }
             }
-            let value = pop(frame)?;
-            write_environment(runtime, frame, index, SlotValue::Value(value))?;
         }
         FinalOpcode::SetVarRef
         | FinalOpcode::SetVarRef0
@@ -2825,16 +2846,21 @@ pub(super) fn execute_one(
         | FinalOpcode::SetVarRef2
         | FinalOpcode::SetVarRef3 => {
             let index = closure_index(opcode, operands)?;
-            if is_class_name_capture_write(runtime, frame, index)? {
-                return Ok(Step::Abrupt(immutable_binding_exception(
-                    runtime,
-                    frame,
-                    BindingName::Closure(index),
-                    source_pc,
-                )?));
+            match captured_write_action(runtime, frame, index)? {
+                CapturedWriteAction::Throw => {
+                    return Ok(Step::Abrupt(immutable_binding_exception(
+                        runtime,
+                        frame,
+                        BindingName::Closure(index),
+                        source_pc,
+                    )?));
+                }
+                CapturedWriteAction::Ignore => {}
+                CapturedWriteAction::Write => {
+                    let value = peek(frame)?.duplicate();
+                    write_environment(runtime, frame, index, SlotValue::Value(value))?;
+                }
             }
-            let value = peek(frame)?.duplicate();
-            write_environment(runtime, frame, index, SlotValue::Value(value))?;
         }
         FinalOpcode::SetLocUninitialized => {
             let index = local_index(opcode, operands)?;
@@ -2908,16 +2934,23 @@ pub(super) fn execute_one(
                     source_pc,
                 )?));
             }
-            if is_class_name_capture_write(runtime, frame, index)? {
-                return Ok(Step::Abrupt(immutable_binding_exception(
-                    runtime,
-                    frame,
-                    BindingName::Closure(index),
-                    source_pc,
-                )?));
+            match captured_write_action(runtime, frame, index)? {
+                CapturedWriteAction::Throw => {
+                    return Ok(Step::Abrupt(immutable_binding_exception(
+                        runtime,
+                        frame,
+                        BindingName::Closure(index),
+                        source_pc,
+                    )?));
+                }
+                CapturedWriteAction::Ignore => {
+                    pop(frame)?;
+                }
+                CapturedWriteAction::Write => {
+                    let value = pop(frame)?;
+                    write_environment(runtime, frame, index, SlotValue::Value(value))?;
+                }
             }
-            let value = pop(frame)?;
-            write_environment(runtime, frame, index, SlotValue::Value(value))?;
         }
         FinalOpcode::CloseLoc => {
             let index = local_index(opcode, operands)?;

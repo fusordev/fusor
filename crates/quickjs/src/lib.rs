@@ -9,8 +9,9 @@
 use std::{error::Error, fmt, sync::Arc};
 
 use quickjs_bytecode::{
-    BytecodeGraphVerificationLimits, FunctionGraphVerificationLimits, VerificationLimits,
-    VerifiedBytecode,
+    BytecodeGraphVerificationLimits, CompilerBindingKind, CompilerBindingPolicy,
+    CompilerInitializationPolicy, CompilerWritePolicy, FunctionGraphVerificationLimits,
+    VerificationLimits, VerifiedBytecode,
 };
 use quickjs_compiler::{CompilationContext, CompilerError, LeafCompilationError};
 pub use quickjs_diagnostics::{
@@ -22,17 +23,23 @@ pub use quickjs_diagnostics::{
     render_pretty_report,
 };
 use quickjs_frontend::{
-    CompilationGoal, DiagnosticStage, DirectEvalCapabilities as FrontendDirectEvalCapabilities,
-    DirectEvalContext, DirectEvalScopeSnapshot, DynamicFunctionError, DynamicFunctionKind,
-    DynamicFunctionSource, FrontendError, FrontendLimits, FrontendOptions, GlobalScriptGoal,
-    IndirectEvalGoal, PreparedDynamicFunctionSource, RegisteredFrontendError, SourceFragment,
+    CompilationGoal, DiagnosticStage, DirectEvalBinding as FrontendDirectEvalBinding,
+    DirectEvalBindingKind as FrontendDirectEvalBindingKind,
+    DirectEvalBindingLocation as FrontendDirectEvalBindingLocation,
+    DirectEvalCapabilities as FrontendDirectEvalCapabilities, DirectEvalContext,
+    DirectEvalScopeFrame as FrontendDirectEvalScopeFrame,
+    DirectEvalScopeKind as FrontendDirectEvalScopeKind, DirectEvalScopeSnapshot,
+    DynamicFunctionError, DynamicFunctionKind, DynamicFunctionSource, FrontendError,
+    FrontendLimits, FrontendOptions, GlobalScriptGoal, IndirectEvalGoal,
+    PreparedDynamicFunctionSource, RegisteredFrontendError, SourceFragment,
     with_dynamic_function_source_and_prepared, with_parsed_program, with_registered_program,
 };
 use quickjs_runtime::{
-    Context, DirectEvalCompileRequest, DynamicFunctionCompileFailure,
-    DynamicFunctionCompileRequest, DynamicFunctionCompiler, DynamicFunctionFamily,
-    DynamicFunctionScriptError, ExecutionError, ExecutionLimits, Function, GlobalScriptError,
-    IndirectEvalCompileRequest, InstallError, JsString, JsValue, RuntimeDiagnosticError,
+    Context, DirectEvalCallerBindingLocation, DirectEvalCompileRequest,
+    DynamicFunctionCompileFailure, DynamicFunctionCompileRequest, DynamicFunctionCompiler,
+    DynamicFunctionFamily, DynamicFunctionScriptError, ExecutionError, ExecutionLimits, Function,
+    GlobalScriptError, IndirectEvalCompileRequest, InstallError, JsString, JsValue,
+    RuntimeDiagnosticError,
 };
 
 /// Resource limits applied across Global Script parsing, compilation,
@@ -980,13 +987,57 @@ fn compile_direct_eval_source(
     limits: DynamicFunctionLimits,
 ) -> Result<Arc<VerifiedBytecode>, DynamicFunctionCompileFailure> {
     let source = js_string_to_utf8(request.source(), RuntimeSourceFragment::DirectEval)?;
+    let mut binding_names = Vec::new();
+    binding_names
+        .try_reserve_exact(request.bindings().len())
+        .map_err(|error| {
+            engine_failure_with_source(
+                DynamicFunctionEngineStage::SourceConversion,
+                format!(
+                    "could not reserve {} direct-eval binding names",
+                    request.bindings().len()
+                ),
+                error,
+            )
+        })?;
+    for binding in request.bindings() {
+        binding_names.push(js_string_to_utf8(
+            binding.name(),
+            RuntimeSourceFragment::DirectEval,
+        )?);
+    }
+    let mut bindings = Vec::new();
+    bindings
+        .try_reserve_exact(request.bindings().len())
+        .map_err(|error| {
+            engine_failure_with_source(
+                DynamicFunctionEngineStage::SourceConversion,
+                format!(
+                    "could not reserve {} direct-eval binding descriptors",
+                    request.bindings().len()
+                ),
+                error,
+            )
+        })?;
+    for (binding, name) in request.bindings().iter().zip(&binding_names) {
+        let (kind, is_lexical, is_const) = frontend_direct_eval_policy(binding.policy())?;
+        let location = frontend_direct_eval_location(binding.location())?;
+        bindings.push(FrontendDirectEvalBinding::new(
+            name, kind, is_lexical, is_const, location,
+        ));
+    }
+    let frames = [FrontendDirectEvalScopeFrame::new(
+        FrontendDirectEvalScopeKind::Pseudo,
+        &bindings,
+        &[],
+    )];
     let capabilities = FrontendDirectEvalCapabilities::new()
         .with_strict(request.is_strict())
         .with_new_target(request.allows_new_target())
         .with_super_property(request.allows_super_property())
         .with_super_call(request.allows_super_call())
         .with_arguments_allowed(request.allows_arguments());
-    let context = DirectEvalContext::new(capabilities, DirectEvalScopeSnapshot::default());
+    let context = DirectEvalContext::new(capabilities, DirectEvalScopeSnapshot::new(&frames));
     let compiled = with_parsed_program(
         &source,
         FrontendOptions::for_goal(CompilationGoal::DirectEval(context))
@@ -1016,6 +1067,72 @@ fn compile_direct_eval_source(
         engine_failure_with_source(stage, source.to_string(), source)
     })?;
     Ok(Arc::new(compiled.verified_bytecode().clone()))
+}
+
+fn frontend_direct_eval_location(
+    location: DirectEvalCallerBindingLocation,
+) -> Result<FrontendDirectEvalBindingLocation, DynamicFunctionCompileFailure> {
+    let (domain, index) = match location {
+        DirectEvalCallerBindingLocation::Argument(index) => ("argument", index),
+        DirectEvalCallerBindingLocation::Local(index) => ("local", index),
+        DirectEvalCallerBindingLocation::Closure(index) => ("closure", index),
+    };
+    let index = u16::try_from(index).map_err(|_| {
+        engine_failure(
+            DynamicFunctionEngineStage::SourceConversion,
+            format!("direct-eval caller {domain} index is not representable"),
+        )
+    })?;
+    Ok(match location {
+        DirectEvalCallerBindingLocation::Argument(_) => {
+            FrontendDirectEvalBindingLocation::Argument { index }
+        }
+        DirectEvalCallerBindingLocation::Local(_) => {
+            FrontendDirectEvalBindingLocation::Local { index }
+        }
+        DirectEvalCallerBindingLocation::Closure(_) => {
+            FrontendDirectEvalBindingLocation::Closure { index }
+        }
+    })
+}
+
+fn frontend_direct_eval_policy(
+    policy: CompilerBindingPolicy,
+) -> Result<(FrontendDirectEvalBindingKind, bool, bool), DynamicFunctionCompileFailure> {
+    let binding = match policy.kind() {
+        CompilerBindingKind::Parameter | CompilerBindingKind::Var => {
+            (FrontendDirectEvalBindingKind::Normal, false, false)
+        }
+        CompilerBindingKind::Let => (FrontendDirectEvalBindingKind::Normal, true, false),
+        CompilerBindingKind::Const | CompilerBindingKind::ClassName => {
+            (FrontendDirectEvalBindingKind::Normal, true, true)
+        }
+        CompilerBindingKind::Function => (
+            if policy.initialization() == CompilerInitializationPolicy::FunctionAtScopeEntry {
+                FrontendDirectEvalBindingKind::NewFunctionDeclaration
+            } else {
+                FrontendDirectEvalBindingKind::FunctionDeclaration
+            },
+            policy.initialization() == CompilerInitializationPolicy::FunctionAtScopeEntry,
+            false,
+        ),
+        CompilerBindingKind::FunctionName => (
+            FrontendDirectEvalBindingKind::FunctionName,
+            false,
+            policy.writes() == CompilerWritePolicy::Immutable,
+        ),
+        CompilerBindingKind::Catch => (FrontendDirectEvalBindingKind::Catch, true, false),
+        CompilerBindingKind::ClassFieldKey
+        | CompilerBindingKind::ClassPrivateName
+        | CompilerBindingKind::ClassStaticReceiver
+        | CompilerBindingKind::GlobalReference => {
+            return Err(engine_failure(
+                DynamicFunctionEngineStage::SourceConversion,
+                "compiler-internal and Realm-global bindings must not enter a direct-eval caller snapshot",
+            ));
+        }
+    };
+    Ok(binding)
 }
 
 fn map_eval_frontend_error(source: FrontendError) -> DynamicFunctionCompileFailure {

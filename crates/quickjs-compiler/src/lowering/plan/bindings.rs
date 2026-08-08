@@ -1,13 +1,13 @@
 use super::super::{
     ArgumentSlot, AssignmentExpression, AssignmentOperator, AssignmentTarget, BindingId,
     BindingIdentifier, BindingPattern, BranchKind, CompilationContext, CompiledConstantPool,
-    CompilerClosureBinding, CompilerWritePolicy, DeclarationKind,
-    DestructuringBindingInitialization, ExecutableId, Expression, FinalOpcode, ForStatementLeft,
-    FrameLayout, FrameSlot, FunctionTreeLayout, GetSpan, IdentifierReference, LeafCompilationError,
-    LocalSlot, NativeReferenceId, Operands, PlannedControlFlow, PlannedInstruction, RealmGlobalId,
-    ReferenceAccess, ReferenceId, Span, StoragePlacement, SymbolId, UnresolvedGlobalId,
-    UnsupportedLeafFeature, VariableDeclaration, VariableDeclarationKind, VariableDeclarator,
-    WritePolicy, anonymous_named_evaluation_span, binary_opcode, unsupported,
+    CompilerClosureBinding, DeclarationKind, DestructuringBindingInitialization, ExecutableId,
+    Expression, FinalOpcode, ForStatementLeft, FrameLayout, FrameSlot, FunctionTreeLayout, GetSpan,
+    IdentifierReference, LeafCompilationError, LocalSlot, NativeReferenceId, Operands,
+    PlannedControlFlow, PlannedInstruction, RealmGlobalId, ReferenceAccess, ReferenceId, Span,
+    StoragePlacement, SymbolId, UnresolvedGlobalId, UnsupportedLeafFeature, VariableDeclaration,
+    VariableDeclarationKind, VariableDeclarator, WritePolicy, anonymous_named_evaluation_span,
+    binary_opcode, unsupported,
 };
 use super::expressions::{ExpressionPlanner, ExpressionWork};
 
@@ -157,20 +157,15 @@ pub(in crate::lowering) fn plan_external_put(
     binding: CompilerClosureBinding,
     slot: u16,
     span: Span,
-) -> Result<PlannedInstruction, LeafCompilationError> {
+) -> PlannedInstruction {
     let (opcode, operands) = match binding {
-        CompilerClosureBinding::Captured(policy)
-            if policy.writes() != CompilerWritePolicy::Mutable =>
-        {
-            return unsupported(UnsupportedLeafFeature::UnsupportedReference, span);
-        }
         CompilerClosureBinding::Captured(policy) if policy.has_temporal_dead_zone() => {
             (FinalOpcode::PutVarRefCheck, Operands::VarRef(slot))
         }
         CompilerClosureBinding::Captured(_) => compact_put_capture(slot),
         CompilerClosureBinding::RealmGlobal(_) => (FinalOpcode::PutVar, Operands::VarRef(slot)),
     };
-    Ok(PlannedInstruction::new(opcode, operands, span))
+    PlannedInstruction::new(opcode, operands, span)
 }
 
 impl LoweredReference {
@@ -255,7 +250,7 @@ impl<'arena> ExpressionPlanner<'_, '_, 'arena, '_> {
         work: &mut Vec<ExpressionWork<'expression, 'arena>>,
     ) -> Result<(), LeafCompilationError> {
         let read = plan_external_read(binding, slot, false, assignment.left.span());
-        let write = plan_external_put(binding, slot, assignment.left.span())?;
+        let write = plan_external_put(binding, slot, assignment.left.span());
         match assignment.operator {
             AssignmentOperator::Assign => {
                 work.push(ExpressionWork::Emit(write));
@@ -653,7 +648,7 @@ impl<'arena> CompilationContext<'_, 'arena, '_> {
                         }
                     }
                     LoweredReference::RealmGlobal { slot, binding, .. } => {
-                        flow.emit(plan_external_put(binding, slot, identifier.span)?)?;
+                        flow.emit(plan_external_put(binding, slot, identifier.span))?;
                     }
                 }
             }
@@ -1364,12 +1359,6 @@ impl CompilationContext<'_, '_, '_> {
                 {
                     return unsupported(UnsupportedLeafFeature::UnsupportedReference, span);
                 }
-            }
-            LoweredReference::RealmGlobal {
-                binding: CompilerClosureBinding::Captured(policy),
-                ..
-            } if policy.writes() != CompilerWritePolicy::Mutable => {
-                return unsupported(UnsupportedLeafFeature::UnsupportedReference, span);
             }
             LoweredReference::RealmGlobal { .. } => {}
         }

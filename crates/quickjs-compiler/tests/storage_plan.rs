@@ -519,6 +519,65 @@ fn nested_frame_captures_are_forwarded_through_intermediate_executables() {
 }
 
 #[test]
+fn direct_eval_captures_visible_outer_bindings_without_source_references() {
+    let plan = script(
+        "function outer(value) { \
+             return function inner() { return eval('value'); }; \
+         }",
+    );
+    let outer = plan.executables()[1].id();
+    let inner = plan.executables()[2].id();
+    let value = plan
+        .bindings_for(outer)
+        .unwrap()
+        .iter()
+        .find(|binding| binding.name() == "value")
+        .unwrap();
+
+    assert!(value.is_frame_captured());
+    let captures = plan.frame_captures_for(inner).unwrap();
+    assert_eq!(captures.len(), 1);
+    assert_eq!(captures[0].binding(), value.id());
+    assert_eq!(
+        captures[0].source(),
+        CaptureSource::ParentBinding(value.id())
+    );
+}
+
+#[test]
+fn direct_eval_capture_visibility_respects_lexical_shadowing() {
+    let plan = script(
+        "function outer(value) { \
+             { let value = 2; return function inner() { return eval('value'); }; } \
+         }",
+    );
+    let outer = plan.executables()[1].id();
+    let inner = plan.executables()[2].id();
+    let outer_values = plan
+        .bindings_for(outer)
+        .unwrap()
+        .iter()
+        .filter(|binding| binding.name() == "value")
+        .collect::<Vec<_>>();
+    let parameter = outer_values
+        .iter()
+        .copied()
+        .find(|binding| binding.policy().kind() == DeclarationKind::Parameter)
+        .unwrap();
+    let lexical = outer_values
+        .iter()
+        .copied()
+        .find(|binding| binding.policy().kind() == DeclarationKind::Let)
+        .unwrap();
+
+    assert!(!parameter.is_frame_captured());
+    assert!(lexical.is_frame_captured());
+    let captures = plan.frame_captures_for(inner).unwrap();
+    assert_eq!(captures.len(), 1);
+    assert_eq!(captures[0].binding(), lexical.id());
+}
+
+#[test]
 fn sibling_captures_are_deduplicated_per_executable() {
     let plan = script(
         "function outer(value) { \

@@ -6793,13 +6793,15 @@ fn ordinary_root_authority_cannot_originate_constructor_realm_globals() {
 
 fn direct_eval_binding_input(
     executable_kind: CompilerExecutableKind,
+    instructions: &[(FinalOpcode, Operands)],
+    policy: CompilerBindingPolicy,
 ) -> UnverifiedCompilerBytecodeGraph {
     let closure_source = CompilerClosureSource::DirectEvalBinding {
         index: 1,
         environment_size: 2,
     };
     let flow = flow_with_header(
-        &[(FinalOpcode::ReturnUndef, Operands::None)],
+        instructions,
         1,
         0,
         0,
@@ -6825,6 +6827,11 @@ fn direct_eval_binding_input(
     );
     let text = "callerValue";
     let full_span = SourceByteSpan::new(0, u32::try_from(text.len()).expect("source length"));
+    let mappings = flow
+        .instructions()
+        .iter()
+        .map(|instruction| (instruction.decoded().pc().get(), full_span))
+        .collect::<Vec<_>>();
     UnverifiedCompilerBytecodeGraph::new(
         graph,
         Arc::from([UnverifiedFunctionMetadata::new(
@@ -6832,10 +6839,10 @@ fn direct_eval_binding_input(
             Arc::from([]),
             Arc::from([ClosureVariableDefinition::new(
                 Some(AtomPoolIndex::new(0)),
-                var_policy(),
+                policy,
                 closure_source,
             )]),
-            source(text, full_span, None, &[(0, full_span)]),
+            source(text, full_span, None, &mappings),
         )
         .with_executable_kind(executable_kind)]),
     )
@@ -6844,7 +6851,11 @@ fn direct_eval_binding_input(
 #[test]
 fn direct_eval_authority_binds_only_direct_eval_caller_sources() {
     let verified = verify_compiler_bytecode_graph(
-        direct_eval_binding_input(CompilerExecutableKind::DirectEvalScript),
+        direct_eval_binding_input(
+            CompilerExecutableKind::DirectEvalScript,
+            &[(FinalOpcode::ReturnUndef, Operands::None)],
+            var_policy(),
+        ),
         BytecodeGraphVerificationLimits::default(),
     )
     .expect("a direct-eval Script root can import a typed caller binding");
@@ -6858,7 +6869,11 @@ fn direct_eval_authority_binds_only_direct_eval_caller_sources() {
     );
 
     let error = verify_compiler_bytecode_graph(
-        direct_eval_binding_input(CompilerExecutableKind::IndirectEvalScript),
+        direct_eval_binding_input(
+            CompilerExecutableKind::IndirectEvalScript,
+            &[(FinalOpcode::ReturnUndef, Operands::None)],
+            var_policy(),
+        ),
         BytecodeGraphVerificationLimits::default(),
     )
     .expect_err("an indirect-eval authority cannot import a caller binding");
@@ -6867,6 +6882,28 @@ fn direct_eval_authority_binds_only_direct_eval_caller_sources() {
         &BytecodeVerificationErrorKind::DirectEvalBindingSourceRequiresDirectEvalScript {
             closure: 0,
         }
+    );
+}
+
+#[test]
+fn direct_eval_immutable_caller_writes_remain_runtime_checked() {
+    let verified = verify_compiler_bytecode_graph(
+        direct_eval_binding_input(
+            CompilerExecutableKind::DirectEvalScript,
+            &[
+                (FinalOpcode::Push1, Operands::NoneInt),
+                (FinalOpcode::PutVarRefCheck, Operands::VarRef(0)),
+                (FinalOpcode::ReturnUndef, Operands::None),
+            ],
+            const_policy(),
+        ),
+        BytecodeGraphVerificationLimits::default(),
+    )
+    .expect("a verified captured write retains immutable caller policy for the VM");
+
+    assert_eq!(
+        verified.root().metadata().closures()[0].policy(),
+        const_policy()
     );
 }
 

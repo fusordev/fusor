@@ -954,7 +954,7 @@ impl<'arena> CompilationContext<'_, 'arena, '_> {
                     binding,
                     slot,
                     identifier.span,
-                )?));
+                )));
             }
         }
         Ok(())

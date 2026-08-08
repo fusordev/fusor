@@ -2,7 +2,7 @@
 
 use std::{error::Error, fmt, sync::Arc};
 
-use quickjs_bytecode::VerifiedBytecode;
+use quickjs_bytecode::{CompilerBindingPolicy, VerifiedBytecode};
 
 use crate::{JsString, error::DynamicFunctionCompileFailure};
 
@@ -37,12 +37,66 @@ pub struct IndirectEvalCompileRequest {
     source: JsString,
 }
 
+/// Storage address of one caller binding exposed to direct `eval`.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum DirectEvalCallerBindingLocation {
+    /// Argument slot in the calling activation.
+    Argument(u32),
+    /// Local slot in the calling activation.
+    Local(u32),
+    /// Imported closure slot in the calling function object.
+    Closure(u32),
+}
+
+/// One named live caller binding visible to direct `eval`.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct DirectEvalCallerBinding {
+    name: JsString,
+    policy: CompilerBindingPolicy,
+    location: DirectEvalCallerBindingLocation,
+}
+
+impl DirectEvalCallerBinding {
+    /// Creates one caller-environment snapshot entry.
+    #[must_use]
+    pub const fn new(
+        name: JsString,
+        policy: CompilerBindingPolicy,
+        location: DirectEvalCallerBindingLocation,
+    ) -> Self {
+        Self {
+            name,
+            policy,
+            location,
+        }
+    }
+
+    /// Returns the exact identifier name.
+    #[must_use]
+    pub const fn name(&self) -> &JsString {
+        &self.name
+    }
+
+    /// Returns the verified declaration policy of the caller binding.
+    #[must_use]
+    pub const fn policy(&self) -> CompilerBindingPolicy {
+        self.policy
+    }
+
+    /// Returns the caller-frame storage address.
+    #[must_use]
+    pub const fn location(&self) -> DirectEvalCallerBindingLocation {
+        self.location
+    }
+}
+
 /// Owned source and caller grammar capabilities for one direct `eval`.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct DirectEvalCompileRequest {
     source: JsString,
     scope_index: u16,
     capabilities: u8,
+    bindings: Arc<[DirectEvalCallerBinding]>,
 }
 
 impl DirectEvalCompileRequest {
@@ -54,12 +108,20 @@ impl DirectEvalCompileRequest {
 
     /// Creates a direct-eval request with the caller's strictness.
     #[must_use]
-    pub const fn new(source: JsString, strict: bool) -> Self {
+    pub fn new(source: JsString, strict: bool) -> Self {
         Self {
             source,
             scope_index: 1,
             capabilities: if strict { Self::STRICT } else { 0 },
+            bindings: Arc::from([]),
         }
+    }
+
+    /// Attaches the ordered caller-environment snapshot.
+    #[must_use]
+    pub fn with_bindings(mut self, bindings: Arc<[DirectEvalCallerBinding]>) -> Self {
+        self.bindings = bindings;
+        self
     }
 
     /// Retains the verified adjusted lexical-scope operand from the callsite.
@@ -113,6 +175,18 @@ impl DirectEvalCompileRequest {
     #[must_use]
     pub const fn scope_index(&self) -> u16 {
         self.scope_index
+    }
+
+    /// Returns caller bindings from innermost to outermost resolution order.
+    #[must_use]
+    pub fn bindings(&self) -> &[DirectEvalCallerBinding] {
+        &self.bindings
+    }
+
+    /// Clones the shared caller-environment snapshot.
+    #[must_use]
+    pub fn shared_bindings(&self) -> Arc<[DirectEvalCallerBinding]> {
+        Arc::clone(&self.bindings)
     }
 
     /// Returns whether `new.target` is meaningful in the caller.
@@ -294,11 +368,15 @@ pub type OrdinaryDynamicFunctionSource = DynamicFunctionCompileRequest;
 mod tests {
     use std::sync::Arc;
 
-    use quickjs_bytecode::VerifiedBytecode;
+    use quickjs_bytecode::{
+        CompilerBindingKind, CompilerBindingPolicy, CompilerInitializationPolicy,
+        CompilerWritePolicy, VerifiedBytecode,
+    };
 
     use super::{
-        DirectEvalCompileRequest, DynamicFunctionCompileRequest, DynamicFunctionCompiler,
-        DynamicFunctionFamily, IndirectEvalCompileRequest,
+        DirectEvalCallerBinding, DirectEvalCallerBindingLocation, DirectEvalCompileRequest,
+        DynamicFunctionCompileRequest, DynamicFunctionCompiler, DynamicFunctionFamily,
+        IndirectEvalCompileRequest,
     };
     use crate::{JsString, error::DynamicFunctionCompileFailure};
 
@@ -336,7 +414,19 @@ mod tests {
     #[test]
     fn direct_eval_request_retains_verified_caller_context() {
         let source = string("answer");
+        let binding = DirectEvalCallerBinding::new(
+            string("answer"),
+            CompilerBindingPolicy::new(
+                CompilerBindingKind::Var,
+                CompilerInitializationPolicy::UndefinedAtInstantiation,
+                CompilerWritePolicy::Mutable,
+                false,
+            ),
+            DirectEvalCallerBindingLocation::Local(3),
+        );
+        let bindings: Arc<[DirectEvalCallerBinding]> = Arc::from([binding.clone()]);
         let request = DirectEvalCompileRequest::new(source.clone(), true)
+            .with_bindings(Arc::clone(&bindings))
             .with_scope_index(7)
             .with_new_target(true)
             .with_super_property(true)
@@ -344,6 +434,8 @@ mod tests {
             .with_arguments_allowed(true);
 
         assert_eq!(request.source(), &source);
+        assert_eq!(request.bindings(), &[binding]);
+        assert!(Arc::ptr_eq(&request.shared_bindings(), &bindings));
         assert!(request.is_strict());
         assert_eq!(request.scope_index(), 7);
         assert!(request.allows_new_target());

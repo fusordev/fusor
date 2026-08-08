@@ -1136,10 +1136,13 @@ impl<'unit, 'arena, 'scope> Planner<'unit, 'arena, 'scope> {
             self.class_private_method_capture_requests(&class_private_method_bindings, &bindings)?;
         let class_static_receiver_captures = self
             .class_static_receiver_capture_requests(&class_static_receiver_bindings, &bindings)?;
+        let direct_eval_captures =
+            self.direct_eval_capture_requests(&scope_by_binding, &bindings)?;
         let mut synthetic_captures = class_field_key_captures;
         synthetic_captures.extend(class_private_name_captures);
         synthetic_captures.extend(class_private_method_captures);
         synthetic_captures.extend(class_static_receiver_captures);
+        synthetic_captures.extend(direct_eval_captures);
         synthetic_captures.sort_unstable_by_key(|request| {
             (
                 request.executable.index(),
@@ -1331,6 +1334,81 @@ impl<'unit, 'arena, 'scope> Planner<'unit, 'arena, 'scope> {
         self.bind_class_private_method_scopes(&mut scopes, class_private_method_bindings)?;
         self.bind_class_static_receiver_scopes(&mut scopes, class_static_receiver_bindings)?;
         Ok(scopes)
+    }
+
+    fn direct_eval_capture_requests(
+        &self,
+        scope_by_binding: &[Option<ScopeId>],
+        bindings: &[BindingStorage],
+    ) -> Result<Vec<CaptureRequest>, CompilerError> {
+        let semantic = self.unit.semantic();
+        let scoping = semantic.scoping();
+        let mut bindings_by_scope = vec![Vec::new(); scoping.scopes_len()];
+        for binding in bindings {
+            if !matches!(
+                binding.placement,
+                StoragePlacement::Argument { .. } | StoragePlacement::Local
+            ) || binding.policy.writes == WritePolicy::Internal
+                || matches!(
+                    binding.policy.kind,
+                    DeclarationKind::ClassFieldKey
+                        | DeclarationKind::ClassPrivateName
+                        | DeclarationKind::ClassStaticReceiver
+                )
+            {
+                continue;
+            }
+            let Some(scope) = scope_by_binding.get(binding.id.index()).copied().flatten() else {
+                continue;
+            };
+            let scoped = bindings_by_scope.get_mut(scope.index()).ok_or(
+                CompilerError::SemanticInvariant {
+                    invariant: "direct eval binding scope index is in range",
+                    span: binding.declaration_spans.first().copied(),
+                },
+            )?;
+            scoped.push(binding.id);
+        }
+
+        let nodes = semantic.nodes();
+        let mut requests = Vec::new();
+        for (node_id, node) in nodes.iter_enumerated() {
+            let AstKind::CallExpression(call) = node.kind() else {
+                continue;
+            };
+            if call.optional || !call.callee.is_specific_id("eval") {
+                continue;
+            }
+            let owner = self
+                .instance_field_initializer_owner(node_id)?
+                .unwrap_or(self.scope_owner(node.scope_id(), Some(call.span))?);
+            let mut visible_names = HashSet::new();
+            for scope in scoping.scope_ancestors(node.scope_id()) {
+                let scoped = bindings_by_scope.get(scope.index()).ok_or(
+                    CompilerError::SemanticInvariant {
+                        invariant: "direct eval lexical scope index is in range",
+                        span: Some(call.span),
+                    },
+                )?;
+                for &binding_id in scoped {
+                    let binding = bindings.get(binding_id.index()).ok_or(
+                        CompilerError::SemanticInvariant {
+                            invariant: "direct eval visible binding exists",
+                            span: Some(call.span),
+                        },
+                    )?;
+                    if !visible_names.insert(binding.name.clone()) || binding.executable == owner {
+                        continue;
+                    }
+                    requests.push(CaptureRequest {
+                        executable: owner,
+                        binding: binding_id,
+                        span: call.span,
+                    });
+                }
+            }
+        }
+        Ok(requests)
     }
 
     fn bind_class_field_key_scopes(

@@ -5355,7 +5355,7 @@ impl<'compiler, 'unit, 'arena, 'scope> ExpressionPlanner<'compiler, 'unit, 'aren
                     binding,
                     slot,
                     identifier.span,
-                )?));
+                )));
                 if update.prefix {
                     work.push(ExpressionWork::Emit(PlannedInstruction::new(
                         FinalOpcode::Dup,

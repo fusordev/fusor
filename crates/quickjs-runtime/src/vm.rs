@@ -37,18 +37,19 @@ use std::{
 use quickjs_bytecode::{
     BytecodePc, CompilerBindingKind, CompilerClosureBinding, CompilerClosureSource,
     CompilerExecutableKind, FinalOpcode, FunctionKind, FunctionTemplateId, InstructionIndex,
-    Operands, SourceByteSpan, VerifiedBytecodeFunction, VerifiedSuccessorKind,
+    Operands, ScopeLink, SourceByteSpan, VerifiedBytecodeFunction, VerifiedSuccessorKind,
 };
 
 #[cfg(test)]
 use crate::runtime::ForInAdvance;
 use crate::{
-    ArrayIndex, BigIntError, Context, DirectEvalCompileRequest, DynamicFunctionCompileFailure,
-    DynamicFunctionFamily, EngineFault, ExceptionKind, ExecutionError, Function,
-    GlobalDeclarationRejectionKind, HandleError, HandleKind, IndirectEvalCompileRequest, JsBigInt,
-    JsException, JsNumber, JsStackFrame, JsString, JsStringError, JsValue, MAX_STRING_CODE_UNITS,
-    OrdinaryDynamicFunctionCompiler, OrdinaryDynamicFunctionSource, PredefinedAtom, PropertyKey,
-    PropertyLayout, Runtime, RuntimeError, RuntimeResource,
+    ArrayIndex, BigIntError, Context, DirectEvalCallerBinding, DirectEvalCallerBindingLocation,
+    DirectEvalCompileRequest, DynamicFunctionCompileFailure, DynamicFunctionFamily, EngineFault,
+    ExceptionKind, ExecutionError, Function, GlobalDeclarationRejectionKind, HandleError,
+    HandleKind, IndirectEvalCompileRequest, JsBigInt, JsException, JsNumber, JsStackFrame,
+    JsString, JsStringError, JsValue, MAX_STRING_CODE_UNITS, OrdinaryDynamicFunctionCompiler,
+    OrdinaryDynamicFunctionSource, PredefinedAtom, PropertyKey, PropertyLayout, Runtime,
+    RuntimeError, RuntimeResource,
     conversion::{
         MAX_SAFE_INTEGER, number_to_index, number_to_int8, number_to_int16, number_to_int32,
         number_to_integer_or_infinity, number_to_length, number_to_uint8, number_to_uint16,
@@ -4132,6 +4133,30 @@ struct PendingOwnCell {
     value: SlotValue,
 }
 
+struct PendingDirectEvalCell {
+    external_index: usize,
+    location: DirectEvalCallerBindingLocation,
+    own_index: Option<usize>,
+    value: SlotValue,
+}
+
+struct CreatedDirectEvalCell {
+    location: DirectEvalCallerBindingLocation,
+    own_index: Option<usize>,
+    cell: BindingCellId,
+}
+
+struct DirectEvalEnvironment {
+    bindings: Vec<Option<EnvironmentBinding>>,
+    created_cells: Vec<CreatedDirectEvalCell>,
+}
+
+impl DirectEvalEnvironment {
+    fn bindings(&self) -> &[Option<EnvironmentBinding>] {
+        &self.bindings
+    }
+}
+
 impl Context<'_> {
     /// Invokes one runtime-installed ordinary bytecode function.
     ///
@@ -4835,6 +4860,10 @@ fn execute_frame_loop(
                 };
                 match finish_direct_eval(
                     runtime,
+                    frames.last_mut().ok_or(EngineFault::MissingInstruction {
+                        function: FunctionTemplateId::new(0),
+                        instruction: 0,
+                    })?,
                     realm,
                     request,
                     receiver,

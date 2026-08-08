@@ -27,13 +27,13 @@
 
 use super::{
     Arc, AtomError, BytecodeFunction, CompilerExecutableKind, Context, DynamicFunctionScriptError,
-    ErrorObjectKind, ExceptionKind, ExecutionLimits, Function, FunctionImplementation,
-    GlobalScriptError, HandleKind, HeapFunction, HeapObject, HeapReference, InstallError,
-    InstalledCode, InstalledRoot, InstalledTemplate, JsNumber, JsString, JsValue, ObjectId,
-    ObjectRecord, OrdinaryDynamicFunctionCompiler, PendingRootEnvironment, PredefinedAtom,
-    PrimitiveValue, PropertyKey, PropertyLayout, RootPublication, Runtime, RuntimeResource,
-    RuntimeUsage, StoredValue, VerifiedBytecode, check_install_limit, global_declaration_error,
-    preflight_opcodes, require_root_kind, usize_to_u64,
+    EnvironmentBinding, ErrorObjectKind, ExceptionKind, ExecutionLimits, Function,
+    FunctionImplementation, GlobalScriptError, HandleKind, HeapFunction, HeapObject, HeapReference,
+    InstallError, InstalledCode, InstalledRoot, InstalledTemplate, JsNumber, JsString, JsValue,
+    ObjectId, ObjectRecord, OrdinaryDynamicFunctionCompiler, PendingRootEnvironment,
+    PredefinedAtom, PrimitiveValue, PropertyKey, PropertyLayout, RootPublication, Runtime,
+    RuntimeResource, RuntimeUsage, StoredValue, VerifiedBytecode, check_install_limit,
+    global_declaration_error, preflight_opcodes, require_root_kind, usize_to_u64,
 };
 
 struct RootFunctionRecords {
@@ -266,7 +266,7 @@ impl Context<'_> {
         authority: Arc<VerifiedBytecode>,
     ) -> Result<Function, InstallError> {
         require_root_kind(&authority, CompilerExecutableKind::OrdinaryFunction)?;
-        let installed = self.install_root(authority, RootPublication::Public, true)?;
+        let installed = self.install_root(authority, RootPublication::Public, true, None)?;
         Ok(Function::from_root(JsValue::rooted_heap(
             &self.runtime.mailbox,
             HeapReference::Function(installed.function),
@@ -341,35 +341,36 @@ impl Context<'_> {
             .realm_global_object(self.realm)
             .map_err(crate::ExecutionError::from)?;
         let exception_authority = Arc::clone(&authority);
-        let mut installed = match self.install_root(authority, RootPublication::Internal, true) {
-            Ok(installed) => installed,
-            Err(InstallError::GlobalDeclarationRejected {
-                name,
-                kind: _,
-                function,
-                pc,
-                source_span,
-            }) => {
-                let (message, origin) = global_declaration_error(
-                    &exception_authority,
-                    &name,
+        let mut installed =
+            match self.install_root(authority, RootPublication::Internal, true, None) {
+                Ok(installed) => installed,
+                Err(InstallError::GlobalDeclarationRejected {
+                    name,
+                    kind: _,
                     function,
                     pc,
                     source_span,
-                )
-                .map_err(GlobalScriptError::Execution)?;
-                let exception = crate::JsException::engine_error(
-                    ExceptionKind::SyntaxError,
-                    message,
-                    origin,
-                    Vec::new(),
-                );
-                return Err(GlobalScriptError::Execution(
-                    crate::ExecutionError::Exception(exception),
-                ));
-            }
-            Err(error) => return Err(error.into()),
-        };
+                }) => {
+                    let (message, origin) = global_declaration_error(
+                        &exception_authority,
+                        &name,
+                        function,
+                        pc,
+                        source_span,
+                    )
+                    .map_err(GlobalScriptError::Execution)?;
+                    let exception = crate::JsException::engine_error(
+                        ExceptionKind::SyntaxError,
+                        message,
+                        origin,
+                        Vec::new(),
+                    );
+                    return Err(GlobalScriptError::Execution(
+                        crate::ExecutionError::Exception(exception),
+                    ));
+                }
+                Err(error) => return Err(error.into()),
+            };
         let result = match compiler {
             Some(compiler) => self.execute_internal_root_with_dynamic_function_compiler(
                 &mut installed,
@@ -428,35 +429,36 @@ impl Context<'_> {
             .realm_global_object(self.realm)
             .map_err(crate::ExecutionError::from)?;
         let exception_authority = Arc::clone(&authority);
-        let mut installed = match self.install_root(authority, RootPublication::Internal, true) {
-            Ok(installed) => installed,
-            Err(InstallError::GlobalDeclarationRejected {
-                name,
-                kind: _,
-                function,
-                pc,
-                source_span,
-            }) => {
-                let (message, origin) = global_declaration_error(
-                    &exception_authority,
-                    &name,
+        let mut installed =
+            match self.install_root(authority, RootPublication::Internal, true, None) {
+                Ok(installed) => installed,
+                Err(InstallError::GlobalDeclarationRejected {
+                    name,
+                    kind: _,
                     function,
                     pc,
                     source_span,
-                )
-                .map_err(DynamicFunctionScriptError::Execution)?;
-                let exception = crate::JsException::engine_error(
-                    ExceptionKind::TypeError,
-                    message,
-                    origin,
-                    Vec::new(),
-                );
-                return Err(DynamicFunctionScriptError::Execution(
-                    crate::ExecutionError::Exception(exception),
-                ));
-            }
-            Err(error) => return Err(error.into()),
-        };
+                }) => {
+                    let (message, origin) = global_declaration_error(
+                        &exception_authority,
+                        &name,
+                        function,
+                        pc,
+                        source_span,
+                    )
+                    .map_err(DynamicFunctionScriptError::Execution)?;
+                    let exception = crate::JsException::engine_error(
+                        ExceptionKind::TypeError,
+                        message,
+                        origin,
+                        Vec::new(),
+                    );
+                    return Err(DynamicFunctionScriptError::Execution(
+                        crate::ExecutionError::Exception(exception),
+                    ));
+                }
+                Err(error) => return Err(error.into()),
+            };
         let result = match compiler {
             Some(compiler) => self.execute_internal_root_with_dynamic_function_compiler(
                 &mut installed,
@@ -487,6 +489,7 @@ impl Context<'_> {
         authority: Arc<VerifiedBytecode>,
         publication: RootPublication,
         prepare_safe_point: bool,
+        external_environment: Option<&[Option<EnvironmentBinding>]>,
     ) -> Result<InstalledRoot, InstallError> {
         preflight_opcodes(&authority)?;
         if prepare_safe_point {
@@ -605,15 +608,33 @@ impl Context<'_> {
         }
 
         let root_sources = authority.root().function().closure_sources();
-        if root_sources.iter().any(|source| {
-            !matches!(
-                source,
-                quickjs_bytecode::CompilerClosureSource::ConstructorRealmGlobal(_)
-            )
-        }) {
-            return Err(InstallError::AuthorityInvariant {
-                message: "root function requires an external closure environment",
-            });
+        for source in root_sources {
+            match *source {
+                quickjs_bytecode::CompilerClosureSource::ConstructorRealmGlobal(_) => {}
+                quickjs_bytecode::CompilerClosureSource::DirectEvalBinding {
+                    index,
+                    environment_size,
+                } => {
+                    let Some(environment) = external_environment else {
+                        return Err(InstallError::AuthorityInvariant {
+                            message: "direct-eval root has no caller environment",
+                        });
+                    };
+                    if environment.len() != environment_size as usize
+                        || environment.get(index as usize).copied().flatten().is_none()
+                    {
+                        return Err(InstallError::AuthorityInvariant {
+                            message: "direct-eval caller environment does not match its authority",
+                        });
+                    }
+                }
+                quickjs_bytecode::CompilerClosureSource::ParentVariableReference(_)
+                | quickjs_bytecode::CompilerClosureSource::ParentClosure(_) => {
+                    return Err(InstallError::AuthorityInvariant {
+                        message: "root function requires an external parent environment",
+                    });
+                }
+            }
         }
 
         self.runtime
@@ -673,10 +694,12 @@ impl Context<'_> {
                 return Err(error);
             }
         };
-        let mut root_environment = match self
-            .runtime
-            .materialize_root_environment(self.realm, &authority, &templates)
-        {
+        let mut root_environment = match self.runtime.materialize_root_environment(
+            self.realm,
+            &authority,
+            &templates,
+            external_environment,
+        ) {
             Ok(environment) => environment,
             Err(error) => {
                 if publication.is_public() {
@@ -846,7 +869,7 @@ impl Context<'_> {
         authority: Arc<VerifiedBytecode>,
     ) -> Result<InstalledRoot, InstallError> {
         require_root_kind(&authority, CompilerExecutableKind::DynamicFunctionScript)?;
-        self.install_root(authority, RootPublication::Internal, false)
+        self.install_root(authority, RootPublication::Internal, false, None)
     }
 
     /// Installs a verified indirect-eval Script while bytecode frames are
@@ -856,17 +879,23 @@ impl Context<'_> {
         authority: Arc<VerifiedBytecode>,
     ) -> Result<InstalledRoot, InstallError> {
         require_root_kind(&authority, CompilerExecutableKind::IndirectEvalScript)?;
-        self.install_root(authority, RootPublication::Internal, false)
+        self.install_root(authority, RootPublication::Internal, false, None)
     }
 
-    /// Installs a verified closed direct-eval Script while bytecode frames are
-    /// active. Caller-binding authorities use the dedicated environment
-    /// installer rather than this closed form.
+    /// Installs a verified direct-eval Script and its caller environment while
+    /// bytecode frames are active. The authority remains internal and is
+    /// retired with its frame.
     pub(crate) fn install_direct_eval_script_during_execution(
         &mut self,
         authority: Arc<VerifiedBytecode>,
+        external_environment: &[Option<EnvironmentBinding>],
     ) -> Result<InstalledRoot, InstallError> {
         require_root_kind(&authority, CompilerExecutableKind::DirectEvalScript)?;
-        self.install_root(authority, RootPublication::Internal, false)
+        self.install_root(
+            authority,
+            RootPublication::Internal,
+            false,
+            Some(external_environment),
+        )
     }
 }

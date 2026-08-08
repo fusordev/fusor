@@ -319,6 +319,7 @@ pub(super) fn finish_indirect_eval(
 )]
 pub(super) fn finish_direct_eval(
     runtime: &mut Runtime,
+    caller: &mut Frame,
     realm: RealmId,
     request: DirectEvalCompileRequest,
     receiver: StoredValue,
@@ -330,6 +331,7 @@ pub(super) fn finish_direct_eval(
     execution_budget: &mut ExecutionBudget,
 ) -> Result<Frame, NativeFailure> {
     execution_budget.charge_indirect_eval_compilation(request.source())?;
+    let caller_bindings = request.shared_bindings();
     let authority = match compiler.compile_direct_eval(request) {
         Ok(authority) => authority,
         Err(DynamicFunctionCompileFailure::Syntax { message }) => {
@@ -346,20 +348,22 @@ pub(super) fn finish_direct_eval(
             return Err(NativeFailure::Execution(error.into()));
         }
     };
-    if !authority.root().metadata().closures().is_empty() {
-        return Err(NativeFailure::Execution(
-            EngineFault::RuntimeInvariant {
-                message: "closed direct eval authority imported an external environment",
-            }
-            .into(),
-        ));
-    }
+    let environment =
+        materialize_direct_eval_environment(runtime, caller, &authority, &caller_bindings)
+            .map_err(NativeFailure::Execution)?;
 
     let installation = {
         let mut context = Context { runtime, realm };
-        context.install_direct_eval_script_during_execution(authority)
+        context.install_direct_eval_script_during_execution(authority, environment.bindings())
     };
-    let mut installed = installation.map_err(|error| NativeFailure::Execution(error.into()))?;
+    let mut installed = match installation {
+        Ok(installed) => installed,
+        Err(error) => {
+            rollback_direct_eval_environment(runtime, caller, environment)
+                .map_err(|fault| NativeFailure::Execution(fault.into()))?;
+            return Err(NativeFailure::Execution(error.into()));
+        }
+    };
     let plan = match plan_frame(
         runtime,
         installed.function,
@@ -370,7 +374,10 @@ pub(super) fn finish_direct_eval(
     ) {
         Ok(plan) => plan,
         Err(error) => {
-            retire_failed_dynamic_root(runtime, installed)?;
+            let retirement = retire_failed_dynamic_root(runtime, installed);
+            let rollback = rollback_direct_eval_environment(runtime, caller, environment);
+            retirement?;
+            rollback.map_err(|fault| NativeFailure::Execution(fault.into()))?;
             return Err(NativeFailure::Execution(error));
         }
     };
@@ -385,12 +392,18 @@ pub(super) fn finish_direct_eval(
     ) {
         Ok(frame) => frame,
         Err(error) => {
-            retire_failed_dynamic_root(runtime, installed)?;
+            let retirement = retire_failed_dynamic_root(runtime, installed);
+            let rollback = rollback_direct_eval_environment(runtime, caller, environment);
+            retirement?;
+            rollback.map_err(|fault| NativeFailure::Execution(fault.into()))?;
             return Err(NativeFailure::Execution(error));
         }
     };
     if let Err(error) = installed.commit_environment() {
-        retire_failed_dynamic_root(runtime, installed)?;
+        let retirement = retire_failed_dynamic_root(runtime, installed);
+        let rollback = rollback_direct_eval_environment(runtime, caller, environment);
+        retirement?;
+        rollback.map_err(|fault| NativeFailure::Execution(fault.into()))?;
         return Err(NativeFailure::Execution(error.into()));
     }
     frame.dynamic_return = Some(DynamicFunctionReturn {
@@ -1165,12 +1178,23 @@ pub(super) fn direct_eval_compile_request(
     source: JsString,
     scope_index: u16,
 ) -> Result<DirectEvalCompileRequest, ExecutionError> {
-    let template = code(runtime, frame.code)?
-        .authority
-        .function(frame.template)
-        .ok_or(EngineFault::InvalidClosureEnvironment {
+    let installed_code = code(runtime, frame.code)?;
+    let template = installed_code.authority.function(frame.template).ok_or(
+        EngineFault::InvalidClosureEnvironment {
             function: frame.template,
-        })?;
+        },
+    )?;
+    let installed_index = usize::try_from(frame.template.get()).map_err(|_| {
+        EngineFault::InvalidClosureEnvironment {
+            function: frame.template,
+        }
+    })?;
+    let installed = installed_code.templates.get(installed_index).ok_or(
+        EngineFault::InvalidClosureEnvironment {
+            function: frame.template,
+        },
+    )?;
+    let bindings = direct_eval_caller_bindings(&template, installed, frame.template, scope_index)?;
     let function_code = runtime
         .functions
         .get(frame.function)
@@ -1189,6 +1213,7 @@ pub(super) fn direct_eval_compile_request(
             | CompilerExecutableKind::DynamicFunctionScript
     );
     Ok(DirectEvalCompileRequest::new(source, frame.strict)
+        .with_bindings(bindings.into())
         .with_scope_index(scope_index)
         .with_new_target(function_context)
         .with_super_property(function_code.home_object.is_some())
@@ -1197,6 +1222,172 @@ pub(super) fn direct_eval_compile_request(
             ConstructorState::DerivedUninitialized | ConstructorState::DerivedInitialized
         ))
         .with_arguments_allowed(function_context))
+}
+
+#[allow(
+    clippy::too_many_lines,
+    reason = "the adjusted lexical chain, function body, and inherited closures share one ordered caller snapshot"
+)]
+fn direct_eval_caller_bindings(
+    template: &VerifiedBytecodeFunction,
+    installed: &InstalledTemplate,
+    function: FunctionTemplateId,
+    scope_index: u16,
+) -> Result<Vec<DirectEvalCallerBinding>, ExecutionError> {
+    let domains = template.function().control_flow().domains();
+    let argument_count = domains.argument_count();
+    let local_count = domains.local_count();
+    let variables = template.metadata().variables();
+    let closures = template.metadata().closures();
+    let capacity = usize::try_from(argument_count)
+        .ok()
+        .and_then(|arguments| {
+            usize::try_from(local_count)
+                .ok()
+                .and_then(|locals| arguments.checked_add(locals))
+        })
+        .and_then(|variables| variables.checked_add(closures.len()))
+        .ok_or(ExecutionError::AllocationFailed {
+            resource: RuntimeResource::FrameValues,
+            additional: usize::MAX,
+        })?;
+    let mut bindings = Vec::new();
+    bindings
+        .try_reserve_exact(capacity)
+        .map_err(|_| ExecutionError::AllocationFailed {
+            resource: RuntimeResource::FrameValues,
+            additional: capacity,
+        })?;
+
+    let mut is_argument_scope = scope_index == 0;
+    let mut lexical_local = (scope_index >= 2).then(|| u32::from(scope_index - 2));
+    while let Some(local) = lexical_local {
+        if local >= local_count {
+            return Err(EngineFault::InvalidClosureEnvironment { function }.into());
+        }
+        let variable = variables
+            .get(argument_count.saturating_add(local) as usize)
+            .ok_or(EngineFault::InvalidClosureEnvironment { function })?;
+        if !variable.has_scope() {
+            return Err(EngineFault::InvalidClosureEnvironment { function }.into());
+        }
+        push_direct_eval_caller_binding(
+            &mut bindings,
+            installed,
+            variable.name(),
+            variable.policy(),
+            DirectEvalCallerBindingLocation::Local(local),
+        )?;
+        lexical_local = match variable.scope_next() {
+            ScopeLink::Local(parent) => Some(parent),
+            ScopeLink::End => None,
+            ScopeLink::ArgumentScopeEnd => {
+                is_argument_scope = true;
+                None
+            }
+        };
+    }
+
+    if is_argument_scope {
+        for local in 0..local_count {
+            let variable = variables
+                .get(argument_count.saturating_add(local) as usize)
+                .ok_or(EngineFault::InvalidClosureEnvironment { function })?;
+            if !variable.has_scope()
+                && variable.policy().kind() == CompilerBindingKind::FunctionName
+            {
+                push_direct_eval_caller_binding(
+                    &mut bindings,
+                    installed,
+                    variable.name(),
+                    variable.policy(),
+                    DirectEvalCallerBindingLocation::Local(local),
+                )?;
+            }
+        }
+    } else {
+        for argument in 0..argument_count {
+            let variable = variables
+                .get(argument as usize)
+                .ok_or(EngineFault::InvalidClosureEnvironment { function })?;
+            push_direct_eval_caller_binding(
+                &mut bindings,
+                installed,
+                variable.name(),
+                variable.policy(),
+                DirectEvalCallerBindingLocation::Argument(argument),
+            )?;
+        }
+        for local in 0..local_count {
+            let variable = variables
+                .get(argument_count.saturating_add(local) as usize)
+                .ok_or(EngineFault::InvalidClosureEnvironment { function })?;
+            if !variable.has_scope() {
+                push_direct_eval_caller_binding(
+                    &mut bindings,
+                    installed,
+                    variable.name(),
+                    variable.policy(),
+                    DirectEvalCallerBindingLocation::Local(local),
+                )?;
+            }
+        }
+    }
+
+    for (closure, definition) in closures.iter().enumerate() {
+        if !matches!(definition.binding(), CompilerClosureBinding::Captured(_)) {
+            continue;
+        }
+        let closure = u32::try_from(closure)
+            .map_err(|_| EngineFault::InvalidClosureEnvironment { function })?;
+        push_direct_eval_caller_binding(
+            &mut bindings,
+            installed,
+            definition.name(),
+            definition.policy(),
+            DirectEvalCallerBindingLocation::Closure(closure),
+        )?;
+    }
+    Ok(bindings)
+}
+
+fn push_direct_eval_caller_binding(
+    bindings: &mut Vec<DirectEvalCallerBinding>,
+    installed: &InstalledTemplate,
+    name: Option<quickjs_bytecode::AtomPoolIndex>,
+    policy: quickjs_bytecode::CompilerBindingPolicy,
+    location: DirectEvalCallerBindingLocation,
+) -> Result<(), ExecutionError> {
+    if matches!(
+        policy.kind(),
+        CompilerBindingKind::ClassFieldKey
+            | CompilerBindingKind::ClassPrivateName
+            | CompilerBindingKind::ClassStaticReceiver
+            | CompilerBindingKind::GlobalReference
+    ) {
+        return Ok(());
+    }
+    let Some(name) = name else {
+        return Ok(());
+    };
+    let atom = installed
+        .atoms
+        .get(name.get() as usize)
+        .ok_or(EngineFault::MissingPoolEntry {
+            pool: "direct-eval caller atom",
+            index: name.get(),
+        })?;
+    let name = atom
+        .description()
+        .ok_or(EngineFault::RuntimeInvariant {
+            message: "direct-eval caller binding has no string atom",
+        })?
+        .clone();
+    if name.code_units().eq("_ret_".encode_utf16()) {
+        return Ok(());
+    }
+    bindings.push(DirectEvalCallerBinding::new(name, policy, location));
+    Ok(())
 }
 
 pub(super) fn function_is_constructor(

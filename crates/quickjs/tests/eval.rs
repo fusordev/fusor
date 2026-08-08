@@ -1,5 +1,8 @@
-use quickjs::{ScriptLimits, evaluate_script};
-use quickjs_runtime::{JsNumber, Runtime, RuntimeLimits, ValueKind};
+use quickjs::{ScriptEvaluationError, ScriptLimits, evaluate_script};
+use quickjs_runtime::{
+    ExecutionError, GlobalScriptError, InstallError, JsNumber, Runtime, RuntimeLimits,
+    RuntimeResource, ValueKind,
+};
 
 fn evaluate<T>(source: &str, inspect: impl FnOnce(&quickjs_runtime::JsValue) -> T) -> T {
     let mut runtime = Runtime::try_new(RuntimeLimits::default()).expect("runtime");
@@ -49,6 +52,112 @@ fn closed_direct_eval_returns_the_script_completion() {
         "function local(){return eval('let answer=40+2;answer;');} local();",
         |value| assert!(number(value).strict_equals(JsNumber::from_i32(42))),
     );
+}
+
+#[test]
+fn direct_eval_reads_arguments_and_writes_live_lexicals() {
+    evaluate(
+        "function local(argument){let value=1;eval('value=argument+1');return value;}local(41);",
+        |value| assert!(number(value).strict_equals(JsNumber::from_i32(42))),
+    );
+}
+
+#[test]
+fn strict_direct_eval_writes_the_same_live_lexical_cell() {
+    evaluate(
+        "function local(){'use strict';let value=1;eval('value=42');return value;}local();",
+        |value| assert!(number(value).strict_equals(JsNumber::from_i32(42))),
+    );
+}
+
+#[test]
+fn direct_eval_preserves_caller_const_assignment_semantics() {
+    evaluate(
+        "function local(){const value=1;try{eval('value=2');return false;}catch(error){return error.constructor===TypeError&&value===1;}}local();",
+        |value| assert_eq!(value.as_boolean(), Ok(Some(true))),
+    );
+}
+
+#[test]
+fn sloppy_direct_eval_ignores_a_named_function_binding_write() {
+    evaluate(
+        "let named=function self(){eval('self=1');return typeof self;};named();",
+        |value| assert_eq!(string(value), "function"),
+    );
+}
+
+#[test]
+fn strict_direct_eval_rejects_a_named_function_binding_write() {
+    evaluate(
+        "let named=function self(){try{eval('\"use strict\";self=1');return false;}catch(error){return error.constructor===TypeError;}};named();",
+        |value| assert_eq!(value.as_boolean(), Ok(Some(true))),
+    );
+}
+
+#[test]
+fn direct_eval_observes_caller_lexical_tdz() {
+    evaluate(
+        "function local(){try{return eval('value');}catch(error){return error.constructor===ReferenceError;}let value=1;}local();",
+        |value| assert_eq!(value.as_boolean(), Ok(Some(true))),
+    );
+}
+
+#[test]
+fn direct_eval_closures_retain_live_caller_cells() {
+    evaluate(
+        "function local(){let value=1;let read=eval('()=>value');value=42;return read();}local();",
+        |value| assert!(number(value).strict_equals(JsNumber::from_i32(42))),
+    );
+}
+
+#[test]
+fn escaped_direct_eval_closures_retain_caller_cells_after_return() {
+    evaluate(
+        "function local(){let value=40;return eval('()=>++value');}let increment=local();increment();increment();",
+        |value| assert!(number(value).strict_equals(JsNumber::from_i32(42))),
+    );
+}
+
+#[test]
+fn direct_eval_resolves_outer_closures_before_realm_globals() {
+    evaluate(
+        "var value=1;function outer(value){return function(){return eval('value+1');};}outer(41)();",
+        |value| assert!(number(value).strict_equals(JsNumber::from_i32(42))),
+    );
+}
+
+#[test]
+fn direct_eval_unmatched_names_fall_back_to_the_realm_global() {
+    evaluate(
+        "var realmValue=41;function local(){return eval('realmValue+1');}local();",
+        |value| assert!(number(value).strict_equals(JsNumber::from_i32(42))),
+    );
+}
+
+#[test]
+fn failed_direct_eval_install_rolls_back_promoted_caller_cells() {
+    let mut runtime =
+        Runtime::try_new(RuntimeLimits::default().with_max_installed_code(1)).expect("runtime");
+    let realm = runtime.create_realm().expect("realm");
+    let mut context = runtime.context(&realm).expect("context");
+    let error = evaluate_script(
+        &mut context,
+        "function local(){let value=1;return eval('value');}local();",
+        "direct-eval-rollback.js",
+        ScriptLimits::default(),
+    )
+    .expect_err("the nested direct-eval installation exceeds the pinned limit");
+
+    assert!(matches!(
+        error,
+        ScriptEvaluationError::Runtime(GlobalScriptError::Execution(
+            ExecutionError::DynamicFunctionInstallation(InstallError::LimitExceeded {
+                resource: RuntimeResource::InstalledCode,
+                ..
+            })
+        ))
+    ));
+    assert_eq!(context.runtime_usage().binding_cells(), 0);
 }
 
 #[test]

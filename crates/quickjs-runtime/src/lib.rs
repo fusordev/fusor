@@ -49,9 +49,9 @@ pub use error::{
     HandleKind, InstallError, JsException, JsStackFrame, RuntimeError, RuntimeResource, ValueKind,
 };
 pub use host::{
-    DirectEvalCompileRequest, DynamicFunctionCompileRequest, DynamicFunctionCompiler,
-    DynamicFunctionFamily, IndirectEvalCompileRequest, OrdinaryDynamicFunctionCompiler,
-    OrdinaryDynamicFunctionSource,
+    DirectEvalCallerBinding, DirectEvalCallerBindingLocation, DirectEvalCompileRequest,
+    DynamicFunctionCompileRequest, DynamicFunctionCompiler, DynamicFunctionFamily,
+    IndirectEvalCompileRequest, OrdinaryDynamicFunctionCompiler, OrdinaryDynamicFunctionSource,
 };
 pub use interrupt::{INTERRUPT_POLL_INTERVAL, InterruptHandler};
 pub use number::JsNumber;

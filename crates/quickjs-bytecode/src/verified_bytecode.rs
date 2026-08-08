@@ -2595,7 +2595,7 @@ fn verify_executable_kind(
                     BytecodeVerificationErrorKind::DirectEvalScriptNotRoot,
                 ));
             }
-            if metadata_has_function_name(metadata) {
+            if metadata_has_local_function_name(metadata) {
                 return Err(BytecodeVerificationError::function(
                     id,
                     BytecodeVerificationErrorKind::DirectEvalScriptHasFunctionName,
@@ -2648,15 +2648,19 @@ fn verify_executable_kind(
 }
 
 fn metadata_has_function_name(metadata: &UnverifiedFunctionMetadata) -> bool {
+    metadata_has_local_function_name(metadata)
+        || metadata
+            .closures
+            .iter()
+            .any(|definition| definition.policy().kind() == CompilerBindingKind::FunctionName)
+}
+
+fn metadata_has_local_function_name(metadata: &UnverifiedFunctionMetadata) -> bool {
     metadata.function_name.is_some()
         || metadata
             .variables
             .iter()
             .any(|definition| definition.policy.kind() == CompilerBindingKind::FunctionName)
-        || metadata
-            .closures
-            .iter()
-            .any(|definition| definition.policy().kind() == CompilerBindingKind::FunctionName)
 }
 
 #[allow(
@@ -9725,17 +9729,10 @@ fn verify_closure_opcode(
             },
         ));
     }
-    if is_closure_write(opcode)
-        && policy.writes != CompilerWritePolicy::Mutable
-        && policy.kind() != CompilerBindingKind::ClassName
-    {
-        return Err(policy_error(
-            id,
-            slot,
-            Some(pc),
-            BindingPolicyViolationReason::ImmutableWrite,
-        ));
-    }
+    // Captured writes retain their declaration policy in the authority. The
+    // VM uses it to throw for immutable bindings or ignore a sloppy write to
+    // an ImmutableInStrictCode binding; these opcodes never grant an
+    // unchecked mutation capability.
     Ok(())
 }
 
@@ -10362,23 +10359,6 @@ const fn is_argument_write(opcode: FinalOpcode) -> bool {
             | FinalOpcode::SetArg1
             | FinalOpcode::SetArg2
             | FinalOpcode::SetArg3
-    )
-}
-
-const fn is_closure_write(opcode: FinalOpcode) -> bool {
-    matches!(
-        opcode,
-        FinalOpcode::PutVarRef
-            | FinalOpcode::SetVarRef
-            | FinalOpcode::PutVarRef0
-            | FinalOpcode::PutVarRef1
-            | FinalOpcode::PutVarRef2
-            | FinalOpcode::PutVarRef3
-            | FinalOpcode::SetVarRef0
-            | FinalOpcode::SetVarRef1
-            | FinalOpcode::SetVarRef2
-            | FinalOpcode::SetVarRef3
-            | FinalOpcode::PutVarRefCheck
     )
 }
 
