@@ -9,7 +9,7 @@ permissions:
 jobs:
   test262:
     name: Full Test262 (latest upstream)
-    runs-on: macos-latest
+    runs-on: ubuntu-latest
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@v7
