@@ -830,6 +830,107 @@ fn zoned_date_time_round_uses_time_zone_aware_day_rounding() {
 }
 
 #[test]
+fn zoned_date_time_until_since_difference_across_dst_and_options() {
+    assert_eq!(
+        rendered(
+            "var a=new Temporal.PlainDateTime(2025,3,8,12,0).toZonedDateTime('America/New_York');
+             var b=new Temporal.PlainDateTime(2025,3,10,12,0).toZonedDateTime('America/New_York');
+             var method=Object.getOwnPropertyDescriptor(Temporal.ZonedDateTime.prototype,'until');
+             return [a.until(b).toString(),a.until(b,{largestUnit:'day'}).toString(),
+               a.since(b,{largestUnit:'day'}).toString(),a.until(a).toString(),
+               method.value.length,method.value.name,method.enumerable,
+               method.writable,method.configurable].join('|');"
+        ),
+        "PT47H|P2D|-P2D|PT0S|1|until|false|true|true"
+    );
+    assert_eq!(
+        rendered(
+            "var a=new Temporal.PlainDateTime(2025,3,8,12,30).toZonedDateTime('America/New_York');
+             var b=new Temporal.PlainDateTime(2025,3,10,12,0).toZonedDateTime('America/New_York');
+             return [a.until(b,{largestUnit:'day'}).toString(),
+               a.until(b,{smallestUnit:'hour',roundingMode:'halfExpand'}).toString(),
+               a.until(b,{largestUnit:'days',smallestUnit:'minutes'}).toString(),
+               a.until('2025-03-10T12:00:00-04:00[America/New_York]',{largestUnit:'day'}).toString(),
+               a.until({year:2025,month:3,day:10,hour:12,timeZone:'America/New_York'},{largestUnit:'day'}).toString()].join('|');"
+        ),
+        "P1DT23H30M|PT47H|P1DT23H30M|P1DT23H30M|P1DT23H30M"
+    );
+    assert_eq!(
+        rendered(
+            "var log=[],options={};
+             Object.defineProperty(options,'largestUnit',{get:function(){log.push('get largestUnit');return 'hour';}});
+             Object.defineProperty(options,'roundingIncrement',{get:function(){log.push('get roundingIncrement');return 1;}});
+             Object.defineProperty(options,'roundingMode',{get:function(){log.push('get roundingMode');return 'trunc';}});
+             Object.defineProperty(options,'smallestUnit',{get:function(){log.push('get smallestUnit');return 'minute';}});
+             var a=new Temporal.ZonedDateTime(0n,'UTC');
+             a.until(new Temporal.ZonedDateTime(3661000000000n,'UTC'),options).toString();
+             return log.join(',');"
+        ),
+        "get largestUnit,get roundingIncrement,get roundingMode,get smallestUnit"
+    );
+    assert_eq!(
+        rendered(
+            "var relativeTo=new Temporal.ZonedDateTime(1546300800000000000n,'UTC');
+             return [new Temporal.Duration(1,6).total({unit:'months',relativeTo}),
+               Temporal.Duration.compare(new Temporal.Duration(0,13),new Temporal.Duration(1),{relativeTo:relativeTo.toPlainDate()})].join('|');"
+        ),
+        "18|1"
+    );
+    assert_eq!(
+        thrown("return new Temporal.ZonedDateTime(0n,'UTC').until(5);"),
+        ExceptionKind::TypeError
+    );
+    assert_eq!(
+        thrown(
+            "return new Temporal.ZonedDateTime(0n,'UTC').until(new Temporal.ZonedDateTime(0n,'UTC'),null);"
+        ),
+        ExceptionKind::TypeError
+    );
+    assert_eq!(
+        thrown(
+            "return new Temporal.ZonedDateTime(0n,'UTC').until(new Temporal.ZonedDateTime(0n,'UTC','gregory'));"
+        ),
+        ExceptionKind::RangeError
+    );
+    assert_eq!(
+        thrown(
+            "return new Temporal.ZonedDateTime(0n,'UTC').until(new Temporal.ZonedDateTime(0n,'Europe/Berlin'),{largestUnit:'day'});"
+        ),
+        ExceptionKind::RangeError
+    );
+    assert_eq!(
+        thrown(
+            "return new Temporal.ZonedDateTime(0n,'UTC').until(new Temporal.ZonedDateTime(0n,'UTC'),{largestUnit:'hour',smallestUnit:'day'});"
+        ),
+        ExceptionKind::RangeError
+    );
+    assert_eq!(
+        thrown(
+            "return new Temporal.ZonedDateTime(0n,'UTC').until(new Temporal.ZonedDateTime(0n,'UTC'),{largestUnit:'fortnight'});"
+        ),
+        ExceptionKind::RangeError
+    );
+    assert_eq!(
+        thrown(
+            "return new Temporal.ZonedDateTime(0n,'UTC').until(new Temporal.ZonedDateTime(0n,'UTC'),{roundingIncrement:NaN});"
+        ),
+        ExceptionKind::RangeError
+    );
+    assert_eq!(
+        thrown(
+            "return new Temporal.ZonedDateTime(0n,'UTC').since(new Temporal.ZonedDateTime(0n,'UTC'),{roundingMode:'balance'});"
+        ),
+        ExceptionKind::RangeError
+    );
+    assert_eq!(
+        thrown(
+            "return Object.getOwnPropertyDescriptor(Temporal.ZonedDateTime.prototype,'since').value.call({},new Temporal.ZonedDateTime(0n,'UTC'));"
+        ),
+        ExceptionKind::TypeError
+    );
+}
+
+#[test]
 fn zoned_date_time_transition_accepts_string_and_resumable_options_forms() {
     assert_eq!(
         rendered(

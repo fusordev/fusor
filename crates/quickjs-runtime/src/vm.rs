@@ -783,6 +783,7 @@ enum NativeContinuation {
     TemporalZonedDateTimeBag(Box<TemporalZonedDateTimeBagContinuation>),
     TemporalZonedDateTimeOptions(Box<TemporalZonedDateTimeOptionsContinuation>),
     TemporalZonedDateTimeRoundOptions(Box<TemporalZonedDateTimeRoundContinuation>),
+    TemporalZonedDateTimeDifferenceOptions(Box<TemporalZonedDateTimeDifferenceContinuation>),
     TemporalPlainDateToZonedDateTime(Box<TemporalPlainDateToZonedDateTimeContinuation>),
     TemporalPlainDateTimeToZonedDateTime(Box<TemporalPlainDateTimeToZonedDateTimeContinuation>),
     TemporalPlainTimeBag(Box<TemporalPlainTimeBagContinuation>),
@@ -950,9 +951,6 @@ impl NativeContinuation {
                 TemporalZonedDateTimeBagContinuation::retained_values()
             }
             Self::TemporalZonedDateTimeOptions(state) => state.retained_values(),
-            Self::TemporalZonedDateTimeRoundOptions(_) => {
-                TemporalZonedDateTimeRoundContinuation::retained_values()
-            }
             Self::TemporalPlainDateToZonedDateTime(_) => {
                 TemporalPlainDateToZonedDateTimeContinuation::retained_values()
             }
@@ -999,6 +997,9 @@ impl NativeContinuation {
             }
             Self::TemporalZonedDateTimeRoundOptions(_) => {
                 TemporalZonedDateTimeRoundContinuation::retained_values()
+            }
+            Self::TemporalZonedDateTimeDifferenceOptions(_) => {
+                TemporalZonedDateTimeDifferenceContinuation::retained_values()
             }
             Self::TemporalPlainTimeRoundOptions(_) => {
                 TemporalPlainTimeRoundContinuation::retained_values()
@@ -2334,6 +2335,12 @@ enum OperatorPrimitiveTarget {
     TemporalZonedDateTimeRoundRoundingIncrement(Box<TemporalZonedDateTimeRoundContinuation>),
     TemporalZonedDateTimeRoundRoundingMode(Box<TemporalZonedDateTimeRoundContinuation>),
     TemporalZonedDateTimeRoundSmallestUnit(Box<TemporalZonedDateTimeRoundContinuation>),
+    TemporalZonedDateTimeDifferenceLargestUnit(Box<TemporalZonedDateTimeDifferenceContinuation>),
+    TemporalZonedDateTimeDifferenceRoundingIncrement(
+        Box<TemporalZonedDateTimeDifferenceContinuation>,
+    ),
+    TemporalZonedDateTimeDifferenceRoundingMode(Box<TemporalZonedDateTimeDifferenceContinuation>),
+    TemporalZonedDateTimeDifferenceSmallestUnit(Box<TemporalZonedDateTimeDifferenceContinuation>),
     TemporalDurationBag(Box<TemporalDurationBagContinuation>),
     TemporalDurationRoundLargestUnit(Box<TemporalDurationRoundContinuation>),
     TemporalDurationRoundRoundingIncrement(Box<TemporalDurationRoundContinuation>),
@@ -2703,6 +2710,12 @@ impl OperatorPrimitiveTarget {
             | Self::TemporalZonedDateTimeRoundSmallestUnit(_) => {
                 TemporalZonedDateTimeRoundContinuation::retained_values()
             }
+            Self::TemporalZonedDateTimeDifferenceLargestUnit(_)
+            | Self::TemporalZonedDateTimeDifferenceRoundingIncrement(_)
+            | Self::TemporalZonedDateTimeDifferenceRoundingMode(_)
+            | Self::TemporalZonedDateTimeDifferenceSmallestUnit(_) => {
+                TemporalZonedDateTimeDifferenceContinuation::retained_values()
+            }
             Self::TemporalDurationBag(state) => state.retained_values(),
             Self::TemporalDurationRoundLargestUnit(_state)
             | Self::TemporalDurationRoundRoundingIncrement(_state)
@@ -3065,6 +3078,12 @@ fn trace_operator_primitive_target_roots(
         | OperatorPrimitiveTarget::TemporalZonedDateTimeRoundSmallestUnit(state) => {
             state.trace_roots(mark);
         }
+        OperatorPrimitiveTarget::TemporalZonedDateTimeDifferenceLargestUnit(state)
+        | OperatorPrimitiveTarget::TemporalZonedDateTimeDifferenceRoundingIncrement(state)
+        | OperatorPrimitiveTarget::TemporalZonedDateTimeDifferenceRoundingMode(state)
+        | OperatorPrimitiveTarget::TemporalZonedDateTimeDifferenceSmallestUnit(state) => {
+            state.trace_roots(mark);
+        }
         OperatorPrimitiveTarget::TemporalDurationBag(state) => state.trace_roots(mark),
         OperatorPrimitiveTarget::TemporalDurationRoundLargestUnit(state)
         | OperatorPrimitiveTarget::TemporalDurationRoundRoundingIncrement(state)
@@ -3336,6 +3355,9 @@ fn trace_native_continuation_roots(
         NativeContinuation::TemporalZonedDateTimeBag(state) => state.trace_roots(mark),
         NativeContinuation::TemporalZonedDateTimeOptions(state) => state.trace_roots(mark),
         NativeContinuation::TemporalZonedDateTimeRoundOptions(state) => state.trace_roots(mark),
+        NativeContinuation::TemporalZonedDateTimeDifferenceOptions(state) => {
+            state.trace_roots(mark);
+        }
         NativeContinuation::TemporalPlainDateToZonedDateTime(state) => state.trace_roots(mark),
         NativeContinuation::TemporalPlainDateTimeToZonedDateTime(state) => {
             state.trace_roots(mark);

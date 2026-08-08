@@ -2543,6 +2543,36 @@ fn finish_operator_primitive_target(
         OperatorPrimitiveTarget::TemporalZonedDateTimeRoundSmallestUnit(state) => {
             finish_temporal_zoned_date_time_round_smallest_unit(runtime, state.as_ref(), value)
         }
+        OperatorPrimitiveTarget::TemporalZonedDateTimeDifferenceLargestUnit(state) => {
+            finish_temporal_zoned_date_time_difference_largest_unit(
+                runtime,
+                *state,
+                value,
+                return_to,
+                execution_budget,
+            )
+        }
+        OperatorPrimitiveTarget::TemporalZonedDateTimeDifferenceRoundingIncrement(state) => {
+            finish_temporal_zoned_date_time_difference_rounding_increment(
+                runtime,
+                *state,
+                value,
+                return_to,
+                execution_budget,
+            )
+        }
+        OperatorPrimitiveTarget::TemporalZonedDateTimeDifferenceRoundingMode(state) => {
+            finish_temporal_zoned_date_time_difference_rounding_mode(
+                runtime,
+                *state,
+                value,
+                return_to,
+                execution_budget,
+            )
+        }
+        OperatorPrimitiveTarget::TemporalZonedDateTimeDifferenceSmallestUnit(state) => {
+            finish_temporal_zoned_date_time_difference_smallest_unit(runtime, state.as_ref(), value)
+        }
         OperatorPrimitiveTarget::TemporalPlainDateTimeToStringCalendarName(state) => {
             finish_temporal_plain_date_time_to_string_calendar_name(
                 runtime,

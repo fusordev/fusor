@@ -10,8 +10,9 @@ use temporal_rs::{
     Calendar, MonthCode, PlainTime, TimeZone, UtcOffset, ZonedDateTime,
     fields::{CalendarFields, ZonedDateTimeFields},
     options::{
-        Disambiguation, DisplayCalendar, DisplayOffset, DisplayTimeZone, OffsetDisambiguation,
-        Overflow, RoundingIncrement, RoundingMode, RoundingOptions, ToStringRoundingOptions, Unit,
+        DifferenceSettings, Disambiguation, DisplayCalendar, DisplayOffset, DisplayTimeZone,
+        OffsetDisambiguation, Overflow, RoundingIncrement, RoundingMode, RoundingOptions,
+        ToStringRoundingOptions, Unit,
     },
     parsers::Precision,
     partial::{PartialTime, PartialZonedDateTime},
@@ -79,7 +80,10 @@ fn temporal_zoned_date_time_property_bag_fields(
         TemporalZonedDateTimeLikeTarget::From { .. }
         | TemporalZonedDateTimeLikeTarget::CompareFirst { .. }
         | TemporalZonedDateTimeLikeTarget::CompareSecond { .. }
-        | TemporalZonedDateTimeLikeTarget::Equals { .. } => &TEMPORAL_ZONED_DATE_TIME_BAG_FIELDS,
+        | TemporalZonedDateTimeLikeTarget::Equals { .. }
+        | TemporalZonedDateTimeLikeTarget::Difference { .. } => {
+            &TEMPORAL_ZONED_DATE_TIME_BAG_FIELDS
+        }
     }
 }
 
@@ -107,6 +111,11 @@ enum TemporalZonedDateTimeLikeTarget {
         receiver: ZonedDateTime,
         options: StoredValue,
     },
+    Difference {
+        receiver: ZonedDateTime,
+        options: StoredValue,
+        since: bool,
+    },
 }
 
 impl TemporalZonedDateTimeLikeTarget {
@@ -114,7 +123,8 @@ impl TemporalZonedDateTimeLikeTarget {
         match self {
             Self::From { options }
             | Self::CompareFirst { second: options }
-            | Self::With { options, .. } => {
+            | Self::With { options, .. }
+            | Self::Difference { options, .. } => {
                 trace_stored_value_root(options, mark);
             }
             Self::CompareSecond { .. } | Self::Equals { .. } => {}
@@ -819,6 +829,21 @@ fn continue_temporal_zoned_date_time_like(
         TemporalZonedDateTimeLikeTarget::With { .. } => {
             unreachable!("Temporal.ZonedDateTime.with completes from its property-bag state")
         }
+        TemporalZonedDateTimeLikeTarget::Difference {
+            receiver,
+            options,
+            since,
+        } => begin_temporal_zoned_date_time_difference(
+            runtime,
+            receiver,
+            date_time,
+            options,
+            since,
+            realm,
+            return_to,
+            origin,
+            execution_budget,
+        ),
     }
 }
 
@@ -1797,6 +1822,24 @@ pub(in crate::vm) fn dispatch_temporal_zoned_date_time_prototype(
             };
             allocate_temporal_zoned_date_time_result(runtime, realm, result)
         }
+        TemporalZonedDateTimePrototypeMethod::Until
+        | TemporalZonedDateTimePrototypeMethod::Since => {
+            let other = arguments.take_first_or_undefined();
+            let options = arguments.take_first_or_undefined();
+            begin_temporal_zoned_date_time_like(
+                runtime,
+                other,
+                TemporalZonedDateTimeLikeTarget::Difference {
+                    receiver: date_time,
+                    options,
+                    since: matches!(method, TemporalZonedDateTimePrototypeMethod::Since),
+                },
+                realm,
+                return_to,
+                origin.clone(),
+                execution_budget,
+            )
+        }
         TemporalZonedDateTimePrototypeMethod::Round => begin_temporal_zoned_date_time_round(
             runtime,
             date_time,
@@ -2229,6 +2272,405 @@ fn complete_temporal_zoned_date_time_round(
         }
     };
     allocate_temporal_zoned_date_time_result(runtime, realm, rounded)
+}
+
+#[derive(Clone, Copy)]
+enum TemporalZonedDateTimeDifferenceStage {
+    LargestUnit,
+    RoundingIncrement,
+    RoundingMode,
+    SmallestUnit,
+}
+
+/// Resumable options state for `Temporal.ZonedDateTime.prototype.until` and
+/// `since`. Each option Get and primitive conversion may invoke JavaScript.
+pub(in crate::vm) struct TemporalZonedDateTimeDifferenceContinuation {
+    receiver: ZonedDateTime,
+    other: ZonedDateTime,
+    options: StoredValue,
+    largest_unit: Option<Unit>,
+    rounding_increment: RoundingIncrement,
+    rounding_mode: RoundingMode,
+    since: bool,
+    stage: TemporalZonedDateTimeDifferenceStage,
+    realm: RealmId,
+    origin: JsStackFrame,
+}
+
+impl TemporalZonedDateTimeDifferenceContinuation {
+    pub(in crate::vm) const fn retained_values() -> u64 {
+        1
+    }
+
+    pub(in crate::vm) fn trace_roots(&self, mark: &mut dyn FnMut(CollectionRoot)) {
+        trace_stored_value_root(&self.options, mark);
+    }
+}
+
+#[allow(
+    clippy::too_many_arguments,
+    reason = "the zoned-date-time operand is converted before the observable options object"
+)]
+fn begin_temporal_zoned_date_time_difference(
+    runtime: &mut Runtime,
+    receiver: ZonedDateTime,
+    other: ZonedDateTime,
+    options: StoredValue,
+    since: bool,
+    realm: RealmId,
+    return_to: Option<CallReturn>,
+    origin: JsStackFrame,
+    execution_budget: &mut ExecutionBudget,
+) -> Result<NativeDispatch, NativeFailure> {
+    // The calendar agreement check precedes the observable options reads.
+    if receiver.calendar() != other.calendar() {
+        return temporal_range_error(
+            realm,
+            &origin,
+            "Temporal.ZonedDateTime difference requires matching calendars",
+        );
+    }
+    if matches!(options, StoredValue::Undefined) {
+        return complete_temporal_zoned_date_time_difference(
+            runtime,
+            &receiver,
+            &other,
+            None,
+            RoundingIncrement::ONE,
+            RoundingMode::Trunc,
+            None,
+            since,
+            realm,
+            &origin,
+        );
+    }
+    if options.heap_reference().is_none() {
+        return temporal_type_error(
+            realm,
+            &origin,
+            "Temporal.ZonedDateTime.prototype.until options must be an object",
+        );
+    }
+    begin_temporal_zoned_date_time_difference_get(
+        runtime,
+        TemporalZonedDateTimeDifferenceContinuation {
+            receiver,
+            other,
+            options,
+            largest_unit: None,
+            rounding_increment: RoundingIncrement::ONE,
+            rounding_mode: RoundingMode::Trunc,
+            since,
+            stage: TemporalZonedDateTimeDifferenceStage::LargestUnit,
+            realm,
+            origin,
+        },
+        "largestUnit",
+        TemporalZonedDateTimeDifferenceStage::LargestUnit,
+        return_to,
+        execution_budget,
+    )
+}
+
+#[allow(
+    clippy::too_many_arguments,
+    reason = "each zoned-date-time difference option Get owns native call state across suspension"
+)]
+fn begin_temporal_zoned_date_time_difference_get(
+    runtime: &mut Runtime,
+    mut state: TemporalZonedDateTimeDifferenceContinuation,
+    name: &str,
+    next_stage: TemporalZonedDateTimeDifferenceStage,
+    return_to: Option<CallReturn>,
+    execution_budget: &mut ExecutionBudget,
+) -> Result<NativeDispatch, NativeFailure> {
+    state.stage = next_stage;
+    charge_heap_property_lookup(runtime, &state.options, execution_budget)?;
+    let name = JsString::from_utf8(name)?;
+    let key = runtime.property_key_from_string(&name)?;
+    let realm = state.realm;
+    let origin = state.origin.clone();
+    let dispatch = begin_value_get(
+        runtime,
+        &state.options,
+        key,
+        Some(&name),
+        realm,
+        return_to,
+        origin,
+        execution_budget,
+    )?;
+    match continue_get_state_after(
+        dispatch,
+        state,
+        temporal_zoned_date_time_difference_continuation,
+        "Temporal.ZonedDateTime difference option Get produced a structured result",
+    )? {
+        GetContinuationDispatch::Ready { state, value } => {
+            advance_temporal_zoned_date_time_difference_options(
+                runtime,
+                state,
+                value,
+                return_to,
+                execution_budget,
+            )
+        }
+        GetContinuationDispatch::Suspended(dispatch) => Ok(dispatch),
+    }
+}
+
+fn temporal_zoned_date_time_difference_continuation(
+    state: TemporalZonedDateTimeDifferenceContinuation,
+) -> NativeContinuation {
+    NativeContinuation::TemporalZonedDateTimeDifferenceOptions(Box::new(state))
+}
+
+#[allow(
+    clippy::too_many_arguments,
+    clippy::too_many_lines,
+    reason = "one ordered state table preserves zoned-date-time difference option observation across suspension"
+)]
+pub(in crate::vm) fn advance_temporal_zoned_date_time_difference_options(
+    runtime: &mut Runtime,
+    state: TemporalZonedDateTimeDifferenceContinuation,
+    value: StoredValue,
+    return_to: Option<CallReturn>,
+    execution_budget: &mut ExecutionBudget,
+) -> Result<NativeDispatch, NativeFailure> {
+    match state.stage {
+        TemporalZonedDateTimeDifferenceStage::LargestUnit => {
+            if matches!(value, StoredValue::Undefined) {
+                return begin_temporal_zoned_date_time_difference_get(
+                    runtime,
+                    state,
+                    "roundingIncrement",
+                    TemporalZonedDateTimeDifferenceStage::RoundingIncrement,
+                    return_to,
+                    execution_budget,
+                );
+            }
+            let realm = state.realm;
+            let origin = state.origin.clone();
+            begin_operator_primitive_conversion(
+                runtime,
+                value,
+                OperatorPrimitiveHint::String,
+                OperatorPrimitiveTarget::TemporalZonedDateTimeDifferenceLargestUnit(Box::new(
+                    state,
+                )),
+                realm,
+                return_to,
+                origin,
+                execution_budget,
+            )
+        }
+        TemporalZonedDateTimeDifferenceStage::RoundingIncrement => {
+            if matches!(value, StoredValue::Undefined) {
+                return begin_temporal_zoned_date_time_difference_get(
+                    runtime,
+                    state,
+                    "roundingMode",
+                    TemporalZonedDateTimeDifferenceStage::RoundingMode,
+                    return_to,
+                    execution_budget,
+                );
+            }
+            let realm = state.realm;
+            let origin = state.origin.clone();
+            begin_operator_primitive_conversion(
+                runtime,
+                value,
+                OperatorPrimitiveHint::Number,
+                OperatorPrimitiveTarget::TemporalZonedDateTimeDifferenceRoundingIncrement(
+                    Box::new(state),
+                ),
+                realm,
+                return_to,
+                origin,
+                execution_budget,
+            )
+        }
+        TemporalZonedDateTimeDifferenceStage::RoundingMode => {
+            if matches!(value, StoredValue::Undefined) {
+                return begin_temporal_zoned_date_time_difference_get(
+                    runtime,
+                    state,
+                    "smallestUnit",
+                    TemporalZonedDateTimeDifferenceStage::SmallestUnit,
+                    return_to,
+                    execution_budget,
+                );
+            }
+            let realm = state.realm;
+            let origin = state.origin.clone();
+            begin_operator_primitive_conversion(
+                runtime,
+                value,
+                OperatorPrimitiveHint::String,
+                OperatorPrimitiveTarget::TemporalZonedDateTimeDifferenceRoundingMode(Box::new(
+                    state,
+                )),
+                realm,
+                return_to,
+                origin,
+                execution_budget,
+            )
+        }
+        TemporalZonedDateTimeDifferenceStage::SmallestUnit => {
+            if matches!(value, StoredValue::Undefined) {
+                return complete_temporal_zoned_date_time_difference(
+                    runtime,
+                    &state.receiver,
+                    &state.other,
+                    state.largest_unit,
+                    state.rounding_increment,
+                    state.rounding_mode,
+                    None,
+                    state.since,
+                    state.realm,
+                    &state.origin,
+                );
+            }
+            let realm = state.realm;
+            let origin = state.origin.clone();
+            begin_operator_primitive_conversion(
+                runtime,
+                value,
+                OperatorPrimitiveHint::String,
+                OperatorPrimitiveTarget::TemporalZonedDateTimeDifferenceSmallestUnit(Box::new(
+                    state,
+                )),
+                realm,
+                return_to,
+                origin,
+                execution_budget,
+            )
+        }
+    }
+}
+
+pub(in crate::vm) fn finish_temporal_zoned_date_time_difference_largest_unit(
+    runtime: &mut Runtime,
+    mut state: TemporalZonedDateTimeDifferenceContinuation,
+    value: StoredValue,
+    return_to: Option<CallReturn>,
+    execution_budget: &mut ExecutionBudget,
+) -> Result<NativeDispatch, NativeFailure> {
+    let source = operator_primitive_to_string(value, state.realm, &state.origin)?;
+    state.largest_unit = Some(temporal_round_unit(&source, state.realm, &state.origin)?);
+    begin_temporal_zoned_date_time_difference_get(
+        runtime,
+        state,
+        "roundingIncrement",
+        TemporalZonedDateTimeDifferenceStage::RoundingIncrement,
+        return_to,
+        execution_budget,
+    )
+}
+
+pub(in crate::vm) fn finish_temporal_zoned_date_time_difference_rounding_increment(
+    runtime: &mut Runtime,
+    mut state: TemporalZonedDateTimeDifferenceContinuation,
+    value: StoredValue,
+    return_to: Option<CallReturn>,
+    execution_budget: &mut ExecutionBudget,
+) -> Result<NativeDispatch, NativeFailure> {
+    let value = operator_to_number(value, state.realm, &state.origin)?.as_f64();
+    state.rounding_increment = match RoundingIncrement::try_from(value) {
+        Ok(increment) => increment,
+        Err(error) => {
+            return Err(NativeFailure::Abrupt(temporal_exception_from_error(
+                state.realm,
+                &state.origin,
+                error,
+            )?));
+        }
+    };
+    begin_temporal_zoned_date_time_difference_get(
+        runtime,
+        state,
+        "roundingMode",
+        TemporalZonedDateTimeDifferenceStage::RoundingMode,
+        return_to,
+        execution_budget,
+    )
+}
+
+pub(in crate::vm) fn finish_temporal_zoned_date_time_difference_rounding_mode(
+    runtime: &mut Runtime,
+    mut state: TemporalZonedDateTimeDifferenceContinuation,
+    value: StoredValue,
+    return_to: Option<CallReturn>,
+    execution_budget: &mut ExecutionBudget,
+) -> Result<NativeDispatch, NativeFailure> {
+    let source = operator_primitive_to_string(value, state.realm, &state.origin)?;
+    state.rounding_mode = temporal_rounding_mode(&source, state.realm, &state.origin)?;
+    begin_temporal_zoned_date_time_difference_get(
+        runtime,
+        state,
+        "smallestUnit",
+        TemporalZonedDateTimeDifferenceStage::SmallestUnit,
+        return_to,
+        execution_budget,
+    )
+}
+
+pub(in crate::vm) fn finish_temporal_zoned_date_time_difference_smallest_unit(
+    runtime: &mut Runtime,
+    state: &TemporalZonedDateTimeDifferenceContinuation,
+    value: StoredValue,
+) -> Result<NativeDispatch, NativeFailure> {
+    let source = operator_primitive_to_string(value, state.realm, &state.origin)?;
+    let smallest_unit = temporal_round_unit(&source, state.realm, &state.origin)?;
+    complete_temporal_zoned_date_time_difference(
+        runtime,
+        &state.receiver,
+        &state.other,
+        state.largest_unit,
+        state.rounding_increment,
+        state.rounding_mode,
+        Some(smallest_unit),
+        state.since,
+        state.realm,
+        &state.origin,
+    )
+}
+
+#[allow(
+    clippy::too_many_arguments,
+    reason = "the completed JavaScript difference settings are passed explicitly to the Temporal kernel"
+)]
+fn complete_temporal_zoned_date_time_difference(
+    runtime: &mut Runtime,
+    receiver: &ZonedDateTime,
+    other: &ZonedDateTime,
+    largest_unit: Option<Unit>,
+    rounding_increment: RoundingIncrement,
+    rounding_mode: RoundingMode,
+    smallest_unit: Option<Unit>,
+    since: bool,
+    realm: RealmId,
+    origin: &JsStackFrame,
+) -> Result<NativeDispatch, NativeFailure> {
+    let mut settings = DifferenceSettings::default();
+    settings.largest_unit = largest_unit;
+    settings.smallest_unit = smallest_unit;
+    settings.rounding_mode = Some(rounding_mode);
+    settings.increment = Some(rounding_increment);
+    let duration = if since {
+        receiver.since(other, settings)
+    } else {
+        receiver.until(other, settings)
+    };
+    let duration = match duration {
+        Ok(duration) => duration,
+        Err(error) => {
+            return Err(NativeFailure::Abrupt(temporal_exception_from_error(
+                realm, origin, error,
+            )?));
+        }
+    };
+    allocate_temporal_duration_result(runtime, realm, duration)
 }
 
 fn finish_temporal_zoned_date_time_with_calendar(

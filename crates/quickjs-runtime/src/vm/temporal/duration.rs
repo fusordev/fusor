@@ -1739,6 +1739,9 @@ fn temporal_relative_to_from_value(
             if let Some(date_time) = runtime.temporal_plain_date_time(*object)? {
                 return Ok(Some(RelativeTo::PlainDate(date_time.to_plain_date())));
             }
+            if let Some(date_time) = runtime.temporal_zoned_date_time(*object)? {
+                return Ok(Some(RelativeTo::ZonedDateTime(date_time)));
+            }
             Err(NativeFailure::Abrupt(temporal_pending_exception(
                 realm,
                 origin,

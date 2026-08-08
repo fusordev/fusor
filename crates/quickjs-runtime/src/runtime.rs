@@ -2382,6 +2382,8 @@ pub(crate) enum TemporalZonedDateTimePrototypeMethod {
     WithTimeZone,
     Add,
     Subtract,
+    Until,
+    Since,
     Round,
     ToString,
     ToJson,
@@ -2853,7 +2855,7 @@ impl TemporalZonedDateTimeStaticMethod {
 }
 
 impl TemporalZonedDateTimePrototypeMethod {
-    pub(crate) const ALL: [Self; 46] = [
+    pub(crate) const ALL: [Self; 48] = [
         Self::CalendarId,
         Self::TimeZoneId,
         Self::Year,
@@ -2895,6 +2897,8 @@ impl TemporalZonedDateTimePrototypeMethod {
         Self::WithTimeZone,
         Self::Add,
         Self::Subtract,
+        Self::Until,
+        Self::Since,
         Self::Round,
         Self::ToString,
         Self::ToJson,
@@ -2945,6 +2949,8 @@ impl TemporalZonedDateTimePrototypeMethod {
             Self::WithTimeZone => "withTimeZone",
             Self::Add => "add",
             Self::Subtract => "subtract",
+            Self::Until => "until",
+            Self::Since => "since",
             Self::Round => "round",
             Self::ToString => "toString",
             Self::ToJson => "toJSON",
@@ -3003,6 +3009,8 @@ impl TemporalZonedDateTimePrototypeMethod {
                 | Self::WithTimeZone
                 | Self::Add
                 | Self::Subtract
+                | Self::Until
+                | Self::Since
                 | Self::Round
                 | Self::ToString
                 | Self::ToJson
@@ -3017,6 +3025,8 @@ impl TemporalZonedDateTimePrototypeMethod {
             | Self::GetTimeZoneTransition
             | Self::Add
             | Self::Subtract
+            | Self::Until
+            | Self::Since
             | Self::Round
             | Self::With
             | Self::WithCalendar
