@@ -285,6 +285,17 @@ fn computed_instance_field_keys_follow_class_element_evaluation_order() {
 }
 
 #[test]
+fn interleaved_computed_fields_evaluate_all_keys_before_static_initializers() {
+    run_with(
+        "function run(){let index=0;class Box{[index++]=index++;static[index++]=index++;[index++]=index++;}let value=new Box;return index===6&&value[0]===4&&value[2]===5&&Box[1]===3&&!value.hasOwnProperty('1')&&!Box.hasOwnProperty('0')&&!Box.hasOwnProperty('2');}",
+        |result| {
+            let value = result.expect("interleaved computed field execution");
+            assert_eq!(value.as_boolean().expect("live Boolean"), Some(true));
+        },
+    );
+}
+
+#[test]
 fn uncomputed_instance_field_initializers_observe_this_super_and_new_target() {
     run_with(
         "function run(){class Base{constructor(value){this._value=value;}get value(){return this._value;}}class Derived extends Base{fromSuper=super.value;target=new.target;constructor(value){super(value);this.bodySeesFields=this.fromSuper===value&&this.target===Derived;}}let value=new Derived(7);return value.fromSuper===7&&value.target===Derived&&value.bodySeesFields;}",

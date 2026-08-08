@@ -1339,22 +1339,22 @@ impl<'unit, 'arena, 'scope> Planner<'unit, 'arena, 'scope> {
                     span: None,
                 });
             };
-            if field.r#static || !field.computed {
+            if !field.computed {
                 return Err(CompilerError::SemanticInvariant {
-                    invariant: "synthetic class-field key binding belongs to a computed instance field",
+                    invariant: "synthetic class-field key binding belongs to a computed field",
                     span: Some(field.span),
                 });
             }
             let nodes = self.unit.semantic().nodes();
             let AstKind::ClassBody(body) = nodes.parent_kind(node_id) else {
                 return Err(CompilerError::SemanticInvariant {
-                    invariant: "computed instance field belongs to a class body",
+                    invariant: "computed field belongs to a class body",
                     span: Some(field.span),
                 });
             };
             let AstKind::Class(class) = nodes.parent_kind(body.node_id.get()) else {
                 return Err(CompilerError::SemanticInvariant {
-                    invariant: "computed instance field class body belongs to a class",
+                    invariant: "computed field class body belongs to a class",
                     span: Some(body.span),
                 });
             };
@@ -2460,9 +2460,9 @@ impl<'unit, 'arena, 'scope> Planner<'unit, 'arena, 'scope> {
         Ok(())
     }
 
-    /// Adds one fresh class-scope cell for every computed public instance
-    /// field. The constructor captures the cell; class definition evaluation
-    /// stores the once-converted property key before the constructor can run.
+    /// Adds one fresh class-scope cell for every computed public field. Class
+    /// definition evaluation stores every once-converted key before static
+    /// initialization; instance constructors additionally capture their keys.
     fn add_class_field_key_bindings(
         &self,
         bindings: &mut Vec<BindingDraft>,
@@ -2478,7 +2478,7 @@ impl<'unit, 'arena, 'scope> Planner<'unit, 'arena, 'scope> {
                 let ClassElement::PropertyDefinition(field) = element else {
                     continue;
                 };
-                if field.r#static || !field.computed {
+                if !field.computed {
                     continue;
                 }
                 let field_node = field.node_id.get();
@@ -2516,21 +2516,21 @@ impl<'unit, 'arena, 'scope> Planner<'unit, 'arena, 'scope> {
                     span: None,
                 });
             };
-            if field.r#static || !field.computed {
+            if !field.computed {
                 return Err(CompilerError::SemanticInvariant {
-                    invariant: "class-field key capture belongs to a computed instance field",
+                    invariant: "class-field key binding belongs to a computed field",
                     span: Some(field.span),
                 });
             }
             let AstKind::ClassBody(body) = nodes.parent_kind(field_node) else {
                 return Err(CompilerError::SemanticInvariant {
-                    invariant: "computed instance field belongs to a class body",
+                    invariant: "computed field belongs to a class body",
                     span: Some(field.span),
                 });
             };
             let AstKind::Class(class) = nodes.parent_kind(body.node_id.get()) else {
                 return Err(CompilerError::SemanticInvariant {
-                    invariant: "computed instance field class body belongs to a class",
+                    invariant: "computed field class body belongs to a class",
                     span: Some(body.span),
                 });
             };
@@ -2548,6 +2548,9 @@ impl<'unit, 'arena, 'scope> Planner<'unit, 'arena, 'scope> {
                     invariant: "class-field key capture uses an immutable local binding",
                     span: Some(field.key.span()),
                 });
+            }
+            if field.r#static {
+                continue;
             }
             let constructor = self.instance_field_constructor_owner(class.node_id.get(), class)?;
             if constructor == storage.executable {

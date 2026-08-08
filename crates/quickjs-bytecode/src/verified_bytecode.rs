@@ -44,7 +44,7 @@ pub enum CompilerBindingKind {
     /// The immutable inner binding created for a named class definition.
     ClassName,
     /// The compiler-created immutable class-scope cell for one evaluated
-    /// computed public instance-field key.
+    /// computed public field key.
     ClassFieldKey,
     /// The compiler-created immutable class-scope cell for one fresh private
     /// instance-field name.
@@ -4179,13 +4179,11 @@ fn verify_closure_metadata(
     Ok(())
 }
 
-/// Certifies the synthetic cell that carries one computed public
-/// instance-field key from `ClassDefinitionEvaluation` into its constructor.
-/// The cell is not source-addressable: it has one lexical activation, one
-/// immediately-post-`to_prop_key` initialization, and one direct capture by
-/// the class constructor template it belongs to.  This is what lets the
-/// object-definition provenance pass distinguish a retained, once-evaluated
-/// field key from an arbitrary captured value.
+/// Certifies the synthetic cell that retains one computed public field key.
+/// The cell is not source-addressable: it has one lexical activation and one
+/// immediately-post-`to_prop_key` initialization. An instance key is captured
+/// once by its constructor; a static key is instead read once by the class
+/// definition after all element keys have been evaluated.
 #[allow(
     clippy::too_many_lines,
     reason = "local initialization and every parent-child capture edge are one certificate"
@@ -4199,6 +4197,12 @@ fn verify_class_field_key_bindings(
         let parent_metadata = &metadata[parent_index];
         let arguments = parent.control_flow().domains().argument_count() as usize;
         let mut captures = try_filled_vec(
+            parent_id,
+            parent_metadata.variables.len(),
+            0_u32,
+            BytecodeGraphResource::VariableDefinitions,
+        )?;
+        let mut direct_reads = try_filled_vec(
             parent_id,
             parent_metadata.variables.len(),
             0_u32,
@@ -4220,10 +4224,7 @@ fn verify_class_field_key_bindings(
                     BindingPolicyViolationReason::InvalidDeclarationPolicy,
                 ));
             };
-            if !definition.has_scope
-                || definition.variable_reference.is_none()
-                || definition.function_initializer.is_some()
-            {
+            if !definition.has_scope || definition.function_initializer.is_some() {
                 return Err(policy_error(
                     parent_id,
                     BindingSlot::Local(local),
@@ -4235,12 +4236,29 @@ fn verify_class_field_key_bindings(
             let instructions = parent.control_flow().instructions();
             let mut initialization = None;
             let mut initialization_count = 0_u32;
-            for index in 1..instructions.len() {
+            let mut direct_read_count = 0_u32;
+            for index in 0..instructions.len() {
                 let instruction = instructions[index].decoded().instruction();
-                if local_operand(instruction.opcode(), instruction.operands()) != Some(local)
-                    || !is_unchecked_local_put(instruction.opcode())
-                {
+                if local_operand(instruction.opcode(), instruction.operands()) != Some(local) {
                     continue;
+                }
+                if instruction.opcode() == FinalOpcode::GetLocCheck {
+                    direct_read_count = direct_read_count.saturating_add(1);
+                    continue;
+                }
+                if instruction.opcode() == FinalOpcode::SetLocUninitialized {
+                    continue;
+                }
+                if instruction.opcode() == FinalOpcode::CloseLoc {
+                    continue;
+                }
+                if !is_unchecked_local_put(instruction.opcode()) || index == 0 {
+                    return Err(policy_error(
+                        parent_id,
+                        BindingSlot::Local(local),
+                        Some(instructions[index].decoded().pc()),
+                        BindingPolicyViolationReason::InvalidDeclarationPolicy,
+                    ));
                 }
                 initialization_count = initialization_count.saturating_add(1);
                 let prior = instructions[index - 1].decoded().instruction();
@@ -4272,6 +4290,7 @@ fn verify_class_field_key_bindings(
                     BindingPolicyViolationReason::InvalidLexicalInitialization,
                 ));
             }
+            direct_reads[definition_index] = direct_read_count;
         }
 
         for constant in parent.constants() {
@@ -4374,7 +4393,12 @@ fn verify_class_field_key_bindings(
                         BindingPolicyViolationReason::InvalidDeclarationPolicy,
                     )
                 })?;
-            if captures[definition_index] != 1 {
+            let valid_use = if definition.variable_reference.is_some() {
+                captures[definition_index] == 1 && direct_reads[definition_index] == 0
+            } else {
+                captures[definition_index] == 0 && direct_reads[definition_index] == 1
+            };
+            if !valid_use {
                 return Err(policy_error(
                     parent_id,
                     BindingSlot::Local(local),
@@ -5180,10 +5204,10 @@ fn inferred_computed_class_name_pair(
 }
 
 /// Certifies `NamedEvaluation` for an anonymous class in a computed public
-/// instance-field initializer. The key is evaluated once during
-/// `ClassDefinitionEvaluation` and captured by every constructor, so this form
-/// reads the compiler-created immutable `ClassFieldKey` closure cell instead
-/// of evaluating `ToPropertyKey` again.
+/// field initializer. The key is evaluated once during
+/// `ClassDefinitionEvaluation` and retained in a compiler-created immutable
+/// `ClassFieldKey` cell: locally for a static field or through the constructor
+/// capture for an instance field.
 #[allow(
     clippy::too_many_arguments,
     reason = "the certificate validates one complete cross-function class-name sequence"
@@ -5222,15 +5246,29 @@ fn inferred_captured_computed_class_name_pair(
         definition_class_index,
     )?;
     let key_read = instructions.get(key_read_index)?.decoded().instruction();
-    let slot = closure_operand(key_read.opcode(), key_read.operands())?;
-    if key_read.opcode() != FinalOpcode::GetVarRefCheck
-        || !parent_metadata
-            .closures()
-            .get(slot as usize)
-            .is_some_and(|definition| {
-                definition.policy().kind() == CompilerBindingKind::ClassFieldKey
-            })
-    {
+    let retained_key = if key_read.opcode() == FinalOpcode::GetVarRefCheck {
+        closure_operand(key_read.opcode(), key_read.operands()).is_some_and(|slot| {
+            parent_metadata
+                .closures()
+                .get(slot as usize)
+                .is_some_and(|definition| {
+                    definition.policy().kind() == CompilerBindingKind::ClassFieldKey
+                })
+        })
+    } else if key_read.opcode() == FinalOpcode::GetLocCheck {
+        local_operand(key_read.opcode(), key_read.operands()).is_some_and(|slot| {
+            let arguments = parent.control_flow().domains().argument_count() as usize;
+            parent_metadata
+                .variables
+                .get(arguments.saturating_add(slot as usize))
+                .is_some_and(|definition| {
+                    definition.policy().kind() == CompilerBindingKind::ClassFieldKey
+                })
+        })
+    } else {
+        false
+    };
+    if !retained_key {
         return None;
     }
     let expected_opcodes = [
@@ -5769,7 +5807,7 @@ enum ObjectDefinitionProvenance {
     AppendLengthCursor(u32),
     ConvertedPropertyKey(u32),
     /// A property key that class definition evaluation converted exactly once
-    /// and stored in the constructor's captured class-field-key cell.
+    /// and retained in a compiler-only class-field-key cell.
     ClassFieldKey(u32),
 }
 
@@ -5953,9 +5991,17 @@ fn verify_object_definition_provenance(
                         Some(ObjectDefinitionProvenance::ClassFieldKey(_))
                     )
                 );
+                let computed_static_field = matches!(
+                    (object, key),
+                    (
+                        Some(ObjectDefinitionProvenance::ClassConstructor(_)),
+                        Some(ObjectDefinitionProvenance::ClassFieldKey(_))
+                    )
+                );
                 if !object_literal
                     && !static_class_field
                     && !computed_instance_field
+                    && !computed_static_field
                     && append_pair_for_element(&state).is_none()
                 {
                     return Err(define_array_element_key_error(id, decoded.pc()));
@@ -6135,6 +6181,23 @@ fn transfer_object_definition_provenance(
                     metadata
                         .closures
                         .get(slot as usize)
+                        .is_some_and(|definition| {
+                            definition.policy().kind() == CompilerBindingKind::ClassFieldKey
+                        })
+                },
+            ) =>
+        {
+            state.push(ObjectDefinitionProvenance::ClassFieldKey(usize_to_u32(
+                instruction_index,
+            )));
+        }
+        FinalOpcode::GetLocCheck
+            if local_operand(instruction.opcode(), instruction.operands()).is_some_and(
+                |slot| {
+                    let arguments = function.control_flow().domains().argument_count() as usize;
+                    metadata
+                        .variables
+                        .get(arguments.saturating_add(slot as usize))
                         .is_some_and(|definition| {
                             definition.policy().kind() == CompilerBindingKind::ClassFieldKey
                         })

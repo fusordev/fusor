@@ -1214,16 +1214,8 @@ impl<'compiler, 'unit, 'arena, 'scope> ExpressionPlanner<'compiler, 'unit, 'aren
                     self.plan_base_class_method(method, layout, tree_layout, constants, flow)?;
                 }
                 ClassElement::PropertyDefinition(field) => {
-                    if field.r#static {
-                        self.plan_base_class_static_field(
-                            field,
-                            layout,
-                            tree_layout,
-                            constants,
-                            flow,
-                        )?;
-                    } else if field.computed {
-                        self.plan_base_class_computed_instance_field_key(
+                    if field.computed {
+                        self.plan_base_class_computed_field_key(
                             field,
                             layout,
                             tree_layout,
@@ -1231,6 +1223,20 @@ impl<'compiler, 'unit, 'arena, 'scope> ExpressionPlanner<'compiler, 'unit, 'aren
                             flow,
                         )?;
                     }
+                }
+                ClassElement::StaticBlock(_) => {}
+                _ => {
+                    return Err(LeafCompilationError::SemanticInvariant {
+                        invariant: "validated class body has only methods, fields, and static blocks",
+                        span: Some(element.span()),
+                    });
+                }
+            }
+        }
+        for element in &class.body.body {
+            match element {
+                ClassElement::PropertyDefinition(field) if field.r#static => {
+                    self.plan_base_class_static_field(field, layout, tree_layout, constants, flow)?;
                 }
                 ClassElement::StaticBlock(block) => {
                     self.plan_base_class_static_block(
@@ -1242,6 +1248,7 @@ impl<'compiler, 'unit, 'arena, 'scope> ExpressionPlanner<'compiler, 'unit, 'aren
                         flow,
                     )?;
                 }
+                ClassElement::MethodDefinition(_) | ClassElement::PropertyDefinition(_) => {}
                 _ => {
                     return Err(LeafCompilationError::SemanticInvariant {
                         invariant: "validated class body has only methods, fields, and static blocks",
@@ -1851,24 +1858,19 @@ impl<'compiler, 'unit, 'arena, 'scope> ExpressionPlanner<'compiler, 'unit, 'aren
         constants: &CompiledConstantPool,
         flow: &mut PlannedControlFlow,
     ) -> Result<(), LeafCompilationError> {
-        let key = field
-            .key
-            .as_expression()
-            .ok_or(LeafCompilationError::Unsupported {
-                feature: UnsupportedLeafFeature::UnsupportedDeclaration,
-                span: field.key.span(),
-            })?;
+        let (binding, slot) = self.computed_class_field_key_binding(field, layout)?;
+        let FrameSlot::Local(_) = slot else {
+            return Err(LeafCompilationError::SemanticInvariant {
+                invariant: "class definition retains its computed static field key locally",
+                span: Some(field.key.span()),
+            });
+        };
         flow.emit(PlannedInstruction::new(
             FinalOpcode::Swap,
             Operands::None,
             field.span,
         ))?;
-        self.plan_expression(key, layout, tree_layout, constants, &[], flow)?;
-        flow.emit(PlannedInstruction::new(
-            FinalOpcode::ToPropKey,
-            Operands::None,
-            field.key.span(),
-        ))?;
+        flow.emit(self.plan_read_slot(binding, slot, field.key.span())?)?;
         if let Some(value) = &field.value {
             let inferred_name = Self::plan_inferred_computed_property_name_for_initializer(value)?;
             self.plan_expression(value, layout, tree_layout, constants, &[], flow)?;
@@ -1899,7 +1901,7 @@ impl<'compiler, 'unit, 'arena, 'scope> ExpressionPlanner<'compiler, 'unit, 'aren
         ))
     }
 
-    fn plan_base_class_computed_instance_field_key(
+    fn plan_base_class_computed_field_key(
         &self,
         field: &PropertyDefinition<'arena>,
         layout: &FrameLayout,
@@ -1914,7 +1916,13 @@ impl<'compiler, 'unit, 'arena, 'scope> ExpressionPlanner<'compiler, 'unit, 'aren
                 feature: UnsupportedLeafFeature::UnsupportedDeclaration,
                 span: field.key.span(),
             })?;
-        let (binding, slot) = self.computed_instance_field_key_binding(field, layout)?;
+        let (binding, slot) = self.computed_class_field_key_binding(field, layout)?;
+        let FrameSlot::Local(_) = slot else {
+            return Err(LeafCompilationError::SemanticInvariant {
+                invariant: "class definition stores each computed field key locally",
+                span: Some(field.key.span()),
+            });
+        };
         self.plan_expression(key, layout, tree_layout, constants, &[], flow)?;
         flow.emit(PlannedInstruction::new(
             FinalOpcode::ToPropKey,
@@ -1927,12 +1935,12 @@ impl<'compiler, 'unit, 'arena, 'scope> ExpressionPlanner<'compiler, 'unit, 'aren
                 .plan
                 .binding(binding)
                 .ok_or(LeafCompilationError::SemanticInvariant {
-                    invariant: "computed instance-field key binding exists after planning",
+                    invariant: "computed class-field key binding exists after planning",
                     span: Some(field.key.span()),
                 })?;
         if storage.policy().kind() != DeclarationKind::ClassFieldKey {
             return Err(LeafCompilationError::SemanticInvariant {
-                invariant: "computed instance-field key writes only its synthetic binding",
+                invariant: "computed class-field key writes only its synthetic binding",
                 span: Some(field.key.span()),
             });
         }
@@ -2194,7 +2202,7 @@ impl<'compiler, 'unit, 'arena, 'scope> ExpressionPlanner<'compiler, 'unit, 'aren
         synthesized_default: bool,
         flow: &mut PlannedControlFlow,
     ) -> Result<(), LeafCompilationError> {
-        let (binding, slot) = self.computed_instance_field_key_binding(field, layout)?;
+        let (binding, slot) = self.computed_class_field_key_binding(field, layout)?;
         let FrameSlot::Capture(_) = slot else {
             return Err(LeafCompilationError::SemanticInvariant {
                 invariant: "instance constructor captures its computed field key",
@@ -2252,14 +2260,14 @@ impl<'compiler, 'unit, 'arena, 'scope> ExpressionPlanner<'compiler, 'unit, 'aren
         Ok(())
     }
 
-    fn computed_instance_field_key_binding(
+    fn computed_class_field_key_binding(
         &self,
         field: &PropertyDefinition<'arena>,
         layout: &FrameLayout,
     ) -> Result<(BindingId, FrameSlot), LeafCompilationError> {
-        if field.r#static || !field.computed {
+        if !field.computed {
             return Err(LeafCompilationError::SemanticInvariant {
-                invariant: "computed instance-field key binding belongs to a computed instance field",
+                invariant: "computed class-field key binding belongs to a computed field",
                 span: Some(field.span),
             });
         }
@@ -2270,7 +2278,7 @@ impl<'compiler, 'unit, 'arena, 'scope> ExpressionPlanner<'compiler, 'unit, 'aren
             .get(&field.node_id.get())
             .copied()
             .ok_or(LeafCompilationError::SemanticInvariant {
-                invariant: "computed instance field has a class-scope key binding",
+                invariant: "computed field has a class-scope key binding",
                 span: Some(field.key.span()),
             })?;
         let storage =
@@ -2278,21 +2286,21 @@ impl<'compiler, 'unit, 'arena, 'scope> ExpressionPlanner<'compiler, 'unit, 'aren
                 .plan
                 .binding(binding)
                 .ok_or(LeafCompilationError::SemanticInvariant {
-                    invariant: "computed instance-field key binding exists",
+                    invariant: "computed class-field key binding exists",
                     span: Some(field.key.span()),
                 })?;
         if storage.policy().kind() != DeclarationKind::ClassFieldKey
             || storage.placement() != StoragePlacement::Local
         {
             return Err(LeafCompilationError::SemanticInvariant {
-                invariant: "computed instance-field key binding is immutable local storage",
+                invariant: "computed class-field key binding is immutable local storage",
                 span: Some(field.key.span()),
             });
         }
         let slot = layout
             .slot(binding)
             .ok_or(LeafCompilationError::SemanticInvariant {
-                invariant: "computed instance-field key binding has a frame slot",
+                invariant: "computed class-field key binding has a frame slot",
                 span: Some(field.key.span()),
             })?;
         Ok((binding, slot))

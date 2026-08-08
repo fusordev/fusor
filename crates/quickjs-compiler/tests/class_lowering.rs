@@ -1062,6 +1062,38 @@ fn computed_public_instance_fields_capture_a_once_evaluated_class_key() {
 }
 
 #[test]
+fn interleaved_computed_fields_capture_all_keys_before_static_initializers() {
+    let tree = compile(
+        "function make(){let index=0;class Box{[index++]=index++;static[index++]=index++;[index++]=index++;}return Box;}",
+        "make",
+    );
+    let root = tree.root();
+    assert_eq!(
+        root.storage_plan()
+            .bindings()
+            .iter()
+            .filter(|binding| binding.policy().kind() == DeclarationKind::ClassFieldKey)
+            .count(),
+        3
+    );
+    let opcodes = root
+        .control_flow()
+        .instructions()
+        .iter()
+        .map(|instruction| instruction.decoded().instruction().opcode())
+        .collect::<Vec<_>>();
+    let last_key = opcodes
+        .iter()
+        .rposition(|&opcode| opcode == FinalOpcode::ToPropKey)
+        .expect("computed field keys");
+    let first_static_initializer = opcodes
+        .iter()
+        .position(|&opcode| opcode == FinalOpcode::DefineArrayEl)
+        .expect("computed static field initializer");
+    assert!(last_key < first_static_initializer);
+}
+
+#[test]
 fn named_base_class_members_capture_a_distinct_immutable_class_name_cell() {
     let tree = compile(
         "function make(){class Box{constructor(){}static self(){return Box;}}}",
