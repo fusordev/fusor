@@ -199,6 +199,67 @@ fn sloppy_direct_eval_rejects_an_intervening_lexical_collision() {
 }
 
 #[test]
+fn sloppy_direct_eval_reuses_an_existing_function_variable_binding() {
+    let bindings = [DirectEvalBinding::new(
+        "answer",
+        DirectEvalBindingKind::Normal,
+        false,
+        false,
+        DirectEvalBindingLocation::Local { index: 2 },
+    )
+    .with_scope(DirectEvalBindingScope::Variable)];
+    let tree = compile_with_bindings_in_variable_environment(
+        "var answer = 42; answer;",
+        false,
+        &bindings,
+        DirectEvalVariableEnvironment::Function,
+    )
+    .expect("existing function variable cell is the eval declaration target");
+    let root = tree.verified_bytecode().root();
+
+    assert_eq!(
+        root.function().closure_sources(),
+        [CompilerClosureSource::DirectEvalBinding {
+            index: 0,
+            environment_size: 1,
+        }]
+    );
+    assert!(matches!(
+        root.metadata().closures()[0].binding(),
+        CompilerClosureBinding::Captured(_)
+    ));
+}
+
+#[test]
+fn sloppy_direct_eval_function_declaration_can_replace_an_existing_var_binding() {
+    let bindings = [DirectEvalBinding::new(
+        "answer",
+        DirectEvalBindingKind::Normal,
+        false,
+        false,
+        DirectEvalBindingLocation::Local { index: 2 },
+    )
+    .with_scope(DirectEvalBindingScope::Variable)];
+    let tree = compile_with_bindings_in_variable_environment(
+        "function answer() { return 42; } answer();",
+        false,
+        &bindings,
+        DirectEvalVariableEnvironment::Function,
+    )
+    .expect("function declaration initializes the existing variable cell");
+    let root = tree.verified_bytecode().root();
+
+    assert!(
+        root.function()
+            .control_flow()
+            .instructions()
+            .iter()
+            .any(|instruction| instruction.decoded().instruction().opcode()
+                == quickjs_bytecode::FinalOpcode::PutVarRef)
+    );
+}
+
+#[test]
 fn direct_eval_resolves_caller_bindings_before_realm_globals() {
     let bindings = [
         DirectEvalBinding::new(

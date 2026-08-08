@@ -27,9 +27,8 @@ use oxc_syntax::operator::{
     AssignmentOperator, BinaryOperator, LogicalOperator, UnaryOperator, UpdateOperator,
 };
 use quickjs_bytecode::{
-    AtomPoolIndex, BranchKind, BytecodeGraphVerificationLimits,
-    CompilerBindingKind as VerifiedBindingKind, CompilerClosureBinding, FinalOpcode,
-    FunctionGraphVerificationLimits, MAX_FUNCTION_INDEX_ENTRIES, Operands,
+    AtomPoolIndex, BranchKind, BytecodeGraphVerificationLimits, CompilerClosureBinding,
+    FinalOpcode, FunctionGraphVerificationLimits, MAX_FUNCTION_INDEX_ENTRIES, Operands,
     UnverifiedCompilerBytecodeGraph, VerificationLimits, verify_compiler_bytecode_graph,
 };
 #[cfg(test)]

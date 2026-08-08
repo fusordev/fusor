@@ -1349,6 +1349,43 @@ fn direct_eval_caller_bindings(
             }
         }
     } else {
+        for local in 0..local_count {
+            let variable = variables
+                .get(argument_count.saturating_add(local) as usize)
+                .ok_or(EngineFault::InvalidClosureEnvironment { function })?;
+            if !variable.has_scope()
+                && direct_eval_local_scope(variable.policy().kind())
+                    == DirectEvalCallerBindingScope::Lexical
+            {
+                push_direct_eval_caller_binding(
+                    &mut bindings,
+                    installed,
+                    variable.name(),
+                    variable.policy(),
+                    DirectEvalCallerBindingLocation::Local(local),
+                    DirectEvalCallerBindingScope::Lexical,
+                )?;
+            }
+        }
+        for local in 0..local_count {
+            let variable = variables
+                .get(argument_count.saturating_add(local) as usize)
+                .ok_or(EngineFault::InvalidClosureEnvironment { function })?;
+            if !variable.has_scope()
+                && variable.policy().kind() != CompilerBindingKind::Parameter
+                && direct_eval_local_scope(variable.policy().kind())
+                    == DirectEvalCallerBindingScope::Variable
+            {
+                push_direct_eval_caller_binding(
+                    &mut bindings,
+                    installed,
+                    variable.name(),
+                    variable.policy(),
+                    DirectEvalCallerBindingLocation::Local(local),
+                    DirectEvalCallerBindingScope::Variable,
+                )?;
+            }
+        }
         for argument in 0..argument_count {
             let variable = variables
                 .get(argument as usize)
@@ -1366,30 +1403,32 @@ fn direct_eval_caller_bindings(
             let variable = variables
                 .get(argument_count.saturating_add(local) as usize)
                 .ok_or(EngineFault::InvalidClosureEnvironment { function })?;
-            if !variable.has_scope() {
-                let scope = match variable.policy().kind() {
-                    CompilerBindingKind::Let
-                    | CompilerBindingKind::Const
-                    | CompilerBindingKind::ClassName => DirectEvalCallerBindingScope::Lexical,
-                    CompilerBindingKind::FunctionName => DirectEvalCallerBindingScope::Outer,
-                    CompilerBindingKind::Parameter
-                    | CompilerBindingKind::Var
-                    | CompilerBindingKind::Function
-                    | CompilerBindingKind::Catch
-                    | CompilerBindingKind::ClassFieldKey
-                    | CompilerBindingKind::ClassPrivateName
-                    | CompilerBindingKind::ClassStaticReceiver
-                    | CompilerBindingKind::GlobalReference => {
-                        DirectEvalCallerBindingScope::Variable
-                    }
-                };
+            if !variable.has_scope() && variable.policy().kind() == CompilerBindingKind::Parameter {
                 push_direct_eval_caller_binding(
                     &mut bindings,
                     installed,
                     variable.name(),
                     variable.policy(),
                     DirectEvalCallerBindingLocation::Local(local),
-                    scope,
+                    DirectEvalCallerBindingScope::Variable,
+                )?;
+            }
+        }
+        for local in 0..local_count {
+            let variable = variables
+                .get(argument_count.saturating_add(local) as usize)
+                .ok_or(EngineFault::InvalidClosureEnvironment { function })?;
+            if !variable.has_scope()
+                && direct_eval_local_scope(variable.policy().kind())
+                    == DirectEvalCallerBindingScope::Outer
+            {
+                push_direct_eval_caller_binding(
+                    &mut bindings,
+                    installed,
+                    variable.name(),
+                    variable.policy(),
+                    DirectEvalCallerBindingLocation::Local(local),
+                    DirectEvalCallerBindingScope::Outer,
                 )?;
             }
         }
@@ -1411,6 +1450,23 @@ fn direct_eval_caller_bindings(
         )?;
     }
     Ok(bindings)
+}
+
+const fn direct_eval_local_scope(kind: CompilerBindingKind) -> DirectEvalCallerBindingScope {
+    match kind {
+        CompilerBindingKind::Let
+        | CompilerBindingKind::Const
+        | CompilerBindingKind::ClassName
+        | CompilerBindingKind::Catch => DirectEvalCallerBindingScope::Lexical,
+        CompilerBindingKind::Parameter
+        | CompilerBindingKind::Var
+        | CompilerBindingKind::Function => DirectEvalCallerBindingScope::Variable,
+        CompilerBindingKind::FunctionName
+        | CompilerBindingKind::ClassFieldKey
+        | CompilerBindingKind::ClassPrivateName
+        | CompilerBindingKind::ClassStaticReceiver
+        | CompilerBindingKind::GlobalReference => DirectEvalCallerBindingScope::Outer,
+    }
 }
 
 fn push_direct_eval_caller_binding(

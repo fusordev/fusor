@@ -6,8 +6,8 @@ use super::super::{
     Expression, ExpressionPlanner, FinalOpcode, FrameLayout, FrameSlot, Function,
     FunctionPlanningContext, FunctionTreeLayout, FunctionType, InitializationPolicy,
     LeafCompilationError, NodeId, Operands, PlannedControlFlow, PlannedInstruction,
-    ScopeEntryInitialization, Span, StoragePlacement, UnsupportedLeafFeature, VerifiedBindingKind,
-    WritePolicy, checked_function_index, compact_get_argument, plan_put_slot, unsupported,
+    ScopeEntryInitialization, Span, StoragePlacement, UnsupportedLeafFeature, WritePolicy,
+    checked_function_index, compact_get_argument, plan_put_slot, unsupported,
 };
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
@@ -673,16 +673,18 @@ impl<'arena> CompilationContext<'_, 'arena, '_> {
                     span: Some(root.span()),
                 },
             )?;
-            if descriptor.policy.kind() != VerifiedBindingKind::Function {
+            let Some(binding) = descriptor.declaration else {
+                continue;
+            };
+            let declaration = self.planned.plan.binding(binding).ok_or(
+                LeafCompilationError::SemanticInvariant {
+                    invariant: "external function initializer has a declared binding",
+                    span: Some(descriptor.first_span),
+                },
+            )?;
+            if declaration.policy().kind() != DeclarationKind::Function {
                 continue;
             }
-            let binding =
-                descriptor
-                    .declaration
-                    .ok_or(LeafCompilationError::SemanticInvariant {
-                        invariant: "constructor-realm function initializer has a declared binding",
-                        span: Some(descriptor.first_span),
-                    })?;
             let child = tree_layout.function_declaration(binding).ok_or(
                 LeafCompilationError::SemanticInvariant {
                     invariant: "constructor-realm function initializer selects its last child",
@@ -705,8 +707,12 @@ impl<'arena> CompilationContext<'_, 'arena, '_> {
                 tree_layout
                     .realm_globals
                     .closure_slot(&self.planned.plan, executable, global)?;
+            let opcode = match descriptor.binding {
+                quickjs_bytecode::CompilerClosureBinding::Captured(_) => FinalOpcode::PutVarRef,
+                quickjs_bytecode::CompilerClosureBinding::RealmGlobal(_) => FinalOpcode::PutVar,
+            };
             flow.emit(PlannedInstruction::new(
-                FinalOpcode::PutVar,
+                opcode,
                 Operands::VarRef(slot),
                 descriptor.first_span,
             ))?;

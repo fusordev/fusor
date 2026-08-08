@@ -119,6 +119,54 @@ fn escaped_direct_eval_closures_retain_caller_cells_after_return() {
 }
 
 #[test]
+fn sloppy_direct_eval_var_declaration_reuses_an_existing_parameter_cell() {
+    evaluate(
+        "function local(answer){eval('var answer=42;');return answer;}local(1);",
+        |value| assert!(number(value).strict_equals(JsNumber::from_i32(42))),
+    );
+}
+
+#[test]
+fn sloppy_direct_eval_var_without_initializer_preserves_an_existing_local() {
+    evaluate(
+        "function local(){var answer=42;eval('var answer;');return answer;}local();",
+        |value| assert!(number(value).strict_equals(JsNumber::from_i32(42))),
+    );
+}
+
+#[test]
+fn nested_sloppy_direct_eval_reuses_the_same_function_variable_cell() {
+    evaluate(
+        "function local(){var answer=1;eval('answer=2;eval(\"answer=42;\");');return answer;}local();",
+        |value| assert!(number(value).strict_equals(JsNumber::from_i32(42))),
+    );
+}
+
+#[test]
+fn sloppy_direct_eval_function_declaration_replaces_an_existing_var_cell() {
+    evaluate(
+        "function local(){var answer=1;eval('function answer(){return 42;}');return answer();}local();",
+        |value| assert!(number(value).strict_equals(JsNumber::from_i32(42))),
+    );
+}
+
+#[test]
+fn sloppy_direct_eval_targets_the_body_var_inside_non_simple_parameters() {
+    evaluate(
+        "function local(value=1){var value;eval('var value=42;');return value;}local();",
+        |value| assert!(number(value).strict_equals(JsNumber::from_i32(42))),
+    );
+}
+
+#[test]
+fn sloppy_direct_eval_rejects_a_function_body_lexical_collision() {
+    evaluate(
+        "function local(){let answer=1;try{eval('var answer=42;');}catch(error){return error instanceof SyntaxError&&answer===1;}return false;}local();",
+        |value| assert_eq!(value.as_boolean(), Ok(Some(true))),
+    );
+}
+
+#[test]
 fn direct_eval_resolves_outer_closures_before_realm_globals() {
     evaluate(
         "var value=1;function outer(value){return function(){return eval('value+1');};}outer(41)();",

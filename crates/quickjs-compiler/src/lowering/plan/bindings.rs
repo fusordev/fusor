@@ -896,11 +896,13 @@ impl<'arena> CompilationContext<'_, 'arena, '_> {
                 layout.executable,
                 global,
             )?;
-            return flow.emit(PlannedInstruction::new(
-                FinalOpcode::PutVar,
-                Operands::VarRef(slot),
-                identifier.span,
-            ));
+            let descriptor = tree_layout.realm_globals.binding(global).ok_or(
+                LeafCompilationError::SemanticInvariant {
+                    invariant: "for-in external declaration descriptor exists",
+                    span: Some(identifier.span),
+                },
+            )?;
+            return flow.emit(plan_external_put(descriptor.binding, slot, identifier.span));
         }
 
         let slot = layout
@@ -1076,16 +1078,22 @@ impl<'arena> CompilationContext<'_, 'arena, '_> {
                         layout.executable,
                         global,
                     )?;
-                    let opcode = if storage.placement() == StoragePlacement::GlobalLexical {
-                        FinalOpcode::PutVarInit
+                    let instruction = if storage.placement() == StoragePlacement::GlobalLexical {
+                        PlannedInstruction::new(
+                            FinalOpcode::PutVarInit,
+                            Operands::VarRef(slot),
+                            identifier.span,
+                        )
                     } else {
-                        FinalOpcode::PutVar
+                        let descriptor = tree_layout.realm_globals.binding(global).ok_or(
+                            LeafCompilationError::SemanticInvariant {
+                                invariant: "declared external binding descriptor exists",
+                                span: Some(identifier.span),
+                            },
+                        )?;
+                        plan_external_put(descriptor.binding, slot, identifier.span)
                     };
-                    flow.emit(PlannedInstruction::new(
-                        opcode,
-                        Operands::VarRef(slot),
-                        identifier.span,
-                    ))?;
+                    flow.emit(instruction)?;
                 }
                 return Ok(());
             }

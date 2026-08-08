@@ -625,16 +625,22 @@ impl<'arena> CompilationContext<'_, 'arena, '_> {
                 layout.executable,
                 global,
             )?;
-            let opcode = if storage.placement() == StoragePlacement::GlobalLexical {
-                FinalOpcode::PutVarInit
+            let instruction = if storage.placement() == StoragePlacement::GlobalLexical {
+                PlannedInstruction::new(
+                    FinalOpcode::PutVarInit,
+                    Operands::VarRef(slot),
+                    identifier.span,
+                )
             } else {
-                FinalOpcode::PutVar
+                let descriptor = tree_layout.realm_globals.binding(global).ok_or(
+                    LeafCompilationError::SemanticInvariant {
+                        invariant: "destructured external binding descriptor exists",
+                        span: Some(identifier.span),
+                    },
+                )?;
+                plan_external_put(descriptor.binding, slot, identifier.span)
             };
-            return flow.emit(PlannedInstruction::new(
-                opcode,
-                Operands::VarRef(slot),
-                identifier.span,
-            ));
+            return flow.emit(instruction);
         }
         let frame_slot = layout
             .slot(binding)
