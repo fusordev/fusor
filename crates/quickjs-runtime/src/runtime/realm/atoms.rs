@@ -432,6 +432,8 @@ fn visit_core_name_order(
         RealmNameId::Description,
         RealmNameId::IsError,
         RealmNameId::Bind,
+        RealmNameId::Intl,
+        RealmNameId::IntlGetCanonicalLocales,
         RealmNameId::Deref,
         RealmNameId::Register,
         RealmNameId::Unregister,
@@ -494,6 +496,8 @@ fn realm_name_description(id: RealmNameId) -> &'static str {
         RealmNameId::Description => "description",
         RealmNameId::IsError => "isError",
         RealmNameId::Bind => "bind",
+        RealmNameId::Intl => "Intl",
+        RealmNameId::IntlGetCanonicalLocales => "getCanonicalLocales",
         RealmNameId::Deref => "deref",
         RealmNameId::Register => "register",
         RealmNameId::Unregister => "unregister",
@@ -620,8 +624,8 @@ mod tests {
         let schema = RealmIntrinsicSchema::try_new().expect("Realm schema");
         let plan = RealmAtomPlan::try_new(&schema).expect("atom plan");
 
-        assert_eq!(plan.len(), 355);
-        assert_eq!(plan.description_code_units(), 3_095);
+        assert_eq!(plan.len(), 357);
+        assert_eq!(plan.description_code_units(), 3_118);
     }
 
     #[test]

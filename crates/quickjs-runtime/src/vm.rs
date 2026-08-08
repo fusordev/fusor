@@ -124,6 +124,7 @@ mod from_entries;
 mod generator;
 mod group_by;
 mod instanceof;
+mod intl;
 mod iterators;
 mod json_parse;
 mod json_stringify;
@@ -164,10 +165,10 @@ use {
     array_statics::*, async_from_sync::*, async_generator::*, atomics::*, bigint_intrinsics::*,
     bindings::*, conversions::*, data_view::*, date::*, define_property_intrinsics::*, dynamic::*,
     error_stack::*, errors::*, exceptions::*, execution::*, for_in::*, from_entries::*,
-    generator::*, group_by::*, iterators::*, json_parse::*, json_stringify::*, locale_string::*,
-    map::*, math::*, math_sum_precise::*, native::*, object_intrinsics::*, promise::*,
-    promise_combinators::*, properties::*, proxy::*, reflect::*, regexp::*, set::*, stack::*,
-    string_methods::*, string_raw::*, string_replace::*, string_split::*, temporal::*,
+    generator::*, group_by::*, intl::*, iterators::*, json_parse::*, json_stringify::*,
+    locale_string::*, map::*, math::*, math_sum_precise::*, native::*, object_intrinsics::*,
+    promise::*, promise_combinators::*, properties::*, proxy::*, reflect::*, regexp::*, set::*,
+    stack::*, string_methods::*, string_raw::*, string_replace::*, string_split::*, temporal::*,
     typed_array::*, uri::*, weak_collections::*, weak_references::*,
 };
 
@@ -867,6 +868,7 @@ enum NativeContinuation {
     StringSplit(Box<StringSplitContinuation>),
     RegExp(Box<RegExpContinuation>),
     LocaleString(Box<LocaleStringContinuation>),
+    IntlLocaleList(Box<IntlLocaleListContinuation>),
     DefineProperty(Box<DefinePropertyContinuation>),
     DefineProperties(Box<DefinePropertiesContinuation>),
     InstanceOf(InstanceOfContinuation),
@@ -1094,6 +1096,7 @@ impl NativeContinuation {
             Self::StringSplit(state) => state.retained_values(),
             Self::RegExp(state) => state.retained_values(),
             Self::LocaleString(state) => state.retained_values(),
+            Self::IntlLocaleList(state) => state.retained_values(),
             Self::DefineProperty(state) => state.retained_values(),
             Self::DefineProperties(state) => state.retained_values(),
             Self::InstanceOf(state) => state.retained_values(),
@@ -2461,6 +2464,10 @@ enum OperatorPrimitiveTarget {
     ArrayFlattenValue(Box<ArrayFlattenContinuation>),
     /// An array-like `Array.from` length awaiting `ToNumber`.
     ArrayStaticLength(Box<ArrayStaticContinuation>),
+    /// `CanonicalizeLocaleList`'s array-like length awaiting `ToNumber`.
+    IntlLocaleListLength(Box<IntlLocaleListContinuation>),
+    /// One `CanonicalizeLocaleList` element awaiting `ToString`.
+    IntlLocaleListElement(Box<IntlLocaleListContinuation>),
     /// An array-like `Array.fromAsync` length awaiting `ToNumber`.
     ArrayFromAsyncLength {
         operation: ObjectId,
@@ -2789,6 +2796,9 @@ impl OperatorPrimitiveTarget {
             Self::ArraySortValue(state) => state.retained_values(),
             Self::ArrayFlattenValue(state) => state.retained_values(),
             Self::ArrayStaticLength(state) => state.retained_values(),
+            Self::IntlLocaleListLength(state) | Self::IntlLocaleListElement(state) => {
+                state.retained_values()
+            }
             Self::StringRawValue(state) => state.retained_values(),
             Self::StringReplaceValue(state) => state.retained_values(),
             Self::StringSplitValue(state) => state.retained_values(),
@@ -3215,6 +3225,8 @@ fn trace_operator_primitive_target_roots(
         OperatorPrimitiveTarget::ArraySortValue(state) => state.trace_roots(mark),
         OperatorPrimitiveTarget::ArrayFlattenValue(state) => state.trace_roots(mark),
         OperatorPrimitiveTarget::ArrayStaticLength(state) => state.trace_roots(mark),
+        OperatorPrimitiveTarget::IntlLocaleListLength(state)
+        | OperatorPrimitiveTarget::IntlLocaleListElement(state) => state.trace_roots(mark),
         OperatorPrimitiveTarget::ArrayFromAsyncLength { operation } => {
             mark(CollectionRoot::Heap(HeapReference::Object(*operation)));
         }
@@ -3318,6 +3330,7 @@ fn trace_native_continuation_roots(
         NativeContinuation::StringSplit(state) => state.trace_roots(mark),
         NativeContinuation::RegExp(state) => state.trace_roots(mark),
         NativeContinuation::LocaleString(state) => state.trace_roots(mark),
+        NativeContinuation::IntlLocaleList(state) => state.trace_roots(mark),
         NativeContinuation::DefineProperty(state) => state.trace_roots(mark),
         NativeContinuation::FunctionBind(state) => {
             trace_function_bind_roots(state, mark);

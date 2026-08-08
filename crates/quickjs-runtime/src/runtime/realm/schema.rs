@@ -79,6 +79,7 @@ pub(in crate::runtime) enum IntrinsicObjectId {
     WeakSetPrototype,
     WeakRefPrototype,
     FinalizationRegistryPrototype,
+    Intl,
     Reflect,
     Json,
     Math,
@@ -86,7 +87,7 @@ pub(in crate::runtime) enum IntrinsicObjectId {
 }
 
 impl IntrinsicObjectId {
-    pub(in crate::runtime) const ALL: [Self; 71] = [
+    pub(in crate::runtime) const ALL: [Self; 72] = [
         Self::ObjectPrototype,
         Self::GlobalObject,
         Self::ErrorPrototype(ErrorIntrinsicKind::Error),
@@ -154,6 +155,7 @@ impl IntrinsicObjectId {
         Self::WeakSetPrototype,
         Self::WeakRefPrototype,
         Self::FinalizationRegistryPrototype,
+        Self::Intl,
         Self::Reflect,
         Self::Json,
         Self::Math,
@@ -179,6 +181,8 @@ pub(in crate::runtime) enum RealmNameId {
     Description,
     IsError,
     Bind,
+    Intl,
+    IntlGetCanonicalLocales,
     Reflect,
     JsonIsRawJson,
     JsonParse,

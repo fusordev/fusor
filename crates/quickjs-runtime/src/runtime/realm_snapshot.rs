@@ -261,7 +261,7 @@ impl RealmSnapshot {
             .objects
             .get(state.global_object)
             .expect("snapshot global is live");
-        for name in ["Reflect", "JSON", "Math", "Atomics"] {
+        for name in ["Reflect", "Intl", "JSON", "Math", "Atomics"] {
             register_identity(
                 HeapReference::Object(global_object_property(&global.record, name)),
                 format!("%{name}%"),
@@ -521,9 +521,9 @@ mod tests {
 
     use crate::runtime::{RealmIntrinsics, RuntimeLimits, RuntimeUsage};
 
-    const REALM_NODES: usize = 799;
-    const REALM_PROPERTIES: u64 = 2_427;
-    const REALM_SNAPSHOT_FINGERPRINT: u64 = 16_300_020_223_081_114_808;
+    const REALM_NODES: usize = 801;
+    const REALM_PROPERTIES: u64 = 2_432;
+    const REALM_SNAPSHOT_FINGERPRINT: u64 = 13_888_418_631_905_877_360;
 
     #[test]
     fn complete_realm_snapshot_pins_the_installed_intrinsic_graph() {
@@ -571,9 +571,9 @@ mod tests {
         assert_eq!(
             first_atoms,
             AtomUsage {
-                live_atoms: PREDEFINED_ATOM_COUNT + 340,
-                live_description_code_units: PREDEFINED_DESCRIPTION_CODE_UNITS + 2_944,
-                interner_slots: PREDEFINED_INTERNER_SLOTS + 340,
+                live_atoms: PREDEFINED_ATOM_COUNT + 352,
+                live_description_code_units: PREDEFINED_DESCRIPTION_CODE_UNITS + 3_097,
+                interner_slots: PREDEFINED_INTERNER_SLOTS + 352,
             }
         );
 

@@ -1221,6 +1221,8 @@ pub(crate) enum NativeFunctionKind {
     JsonRawJson,
     /// `JSON.stringify`.
     JsonStringify,
+    /// `Intl.getCanonicalLocales`.
+    IntlGetCanonicalLocales,
     /// One method on the ordinary `%Math%` object.
     Math(MathMethod),
     /// One method on the ordinary `%Atomics%` object.

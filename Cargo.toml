@@ -5,6 +5,7 @@ members = [
     "crates/quickjs-compiler",
     "crates/quickjs-diagnostics",
     "crates/quickjs-frontend",
+    "crates/quickjs-intl",
     "crates/quickjs-regexp",
     "crates/quickjs-runtime",
     "xtask",
