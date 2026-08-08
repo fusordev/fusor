@@ -1865,17 +1865,41 @@ pub(super) fn execute_one(
                     .into());
                 }
             };
-            if let PropertyWriteOutcome::Failed(failure) =
-                define_static_property(runtime, &base, property.key, value, execution_budget)?
-            {
+            let Some(reference) = base.heap_reference() else {
                 return Ok(Step::Abrupt(property_exception_at(
                     realm,
                     instruction_location(runtime, frame, source_pc)?,
                     Some(&property.name),
-                    failure,
+                    PropertyFailure::NotObject,
                 )?));
-            }
+            };
+            let return_to =
+                CallReturn::discard(verified_instruction.successors().fallthrough().ok_or(
+                    EngineFault::InvalidSuccessor {
+                        function: frame.template,
+                        pc: source_pc,
+                    },
+                )?);
+            let origin = instruction_location(runtime, frame, source_pc)?;
+            let definition =
+                PropertyDefinition::data(Requested::Present(value), Requested::Present(true))
+                    .with_enumerable(Requested::Present(true))
+                    .with_configurable(Requested::Present(true));
             push(frame, key_value);
+            return native_step(
+                begin_internal_define_own_property(
+                    runtime,
+                    reference,
+                    property.key,
+                    definition,
+                    realm,
+                    Some(return_to),
+                    origin,
+                    execution_budget,
+                    DefinePropertyResult::Target,
+                ),
+                return_to,
+            );
         }
         FinalOpcode::DefineMethodComputed => {
             let realm = code(runtime, frame.code)?.realm;
@@ -2286,20 +2310,45 @@ pub(super) fn execute_one(
             }
         }
         FinalOpcode::DefineField => {
+            let realm = code(runtime, frame.code)?.realm;
             let property = static_property_operand(runtime, frame, operands)?;
             let value = pop(frame)?;
             let base = peek(frame)?.duplicate();
-            if let PropertyWriteOutcome::Failed(failure) =
-                define_static_property(runtime, &base, property.key, value, execution_budget)?
-            {
+            let Some(reference) = base.heap_reference() else {
                 return Ok(Step::Abrupt(property_exception(
                     runtime,
                     frame,
                     source_pc,
                     &property.name,
-                    failure,
+                    PropertyFailure::NotObject,
                 )?));
-            }
+            };
+            let return_to =
+                CallReturn::discard(verified_instruction.successors().fallthrough().ok_or(
+                    EngineFault::InvalidSuccessor {
+                        function: frame.template,
+                        pc: source_pc,
+                    },
+                )?);
+            let origin = instruction_location(runtime, frame, source_pc)?;
+            let definition =
+                PropertyDefinition::data(Requested::Present(value), Requested::Present(true))
+                    .with_enumerable(Requested::Present(true))
+                    .with_configurable(Requested::Present(true));
+            return native_step(
+                begin_internal_define_own_property(
+                    runtime,
+                    reference,
+                    property.key,
+                    definition,
+                    realm,
+                    Some(return_to),
+                    origin,
+                    execution_budget,
+                    DefinePropertyResult::Target,
+                ),
+                return_to,
+            );
         }
         FinalOpcode::DefinePrivateField => {
             let Operands::U8(private_element_kind @ 0..=3) = operands else {
