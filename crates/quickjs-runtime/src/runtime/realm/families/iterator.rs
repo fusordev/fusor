@@ -79,6 +79,16 @@ pub(super) fn visit_functions(visit: FunctionSink<'_>) {
             0,
         ),
         (
+            NativeFunctionKind::IteratorZip,
+            IntrinsicNameSpec::RealmName(RealmNameId::IteratorZip),
+            1,
+        ),
+        (
+            NativeFunctionKind::IteratorZipKeyed,
+            IntrinsicNameSpec::RealmName(RealmNameId::IteratorZipKeyed),
+            1,
+        ),
+        (
             NativeFunctionKind::IteratorFrom,
             IntrinsicNameSpec::Predefined(PredefinedAtom::From),
             1,
@@ -267,6 +277,16 @@ pub(super) fn visit_properties(visit: PropertySink<'_>) {
         constructor,
         IntrinsicKeySpec::PredefinedString(PredefinedAtom::Concat),
         NativeFunctionKind::IteratorConcat,
+    ));
+    visit(method(
+        constructor,
+        IntrinsicKeySpec::InternedString(RealmNameId::IteratorZip),
+        NativeFunctionKind::IteratorZip,
+    ));
+    visit(method(
+        constructor,
+        IntrinsicKeySpec::InternedString(RealmNameId::IteratorZipKeyed),
+        NativeFunctionKind::IteratorZipKeyed,
     ));
     visit(accessor(
         prototype,

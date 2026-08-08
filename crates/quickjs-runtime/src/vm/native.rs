@@ -996,6 +996,15 @@ pub(super) fn resume_native_continuations(
                 return_to,
                 execution_budget,
             )?,
+            NativeContinuation::IteratorZipCreation(state) => {
+                advance_iterator_zip_creation(runtime, *state, value, return_to, execution_budget)?
+            }
+            NativeContinuation::IteratorZipNext(state) => {
+                advance_iterator_zip_next(runtime, state, value, return_to, execution_budget)?
+            }
+            NativeContinuation::IteratorZipClose(state) => {
+                advance_iterator_zip_close(runtime, *state, value, return_to, execution_budget)?
+            }
             NativeContinuation::IteratorConsumer(state) => {
                 advance_iterator_consumer(runtime, state, value, return_to, execution_budget)?
             }
@@ -3733,6 +3742,22 @@ pub(super) fn dispatch_native_call_with_frames(
             execution_budget,
         ),
         NativeFunctionKind::IteratorConcat => begin_iterator_concat(
+            runtime,
+            inputs.arguments,
+            native.realm,
+            return_to,
+            origin.unwrap_or_else(native_function_host_origin),
+            execution_budget,
+        ),
+        NativeFunctionKind::IteratorZip => begin_iterator_zip(
+            runtime,
+            inputs.arguments,
+            native.realm,
+            return_to,
+            origin.unwrap_or_else(native_function_host_origin),
+            execution_budget,
+        ),
+        NativeFunctionKind::IteratorZipKeyed => begin_iterator_zip_keyed(
             runtime,
             inputs.arguments,
             native.realm,

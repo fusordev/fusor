@@ -1160,6 +1160,24 @@ impl Runtime {
                                             &mut work,
                                         );
                                     }
+                                    for record in helper.zip_records() {
+                                        for value in [record.iterator(), record.next_method()] {
+                                            mark_stored_value(
+                                                value,
+                                                &mut marked_functions,
+                                                &mut marked_objects,
+                                                &mut work,
+                                            );
+                                        }
+                                    }
+                                    for value in helper.zip_padding() {
+                                        mark_stored_value(
+                                            value,
+                                            &mut marked_functions,
+                                            &mut marked_objects,
+                                            &mut work,
+                                        );
+                                    }
                                 }
                             }
                             if let Some(view) = object.data_view_state() {

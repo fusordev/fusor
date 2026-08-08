@@ -828,6 +828,9 @@ enum NativeContinuation {
     ErrorToString(ErrorToStringContinuation),
     IteratorFrom(IteratorFromContinuation),
     IteratorConcatCreation(IteratorConcatCreationContinuation),
+    IteratorZipCreation(Box<IteratorZipCreationContinuation>),
+    IteratorZipNext(IteratorZipNextContinuation),
+    IteratorZipClose(Box<IteratorZipCloseContinuation>),
     IteratorConsumer(IteratorConsumerContinuation),
     IteratorDispose(IteratorDisposeContinuation),
     IteratorHelperCreation(IteratorHelperCreationContinuation),
@@ -1050,6 +1053,9 @@ impl NativeContinuation {
             Self::ErrorToString(state) => state.retained_values(),
             Self::IteratorFrom(state) => state.retained_values(),
             Self::IteratorConcatCreation(state) => state.retained_values(),
+            Self::IteratorZipCreation(state) => state.retained_values(),
+            Self::IteratorZipNext(state) => state.retained_values(),
+            Self::IteratorZipClose(state) => state.retained_values(),
             Self::IteratorConsumer(state) => state.retained_values(),
             Self::IteratorDispose(_) => IteratorDisposeContinuation::retained_values(),
             Self::IteratorHelperCreation(state) => state.retained_values(),
@@ -1132,6 +1138,9 @@ impl NativeContinuation {
                 | Self::IteratorHelperReturn(_)
                 | Self::IteratorAppend(_)
                 | Self::IteratorClose(_)
+                | Self::IteratorZipCreation(_)
+                | Self::IteratorZipNext(_)
+                | Self::IteratorZipClose(_)
                 | Self::AsyncFromSync(_)
                 | Self::AsyncFromSyncClose(_)
                 | Self::AsyncGeneratorReturnAwait { .. }
@@ -3445,6 +3454,9 @@ fn trace_native_continuation_roots(
         NativeContinuation::ErrorToString(state) => state.trace_roots(mark),
         NativeContinuation::IteratorFrom(state) => state.trace_roots(mark),
         NativeContinuation::IteratorConcatCreation(state) => state.trace_roots(mark),
+        NativeContinuation::IteratorZipCreation(state) => state.trace_roots(mark),
+        NativeContinuation::IteratorZipNext(state) => state.trace_roots(mark),
+        NativeContinuation::IteratorZipClose(state) => state.trace_roots(mark),
         NativeContinuation::IteratorConsumer(state) => state.trace_roots(mark),
         NativeContinuation::IteratorDispose(state) => state.trace_roots(mark),
         NativeContinuation::IteratorHelperCreation(state) => state.trace_roots(mark),

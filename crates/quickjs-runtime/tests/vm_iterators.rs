@@ -423,6 +423,36 @@ fn rooted_iterator_concat_helper_keeps_captured_records_live_through_collection(
 }
 
 #[test]
+fn rooted_iterator_zip_helper_keeps_records_padding_and_keys_live_through_collection() {
+    let mut runtime = Runtime::try_new(RuntimeLimits::default()).expect("runtime");
+    let realm = runtime.create_realm().expect("realm");
+    let helper = {
+        let mut context = runtime.context(&realm).expect("context");
+        let function = dynamic_function(
+            &mut context,
+            "let state={value:42};return Iterator.zipKeyed({item:{[Symbol.iterator](){\
+               let used=false;return {next(){return used?{done:true}:\
+                 (used=true,{done:false,value:state.value});}};}}},\
+               {mode:'longest',padding:{item:99}});",
+        );
+        context
+            .call(&function, &[], ExecutionLimits::default())
+            .expect("Iterator.zipKeyed helper")
+    };
+
+    runtime
+        .collect_cycles()
+        .expect("captured Iterator.zipKeyed state survives collection");
+
+    let mut context = runtime.context(&realm).expect("context");
+    let next = dynamic_function(&mut context, "return arguments[0].next().value.item;");
+    let result = context
+        .call(&next, &[helper], ExecutionLimits::default())
+        .expect("hidden Iterator.zipKeyed state remains live");
+    assert_number(&result, 42);
+}
+
+#[test]
 fn rooted_iterator_flat_map_helper_keeps_its_active_inner_iterator_live() {
     let mut runtime = Runtime::try_new(RuntimeLimits::default()).expect("runtime");
     let realm = runtime.create_realm().expect("realm");
@@ -919,6 +949,32 @@ fn iterator_concat_return_targets_only_the_active_iterator() {
         .call(&function, &[], ExecutionLimits::default())
         .expect("Iterator.concat return forwarding");
     assert_eq!(string_value(&result), "1|0|1|true|true|true|true|true|0");
+}
+
+#[test]
+fn iterator_zip_modes_and_keyed_results_share_reverse_close_semantics() {
+    let mut runtime = Runtime::try_new(RuntimeLimits::default()).expect("runtime");
+    let realm = runtime.create_realm().expect("realm");
+    let mut context = runtime.context(&realm).expect("context");
+    let function = dynamic_function(
+        &mut context,
+        "let close='';\
+         function input(tag,values){let index=0;return {next(){return index<values.length\
+           ?{done:false,value:values[index++]}:{done:true};},return(){close+=tag;return {};}};}\
+         let longest=Iterator.zipKeyed({x:input('x',[1]),y:input('y',[2,3])},\
+           {mode:'longest',padding:{x:9,y:8}});\
+         let first=longest.next().value,second=longest.next().value,done=longest.next();\
+         let strict=Iterator.zip([input('a',[4,5]),input('b',[6])],{mode:'strict'});\
+         strict.next();let mismatch=false;try{strict.next();}catch(error){mismatch=error instanceof TypeError;}\
+         let left=input('l',[1]),right=input('r',[2]);Iterator.zip([left,right]).return();\
+         return [Object.getPrototypeOf(first)===null,first.x,first.y,second.x,second.y,\
+           done.done,mismatch,close].join('|');",
+    );
+
+    let result = context
+        .call(&function, &[], ExecutionLimits::default())
+        .expect("Iterator.zip modes");
+    assert_eq!(string_value(&result), "true|1|2|9|3|true|true|arl");
 }
 
 #[test]

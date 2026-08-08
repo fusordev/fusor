@@ -254,6 +254,8 @@ fn visit_realm_name_order(
     visit(RealmNameId::IteratorMap)?;
     visit(RealmNameId::IteratorTake)?;
     visit(RealmNameId::IteratorToArray)?;
+    visit(RealmNameId::IteratorZip)?;
+    visit(RealmNameId::IteratorZipKeyed)?;
     visit(RealmNameId::ArrayBufferIsView)?;
     for method in ArrayBufferPrototypeMethod::ALL {
         if !matches!(method, ArrayBufferPrototypeMethod::MaxByteLength) {
@@ -562,6 +564,8 @@ fn realm_name_description(id: RealmNameId) -> &'static str {
         RealmNameId::IteratorMap => "map",
         RealmNameId::IteratorTake => "take",
         RealmNameId::IteratorToArray => "toArray",
+        RealmNameId::IteratorZip => "zip",
+        RealmNameId::IteratorZipKeyed => "zipKeyed",
         RealmNameId::ArrayBufferIsView => "isView",
         RealmNameId::ArrayBufferPrototype(method) => method.name(),
         RealmNameId::SharedArrayBufferPrototype(method) => method.name(),
