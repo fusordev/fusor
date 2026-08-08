@@ -256,3 +256,84 @@ fn registered_positions_reject_utf16_columns_inside_surrogate_pairs() {
         .resolve_original(&source, SourceMapPosition::new(0, 2))
         .expect("column after emoji");
 }
+
+#[test]
+fn byte_offsets_and_source_map_positions_round_trip_utf16_columns() {
+    let mut sources = SourceRegistry::new();
+    let source = sources
+        .register("round-trip.js", "😀x\n猫")
+        .expect("source");
+
+    let position = sources
+        .source_map_position(&source, "😀".len())
+        .expect("position after emoji");
+    assert_eq!(position, SourceMapPosition::new(0, 2));
+    assert_eq!(
+        sources
+            .byte_offset_for_source_map_position(&source, position)
+            .expect("byte offset"),
+        "😀".len()
+    );
+}
+
+#[test]
+fn source_spans_follow_registered_multi_hop_maps() {
+    let to_intermediate = regular_map(r#"["intermediate.js"]"#, "[]", "AAAA", "[null]");
+    let to_original = regular_map(r#"["original.ts"]"#, "[]", "AAAA", "[null]");
+    let mut sources = SourceRegistry::new();
+    let bundle = sources
+        .register_with_source_map("bundle.js", "x", Some(to_intermediate))
+        .expect("bundle");
+    sources
+        .register_with_source_map("intermediate.js", "x", Some(to_original))
+        .expect("intermediate");
+    let original = sources.register("original.ts", "x").expect("original");
+    let generated_span = sources.span(&bundle, 0, 1).expect("generated span");
+
+    let resolved = sources
+        .resolve_span(&generated_span)
+        .expect("resolved span");
+    assert_eq!(resolved.location().hops(), 2);
+    assert_eq!(resolved.location().original().source_id(), Some(&original));
+    assert_eq!(
+        resolved.mapped_span().expect("mapped").source_id(),
+        &original
+    );
+    assert_eq!(resolved.mapped_span().expect("mapped").bytes().start(), 0);
+    assert_eq!(resolved.mapped_span().expect("mapped").bytes().end(), 0);
+    assert_eq!(
+        resolved.display_span(),
+        resolved.mapped_span().expect("mapped")
+    );
+}
+
+#[test]
+fn unresolved_embedded_sources_keep_the_generated_span_as_fallback() {
+    let map = regular_map(
+        r#"["missing.ts"]"#,
+        "[]",
+        "AAAA",
+        r#"["let original = true;"]"#,
+    );
+    let mut sources = SourceRegistry::new();
+    let bundle = sources
+        .register_with_source_map("bundle.js", "x", Some(map))
+        .expect("bundle");
+    let generated_span = sources.span(&bundle, 0, 1).expect("generated span");
+
+    let resolved = sources
+        .resolve_span(&generated_span)
+        .expect("resolved span");
+    assert!(resolved.location().is_mapped());
+    assert_eq!(resolved.location().original().source_name(), "missing.ts");
+    assert_eq!(
+        resolved
+            .location()
+            .original()
+            .embedded_source()
+            .map(AsRef::as_ref),
+        Some("let original = true;")
+    );
+    assert_eq!(resolved.mapped_span(), None);
+    assert_eq!(resolved.display_span(), &generated_span);
+}

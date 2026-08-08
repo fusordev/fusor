@@ -383,6 +383,15 @@ impl SourceFile {
             .byte_offset_for_source_map_position(&self.text, line, column)
             .map(|_| ())
     }
+
+    pub(crate) fn byte_offset_for_source_map_position(
+        &self,
+        line: u32,
+        column: u32,
+    ) -> Result<usize, SourceError> {
+        self.line_index
+            .byte_offset_for_source_map_position(&self.text, line, column)
+    }
 }
 
 /// An owned excerpt around a source span.

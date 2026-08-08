@@ -15,14 +15,15 @@ mod source;
 mod source_map;
 
 pub use diagnostic::{
-    Diagnostic, DiagnosticCode, DiagnosticCodeError, DiagnosticLabel, DiagnosticSeverity,
-    PrettyDiagnostic, PrettyDiagnosticError, render_pretty,
+    Diagnostic, DiagnosticCode, DiagnosticCodeError, DiagnosticLabel, DiagnosticReport,
+    DiagnosticSeverity, PrettyDiagnostic, PrettyDiagnosticError, PrettyDiagnosticReport,
+    render_pretty, render_pretty_report,
 };
 pub use source::{
     ByteSpan, ColumnEncoding, LineColumn, SourceError, SourceFile, SourceId, SourceRegistry,
     SourceSnippet, SourceSpan,
 };
 pub use source_map::{
-    OriginalLocation, ResolvedLocation, SourceMap, SourceMapError, SourceMapErrorKind,
-    SourceMapMapping, SourceMapPosition,
+    OriginalLocation, ResolvedLocation, ResolvedSpan, SourceMap, SourceMapError,
+    SourceMapErrorKind, SourceMapMapping, SourceMapPosition,
 };

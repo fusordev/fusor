@@ -9,7 +9,7 @@ use std::{
 use serde_json::Value;
 use sourcemap::DecodedMap;
 
-use crate::{SourceError, SourceId, SourceRegistry};
+use crate::{ColumnEncoding, SourceError, SourceId, SourceRegistry, SourceSpan};
 
 const DEFAULT_MAX_SOURCE_MAP_BYTES: usize = 64 * 1024 * 1024;
 const DEFAULT_MAX_CHAIN_DEPTH: usize = 32;
@@ -468,6 +468,54 @@ pub struct ResolvedLocation {
     hops: usize,
 }
 
+/// A validated generated span and its deepest registered mapped span.
+///
+/// Source-map v3 mappings are point mappings. The start and end of a generated
+/// span are therefore resolved independently. When both endpoints reach the
+/// same registered original source in order, [`Self::mapped_span`] contains
+/// that original range. Otherwise callers retain [`Self::generated_span`] as
+/// the safe rendering fallback while [`Self::location`] still exposes the
+/// deepest mapped start position and embedded source metadata.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ResolvedSpan {
+    generated_span: SourceSpan,
+    mapped_span: Option<SourceSpan>,
+    location: ResolvedLocation,
+}
+
+impl ResolvedSpan {
+    /// Returns the validated span in the generated source.
+    #[must_use]
+    pub const fn generated_span(&self) -> &SourceSpan {
+        &self.generated_span
+    }
+
+    /// Returns the mapped range when both endpoints resolved into one
+    /// registered original source.
+    #[must_use]
+    pub const fn mapped_span(&self) -> Option<&SourceSpan> {
+        self.mapped_span.as_ref()
+    }
+
+    /// Returns the best span for a source-backed diagnostic.
+    ///
+    /// This is the mapped original range when available and the generated
+    /// range otherwise.
+    #[must_use]
+    pub const fn display_span(&self) -> &SourceSpan {
+        match &self.mapped_span {
+            Some(span) => span,
+            None => &self.generated_span,
+        }
+    }
+
+    /// Returns the deepest mapping of the generated start position.
+    #[must_use]
+    pub const fn location(&self) -> &ResolvedLocation {
+        &self.location
+    }
+}
+
 impl ResolvedLocation {
     /// Returns the generated registered source.
     #[must_use]
@@ -508,6 +556,51 @@ impl ResolvedLocation {
 }
 
 impl SourceRegistry {
+    /// Converts a registered UTF-8 byte offset to a zero-based source-map v3
+    /// line and UTF-16 column.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for a foreign source ID, an out-of-bounds byte offset,
+    /// or an offset that splits a UTF-8 scalar.
+    pub fn source_map_position(
+        &self,
+        source_id: &SourceId,
+        byte_offset: usize,
+    ) -> Result<SourceMapPosition, SourceError> {
+        let position =
+            self.position_with_encoding(source_id, byte_offset, ColumnEncoding::Utf16CodeUnit)?;
+        let line = u32::try_from(position.line() - 1).map_err(|_| {
+            SourceError::InvalidSourceMapPosition {
+                line: u32::MAX,
+                column: 0,
+            }
+        })?;
+        let column = u32::try_from(position.column() - 1).map_err(|_| {
+            SourceError::InvalidSourceMapPosition {
+                line,
+                column: u32::MAX,
+            }
+        })?;
+        Ok(SourceMapPosition::new(line, column))
+    }
+
+    /// Converts a zero-based source-map v3 line and UTF-16 column to a
+    /// registered UTF-8 byte offset.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for a foreign source ID, an out-of-range position, or
+    /// a UTF-16 column that splits a surrogate pair.
+    pub fn byte_offset_for_source_map_position(
+        &self,
+        source_id: &SourceId,
+        position: SourceMapPosition,
+    ) -> Result<usize, SourceError> {
+        let source = self.source(source_id)?;
+        source.byte_offset_for_source_map_position(position.line, position.column)
+    }
+
     /// Resolves a generated position through at most 32 incoming source maps.
     ///
     /// A source with no map, a missing token, an unmapped segment, or an
@@ -617,6 +710,88 @@ impl SourceRegistry {
             original,
             name,
             hops,
+        })
+    }
+
+    /// Resolves both endpoints of a validated generated span through at most
+    /// 32 incoming source maps.
+    ///
+    /// If both endpoints reach the same registered original source in order,
+    /// the result exposes a mapped [`SourceSpan`]. URL-only, embedded-only,
+    /// differently sourced, or non-monotonic endpoints preserve the generated
+    /// span as the rendering fallback without discarding the mapped start
+    /// location.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for invalid registry provenance, source-map positions,
+    /// malformed map state, cycles, or excessive chain depth.
+    pub fn resolve_span(&self, span: &SourceSpan) -> Result<ResolvedSpan, SourceMapError> {
+        self.resolve_span_with_limit(span, DEFAULT_MAX_CHAIN_DEPTH)
+    }
+
+    /// Resolves both endpoints of a generated span with an explicit maximum
+    /// number of successful map hops per endpoint.
+    ///
+    /// # Errors
+    ///
+    /// Has the same failure modes as [`Self::resolve_span`].
+    pub fn resolve_span_with_limit(
+        &self,
+        span: &SourceSpan,
+        max_depth: usize,
+    ) -> Result<ResolvedSpan, SourceMapError> {
+        let generated_span = self
+            .span(
+                span.source_id(),
+                span.bytes().start() as usize,
+                span.bytes().end() as usize,
+            )
+            .map_err(SourceMapError::from_source)?;
+        let start_position = self
+            .source_map_position(span.source_id(), span.bytes().start() as usize)
+            .map_err(SourceMapError::from_source)?;
+        let location =
+            self.resolve_original_with_limit(span.source_id(), start_position, max_depth)?;
+
+        let mapped_span = if location.is_mapped() {
+            if let Some(mapped_source) = location.original().source_id() {
+                let start = self
+                    .byte_offset_for_source_map_position(
+                        mapped_source,
+                        location.original().position(),
+                    )
+                    .map_err(SourceMapError::from_source)?;
+                let end_position = self
+                    .source_map_position(span.source_id(), span.bytes().end() as usize)
+                    .map_err(SourceMapError::from_source)?;
+                let end_location =
+                    self.resolve_original_with_limit(span.source_id(), end_position, max_depth)?;
+                let end = if end_location.original().source_id() == Some(mapped_source) {
+                    self.byte_offset_for_source_map_position(
+                        mapped_source,
+                        end_location.original().position(),
+                    )
+                    .map_err(SourceMapError::from_source)?
+                    .max(start)
+                } else {
+                    start
+                };
+                Some(
+                    self.span(mapped_source, start, end)
+                        .map_err(SourceMapError::from_source)?,
+                )
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+
+        Ok(ResolvedSpan {
+            generated_span,
+            mapped_span,
+            location,
         })
     }
 }

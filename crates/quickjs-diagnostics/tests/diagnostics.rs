@@ -1,6 +1,7 @@
 use quickjs_diagnostics::{
-    Diagnostic, DiagnosticCode, DiagnosticCodeError, DiagnosticLabel, DiagnosticSeverity,
-    PrettyDiagnosticError, SourceRegistry, render_pretty,
+    Diagnostic, DiagnosticCode, DiagnosticCodeError, DiagnosticLabel, DiagnosticReport,
+    DiagnosticSeverity, PrettyDiagnosticError, SourceMap, SourceRegistry, render_pretty,
+    render_pretty_report,
 };
 
 #[test]
@@ -71,4 +72,75 @@ fn miette_adapter_rejects_labels_from_multiple_sources() {
         diagnostic.to_pretty(&sources).expect_err("mixed sources"),
         PrettyDiagnosticError::MultipleSources
     );
+}
+
+#[test]
+fn related_miette_diagnostics_render_independent_sources() {
+    let mut sources = SourceRegistry::new();
+    let origin = sources
+        .register("origin.js", "throw value;")
+        .expect("origin");
+    let caller = sources.register("caller.js", "run();").expect("caller");
+    let origin_span = sources.span(&origin, 0, 5).expect("origin span");
+    let caller_span = sources.span(&caller, 0, 5).expect("caller span");
+    let primary = Diagnostic::new(
+        DiagnosticCode::new("quickjs::runtime::uncaught").expect("code"),
+        DiagnosticSeverity::Error,
+        "uncaught JavaScript value",
+    )
+    .with_label(DiagnosticLabel::primary(
+        origin_span,
+        Some("thrown here".to_owned()),
+    ));
+    let related = Diagnostic::new(
+        DiagnosticCode::new("quickjs::runtime::stack_frame").expect("code"),
+        DiagnosticSeverity::Advice,
+        "called from caller.js",
+    )
+    .with_label(DiagnosticLabel::primary(
+        caller_span,
+        Some("call site".to_owned()),
+    ));
+    let report = DiagnosticReport::new(primary).with_related(related);
+
+    let rendered = render_pretty_report(&sources, &report).expect("pretty report");
+    assert!(rendered.contains("uncaught JavaScript value"));
+    assert!(rendered.contains("origin.js"));
+    assert!(rendered.contains("called from caller.js"));
+    assert!(rendered.contains("caller.js"));
+}
+
+#[test]
+fn diagnostics_resolve_registered_source_map_chains_before_rendering() {
+    let outer = SourceMap::from_slice(
+        br#"{"version":3,"sources":["intermediate.js"],"names":[],"mappings":"AAAA"}"#,
+    )
+    .expect("outer map");
+    let inner = SourceMap::from_slice(
+        br#"{"version":3,"sources":["original.ts"],"names":[],"mappings":"AAAA"}"#,
+    )
+    .expect("inner map");
+    let mut sources = SourceRegistry::new();
+    let bundle = sources
+        .register_with_source_map("bundle.js", "x", Some(outer))
+        .expect("bundle");
+    sources
+        .register_with_source_map("intermediate.js", "x", Some(inner))
+        .expect("intermediate");
+    let original = sources.register("original.ts", "x").expect("original");
+    let generated = sources.span(&bundle, 0, 1).expect("generated span");
+    let diagnostic = Diagnostic::new(
+        DiagnosticCode::new("quickjs::compiler::lowering").expect("code"),
+        DiagnosticSeverity::Error,
+        "lowering failed",
+    )
+    .with_label(DiagnosticLabel::primary(generated, None));
+
+    let resolved = diagnostic
+        .resolve_source_maps(&sources)
+        .expect("resolved diagnostic");
+    assert_eq!(resolved.labels()[0].span().source_id(), &original);
+    let rendered = render_pretty(&sources, &resolved).expect("pretty output");
+    assert!(rendered.contains("original.ts"));
+    assert!(!rendered.contains("bundle.js"));
 }
