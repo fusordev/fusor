@@ -2220,6 +2220,9 @@ enum OperatorPrimitiveTarget {
     DataViewSetValue(Box<DataViewSetValueState>),
     /// An integer-indexed typed-array write after `ToNumber` or `ToBigInt`.
     TypedArrayElementSet(Box<TypedArrayElementSetState>),
+    /// `%TypedArray%.from` or `%TypedArray%.of` after one destination element's
+    /// observable numeric conversion.
+    TypedArrayStaticElement(Box<ArrayStaticContinuation>),
     /// `Atomics.isLockFree` after `ToIntegerOrInfinity`'s primitive conversion.
     AtomicsIsLockFree,
     /// An atomic operation's typed-array index after `ToIndex`.
@@ -2239,11 +2242,11 @@ enum OperatorPrimitiveTarget {
     SharedArrayBufferGrow {
         object: ObjectId,
     },
-    /// `ArrayBuffer.prototype.transfer` or `transferToFixedLength` after
-    /// `ToIndex(newLength)`.
+    /// An `ArrayBuffer` transfer operation after `ToIndex(newLength)`.
     ArrayBufferTransfer {
         object: ObjectId,
         preserve_resizability: bool,
+        immutable: bool,
     },
     /// `ArrayBuffer.prototype.slice`'s start argument, awaiting
     /// `ToClampedIndex`'s `ToNumber` component.
@@ -2600,6 +2603,9 @@ impl OperatorPrimitiveTarget {
             Self::DataViewSetOffset(_) => DataViewSetOffsetState::retained_values(),
             Self::DataViewSetValue(_) => DataViewSetValueState::retained_values(),
             Self::TypedArrayElementSet(state) => state.retained_values(),
+            Self::TypedArrayStaticElement(state) | Self::ArrayStaticLength(state) => {
+                state.retained_values()
+            }
             Self::AtomicsIndex(state)
             | Self::AtomicsValue(state)
             | Self::AtomicsReplacement(state)
@@ -2788,7 +2794,6 @@ impl OperatorPrimitiveTarget {
             Self::ArraySpliceArgument(state) => state.retained_values(),
             Self::ArraySortValue(state) => state.retained_values(),
             Self::ArrayFlattenValue(state) => state.retained_values(),
-            Self::ArrayStaticLength(state) => state.retained_values(),
             Self::StringRawValue(state) => state.retained_values(),
             Self::StringReplaceValue(state) => state.retained_values(),
             Self::StringSplitValue(state) => state.retained_values(),
@@ -3181,6 +3186,8 @@ fn trace_operator_primitive_target_roots(
         OperatorPrimitiveTarget::DataViewSetOffset(state) => state.trace_roots(mark),
         OperatorPrimitiveTarget::DataViewSetValue(state) => state.trace_roots(mark),
         OperatorPrimitiveTarget::TypedArrayElementSet(state) => state.trace_roots(mark),
+        OperatorPrimitiveTarget::TypedArrayStaticElement(state)
+        | OperatorPrimitiveTarget::ArrayStaticLength(state) => state.trace_roots(mark),
         OperatorPrimitiveTarget::AtomicsIndex(state)
         | OperatorPrimitiveTarget::AtomicsValue(state)
         | OperatorPrimitiveTarget::AtomicsReplacement(state)
@@ -3214,7 +3221,6 @@ fn trace_operator_primitive_target_roots(
         OperatorPrimitiveTarget::ArraySpliceArgument(state) => state.trace_roots(mark),
         OperatorPrimitiveTarget::ArraySortValue(state) => state.trace_roots(mark),
         OperatorPrimitiveTarget::ArrayFlattenValue(state) => state.trace_roots(mark),
-        OperatorPrimitiveTarget::ArrayStaticLength(state) => state.trace_roots(mark),
         OperatorPrimitiveTarget::ArrayFromAsyncLength { operation } => {
             mark(CollectionRoot::Heap(HeapReference::Object(*operation)));
         }

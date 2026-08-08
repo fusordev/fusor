@@ -1238,6 +1238,7 @@ pub(crate) enum NativeFunctionKind {
     /// `Object.getPrototypeOf(Int8Array)`, but never installed globally.
     TypedArrayBaseConstructor,
     TypedArrayConstructor(TypedArrayElementType),
+    TypedArrayStatic(ArrayStatic),
     TypedArraySpeciesGetter,
     TypedArrayPrototype(TypedArrayPrototypeMethod),
     DateConstructor,
@@ -1506,6 +1507,20 @@ impl AtomicsMethod {
     pub(crate) const fn requires_shared_buffer(self) -> bool {
         matches!(self, Self::Wait)
     }
+
+    pub(crate) const fn requires_writable_buffer(self) -> bool {
+        matches!(
+            self,
+            Self::Add
+                | Self::And
+                | Self::CompareExchange
+                | Self::Exchange
+                | Self::Or
+                | Self::Store
+                | Self::Sub
+                | Self::Xor
+        )
+    }
 }
 
 /// Static methods on `%Date%` in pinned `QuickJS` publication order.
@@ -1734,12 +1749,15 @@ impl DatePrototypeMethod {
 pub(crate) enum ArrayBufferPrototypeMethod {
     ByteLength,
     Detached,
+    Immutable,
     MaxByteLength,
     Resizable,
     Resize,
     Slice,
+    SliceToImmutable,
     Transfer,
     TransferToFixedLength,
+    TransferToImmutable,
 }
 
 /// Methods and accessors published on `%SharedArrayBuffer.prototype%`.
@@ -2215,42 +2233,59 @@ impl TypedArrayPrototypeMethod {
 }
 
 impl ArrayBufferPrototypeMethod {
-    pub(crate) const ALL: [Self; 8] = [
+    pub(crate) const ALL: [Self; 11] = [
         Self::ByteLength,
         Self::Detached,
+        Self::Immutable,
         Self::MaxByteLength,
         Self::Resizable,
         Self::Resize,
         Self::Slice,
+        Self::SliceToImmutable,
         Self::Transfer,
         Self::TransferToFixedLength,
+        Self::TransferToImmutable,
     ];
 
     pub(crate) const fn name(self) -> &'static str {
         match self {
             Self::ByteLength => "byteLength",
             Self::Detached => "detached",
+            Self::Immutable => "immutable",
             Self::MaxByteLength => "maxByteLength",
             Self::Resizable => "resizable",
             Self::Resize => "resize",
             Self::Slice => "slice",
+            Self::SliceToImmutable => "sliceToImmutable",
             Self::Transfer => "transfer",
             Self::TransferToFixedLength => "transferToFixedLength",
+            Self::TransferToImmutable => "transferToImmutable",
         }
     }
 
     pub(crate) const fn length(self) -> i32 {
         match self {
-            Self::Resize | Self::Transfer | Self::TransferToFixedLength => 1,
-            Self::Slice => 2,
-            Self::ByteLength | Self::Detached | Self::MaxByteLength | Self::Resizable => 0,
+            Self::Resize => 1,
+            Self::Slice | Self::SliceToImmutable => 2,
+            Self::ByteLength
+            | Self::Detached
+            | Self::Immutable
+            | Self::MaxByteLength
+            | Self::Resizable
+            | Self::Transfer
+            | Self::TransferToFixedLength
+            | Self::TransferToImmutable => 0,
         }
     }
 
     pub(crate) const fn is_accessor(self) -> bool {
         matches!(
             self,
-            Self::ByteLength | Self::Detached | Self::MaxByteLength | Self::Resizable
+            Self::ByteLength
+                | Self::Detached
+                | Self::Immutable
+                | Self::MaxByteLength
+                | Self::Resizable
         )
     }
 }

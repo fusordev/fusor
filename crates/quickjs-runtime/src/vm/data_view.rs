@@ -412,6 +412,19 @@ pub(super) fn dispatch_data_view_prototype(
             })?;
             let byte_offset = arguments.take_first_or_undefined();
             if method.is_setter() {
+                let state = copied_data_view_state(runtime, view)?;
+                let buffer = runtime.array_buffer_state(state.buffer())?.ok_or(
+                    EngineFault::RuntimeInvariant {
+                        message: "DataView setter backing buffer lost its internal slots",
+                    },
+                )?;
+                if buffer.is_immutable() {
+                    return data_view_type_error(
+                        realm,
+                        &origin,
+                        "DataView backing buffer is immutable",
+                    );
+                }
                 let value = arguments.take_first_or_undefined();
                 let little_endian = arguments.take_first_or_undefined();
                 begin_operator_primitive_conversion(
@@ -761,6 +774,12 @@ fn data_view_write(
     realm: RealmId,
     origin: &JsStackFrame,
 ) -> Result<NativeDispatch, NativeFailure> {
+    if runtime
+        .array_buffer_state(buffer)?
+        .is_some_and(crate::object::ArrayBufferState::is_immutable)
+    {
+        return data_view_type_error(realm, origin, "DataView backing buffer is immutable");
+    }
     let bytes = match (element, value) {
         (DataViewElementType::BigInt64, DataViewNumeric::BigInt(value)) => {
             let value = match value.as_int_n(64) {

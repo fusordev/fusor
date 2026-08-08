@@ -127,6 +127,18 @@ fn array_buffer_construction_resize_transfer_slice_and_intrinsics_are_branded() 
 }
 
 #[test]
+fn array_buffer_transfer_optional_parameters_have_zero_function_length() {
+    assert_eq!(
+        rendered(
+            "return [ArrayBuffer.prototype.transfer.length,\
+             ArrayBuffer.prototype.transferToFixedLength.length,\
+             ArrayBuffer.prototype.transferToImmutable.length].join('|');"
+        ),
+        "0|0|0"
+    );
+}
+
+#[test]
 fn array_buffer_observable_conversion_and_species_order_matches_the_specification() {
     assert_eq!(
         rendered(
@@ -155,6 +167,85 @@ fn array_buffer_constructor_and_brand_failures_are_the_required_error_kinds() {
     assert_eq!(
         thrown("return ArrayBuffer.prototype.resize.call(new ArrayBuffer(1),1);"),
         ExceptionKind::TypeError
+    );
+}
+
+#[test]
+fn immutable_array_buffers_are_fixed_read_only_copies() {
+    assert_eq!(
+        rendered(
+            "var source=new ArrayBuffer(4,{maxByteLength:8}),view=new Uint8Array(source);\
+             view[0]=1;view[1]=2;view[2]=3;view[3]=4;\
+             var immutable=source.transferToImmutable(6),slice=immutable.sliceToImmutable(1,4);\
+             return [source.detached,immutable.immutable,immutable.resizable,\
+               immutable.byteLength,immutable.maxByteLength,new Uint8Array(immutable).join(','),\
+               slice.immutable,slice.byteLength,new Uint8Array(slice).join(',')].join('|');"
+        ),
+        "true|true|false|6|6|1,2,3,4,0,0|true|3|2,3,4"
+    );
+}
+
+#[test]
+fn immutable_array_buffer_writes_reject_before_argument_coercion() {
+    assert_eq!(
+        rendered(
+            "var immutable=(new ArrayBuffer(8)).transferToImmutable(),log=[];\
+             var index={valueOf:function(){log.push('index');return 0}},\
+             value={valueOf:function(){log.push('value');return 1}},\
+             source={get length(){log.push('source.length');return 1}},\
+             offset={valueOf:function(){log.push('offset');return 0}};\
+             try{new DataView(immutable).setUint8(index,value)}catch(e){log.push(e.name)}\
+             try{new Uint8Array(immutable).set(source,offset)}catch(e){log.push(e.name)}\
+             try{Atomics.store(new Int32Array(immutable),index,value)}catch(e){log.push(e.name)}\
+             var notified=Atomics.notify(new Int32Array(immutable),0);\
+             try{immutable.resize(index)}catch(e){log.push(e.name)}\
+             try{immutable.transfer(index)}catch(e){log.push(e.name)}\
+             return [notified,log.join(',')].join('|');"
+        ),
+        "0|TypeError,TypeError,TypeError,TypeError,index,TypeError"
+    );
+}
+
+#[test]
+fn immutable_typed_array_indices_are_read_only_and_freezable() {
+    assert_eq!(
+        rendered(
+            "var view=new Uint8Array((new ArrayBuffer(1)).transferToImmutable()),calls=[],\
+             value={valueOf:function(){calls.push('value');return 1}},strictKind='',sameKind='',\
+             differentKind='',freezeKind='';\
+             var sloppy=(function(target,next){target[0]=next;return target[0]})(view,value);\
+             try{(function(target,next){'use strict';target[0]=next})(view,value)}catch(e){strictKind=e.name}\
+             var reflected=Reflect.set(view,'0',value);\
+             var same=false;\
+             try{same=Object.defineProperty(view,'0',{value:0})===view}catch(e){sameKind=e.name}\
+             try{Object.defineProperty(view,'0',{value:1})}catch(e){differentKind=e.name}\
+             var descriptor=Object.getOwnPropertyDescriptor(view,'0')||\
+               {value:'missing',writable:'missing',enumerable:'missing',configurable:'missing'};\
+             try{Object.freeze(view)}catch(e){freezeKind=e.name}\
+             var frozen;try{frozen=Object.isFrozen(view)}catch(e){frozen='error:'+e.name}\
+             return [sloppy,strictKind,reflected,same,sameKind,differentKind,freezeKind,calls.join(','),\
+               descriptor.value,descriptor.writable,descriptor.enumerable,descriptor.configurable,\
+               frozen].join('|');"
+        ),
+        "0|TypeError|false|true||TypeError|||0|false|true|false|true"
+    );
+}
+
+#[test]
+fn slice_to_immutable_uses_original_bounds_and_rechecks_source() {
+    assert_eq!(
+        rendered(
+            "var source=new ArrayBuffer(10,{maxByteLength:12}),view=new Uint8Array(source);\
+             for(var i=0;i<10;i++)view[i]=i+1;\
+             var start={valueOf:function(){source.resize(11);return -7}},\
+             end={valueOf:function(){source.resize(12);return -4}},\
+             result=source.sliceToImmutable(start,end),negativeZero=source.sliceToImmutable(0,-0.9),\
+             detached=new ArrayBuffer(2),kind='';\
+             try{detached.sliceToImmutable(0,{valueOf:function(){detached.transfer();return 1}})}\
+             catch(e){kind=e.name}\
+             return [new Uint8Array(result).join(','),negativeZero.byteLength,source.byteLength,kind].join('|');"
+        ),
+        "4,5,6|0|12|TypeError"
     );
 }
 

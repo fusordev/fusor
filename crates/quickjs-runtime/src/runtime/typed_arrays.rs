@@ -70,6 +70,7 @@ pub(crate) enum TypedArrayElementValue<'a> {
 pub(crate) enum TypedArrayStoreOutcome {
     Stored,
     Missing,
+    Immutable,
     ContentTypeMismatch,
 }
 
@@ -283,6 +284,22 @@ impl Runtime {
         })
     }
 
+    pub(crate) fn is_typed_array_backing_buffer_immutable(
+        &self,
+        object: ObjectId,
+    ) -> Result<bool, crate::EngineFault> {
+        let state = self.typed_array_state(object)?.copied().ok_or(
+            crate::EngineFault::RuntimeInvariant {
+                message: "immutable TypedArray check received a non-typed-array object",
+            },
+        )?;
+        self.array_buffer_state(state.buffer())?
+            .map(crate::object::ArrayBufferState::is_immutable)
+            .ok_or(crate::EngineFault::RuntimeInvariant {
+                message: "TypedArray backing buffer lost its ArrayBuffer slots",
+            })
+    }
+
     /// Classifies a key for an existing typed array. Symbol and non-canonical
     /// string keys stay ordinary; canonical non-indices are blocked by the
     /// integer-indexed exotic rather than falling through to a prototype.
@@ -314,15 +331,16 @@ impl Runtime {
                 TypedArrayPropertyKey::Index(_) => unreachable!("matched above"),
             });
         };
-        let property = self
-            .typed_array_read_index(object, index)?
-            .map(|value| OwnProperty::Data {
-                // Typed-array elements are unusual: their own descriptors are
-                // configurable even though the integer-indexed exotic `[[Delete]]`
-                // operation still refuses to remove an in-bounds element.
-                layout: PropertyLayout::data(true, true, true),
+        let mutable = !self.is_typed_array_backing_buffer_immutable(object)?;
+        let property = self.typed_array_read_index(object, index)?.map(|value| {
+            OwnProperty::Data {
+                // Mutable typed-array elements expose the usual virtual
+                // writable/configurable descriptor. Immutable backing makes
+                // both attributes false while preserving enumerability.
+                layout: PropertyLayout::data(mutable, true, mutable),
                 value,
-            });
+            }
+        });
         Ok(TypedArrayOwnProperty::IntegerIndexed(property))
     }
 
@@ -379,6 +397,12 @@ impl Runtime {
         }
         if element.is_bigint() != matches!(value, TypedArrayElementValue::BigInt(_)) {
             return Ok(TypedArrayStoreOutcome::ContentTypeMismatch);
+        }
+        if self
+            .array_buffer_state(buffer)?
+            .is_some_and(crate::object::ArrayBufferState::is_immutable)
+        {
+            return Ok(TypedArrayStoreOutcome::Immutable);
         }
         let byte_index = typed_array_element_byte_index(byte_offset, index, element)?;
         let bytes = typed_array_write_element(element, value);

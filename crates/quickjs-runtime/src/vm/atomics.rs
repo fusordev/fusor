@@ -224,6 +224,9 @@ fn atomics_typed_array(
             "typed array is not backed by SharedArrayBuffer",
         );
     }
+    if method.requires_writable_buffer() && buffer.is_immutable() {
+        return atomics_type_error(realm, origin, "typed array backing buffer is immutable");
+    }
     Ok(*object)
 }
 

@@ -2359,11 +2359,14 @@ impl DateState {
 ///
 /// A detached buffer has no backing block. A fixed-length buffer has no
 /// `[[ArrayBufferMaxByteLength]]`, while a resizable buffer retains the
-/// inclusive maximum supplied at construction.
+/// inclusive maximum supplied at construction. Immutable buffers carry the
+/// proposal's `[[ArrayBufferIsImmutable]]` slot and are always fixed-length,
+/// non-shared, and non-detachable.
 pub(crate) struct ArrayBufferState {
     data: Option<Vec<u8>>,
     max_byte_length: Option<usize>,
     shared: bool,
+    immutable: bool,
 }
 
 /// The specification-level slots of an ECMAScript `DataView` object.
@@ -2566,6 +2569,7 @@ impl ArrayBufferState {
             data: Some(data),
             max_byte_length,
             shared: false,
+            immutable: false,
         }
     }
 
@@ -2574,12 +2578,27 @@ impl ArrayBufferState {
             data: Some(data),
             max_byte_length,
             shared: true,
+            immutable: false,
+        }
+    }
+
+    pub(crate) const fn immutable(data: Vec<u8>) -> Self {
+        Self {
+            data: Some(data),
+            max_byte_length: None,
+            shared: false,
+            immutable: true,
         }
     }
 
     #[must_use]
     pub(crate) const fn is_shared(&self) -> bool {
         self.shared
+    }
+
+    #[must_use]
+    pub(crate) const fn is_immutable(&self) -> bool {
+        self.immutable
     }
 
     #[must_use]
@@ -2608,10 +2627,16 @@ impl ArrayBufferState {
     }
 
     pub(crate) fn replace_data(&mut self, data: Vec<u8>) -> Option<Vec<u8>> {
+        if self.immutable {
+            return None;
+        }
         self.data.replace(data)
     }
 
     pub(crate) fn detach(&mut self) -> Option<Vec<u8>> {
+        if self.immutable {
+            return None;
+        }
         self.data.take()
     }
 
@@ -2620,6 +2645,9 @@ impl ArrayBufferState {
     }
 
     pub(crate) fn data_mut(&mut self) -> Option<&mut [u8]> {
+        if self.immutable {
+            return None;
+        }
         self.data.as_deref_mut()
     }
 }

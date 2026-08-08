@@ -330,6 +330,9 @@ pub(super) fn reflect_set_property(
     }
     if target.strict_equals(&receiver) {
         if let Some((object, key)) = typed_array_indexed_key(runtime, &target, &key)? {
+            if runtime.is_typed_array_backing_buffer_immutable(object)? {
+                return Ok(NativeDispatch::Immediate(StoredValue::Boolean(false)));
+            }
             return begin_typed_array_element_set(
                 runtime,
                 object,

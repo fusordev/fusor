@@ -64,8 +64,10 @@ pub(super) struct ArrayBufferSliceContinuation {
     object: ObjectId,
     initial_length: usize,
     shared: bool,
+    immutable: bool,
     end: StoredValue,
     first: usize,
+    final_index: usize,
     new_length: usize,
     realm: RealmId,
     stage: ArrayBufferSliceStage,
@@ -453,7 +455,7 @@ pub(super) fn dispatch_array_buffer_prototype(
     origin: JsStackFrame,
     execution_budget: &mut ExecutionBudget,
 ) -> Result<NativeDispatch, NativeFailure> {
-    let (object, detached, byte_length, max_byte_length, resizable) =
+    let (object, detached, byte_length, max_byte_length, resizable, immutable) =
         array_buffer_receiver_state(runtime, receiver, realm, &origin)?;
     match method {
         ArrayBufferPrototypeMethod::ByteLength => Ok(NativeDispatch::Immediate(
@@ -461,6 +463,9 @@ pub(super) fn dispatch_array_buffer_prototype(
         )),
         ArrayBufferPrototypeMethod::Detached => {
             Ok(NativeDispatch::Immediate(StoredValue::Boolean(detached)))
+        }
+        ArrayBufferPrototypeMethod::Immutable => {
+            Ok(NativeDispatch::Immediate(StoredValue::Boolean(immutable)))
         }
         ArrayBufferPrototypeMethod::MaxByteLength => Ok(NativeDispatch::Immediate(
             StoredValue::Number(JsNumber::from_f64(array_buffer_length_as_f64(
@@ -486,14 +491,17 @@ pub(super) fn dispatch_array_buffer_prototype(
             )
         }
         ArrayBufferPrototypeMethod::Transfer
-        | ArrayBufferPrototypeMethod::TransferToFixedLength => {
+        | ArrayBufferPrototypeMethod::TransferToFixedLength
+        | ArrayBufferPrototypeMethod::TransferToImmutable => {
             let preserve_resizability = method == ArrayBufferPrototypeMethod::Transfer;
+            let immutable = method == ArrayBufferPrototypeMethod::TransferToImmutable;
             let requested = arguments.take_first_or_undefined();
             if matches!(requested, StoredValue::Undefined) {
                 return finish_array_buffer_transfer(
                     runtime,
                     object,
                     preserve_resizability,
+                    immutable,
                     StoredValue::Number(JsNumber::from_f64(array_buffer_length_as_f64(
                         byte_length,
                     ))),
@@ -508,6 +516,7 @@ pub(super) fn dispatch_array_buffer_prototype(
                 OperatorPrimitiveTarget::ArrayBufferTransfer {
                     object,
                     preserve_resizability,
+                    immutable,
                 },
                 realm,
                 return_to,
@@ -515,7 +524,7 @@ pub(super) fn dispatch_array_buffer_prototype(
                 execution_budget,
             )
         }
-        ArrayBufferPrototypeMethod::Slice => {
+        ArrayBufferPrototypeMethod::Slice | ArrayBufferPrototypeMethod::SliceToImmutable => {
             if detached {
                 return array_buffer_type_error(realm, &origin, "ArrayBuffer is detached");
             }
@@ -530,6 +539,7 @@ pub(super) fn dispatch_array_buffer_prototype(
                 origin,
                 execution_budget,
                 false,
+                method == ArrayBufferPrototypeMethod::SliceToImmutable,
             )
         }
     }
@@ -593,6 +603,7 @@ pub(super) fn dispatch_shared_array_buffer_prototype(
             origin,
             execution_budget,
             true,
+            false,
         ),
     }
 }
@@ -612,6 +623,7 @@ fn begin_array_buffer_slice(
     origin: JsStackFrame,
     execution_budget: &mut ExecutionBudget,
     shared: bool,
+    immutable: bool,
 ) -> Result<NativeDispatch, NativeFailure> {
     begin_operator_primitive_conversion(
         runtime,
@@ -621,8 +633,10 @@ fn begin_array_buffer_slice(
             object,
             initial_length,
             shared,
+            immutable,
             end,
             first: 0,
+            final_index: 0,
             new_length: 0,
             realm,
             stage: ArrayBufferSliceStage::Constructor,
@@ -645,6 +659,7 @@ pub(super) fn finish_array_buffer_slice_start(
     state.first =
         array_buffer_to_clamped_index(value, state.initial_length, state.realm, &state.origin)?;
     if matches!(state.end, StoredValue::Undefined) {
+        state.final_index = state.initial_length;
         state.new_length = state.initial_length.saturating_sub(state.first);
         return begin_array_buffer_slice_constructor_get(
             runtime,
@@ -677,8 +692,68 @@ pub(super) fn finish_array_buffer_slice_end(
 ) -> Result<NativeDispatch, NativeFailure> {
     let final_index =
         array_buffer_to_clamped_index(value, state.initial_length, state.realm, &state.origin)?;
+    state.final_index = final_index;
     state.new_length = final_index.saturating_sub(state.first);
     begin_array_buffer_slice_constructor_get(runtime, state, return_to, execution_budget)
+}
+
+fn finish_array_buffer_slice_to_immutable(
+    runtime: &mut Runtime,
+    state: &ArrayBufferSliceContinuation,
+) -> Result<NativeDispatch, NativeFailure> {
+    let copied = {
+        let Some(source) = runtime.array_buffer_state(state.object)? else {
+            return Err(EngineFault::RuntimeInvariant {
+                message: "ArrayBuffer.sliceToImmutable source lost its internal slots",
+            }
+            .into());
+        };
+        if source.is_shared() {
+            return Err(EngineFault::RuntimeInvariant {
+                message: "ArrayBuffer.sliceToImmutable source changed its buffer brand",
+            }
+            .into());
+        }
+        if source.is_detached() {
+            return array_buffer_type_error(state.realm, &state.origin, "ArrayBuffer is detached");
+        }
+        if source.byte_length() < state.final_index {
+            return array_buffer_range_error(
+                state.realm,
+                &state.origin,
+                "ArrayBuffer shrank below the resolved slice end",
+            );
+        }
+        let mut copied = Vec::new();
+        copied.try_reserve_exact(state.new_length).map_err(|_| {
+            NativeFailure::Execution(ExecutionError::AllocationFailed {
+                resource: RuntimeResource::ArrayBufferBytes,
+                additional: state.new_length,
+            })
+        })?;
+        if state.new_length != 0 {
+            let end =
+                state
+                    .first
+                    .checked_add(state.new_length)
+                    .ok_or(EngineFault::RuntimeInvariant {
+                        message: "ArrayBuffer.sliceToImmutable byte range overflowed",
+                    })?;
+            let bytes = source
+                .data()
+                .and_then(|data| data.get(state.first..end))
+                .ok_or(EngineFault::RuntimeInvariant {
+                    message: "ArrayBuffer.sliceToImmutable escaped its validated source range",
+                })?;
+            copied.extend_from_slice(bytes);
+        }
+        copied
+    };
+    let prototype = HeapReference::Object(runtime.realm_array_buffer_prototype(state.realm)?);
+    let target = runtime
+        .allocate_immutable_array_buffer(prototype, copied)
+        .map_err(NativeFailure::Execution)?;
+    Ok(NativeDispatch::Immediate(StoredValue::Object(target)))
 }
 
 fn begin_array_buffer_slice_constructor_get(
@@ -687,6 +762,9 @@ fn begin_array_buffer_slice_constructor_get(
     return_to: Option<CallReturn>,
     execution_budget: &mut ExecutionBudget,
 ) -> Result<NativeDispatch, NativeFailure> {
+    if state.immutable {
+        return finish_array_buffer_slice_to_immutable(runtime, &state);
+    }
     state.stage = ArrayBufferSliceStage::Constructor;
     let receiver = StoredValue::Object(state.object);
     charge_heap_property_lookup(runtime, &receiver, execution_budget)?;
@@ -834,6 +912,13 @@ fn finish_array_buffer_slice_construct(
             "ArrayBuffer species constructor returned the wrong buffer type",
         );
     }
+    if target_state.is_immutable() {
+        return array_buffer_type_error(
+            state.realm,
+            &state.origin,
+            "ArrayBuffer species constructor returned an immutable buffer",
+        );
+    }
     if target_state.is_detached() || target_state.byte_length() < state.new_length {
         return array_buffer_type_error(
             state.realm,
@@ -944,6 +1029,9 @@ fn array_buffer_to_clamped_index(
     origin: &JsStackFrame,
 ) -> Result<usize, NativeFailure> {
     let integer = number_to_integer_or_infinity(operator_to_number(value, realm, origin)?);
+    if integer == 0.0 {
+        return Ok(0);
+    }
     if integer.is_sign_negative() {
         if integer.is_infinite() {
             return Ok(0);
@@ -1056,6 +1144,7 @@ pub(super) fn finish_array_buffer_transfer(
     runtime: &mut Runtime,
     object: ObjectId,
     preserve_resizability: bool,
+    immutable: bool,
     value: StoredValue,
     realm: RealmId,
     origin: &JsStackFrame,
@@ -1070,6 +1159,9 @@ pub(super) fn finish_array_buffer_transfer(
     if state.is_detached() {
         return array_buffer_type_error(realm, origin, "ArrayBuffer is detached");
     }
+    if state.is_immutable() {
+        return array_buffer_type_error(realm, origin, "ArrayBuffer is immutable");
+    }
     let max_byte_length = if preserve_resizability {
         state.resizable_max_byte_length()
     } else {
@@ -1080,7 +1172,13 @@ pub(super) fn finish_array_buffer_transfer(
     }
     let prototype = HeapReference::Object(runtime.realm_array_buffer_prototype(realm)?);
     let target = runtime
-        .transfer_array_buffer(object, prototype, new_byte_length, preserve_resizability)
+        .transfer_array_buffer(
+            object,
+            prototype,
+            new_byte_length,
+            preserve_resizability,
+            immutable,
+        )
         .map_err(NativeFailure::Execution)?;
     Ok(NativeDispatch::Immediate(StoredValue::Object(target)))
 }
@@ -1090,7 +1188,7 @@ fn array_buffer_receiver_state(
     receiver: &StoredValue,
     realm: RealmId,
     origin: &JsStackFrame,
-) -> Result<(ObjectId, bool, usize, usize, bool), NativeFailure> {
+) -> Result<(ObjectId, bool, usize, usize, bool, bool), NativeFailure> {
     let StoredValue::Object(object) = receiver else {
         return array_buffer_type_error(realm, origin, "not an ArrayBuffer");
     };
@@ -1106,6 +1204,7 @@ fn array_buffer_receiver_state(
         state.byte_length(),
         state.max_byte_length(),
         state.is_resizable(),
+        state.is_immutable(),
     ))
 }
 

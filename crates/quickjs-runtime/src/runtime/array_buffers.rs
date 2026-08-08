@@ -32,6 +32,52 @@ impl Runtime {
         self.allocate_buffer(prototype, byte_length, max_byte_length, true)
     }
 
+    /// Allocates one fixed-length immutable `ArrayBuffer` from an already
+    /// copied byte block. Immutable data is installed only after all runtime
+    /// limits and arena reservations have succeeded, so no writable view can
+    /// observe the target during construction.
+    pub(crate) fn allocate_immutable_array_buffer(
+        &mut self,
+        prototype: HeapReference,
+        data: Vec<u8>,
+    ) -> Result<ObjectId, crate::ExecutionError> {
+        if !self.heap_reference_is_live(prototype) {
+            return Err(stale_heap_reference(prototype).into());
+        }
+        let byte_length = data.len();
+        check_execution_limit(
+            RuntimeResource::HeapObjects,
+            self.limits.max_heap_objects,
+            usize_to_u64(self.objects.len()).saturating_add(1),
+        )?;
+        let observed_bytes = self
+            .array_buffer_bytes
+            .saturating_add(usize_to_u64(byte_length));
+        check_execution_limit(
+            RuntimeResource::ArrayBufferBytes,
+            self.limits.max_array_buffer_bytes,
+            observed_bytes,
+        )?;
+        self.objects
+            .try_reserve(1)
+            .map_err(|_| crate::ExecutionError::AllocationFailed {
+                resource: RuntimeResource::HeapObjects,
+                additional: 1,
+            })?;
+        let object = self
+            .insert_heap_object(HeapObject::array_buffer(
+                ObjectRecord::empty(Some(prototype)),
+                ArrayBufferState::immutable(data),
+            ))
+            .map_err(|_| crate::ExecutionError::AllocationFailed {
+                resource: RuntimeResource::HeapObjects,
+                additional: 1,
+            })?;
+        self.array_buffer_bytes = observed_bytes;
+        self.collection_pending = true;
+        Ok(object)
+    }
+
     fn allocate_buffer(
         &mut self,
         prototype: HeapReference,
@@ -458,6 +504,7 @@ impl Runtime {
         prototype: HeapReference,
         new_byte_length: usize,
         preserve_resizability: bool,
+        immutable: bool,
     ) -> Result<ObjectId, crate::ExecutionError> {
         if !self.heap_reference_is_live(prototype) {
             return Err(stale_heap_reference(prototype).into());
@@ -511,10 +558,16 @@ impl Runtime {
         let mut data = zeroed_byte_data(new_byte_length)?;
         let copy_length = old_byte_length.min(new_byte_length);
         data[..copy_length].copy_from_slice(&source_data[..copy_length]);
+        debug_assert!(!immutable || max_byte_length.is_none());
+        let target_state = if immutable {
+            ArrayBufferState::immutable(data)
+        } else {
+            ArrayBufferState::new(data, max_byte_length)
+        };
         let target = self
             .insert_heap_object(HeapObject::array_buffer(
                 ObjectRecord::empty(Some(prototype)),
-                ArrayBufferState::new(data, max_byte_length),
+                target_state,
             ))
             .map_err(|_| crate::ExecutionError::AllocationFailed {
                 resource: RuntimeResource::HeapObjects,

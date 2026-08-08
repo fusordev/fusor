@@ -43,6 +43,7 @@ pub(super) fn visit_functions(visit: FunctionSink<'_>) {
             IntrinsicNameSpec::Literal(match method {
                 ArrayBufferPrototypeMethod::ByteLength => "get byteLength",
                 ArrayBufferPrototypeMethod::Detached => "get detached",
+                ArrayBufferPrototypeMethod::Immutable => "get immutable",
                 ArrayBufferPrototypeMethod::MaxByteLength => "get maxByteLength",
                 ArrayBufferPrototypeMethod::Resizable => "get resizable",
                 _ => unreachable!("only ArrayBuffer accessors reach this arm"),

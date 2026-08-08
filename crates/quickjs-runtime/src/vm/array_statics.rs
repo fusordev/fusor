@@ -51,6 +51,8 @@ enum ArrayStaticStage {
     AwaitDone,
     AwaitIteratorValue,
     AwaitIterableMapper,
+    AwaitTypedArrayIterableConstruct,
+    AwaitTypedArrayIterableMapper,
     AwaitArrayLikeLength,
     AwaitArrayLikeLengthConversion,
     AwaitArrayLikeConstruct,
@@ -74,6 +76,7 @@ pub(crate) struct ArrayStaticContinuation {
     result: Option<StoredValue>,
     length: u64,
     index: u64,
+    typed_array: bool,
     realm: RealmId,
     stage: ArrayStaticStage,
     origin: JsStackFrame,
@@ -130,6 +133,7 @@ impl ArrayStaticContinuation {
 pub(super) fn begin_array_static(
     runtime: &mut Runtime,
     method: ArrayStatic,
+    typed_array: bool,
     realm: RealmId,
     constructor: StoredValue,
     mut arguments: CallArguments,
@@ -164,6 +168,7 @@ pub(super) fn begin_array_static(
             result: None,
             length,
             index: 0,
+            typed_array,
             realm,
             stage: ArrayStaticStage::AwaitOfConstruct,
             origin,
@@ -198,6 +203,7 @@ pub(super) fn begin_array_static(
         result: None,
         length: 0,
         index: 0,
+        typed_array,
         realm,
         stage: ArrayStaticStage::AwaitIteratorMethod,
         origin,
@@ -252,6 +258,18 @@ pub(super) fn advance_array_static(
                     }
                     StoredValue::Function(method) => {
                         state.iterator_method = Some(method);
+                        if state.typed_array {
+                            let receiver = state.source.duplicate();
+                            state.stage = ArrayStaticStage::AwaitIterator;
+                            return call_array_static_function(
+                                state,
+                                method,
+                                receiver,
+                                Vec::new(),
+                                None,
+                                return_to,
+                            );
+                        }
                         state.stage = ArrayStaticStage::AwaitIterableConstruct;
                         return allocate_or_construct_array_static(
                             runtime,
@@ -273,6 +291,7 @@ pub(super) fn advance_array_static(
             ArrayStaticStage::AwaitIterableConstruct => {
                 if let Some(value) = completion.take() {
                     state.target = Some(require_array_static_object(&state, value)?);
+                    validate_typed_array_static_target(runtime, &state)?;
                 }
                 let method = state.iterator_method.ok_or(EngineFault::RuntimeInvariant {
                     message: "Array.from iterable path lost its iterator method",
@@ -330,6 +349,18 @@ pub(super) fn advance_array_static(
                     state.next = None;
                     state.result = None;
                     state.length = state.index;
+                    if state.typed_array {
+                        state.index = 0;
+                        state.stage = ArrayStaticStage::AwaitTypedArrayIterableConstruct;
+                        let arguments = array_static_single_argument(state.length)?;
+                        return allocate_or_construct_array_static(
+                            runtime,
+                            state,
+                            arguments,
+                            return_to,
+                            execution_budget,
+                        );
+                    }
                     return finish_array_static_length(runtime, state, return_to, execution_budget);
                 }
                 state.stage = ArrayStaticStage::AwaitIteratorValue;
@@ -344,6 +375,18 @@ pub(super) fn advance_array_static(
             }
             ArrayStaticStage::AwaitIteratorValue => {
                 let value = take_array_static_completion(&mut completion)?;
+                if state.typed_array {
+                    state.items.try_reserve_exact(1).map_err(|_| {
+                        ExecutionError::AllocationFailed {
+                            resource: RuntimeResource::FrameValues,
+                            additional: 1,
+                        }
+                    })?;
+                    state.items.push(value);
+                    state.index = state.index.saturating_add(1);
+                    state.result = None;
+                    return call_array_static_next(runtime, state, return_to, execution_budget);
+                }
                 if let Some(mapper) = state.mapper {
                     let arguments = array_static_mapper_arguments(value, state.index)?;
                     let receiver = state.this_arg.duplicate();
@@ -381,6 +424,46 @@ pub(super) fn advance_array_static(
                 }
                 state.result = None;
                 return call_array_static_next(runtime, state, return_to, execution_budget);
+            }
+            ArrayStaticStage::AwaitTypedArrayIterableConstruct => {
+                if let Some(value) = completion.take() {
+                    state.target = Some(require_array_static_object(&state, value)?);
+                    validate_typed_array_static_target(runtime, &state)?;
+                }
+                if state.index >= state.length {
+                    return finish_array_static_length(runtime, state, return_to, execution_budget);
+                }
+                let index =
+                    usize::try_from(state.index).map_err(|_| EngineFault::RuntimeInvariant {
+                        message: "TypedArray.from item index does not fit usize",
+                    })?;
+                let value = state.items[index].duplicate();
+                if let Some(mapper) = state.mapper {
+                    let arguments = array_static_mapper_arguments(value, state.index)?;
+                    let receiver = state.this_arg.duplicate();
+                    state.stage = ArrayStaticStage::AwaitTypedArrayIterableMapper;
+                    return call_array_static_function(
+                        state, mapper, receiver, arguments, None, return_to,
+                    );
+                }
+                return begin_typed_array_static_element(
+                    runtime,
+                    state,
+                    value,
+                    return_to,
+                    execution_budget,
+                );
+            }
+            ArrayStaticStage::AwaitTypedArrayIterableMapper => {
+                let value = take_array_static_completion(&mut completion)?;
+                state.stage = ArrayStaticStage::AwaitTypedArrayIterableConstruct;
+                return begin_typed_array_static_element(
+                    runtime,
+                    state,
+                    value,
+                    return_to,
+                    execution_budget,
+                );
             }
             ArrayStaticStage::AwaitArrayLikeLength => {
                 let value = take_array_static_completion(&mut completion)?;
@@ -420,6 +503,7 @@ pub(super) fn advance_array_static(
             ArrayStaticStage::AwaitArrayLikeConstruct => {
                 if let Some(value) = completion.take() {
                     state.target = Some(require_array_static_object(&state, value)?);
+                    validate_typed_array_static_target(runtime, &state)?;
                 }
                 if state.index >= state.length {
                     return finish_array_static_length(runtime, state, return_to, execution_budget);
@@ -445,6 +529,16 @@ pub(super) fn advance_array_static(
                         state, mapper, receiver, arguments, None, return_to,
                     );
                 }
+                if state.typed_array {
+                    state.stage = ArrayStaticStage::AwaitArrayLikeConstruct;
+                    return begin_typed_array_static_element(
+                        runtime,
+                        state,
+                        value,
+                        return_to,
+                        execution_budget,
+                    );
+                }
                 if let Some(pending) =
                     define_array_static_element(runtime, &mut state, value, execution_budget)?
                 {
@@ -454,6 +548,16 @@ pub(super) fn advance_array_static(
             }
             ArrayStaticStage::AwaitArrayLikeMapper => {
                 let value = take_array_static_completion(&mut completion)?;
+                if state.typed_array {
+                    state.stage = ArrayStaticStage::AwaitArrayLikeConstruct;
+                    return begin_typed_array_static_element(
+                        runtime,
+                        state,
+                        value,
+                        return_to,
+                        execution_budget,
+                    );
+                }
                 if let Some(pending) =
                     define_array_static_element(runtime, &mut state, value, execution_budget)?
                 {
@@ -464,6 +568,22 @@ pub(super) fn advance_array_static(
             ArrayStaticStage::AwaitOfConstruct => {
                 if let Some(value) = completion.take() {
                     state.target = Some(require_array_static_object(&state, value)?);
+                    validate_typed_array_static_target(runtime, &state)?;
+                }
+                if state.typed_array && state.index < state.length {
+                    let index = usize::try_from(state.index).map_err(|_| {
+                        EngineFault::RuntimeInvariant {
+                            message: "TypedArray.of item index does not fit usize",
+                        }
+                    })?;
+                    let value = state.items[index].duplicate();
+                    return begin_typed_array_static_element(
+                        runtime,
+                        state,
+                        value,
+                        return_to,
+                        execution_budget,
+                    );
                 }
                 while state.index < state.length {
                     let index = usize::try_from(state.index).map_err(|_| {
@@ -509,6 +629,9 @@ fn allocate_or_construct_array_static(
             Some(constructor),
             return_to,
         );
+    }
+    if state.typed_array {
+        return array_static_type_error(state.realm, state.origin, "not a constructor");
     }
 
     let length = match state.stage {
@@ -575,6 +698,81 @@ fn call_array_static_next(
     call_array_static_function(state, function, receiver, Vec::new(), None, return_to)
 }
 
+fn begin_typed_array_static_element(
+    runtime: &mut Runtime,
+    state: ArrayStaticContinuation,
+    value: StoredValue,
+    return_to: Option<CallReturn>,
+    execution_budget: &mut ExecutionBudget,
+) -> Result<NativeDispatch, NativeFailure> {
+    let realm = state.realm;
+    let origin = state.origin.clone();
+    begin_operator_primitive_conversion(
+        runtime,
+        value,
+        OperatorPrimitiveHint::Number,
+        OperatorPrimitiveTarget::TypedArrayStaticElement(Box::new(state)),
+        realm,
+        return_to,
+        origin,
+        execution_budget,
+    )
+}
+
+pub(super) fn finish_typed_array_static_element(
+    runtime: &mut Runtime,
+    mut state: ArrayStaticContinuation,
+    value: StoredValue,
+    return_to: Option<CallReturn>,
+    execution_budget: &mut ExecutionBudget,
+) -> Result<NativeDispatch, NativeFailure> {
+    let StoredValue::Object(target) = *array_static_target(&state)? else {
+        return Err(EngineFault::RuntimeInvariant {
+            message: "TypedArray factory target changed into a non-object",
+        }
+        .into());
+    };
+    let element = runtime
+        .typed_array_state(target)?
+        .copied()
+        .ok_or(EngineFault::RuntimeInvariant {
+            message: "TypedArray factory target lost its internal slots",
+        })?
+        .element();
+    let index = usize::try_from(state.index).map_err(|_| EngineFault::RuntimeInvariant {
+        message: "TypedArray factory element index does not fit usize",
+    })?;
+    let outcome = if element.is_bigint() {
+        let value = to_bigint_from_primitive(&value, state.realm, &state.origin)?;
+        runtime.typed_array_store_index(
+            target,
+            index,
+            TypedArrayElementValue::BigInt(value.as_ref()),
+        )?
+    } else {
+        let value = operator_to_number(value, state.realm, &state.origin)?;
+        runtime.typed_array_store_index(target, index, TypedArrayElementValue::Number(value))?
+    };
+    match outcome {
+        TypedArrayStoreOutcome::Stored | TypedArrayStoreOutcome::Missing => {}
+        TypedArrayStoreOutcome::Immutable => {
+            return array_static_type_error(
+                state.realm,
+                state.origin,
+                "TypedArray backing buffer is immutable",
+            );
+        }
+        TypedArrayStoreOutcome::ContentTypeMismatch => {
+            return Err(EngineFault::RuntimeInvariant {
+                message: "TypedArray factory destination content type changed during conversion",
+            }
+            .into());
+        }
+    }
+    state.index = state.index.saturating_add(1);
+    advance_array_static(runtime, state, None, return_to, execution_budget)
+}
+
 fn define_array_static_element(
     runtime: &mut Runtime,
     state: &mut ArrayStaticContinuation,
@@ -607,6 +805,9 @@ fn finish_array_static_length(
     execution_budget: &mut ExecutionBudget,
 ) -> Result<NativeDispatch, NativeFailure> {
     let target = array_static_target(&state)?.duplicate();
+    if state.typed_array {
+        return Ok(NativeDispatch::Immediate(target));
+    }
     let key = runtime.predefined_property_key(PredefinedAtom::Length);
     let name = JsString::from_utf8("length")?;
     if let StoredValue::Object(object) = target
@@ -815,6 +1016,49 @@ fn array_static_target(state: &ArrayStaticContinuation) -> Result<&StoredValue, 
     state.target.as_ref().ok_or(EngineFault::RuntimeInvariant {
         message: "Array factory lost its constructed target",
     })
+}
+
+fn validate_typed_array_static_target(
+    runtime: &Runtime,
+    state: &ArrayStaticContinuation,
+) -> Result<(), NativeFailure> {
+    if !state.typed_array {
+        return Ok(());
+    }
+    let StoredValue::Object(object) = *array_static_target(state)? else {
+        return array_static_type_error(state.realm, state.origin.clone(), "not a TypedArray");
+    };
+    if runtime.typed_array_state(object)?.is_none() {
+        return array_static_type_error(state.realm, state.origin.clone(), "not a TypedArray");
+    }
+    let TypedArrayView::InBounds { buffer, length, .. } = runtime.typed_array_view(object)? else {
+        return array_static_type_error(
+            state.realm,
+            state.origin.clone(),
+            "TypedArray is out of bounds",
+        );
+    };
+    let Some(buffer) = runtime.array_buffer_state(buffer)? else {
+        return Err(EngineFault::RuntimeInvariant {
+            message: "TypedArray factory result lost its backing ArrayBuffer slots",
+        }
+        .into());
+    };
+    if buffer.is_immutable() {
+        return array_static_type_error(
+            state.realm,
+            state.origin.clone(),
+            "TypedArray backing buffer is immutable",
+        );
+    }
+    if usize_to_u64(length) < state.length {
+        return array_static_type_error(
+            state.realm,
+            state.origin.clone(),
+            "TypedArray result is shorter than requested",
+        );
+    }
+    Ok(())
 }
 
 fn require_array_static_object(
