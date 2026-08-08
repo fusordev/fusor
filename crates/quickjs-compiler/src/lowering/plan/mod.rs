@@ -9,7 +9,7 @@ pub(in crate::lowering) mod statements;
 
 pub(in crate::lowering) use bindings::{
     LoweredReference, ScopeEntryInitialization, compact_get_argument, compact_get_local,
-    compact_put_local, plan_put_slot,
+    compact_put_local, plan_external_put, plan_external_read, plan_put_slot,
 };
 pub(in crate::lowering) use control::StatementControlStack;
 pub(in crate::lowering) use destructuring::DestructuringBindingInitialization;

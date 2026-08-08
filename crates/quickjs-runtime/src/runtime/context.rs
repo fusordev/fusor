@@ -858,4 +858,15 @@ impl Context<'_> {
         require_root_kind(&authority, CompilerExecutableKind::IndirectEvalScript)?;
         self.install_root(authority, RootPublication::Internal, false)
     }
+
+    /// Installs a verified closed direct-eval Script while bytecode frames are
+    /// active. Caller-binding authorities use the dedicated environment
+    /// installer rather than this closed form.
+    pub(crate) fn install_direct_eval_script_during_execution(
+        &mut self,
+        authority: Arc<VerifiedBytecode>,
+    ) -> Result<InstalledRoot, InstallError> {
+        require_root_kind(&authority, CompilerExecutableKind::DirectEvalScript)?;
+        self.install_root(authority, RootPublication::Internal, false)
+    }
 }

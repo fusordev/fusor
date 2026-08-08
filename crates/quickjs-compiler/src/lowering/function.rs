@@ -886,14 +886,19 @@ impl CompilationContext<'_, '_, '_> {
             if crate::is_supported_global_script_goal(self.unit.goal()) {
                 let (executable, program) = self.selected_global_script(executable_id)?;
                 (executable, program, CompilerExecutableKind::GlobalScript)
-            } else if crate::is_supported_indirect_eval_goal(self.unit.goal())
-                || crate::is_supported_direct_eval_goal(self.unit.goal())
-            {
+            } else if crate::is_supported_indirect_eval_goal(self.unit.goal()) {
                 let (executable, program) = self.selected_eval_script(executable_id)?;
                 (
                     executable,
                     program,
                     CompilerExecutableKind::IndirectEvalScript,
+                )
+            } else if crate::is_supported_direct_eval_goal(self.unit.goal()) {
+                let (executable, program) = self.selected_eval_script(executable_id)?;
+                (
+                    executable,
+                    program,
+                    CompilerExecutableKind::DirectEvalScript,
                 )
             } else {
                 let (executable, program) = self.selected_dynamic_function_script(executable_id)?;
@@ -1004,7 +1009,9 @@ const fn executable_header(
     variable_reference_count: u32,
 ) -> UnverifiedFunctionHeader {
     let header = match kind {
-        CompilerExecutableKind::GlobalScript | CompilerExecutableKind::IndirectEvalScript => {
+        CompilerExecutableKind::GlobalScript
+        | CompilerExecutableKind::IndirectEvalScript
+        | CompilerExecutableKind::DirectEvalScript => {
             UnverifiedFunctionHeader::global_script(strict, variable_reference_count)
         }
         CompilerExecutableKind::OrdinaryFunction => {

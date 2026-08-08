@@ -357,7 +357,7 @@ pub(super) fn finish_direct_eval(
 
     let installation = {
         let mut context = Context { runtime, realm };
-        context.install_indirect_eval_script_during_execution(authority)
+        context.install_direct_eval_script_during_execution(authority)
     };
     let mut installed = installation.map_err(|error| NativeFailure::Execution(error.into()))?;
     let plan = match plan_frame(
@@ -1185,6 +1185,7 @@ pub(super) fn direct_eval_compile_request(
         kind,
         CompilerExecutableKind::GlobalScript
             | CompilerExecutableKind::IndirectEvalScript
+            | CompilerExecutableKind::DirectEvalScript
             | CompilerExecutableKind::DynamicFunctionScript
     );
     Ok(DirectEvalCompileRequest::new(source, frame.strict)

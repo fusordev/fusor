@@ -1,5 +1,6 @@
 use std::ops::Range;
 
+use quickjs_frontend::DirectEvalContext;
 use quickjs_frontend::Span;
 
 use crate::storage::{BindingId, Executable, ExecutableId, StoragePlan};
@@ -11,9 +12,10 @@ use super::super::{
 use super::{RealmGlobalLayout, RealmGlobalLayoutInput};
 
 #[derive(Clone, Copy)]
-pub(in crate::lowering) struct FunctionTreeLayoutSeedInput<'plan> {
+pub(in crate::lowering) struct FunctionTreeLayoutSeedInput<'plan, 'scope> {
     pub(in crate::lowering) plan: &'plan StoragePlan,
     pub(in crate::lowering) allow_realm_globals: bool,
+    pub(in crate::lowering) direct_eval: Option<DirectEvalContext<'scope>>,
 }
 
 pub(in crate::lowering) struct FunctionTreeLayoutInput {
@@ -45,11 +47,12 @@ struct FunctionChildLayout {
 
 impl FunctionTreeLayoutSeed {
     pub(in crate::lowering) fn new(
-        input: FunctionTreeLayoutSeedInput<'_>,
+        input: FunctionTreeLayoutSeedInput<'_, '_>,
     ) -> Result<Self, LeafCompilationError> {
         let FunctionTreeLayoutSeedInput {
             plan,
             allow_realm_globals,
+            direct_eval,
         } = input;
         let executables = plan.executables();
         let FunctionChildLayout {
@@ -64,6 +67,7 @@ impl FunctionTreeLayoutSeed {
             realm_globals: RealmGlobalLayout::new(RealmGlobalLayoutInput {
                 plan,
                 enabled: allow_realm_globals,
+                direct_eval,
             })?,
         })
     }
@@ -404,6 +408,7 @@ mod tests {
                 let seed = FunctionTreeLayoutSeed::new(FunctionTreeLayoutSeedInput {
                     plan,
                     allow_realm_globals: false,
+                    direct_eval: None,
                 })
                 .expect("function tree seed");
                 let named = |name| {

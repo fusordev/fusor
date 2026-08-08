@@ -9,7 +9,8 @@ use super::super::{
     InitializationPolicy, LeafCompilationError, LoweredReference, ObjectAssignmentTarget,
     ObjectPattern, Operands, PlannedControlFlow, PlannedInstruction, Span, StoragePlacement,
     UnsupportedLeafFeature, WritePolicy, anonymous_class_expression_span,
-    anonymous_named_evaluation_span, anonymous_ordinary_function_span, plan_put_slot, unsupported,
+    anonymous_named_evaluation_span, anonymous_ordinary_function_span, plan_external_put,
+    plan_put_slot, unsupported,
 };
 use super::abrupt::{AbruptMarker, AbruptMarkerKind};
 
@@ -948,12 +949,12 @@ impl<'arena> CompilationContext<'_, 'arena, '_> {
             LoweredReference::Frame { slot, .. } => {
                 work.push(ExpressionWork::Emit(plan_put_slot(slot, identifier.span)));
             }
-            LoweredReference::RealmGlobal { slot, .. } => {
-                work.push(ExpressionWork::Emit(PlannedInstruction::new(
-                    FinalOpcode::PutVar,
-                    Operands::VarRef(slot),
+            LoweredReference::RealmGlobal { slot, binding, .. } => {
+                work.push(ExpressionWork::Emit(plan_external_put(
+                    binding,
+                    slot,
                     identifier.span,
-                )));
+                )?));
             }
         }
         Ok(())

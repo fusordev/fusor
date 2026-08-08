@@ -482,7 +482,8 @@ pub(super) fn create_closure(
                 }
                 capture_plans.push(ClosureCapturePlan::Existing(binding));
             }
-            CompilerClosureSource::ConstructorRealmGlobal(_) => {
+            CompilerClosureSource::ConstructorRealmGlobal(_)
+            | CompilerClosureSource::DirectEvalBinding { .. } => {
                 return Err(EngineFault::InvalidClosureEnvironment { function: child }.into());
             }
         }

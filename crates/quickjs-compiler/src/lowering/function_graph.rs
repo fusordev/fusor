@@ -16,6 +16,7 @@ use quickjs_bytecode::{
     VariableDefinition, VerifiedCompilerFunctionGraph, verify_compiler_function_graph,
 };
 
+use super::layouts::RealmGlobalRootSource;
 use super::{
     CompilationContext, CompiledClosureSource, CompiledClosureVariable, CompiledConstant,
     CompiledConstantPool, CompiledFunction, CompiledMetadataAtomKey, CompiledRealmGlobal,
@@ -563,12 +564,25 @@ impl CompilationContext<'_, '_, '_> {
                 CompiledRealmGlobalSource::ConstructorRealm => {
                     CompilerGraphClosureSource::ConstructorRealmGlobal(name)
                 }
+                CompiledRealmGlobalSource::DirectEvalBinding {
+                    index,
+                    environment_size,
+                } => CompilerGraphClosureSource::DirectEvalBinding {
+                    index,
+                    environment_size,
+                },
                 CompiledRealmGlobalSource::ParentClosure(index) => {
                     CompilerGraphClosureSource::ParentClosure(u32::from(index))
                 }
             };
-            let mut definition =
-                VerifiedClosureVariableDefinition::realm_global(Some(name), global.policy, source);
+            let mut definition = match global.binding {
+                quickjs_bytecode::CompilerClosureBinding::Captured(policy) => {
+                    VerifiedClosureVariableDefinition::new(Some(name), policy, source)
+                }
+                quickjs_bytecode::CompilerClosureBinding::RealmGlobal(policy) => {
+                    VerifiedClosureVariableDefinition::realm_global(Some(name), policy, source)
+                }
+            };
             if let Some(initializer) = global.function_initializer {
                 definition = definition.with_function_initializer(initializer);
             }
@@ -712,15 +726,35 @@ impl CompilationContext<'_, '_, '_> {
                     id,
                 )?)
             } else {
-                if !crate::is_supported_script_root_goal(self.unit.goal())
-                    || executable.index() != 0
-                {
+                if executable.index() != 0 {
                     return Err(LeafCompilationError::SemanticInvariant {
                         invariant: "only a Script root originates realm-global slots",
                         span: Some(metadata.span()),
                     });
                 }
-                CompiledRealmGlobalSource::ConstructorRealm
+                match binding.root_source {
+                    RealmGlobalRootSource::ConstructorRealm
+                        if crate::is_supported_script_compilation_goal(self.unit.goal()) =>
+                    {
+                        CompiledRealmGlobalSource::ConstructorRealm
+                    }
+                    RealmGlobalRootSource::DirectEvalBinding {
+                        index,
+                        environment_size,
+                    } if crate::is_supported_direct_eval_goal(self.unit.goal()) => {
+                        CompiledRealmGlobalSource::DirectEvalBinding {
+                            index,
+                            environment_size,
+                        }
+                    }
+                    RealmGlobalRootSource::ConstructorRealm
+                    | RealmGlobalRootSource::DirectEvalBinding { .. } => {
+                        return Err(LeafCompilationError::SemanticInvariant {
+                            invariant: "Script root external-binding source matches its compilation goal",
+                            span: Some(metadata.span()),
+                        });
+                    }
+                }
             };
             let function_initializer = if source == CompiledRealmGlobalSource::ConstructorRealm
                 && binding.policy.kind() == VerifiedBindingKind::Function
@@ -749,6 +783,7 @@ impl CompilationContext<'_, '_, '_> {
                 atom: constants.metadata_atom_index(CompiledMetadataAtomKey::RealmGlobal(id))?,
                 slot,
                 source,
+                binding: binding.binding,
                 policy: binding.policy,
                 function_initializer,
             });
@@ -855,6 +890,13 @@ fn build_unverified_graph_records(
                 CompiledRealmGlobalSource::ConstructorRealm => {
                     CompilerGraphClosureSource::ConstructorRealmGlobal(global.atom())
                 }
+                CompiledRealmGlobalSource::DirectEvalBinding {
+                    index,
+                    environment_size,
+                } => CompilerGraphClosureSource::DirectEvalBinding {
+                    index,
+                    environment_size,
+                },
                 CompiledRealmGlobalSource::ParentClosure(index) => {
                     CompilerGraphClosureSource::ParentClosure(u32::from(index))
                 }

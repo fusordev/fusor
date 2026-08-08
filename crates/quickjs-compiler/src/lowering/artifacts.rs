@@ -1,9 +1,9 @@
 use std::sync::Arc;
 
 use quickjs_bytecode::{
-    AtomPoolIndex, BytecodePc, CompilerAtom, CompilerBindingPolicy, CompilerConstantKind,
-    CompilerConstantValue, FunctionTemplateId, UnverifiedFunctionMetadata, VerifiedBytecode,
-    VerifiedCompilerFunctionGraph, VerifiedControlFlow,
+    AtomPoolIndex, BytecodePc, CompilerAtom, CompilerBindingPolicy, CompilerClosureBinding,
+    CompilerConstantKind, CompilerConstantValue, FunctionTemplateId, UnverifiedFunctionMetadata,
+    VerifiedBytecode, VerifiedCompilerFunctionGraph, VerifiedControlFlow,
 };
 use quickjs_frontend::Span;
 
@@ -148,6 +148,13 @@ impl RealmGlobalId {
 pub enum CompiledRealmGlobalSource {
     /// The dynamic Script root resolves this name in its constructor realm.
     ConstructorRealm,
+    /// A direct-eval Script root imports one live caller binding.
+    DirectEvalBinding {
+        /// Zero-based entry in the caller-environment snapshot.
+        index: u32,
+        /// Exact caller-environment shape bound into the authority.
+        environment_size: u32,
+    },
     /// A child forwards the same realm-owned handle from its parent.
     ParentClosure(u16),
 }
@@ -160,6 +167,7 @@ pub struct CompiledRealmGlobal {
     pub(super) atom: AtomPoolIndex,
     pub(super) slot: u16,
     pub(super) source: CompiledRealmGlobalSource,
+    pub(super) binding: CompilerClosureBinding,
     pub(super) policy: CompilerBindingPolicy,
     pub(super) function_initializer: Option<u32>,
 }
@@ -193,6 +201,13 @@ impl CompiledRealmGlobal {
     #[must_use]
     pub const fn source(&self) -> CompiledRealmGlobalSource {
         self.source
+    }
+
+    /// Returns whether this slot is a captured caller cell or a Realm-global
+    /// handle.
+    #[must_use]
+    pub const fn binding(&self) -> CompilerClosureBinding {
+        self.binding
     }
 
     /// Returns whether this name is an unresolved lookup, property-backed

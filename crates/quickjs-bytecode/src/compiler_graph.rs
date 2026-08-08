@@ -452,6 +452,16 @@ pub enum CompilerClosureSource {
     /// Function-local atom naming either an unresolved lookup or a
     /// configurable indirect-eval `var` in the constructor realm.
     ConstructorRealmGlobal(AtomPoolIndex),
+    /// One live binding supplied by the calling activation of direct `eval`.
+    ///
+    /// `index` addresses the ordered external environment snapshot while
+    /// `environment_size` binds the authority to the exact snapshot shape.
+    DirectEvalBinding {
+        /// Zero-based entry in the caller-environment snapshot.
+        index: u32,
+        /// Exact number of entries required from that snapshot.
+        environment_size: u32,
+    },
 }
 
 impl fmt::Display for CompilerClosureSource {
@@ -464,6 +474,13 @@ impl fmt::Display for CompilerClosureSource {
             Self::ConstructorRealmGlobal(atom) => {
                 write!(formatter, "constructor-realm global atom {}", atom.get())
             }
+            Self::DirectEvalBinding {
+                index,
+                environment_size,
+            } => write!(
+                formatter,
+                "direct-eval binding {index} in environment of size {environment_size}"
+            ),
         }
     }
 }
@@ -1136,6 +1153,32 @@ pub enum FunctionGraphVerificationErrorKind {
         /// Closure-domain slot containing the source.
         closure: u32,
     },
+    /// A non-root function tries to originate a direct-eval caller binding
+    /// instead of forwarding the root-owned slot.
+    DirectEvalBindingSourceNotRoot {
+        /// Closure-domain slot containing the source.
+        closure: u32,
+    },
+    /// A direct-eval caller-binding source addresses outside its declared
+    /// external environment.
+    DirectEvalBindingOutOfBounds {
+        /// Closure-domain slot containing the source.
+        closure: u32,
+        /// Rejected external-environment index.
+        index: u32,
+        /// Declared external-environment size.
+        environment_size: u32,
+    },
+    /// Direct-eval caller-binding sources disagree about the external
+    /// environment shape bound into the authority.
+    DirectEvalEnvironmentSizeMismatch {
+        /// First declared external-environment size.
+        expected: u32,
+        /// Closure-domain slot containing the disagreement.
+        closure: u32,
+        /// Conflicting external-environment size.
+        actual: u32,
+    },
     /// A compiler function imports the same immediate-parent cell twice.
     DuplicateClosureSource {
         /// First child closure slot using the source.
@@ -1280,6 +1323,26 @@ impl fmt::Display for FunctionGraphVerificationErrorKind {
             Self::ConstructorRealmGlobalSourceNotRoot { closure } => write!(
                 formatter,
                 "non-root closure slot {closure} originates a constructor-realm global source"
+            ),
+            Self::DirectEvalBindingSourceNotRoot { closure } => write!(
+                formatter,
+                "non-root closure slot {closure} originates a direct-eval caller binding"
+            ),
+            Self::DirectEvalBindingOutOfBounds {
+                closure,
+                index,
+                environment_size,
+            } => write!(
+                formatter,
+                "closure slot {closure} addresses direct-eval binding {index} outside environment size {environment_size}"
+            ),
+            Self::DirectEvalEnvironmentSizeMismatch {
+                expected,
+                closure,
+                actual,
+            } => write!(
+                formatter,
+                "closure slot {closure} declares direct-eval environment size {actual}, expected {expected}"
             ),
             Self::DuplicateClosureSource {
                 first,
@@ -1529,34 +1592,76 @@ fn validate_root_closure_sources(
         if index == root_index {
             continue;
         }
-        if let Some(closure) = function
-            .closure_sources
-            .iter()
-            .position(|source| matches!(source, CompilerClosureSource::ConstructorRealmGlobal(_)))
-        {
-            return Err(FunctionGraphVerificationError::at_function(
-                function_id(index)?,
-                FunctionGraphVerificationErrorKind::ConstructorRealmGlobalSourceNotRoot {
-                    closure: usize_to_u32(closure),
-                },
-            ));
+        for (closure, source) in function.closure_sources.iter().enumerate() {
+            let kind = match source {
+                CompilerClosureSource::ConstructorRealmGlobal(_) => Some(
+                    FunctionGraphVerificationErrorKind::ConstructorRealmGlobalSourceNotRoot {
+                        closure: usize_to_u32(closure),
+                    },
+                ),
+                CompilerClosureSource::DirectEvalBinding { .. } => Some(
+                    FunctionGraphVerificationErrorKind::DirectEvalBindingSourceNotRoot {
+                        closure: usize_to_u32(closure),
+                    },
+                ),
+                CompilerClosureSource::ParentVariableReference(_)
+                | CompilerClosureSource::ParentClosure(_) => None,
+            };
+            if let Some(kind) = kind {
+                return Err(FunctionGraphVerificationError::at_function(
+                    function_id(index)?,
+                    kind,
+                ));
+            }
         }
     }
 
     let root_function = &functions[root_index];
-    if root_function
-        .closure_sources
-        .iter()
-        .all(|source| matches!(source, CompilerClosureSource::ConstructorRealmGlobal(_)))
-    {
-        return Ok(());
+    let mut direct_environment_size = None;
+    for (closure, source) in root_function.closure_sources.iter().enumerate() {
+        match *source {
+            CompilerClosureSource::ConstructorRealmGlobal(_) => {}
+            CompilerClosureSource::DirectEvalBinding {
+                index,
+                environment_size,
+            } => {
+                if index >= environment_size {
+                    return Err(FunctionGraphVerificationError::at_function(
+                        root,
+                        FunctionGraphVerificationErrorKind::DirectEvalBindingOutOfBounds {
+                            closure: usize_to_u32(closure),
+                            index,
+                            environment_size,
+                        },
+                    ));
+                }
+                if let Some(expected) = direct_environment_size {
+                    if environment_size != expected {
+                        return Err(FunctionGraphVerificationError::at_function(
+                            root,
+                            FunctionGraphVerificationErrorKind::DirectEvalEnvironmentSizeMismatch {
+                                expected,
+                                closure: usize_to_u32(closure),
+                                actual: environment_size,
+                            },
+                        ));
+                    }
+                } else {
+                    direct_environment_size = Some(environment_size);
+                }
+            }
+            CompilerClosureSource::ParentVariableReference(_)
+            | CompilerClosureSource::ParentClosure(_) => {
+                return Err(FunctionGraphVerificationError::at_function(
+                    root,
+                    FunctionGraphVerificationErrorKind::RootRequiresEnvironment {
+                        closure_variables: root_function.control_flow.domains().closure_var_count(),
+                    },
+                ));
+            }
+        }
     }
-    Err(FunctionGraphVerificationError::at_function(
-        root,
-        FunctionGraphVerificationErrorKind::RootRequiresEnvironment {
-            closure_variables: root_function.control_flow.domains().closure_var_count(),
-        },
-    ))
+    Ok(())
 }
 
 fn preflight_graph_usage(
@@ -1844,6 +1949,7 @@ fn validate_closure_edges(
                     CompilerClosureSource::ConstructorRealmGlobal(_) => {
                         continue;
                     }
+                    CompilerClosureSource::DirectEvalBinding { .. } => continue,
                 };
                 if source_index >= len {
                     return Err(FunctionGraphVerificationError::at_function(

@@ -543,6 +543,8 @@ pub enum CompilerExecutableKind {
     GlobalScript,
     /// A Script compiled for an indirect invocation of `%eval%`.
     IndirectEvalScript,
+    /// A Script compiled for a direct invocation of the caller's `%eval%`.
+    DirectEvalScript,
     /// An ordinary callable JavaScript function.
     #[default]
     OrdinaryFunction,
@@ -1274,6 +1276,18 @@ pub enum BytecodeVerificationErrorKind {
     /// An indirect-eval Script record carries function-name metadata or a
     /// named-function self binding.
     IndirectEvalScriptHasFunctionName,
+    /// A direct-eval Script record is not the graph root.
+    DirectEvalScriptNotRoot,
+    /// A direct-eval Script record declares a call-argument domain.
+    DirectEvalScriptHasArguments {
+        /// Header-defined arguments.
+        defined: u32,
+        /// Frame argument slots.
+        arguments: u32,
+    },
+    /// A direct-eval Script record carries function-name metadata or a
+    /// named-function self binding.
+    DirectEvalScriptHasFunctionName,
     /// A dynamic-Function Script record is not the graph root.
     DynamicFunctionScriptNotRoot,
     /// A dynamic-Function Script record declares a call-argument domain.
@@ -1295,6 +1309,12 @@ pub enum BytecodeVerificationErrorKind {
     /// A constructor-realm global source appears outside a Script authority
     /// root.
     ConstructorRealmGlobalSourceRequiresDynamicFunctionScript {
+        /// Closure-domain slot containing the source.
+        closure: u32,
+    },
+    /// A caller-binding source appears outside a direct-eval Script authority
+    /// root.
+    DirectEvalBindingSourceRequiresDirectEvalScript {
         /// Closure-domain slot containing the source.
         closure: u32,
     },
@@ -1770,6 +1790,15 @@ impl fmt::Display for BytecodeVerificationErrorKind {
             ),
             Self::IndirectEvalScriptHasFunctionName => formatter
                 .write_str("indirect-eval Script carries function-name metadata or a self binding"),
+            Self::DirectEvalScriptNotRoot => {
+                formatter.write_str("direct-eval Script executable is not the graph root")
+            }
+            Self::DirectEvalScriptHasArguments { defined, arguments } => write!(
+                formatter,
+                "direct-eval Script declares {defined} defined arguments and {arguments} frame arguments"
+            ),
+            Self::DirectEvalScriptHasFunctionName => formatter
+                .write_str("direct-eval Script carries function-name metadata or a self binding"),
             Self::DynamicFunctionScriptNotRoot => {
                 formatter.write_str("dynamic-Function Script executable is not the graph root")
             }
@@ -1789,6 +1818,10 @@ impl fmt::Display for BytecodeVerificationErrorKind {
             Self::ConstructorRealmGlobalSourceRequiresDynamicFunctionScript { closure } => write!(
                 formatter,
                 "closure slot {closure} originates a constructor-realm global outside a Script root"
+            ),
+            Self::DirectEvalBindingSourceRequiresDirectEvalScript { closure } => write!(
+                formatter,
+                "closure slot {closure} originates a caller binding outside a direct-eval Script root"
             ),
             Self::ClosureBindingOpcodeMismatch {
                 closure,
@@ -2555,6 +2588,21 @@ fn verify_executable_kind(
             }
             Ok(())
         }
+        CompilerExecutableKind::DirectEvalScript => {
+            if id != root {
+                return Err(BytecodeVerificationError::function(
+                    id,
+                    BytecodeVerificationErrorKind::DirectEvalScriptNotRoot,
+                ));
+            }
+            if metadata_has_function_name(metadata) {
+                return Err(BytecodeVerificationError::function(
+                    id,
+                    BytecodeVerificationErrorKind::DirectEvalScriptHasFunctionName,
+                ));
+            }
+            Ok(())
+        }
         CompilerExecutableKind::OrdinaryFunction
         | CompilerExecutableKind::GeneratorFunction
         | CompilerExecutableKind::AsyncFunction
@@ -2657,6 +2705,26 @@ fn verify_header(
                 return Err(BytecodeVerificationError::function(
                     id,
                     BytecodeVerificationErrorKind::IndirectEvalScriptHasArguments {
+                        defined: header.defined_argument_count(),
+                        arguments,
+                    },
+                ));
+            }
+        }
+        CompilerExecutableKind::DirectEvalScript => {
+            if header.kind() != FunctionKind::Normal
+                || header.flags().bits() != 0x0400
+                || header.mode().bits() & !1 != 0
+            {
+                return Err(BytecodeVerificationError::function(
+                    id,
+                    BytecodeVerificationErrorKind::UnsupportedFunctionHeader,
+                ));
+            }
+            if header.defined_argument_count() != 0 || arguments != 0 {
+                return Err(BytecodeVerificationError::function(
+                    id,
+                    BytecodeVerificationErrorKind::DirectEvalScriptHasArguments {
                         defined: header.defined_argument_count(),
                         arguments,
                     },
@@ -3831,6 +3899,10 @@ fn verify_realm_global_function_initializers(
     Ok(prefix_index)
 }
 
+#[allow(
+    clippy::too_many_lines,
+    reason = "closure provenance, storage policy, and initializer checks form one audited boundary"
+)]
 fn verify_closures(
     id: FunctionTemplateId,
     root: FunctionTemplateId,
@@ -3841,6 +3913,18 @@ fn verify_closures(
     for (index, (closure, staged_source)) in
         closures.iter().zip(function.closure_sources()).enumerate()
     {
+        if matches!(
+            staged_source,
+            CompilerClosureSource::DirectEvalBinding { .. }
+        ) && (id != root || authority_kind != CompilerExecutableKind::DirectEvalScript)
+        {
+            return Err(BytecodeVerificationError::function(
+                id,
+                BytecodeVerificationErrorKind::DirectEvalBindingSourceRequiresDirectEvalScript {
+                    closure: usize_to_u32(index),
+                },
+            ));
+        }
         let slot = BindingSlot::Closure(usize_to_u32(index));
         verify_required_atom(
             id,
@@ -3858,6 +3942,7 @@ fn verify_closures(
                         staged_source,
                         CompilerClosureSource::ParentVariableReference(_)
                             | CompilerClosureSource::ParentClosure(_)
+                            | CompilerClosureSource::DirectEvalBinding { .. }
                     )
             }
             CompilerClosureBinding::RealmGlobal(_) => {
@@ -3879,7 +3964,8 @@ fn verify_closures(
                             closure.name == Some(atom)
                         }
                         CompilerClosureSource::ParentClosure(_) => id != root,
-                        CompilerClosureSource::ParentVariableReference(_) => false,
+                        CompilerClosureSource::ParentVariableReference(_)
+                        | CompilerClosureSource::DirectEvalBinding { .. } => false,
                     }
             }
         };
@@ -4050,6 +4136,7 @@ const fn is_script_authority_kind(kind: CompilerExecutableKind) -> bool {
         kind,
         CompilerExecutableKind::GlobalScript
             | CompilerExecutableKind::IndirectEvalScript
+            | CompilerExecutableKind::DirectEvalScript
             | CompilerExecutableKind::DynamicFunctionScript
     )
 }
@@ -4318,7 +4405,8 @@ fn verify_closure_metadata(
                         .ok()
                         .and_then(|index| parent_metadata.closures.get(index))
                         .map(|definition| (definition.name, definition.binding, parent.atoms())),
-                    CompilerClosureSource::ConstructorRealmGlobal(_) => None,
+                    CompilerClosureSource::ConstructorRealmGlobal(_)
+                    | CompilerClosureSource::DirectEvalBinding { .. } => None,
                 };
                 let matches =
                     expected.is_some_and(|(expected_name, expected_binding, expected_atoms)| {

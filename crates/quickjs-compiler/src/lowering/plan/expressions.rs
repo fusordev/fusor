@@ -2,17 +2,18 @@ use super::super::{
     ArrayExpression, ArrayExpressionElement, ArrowFunctionExpression, AssignmentExpression,
     AssignmentOperator, AssignmentTarget, AstKind, AtomPoolIndex, BinaryOperator, BindingId,
     BranchKind, CallExpression, ChainElement, ChainExpression, Class, ClassElement,
-    CompilationContext, CompiledConstantPool, CompiledMetadataAtomKey, CompilerLabel,
-    ComputedMemberExpression, ConditionalExpression, DeclarationKind, ExecutableId, ExecutableKind,
-    Expression, FinalOpcode, FrameLayout, FrameSlot, Function, FunctionPlanningContext,
-    FunctionTreeLayout, GetSpan, IdentifierReference, InitializationPolicy, LeafCompilationError,
-    LogicalExpression, LogicalOperator, LoweredReference, MethodDefinition, MethodDefinitionKind,
-    NodeId, ObjectExpression, ObjectProperty, ObjectPropertyKind, Operands, OxcPropertyKey,
-    PlannedControlFlow, PlannedInstruction, PrivateFieldExpression, PrivateInExpression,
-    PropertyDefinition, PropertyKind, SequenceExpression, SimpleAssignmentTarget, Span,
-    StatementCompletion, StatementControlStack, StatementPlanningState, StatementWork,
-    StaticMemberExpression, StoragePlacement, UnaryExpression, UnaryOperator,
-    UnsupportedLeafFeature, UpdateExpression, UpdateOperator, compiled_static_property_key,
+    CompilationContext, CompiledConstantPool, CompiledMetadataAtomKey, CompilerClosureBinding,
+    CompilerLabel, ComputedMemberExpression, ConditionalExpression, DeclarationKind, ExecutableId,
+    ExecutableKind, Expression, FinalOpcode, FrameLayout, FrameSlot, Function,
+    FunctionPlanningContext, FunctionTreeLayout, GetSpan, IdentifierReference,
+    InitializationPolicy, LeafCompilationError, LogicalExpression, LogicalOperator,
+    LoweredReference, MethodDefinition, MethodDefinitionKind, NodeId, ObjectExpression,
+    ObjectProperty, ObjectPropertyKind, Operands, OxcPropertyKey, PlannedControlFlow,
+    PlannedInstruction, PrivateFieldExpression, PrivateInExpression, PropertyDefinition,
+    PropertyKind, SequenceExpression, SimpleAssignmentTarget, Span, StatementCompletion,
+    StatementControlStack, StatementPlanningState, StatementWork, StaticMemberExpression,
+    StoragePlacement, UnaryExpression, UnaryOperator, UnsupportedLeafFeature, UpdateExpression,
+    UpdateOperator, compiled_static_property_key, plan_external_put, plan_external_read,
     plan_put_slot, unsupported,
 };
 use super::abrupt::{AbruptMarker, AbruptMarkerKind};
@@ -4305,10 +4306,11 @@ impl<'compiler, 'unit, 'arena, 'scope> ExpressionPlanner<'compiler, 'unit, 'aren
         };
         let (binding, frame_slot) = match reference {
             LoweredReference::Frame { binding, slot, .. } => (binding, slot),
-            LoweredReference::RealmGlobal { slot, .. } => {
+            LoweredReference::RealmGlobal { slot, binding, .. } => {
                 return Self::plan_realm_global_assignment(
                     assignment,
                     slot,
+                    binding,
                     inferred_name,
                     flow,
                     work,
@@ -5348,12 +5350,12 @@ impl<'compiler, 'unit, 'arena, 'scope> ExpressionPlanner<'compiler, 'unit, 'aren
         self.validate_lowered_mutation_reference(reference, true, identifier.span)?;
         let (binding, frame_slot) = match reference {
             LoweredReference::Frame { binding, slot, .. } => (binding, slot),
-            LoweredReference::RealmGlobal { slot, .. } => {
-                work.push(ExpressionWork::Emit(PlannedInstruction::new(
-                    FinalOpcode::PutVar,
-                    Operands::VarRef(slot),
+            LoweredReference::RealmGlobal { slot, binding, .. } => {
+                work.push(ExpressionWork::Emit(plan_external_put(
+                    binding,
+                    slot,
                     identifier.span,
-                )));
+                )?));
                 if update.prefix {
                     work.push(ExpressionWork::Emit(PlannedInstruction::new(
                         FinalOpcode::Dup,
@@ -5366,9 +5368,10 @@ impl<'compiler, 'unit, 'arena, 'scope> ExpressionPlanner<'compiler, 'unit, 'aren
                     Operands::None,
                     update.span,
                 )));
-                work.push(ExpressionWork::Emit(PlannedInstruction::new(
-                    FinalOpcode::GetVar,
-                    Operands::VarRef(slot),
+                work.push(ExpressionWork::Emit(plan_external_read(
+                    binding,
+                    slot,
+                    false,
                     identifier.span,
                 )));
                 return Ok(());
@@ -5418,7 +5421,13 @@ impl<'compiler, 'unit, 'arena, 'scope> ExpressionPlanner<'compiler, 'unit, 'aren
                     layout,
                     tree_layout,
                 )?;
-                if let LoweredReference::RealmGlobal { slot, access, .. } = reference {
+                if let LoweredReference::RealmGlobal {
+                    slot,
+                    binding: CompilerClosureBinding::RealmGlobal(_),
+                    access,
+                    ..
+                } = reference
+                {
                     if !access.reads() || access.writes() {
                         return unsupported(
                             UnsupportedLeafFeature::UnsupportedReference,
@@ -5538,7 +5547,11 @@ impl<'compiler, 'unit, 'arena, 'scope> ExpressionPlanner<'compiler, 'unit, 'aren
                     tree_layout,
                 )?;
                 let opcode = match reference {
-                    LoweredReference::Frame { .. } => {
+                    LoweredReference::Frame { .. }
+                    | LoweredReference::RealmGlobal {
+                        binding: CompilerClosureBinding::Captured(_),
+                        ..
+                    } => {
                         PlannedInstruction::new(FinalOpcode::PushFalse, Operands::None, unary.span)
                     }
                     LoweredReference::RealmGlobal { global, .. } => {

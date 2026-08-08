@@ -4879,6 +4879,9 @@ fn require_root_kind(
         CompilerExecutableKind::IndirectEvalScript => {
             "non-eval executable cannot execute as an indirect-eval Script"
         }
+        CompilerExecutableKind::DirectEvalScript => {
+            "non-eval executable cannot execute as a direct-eval Script"
+        }
         CompilerExecutableKind::OrdinaryFunction => {
             "non-instantiable executable cannot be instantiated as a source function"
         }

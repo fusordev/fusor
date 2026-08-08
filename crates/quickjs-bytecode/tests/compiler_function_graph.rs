@@ -781,6 +781,100 @@ fn constructor_realm_global_sources_are_atom_bound_and_root_owned() {
 }
 
 #[test]
+fn direct_eval_sources_are_shape_bound_and_root_owned() {
+    let direct = |index, environment_size| CompilerClosureSource::DirectEvalBinding {
+        index,
+        environment_size,
+    };
+    let root_flow = compiler_flow(
+        &[(FinalOpcode::ReturnUndef, Operands::None)],
+        0,
+        0,
+        &[],
+        2,
+        &[],
+    );
+    let root = function(Arc::clone(&root_flow), &[], &[direct(0, 3), direct(2, 3)]);
+    let verified = verify_compiler_function_graph(
+        graph(vec![root]),
+        FunctionGraphVerificationLimits::default(),
+    )
+    .expect("a root can bind a sparse subset of one exact caller environment");
+    assert_eq!(
+        verified.root().closure_sources(),
+        [direct(0, 3), direct(2, 3)]
+    );
+
+    let out_of_bounds = function(Arc::clone(&root_flow), &[], &[direct(3, 3), direct(0, 3)]);
+    let error = verify_compiler_function_graph(
+        graph(vec![out_of_bounds]),
+        FunctionGraphVerificationLimits::default(),
+    )
+    .expect_err("a caller-binding index must fit the bound environment shape");
+    assert_eq!(
+        error.kind(),
+        &FunctionGraphVerificationErrorKind::DirectEvalBindingOutOfBounds {
+            closure: 0,
+            index: 3,
+            environment_size: 3,
+        }
+    );
+
+    let inconsistent = function(root_flow, &[], &[direct(0, 2), direct(1, 3)]);
+    let error = verify_compiler_function_graph(
+        graph(vec![inconsistent]),
+        FunctionGraphVerificationLimits::default(),
+    )
+    .expect_err("every caller-binding source must bind the same environment shape");
+    assert_eq!(
+        error.kind(),
+        &FunctionGraphVerificationErrorKind::DirectEvalEnvironmentSizeMismatch {
+            expected: 2,
+            closure: 1,
+            actual: 3,
+        }
+    );
+
+    let parent = function(
+        compiler_flow(
+            &[
+                (FinalOpcode::FClosure8, Operands::Const8(0)),
+                (FinalOpcode::Return, Operands::None),
+            ],
+            0,
+            0,
+            &[],
+            0,
+            &[CompilerConstantKind::Function],
+        ),
+        &[1],
+        &[],
+    );
+    let child = function(
+        compiler_flow(
+            &[(FinalOpcode::ReturnUndef, Operands::None)],
+            0,
+            0,
+            &[],
+            1,
+            &[],
+        ),
+        &[],
+        &[direct(0, 1)],
+    );
+    let error = verify_compiler_function_graph(
+        graph(vec![parent, child]),
+        FunctionGraphVerificationLimits::default(),
+    )
+    .expect_err("a descendant must forward the root caller binding");
+    assert_eq!(
+        error.kind(),
+        &FunctionGraphVerificationErrorKind::DirectEvalBindingSourceNotRoot { closure: 0 }
+    );
+    assert_eq!(error.function(), Some(FunctionTemplateId::new(1)));
+}
+
+#[test]
 fn rejects_duplicate_compiler_capture_sources() {
     let parent = function(
         compiler_flow(

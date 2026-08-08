@@ -5474,6 +5474,7 @@ fn define_method_input_with_root_arguments(
             }
             CompilerExecutableKind::GlobalScript
             | CompilerExecutableKind::IndirectEvalScript
+            | CompilerExecutableKind::DirectEvalScript
             | CompilerExecutableKind::DynamicFunctionScript => {
                 panic!("a define_method child cannot be a Script")
             }
@@ -6785,6 +6786,85 @@ fn ordinary_root_authority_cannot_originate_constructor_realm_globals() {
     assert_eq!(
         error.kind(),
         &BytecodeVerificationErrorKind::ConstructorRealmGlobalSourceRequiresDynamicFunctionScript {
+            closure: 0,
+        }
+    );
+}
+
+fn direct_eval_binding_input(
+    executable_kind: CompilerExecutableKind,
+) -> UnverifiedCompilerBytecodeGraph {
+    let closure_source = CompilerClosureSource::DirectEvalBinding {
+        index: 1,
+        environment_size: 2,
+    };
+    let flow = flow_with_header(
+        &[(FinalOpcode::ReturnUndef, Operands::None)],
+        1,
+        0,
+        0,
+        &[],
+        1,
+        &[],
+        UnverifiedFunctionHeader::global_script(false, 0),
+    );
+    let graph = Arc::new(
+        verify_compiler_function_graph(
+            UnverifiedCompilerFunctionGraph::new(
+                FunctionTemplateId::new(0),
+                Arc::from([UnverifiedCompilerFunction::new(
+                    Arc::clone(&flow),
+                    Arc::from([]),
+                    Arc::from([closure_source]),
+                )
+                .with_atom_pool(Arc::from([atom("callerValue")]))]),
+            ),
+            FunctionGraphVerificationLimits::default(),
+        )
+        .expect("staged direct-eval caller-binding graph"),
+    );
+    let text = "callerValue";
+    let full_span = SourceByteSpan::new(0, u32::try_from(text.len()).expect("source length"));
+    UnverifiedCompilerBytecodeGraph::new(
+        graph,
+        Arc::from([UnverifiedFunctionMetadata::new(
+            None,
+            Arc::from([]),
+            Arc::from([ClosureVariableDefinition::new(
+                Some(AtomPoolIndex::new(0)),
+                var_policy(),
+                closure_source,
+            )]),
+            source(text, full_span, None, &[(0, full_span)]),
+        )
+        .with_executable_kind(executable_kind)]),
+    )
+}
+
+#[test]
+fn direct_eval_authority_binds_only_direct_eval_caller_sources() {
+    let verified = verify_compiler_bytecode_graph(
+        direct_eval_binding_input(CompilerExecutableKind::DirectEvalScript),
+        BytecodeGraphVerificationLimits::default(),
+    )
+    .expect("a direct-eval Script root can import a typed caller binding");
+    assert_eq!(
+        verified.root().metadata().executable_kind(),
+        CompilerExecutableKind::DirectEvalScript
+    );
+    assert_eq!(
+        verified.root().metadata().closures()[0].binding(),
+        CompilerClosureBinding::Captured(var_policy())
+    );
+
+    let error = verify_compiler_bytecode_graph(
+        direct_eval_binding_input(CompilerExecutableKind::IndirectEvalScript),
+        BytecodeGraphVerificationLimits::default(),
+    )
+    .expect_err("an indirect-eval authority cannot import a caller binding");
+    assert_eq!(
+        error.kind(),
+        &BytecodeVerificationErrorKind::DirectEvalBindingSourceRequiresDirectEvalScript {
             closure: 0,
         }
     );

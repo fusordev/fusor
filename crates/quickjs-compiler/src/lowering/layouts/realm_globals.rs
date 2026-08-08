@@ -1,7 +1,12 @@
 use std::{collections::HashMap, ops::Range, sync::Arc};
 
-use quickjs_bytecode::CompilerBindingPolicy;
-use quickjs_frontend::Span;
+use quickjs_bytecode::{
+    CompilerBindingKind, CompilerBindingPolicy, CompilerClosureBinding,
+    CompilerInitializationPolicy, CompilerWritePolicy,
+};
+use quickjs_frontend::{
+    DirectEvalBinding, DirectEvalBindingKind, DirectEvalBindingLocation, DirectEvalContext, Span,
+};
 
 use crate::storage::{
     BindingId, DeclarationKind, ExecutableId, InitializationPolicy, StoragePlacement, StoragePlan,
@@ -14,16 +19,31 @@ use super::super::{
 };
 
 #[derive(Clone, Copy)]
-pub(in crate::lowering) struct RealmGlobalLayoutInput<'plan> {
+pub(in crate::lowering) struct RealmGlobalLayoutInput<'plan, 'scope> {
     pub(in crate::lowering) plan: &'plan StoragePlan,
     pub(in crate::lowering) enabled: bool,
+    pub(in crate::lowering) direct_eval: Option<DirectEvalContext<'scope>>,
+}
+
+#[derive(Clone, Copy)]
+pub(in crate::lowering) enum RealmGlobalRootSource {
+    ConstructorRealm,
+    DirectEvalBinding { index: u32, environment_size: u32 },
 }
 
 pub(in crate::lowering) struct RealmGlobalBinding {
     pub(in crate::lowering) name: Arc<str>,
     pub(in crate::lowering) first_span: Span,
     pub(in crate::lowering) policy: CompilerBindingPolicy,
+    pub(in crate::lowering) binding: CompilerClosureBinding,
+    pub(in crate::lowering) root_source: RealmGlobalRootSource,
     pub(in crate::lowering) declaration: Option<BindingId>,
+}
+
+#[derive(Clone, Copy)]
+struct DirectEvalCallerBinding {
+    index: u32,
+    policy: CompilerBindingPolicy,
 }
 
 pub(in crate::lowering) struct RealmGlobalLayout {
@@ -41,19 +61,119 @@ struct RealmGlobalLayoutBuilder<'plan> {
     by_binding: Vec<Option<RealmGlobalId>>,
     by_unresolved: Vec<Option<RealmGlobalId>>,
     needs: Vec<Vec<RealmGlobalId>>,
+    direct_by_name: HashMap<Arc<str>, DirectEvalCallerBinding>,
+    direct_environment_size: u32,
+}
+
+fn direct_eval_binding_policy(
+    binding: DirectEvalBinding<'_>,
+) -> Result<CompilerBindingPolicy, LeafCompilationError> {
+    let policy = match binding.kind() {
+        DirectEvalBindingKind::Normal => {
+            if matches!(
+                binding.location(),
+                DirectEvalBindingLocation::Argument { .. }
+            ) {
+                CompilerBindingPolicy::new(
+                    CompilerBindingKind::Parameter,
+                    CompilerInitializationPolicy::Argument,
+                    CompilerWritePolicy::Mutable,
+                    false,
+                )
+            } else if binding.is_const() {
+                CompilerBindingPolicy::new(
+                    CompilerBindingKind::Const,
+                    CompilerInitializationPolicy::AtDeclaration,
+                    CompilerWritePolicy::Immutable,
+                    true,
+                )
+            } else if binding.is_lexical() {
+                CompilerBindingPolicy::new(
+                    CompilerBindingKind::Let,
+                    CompilerInitializationPolicy::AtDeclaration,
+                    CompilerWritePolicy::Mutable,
+                    true,
+                )
+            } else {
+                CompilerBindingPolicy::new(
+                    CompilerBindingKind::Var,
+                    CompilerInitializationPolicy::UndefinedAtInstantiation,
+                    CompilerWritePolicy::Mutable,
+                    false,
+                )
+            }
+        }
+        DirectEvalBindingKind::FunctionDeclaration
+        | DirectEvalBindingKind::NewFunctionDeclaration
+        | DirectEvalBindingKind::GlobalFunctionDeclaration => CompilerBindingPolicy::new(
+            CompilerBindingKind::Function,
+            if binding.is_lexical() {
+                CompilerInitializationPolicy::FunctionAtScopeEntry
+            } else {
+                CompilerInitializationPolicy::FunctionAtInstantiation
+            },
+            CompilerWritePolicy::Mutable,
+            false,
+        ),
+        DirectEvalBindingKind::Catch => CompilerBindingPolicy::new(
+            CompilerBindingKind::Catch,
+            CompilerInitializationPolicy::Catch,
+            CompilerWritePolicy::Mutable,
+            false,
+        ),
+        DirectEvalBindingKind::FunctionName => CompilerBindingPolicy::new(
+            CompilerBindingKind::FunctionName,
+            CompilerInitializationPolicy::FunctionName,
+            if binding.is_const() {
+                CompilerWritePolicy::Immutable
+            } else {
+                CompilerWritePolicy::ImmutableInStrictCode
+            },
+            false,
+        ),
+        _ => {
+            return Err(LeafCompilationError::SemanticInvariant {
+                invariant: "direct-eval caller binding kind is supported",
+                span: None,
+            });
+        }
+    };
+    Ok(policy)
 }
 
 impl<'plan> RealmGlobalLayoutBuilder<'plan> {
-    fn new(input: RealmGlobalLayoutInput<'plan>) -> Self {
+    fn new(input: RealmGlobalLayoutInput<'plan, '_>) -> Result<Self, LeafCompilationError> {
         let plan = input.plan;
-        Self {
+        let mut direct_by_name = HashMap::new();
+        let mut direct_environment_size = 0_u32;
+        if let Some(context) = input.direct_eval {
+            for frame in context.scope_snapshot().frames() {
+                for binding in frame.bindings() {
+                    let index = direct_environment_size;
+                    direct_environment_size = direct_environment_size.checked_add(1).ok_or(
+                        LeafCompilationError::CapacityExceeded {
+                            domain: "direct-eval caller bindings",
+                        },
+                    )?;
+                    direct_by_name.entry(Arc::from(binding.name())).or_insert(
+                        DirectEvalCallerBinding {
+                            index,
+                            policy: direct_eval_binding_policy(*binding)?,
+                        },
+                    );
+                }
+            }
+        }
+        Ok(Self {
             plan,
             bindings: Vec::new(),
             by_name: HashMap::new(),
             by_binding: vec![None; plan.bindings().len()],
             by_unresolved: vec![None; plan.unresolved_globals().len()],
             needs: (0..plan.executables().len()).map(|_| Vec::new()).collect(),
-        }
+            direct_by_name,
+            direct_environment_size,
+        })
     }
 
     fn collect_declarations(&mut self) -> Result<(), LeafCompilationError> {
@@ -140,10 +260,13 @@ impl<'plan> RealmGlobalLayoutBuilder<'plan> {
                 span: Some(first_span),
             });
         }
+        let policy = verified_storage_policy(binding)?;
         let id = self.push_binding(RealmGlobalBinding {
             name: Arc::clone(&name),
             first_span,
-            policy: verified_storage_policy(binding)?,
+            policy,
+            binding: CompilerClosureBinding::RealmGlobal(policy),
+            root_source: RealmGlobalRootSource::ConstructorRealm,
             declaration: Some(binding.id()),
         })?;
         self.by_name.insert(name, id);
@@ -168,10 +291,30 @@ impl<'plan> RealmGlobalLayoutBuilder<'plan> {
             let id = if let Some(&id) = self.by_name.get(&name) {
                 id
             } else {
+                let caller = self.direct_by_name.get(&name).copied();
+                let policy =
+                    caller.map_or_else(constructor_realm_lookup_policy, |binding| binding.policy);
+                let (binding, root_source) = caller.map_or(
+                    (
+                        CompilerClosureBinding::RealmGlobal(policy),
+                        RealmGlobalRootSource::ConstructorRealm,
+                    ),
+                    |caller| {
+                        (
+                            CompilerClosureBinding::Captured(policy),
+                            RealmGlobalRootSource::DirectEvalBinding {
+                                index: caller.index,
+                                environment_size: self.direct_environment_size,
+                            },
+                        )
+                    },
+                );
                 let id = self.push_binding(RealmGlobalBinding {
                     name: Arc::clone(&name),
                     first_span: reference.span(),
-                    policy: constructor_realm_lookup_policy(),
+                    policy,
+                    binding,
+                    root_source,
                     declaration: None,
                 })?;
                 self.by_name.insert(name, id);
@@ -271,7 +414,7 @@ impl<'plan> RealmGlobalLayoutBuilder<'plan> {
 
 impl RealmGlobalLayout {
     pub(in crate::lowering) fn new(
-        input: RealmGlobalLayoutInput<'_>,
+        input: RealmGlobalLayoutInput<'_, '_>,
     ) -> Result<Self, LeafCompilationError> {
         let plan = input.plan;
         if !input.enabled {
@@ -284,7 +427,7 @@ impl RealmGlobalLayout {
             });
         }
 
-        let mut builder = RealmGlobalLayoutBuilder::new(input);
+        let mut builder = RealmGlobalLayoutBuilder::new(input)?;
         builder.collect_declarations()?;
         builder.collect_unresolved()?;
         builder.collect_resolved_needs()?;
@@ -375,6 +518,7 @@ mod tests {
             let layout = RealmGlobalLayout::new(RealmGlobalLayoutInput {
                 plan,
                 enabled: true,
+                direct_eval: None,
             })
             .expect("realm global layout");
             let realm_read_index = layout

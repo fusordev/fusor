@@ -1,13 +1,13 @@
 use super::super::{
     ArgumentSlot, AssignmentExpression, AssignmentOperator, AssignmentTarget, BindingId,
     BindingIdentifier, BindingPattern, BranchKind, CompilationContext, CompiledConstantPool,
-    DeclarationKind, DestructuringBindingInitialization, ExecutableId, Expression, FinalOpcode,
-    ForStatementLeft, FrameLayout, FrameSlot, FunctionTreeLayout, GetSpan, IdentifierReference,
-    LeafCompilationError, LocalSlot, NativeReferenceId, Operands, PlannedControlFlow,
-    PlannedInstruction, RealmGlobalId, ReferenceAccess, ReferenceId, Span, StoragePlacement,
-    SymbolId, UnresolvedGlobalId, UnsupportedLeafFeature, VariableDeclaration,
-    VariableDeclarationKind, VariableDeclarator, WritePolicy, anonymous_named_evaluation_span,
-    binary_opcode, unsupported,
+    CompilerClosureBinding, CompilerWritePolicy, DeclarationKind,
+    DestructuringBindingInitialization, ExecutableId, Expression, FinalOpcode, ForStatementLeft,
+    FrameLayout, FrameSlot, FunctionTreeLayout, GetSpan, IdentifierReference, LeafCompilationError,
+    LocalSlot, NativeReferenceId, Operands, PlannedControlFlow, PlannedInstruction, RealmGlobalId,
+    ReferenceAccess, ReferenceId, Span, StoragePlacement, SymbolId, UnresolvedGlobalId,
+    UnsupportedLeafFeature, VariableDeclaration, VariableDeclarationKind, VariableDeclarator,
+    WritePolicy, anonymous_named_evaluation_span, binary_opcode, unsupported,
 };
 use super::expressions::{ExpressionPlanner, ExpressionWork};
 
@@ -21,6 +21,7 @@ pub(in crate::lowering) enum LoweredReference {
     RealmGlobal {
         global: RealmGlobalId,
         slot: u16,
+        binding: CompilerClosureBinding,
         access: ReferenceAccess,
     },
 }
@@ -133,6 +134,45 @@ pub(in crate::lowering) fn plan_put_slot(slot: FrameSlot, span: Span) -> Planned
     PlannedInstruction::new(opcode, operands, span)
 }
 
+pub(in crate::lowering) fn plan_external_read(
+    binding: CompilerClosureBinding,
+    slot: u16,
+    unresolved_is_undefined: bool,
+    span: Span,
+) -> PlannedInstruction {
+    let (opcode, operands) = match binding {
+        CompilerClosureBinding::Captured(policy) if policy.has_temporal_dead_zone() => {
+            (FinalOpcode::GetVarRefCheck, Operands::VarRef(slot))
+        }
+        CompilerClosureBinding::Captured(_) => compact_get_capture(slot),
+        CompilerClosureBinding::RealmGlobal(_) if unresolved_is_undefined => {
+            (FinalOpcode::GetVarUndef, Operands::VarRef(slot))
+        }
+        CompilerClosureBinding::RealmGlobal(_) => (FinalOpcode::GetVar, Operands::VarRef(slot)),
+    };
+    PlannedInstruction::new(opcode, operands, span)
+}
+
+pub(in crate::lowering) fn plan_external_put(
+    binding: CompilerClosureBinding,
+    slot: u16,
+    span: Span,
+) -> Result<PlannedInstruction, LeafCompilationError> {
+    let (opcode, operands) = match binding {
+        CompilerClosureBinding::Captured(policy)
+            if policy.writes() != CompilerWritePolicy::Mutable =>
+        {
+            return unsupported(UnsupportedLeafFeature::UnsupportedReference, span);
+        }
+        CompilerClosureBinding::Captured(policy) if policy.has_temporal_dead_zone() => {
+            (FinalOpcode::PutVarRefCheck, Operands::VarRef(slot))
+        }
+        CompilerClosureBinding::Captured(_) => compact_put_capture(slot),
+        CompilerClosureBinding::RealmGlobal(_) => (FinalOpcode::PutVar, Operands::VarRef(slot)),
+    };
+    Ok(PlannedInstruction::new(opcode, operands, span))
+}
+
 impl LoweredReference {
     pub(in crate::lowering) const fn access(self) -> ReferenceAccess {
         match self {
@@ -199,11 +239,9 @@ impl<'arena> ExpressionPlanner<'_, '_, 'arena, '_> {
             LoweredReference::Frame { binding, slot, .. } => {
                 self.plan_read_slot(binding, slot, identifier.span)?
             }
-            LoweredReference::RealmGlobal { slot, .. } => PlannedInstruction::new(
-                FinalOpcode::GetVar,
-                Operands::VarRef(slot),
-                identifier.span,
-            ),
+            LoweredReference::RealmGlobal { slot, binding, .. } => {
+                plan_external_read(binding, slot, false, identifier.span)
+            }
         };
         flow.emit(instruction)
     }
@@ -211,20 +249,13 @@ impl<'arena> ExpressionPlanner<'_, '_, 'arena, '_> {
     pub(in crate::lowering) fn plan_realm_global_assignment<'expression>(
         assignment: &'expression AssignmentExpression<'arena>,
         slot: u16,
+        binding: CompilerClosureBinding,
         inferred_name: Option<PlannedInstruction>,
         flow: &mut PlannedControlFlow,
         work: &mut Vec<ExpressionWork<'expression, 'arena>>,
     ) -> Result<(), LeafCompilationError> {
-        let read = PlannedInstruction::new(
-            FinalOpcode::GetVar,
-            Operands::VarRef(slot),
-            assignment.left.span(),
-        );
-        let write = PlannedInstruction::new(
-            FinalOpcode::PutVar,
-            Operands::VarRef(slot),
-            assignment.left.span(),
-        );
+        let read = plan_external_read(binding, slot, false, assignment.left.span());
+        let write = plan_external_put(binding, slot, assignment.left.span())?;
         match assignment.operator {
             AssignmentOperator::Assign => {
                 work.push(ExpressionWork::Emit(write));
@@ -621,12 +652,8 @@ impl<'arena> CompilationContext<'_, 'arena, '_> {
                             flow.emit(instruction)?;
                         }
                     }
-                    LoweredReference::RealmGlobal { slot, .. } => {
-                        flow.emit(PlannedInstruction::new(
-                            FinalOpcode::PutVar,
-                            Operands::VarRef(slot),
-                            identifier.span,
-                        ))?;
+                    LoweredReference::RealmGlobal { slot, binding, .. } => {
+                        flow.emit(plan_external_put(binding, slot, identifier.span)?)?;
                     }
                 }
             }
@@ -1251,12 +1278,12 @@ impl CompilationContext<'_, '_, '_> {
                 span: Some(span),
             });
         }
-        if !crate::is_supported_script_root_goal(self.unit.goal()) {
+        if !crate::is_supported_script_compilation_goal(self.unit.goal()) {
             return unsupported(UnsupportedLeafFeature::UnresolvedReference, span);
         }
         let global = tree_layout.realm_globals.for_unresolved(unresolved).ok_or(
             LeafCompilationError::SemanticInvariant {
-                invariant: "dynamic unresolved reference has a constructor-realm global identity",
+                invariant: "Script unresolved reference has an external-binding identity",
                 span: Some(span),
             },
         )?;
@@ -1265,9 +1292,16 @@ impl CompilationContext<'_, '_, '_> {
             layout.executable,
             global,
         )?;
+        let binding = tree_layout.realm_globals.binding(global).ok_or(
+            LeafCompilationError::SemanticInvariant {
+                invariant: "Script external-binding descriptor exists",
+                span: Some(span),
+            },
+        )?;
         Ok(LoweredReference::RealmGlobal {
             global,
             slot,
+            binding: binding.binding,
             access: reference.access(),
         })
     }
@@ -1294,9 +1328,16 @@ impl CompilationContext<'_, '_, '_> {
             layout.executable,
             global,
         )?;
+        let descriptor = tree_layout.realm_globals.binding(global).ok_or(
+            LeafCompilationError::SemanticInvariant {
+                invariant: "Script external-binding descriptor exists",
+                span: Some(span),
+            },
+        )?;
         Ok(LoweredReference::RealmGlobal {
             global,
             slot,
+            binding: descriptor.binding,
             access,
         })
     }
@@ -1310,18 +1351,27 @@ impl CompilationContext<'_, '_, '_> {
         if !reference.access().writes() || reference.access().reads() != needs_read {
             return unsupported(UnsupportedLeafFeature::UnsupportedReference, span);
         }
-        if let LoweredReference::Frame { binding, .. } = reference {
-            let storage = self.planned.plan.binding(binding).ok_or(
-                LeafCompilationError::SemanticInvariant {
-                    invariant: "written compiler binding exists",
-                    span: Some(span),
-                },
-            )?;
-            if storage.policy().writes() != WritePolicy::Mutable
-                && storage.policy().kind() != DeclarationKind::ClassName
-            {
+        match reference {
+            LoweredReference::Frame { binding, .. } => {
+                let storage = self.planned.plan.binding(binding).ok_or(
+                    LeafCompilationError::SemanticInvariant {
+                        invariant: "written compiler binding exists",
+                        span: Some(span),
+                    },
+                )?;
+                if storage.policy().writes() != WritePolicy::Mutable
+                    && storage.policy().kind() != DeclarationKind::ClassName
+                {
+                    return unsupported(UnsupportedLeafFeature::UnsupportedReference, span);
+                }
+            }
+            LoweredReference::RealmGlobal {
+                binding: CompilerClosureBinding::Captured(policy),
+                ..
+            } if policy.writes() != CompilerWritePolicy::Mutable => {
                 return unsupported(UnsupportedLeafFeature::UnsupportedReference, span);
             }
+            LoweredReference::RealmGlobal { .. } => {}
         }
         Ok(())
     }
