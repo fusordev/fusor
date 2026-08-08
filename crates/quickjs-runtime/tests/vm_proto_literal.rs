@@ -1,10 +1,10 @@
-//! Object-literal `__proto__` data properties and explicit prototype changes.
+//! Normative object-initializer `ProtoSetter` semantics.
 //!
 //! Oracle transcript for the behaviors asserted here:
 //!
 //! ```text
-//! static proto is own => true
-//! static proto keeps default prototype => true
+//! static proto changes prototype => true
+//! static proto is not own => true
 //! explicit prototype => 1
 //! computed proto is own => __proto__
 //! ```
@@ -68,99 +68,65 @@ fn boolean(source: &str) -> bool {
     })
 }
 
-/// Annex B object-literal prototype mutation is absent: a static
-/// `__proto__` spelling creates an own data property and leaves the ordinary
-/// object prototype unchanged.
+/// A static `ProtoSetter` changes the fresh literal's prototype without defining
+/// an own `__proto__` property.
 #[test]
-fn a_proto_literal_key_defines_an_own_property() {
+fn a_proto_literal_key_changes_the_literal_prototype() {
     assert!(boolean(
         "function run(){let base={m:1};let o={__proto__:base};\
-         return o.__proto__===base&&o.m===void 0;}"
+         return o.m===1&&o.__proto__===void 0;}"
     ));
 }
 
-/// A static data key preserves normal own-key enumeration order.
+/// A `ProtoSetter` does not enter the literal's own-key enumeration order.
 #[test]
-fn a_proto_literal_key_is_an_own_property() {
+fn a_proto_literal_key_is_not_an_own_property() {
     assert_eq!(
         text(
-            "function run(){\
-                let base={inherited:1};\
-                let o={__proto__:base,own:2};\
-                let keys=\"\";\
-                for(let k in o){keys+=k+\",\";}\
-                return keys;\
-            }"
+            "function run(){let base={inherited:1};let o={__proto__:base,own:2};\
+             let keys='';for(let key in o){keys+=key+',';}return keys;}"
         ),
-        "__proto__,own,"
+        "own,inherited,"
     );
 }
 
-/// `null` is stored like every other static data value; it does not detach the
-/// literal from `Object.prototype`.
+/// `null` detaches the fresh literal from `Object.prototype`.
 #[test]
-fn a_null_proto_literal_key_is_an_ordinary_data_property() {
+fn a_null_proto_literal_key_creates_a_null_prototype() {
     assert_eq!(
         text(
-            "function run(){\
-                let o={__proto__:null,own:1};\
-                let keys=\"\";\
-                for(let k in o){keys+=k;}\
-                return keys;\
-            }"
+            "function run(){let o={__proto__:null,own:1};let keys='';\
+             for(let key in o){keys+=key;}return keys+':'+(o.toString===void 0);}"
         ),
-        "__proto__own"
+        "own:true"
     );
 }
 
-/// Primitive values are stored rather than silently discarded by an Annex B
-/// prototype-mutating special case.
+/// Primitive `ProtoSetter` values are evaluated and ignored without defining a
+/// data property.
 #[test]
-fn a_non_object_proto_literal_key_is_stored() {
+fn a_non_object_proto_literal_value_is_ignored() {
     assert!(boolean(
         "function run(){\
             let ignored={__proto__:5};\
-            return ignored.__proto__===5;\
+            return typeof ignored.toString==='function'&&ignored.__proto__===void 0;\
         }"
     ));
     assert!(boolean(
         "function run(){\
             let literal={__proto__:void 0};\
-            return literal.__proto__===void 0;\
+            return typeof literal.toString==='function'&&literal.__proto__===void 0;\
         }"
     ));
-    assert_eq!(
-        text(
-            "function run(){\
-                let o={__proto__:5};\
-                let keys=\"\";\
-                for(let k in o){keys+=k;}\
-                return keys;\
-            }"
-        ),
-        "__proto__"
-    );
 }
 
-/// Quoted static keys follow the same ordinary data-property rule.
+/// Quoted static keys have the same `ProtoSetter` semantics.
 #[test]
-fn a_quoted_proto_literal_key_defines_an_own_property() {
+fn a_quoted_proto_literal_key_changes_the_literal_prototype() {
     assert!(boolean(
         "function run(){let base={m:1};let o={\"__proto__\":base};\
-         return o.__proto__===base&&o.m===void 0;}"
+         return o.m===1&&o.__proto__===void 0;}"
     ));
-    assert_eq!(
-        text(
-            "function run(){\
-                let base={m:1};\
-                let o={\"__proto__\":base};\
-                let keys=\"\";\
-                for(let k in o){keys+=k;}\
-                return keys;\
-            }"
-        ),
-        "__proto__"
-    );
 }
 
 /// A shorthand `__proto__` is an ordinary own data property, never an object

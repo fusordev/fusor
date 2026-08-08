@@ -1108,10 +1108,10 @@ fn deleting_a_resolved_identifier_pushes_false_without_reading_it() {
     );
 }
 
-/// Annex B object-literal `__proto__` mutation is absent. Every static spelling
-/// defines an ordinary own data property with the cooked property key.
+/// The normative object-initializer `ProtoSetter` uses `set_proto` for every
+/// static spelling, including escaped and quoted cooked property names.
 #[test]
-fn proto_data_keys_define_ordinary_own_properties_in_every_spelling() {
+fn proto_setters_use_set_proto_in_every_static_spelling() {
     for source in [
         "function make(value){return {__proto__:value};}",
         "function make(value){return {\"__proto__\":value};}",
@@ -1123,10 +1123,7 @@ fn proto_data_keys_define_ordinary_own_properties_in_every_spelling() {
             vec![
                 (FinalOpcode::Object, Operands::None),
                 (FinalOpcode::GetArg0, Operands::NoneArg),
-                (
-                    FinalOpcode::DefineField,
-                    Operands::Atom(AtomPoolIndex::new(0))
-                ),
+                (FinalOpcode::SetProto, Operands::None),
                 (FinalOpcode::Return, Operands::None),
             ],
             "{source}"
@@ -1134,8 +1131,8 @@ fn proto_data_keys_define_ordinary_own_properties_in_every_spelling() {
     }
 }
 
-/// A computed `__proto__` key is likewise an ordinary own property and uses
-/// the computed definition opcode.
+/// A computed `__proto__` key remains an ordinary own property and uses the
+/// computed definition opcode rather than `ProtoSetter` semantics.
 #[test]
 fn a_computed_proto_key_still_defines_an_own_property() {
     let compiled = compile("function make(key,value){return {[key]:value};}", "make");
@@ -1144,7 +1141,7 @@ fn a_computed_proto_key_still_defines_an_own_property() {
         lowered
             .iter()
             .all(|(opcode, _)| *opcode != FinalOpcode::SetProto),
-        "a computed key must not use an Annex B prototype mutation: {lowered:?}"
+        "a computed key must not use ProtoSetter semantics: {lowered:?}"
     );
     assert!(
         lowered

@@ -3855,6 +3855,15 @@ impl<'compiler, 'unit, 'arena, 'scope> ExpressionPlanner<'compiler, 'unit, 'aren
                 )?));
                 continue;
             }
+            if !property.shorthand && key.value.latin1_units() == Some(b"__proto__") {
+                work.push(ExpressionWork::Emit(PlannedInstruction::new(
+                    FinalOpcode::SetProto,
+                    Operands::None,
+                    property.span,
+                )));
+                work.push(ExpressionWork::Visit(&property.value));
+                continue;
+            }
             let inferred_name = Self::plan_inferred_static_property_name_for_initializer(
                 &property.value,
                 constants.property_atom_index(key.span)?,

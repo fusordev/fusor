@@ -309,11 +309,11 @@ fn annex_b_object_prototype_extensions_are_absent() {
 }
 
 #[test]
-fn proto_named_object_literal_property_is_an_ordinary_own_data_property() {
+fn proto_named_object_literal_uses_the_normative_prototype_setter() {
     assert!(boolean(
         "let prototype={marker:1};let literal={__proto__:prototype};\
-         return Object.getPrototypeOf(literal)===Object.prototype&&\
-           Object.hasOwn(literal,'__proto__')&&literal.__proto__===prototype;"
+         return Object.getPrototypeOf(literal)===prototype&&literal.marker===1&&\
+           !Object.hasOwn(literal,'__proto__');"
     ));
 }
 
