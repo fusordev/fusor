@@ -92,6 +92,22 @@ fn annex_b_catch_var_initializer_updates_only_the_catch_parameter() {
 }
 
 #[test]
+fn annex_b_labelled_function_is_instantiated_in_the_variable_environment() {
+    let mut runtime = Runtime::try_new(RuntimeLimits::default()).expect("runtime");
+    let realm = runtime.create_realm().expect("realm");
+    let mut context = runtime.context(&realm).expect("context");
+
+    let value = evaluate_script(
+        &mut context,
+        "outer: inner: function legacy(value) { return value + 1; } legacy(41);",
+        "annex-b-labelled-function.js",
+        ScriptLimits::default(),
+    )
+    .expect("Annex B labelled-function Script");
+    assert!(number(&value).strict_equals(JsNumber::from_i32(42)));
+}
+
+#[test]
 fn global_anonymous_function_initializers_receive_their_binding_name() {
     let mut runtime = Runtime::try_new(RuntimeLimits::default()).expect("runtime");
     let realm = runtime.create_realm().expect("realm");

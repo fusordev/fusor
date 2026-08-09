@@ -1875,8 +1875,11 @@ impl<'unit, 'arena, 'scope> Planner<'unit, 'arena, 'scope> {
                 {
                     let declaration_scope = node.scope_id();
                     let flags = semantic.scoping().scope_flags(declaration_scope);
-                    let single_statement_parent =
-                        is_single_statement_parent(nodes.parent_kind(node_id));
+                    let parent = nodes.parent_kind(node_id);
+                    if matches!(parent, AstKind::LabeledStatement(_)) {
+                        continue;
+                    }
+                    let single_statement_parent = is_single_statement_parent(parent);
                     if single_statement_parent || (!flags.is_var() && !flags.is_strict_mode()) {
                         return unsupported(UnsupportedFeature::AnnexBBlockFunction, function.span);
                     }

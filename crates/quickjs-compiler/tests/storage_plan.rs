@@ -1418,13 +1418,19 @@ fn sloppy_block_functions_fail_closed_for_annex_b_dual_bindings() {
 }
 
 #[test]
-fn sloppy_labelled_function_fails_closed_for_annex_b_binding_rules() {
-    let source = "legacy: function declared() {}";
-    let (feature, span) = unsupported(source, ParseMode::Script);
-    assert_eq!(feature, UnsupportedFeature::AnnexBBlockFunction);
+fn sloppy_labelled_function_uses_the_variable_environment_binding() {
+    let plan = script("legacy: function declared() {}");
+    let binding = plan
+        .bindings()
+        .iter()
+        .find(|binding| binding.name() == "declared")
+        .expect("labelled function binding");
+
+    assert_eq!(binding.placement(), StoragePlacement::GlobalObject);
+    assert_eq!(binding.policy().kind(), DeclarationKind::Function);
     assert_eq!(
-        &source[span.start as usize..span.end as usize],
-        "function declared() {}"
+        binding.policy().initialization(),
+        InitializationPolicy::FunctionAtInstantiation
     );
 }
 
