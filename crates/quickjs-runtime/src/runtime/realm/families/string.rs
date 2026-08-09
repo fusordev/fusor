@@ -80,6 +80,18 @@ pub(super) fn visit_properties(visit: PropertySink<'_>) {
             key,
             NativeFunctionKind::StringPrototypeMethod(method_spec.method),
         ));
+        let alias = match method_spec.method {
+            StringMethod::TrimEnd => Some(RealmNameId::StringTrimRight),
+            StringMethod::TrimStart => Some(RealmNameId::StringTrimLeft),
+            _ => None,
+        };
+        if let Some(alias) = alias {
+            visit(method(
+                prototype,
+                IntrinsicKeySpec::InternedString(alias),
+                NativeFunctionKind::StringPrototypeMethod(method_spec.method),
+            ));
+        }
     }
     visit(method(
         prototype,

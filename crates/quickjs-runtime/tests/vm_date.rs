@@ -292,6 +292,51 @@ fn date_local_read_methods_have_exact_intrinsic_names_and_lengths() {
 }
 
 #[test]
+fn annex_b_date_get_year_preserves_legacy_local_year_semantics() {
+    assert_eq!(
+        rendered(
+            "return [new Date(2000,0,1).getYear(),new Date(1899,0,1).getYear(),
+               Number.isNaN(new Date(NaN).getYear())].join('|');"
+        ),
+        "100|-1|true"
+    );
+}
+
+#[test]
+fn annex_b_date_set_year_preserves_legacy_conversion_and_recovery_semantics() {
+    assert_eq!(
+        rendered(
+            "var original=new Date(2000,5,15,1,2,3,4);
+             var result=original.setYear(99);
+             var invalid=new Date(NaN),recovered=invalid.setYear(1);
+             var nan=new Date(0),nanResult=nan.setYear(NaN);
+             var touched=false;
+             try{Date.prototype.setYear.call({},
+               {valueOf:function(){touched=true;return 1}})}catch(error){}
+             return [result===original.getTime(),original.getFullYear(),
+               original.getMonth(),original.getDate(),invalid.getFullYear(),
+               recovered===invalid.getTime(),Number.isNaN(nanResult),
+               Number.isNaN(nan.getTime()),touched].join('|');"
+        ),
+        "true|1999|5|15|1901|true|true|true|false"
+    );
+}
+
+#[test]
+fn annex_b_date_to_gmt_string_is_the_utc_string_function() {
+    assert_eq!(
+        rendered(
+            "var descriptor=Object.getOwnPropertyDescriptor(Date.prototype,'toGMTString');
+             return [Date.prototype.toGMTString===Date.prototype.toUTCString,
+               Date.prototype.toGMTString.name,Date.prototype.toGMTString.length,
+               descriptor.writable,descriptor.enumerable,
+               descriptor.configurable].join('|');"
+        ),
+        "true|toUTCString|0|true|false|true"
+    );
+}
+
+#[test]
 fn date_set_time_brand_check_precedes_argument_coercion() {
     assert_eq!(
         rendered(

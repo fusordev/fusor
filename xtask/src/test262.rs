@@ -195,6 +195,7 @@ fn read_required(path: &Path, label: &str) -> Result<String, String> {
 #[derive(Debug, Default)]
 struct BaselinePolicy {
     skipped_features: BTreeSet<String>,
+    inclusions: Vec<String>,
     exclusions: Vec<String>,
 }
 
@@ -219,10 +220,13 @@ impl BaselinePolicy {
                         policy.skipped_features.insert(feature.trim().to_owned());
                     }
                 }
+                "include" => policy.inclusions.push(normalize_baseline_path(line)?),
                 "exclude" => policy.exclusions.push(normalize_baseline_path(line)?),
                 _ => {}
             }
         }
+        policy.inclusions.sort();
+        policy.inclusions.dedup();
         policy.exclusions.sort();
         policy.exclusions.dedup();
         if policy.skipped_features.is_empty() || policy.exclusions.is_empty() {
@@ -233,13 +237,22 @@ impl BaselinePolicy {
 
     fn excludes(&self, relative: &str) -> bool {
         let candidate = format!("test/{relative}");
-        self.exclusions.iter().any(|excluded| {
-            candidate == *excluded
-                || excluded
-                    .strip_suffix('/')
-                    .is_some_and(|directory| candidate.starts_with(&format!("{directory}/")))
-        })
+        !self
+            .inclusions
+            .iter()
+            .any(|included| baseline_path_matches(&candidate, included))
+            && self
+                .exclusions
+                .iter()
+                .any(|excluded| baseline_path_matches(&candidate, excluded))
     }
+}
+
+fn baseline_path_matches(candidate: &str, policy_path: &str) -> bool {
+    candidate == policy_path
+        || policy_path
+            .strip_suffix('/')
+            .is_some_and(|directory| candidate.starts_with(&format!("{directory}/")))
 }
 
 fn normalize_baseline_path(path: &str) -> Result<String, String> {
@@ -1546,7 +1559,9 @@ throw new TypeError();",
     #[test]
     fn parses_quickjs_skip_and_exclusion_policy() {
         let policy = BaselinePolicy::parse(
-            "[features]\nProxy\nTemporal=skip\n\n[exclude]\ntest262/test/intl402/\n",
+            "[features]\nProxy\nTemporal=skip\n\n[include]\n\
+             test262/test/annexB/built-ins/Date/\n\n[exclude]\n\
+             test262/test/annexB/\ntest262/test/intl402/\n",
         )
         .expect("policy");
         assert_eq!(
@@ -1554,6 +1569,8 @@ throw new TypeError();",
             BTreeSet::from(["Temporal".to_owned()])
         );
         assert!(policy.excludes("intl402/DateTimeFormat/basic.js"));
+        assert!(!policy.excludes("annexB/built-ins/Date/prototype/getYear.js"));
+        assert!(policy.excludes("annexB/language/block-function.js"));
         assert!(!policy.excludes("built-ins/Date/basic.js"));
     }
 
@@ -1561,6 +1578,7 @@ throw new TypeError();",
     fn focused_feature_admission_only_removes_the_named_skip() {
         let policy = BaselinePolicy {
             skipped_features: BTreeSet::from(["Temporal".to_owned(), "ShadowRealm".to_owned()]),
+            inclusions: Vec::new(),
             exclusions: Vec::new(),
         };
         let temporal = Metadata {
@@ -1604,6 +1622,11 @@ throw new TypeError();",
         assert!(baseline.config_fingerprint != 0);
         assert!(baseline.policy.skipped_features.contains("Intl.Locale"));
         assert!(baseline.policy.excludes("annexB/language/basic.js"));
+        assert!(
+            !baseline
+                .policy
+                .excludes("annexB/built-ins/String/prototype/substr/basic.js")
+        );
     }
 
     #[test]

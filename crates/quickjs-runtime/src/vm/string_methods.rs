@@ -515,6 +515,15 @@ fn finish_string_method(
             };
             StoredValue::String(subject.slice(start..end)?)
         }
+        StringMethod::Substr => {
+            let start = relative_bound(argument(0)?.integer()?, length);
+            let available = length.saturating_sub(start);
+            let count = match argument(1)? {
+                ConvertedArgument::Absent => available,
+                converted => clamp_to_length(converted.integer()?, available),
+            };
+            StoredValue::String(subject.slice(start..start.saturating_add(count))?)
+        }
         StringMethod::Repeat => {
             let count = argument(0)?.integer()?;
             // A negative or infinite count is a `RangeError`, which the oracle

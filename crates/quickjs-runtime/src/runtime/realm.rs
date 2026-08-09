@@ -74,8 +74,9 @@ const BIGINT_INTERNED_STATICS: [&str; 2] = ["asIntN", "asUintN"];
 /// `QuickJS` own-key order.
 ///
 /// Each `length` matches the pinned oracle, which reports `1` for most methods
-/// and `2` for `replace`, `replaceAll`, `split`, `slice`, and `substring`.
-const STRING_PROTOTYPE_METHODS: [StringPrototypeMethod; 32] = [
+/// and `2` for `replace`, `replaceAll`, `split`, `slice`, `substr`, and
+/// `substring`.
+const STRING_PROTOTYPE_METHODS: [StringPrototypeMethod; 33] = [
     StringPrototypeMethod::interned("at", StringMethod::At, 1),
     StringPrototypeMethod::interned("charCodeAt", StringMethod::CharCodeAt, 1),
     StringPrototypeMethod::interned("charAt", StringMethod::CharAt, 1),
@@ -93,6 +94,7 @@ const STRING_PROTOTYPE_METHODS: [StringPrototypeMethod; 32] = [
     StringPrototypeMethod::interned("search", StringMethod::Search, 1),
     StringPrototypeMethod::interned("split", StringMethod::Split, 2),
     StringPrototypeMethod::interned("substring", StringMethod::Substring, 2),
+    StringPrototypeMethod::interned("substr", StringMethod::Substr, 2),
     StringPrototypeMethod::interned("slice", StringMethod::Slice, 2),
     StringPrototypeMethod::interned("repeat", StringMethod::Repeat, 1),
     StringPrototypeMethod::interned("replace", StringMethod::Replace, 2),

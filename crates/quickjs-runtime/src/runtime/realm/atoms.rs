@@ -237,6 +237,8 @@ fn visit_realm_name_order(
             visit(RealmNameId::StringMethod(method.method))?;
         }
     }
+    visit(RealmNameId::StringTrimRight)?;
+    visit(RealmNameId::StringTrimLeft)?;
     for (name, _) in NUMBER_VALUE_STATICS {
         visit(RealmNameId::NumberValue(name))?;
     }
@@ -295,6 +297,7 @@ fn visit_realm_name_order(
             visit(RealmNameId::DatePrototype(method))?;
         }
     }
+    visit(RealmNameId::DateToGmtString)?;
     visit(RealmNameId::Temporal)?;
     visit(RealmNameId::TemporalNow)?;
     for method in TemporalNowMethod::ALL {
@@ -540,6 +543,8 @@ fn realm_name_description(id: RealmNameId) -> &'static str {
                     .flatten()
             })
             .expect("every dynamic String method has one declared name"),
+        RealmNameId::StringTrimLeft => "trimLeft",
+        RealmNameId::StringTrimRight => "trimRight",
         RealmNameId::NumberValue(name) | RealmNameId::MathConstant(name) => name,
         RealmNameId::NumberPredicate(predicate) => NUMBER_PREDICATE_STATICS
             .into_iter()
@@ -583,6 +588,7 @@ fn realm_name_description(id: RealmNameId) -> &'static str {
         RealmNameId::TypedArrayBytesPerElement => "BYTES_PER_ELEMENT",
         RealmNameId::DateStatic(method) => method.name(),
         RealmNameId::DatePrototype(method) => method.name(),
+        RealmNameId::DateToGmtString => "toGMTString",
         RealmNameId::Temporal => "Temporal",
         RealmNameId::TemporalNow => "Now",
         RealmNameId::TemporalNowMethod(method) => method.name(),

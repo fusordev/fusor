@@ -953,6 +953,7 @@ pub(crate) enum StringMethod {
     Split,
     Slice,
     StartsWith,
+    Substr,
     Substring,
     Trim,
     TrimEnd,
@@ -1012,7 +1013,7 @@ impl StringMethod {
                 &[StringArgument::Integer, StringArgument::OptionalString]
             }
             Self::Repeat => &[StringArgument::Integer],
-            Self::Slice | Self::Substring => {
+            Self::Slice | Self::Substr | Self::Substring => {
                 &[StringArgument::Integer, StringArgument::OptionalInteger]
             }
             Self::LocaleCompare => &[StringArgument::String],
@@ -1672,6 +1673,7 @@ pub(crate) enum DatePrototypeMethod {
     ToLocaleTimeString,
     GetTimezoneOffset,
     GetTime,
+    GetYear,
     GetFullYear,
     GetUtcFullYear,
     GetMonth,
@@ -1701,6 +1703,7 @@ pub(crate) enum DatePrototypeMethod {
     SetUtcDate,
     SetMonth,
     SetUtcMonth,
+    SetYear,
     SetFullYear,
     SetUtcFullYear,
     ToTemporalInstant,
@@ -1709,7 +1712,7 @@ pub(crate) enum DatePrototypeMethod {
 }
 
 impl DatePrototypeMethod {
-    pub(crate) const ALL: [Self; 45] = [
+    pub(crate) const ALL: [Self; 47] = [
         Self::ValueOf,
         Self::ToString,
         Self::ToUtcString,
@@ -1721,6 +1724,7 @@ impl DatePrototypeMethod {
         Self::ToLocaleTimeString,
         Self::GetTimezoneOffset,
         Self::GetTime,
+        Self::GetYear,
         Self::GetFullYear,
         Self::GetUtcFullYear,
         Self::GetMonth,
@@ -1750,6 +1754,7 @@ impl DatePrototypeMethod {
         Self::SetUtcDate,
         Self::SetMonth,
         Self::SetUtcMonth,
+        Self::SetYear,
         Self::SetFullYear,
         Self::SetUtcFullYear,
         Self::ToTemporalInstant,
@@ -1770,6 +1775,7 @@ impl DatePrototypeMethod {
             Self::ToLocaleTimeString => "toLocaleTimeString",
             Self::GetTimezoneOffset => "getTimezoneOffset",
             Self::GetTime => "getTime",
+            Self::GetYear => "getYear",
             Self::GetFullYear => "getFullYear",
             Self::GetUtcFullYear => "getUTCFullYear",
             Self::GetMonth => "getMonth",
@@ -1799,6 +1805,7 @@ impl DatePrototypeMethod {
             Self::SetUtcDate => "setUTCDate",
             Self::SetMonth => "setMonth",
             Self::SetUtcMonth => "setUTCMonth",
+            Self::SetYear => "setYear",
             Self::SetFullYear => "setFullYear",
             Self::SetUtcFullYear => "setUTCFullYear",
             Self::ToTemporalInstant => "toTemporalInstant",
@@ -1817,6 +1824,7 @@ impl DatePrototypeMethod {
             | Self::SetUtcMilliseconds
             | Self::SetDate
             | Self::SetUtcDate
+            | Self::SetYear
             | Self::ToJson
             | Self::SymbolToPrimitive => 1,
             Self::ValueOf
@@ -1830,6 +1838,7 @@ impl DatePrototypeMethod {
             | Self::ToLocaleTimeString
             | Self::GetTimezoneOffset
             | Self::GetTime
+            | Self::GetYear
             | Self::GetFullYear
             | Self::GetUtcFullYear
             | Self::GetMonth
