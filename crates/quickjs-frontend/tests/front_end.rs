@@ -7,12 +7,12 @@ use quickjs_diagnostics::{SourceError, SourceRegistry, render_pretty};
 use quickjs_frontend::{
     Allocator, CompilationGoal, DiagnosticStage, DirectEvalBinding, DirectEvalBindingKind,
     DirectEvalBindingLocation, DirectEvalBindingScope, DirectEvalCapabilities, DirectEvalContext,
-    DirectEvalPrivateName, DirectEvalPrivateNameKind, DirectEvalScopeFrame, DirectEvalScopeKind,
-    DirectEvalScopeSnapshot, DirectEvalVariableEnvironment, DynamicFunctionKind,
-    DynamicFunctionSource, FrontendDiagnosticCode, FrontendLimitError, FrontendLimits,
-    FrontendOptions, FrontendSourceError, GlobalScriptGoal, IndirectEvalGoal, ParseMode,
-    RegisteredFrontendError, SourceFragment, Span, UnsupportedCompilationGoal, parse,
-    with_dynamic_function_source, with_parsed_program, with_registered_program,
+    DirectEvalPrivateName, DirectEvalScopeFrame, DirectEvalScopeKind, DirectEvalScopeSnapshot,
+    DirectEvalVariableEnvironment, DynamicFunctionKind, DynamicFunctionSource,
+    FrontendDiagnosticCode, FrontendLimitError, FrontendLimits, FrontendOptions,
+    FrontendSourceError, GlobalScriptGoal, IndirectEvalGoal, ParseMode, RegisteredFrontendError,
+    SourceFragment, Span, UnsupportedCompilationGoal, parse, with_dynamic_function_source,
+    with_parsed_program, with_registered_program,
 };
 
 #[test]
@@ -294,10 +294,6 @@ fn compilation_goals_preserve_lossless_direct_eval_context() {
     .with_scope(DirectEvalBindingScope::Lexical)];
     let private_names = [DirectEvalPrivateName::new(
         "value",
-        DirectEvalPrivateNameKind::Field,
-        false,
-        true,
-        true,
         DirectEvalBindingLocation::Local { index: 7 },
     )];
     let frames = [
@@ -343,9 +339,6 @@ fn compilation_goals_preserve_lossless_direct_eval_context() {
     );
     assert_eq!(binding.scope(), DirectEvalBindingScope::Lexical);
     let private_name = direct_eval.scope_snapshot().frames()[0].private_names()[0];
-    assert_eq!(private_name.kind(), DirectEvalPrivateNameKind::Field);
-    assert!(private_name.is_lexical());
-    assert!(private_name.is_const());
     assert_eq!(
         private_name.location(),
         DirectEvalBindingLocation::Local { index: 7 }
@@ -591,6 +584,47 @@ fn direct_eval_enforces_class_field_contains_arguments_boundaries() {
         FrontendOptions::for_goal(CompilationGoal::DirectEval(allowed)),
     )
     .expect("non-initializer direct eval admits arguments references");
+}
+
+#[test]
+fn direct_eval_admits_only_private_names_from_the_caller_environment() {
+    let private_names = [DirectEvalPrivateName::new(
+        "visible",
+        DirectEvalBindingLocation::Closure { index: 2 },
+    )];
+    let frames = [DirectEvalScopeFrame::new(
+        DirectEvalScopeKind::Class,
+        &[],
+        &private_names,
+    )];
+    let context = DirectEvalContext::new(
+        DirectEvalCapabilities::new(),
+        DirectEvalScopeSnapshot::new(&frames),
+    );
+
+    for source in ["this.#visible;", "#visible in this;"] {
+        let allocator = Allocator::new();
+        parse(
+            &allocator,
+            source,
+            FrontendOptions::for_goal(CompilationGoal::DirectEval(context)),
+        )
+        .expect("caller private name is in the direct-eval PrivateEnvironment");
+    }
+
+    let allocator = Allocator::new();
+    let error = parse(
+        &allocator,
+        "this.#missing;",
+        FrontendOptions::for_goal(CompilationGoal::DirectEval(context)),
+    )
+    .expect_err("unknown private name remains an early error");
+    assert_eq!(error.stage(), DiagnosticStage::Semantic);
+    assert_eq!(
+        error.diagnostics()[0].code,
+        FrontendDiagnosticCode::OxcSemantic
+    );
+    assert!(error.diagnostics()[0].message.contains("#missing"));
 }
 
 #[test]

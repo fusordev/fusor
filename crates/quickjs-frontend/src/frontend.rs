@@ -450,82 +450,27 @@ impl<'scope> DirectEvalBinding<'scope> {
     }
 }
 
-/// The role of a private name visible to direct `eval`.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-#[non_exhaustive]
-pub enum DirectEvalPrivateNameKind {
-    /// A private field.
-    Field,
-    /// A private method.
-    Method,
-    /// A private getter.
-    Getter,
-    /// A private setter.
-    Setter,
-    /// A combined private getter/setter pair.
-    GetterSetter,
-}
-
 /// A private name visible in one direct-eval scope frame.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct DirectEvalPrivateName<'scope> {
     name: &'scope str,
-    kind: DirectEvalPrivateNameKind,
-    is_static: bool,
-    is_lexical: bool,
-    is_const: bool,
     location: DirectEvalBindingLocation,
 }
 
 impl<'scope> DirectEvalPrivateName<'scope> {
-    /// Creates a private-name snapshot without discarding storage metadata.
+    /// Creates a private-name snapshot retaining its live caller-cell address.
+    ///
+    /// Field/method/accessor and static/instance classifications belong to the
+    /// class element, not to the specification's `PrivateEnvironment` entry.
     #[must_use]
-    pub const fn new(
-        name: &'scope str,
-        kind: DirectEvalPrivateNameKind,
-        is_static: bool,
-        is_lexical: bool,
-        is_const: bool,
-        location: DirectEvalBindingLocation,
-    ) -> Self {
-        Self {
-            name,
-            kind,
-            is_static,
-            is_lexical,
-            is_const,
-            location,
-        }
+    pub const fn new(name: &'scope str, location: DirectEvalBindingLocation) -> Self {
+        Self { name, location }
     }
 
     /// Returns the private name, without a leading `#`.
     #[must_use]
     pub const fn name(self) -> &'scope str {
         self.name
-    }
-
-    /// Returns the private-name role.
-    #[must_use]
-    pub const fn kind(self) -> DirectEvalPrivateNameKind {
-        self.kind
-    }
-
-    /// Returns whether the name belongs to the static class context.
-    #[must_use]
-    pub const fn is_static(self) -> bool {
-        self.is_static
-    }
-
-    /// Returns whether this private name is lexical.
-    #[must_use]
-    pub const fn is_lexical(self) -> bool {
-        self.is_lexical
-    }
-
-    /// Returns whether writes to this private-name binding are forbidden.
-    #[must_use]
-    pub const fn is_const(self) -> bool {
-        self.is_const
     }
 
     /// Returns the private name's independent storage location.
@@ -3139,11 +3084,7 @@ fn parse_in_mode<'arena, 'scope>(
         .with_build_nodes(true)
         .build(program);
     if let CompilationGoal::DirectEval(context) = goal {
-        apply_direct_eval_context(
-            &mut semantic.diagnostics,
-            &semantic.semantic,
-            context.capabilities(),
-        )?;
+        apply_direct_eval_context(&mut semantic.diagnostics, &semantic.semantic, context)?;
     }
     if allow_top_level_await
         && let Some(span) = async_script_await_identifier_span(&semantic.semantic)
@@ -3191,9 +3132,10 @@ fn parse_in_mode<'arena, 'scope>(
 fn apply_direct_eval_context(
     diagnostics: &mut Diagnostics,
     semantic: &Semantic<'_>,
-    capabilities: DirectEvalCapabilities,
+    context: DirectEvalContext<'_>,
 ) -> Result<(), FrontendError> {
-    remove_admitted_direct_eval_diagnostics(diagnostics, semantic, capabilities);
+    let capabilities = context.capabilities();
+    remove_admitted_direct_eval_diagnostics(diagnostics, semantic, context);
     if !capabilities.allows_arguments()
         && let Some(span) = direct_eval_contains_arguments_span(semantic.nodes())
     {
@@ -3205,11 +3147,31 @@ fn apply_direct_eval_context(
 fn remove_admitted_direct_eval_diagnostics(
     diagnostics: &mut Diagnostics,
     semantic: &Semantic<'_>,
-    capabilities: DirectEvalCapabilities,
+    context: DirectEvalContext<'_>,
 ) {
     diagnostics.retain(|diagnostic| {
-        !is_admitted_direct_eval_super_diagnostic(diagnostic, semantic, capabilities)
+        !is_admitted_direct_eval_super_diagnostic(diagnostic, semantic, context.capabilities())
+            && !is_admitted_direct_eval_private_name_diagnostic(diagnostic, context)
     });
+}
+
+fn is_admitted_direct_eval_private_name_diagnostic(
+    diagnostic: &OxcDiagnostic,
+    context: DirectEvalContext<'_>,
+) -> bool {
+    let message = diagnostic.to_string();
+    let Some(name) = message
+        .strip_prefix("Private identifier '#")
+        .and_then(|message| message.strip_suffix("' is not allowed outside class bodies"))
+    else {
+        return false;
+    };
+    context
+        .scope_snapshot()
+        .frames()
+        .iter()
+        .flat_map(|frame| frame.private_names())
+        .any(|private_name| private_name.name() == name)
 }
 
 fn parse_program_for_goal<'arena>(

@@ -938,6 +938,63 @@ fn class_field_direct_eval_rejects_arguments_before_execution_across_arrows() {
 }
 
 #[test]
+fn class_private_environment_is_visible_to_direct_eval() {
+    let mut runtime = Runtime::try_new(RuntimeLimits::default()).expect("runtime");
+    let realm = runtime.create_realm().expect("realm");
+    let mut context = runtime.context(&realm).expect("context");
+    let function = construct_dynamic_function(
+        &mut context,
+        source(
+            &[],
+            "class C{\
+                 #field=40;\
+                 #method(){return 1;}\
+                 get #accessor(){return 1;}\
+                 set #accessor(value){this.#field=value;}\
+                 initialized=eval('this.#field+this.#method()+this.#accessor');\
+                 read(){return eval('this.#field');}\
+                 nested(){return eval(\"eval('this.#field')\");}\
+                 escape(){return eval('()=>this.#field');}\
+                 has(){return eval('#field in this');}\
+                 write(){return eval('this.#accessor=42');}\
+                 reject(){try{eval('this.#missing');}catch(error){return error.name;}}\
+                 static #staticField=43;\
+                 static read(){return eval('this.#staticField');}\
+             }\
+             let instance=new C;\
+             let before=instance.read();\
+             let escaped=instance.escape();\
+             instance.write();\
+             return instance.initialized+'|'+before+'|'+instance.read()+'|'+\
+                 instance.nested()+'|'+escaped()+'|'+instance.has()+'|'+\
+                 C.read()+'|'+instance.reject();",
+        ),
+        DynamicFunctionLimits::default(),
+    )
+    .expect("dynamic Function with class private direct eval")
+    .into_value()
+    .into_function()
+    .expect("function completion");
+
+    let result = call_with_dynamic_function_support(
+        &mut context,
+        &function,
+        &[],
+        DynamicFunctionLimits::default(),
+    )
+    .expect("class private direct eval");
+    assert_eq!(
+        result
+            .as_string()
+            .expect("live result")
+            .expect("string")
+            .to_utf8_lossy()
+            .expect("UTF-8"),
+        "42|40|42|42|42|true|43|SyntaxError"
+    );
+}
+
+#[test]
 fn direct_eval_non_string_returns_without_requesting_a_compiler() {
     let mut runtime = Runtime::try_new(RuntimeLimits::default()).expect("runtime");
     let realm = runtime.create_realm().expect("realm");

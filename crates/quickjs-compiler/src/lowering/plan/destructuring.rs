@@ -994,7 +994,13 @@ impl<'arena> CompilationContext<'_, 'arena, '_> {
                         Operands::U8(depth),
                         element.span(),
                     )));
-                    self.plan_assignment_target_prelude(target, layout, constants, work)?;
+                    self.plan_assignment_target_prelude(
+                        target,
+                        layout,
+                        tree_layout,
+                        constants,
+                        work,
+                    )?;
                 }
             }
         }
@@ -1246,7 +1252,13 @@ impl<'arena> CompilationContext<'_, 'arena, '_> {
                 Operands::None,
                 rest.span,
             )));
-            self.plan_assignment_target_prelude(&rest.target, layout, constants, work)?;
+            self.plan_assignment_target_prelude(
+                &rest.target,
+                layout,
+                tree_layout,
+                constants,
+                work,
+            )?;
         }
         for property in pattern.properties.iter().rev() {
             match property {
@@ -1368,7 +1380,12 @@ impl<'arena> CompilationContext<'_, 'arena, '_> {
                             property.span,
                         )));
                         self.push_object_assignment_reference_prelude(
-                            target, true, layout, constants, work,
+                            target,
+                            true,
+                            layout,
+                            tree_layout,
+                            constants,
+                            work,
                         )?;
                         if has_rest {
                             Self::push_object_rest_computed_key_record(property.span, work);
@@ -1388,7 +1405,12 @@ impl<'arena> CompilationContext<'_, 'arena, '_> {
                             work,
                         )?;
                         self.push_object_assignment_reference_prelude(
-                            target, false, layout, constants, work,
+                            target,
+                            false,
+                            layout,
+                            tree_layout,
+                            constants,
+                            work,
                         )?;
                         if has_rest {
                             Self::push_object_rest_static_key_record(
@@ -1501,6 +1523,7 @@ impl<'arena> CompilationContext<'_, 'arena, '_> {
         target: &'pattern AssignmentTarget<'arena>,
         computed_source: bool,
         layout: &FrameLayout,
+        tree_layout: &FunctionTreeLayout,
         constants: &CompiledConstantPool,
         work: &mut Vec<ExpressionWork<'pattern, 'arena>>,
     ) -> Result<(), LeafCompilationError> {
@@ -1547,22 +1570,21 @@ impl<'arena> CompilationContext<'_, 'arena, '_> {
             }
             AssignmentTarget::PrivateFieldExpression(member) if !member.optional => {
                 let planner = ExpressionPlanner::new(self);
-                let (binding, slot) = planner.private_name_binding_for_access(
+                let reference = planner.private_name_reference_for_access(
                     member.node_id.get(),
                     member.field.name.as_str(),
                     member.span,
                     layout,
+                    tree_layout,
                 )?;
                 Self::push_object_assignment_two_slot_reference_rotation(
                     computed_source,
                     member.span,
                     work,
                 );
-                work.push(ExpressionWork::Emit(planner.plan_read_slot(
-                    binding,
-                    slot,
-                    member.field.span,
-                )?));
+                work.push(ExpressionWork::Emit(
+                    planner.plan_private_name_read(reference, member.field.span)?,
+                ));
                 work.push(ExpressionWork::Visit(&member.object));
                 Ok(())
             }
@@ -1772,6 +1794,7 @@ impl<'arena> CompilationContext<'_, 'arena, '_> {
         &self,
         target: &'pattern AssignmentTarget<'arena>,
         layout: &FrameLayout,
+        tree_layout: &FunctionTreeLayout,
         constants: &CompiledConstantPool,
         work: &mut Vec<ExpressionWork<'pattern, 'arena>>,
     ) -> Result<(), LeafCompilationError> {
@@ -1817,17 +1840,16 @@ impl<'arena> CompilationContext<'_, 'arena, '_> {
             }
             AssignmentTarget::PrivateFieldExpression(member) if !member.optional => {
                 let planner = ExpressionPlanner::new(self);
-                let (binding, slot) = planner.private_name_binding_for_access(
+                let reference = planner.private_name_reference_for_access(
                     member.node_id.get(),
                     member.field.name.as_str(),
                     member.span,
                     layout,
+                    tree_layout,
                 )?;
-                work.push(ExpressionWork::Emit(planner.plan_read_slot(
-                    binding,
-                    slot,
-                    member.field.span,
-                )?));
+                work.push(ExpressionWork::Emit(
+                    planner.plan_private_name_read(reference, member.field.span)?,
+                ));
                 work.push(ExpressionWork::Visit(&member.object));
                 Ok(())
             }
@@ -1943,7 +1965,7 @@ impl<'arena> CompilationContext<'_, 'arena, '_> {
         )));
         // The member base (and computed key) execute before `array_from`
         // and stay below the fresh array for the store.
-        self.plan_assignment_target_prelude(&rest.target, layout, constants, work)?;
+        self.plan_assignment_target_prelude(&rest.target, layout, tree_layout, constants, work)?;
         Ok(())
     }
 }

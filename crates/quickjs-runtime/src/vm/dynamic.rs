@@ -1791,7 +1791,6 @@ fn push_direct_eval_caller_binding(
         policy.kind(),
         CompilerBindingKind::ClassFieldKey
             | CompilerBindingKind::ClassInstanceInitializer
-            | CompilerBindingKind::ClassPrivateName
             | CompilerBindingKind::ClassStaticReceiver
             | CompilerBindingKind::GlobalReference
     ) {
@@ -1807,12 +1806,19 @@ fn push_direct_eval_caller_binding(
             pool: "direct-eval caller atom",
             index: name.get(),
         })?;
-    let name = atom
-        .description()
-        .ok_or(EngineFault::RuntimeInvariant {
-            message: "direct-eval caller binding has no string atom",
-        })?
-        .clone();
+    let atom = atom.description().ok_or(EngineFault::RuntimeInvariant {
+        message: "direct-eval caller binding has no string atom",
+    })?;
+    let name = if policy.kind() == CompilerBindingKind::ClassPrivateName {
+        if atom.code_units().next() != Some(u16::from(b'#')) {
+            // Private method/accessor value cells are compiler internals, not
+            // entries in the specification's PrivateEnvironment.
+            return Ok(());
+        }
+        atom.slice(1..atom.len())?
+    } else {
+        atom.clone()
+    };
     if name.code_units().eq("_ret_".encode_utf16()) {
         return Ok(());
     }

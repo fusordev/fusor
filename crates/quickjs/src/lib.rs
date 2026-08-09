@@ -30,6 +30,7 @@ use quickjs_frontend::{
     DirectEvalBindingLocation as FrontendDirectEvalBindingLocation,
     DirectEvalBindingScope as FrontendDirectEvalBindingScope,
     DirectEvalCapabilities as FrontendDirectEvalCapabilities, DirectEvalContext,
+    DirectEvalPrivateName as FrontendDirectEvalPrivateName,
     DirectEvalScopeFrame as FrontendDirectEvalScopeFrame,
     DirectEvalScopeKind as FrontendDirectEvalScopeKind, DirectEvalScopeSnapshot,
     DirectEvalVariableEnvironment as FrontendDirectEvalVariableEnvironment, DynamicFunctionError,
@@ -989,6 +990,65 @@ fn compile_indirect_eval_source(
     Ok(Arc::new(compiled.verified_bytecode().clone()))
 }
 
+#[derive(Clone, Copy)]
+enum FrontendDirectEvalCallerEntry {
+    Binding(usize),
+    PrivateName(usize),
+}
+
+struct FrontendDirectEvalEntries<'names> {
+    bindings: Vec<FrontendDirectEvalBinding<'names>>,
+    private_names: Vec<FrontendDirectEvalPrivateName<'names>>,
+    order: Vec<FrontendDirectEvalCallerEntry>,
+}
+
+fn frontend_direct_eval_entries<'names>(
+    request: &DirectEvalCompileRequest,
+    names: &'names [String],
+) -> Result<FrontendDirectEvalEntries<'names>, DynamicFunctionCompileFailure> {
+    let count = request.bindings().len();
+    let reserve_failure = |domain, error| {
+        engine_failure_with_source(
+            DynamicFunctionEngineStage::SourceConversion,
+            format!("could not reserve {count} direct-eval {domain}"),
+            error,
+        )
+    };
+    let mut bindings = Vec::new();
+    bindings
+        .try_reserve_exact(count)
+        .map_err(|error| reserve_failure("binding descriptors", error))?;
+    let mut private_names = Vec::new();
+    private_names
+        .try_reserve_exact(count)
+        .map_err(|error| reserve_failure("private-name descriptors", error))?;
+    let mut order = Vec::new();
+    order
+        .try_reserve_exact(count)
+        .map_err(|error| reserve_failure("caller entries", error))?;
+    for (binding, name) in request.bindings().iter().zip(names) {
+        let location = frontend_direct_eval_location(binding.location())?;
+        if binding.policy().kind() == CompilerBindingKind::ClassPrivateName {
+            let index = private_names.len();
+            private_names.push(FrontendDirectEvalPrivateName::new(name, location));
+            order.push(FrontendDirectEvalCallerEntry::PrivateName(index));
+        } else {
+            let (kind, is_lexical, is_const) = frontend_direct_eval_policy(binding.policy())?;
+            let index = bindings.len();
+            bindings.push(
+                FrontendDirectEvalBinding::new(name, kind, is_lexical, is_const, location)
+                    .with_scope(frontend_direct_eval_scope(binding.scope())),
+            );
+            order.push(FrontendDirectEvalCallerEntry::Binding(index));
+        }
+    }
+    Ok(FrontendDirectEvalEntries {
+        bindings,
+        private_names,
+        order,
+    })
+}
+
 fn compile_direct_eval_source(
     request: &DirectEvalCompileRequest,
     limits: DynamicFunctionLimits,
@@ -1013,32 +1073,41 @@ fn compile_direct_eval_source(
             RuntimeSourceFragment::DirectEval,
         )?);
     }
-    let mut bindings = Vec::new();
-    bindings
-        .try_reserve_exact(request.bindings().len())
+    let entries = frontend_direct_eval_entries(request, &binding_names)?;
+    // One data-only frame per caller entry preserves the runtime snapshot's
+    // exact external-environment index while keeping ordinary bindings and
+    // PrivateEnvironment names in distinct typed collections.
+    let mut frames = Vec::new();
+    frames
+        .try_reserve_exact(entries.order.len())
         .map_err(|error| {
             engine_failure_with_source(
                 DynamicFunctionEngineStage::SourceConversion,
                 format!(
-                    "could not reserve {} direct-eval binding descriptors",
-                    request.bindings().len()
+                    "could not reserve {} direct-eval scope frames",
+                    entries.order.len()
                 ),
                 error,
             )
         })?;
-    for (binding, name) in request.bindings().iter().zip(&binding_names) {
-        let (kind, is_lexical, is_const) = frontend_direct_eval_policy(binding.policy())?;
-        let location = frontend_direct_eval_location(binding.location())?;
-        bindings.push(
-            FrontendDirectEvalBinding::new(name, kind, is_lexical, is_const, location)
-                .with_scope(frontend_direct_eval_scope(binding.scope())),
-        );
+    for &entry in &entries.order {
+        match entry {
+            FrontendDirectEvalCallerEntry::Binding(index) => {
+                frames.push(FrontendDirectEvalScopeFrame::new(
+                    FrontendDirectEvalScopeKind::Pseudo,
+                    std::slice::from_ref(&entries.bindings[index]),
+                    &[],
+                ));
+            }
+            FrontendDirectEvalCallerEntry::PrivateName(index) => {
+                frames.push(FrontendDirectEvalScopeFrame::new(
+                    FrontendDirectEvalScopeKind::Class,
+                    &[],
+                    std::slice::from_ref(&entries.private_names[index]),
+                ));
+            }
+        }
     }
-    let frames = [FrontendDirectEvalScopeFrame::new(
-        FrontendDirectEvalScopeKind::Pseudo,
-        &bindings,
-        &[],
-    )];
     let capabilities = FrontendDirectEvalCapabilities::new()
         .with_strict(request.is_strict())
         .with_new_target(request.allows_new_target())

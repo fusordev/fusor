@@ -242,7 +242,7 @@ impl<'arena> ExpressionPlanner<'_, '_, 'arena, '_> {
                 });
             }
             Some(MemberCallee::Private(member)) => {
-                self.plan_private_member_callee(member, layout, work)?;
+                self.plan_private_member_callee(member, layout, tree_layout, work)?;
             }
             None => match with_identifier {
                 Some(identifier) => {
@@ -539,7 +539,7 @@ impl<'arena> ExpressionPlanner<'_, '_, 'arena, '_> {
                     });
                 }
                 Some(MemberCallee::Private(member)) => {
-                    self.plan_private_member_callee(member, layout, work)?;
+                    self.plan_private_member_callee(member, layout, tree_layout, work)?;
                 }
                 None => match with_identifier {
                     Some(identifier) => {
@@ -667,7 +667,7 @@ impl<'arena> ExpressionPlanner<'_, '_, 'arena, '_> {
                 });
             }
             Some(MemberCallee::Private(member)) => {
-                self.plan_private_member_callee(member, layout, work)?;
+                self.plan_private_member_callee(member, layout, tree_layout, work)?;
             }
             None => match with_identifier {
                 Some(identifier) => {

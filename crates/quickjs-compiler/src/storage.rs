@@ -1865,10 +1865,18 @@ impl<'unit, 'arena, 'scope> Planner<'unit, 'arena, 'scope> {
                     binding.policy.kind,
                     DeclarationKind::ClassFieldKey
                         | DeclarationKind::ClassInstanceInitializer
-                        | DeclarationKind::ClassPrivateName
                         | DeclarationKind::ClassStaticReceiver
                         | DeclarationKind::WithObject
                 )
+            {
+                continue;
+            }
+            // A source-spelled private-name identity is part of the caller's
+            // PrivateEnvironment. Private method-value cells currently share
+            // the policy kind but retain a `[[...]]` internal name and must
+            // never become source-visible through eval.
+            if binding.policy.kind == DeclarationKind::ClassPrivateName
+                && !binding.name.starts_with('#')
             {
                 continue;
             }
@@ -4035,14 +4043,14 @@ impl<'unit, 'arena, 'scope> Planner<'unit, 'arena, 'scope> {
             let owner =
                 self.class_definition_owner(class.node_id.get(), class.scope_id(), class.span)?;
             for element in &class.body.body {
-                let (element_node, identifier, name_nodes) = match element {
+                let (identifier, name_nodes) = match element {
                     ClassElement::PropertyDefinition(field)
                         if matches!(field.key, PropertyKey::PrivateIdentifier(_)) =>
                     {
                         let PropertyKey::PrivateIdentifier(identifier) = &field.key else {
                             unreachable!("private property key was matched")
                         };
-                        (field.node_id.get(), identifier, vec![field.node_id.get()])
+                        (identifier, vec![field.node_id.get()])
                     }
                     ClassElement::MethodDefinition(method)
                         if matches!(
@@ -4089,7 +4097,7 @@ impl<'unit, 'arena, 'scope> Planner<'unit, 'arena, 'scope> {
                         if name_nodes.first().copied() != Some(method.node_id.get()) {
                             continue;
                         }
-                        (method.node_id.get(), identifier, name_nodes)
+                        (identifier, name_nodes)
                     }
                     _ => continue,
                 };
@@ -4104,7 +4112,11 @@ impl<'unit, 'arena, 'scope> Planner<'unit, 'arena, 'scope> {
                     class_static_receiver_node: None,
                     with_statement_node: None,
                     executable: owner,
-                    name: Arc::from(format!("[[class-private-name:{}]]", element_node.index())),
+                    // The leading `#` preserves the source spelling at the
+                    // runtime direct-eval boundary while remaining impossible
+                    // to confuse with an ordinary identifier. Binding identity
+                    // still distinguishes same-spelled names in nested classes.
+                    name: Arc::from(format!("#{}", identifier.name)),
                     declaration_spans: Arc::from([identifier.span]),
                     declaration_identity_spans: Arc::from([identifier.span]),
                     placement: StoragePlacement::Local,

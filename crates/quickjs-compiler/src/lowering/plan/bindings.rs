@@ -1283,11 +1283,12 @@ impl<'arena> CompilationContext<'_, 'arena, '_> {
         flow: &mut PlannedControlFlow,
     ) -> Result<(), LeafCompilationError> {
         let planner = ExpressionPlanner::new(self);
-        let (binding, slot) = planner.private_name_binding_for_access(
+        let reference = planner.private_name_reference_for_access(
             member.node_id.get(),
             member.field.name.as_str(),
             member.span,
             layout,
+            tree_layout,
         )?;
         self.plan_expression_with_abrupt_markers(
             &member.object,
@@ -1297,7 +1298,7 @@ impl<'arena> CompilationContext<'_, 'arena, '_> {
             abrupt_markers,
             flow,
         )?;
-        flow.emit(planner.plan_read_slot(binding, slot, member.field.span)?)?;
+        flow.emit(planner.plan_private_name_read(reference, member.field.span)?)?;
         // The iteration value was produced before reference evaluation.
         // `[value, receiver, privateName] -> [receiver, privateName, value]`.
         flow.emit(PlannedInstruction::new(
