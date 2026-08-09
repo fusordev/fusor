@@ -55,6 +55,14 @@ fn closed_direct_eval_returns_the_script_completion() {
 }
 
 #[test]
+fn static_initializer_direct_eval_inherits_the_class_this_binding() {
+    evaluate(
+        "let block;let Box=class{static value='test';static direct=eval('this.value')+'262';static arrow=(()=>eval('this'))();static{block=eval('this');}static ordinary=(function(){return eval('this');}).call({marker:7});};Box.direct==='test262'&&Box.arrow===Box&&block===Box&&Box.ordinary.marker===7;",
+        |value| assert_eq!(value.as_boolean(), Ok(Some(true))),
+    );
+}
+
+#[test]
 fn eval_preserves_lone_surrogates_in_legacy_regexp_literals() {
     evaluate(
         "let unit=String.fromCharCode(0xD800);\

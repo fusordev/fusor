@@ -1341,6 +1341,74 @@ pub(super) fn direct_eval_compile_request(
         .with_arguments_allowed(function_context))
 }
 
+/// Resolves the caller's active `this` binding for a direct eval.
+///
+/// Static field initializers and static blocks are lowered inline into their
+/// surrounding executable. Their specification-level `this` environment is
+/// therefore represented by a verified `ClassStaticReceiver` binding instead
+/// of the surrounding frame's dynamic receiver. The eval callsite's adjusted
+/// lexical-scope operand selects the active local cell; an arrow nested in the
+/// initializer carries the same cell as a verified closure capture.
+pub(super) fn direct_eval_receiver(
+    runtime: &Runtime,
+    frame: &Frame,
+    scope_index: u16,
+) -> Result<StoredValue, ExecutionError> {
+    let installed_code = code(runtime, frame.code)?;
+    let template = installed_code.authority.function(frame.template).ok_or(
+        EngineFault::InvalidClosureEnvironment {
+            function: frame.template,
+        },
+    )?;
+    let domains = template.function().control_flow().domains();
+    let argument_count = domains.argument_count();
+    let local_count = domains.local_count();
+    let variables = template.metadata().variables();
+
+    let mut lexical_local = (scope_index >= 2).then(|| u32::from(scope_index - 2));
+    while let Some(local) = lexical_local {
+        if local >= local_count {
+            return Err(EngineFault::InvalidClosureEnvironment {
+                function: frame.template,
+            }
+            .into());
+        }
+        let variable = variables
+            .get(argument_count.saturating_add(local) as usize)
+            .ok_or(EngineFault::InvalidClosureEnvironment {
+                function: frame.template,
+            })?;
+        if variable.policy().kind() == CompilerBindingKind::ClassStaticReceiver {
+            return duplicate_binding(runtime, frame_local(frame, local)?, false, frame)
+                .map_err(ExecutionError::from);
+        }
+        lexical_local = match variable.scope_next() {
+            ScopeLink::Local(parent) => Some(parent),
+            ScopeLink::End | ScopeLink::ArgumentScopeEnd => None,
+        };
+    }
+
+    let mut captured_receiver = None;
+    for (index, definition) in template.metadata().closures().iter().enumerate() {
+        if definition.policy().kind() != CompilerBindingKind::ClassStaticReceiver {
+            continue;
+        }
+        if captured_receiver.replace(index).is_some() {
+            return Err(EngineFault::RuntimeInvariant {
+                message: "direct eval has more than one lexical class receiver",
+            }
+            .into());
+        }
+    }
+    let Some(index) = captured_receiver else {
+        return Ok(frame.receiver.duplicate());
+    };
+    let index = u32::try_from(index).map_err(|_| EngineFault::InvalidClosureEnvironment {
+        function: frame.template,
+    })?;
+    duplicate_environment(runtime, frame, index, false).map_err(ExecutionError::from)
+}
+
 #[allow(
     clippy::too_many_lines,
     reason = "the adjusted lexical chain, function body, and inherited closures share one ordered caller snapshot"

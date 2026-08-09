@@ -4507,7 +4507,14 @@ impl<'unit, 'arena, 'scope> Planner<'unit, 'arena, 'scope> {
     fn class_static_receiver_is_used(&self, class_node: NodeId) -> Result<bool, CompilerError> {
         let nodes = self.unit.semantic().nodes();
         for (node_id, node) in nodes.iter_enumerated() {
-            if !matches!(node.kind(), AstKind::ThisExpression(_) | AstKind::Super(_)) {
+            let observes_receiver = match node.kind() {
+                AstKind::ThisExpression(_) | AstKind::Super(_) => true,
+                AstKind::CallExpression(call) => {
+                    !call.optional && call.callee.is_specific_id("eval")
+                }
+                _ => false,
+            };
+            if !observes_receiver {
                 continue;
             }
             if self.static_class_initializer_class_for_node(node_id)? == Some(class_node) {
@@ -4528,6 +4535,11 @@ impl<'unit, 'arena, 'scope> Planner<'unit, 'arena, 'scope> {
             let span = match node.kind() {
                 AstKind::ThisExpression(expression) => expression.span,
                 AstKind::Super(expression) => expression.span,
+                AstKind::CallExpression(call)
+                    if !call.optional && call.callee.is_specific_id("eval") =>
+                {
+                    call.span
+                }
                 _ => continue,
             };
             let Some(class_node) = self.static_class_initializer_class_for_node(node_id)? else {

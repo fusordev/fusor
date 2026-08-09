@@ -5229,7 +5229,7 @@ fn execute_frame_loop(
                 let realm = code(runtime, caller.code)?.realm;
                 let origin = instruction_location(runtime, caller, source_pc)?;
                 let request = direct_eval_compile_request(runtime, caller, source, scope_index)?;
-                let receiver = caller.receiver.duplicate();
+                let receiver = direct_eval_receiver(runtime, caller, scope_index)?;
                 let active_frames = active_execution_frames(frames);
                 frames
                     .try_reserve(1)
