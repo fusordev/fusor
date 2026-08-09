@@ -224,6 +224,15 @@ impl<'arena> CompilationContext<'_, 'arena, '_> {
             if function.r#type != FunctionType::FunctionDeclaration {
                 continue;
             }
+            if self
+                .planned
+                .identities
+                .annex_b_functions
+                .get(&node_id)
+                .is_some_and(|binding| binding.synthetic_block)
+            {
+                continue;
+            }
             let Some(identifier) = &function.id else {
                 continue;
             };

@@ -9,7 +9,8 @@ use super::super::{
     InitializationPolicy, LeafCompilationError, ObjectAssignmentTarget, ObjectPattern, Operands,
     PlannedControlFlow, PlannedInstruction, Span, StoragePlacement, UnsupportedLeafFeature,
     WritePolicy, anonymous_class_expression_span, anonymous_named_evaluation_span,
-    anonymous_ordinary_function_span, plan_external_put, plan_put_slot, unsupported,
+    anonymous_ordinary_function_span, plan_external_put, plan_push_integer, plan_put_slot,
+    unsupported,
 };
 use super::abrupt::{AbruptMarker, AbruptMarkerKind};
 
@@ -17,6 +18,7 @@ use super::abrupt::{AbruptMarker, AbruptMarkerKind};
 pub(in crate::lowering) enum DestructuringBindingInitialization {
     Declaration(VariableDeclarationKind),
     Parameter,
+    Catch,
 }
 
 impl<'arena> CompilationContext<'_, 'arena, '_> {
@@ -125,6 +127,96 @@ impl<'arena> CompilationContext<'_, 'arena, '_> {
     /// the freshly allocated target at depth zero.
     const fn copy_data_properties_offsets(target: u8, source: u8, excluded: u8) -> u8 {
         target | (source << 2) | (excluded << 5)
+    }
+
+    /// Materializes an empty or tagged-integer static property spelling as a
+    /// runtime property-key value. Those spellings deliberately remain
+    /// static-property-only atom entries and therefore cannot be operands of
+    /// `get_field2` or `push_atom_value`.
+    fn exceptional_static_property_key(
+        constants: &CompiledConstantPool,
+        atom: AtomPoolIndex,
+        span: Span,
+    ) -> Result<Option<PlannedInstruction>, LeafCompilationError> {
+        let atom = usize::try_from(atom.get())
+            .ok()
+            .and_then(|index| constants.atoms().get(index))
+            .ok_or(LeafCompilationError::SemanticInvariant {
+                invariant: "static property read has one function-local atom",
+                span: Some(span),
+            })?;
+        if !atom.is_static_property_only() {
+            return Ok(None);
+        }
+        if atom.string().is_empty() {
+            return Ok(Some(PlannedInstruction::new(
+                FinalOpcode::PushEmptyString,
+                Operands::None,
+                span,
+            )));
+        }
+        if !atom.string().is_tagged_integer_atom() {
+            return Err(LeafCompilationError::SemanticInvariant {
+                invariant: "static-property-only read atom is empty or a tagged integer",
+                span: Some(span),
+            });
+        }
+        let value = atom.string().code_units().try_fold(0_i32, |value, unit| {
+            let digit = unit.checked_sub(u16::from(b'0'))?;
+            value.checked_mul(10)?.checked_add(i32::from(digit))
+        });
+        let Some(value) = value else {
+            return Err(LeafCompilationError::SemanticInvariant {
+                invariant: "tagged-integer property atom decodes to an i32",
+                span: Some(span),
+            });
+        };
+        Ok(Some(plan_push_integer(value, span)))
+    }
+
+    fn emit_static_property_read(
+        constants: &CompiledConstantPool,
+        atom: AtomPoolIndex,
+        span: Span,
+        flow: &mut PlannedControlFlow,
+    ) -> Result<(), LeafCompilationError> {
+        if let Some(key) = Self::exceptional_static_property_key(constants, atom, span)? {
+            flow.emit(key)?;
+            flow.emit(PlannedInstruction::new(
+                FinalOpcode::GetArrayEl2,
+                Operands::None,
+                span,
+            ))
+        } else {
+            flow.emit(PlannedInstruction::new(
+                FinalOpcode::GetField2,
+                Operands::Atom(atom),
+                span,
+            ))
+        }
+    }
+
+    fn push_static_property_read<'pattern>(
+        constants: &CompiledConstantPool,
+        atom: AtomPoolIndex,
+        span: Span,
+        work: &mut Vec<ExpressionWork<'pattern, 'arena>>,
+    ) -> Result<(), LeafCompilationError> {
+        if let Some(key) = Self::exceptional_static_property_key(constants, atom, span)? {
+            work.push(ExpressionWork::Emit(PlannedInstruction::new(
+                FinalOpcode::GetArrayEl2,
+                Operands::None,
+                span,
+            )));
+            work.push(ExpressionWork::Emit(key));
+        } else {
+            work.push(ExpressionWork::Emit(PlannedInstruction::new(
+                FinalOpcode::GetField2,
+                Operands::Atom(atom),
+                span,
+            )));
+        }
+        Ok(())
     }
 
     /// Destructures an on-stack value through an object pattern: `to_object`,
@@ -254,11 +346,12 @@ impl<'arena> CompilationContext<'_, 'arena, '_> {
                         span,
                     ))?;
                 }
-                flow.emit(PlannedInstruction::new(
-                    FinalOpcode::GetField2,
-                    Operands::Atom(constants.property_atom_index(property.key.span())?),
+                Self::emit_static_property_read(
+                    constants,
+                    constants.property_atom_index(property.key.span())?,
                     span,
-                ))?;
+                    flow,
+                )?;
             }
             self.plan_destructuring_pattern_value(
                 &property.value,
@@ -586,6 +679,10 @@ impl<'arena> CompilationContext<'_, 'arena, '_> {
         }
     }
 
+    #[allow(
+        clippy::too_many_lines,
+        reason = "global, parameter, declaration, and catch initialization share one binding-policy boundary"
+    )]
     fn plan_destructuring_binding_identifier(
         &self,
         identifier: &BindingIdentifier<'arena>,
@@ -679,6 +776,21 @@ impl<'arena> CompilationContext<'_, 'arena, '_> {
                         )),
                     _ => unsupported(UnsupportedLeafFeature::UnsupportedBinding, identifier.span),
                 }
+            }
+            DestructuringBindingInitialization::Catch => {
+                if storage.executable() != layout.executable
+                    || storage.placement() != StoragePlacement::Local
+                    || storage.policy().kind() != DeclarationKind::Catch
+                    || storage.policy().initialization() != InitializationPolicy::Catch
+                    || storage.policy().writes() != WritePolicy::Mutable
+                    || !storage.policy().has_temporal_dead_zone()
+                {
+                    return unsupported(
+                        UnsupportedLeafFeature::UnsupportedBinding,
+                        identifier.span,
+                    );
+                }
+                flow.emit(plan_put_slot(frame_slot, identifier.span))
             }
         }
     }
@@ -1077,11 +1189,12 @@ impl<'arena> CompilationContext<'_, 'arena, '_> {
                             work,
                         )?;
                     }
-                    work.push(ExpressionWork::Emit(PlannedInstruction::new(
-                        FinalOpcode::GetField2,
-                        Operands::Atom(constants.property_atom_index(identifier.binding.span)?),
+                    Self::push_static_property_read(
+                        constants,
+                        constants.property_atom_index(identifier.binding.span)?,
                         identifier.span,
-                    )));
+                        work,
+                    )?;
                     if has_rest {
                         Self::push_object_rest_static_key_record(
                             constants.property_atom_index(identifier.binding.span)?,
@@ -1177,11 +1290,12 @@ impl<'arena> CompilationContext<'_, 'arena, '_> {
                         }
                         work.push(ExpressionWork::Visit(key));
                     } else {
-                        work.push(ExpressionWork::Emit(PlannedInstruction::new(
-                            FinalOpcode::GetField2,
-                            Operands::Atom(constants.property_atom_index(property.name.span())?),
+                        Self::push_static_property_read(
+                            constants,
+                            constants.property_atom_index(property.name.span())?,
                             property.span,
-                        )));
+                            work,
+                        )?;
                         if has_rest {
                             Self::push_object_rest_static_key_record(
                                 constants.property_atom_index(property.name.span())?,

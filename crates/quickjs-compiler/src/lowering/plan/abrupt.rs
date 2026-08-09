@@ -1,7 +1,7 @@
 use oxc_ast::ast::CatchClause;
 use oxc_semantic::ScopeId;
 
-use crate::lowering::{CompilerLabel, PlannedInstruction};
+use crate::lowering::CompilerLabel;
 
 pub(in crate::lowering) struct TryFinallyLabels {
     pub(in crate::lowering) handler: CompilerLabel,
@@ -12,7 +12,7 @@ pub(in crate::lowering) struct TryFinallyLabels {
 pub(in crate::lowering) struct TryFinallyCatchPlan<'statement, 'arena> {
     pub(in crate::lowering) handler: &'statement CatchClause<'arena>,
     pub(in crate::lowering) scope: ScopeId,
-    pub(in crate::lowering) binding: PlannedInstruction,
+    pub(in crate::lowering) body_scope: ScopeId,
     pub(in crate::lowering) rethrow: CompilerLabel,
 }
 

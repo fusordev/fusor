@@ -91,11 +91,10 @@ Nine call sites are recorded as unreachable, each with the reason:
 
 ## Intentional frontend differences
 
-`QJS-OXC-001` intentionally records Oxc accepting a malformed RegExp pattern.
-This frontend validates the RegExp literal boundary and flags, while
-QuickJS-compatible pattern semantics remain delegated to the future RegExp
-layer. The candidate fixture keeps that boundary visible and executable instead
-of silently treating it as parser compatibility.
+`QJS-OXC-001` records the RegExp ownership boundary: Oxc identifies literal
+boundaries and flags, while `quickjs-regexp` performs the specification's
+pattern early error and executable matching. Malformed patterns are therefore
+rejected by both the frontend and pinned QuickJS.
 
 `QJS-OXC-002` records published Oxc accepting an ES-valid `continue` to an
 outer label in a chain that directly labels one iteration statement. Pinned
@@ -116,6 +115,11 @@ stack. The bound is a QuickJS resource limit rather than ECMAScript grammar.
 consistent with method name checks`. ECMAScript reserves `constructor` for
 instance fields and `prototype` for static ones only, and V8 accepts the
 fixture, so the frontend follows the specification.
+
+`QJS-OXC-005` and `QJS-OXC-006` record the intentional exclusion of Annex B
+HTML comments (B.1.3) from ordinary and host-forced strict Script profiles.
+Pinned QuickJS accepts those comments, but they are outside this port's
+explicitly restored Annex B subset.
 
 ## Fixture requirements
 

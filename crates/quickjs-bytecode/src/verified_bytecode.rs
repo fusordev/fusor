@@ -229,7 +229,6 @@ impl CompilerBindingPolicy {
             CompilerBindingKind::Catch => {
                 matches!(self.initialization, CompilerInitializationPolicy::Catch)
                     && matches!(self.writes, CompilerWritePolicy::Mutable)
-                    && !self.temporal_dead_zone
             }
             CompilerBindingKind::GlobalReference => {
                 matches!(
@@ -7825,11 +7824,23 @@ fn classify_iteration_declarative_local_puts(
             limits.max_policy_transfers,
         )?;
         let definition = &variables[argument_count + local];
-        // Mutable lexical writes are already proven safe by the binding-state
-        // pass once their scope is active. An iterator-backed destructuring
-        // assignment may use a different cursor than the declaration's
-        // iterator, so it must not be mistaken for a second declarative put.
-        if definition.policy.writes == CompilerWritePolicy::Mutable {
+        // Mutable lexical writes are normally proven safe by the binding-state
+        // pass once their scope is active. A captured per-iteration `let`
+        // declaration is different: its unchecked iterator-head put must be
+        // certified so the binding-state pass can require the previous cell
+        // to be closed before the backedge reinitializes it. Ordinary
+        // iterator-backed assignments use checked puts; mixed or uncertified
+        // unchecked puts therefore cannot claim declaration authority.
+        let captured_mutable_iteration_declaration = definition.policy.writes
+            == CompilerWritePolicy::Mutable
+            && definition.policy.temporal_dead_zone
+            && definition.has_scope
+            && definition.variable_reference.is_some()
+            && !summary.has_uncertified_put
+            && summary.unchecked_puts == summary.certified_puts;
+        if definition.policy.writes == CompilerWritePolicy::Mutable
+            && !captured_mutable_iteration_declaration
+        {
             continue;
         }
         if definition.policy.temporal_dead_zone && summary.multiple_cursor_sites {
@@ -9762,7 +9773,9 @@ fn verify_binding_opcodes(
         } else if let Some(local) = local_operand(opcode, instruction.operands()) {
             let definition = &variables[argument_count + local as usize];
             verify_local_opcode(id, decoded.pc(), local, opcode, definition)?;
-            if internal_stack.certifies_catch_local_put(index, local) {
+            if internal_stack.certifies_catch_local_put(index, local)
+                && !definition.policy.temporal_dead_zone
+            {
                 if definition.policy.initialization != CompilerInitializationPolicy::Catch {
                     return Err(policy_error(
                         id,
@@ -9831,8 +9844,12 @@ fn verify_binding_opcodes(
                 BindingPolicyViolationReason::MissingLexicalScopeInitialization,
             ));
         }
+        let expected_catch_initializations = u8::from(
+            definition.policy.initialization == CompilerInitializationPolicy::Catch
+                && !definition.policy.temporal_dead_zone,
+        );
         if definition.policy.initialization == CompilerInitializationPolicy::Catch
-            && catch_initializations != 1
+            && catch_initializations != expected_catch_initializations
         {
             return Err(policy_error(
                 id,
@@ -10171,7 +10188,8 @@ fn verify_binding_states(
                 tracked[position].1,
                 initializers.put_definitions[index] == Some(definition_index),
                 internal_stack.certifies_iteration_local_put(index, local),
-                internal_stack.certifies_catch_local_put(index, local),
+                internal_stack.certifies_catch_local_put(index, local)
+                    && !tracked[position].1.policy.temporal_dead_zone,
                 &mut state[position],
             )?;
         }

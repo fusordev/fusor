@@ -1,13 +1,14 @@
 use oxc_semantic::ScopeId;
 
 use super::super::{
-    ArgumentSlot, AstKind, BindingPattern, BranchKind, CompilationContext, CompiledConstantPool,
-    DeclarationKind, DestructuringBindingInitialization, Executable, ExecutableId, ExecutableKind,
-    Expression, ExpressionPlanner, FinalOpcode, FrameLayout, FrameSlot, Function,
-    FunctionPlanningContext, FunctionTreeLayout, FunctionType, InitializationPolicy,
-    LeafCompilationError, NodeId, Operands, PlannedControlFlow, PlannedInstruction,
-    ScopeEntryInitialization, Span, StoragePlacement, UnsupportedLeafFeature, WritePolicy,
-    checked_function_index, compact_get_argument, plan_put_slot, unsupported,
+    ArgumentSlot, AstKind, BindingId, BindingPattern, BranchKind, CompilationContext,
+    CompiledConstantPool, DeclarationKind, DestructuringBindingInitialization, Executable,
+    ExecutableId, ExecutableKind, Expression, ExpressionPlanner, FinalOpcode, FrameLayout,
+    FrameSlot, Function, FunctionPlanningContext, FunctionTreeLayout, FunctionType,
+    InitializationPolicy, LeafCompilationError, NodeId, Operands, PlannedControlFlow,
+    PlannedInstruction, ScopeEntryInitialization, Span, StoragePlacement, UnsupportedLeafFeature,
+    WritePolicy, checked_function_index, compact_get_argument, compact_get_local,
+    plan_external_put, plan_put_slot, unsupported,
 };
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
@@ -528,6 +529,15 @@ impl<'arena> CompilationContext<'_, 'arena, '_> {
                     span: None,
                 },
             )?;
+            if self
+                .planned
+                .identities
+                .annex_b_functions
+                .values()
+                .any(|function| function.synthetic_block && function.lexical == binding)
+            {
+                continue;
+            }
             if Self::realm_global_scope_entry_is_runtime_instantiated(storage, declaration_span)? {
                 continue;
             }
@@ -880,7 +890,183 @@ impl<'arena> CompilationContext<'_, 'arena, '_> {
         Ok(())
     }
 
-    pub(in crate::lowering) fn validate_function_declaration(
+    #[allow(
+        clippy::too_many_lines,
+        reason = "ordinary, Annex B block, and synthetic-if function declarations share one closure-publication boundary"
+    )]
+    pub(in crate::lowering) fn plan_function_declaration(
+        &self,
+        function: &Function<'arena>,
+        layout: &FrameLayout,
+        tree_layout: &FunctionTreeLayout,
+        constants: &CompiledConstantPool,
+        active_scope: Option<ScopeId>,
+        flow: &mut PlannedControlFlow,
+    ) -> Result<(), LeafCompilationError> {
+        let Some(annex_b) = self
+            .planned
+            .identities
+            .annex_b_functions
+            .get(&function.node_id.get())
+            .copied()
+        else {
+            return self.validate_function_declaration(
+                function,
+                layout.executable,
+                tree_layout,
+                active_scope,
+            );
+        };
+        if !annex_b.synthetic_block {
+            self.validate_function_declaration(
+                function,
+                layout.executable,
+                tree_layout,
+                active_scope,
+            )?;
+            return self.plan_annex_b_function_copy(
+                annex_b.lexical,
+                annex_b.variable,
+                function.span,
+                layout,
+                tree_layout,
+                flow,
+            );
+        }
+
+        let identifier = function
+            .id
+            .as_ref()
+            .ok_or(LeafCompilationError::SemanticInvariant {
+                invariant: "Annex B function declaration has a binding identifier",
+                span: Some(function.span),
+            })?;
+        let binding = self.binding_for_identifier(identifier.symbol_id.get(), identifier.span)?;
+        let storage =
+            self.planned
+                .plan
+                .binding(binding)
+                .ok_or(LeafCompilationError::SemanticInvariant {
+                    invariant: "synthetic Annex B lexical binding exists",
+                    span: Some(identifier.span),
+                })?;
+        if binding != annex_b.lexical
+            || storage.executable() != layout.executable
+            || storage.placement() != StoragePlacement::Local
+            || storage.policy().kind() != DeclarationKind::Let
+            || storage.policy().initialization() != InitializationPolicy::AtDeclaration
+            || storage.policy().writes() != WritePolicy::Mutable
+            || !storage.policy().has_temporal_dead_zone()
+            || active_scope != Some(annex_b.lexical_scope)
+        {
+            return Err(LeafCompilationError::SemanticInvariant {
+                invariant: "synthetic Annex B function uses one scoped lexical cell",
+                span: Some(identifier.span),
+            });
+        }
+        let FrameSlot::Local(slot) =
+            layout
+                .slot(binding)
+                .ok_or(LeafCompilationError::SemanticInvariant {
+                    invariant: "synthetic Annex B lexical binding has a local slot",
+                    span: Some(identifier.span),
+                })?
+        else {
+            return Err(LeafCompilationError::SemanticInvariant {
+                invariant: "synthetic Annex B lexical binding uses local storage",
+                span: Some(identifier.span),
+            });
+        };
+        let child = ExpressionPlanner::new(self).executable_for_function(function)?;
+        self.validate_function_declaration_child(
+            function,
+            identifier.span,
+            layout.executable,
+            child,
+            tree_layout,
+        )?;
+        flow.emit(PlannedInstruction::new(
+            FinalOpcode::SetLocUninitialized,
+            Operands::Loc(slot.index()),
+            identifier.span,
+        ))?;
+        flow.emit(ExpressionPlanner::new(self).plan_child_function_closure(
+            child,
+            layout.executable,
+            function.span,
+            tree_layout,
+            constants,
+        )?)?;
+        flow.emit(plan_put_slot(FrameSlot::Local(slot), identifier.span))?;
+        self.plan_annex_b_function_copy(
+            binding,
+            annex_b.variable,
+            identifier.span,
+            layout,
+            tree_layout,
+            flow,
+        )?;
+        if storage.is_frame_captured() {
+            flow.emit(PlannedInstruction::new(
+                FinalOpcode::CloseLoc,
+                Operands::Loc(slot.index()),
+                identifier.span,
+            ))?;
+        }
+        Ok(())
+    }
+
+    fn plan_annex_b_function_copy(
+        &self,
+        lexical: BindingId,
+        variable: Option<BindingId>,
+        span: Span,
+        layout: &FrameLayout,
+        tree_layout: &FunctionTreeLayout,
+        flow: &mut PlannedControlFlow,
+    ) -> Result<(), LeafCompilationError> {
+        let Some(variable) = variable else {
+            return Ok(());
+        };
+        let FrameSlot::Local(lexical_slot) =
+            layout
+                .slot(lexical)
+                .ok_or(LeafCompilationError::SemanticInvariant {
+                    invariant: "Annex B lexical function has an owner-frame slot",
+                    span: Some(span),
+                })?
+        else {
+            return Err(LeafCompilationError::SemanticInvariant {
+                invariant: "Annex B lexical function uses owner-local storage",
+                span: Some(span),
+            });
+        };
+        let (opcode, operands) = compact_get_local(lexical_slot);
+        flow.emit(PlannedInstruction::new(opcode, operands, span))?;
+        if let Some(slot) = layout.slot(variable) {
+            return flow.emit(plan_put_slot(slot, span));
+        }
+        let global = tree_layout.realm_globals.for_binding(variable).ok_or(
+            LeafCompilationError::SemanticInvariant {
+                invariant: "Annex B variable target has frame or realm-global storage",
+                span: Some(span),
+            },
+        )?;
+        let slot = tree_layout.realm_globals.closure_slot(
+            &self.planned.plan,
+            layout.executable,
+            global,
+        )?;
+        let descriptor = tree_layout.realm_globals.binding(global).ok_or(
+            LeafCompilationError::SemanticInvariant {
+                invariant: "Annex B variable target has a realm-global descriptor",
+                span: Some(span),
+            },
+        )?;
+        flow.emit(plan_external_put(descriptor.binding, slot, span))
+    }
+
+    fn validate_function_declaration(
         &self,
         function: &Function<'arena>,
         parent: ExecutableId,
@@ -941,6 +1127,23 @@ impl<'arena> CompilationContext<'_, 'arena, '_> {
             });
         }
         let child = ExpressionPlanner::new(self).executable_for_function(function)?;
+        self.validate_function_declaration_child(
+            function,
+            identifier.span,
+            parent,
+            child,
+            tree_layout,
+        )
+    }
+
+    fn validate_function_declaration_child(
+        &self,
+        function: &Function<'arena>,
+        name_span: Span,
+        parent: ExecutableId,
+        child: ExecutableId,
+        tree_layout: &FunctionTreeLayout,
+    ) -> Result<(), LeafCompilationError> {
         let child_metadata = self
             .planned
             .plan
@@ -948,7 +1151,7 @@ impl<'arena> CompilationContext<'_, 'arena, '_> {
             .ok_or(LeafCompilationError::InvalidExecutable { executable: child })?;
         if child_metadata.parent() != Some(parent)
             || tree_layout.children(parent)?.binary_search(&child).is_err()
-            || child_metadata.name_span() != Some(identifier.span)
+            || child_metadata.name_span() != Some(name_span)
         {
             return Err(LeafCompilationError::SemanticInvariant {
                 invariant: "function declaration has one typed direct-child constant",
