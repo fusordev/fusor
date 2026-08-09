@@ -86,3 +86,36 @@ fn block_arrow_body_uses_ordinary_return_completion() {
     assert!(opcodes.contains(&FinalOpcode::Return));
     assert_eq!(opcodes.last(), Some(&FinalOpcode::ReturnUndef));
 }
+
+#[test]
+fn async_arrows_use_lexical_async_authority_for_concise_and_block_bodies() {
+    let tree = compile_tree(
+        "function outer(){let concise=async value=>await value;let block=async ({value})=>{return await value;};return [concise,block];}",
+        "outer",
+    );
+    assert_eq!(tree.functions().len(), 3);
+
+    for (arrow, expected_flags) in tree
+        .verified_bytecode()
+        .functions()
+        .skip(1)
+        .zip([0x0462, 0x0460])
+    {
+        assert_eq!(
+            arrow.metadata().executable_kind(),
+            CompilerExecutableKind::AsyncArrow
+        );
+        let flow = arrow.function().control_flow();
+        assert_eq!(flow.function_header().kind(), FunctionKind::Async);
+        assert_eq!(flow.function_header().flags().bits(), expected_flags);
+        assert!(!flow.function_header().flags().has_prototype());
+        let opcodes = flow
+            .instructions()
+            .iter()
+            .map(|instruction| instruction.decoded().instruction().opcode())
+            .collect::<Vec<_>>();
+        assert!(opcodes.contains(&FinalOpcode::Await));
+        assert!(opcodes.contains(&FinalOpcode::ReturnAsync));
+        assert!(!opcodes.contains(&FinalOpcode::Return));
+    }
+}

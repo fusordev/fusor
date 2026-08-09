@@ -4258,7 +4258,10 @@ enum ReceiverAccess {
 
 impl ReceiverAccess {
     const fn for_function(strict: bool, executable_kind: CompilerExecutableKind) -> Self {
-        if matches!(executable_kind, CompilerExecutableKind::OrdinaryArrow) {
+        if matches!(
+            executable_kind,
+            CompilerExecutableKind::OrdinaryArrow | CompilerExecutableKind::AsyncArrow
+        ) {
             Self::Lexical
         } else if strict
             || matches!(

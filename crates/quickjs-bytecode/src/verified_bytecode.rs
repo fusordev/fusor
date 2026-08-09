@@ -613,6 +613,8 @@ pub enum CompilerExecutableKind {
     OrdinaryFunction,
     /// A synchronous lexical-this arrow function.
     OrdinaryArrow,
+    /// An asynchronous lexical-this arrow function.
+    AsyncArrow,
     /// A nonconstructable ordinary object-literal method, getter, or setter.
     OrdinaryMethod,
     /// The hidden strict method that initializes one class's instance
@@ -2690,7 +2692,7 @@ fn verify_executable_kind(
         | CompilerExecutableKind::GeneratorFunction
         | CompilerExecutableKind::AsyncFunction
         | CompilerExecutableKind::AsyncGeneratorFunction => Ok(()),
-        CompilerExecutableKind::OrdinaryArrow => {
+        CompilerExecutableKind::OrdinaryArrow | CompilerExecutableKind::AsyncArrow => {
             if metadata_has_local_function_name(metadata) {
                 return Err(BytecodeVerificationError::function(
                     id,
@@ -2847,6 +2849,29 @@ fn verify_header(
         CompilerExecutableKind::OrdinaryArrow => {
             if header.kind() != FunctionKind::Normal
                 || !matches!(header.flags().bits(), 0x0440 | 0x0442)
+                || header.mode().bits() & !1 != 0
+            {
+                return Err(BytecodeVerificationError::function(
+                    id,
+                    BytecodeVerificationErrorKind::UnsupportedFunctionHeader,
+                ));
+            }
+            if header.defined_argument_count() > arguments
+                || (header.flags().has_simple_parameter_list()
+                    && header.defined_argument_count() != arguments)
+            {
+                return Err(BytecodeVerificationError::function(
+                    id,
+                    BytecodeVerificationErrorKind::DefinedArgumentCountMismatch {
+                        defined: header.defined_argument_count(),
+                        arguments,
+                    },
+                ));
+            }
+        }
+        CompilerExecutableKind::AsyncArrow => {
+            if header.kind() != FunctionKind::Async
+                || !matches!(header.flags().bits(), 0x0460 | 0x0462)
                 || header.mode().bits() & !1 != 0
             {
                 return Err(BytecodeVerificationError::function(
@@ -5700,6 +5725,7 @@ fn inferred_function_name_pair(
         child_metadata.executable_kind,
         CompilerExecutableKind::OrdinaryFunction
             | CompilerExecutableKind::OrdinaryArrow
+            | CompilerExecutableKind::AsyncArrow
             | CompilerExecutableKind::GeneratorFunction
             | CompilerExecutableKind::AsyncFunction
             | CompilerExecutableKind::AsyncGeneratorFunction
@@ -6263,7 +6289,8 @@ fn verify_supported_opcodes(
     );
     let asynchronous = matches!(
         executable_kind,
-        CompilerExecutableKind::AsyncFunction
+        CompilerExecutableKind::AsyncArrow
+            | CompilerExecutableKind::AsyncFunction
             | CompilerExecutableKind::AsyncMethod
             | CompilerExecutableKind::AsyncGeneratorFunction
             | CompilerExecutableKind::AsyncGeneratorMethod
@@ -6290,6 +6317,7 @@ fn verify_supported_opcodes(
         || matches!(
             executable_kind,
             CompilerExecutableKind::OrdinaryArrow
+                | CompilerExecutableKind::AsyncArrow
                 | CompilerExecutableKind::OrdinaryMethod
                 | CompilerExecutableKind::ClassInstanceInitializer
                 | CompilerExecutableKind::GeneratorMethod
@@ -6375,9 +6403,11 @@ fn verify_supported_opcodes(
             || (matches!(opcode, FinalOpcode::Return | FinalOpcode::ReturnUndef)
                 && (generator || asynchronous))
             || (opcode == FinalOpcode::CheckCtorReturn
-                && !(executable_kind == CompilerExecutableKind::OrdinaryArrow
-                    || (executable_kind == CompilerExecutableKind::DirectEvalScript
-                        && flow.function_header().flags().super_call_allowed())
+                && !(matches!(
+                    executable_kind,
+                    CompilerExecutableKind::OrdinaryArrow | CompilerExecutableKind::AsyncArrow
+                ) || (executable_kind == CompilerExecutableKind::DirectEvalScript
+                    && flow.function_header().flags().super_call_allowed())
                     || (executable_kind == CompilerExecutableKind::ClassConstructor
                         && flow
                             .function_header()
@@ -6409,6 +6439,7 @@ fn verify_supported_opcodes(
                             executable_kind,
                             CompilerExecutableKind::OrdinaryFunction
                                 | CompilerExecutableKind::OrdinaryArrow
+                                | CompilerExecutableKind::AsyncArrow
                                 | CompilerExecutableKind::OrdinaryMethod
                                 | CompilerExecutableKind::ClassConstructor
                                 | CompilerExecutableKind::GeneratorFunction
@@ -6499,6 +6530,7 @@ fn compiler_special_object_is_authorized(
         CompilerExecutableKind::DirectEvalScript
             | CompilerExecutableKind::OrdinaryFunction
             | CompilerExecutableKind::OrdinaryArrow
+            | CompilerExecutableKind::AsyncArrow
             | CompilerExecutableKind::OrdinaryMethod
             | CompilerExecutableKind::ClassInstanceInitializer
             | CompilerExecutableKind::ClassConstructor
@@ -6513,15 +6545,19 @@ fn compiler_special_object_is_authorized(
     }
     match operands {
         Operands::U8(0) => {
-            executable_kind != CompilerExecutableKind::OrdinaryArrow
-                && (flow.function_header().mode().is_strict() || !simple_parameter_list)
+            !matches!(
+                executable_kind,
+                CompilerExecutableKind::OrdinaryArrow | CompilerExecutableKind::AsyncArrow
+            ) && (flow.function_header().mode().is_strict() || !simple_parameter_list)
                 && arguments_object_count == 1
                 && rest_parameter_count == 0
                 && !mapped_arguments_authority
         }
         Operands::U8(1) => {
-            executable_kind != CompilerExecutableKind::OrdinaryArrow
-                && !flow.function_header().mode().is_strict()
+            !matches!(
+                executable_kind,
+                CompilerExecutableKind::OrdinaryArrow | CompilerExecutableKind::AsyncArrow
+            ) && !flow.function_header().mode().is_strict()
                 && simple_parameter_list
                 && arguments_object_count == 1
                 && rest_parameter_count == 0
@@ -6529,9 +6565,11 @@ fn compiler_special_object_is_authorized(
         }
         Operands::U8(3) => flow.function_header().flags().new_target_allowed(),
         Operands::U8(4) => {
-            executable_kind == CompilerExecutableKind::OrdinaryArrow
-                || (executable_kind == CompilerExecutableKind::DirectEvalScript
-                    && flow.function_header().flags().super_call_allowed())
+            matches!(
+                executable_kind,
+                CompilerExecutableKind::OrdinaryArrow | CompilerExecutableKind::AsyncArrow
+            ) || (executable_kind == CompilerExecutableKind::DirectEvalScript
+                && flow.function_header().flags().super_call_allowed())
                 || (executable_kind == CompilerExecutableKind::ClassConstructor
                     && flow
                         .function_header()
@@ -6544,6 +6582,7 @@ fn compiler_special_object_is_authorized(
                 || matches!(
                     executable_kind,
                     CompilerExecutableKind::OrdinaryArrow
+                        | CompilerExecutableKind::AsyncArrow
                         | CompilerExecutableKind::OrdinaryMethod
                         | CompilerExecutableKind::ClassInstanceInitializer
                         | CompilerExecutableKind::GeneratorMethod

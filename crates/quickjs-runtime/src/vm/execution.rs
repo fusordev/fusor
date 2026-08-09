@@ -146,6 +146,7 @@ pub(super) fn plan_frame(
             | CompilerExecutableKind::DirectEvalScript
             | CompilerExecutableKind::DynamicFunctionScript
             | CompilerExecutableKind::OrdinaryArrow
+            | CompilerExecutableKind::AsyncArrow
     );
     let asynchronous = control_flow.function_header().kind() == FunctionKind::Async;
     let constructor_profile = if control_flow
@@ -715,6 +716,7 @@ pub(super) fn create_frame(
             | CompilerExecutableKind::DynamicFunctionScript
             | CompilerExecutableKind::OrdinaryFunction
             | CompilerExecutableKind::OrdinaryArrow
+            | CompilerExecutableKind::AsyncArrow
             | CompilerExecutableKind::OrdinaryMethod
             | CompilerExecutableKind::ClassInstanceInitializer
             | CompilerExecutableKind::GeneratorFunction

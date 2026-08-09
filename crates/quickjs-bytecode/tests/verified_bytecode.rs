@@ -5554,7 +5554,7 @@ fn define_method_input_with_root_arguments(
                     0,
                 )
             }
-            CompilerExecutableKind::OrdinaryArrow => {
+            CompilerExecutableKind::OrdinaryArrow | CompilerExecutableKind::AsyncArrow => {
                 panic!("a define_method child cannot be an arrow")
             }
             CompilerExecutableKind::GlobalScript
@@ -6000,6 +6000,60 @@ fn ordinary_arrow_profile_is_lexical_and_nonconstructable() {
             opcode: FinalOpcode::SpecialObject,
         } if *pc == BytecodePc::ZERO
     ));
+}
+
+#[test]
+fn async_arrow_profile_combines_lexical_authority_with_async_completion() {
+    let text = "async()=>this";
+    let function_span = SourceByteSpan::new(0, u32::try_from(text.len()).expect("source length"));
+    let mappings = [(0, function_span), (1, function_span)];
+    let input = profiled_single_input(
+        &[
+            (FinalOpcode::PushThis, Operands::None),
+            (FinalOpcode::ReturnAsync, Operands::None),
+        ],
+        UnverifiedFunctionHeader::async_arrow_with_variable_references(false, 0, 0),
+        CompilerExecutableKind::AsyncArrow,
+        &[],
+        None,
+        &[],
+        0,
+        0,
+        &[],
+        source(text, function_span, None, &mappings),
+    );
+    let verified =
+        verify_compiler_bytecode_graph(input, BytecodeGraphVerificationLimits::default())
+            .expect("async arrow has lexical receiver and async-return authority");
+    let header = verified.root().function().control_flow().function_header();
+    assert_eq!(header.kind(), quickjs_bytecode::FunctionKind::Async);
+    assert_eq!(header.flags().bits(), 0x0462);
+    assert!(!header.flags().has_prototype());
+    assert!(!header.flags().arguments_allowed());
+    assert!(header.flags().new_target_allowed());
+
+    let wrong_profile = profiled_single_input(
+        &[
+            (FinalOpcode::PushThis, Operands::None),
+            (FinalOpcode::ReturnAsync, Operands::None),
+        ],
+        UnverifiedFunctionHeader::async_source_function_with_variable_references(false, 0, 0),
+        CompilerExecutableKind::AsyncArrow,
+        &[],
+        None,
+        &[],
+        0,
+        0,
+        &[],
+        source(text, function_span, None, &mappings),
+    );
+    let error =
+        verify_compiler_bytecode_graph(wrong_profile, BytecodeGraphVerificationLimits::default())
+            .expect_err("async source-function flags cannot impersonate an async arrow");
+    assert_eq!(
+        error.kind(),
+        &BytecodeVerificationErrorKind::UnsupportedFunctionHeader
+    );
 }
 
 #[test]

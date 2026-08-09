@@ -966,7 +966,10 @@ pub(super) fn create_closure(
             closure_eval_shadowable,
         )
     };
-    let lexical = executable_kind == CompilerExecutableKind::OrdinaryArrow;
+    let lexical = matches!(
+        executable_kind,
+        CompilerExecutableKind::OrdinaryArrow | CompilerExecutableKind::AsyncArrow
+    );
     let (lexical_derived_constructor, lexical_derived_this_cell) = if lexical_derived_this {
         let constructor =
             frame

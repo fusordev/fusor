@@ -24,7 +24,9 @@ fn lexical_arrow_boundary(
             .ok()
             .and_then(|parent_index| metadata.get(parent_index))?;
         match parent_metadata.executable_kind {
-            CompilerExecutableKind::OrdinaryArrow => ancestor = parent,
+            CompilerExecutableKind::OrdinaryArrow | CompilerExecutableKind::AsyncArrow => {
+                ancestor = parent;
+            }
             kind => return Some((parent, kind)),
         }
     }
@@ -74,7 +76,10 @@ pub(super) fn verify_lexical_arrow_environments(
         BytecodeGraphResource::VerifiedMetadata,
     )?;
     for (index, record) in metadata.iter().enumerate() {
-        if record.executable_kind != CompilerExecutableKind::OrdinaryArrow {
+        if !matches!(
+            record.executable_kind,
+            CompilerExecutableKind::OrdinaryArrow | CompilerExecutableKind::AsyncArrow
+        ) {
             continue;
         }
         let id = function_id(index)?;

@@ -330,7 +330,7 @@ impl<'arena> CompilationContext<'_, 'arena, '_> {
             .ok_or(LeafCompilationError::InvalidExecutable { executable })?;
         let parameters = match self.unit.semantic().nodes().kind(node) {
             AstKind::Function(function) => function.params.as_ref(),
-            AstKind::ArrowFunctionExpression(arrow) if !arrow.r#async => arrow.params.as_ref(),
+            AstKind::ArrowFunctionExpression(arrow) => arrow.params.as_ref(),
             AstKind::Program(_) => return Ok(()),
             _ => {
                 return unsupported(UnsupportedLeafFeature::NonOrdinaryFunction, metadata.span());

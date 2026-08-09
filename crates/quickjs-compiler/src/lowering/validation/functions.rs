@@ -170,12 +170,9 @@ impl<'arena> CompilationContext<'_, 'arena, '_> {
                 executable.span(),
             );
         };
-        if arrow.r#async {
-            return unsupported(UnsupportedLeafFeature::NonOrdinaryFunction, arrow.span);
-        }
         if executable.kind()
             != (ExecutableKind::Arrow {
-                asynchronous: false,
+                asynchronous: arrow.r#async,
             })
         {
             return Err(LeafCompilationError::SemanticInvariant {

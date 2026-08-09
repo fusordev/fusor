@@ -5639,6 +5639,7 @@ fn require_root_kind(
         | CompilerExecutableKind::ClassInstanceInitializer
         | CompilerExecutableKind::ClassConstructor
         | CompilerExecutableKind::OrdinaryArrow
+        | CompilerExecutableKind::AsyncArrow
         | CompilerExecutableKind::GeneratorFunction
         | CompilerExecutableKind::GeneratorMethod
         | CompilerExecutableKind::AsyncFunction

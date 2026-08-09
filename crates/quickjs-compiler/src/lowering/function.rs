@@ -363,6 +363,11 @@ impl<'compiler, 'statement, 'unit, 'arena, 'scope, 'layout>
         let function_scope =
             compiler.created_scope(arrow.scope_id.get(), arrow.node_id.get(), arrow.span)?;
         let flow = PlannedControlFlow::new(limits);
+        let return_opcode = if arrow.r#async {
+            FinalOpcode::ReturnAsync
+        } else {
+            FinalOpcode::Return
+        };
         let mut work = if arrow.expression {
             let [Statement::ExpressionStatement(expression)] = arrow.body.statements.as_slice()
             else {
@@ -380,7 +385,7 @@ impl<'compiler, 'statement, 'unit, 'arena, 'scope, 'layout>
             vec![
                 StatementWork::PopScope(function_scope),
                 StatementWork::Emit(PlannedInstruction::new(
-                    FinalOpcode::Return,
+                    return_opcode,
                     Operands::None,
                     arrow.body.span,
                 )),
@@ -412,7 +417,11 @@ impl<'compiler, 'statement, 'unit, 'arena, 'scope, 'layout>
                 completion: StatementCompletion::Discard,
             },
             flow,
-            terminal: FunctionTerminal::Ordinary,
+            terminal: if arrow.r#async {
+                FunctionTerminal::Async
+            } else {
+                FunctionTerminal::Ordinary
+            },
         })
     }
 
@@ -523,9 +532,7 @@ impl CompilationContext<'_, '_, '_> {
             ExecutableKind::Script {
                 asynchronous: false,
             } => self.validate_script(executable, tree_layout, limits),
-            ExecutableKind::Arrow {
-                asynchronous: false,
-            } => self.validate_arrow(executable, tree_layout, limits),
+            ExecutableKind::Arrow { .. } => self.validate_arrow(executable, tree_layout, limits),
             ExecutableKind::ClassDefaultConstructor => {
                 self.validate_default_class_constructor(executable, tree_layout, limits)
             }
@@ -778,7 +785,11 @@ impl CompilationContext<'_, '_, '_> {
         )?;
 
         Ok(ValidatedFunction {
-            executable_kind: CompilerExecutableKind::OrdinaryArrow,
+            executable_kind: if arrow.r#async {
+                CompilerExecutableKind::AsyncArrow
+            } else {
+                CompilerExecutableKind::OrdinaryArrow
+            },
             strict: executable.is_strict(),
             derived_class_constructor: false,
             argument_count: executable.parameter_count(),
@@ -1127,6 +1138,13 @@ const fn executable_header(
         }
         CompilerExecutableKind::OrdinaryArrow => {
             UnverifiedFunctionHeader::ordinary_arrow_with_variable_references(
+                strict,
+                defined_argument_count,
+                variable_reference_count,
+            )
+        }
+        CompilerExecutableKind::AsyncArrow => {
+            UnverifiedFunctionHeader::async_arrow_with_variable_references(
                 strict,
                 defined_argument_count,
                 variable_reference_count,

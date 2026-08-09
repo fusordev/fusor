@@ -113,6 +113,29 @@ fn static_private_async_methods_preserve_the_home_object_across_await() {
 }
 
 #[test]
+fn async_arrows_await_with_lexical_receiver_arguments_and_inferred_name() {
+    assert_eq!(
+        start_and_read(
+            "function start(){\
+                let state={result:''};\
+                function make(value){\
+                    let task=async ({increment})=>{\
+                        let resumed=await increment;\
+                        return this.base+value+resumed+arguments[0];\
+                    };\
+                    task({increment:2}).then(function(result){\
+                        state.result=result+':'+task.name+':'+('prototype' in task);\
+                    });\
+                    return state;\
+                }\
+                return make.call({base:3},4);\
+            }"
+        ),
+        "13:task:false"
+    );
+}
+
+#[test]
 fn await_always_resumes_as_a_fifo_promise_job() {
     assert_eq!(
         start_and_read(
