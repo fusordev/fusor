@@ -48,10 +48,11 @@ use crate::{
     interrupt::InterruptState,
     object::{
         ArrayBufferState, ArrayIterator, ArrayIteratorKind, ArrayState, BoxedPrimitive,
-        DataViewState, DateState, ForInIterator, ForInSnapshot, HeapObject, KeyPhases,
-        ObjectRecord, OwnProperty, PromiseCapability, PromiseReaction, PropertyDeletion,
-        ProxyState, RegExpState, RegExpStringIterator, ShapeInterner, StringIterator,
-        TypedArrayElementType, TypedArrayState,
+        DataViewState, DateState, ForInIterator, ForInSnapshot, HeapObject,
+        IntlSegmentIteratorObjectState, IntlSegmentsObjectState, KeyPhases, ObjectRecord,
+        OwnProperty, PromiseCapability, PromiseReaction, PropertyDeletion, ProxyState, RegExpState,
+        RegExpStringIterator, ShapeInterner, StringIterator, TypedArrayElementType,
+        TypedArrayState,
     },
     value::{HeapReference, PrimitiveValue, ReleaseMailbox, RootTarget, SlotValue, StoredValue},
 };
@@ -61,6 +62,7 @@ mod async_functions;
 mod atomics_waiters;
 mod data_views;
 mod dates;
+mod intls;
 mod iterators;
 mod limits;
 mod maps;
@@ -113,6 +115,7 @@ enum RealmIntrinsics {
         data_view: DataViewIntrinsics,
         typed_array: TypedArrayIntrinsics,
         date: DateIntrinsics,
+        intl: IntlIntrinsics,
         temporal: TemporalIntrinsics,
         map: MapIntrinsics,
         set: SetIntrinsics,
@@ -294,6 +297,36 @@ struct TypedArrayIntrinsics {
 struct DateIntrinsics {
     prototype: ObjectId,
     constructor: FunctionId,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct IntlIntrinsics {
+    namespace: ObjectId,
+    collator_prototype: ObjectId,
+    collator_constructor: FunctionId,
+    collator_compare: FunctionId,
+    number_format_prototype: ObjectId,
+    number_format_constructor: FunctionId,
+    number_format_format: FunctionId,
+    date_time_format_prototype: ObjectId,
+    date_time_format_constructor: FunctionId,
+    date_time_format_format: FunctionId,
+    plural_rules_prototype: ObjectId,
+    plural_rules_constructor: FunctionId,
+    relative_time_format_prototype: ObjectId,
+    relative_time_format_constructor: FunctionId,
+    list_format_prototype: ObjectId,
+    list_format_constructor: FunctionId,
+    display_names_prototype: ObjectId,
+    display_names_constructor: FunctionId,
+    duration_format_prototype: ObjectId,
+    duration_format_constructor: FunctionId,
+    segmenter_prototype: ObjectId,
+    segments_prototype: ObjectId,
+    segment_iterator_prototype: ObjectId,
+    segmenter_constructor: FunctionId,
+    locale_prototype: ObjectId,
+    locale_constructor: FunctionId,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -866,6 +899,9 @@ pub(crate) enum StringArgument {
     OptionalString,
     /// `ToNumber`, kept as a Number so `NaN` remains distinguishable.
     Number,
+    /// Preserve the original ECMAScript value for an ECMA-402 operation that
+    /// performs its own resumable coercion and property access.
+    Value,
 }
 
 /// One `String.prototype` method's identity and argument shape.
@@ -935,8 +971,6 @@ impl StringMethod {
             | Self::TrimStart
             | Self::IsWellFormed
             | Self::ToWellFormed
-            | Self::ToLocaleLowerCase
-            | Self::ToLocaleUpperCase
             | Self::ToLowerCase
             | Self::ToUpperCase
             | Self::Concat
@@ -965,7 +999,12 @@ impl StringMethod {
             Self::Slice | Self::Substring => {
                 &[StringArgument::Integer, StringArgument::OptionalInteger]
             }
-            Self::LocaleCompare => &[StringArgument::String],
+            Self::LocaleCompare => &[
+                StringArgument::String,
+                StringArgument::Value,
+                StringArgument::Value,
+            ],
+            Self::ToLocaleLowerCase | Self::ToLocaleUpperCase => &[StringArgument::Value],
             Self::Normalize => &[StringArgument::OptionalString],
         }
     }
@@ -1223,6 +1262,80 @@ pub(crate) enum NativeFunctionKind {
     JsonRawJson,
     /// `JSON.stringify`.
     JsonStringify,
+    /// `Intl.getCanonicalLocales`.
+    IntlGetCanonicalLocales,
+    /// `Intl.supportedValuesOf`.
+    IntlSupportedValuesOf,
+    /// The `%Intl.Collator%` constructor.
+    IntlCollatorConstructor,
+    /// `Intl.Collator.supportedLocalesOf`.
+    IntlCollatorSupportedLocalesOf,
+    /// One `%Intl.Collator.prototype%` accessor or method.
+    IntlCollatorPrototype(IntlCollatorPrototypeMethod),
+    /// Hidden comparison target bound by the Collator `compare` getter.
+    IntlCollatorCompare,
+    /// The `%Intl.NumberFormat%` constructor.
+    IntlNumberFormatConstructor,
+    /// `Intl.NumberFormat.supportedLocalesOf`.
+    IntlNumberFormatSupportedLocalesOf,
+    /// One `%Intl.NumberFormat.prototype%` accessor or method.
+    IntlNumberFormatPrototype(IntlNumberFormatPrototypeMethod),
+    /// Hidden formatting target bound by the `NumberFormat` `format` getter.
+    IntlNumberFormatFormat,
+    /// The `%Intl.DateTimeFormat%` constructor.
+    IntlDateTimeFormatConstructor,
+    /// `Intl.DateTimeFormat.supportedLocalesOf`.
+    IntlDateTimeFormatSupportedLocalesOf,
+    /// One `%Intl.DateTimeFormat.prototype%` accessor or method.
+    IntlDateTimeFormatPrototype(IntlDateTimeFormatPrototypeMethod),
+    /// Hidden formatting target bound by the `DateTimeFormat` `format` getter.
+    IntlDateTimeFormatFormat,
+    /// The `%Intl.PluralRules%` constructor.
+    IntlPluralRulesConstructor,
+    /// `Intl.PluralRules.supportedLocalesOf`.
+    IntlPluralRulesSupportedLocalesOf,
+    /// One `%Intl.PluralRules.prototype%` method.
+    IntlPluralRulesPrototype(IntlPluralRulesPrototypeMethod),
+    /// The `%Intl.RelativeTimeFormat%` constructor.
+    IntlRelativeTimeFormatConstructor,
+    /// `Intl.RelativeTimeFormat.supportedLocalesOf`.
+    IntlRelativeTimeFormatSupportedLocalesOf,
+    /// One `%Intl.RelativeTimeFormat.prototype%` method.
+    IntlRelativeTimeFormatPrototype(IntlRelativeTimeFormatPrototypeMethod),
+    /// The `%Intl.ListFormat%` constructor.
+    IntlListFormatConstructor,
+    /// `Intl.ListFormat.supportedLocalesOf`.
+    IntlListFormatSupportedLocalesOf,
+    /// One `%Intl.ListFormat.prototype%` method.
+    IntlListFormatPrototype(IntlListFormatPrototypeMethod),
+    /// The `%Intl.DisplayNames%` constructor.
+    IntlDisplayNamesConstructor,
+    /// `Intl.DisplayNames.supportedLocalesOf`.
+    IntlDisplayNamesSupportedLocalesOf,
+    /// One `%Intl.DisplayNames.prototype%` method.
+    IntlDisplayNamesPrototype(IntlDisplayNamesPrototypeMethod),
+    /// The `%Intl.DurationFormat%` constructor.
+    IntlDurationFormatConstructor,
+    /// `Intl.DurationFormat.supportedLocalesOf`.
+    IntlDurationFormatSupportedLocalesOf,
+    /// One `%Intl.DurationFormat.prototype%` method.
+    IntlDurationFormatPrototype(IntlDurationFormatPrototypeMethod),
+    /// The `%Intl.Segmenter%` constructor.
+    IntlSegmenterConstructor,
+    /// `Intl.Segmenter.supportedLocalesOf`.
+    IntlSegmenterSupportedLocalesOf,
+    /// One `%Intl.Segmenter.prototype%` method.
+    IntlSegmenterPrototype(IntlSegmenterPrototypeMethod),
+    /// `%IntlSegmentsPrototype%.containing`.
+    IntlSegmentsContaining,
+    /// `%IntlSegmentsPrototype%[@@iterator]`.
+    IntlSegmentsIterator,
+    /// `%IntlSegmentIteratorPrototype%.next`.
+    IntlSegmentIteratorNext,
+    /// The `%Intl.Locale%` constructor.
+    IntlLocaleConstructor,
+    /// One `%Intl.Locale.prototype%` accessor or method.
+    IntlLocalePrototype(IntlLocalePrototypeMethod),
     /// One method on the ordinary `%Math%` object.
     Math(MathMethod),
     /// One method on the ordinary `%Atomics%` object.
@@ -1602,6 +1715,378 @@ pub(crate) enum DatePrototypeMethod {
     ToTemporalInstant,
     ToJson,
     SymbolToPrimitive,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum IntlCollatorPrototypeMethod {
+    Compare,
+    ResolvedOptions,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum IntlNumberFormatPrototypeMethod {
+    Format,
+    FormatToParts,
+    ResolvedOptions,
+    FormatRange,
+    FormatRangeToParts,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum IntlDateTimeFormatPrototypeMethod {
+    Format,
+    FormatToParts,
+    ResolvedOptions,
+    FormatRange,
+    FormatRangeToParts,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum IntlPluralRulesPrototypeMethod {
+    Select,
+    SelectRange,
+    ResolvedOptions,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum IntlRelativeTimeFormatPrototypeMethod {
+    ResolvedOptions,
+    Format,
+    FormatToParts,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum IntlListFormatPrototypeMethod {
+    ResolvedOptions,
+    Format,
+    FormatToParts,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum IntlDisplayNamesPrototypeMethod {
+    ResolvedOptions,
+    Of,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum IntlDurationFormatPrototypeMethod {
+    ResolvedOptions,
+    Format,
+    FormatToParts,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum IntlSegmenterPrototypeMethod {
+    ResolvedOptions,
+    Segment,
+}
+
+impl IntlSegmenterPrototypeMethod {
+    pub(crate) const ALL: [Self; 2] = [Self::ResolvedOptions, Self::Segment];
+
+    pub(crate) const fn name(self) -> &'static str {
+        match self {
+            Self::ResolvedOptions => "resolvedOptions",
+            Self::Segment => "segment",
+        }
+    }
+
+    pub(crate) const fn length(self) -> i32 {
+        match self {
+            Self::ResolvedOptions => 0,
+            Self::Segment => 1,
+        }
+    }
+}
+
+impl IntlDurationFormatPrototypeMethod {
+    pub(crate) const ALL: [Self; 3] = [Self::ResolvedOptions, Self::Format, Self::FormatToParts];
+
+    pub(crate) const fn name(self) -> &'static str {
+        match self {
+            Self::ResolvedOptions => "resolvedOptions",
+            Self::Format => "format",
+            Self::FormatToParts => "formatToParts",
+        }
+    }
+
+    pub(crate) const fn length(self) -> i32 {
+        match self {
+            Self::ResolvedOptions => 0,
+            Self::Format | Self::FormatToParts => 1,
+        }
+    }
+}
+
+impl IntlDisplayNamesPrototypeMethod {
+    pub(crate) const ALL: [Self; 2] = [Self::ResolvedOptions, Self::Of];
+
+    pub(crate) const fn name(self) -> &'static str {
+        match self {
+            Self::ResolvedOptions => "resolvedOptions",
+            Self::Of => "of",
+        }
+    }
+
+    pub(crate) const fn length(self) -> i32 {
+        match self {
+            Self::ResolvedOptions => 0,
+            Self::Of => 1,
+        }
+    }
+}
+
+impl IntlListFormatPrototypeMethod {
+    pub(crate) const ALL: [Self; 3] = [Self::ResolvedOptions, Self::Format, Self::FormatToParts];
+
+    pub(crate) const fn name(self) -> &'static str {
+        match self {
+            Self::ResolvedOptions => "resolvedOptions",
+            Self::Format => "format",
+            Self::FormatToParts => "formatToParts",
+        }
+    }
+
+    pub(crate) const fn length(self) -> i32 {
+        match self {
+            Self::ResolvedOptions => 0,
+            Self::Format | Self::FormatToParts => 1,
+        }
+    }
+}
+
+impl IntlRelativeTimeFormatPrototypeMethod {
+    pub(crate) const ALL: [Self; 3] = [Self::ResolvedOptions, Self::Format, Self::FormatToParts];
+
+    pub(crate) const fn name(self) -> &'static str {
+        match self {
+            Self::ResolvedOptions => "resolvedOptions",
+            Self::Format => "format",
+            Self::FormatToParts => "formatToParts",
+        }
+    }
+
+    pub(crate) const fn length(self) -> i32 {
+        match self {
+            Self::ResolvedOptions => 0,
+            Self::Format | Self::FormatToParts => 2,
+        }
+    }
+}
+
+impl IntlPluralRulesPrototypeMethod {
+    pub(crate) const ALL: [Self; 3] = [Self::Select, Self::SelectRange, Self::ResolvedOptions];
+
+    pub(crate) const fn name(self) -> &'static str {
+        match self {
+            Self::Select => "select",
+            Self::SelectRange => "selectRange",
+            Self::ResolvedOptions => "resolvedOptions",
+        }
+    }
+
+    pub(crate) const fn length(self) -> i32 {
+        match self {
+            Self::Select => 1,
+            Self::SelectRange => 2,
+            Self::ResolvedOptions => 0,
+        }
+    }
+}
+
+impl IntlDateTimeFormatPrototypeMethod {
+    pub(crate) const ALL: [Self; 5] = [
+        Self::Format,
+        Self::FormatToParts,
+        Self::ResolvedOptions,
+        Self::FormatRange,
+        Self::FormatRangeToParts,
+    ];
+
+    pub(crate) const fn is_accessor(self) -> bool {
+        matches!(self, Self::Format)
+    }
+
+    pub(crate) const fn name(self) -> &'static str {
+        match self {
+            Self::Format => "format",
+            Self::FormatToParts => "formatToParts",
+            Self::ResolvedOptions => "resolvedOptions",
+            Self::FormatRange => "formatRange",
+            Self::FormatRangeToParts => "formatRangeToParts",
+        }
+    }
+
+    pub(crate) const fn length(self) -> i32 {
+        match self {
+            Self::Format | Self::ResolvedOptions => 0,
+            Self::FormatToParts => 1,
+            Self::FormatRange | Self::FormatRangeToParts => 2,
+        }
+    }
+}
+
+impl IntlNumberFormatPrototypeMethod {
+    pub(crate) const ALL: [Self; 5] = [
+        Self::Format,
+        Self::FormatToParts,
+        Self::ResolvedOptions,
+        Self::FormatRange,
+        Self::FormatRangeToParts,
+    ];
+
+    pub(crate) const fn is_accessor(self) -> bool {
+        matches!(self, Self::Format)
+    }
+
+    pub(crate) const fn name(self) -> &'static str {
+        match self {
+            Self::Format => "format",
+            Self::FormatToParts => "formatToParts",
+            Self::ResolvedOptions => "resolvedOptions",
+            Self::FormatRange => "formatRange",
+            Self::FormatRangeToParts => "formatRangeToParts",
+        }
+    }
+
+    pub(crate) const fn length(self) -> i32 {
+        match self {
+            Self::Format | Self::ResolvedOptions => 0,
+            Self::FormatToParts => 1,
+            Self::FormatRange | Self::FormatRangeToParts => 2,
+        }
+    }
+}
+
+impl IntlCollatorPrototypeMethod {
+    pub(crate) const ALL: [Self; 2] = [Self::Compare, Self::ResolvedOptions];
+
+    pub(crate) const fn is_accessor(self) -> bool {
+        matches!(self, Self::Compare)
+    }
+
+    pub(crate) const fn name(self) -> &'static str {
+        match self {
+            Self::Compare => "compare",
+            Self::ResolvedOptions => "resolvedOptions",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum IntlLocalePrototypeMethod {
+    BaseName,
+    Calendar,
+    CaseFirst,
+    Collation,
+    FirstDayOfWeek,
+    HourCycle,
+    Language,
+    NumberingSystem,
+    Numeric,
+    Region,
+    Script,
+    Variants,
+    Maximize,
+    Minimize,
+    ToString,
+    GetCalendars,
+    GetCollations,
+    GetHourCycles,
+    GetNumberingSystems,
+    GetTextInfo,
+    GetTimeZones,
+    GetWeekInfo,
+}
+
+impl IntlLocalePrototypeMethod {
+    pub(crate) const ALL: [Self; 22] = [
+        Self::BaseName,
+        Self::Calendar,
+        Self::CaseFirst,
+        Self::Collation,
+        Self::FirstDayOfWeek,
+        Self::HourCycle,
+        Self::Language,
+        Self::NumberingSystem,
+        Self::Numeric,
+        Self::Region,
+        Self::Script,
+        Self::Variants,
+        Self::Maximize,
+        Self::Minimize,
+        Self::ToString,
+        Self::GetCalendars,
+        Self::GetCollations,
+        Self::GetHourCycles,
+        Self::GetNumberingSystems,
+        Self::GetTextInfo,
+        Self::GetTimeZones,
+        Self::GetWeekInfo,
+    ];
+
+    pub(crate) const fn is_accessor(self) -> bool {
+        matches!(
+            self,
+            Self::BaseName
+                | Self::Calendar
+                | Self::CaseFirst
+                | Self::Collation
+                | Self::FirstDayOfWeek
+                | Self::HourCycle
+                | Self::Language
+                | Self::NumberingSystem
+                | Self::Numeric
+                | Self::Region
+                | Self::Script
+                | Self::Variants
+        )
+    }
+
+    pub(crate) const fn name(self) -> &'static str {
+        match self {
+            Self::BaseName => "baseName",
+            Self::Calendar => "calendar",
+            Self::CaseFirst => "caseFirst",
+            Self::Collation => "collation",
+            Self::FirstDayOfWeek => "firstDayOfWeek",
+            Self::HourCycle => "hourCycle",
+            Self::Language => "language",
+            Self::NumberingSystem => "numberingSystem",
+            Self::Numeric => "numeric",
+            Self::Region => "region",
+            Self::Script => "script",
+            Self::Variants => "variants",
+            Self::Maximize => "maximize",
+            Self::Minimize => "minimize",
+            Self::ToString => "toString",
+            Self::GetCalendars => "getCalendars",
+            Self::GetCollations => "getCollations",
+            Self::GetHourCycles => "getHourCycles",
+            Self::GetNumberingSystems => "getNumberingSystems",
+            Self::GetTextInfo => "getTextInfo",
+            Self::GetTimeZones => "getTimeZones",
+            Self::GetWeekInfo => "getWeekInfo",
+        }
+    }
+
+    pub(crate) const fn function_name(self) -> &'static str {
+        match self {
+            Self::BaseName => "get baseName",
+            Self::Calendar => "get calendar",
+            Self::CaseFirst => "get caseFirst",
+            Self::Collation => "get collation",
+            Self::FirstDayOfWeek => "get firstDayOfWeek",
+            Self::HourCycle => "get hourCycle",
+            Self::Language => "get language",
+            Self::NumberingSystem => "get numberingSystem",
+            Self::Numeric => "get numeric",
+            Self::Region => "get region",
+            Self::Script => "get script",
+            Self::Variants => "get variants",
+            method => method.name(),
+        }
+    }
 }
 
 impl DatePrototypeMethod {
@@ -4130,6 +4615,16 @@ impl NativeFunctionKind {
                 | Self::DataViewConstructor
                 | Self::TypedArrayConstructor(_)
                 | Self::DateConstructor
+                | Self::IntlCollatorConstructor
+                | Self::IntlNumberFormatConstructor
+                | Self::IntlDateTimeFormatConstructor
+                | Self::IntlPluralRulesConstructor
+                | Self::IntlRelativeTimeFormatConstructor
+                | Self::IntlListFormatConstructor
+                | Self::IntlDisplayNamesConstructor
+                | Self::IntlDurationFormatConstructor
+                | Self::IntlSegmenterConstructor
+                | Self::IntlLocaleConstructor
                 | Self::TemporalDurationConstructor
                 | Self::TemporalInstantConstructor
                 | Self::TemporalPlainDateConstructor

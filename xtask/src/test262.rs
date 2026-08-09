@@ -33,6 +33,7 @@ pub struct Test262Options {
     pub baseline: PathBuf,
     pub filter: Option<String>,
     pub admit_feature: Option<String>,
+    pub admit_intl402: bool,
     pub limit: Option<usize>,
     pub report: Option<PathBuf>,
     pub inventory_only: bool,
@@ -50,6 +51,7 @@ pub fn parse_options(
     let mut baseline = PathBuf::from(DEFAULT_BASELINE);
     let mut filter = None;
     let mut admit_feature = None;
+    let mut admit_intl402 = false;
     let mut limit = None;
     let mut report = None;
     let mut inventory_only = false;
@@ -80,6 +82,7 @@ pub fn parse_options(
                 }
                 admit_feature = Some(value);
             }
+            "--admit-intl402" => admit_intl402 = true,
             "--limit" => {
                 limit = Some(required_positive_usize(&mut arguments, "--limit")?);
             }
@@ -105,6 +108,7 @@ pub fn parse_options(
         baseline,
         filter,
         admit_feature,
+        admit_intl402,
         limit,
         report,
         inventory_only,
@@ -493,6 +497,7 @@ impl Inventory {
         baseline: &Baseline,
         filter: Option<&str>,
         admitted_feature: Option<&str>,
+        admit_intl402: bool,
         limit: Option<usize>,
     ) -> Result<Self, String> {
         let test_root = suite.join("test");
@@ -524,6 +529,7 @@ impl Inventory {
                 &metadata,
                 &baseline.policy,
                 admitted_feature,
+                admit_intl402,
                 &harness_root,
             )?;
             if let Some(reason) = &skip_reason {
@@ -593,16 +599,19 @@ fn classify_skip(
     metadata: &Metadata,
     policy: &BaselinePolicy,
     admitted_feature: Option<&str>,
+    admit_intl402: bool,
     harness_root: &Path,
 ) -> Result<Option<String>, String> {
-    if relative.starts_with("intl402/") || relative.starts_with("staging/intl402/") {
+    let is_intl402 = is_intl402_path(relative);
+    if is_intl402 && !admit_intl402 {
         return Ok(Some("low-priority-intl402".to_owned()));
     }
-    if policy.excludes(relative) {
+    if policy.excludes(relative) && !(is_intl402 && admit_intl402) {
         return Ok(Some("quickjs-baseline-exclude".to_owned()));
     }
     if let Some(feature) = metadata.features.iter().find(|feature| {
         policy.skipped_features.contains(*feature)
+            && !(is_intl402 && admit_intl402)
             && admitted_feature.is_none_or(|admitted| admitted != feature.as_str())
     }) {
         return Ok(Some(format!("quickjs-skipped-feature:{feature}")));
@@ -646,6 +655,28 @@ fn classify_skip(
         }
     }
     Ok(None)
+}
+
+fn is_intl402_path(relative: &str) -> bool {
+    relative.starts_with("intl402/") || relative.starts_with("staging/intl402/")
+}
+
+fn validate_intl402_admission_scope(options: &Test262Options) -> Result<(), String> {
+    if !options.admit_intl402 {
+        return Ok(());
+    }
+    let Some(filter) = options.filter.as_deref() else {
+        return Err("--admit-intl402 requires an explicit Intl subtree --filter".to_owned());
+    };
+    if filter == "intl402"
+        || filter.starts_with("intl402/")
+        || filter == "staging/intl402"
+        || filter.starts_with("staging/intl402/")
+    {
+        Ok(())
+    } else {
+        Err("--admit-intl402 requires --filter intl402[/...] or staging/intl402[/...]".to_owned())
+    }
 }
 
 fn requires_host_api(source: &str) -> bool {
@@ -760,6 +791,7 @@ impl HarnessSources {
 
 pub fn run_test262(options: &Test262Options) -> Result<bool, String> {
     validate_execution_profile(options, cfg!(debug_assertions))?;
+    validate_intl402_admission_scope(options)?;
     let baseline = Baseline::load(&options.baseline)?;
     if let Some(feature) = options.admit_feature.as_deref() {
         if options.filter.is_none() {
@@ -777,6 +809,7 @@ pub fn run_test262(options: &Test262Options) -> Result<bool, String> {
         &baseline,
         options.filter.as_deref(),
         options.admit_feature.as_deref(),
+        options.admit_intl402,
         options.limit,
     )?;
     if inventory.plans.is_empty() {
@@ -1307,6 +1340,7 @@ fn build_report(
         "selection": {
             "filter": options.filter,
             "admitted_feature": options.admit_feature,
+            "admitted_intl402": options.admit_intl402,
             "limit": options.limit,
             "instruction_fuel": options.instruction_fuel,
             "timeout_ms": options.timeout_ms,
@@ -1372,9 +1406,10 @@ mod tests {
             "--baseline",
             "/tmp/baseline",
             "--filter",
-            "test/language/expressions",
+            "test/intl402/Locale",
             "--admit-feature",
             "Temporal",
+            "--admit-intl402",
             "--limit",
             "12",
             "--report",
@@ -1397,8 +1432,9 @@ mod tests {
             Ok(Test262Options {
                 suite: PathBuf::from("/tmp/test262"),
                 baseline: PathBuf::from("/tmp/baseline"),
-                filter: Some("language/expressions".to_owned()),
+                filter: Some("intl402/Locale".to_owned()),
                 admit_feature: Some("Temporal".to_owned()),
+                admit_intl402: true,
                 limit: Some(12),
                 report: Some(PathBuf::from("/tmp/report.json")),
                 inventory_only: true,
@@ -1437,6 +1473,7 @@ mod tests {
             baseline: PathBuf::from("/tmp/baseline"),
             filter: None,
             admit_feature: None,
+            admit_intl402: false,
             limit: None,
             report: None,
             inventory_only: false,
@@ -1580,6 +1617,7 @@ throw new TypeError();",
                 &temporal,
                 &policy,
                 Some("Temporal"),
+                false,
                 harness,
             ),
             Ok(None)
@@ -1591,10 +1629,90 @@ throw new TypeError();",
                 &shadow_realm,
                 &policy,
                 Some("Temporal"),
+                false,
                 harness,
             ),
             Ok(Some("quickjs-skipped-feature:ShadowRealm".to_owned()))
         );
+    }
+
+    #[test]
+    fn focused_intl402_admission_bypasses_only_intl_policy_skips() {
+        let policy = BaselinePolicy {
+            skipped_features: BTreeSet::from(["Intl.Locale".to_owned(), "ShadowRealm".to_owned()]),
+            exclusions: vec!["test/intl402/".to_owned()],
+        };
+        let intl = Metadata {
+            features: BTreeSet::from(["Intl.Locale".to_owned()]),
+            ..Metadata::default()
+        };
+        let shadow_realm = Metadata {
+            features: BTreeSet::from(["ShadowRealm".to_owned()]),
+            ..Metadata::default()
+        };
+        let harness = Path::new("harness");
+
+        assert_eq!(
+            classify_skip(
+                "intl402/Locale/basic.js",
+                "",
+                &intl,
+                &policy,
+                None,
+                false,
+                harness,
+            ),
+            Ok(Some("low-priority-intl402".to_owned()))
+        );
+        assert_eq!(
+            classify_skip(
+                "intl402/Locale/basic.js",
+                "",
+                &intl,
+                &policy,
+                None,
+                true,
+                harness,
+            ),
+            Ok(None)
+        );
+        assert_eq!(
+            classify_skip(
+                "built-ins/ShadowRealm/basic.js",
+                "",
+                &shadow_realm,
+                &policy,
+                None,
+                true,
+                harness,
+            ),
+            Ok(Some("quickjs-skipped-feature:ShadowRealm".to_owned()))
+        );
+    }
+
+    #[test]
+    fn intl402_admission_requires_an_intl_filter() {
+        let mut options = Test262Options {
+            suite: PathBuf::from("/tmp/test262"),
+            baseline: PathBuf::from("/tmp/baseline"),
+            filter: None,
+            admit_feature: None,
+            admit_intl402: true,
+            limit: None,
+            report: None,
+            inventory_only: true,
+            instruction_fuel: DEFAULT_INSTRUCTION_FUEL,
+            timeout_ms: DEFAULT_TIMEOUT_MS,
+            jobs: 1,
+            progress_every: None,
+            verbose: false,
+        };
+
+        assert!(validate_intl402_admission_scope(&options).is_err());
+        options.filter = Some("built-ins/Intl".to_owned());
+        assert!(validate_intl402_admission_scope(&options).is_err());
+        options.filter = Some("intl402/Locale".to_owned());
+        assert_eq!(validate_intl402_admission_scope(&options), Ok(()));
     }
 
     #[test]

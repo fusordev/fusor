@@ -107,6 +107,7 @@ impl RealmSnapshot {
             data_view,
             typed_array,
             date,
+            intl,
             temporal,
             map,
             set,
@@ -151,6 +152,37 @@ impl RealmSnapshot {
             (data_view.prototype, "%DataView.prototype%"),
             (typed_array.prototype, "%TypedArray.prototype%"),
             (date.prototype, "%Date.prototype%"),
+            (intl.namespace, "%Intl%"),
+            (intl.collator_prototype, "%Intl.Collator.prototype%"),
+            (
+                intl.number_format_prototype,
+                "%Intl.NumberFormat.prototype%",
+            ),
+            (
+                intl.date_time_format_prototype,
+                "%Intl.DateTimeFormat.prototype%",
+            ),
+            (intl.plural_rules_prototype, "%Intl.PluralRules.prototype%"),
+            (
+                intl.relative_time_format_prototype,
+                "%Intl.RelativeTimeFormat.prototype%",
+            ),
+            (intl.list_format_prototype, "%Intl.ListFormat.prototype%"),
+            (
+                intl.display_names_prototype,
+                "%Intl.DisplayNames.prototype%",
+            ),
+            (
+                intl.duration_format_prototype,
+                "%Intl.DurationFormat.prototype%",
+            ),
+            (intl.segmenter_prototype, "%Intl.Segmenter.prototype%"),
+            (intl.segments_prototype, "%IntlSegmentsPrototype%"),
+            (
+                intl.segment_iterator_prototype,
+                "%IntlSegmentIteratorPrototype%",
+            ),
+            (intl.locale_prototype, "%Intl.Locale.prototype%"),
             (temporal.namespace, "%Temporal%"),
             (temporal.now, "%Temporal.Now%"),
             (temporal.duration_prototype, "%Temporal.Duration.prototype%"),
@@ -521,9 +553,9 @@ mod tests {
 
     use crate::runtime::{RealmIntrinsics, RuntimeLimits, RuntimeUsage};
 
-    const REALM_NODES: usize = 805;
-    const REALM_PROPERTIES: u64 = 2_445;
-    const REALM_SNAPSHOT_FINGERPRINT: u64 = 17_141_552_549_063_721_660;
+    const REALM_NODES: usize = 895;
+    const REALM_PROPERTIES: u64 = 2_707;
+    const REALM_SNAPSHOT_FINGERPRINT: u64 = 14_052_603_484_784_711_893;
 
     #[test]
     fn complete_realm_snapshot_pins_the_installed_intrinsic_graph() {
@@ -571,9 +603,9 @@ mod tests {
         assert_eq!(
             first_atoms,
             AtomUsage {
-                live_atoms: PREDEFINED_ATOM_COUNT + 340,
-                live_description_code_units: PREDEFINED_DESCRIPTION_CODE_UNITS + 2_944,
-                interner_slots: PREDEFINED_INTERNER_SLOTS + 340,
+                live_atoms: PREDEFINED_ATOM_COUNT + 398,
+                live_description_code_units: PREDEFINED_DESCRIPTION_CODE_UNITS + 3_610,
+                interner_slots: PREDEFINED_INTERNER_SLOTS + 398,
             }
         );
 

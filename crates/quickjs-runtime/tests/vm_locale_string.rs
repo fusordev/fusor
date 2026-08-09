@@ -134,22 +134,26 @@ fn object_locale_string_dynamically_invokes_to_string_and_returns_its_value() {
 }
 
 #[test]
-fn number_and_bigint_locale_strings_use_deterministic_decimal_rendering() {
+fn number_and_bigint_locale_strings_delegate_to_number_format() {
     assert_all(&[
-        ("Number.prototype.toLocaleString.call(1234.5)", "1234.5"),
-        ("Number.prototype.toLocaleString.call(-0)", "0"),
+        ("Number.prototype.toLocaleString.call(1234.5)", "1,234.5"),
+        (
+            "Number.prototype.toLocaleString.call(1234.5,'de-DE')",
+            "1.234,5",
+        ),
+        ("Number.prototype.toLocaleString.call(-0)", "-0"),
         ("Number.prototype.toLocaleString.call(Object(12))", "12"),
         (
             "BigInt.prototype.toLocaleString.call(BigInt(-1234))",
-            "-1234",
+            "-1,234",
         ),
         (
             "BigInt.prototype.toLocaleString.call(Object(BigInt(12)))",
             "12",
         ),
         (
-            "(function(){let used=false;const options={valueOf(){used=true;return 1;}};Number.prototype.toLocaleString.call(3,options);return used;})()",
-            "false",
+            "(function(){let used='';const options={get useGrouping(){used+='grouping';return false;}};const result=Number.prototype.toLocaleString.call(3000,undefined,options);return used+'|'+result;})()",
+            "grouping|3000",
         ),
     ]);
     assert_throw_kind(
@@ -170,8 +174,8 @@ fn array_locale_string_invokes_each_present_value_and_uses_empty_nullish_fields(
             "a|b|string|c#A,,,B,7",
         ),
         (
-            "(function(){let received='unset';const value={toLocaleString(first){received=first;return 'x';}};[value].toLocaleString('locale','options');return received===undefined;})()",
-            "true",
+            "(function(){let received='';const value={toLocaleString(first,second){received=first+'|'+second;return 'x';}};[value].toLocaleString('locale','options');return received;})()",
+            "locale|options",
         ),
         (
             "Array.prototype.toLocaleString.call({length:3,0:1,2:2})",

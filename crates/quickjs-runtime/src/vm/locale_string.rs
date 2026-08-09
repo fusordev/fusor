@@ -23,11 +23,11 @@
  * THE SOFTWARE.
  */
 
-//! Deterministic no-`Intl` `toLocaleString` methods.
+//! ECMA-262 and ECMA-402 `toLocaleString` methods.
 //!
-//! ECMA-262 permits Number and `BigInt` locale rendering to equal ordinary
-//! decimal `toString` when ECMA-402 is absent. The profile also selects `","`
-//! as Array's implementation-defined list separator. Object and Array remain
+//! Number and `BigInt` delegate to the realm's intrinsic `NumberFormat`
+//! semantics. The profile selects `","` as Array's implementation-defined list
+//! separator. Object and Array remain
 //! fully observable: both invoke a property dynamically, and Array additionally
 //! suspends at every length conversion, element getter, locale method, and
 //! conversion of that method's result.
@@ -55,6 +55,7 @@ pub(crate) struct LocaleStringContinuation {
     method: LocaleStringMethod,
     target: StoredValue,
     element: Option<StoredValue>,
+    arguments: Vec<StoredValue>,
     separator: JsString,
     accumulated: JsString,
     length: u64,
@@ -66,7 +67,9 @@ pub(crate) struct LocaleStringContinuation {
 
 impl LocaleStringContinuation {
     pub(crate) fn retained_values(&self) -> u64 {
-        3_u64.saturating_add(u64::from(self.element.is_some()))
+        3_u64
+            .saturating_add(u64::from(self.element.is_some()))
+            .saturating_add(usize_to_u64(self.arguments.len()))
     }
 
     pub(crate) fn trace_roots(&self, mark: &mut dyn FnMut(CollectionRoot)) {
@@ -74,15 +77,23 @@ impl LocaleStringContinuation {
         if let Some(element) = &self.element {
             trace_stored_value_root(element, mark);
         }
+        for argument in &self.arguments {
+            trace_stored_value_root(argument, mark);
+        }
     }
 }
 
-/// Starts one locale-string method under the deterministic no-`Intl` profile.
+/// Starts one locale-string method.
+#[allow(
+    clippy::too_many_arguments,
+    reason = "native dispatch keeps receiver, arguments, realm, return target, origin, and budget explicit"
+)]
 pub(super) fn begin_locale_string(
     runtime: &mut Runtime,
     method: LocaleStringMethod,
     realm: RealmId,
     receiver: StoredValue,
+    mut arguments: CallArguments,
     return_to: Option<CallReturn>,
     origin: JsStackFrame,
     execution_budget: &mut ExecutionBudget,
@@ -90,19 +101,36 @@ pub(super) fn begin_locale_string(
     match method {
         LocaleStringMethod::Number => {
             let value = number_receiver_value(runtime, realm, &receiver, Some(&origin))?;
-            return Ok(NativeDispatch::Immediate(StoredValue::String(
-                value.to_javascript_string()?,
-            )));
+            let value = to_intl_mathematical_value(StoredValue::Number(value), realm, &origin)?;
+            return begin_intl_number_to_locale_string(
+                runtime,
+                arguments,
+                value,
+                realm,
+                return_to,
+                origin,
+                execution_budget,
+            );
         }
         LocaleStringMethod::BigInt => {
             let value = this_bigint_value(runtime, realm, &receiver, &origin)?;
-            return bigint_prototype_to_string(&value, 10, realm, &origin);
+            let value = to_intl_mathematical_value(StoredValue::BigInt(value), realm, &origin)?;
+            return begin_intl_number_to_locale_string(
+                runtime,
+                arguments,
+                value,
+                realm,
+                return_to,
+                origin,
+                execution_budget,
+            );
         }
         LocaleStringMethod::Object => {
             let state = LocaleStringContinuation {
                 method,
                 target: receiver.duplicate(),
                 element: Some(receiver),
+                arguments: Vec::new(),
                 separator: JsString::from_utf8(",")?,
                 accumulated: JsString::empty(),
                 length: 0,
@@ -116,6 +144,11 @@ pub(super) fn begin_locale_string(
         LocaleStringMethod::Array => {}
     }
 
+    let forwarded_arguments = vec![
+        arguments.take_first_or_undefined(),
+        arguments.take_first_or_undefined(),
+    ];
+
     let target = match to_object_value(runtime, realm, receiver, origin.clone())? {
         Ok(target) => target,
         Err(exception) => return Err(NativeFailure::Abrupt(exception)),
@@ -124,6 +157,7 @@ pub(super) fn begin_locale_string(
         method,
         target,
         element: None,
+        arguments: forwarded_arguments,
         separator: JsString::from_utf8(",")?,
         accumulated: JsString::empty(),
         length: 0,
@@ -373,6 +407,7 @@ fn suspend_locale_string(
     return_to: Option<CallReturn>,
 ) -> Result<NativeDispatch, NativeFailure> {
     let origin = state.origin.clone();
+    let arguments = state.arguments.iter().map(StoredValue::duplicate).collect();
     let mut continuations = Vec::new();
     continuations
         .try_reserve_exact(1)
@@ -384,7 +419,7 @@ fn suspend_locale_string(
     Ok(NativeDispatch::Call(NativeCall {
         function,
         receiver,
-        arguments: CallArguments::empty(),
+        arguments: CallArguments::from_values(arguments),
         return_to,
         origin,
         continuations,

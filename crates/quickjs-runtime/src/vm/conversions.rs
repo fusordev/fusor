@@ -3108,6 +3108,248 @@ fn finish_operator_primitive_target(
         OperatorPrimitiveTarget::ArrayStaticLength(state) => {
             advance_array_static(runtime, *state, Some(value), return_to, execution_budget)
         }
+        OperatorPrimitiveTarget::IntlLocaleListLength(state) => {
+            finish_intl_locale_list_length(runtime, *state, value, return_to, execution_budget)
+        }
+        OperatorPrimitiveTarget::IntlLocaleListElement(state) => {
+            let locale = operator_primitive_to_string(value, realm, origin)?;
+            finish_intl_locale_list_element(runtime, *state, &locale, return_to, execution_budget)
+        }
+        OperatorPrimitiveTarget::IntlLocaleConstructor(state) => advance_intl_locale_constructor(
+            runtime,
+            *state,
+            Some(value),
+            return_to,
+            execution_budget,
+        ),
+        OperatorPrimitiveTarget::IntlCollatorConstructor(state) => {
+            advance_intl_collator_constructor(
+                runtime,
+                *state,
+                Some(value),
+                return_to,
+                execution_budget,
+            )
+        }
+        OperatorPrimitiveTarget::IntlCollatorSupportedLocalesOf(state) => {
+            advance_intl_collator_supported_locales(
+                runtime,
+                *state,
+                Some(value),
+                return_to,
+                execution_budget,
+            )
+        }
+        OperatorPrimitiveTarget::IntlNumberFormatConstructor(state) => {
+            advance_intl_number_format_constructor(
+                runtime,
+                *state,
+                Some(value),
+                return_to,
+                execution_budget,
+            )
+        }
+        OperatorPrimitiveTarget::IntlNumberFormatSupportedLocalesOf(state) => {
+            advance_intl_number_format_supported_locales(
+                runtime,
+                *state,
+                Some(value),
+                return_to,
+                execution_budget,
+            )
+        }
+        OperatorPrimitiveTarget::IntlNumberFormatValue(state) => {
+            finish_intl_number_format_value_primitive(
+                runtime,
+                *state,
+                value,
+                return_to,
+                execution_budget,
+            )
+        }
+        OperatorPrimitiveTarget::IntlDateTimeFormatConstructor(state) => {
+            advance_intl_date_time_format_constructor(
+                runtime,
+                *state,
+                Some(value),
+                return_to,
+                execution_budget,
+            )
+        }
+        OperatorPrimitiveTarget::IntlDateTimeFormatSupportedLocalesOf(state) => {
+            advance_intl_date_time_format_supported_locales(
+                runtime,
+                *state,
+                Some(value),
+                return_to,
+                execution_budget,
+            )
+        }
+        OperatorPrimitiveTarget::IntlDateTimeFormatValue(state) => {
+            finish_intl_date_time_format_value_primitive(
+                runtime,
+                *state,
+                value,
+                return_to,
+                execution_budget,
+            )
+        }
+        OperatorPrimitiveTarget::IntlPluralRulesConstructor(state) => {
+            advance_intl_plural_rules_constructor(
+                runtime,
+                *state,
+                Some(value),
+                return_to,
+                execution_budget,
+            )
+        }
+        OperatorPrimitiveTarget::IntlPluralRulesSupportedLocalesOf(state) => {
+            advance_intl_plural_rules_supported_locales(
+                runtime,
+                *state,
+                Some(value),
+                return_to,
+                execution_budget,
+            )
+        }
+        OperatorPrimitiveTarget::IntlPluralRulesValue(state) => {
+            finish_intl_plural_rules_value_primitive(
+                runtime,
+                *state,
+                value,
+                return_to,
+                execution_budget,
+            )
+        }
+        OperatorPrimitiveTarget::IntlRelativeTimeFormatConstructor(state) => {
+            advance_intl_relative_time_format_constructor(
+                runtime,
+                *state,
+                Some(value),
+                return_to,
+                execution_budget,
+            )
+        }
+        OperatorPrimitiveTarget::IntlRelativeTimeFormatSupportedLocalesOf(state) => {
+            advance_intl_relative_time_format_supported_locales(
+                runtime,
+                *state,
+                Some(value),
+                return_to,
+                execution_budget,
+            )
+        }
+        OperatorPrimitiveTarget::IntlRelativeTimeFormatValue(state) => {
+            finish_intl_relative_time_format_value_primitive(
+                runtime,
+                *state,
+                value,
+                return_to,
+                execution_budget,
+            )
+        }
+        OperatorPrimitiveTarget::IntlRelativeTimeFormatUnit(state) => {
+            finish_intl_relative_time_format_unit_primitive(runtime, &state, value)
+        }
+        OperatorPrimitiveTarget::IntlListFormatConstructor(state) => {
+            advance_intl_list_format_constructor(
+                runtime,
+                *state,
+                Some(value),
+                return_to,
+                execution_budget,
+            )
+        }
+        OperatorPrimitiveTarget::IntlListFormatSupportedLocalesOf(state) => {
+            advance_intl_list_format_supported_locales(
+                runtime,
+                *state,
+                Some(value),
+                return_to,
+                execution_budget,
+            )
+        }
+        OperatorPrimitiveTarget::IntlDisplayNamesConstructor(state) => {
+            advance_intl_display_names_constructor(
+                runtime,
+                *state,
+                Some(value),
+                return_to,
+                execution_budget,
+            )
+        }
+        OperatorPrimitiveTarget::IntlDisplayNamesSupportedLocalesOf(state) => {
+            advance_intl_display_names_supported_locales(
+                runtime,
+                *state,
+                Some(value),
+                return_to,
+                execution_budget,
+            )
+        }
+        OperatorPrimitiveTarget::IntlDisplayNamesOf(state) => {
+            finish_intl_display_names_of_primitive(runtime, &state, value)
+        }
+        OperatorPrimitiveTarget::IntlDurationFormatConstructor(state) => {
+            advance_intl_duration_format_constructor(
+                runtime,
+                *state,
+                Some(value),
+                return_to,
+                execution_budget,
+            )
+        }
+        OperatorPrimitiveTarget::IntlDurationFormatSupportedLocalesOf(state) => {
+            advance_intl_duration_format_supported_locales(
+                runtime,
+                *state,
+                Some(value),
+                return_to,
+                execution_budget,
+            )
+        }
+        OperatorPrimitiveTarget::IntlDurationFormatValue(state) => {
+            advance_intl_duration_format_value(
+                runtime,
+                *state,
+                Some(value),
+                return_to,
+                execution_budget,
+            )
+        }
+        OperatorPrimitiveTarget::IntlSegmenterConstructor(state) => {
+            advance_intl_segmenter_constructor(
+                runtime,
+                *state,
+                Some(value),
+                return_to,
+                execution_budget,
+            )
+        }
+        OperatorPrimitiveTarget::IntlSegmenterSupportedLocalesOf(state) => {
+            advance_intl_segmenter_supported_locales(
+                runtime,
+                *state,
+                Some(value),
+                return_to,
+                execution_budget,
+            )
+        }
+        OperatorPrimitiveTarget::IntlSegmenterSegment(state) => {
+            finish_intl_segmenter_segment_primitive(runtime, &state, value)
+        }
+        OperatorPrimitiveTarget::IntlSegmentsContaining(state) => {
+            finish_intl_segments_containing_primitive(runtime, &state, value)
+        }
+        OperatorPrimitiveTarget::IntlCollatorCompareFirst(state) => {
+            finish_intl_collator_compare_first(runtime, *state, value, return_to, execution_budget)
+        }
+        OperatorPrimitiveTarget::IntlCollatorCompareSecond(state) => {
+            finish_intl_collator_compare_second(runtime, *state, value)
+        }
+        OperatorPrimitiveTarget::IntlSupportedValuesOf => {
+            finish_intl_supported_values_of(runtime, value, realm, origin)
+        }
         OperatorPrimitiveTarget::ArrayFromAsyncLength { operation } => {
             resume_array_from_async_length_conversion(
                 runtime,

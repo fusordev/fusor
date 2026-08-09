@@ -3,13 +3,61 @@
     reason = "this private VM sibling participates in the shared interpreter implementation namespace"
 )]
 use super::*;
+use core::str::FromStr;
 use temporal_rs::{
     Calendar, Duration, Instant, PlainDate, PlainDateTime, PlainMonthDay, PlainTime,
-    PlainYearMonth, TimeZone, ZonedDateTime,
+    PlainYearMonth, TimeZone, TinyAsciiStr, ZonedDateTime,
     error::ErrorKind as TemporalErrorKind,
     options::{DisplayCalendar, RoundingMode, Unit},
     parsers::Precision,
 };
+
+pub(in crate::vm) fn temporal_calendar_era(
+    source: &JsString,
+    realm: RealmId,
+    origin: &JsStackFrame,
+) -> Result<TinyAsciiStr<19>, NativeFailure> {
+    let source = source.to_utf8_lossy()?;
+    match TinyAsciiStr::<19>::try_from_utf8(source.as_bytes()) {
+        Ok(era) => Ok(era),
+        Err(_) => Err(NativeFailure::Abrupt(temporal_pending_exception(
+            realm,
+            origin,
+            ExceptionKind::RangeError,
+            "invalid Temporal calendar era",
+        )?)),
+    }
+}
+
+pub(in crate::vm) fn temporal_calendar_supports_eras(calendar: &Calendar) -> bool {
+    !matches!(calendar.identifier(), "iso8601" | "chinese" | "dangi")
+}
+
+pub(in crate::vm) fn temporal_calendar_from_string(
+    source: &JsString,
+    realm: RealmId,
+    origin: &JsStackFrame,
+) -> Result<Calendar, NativeFailure> {
+    let source = source.to_utf8_lossy()?;
+    let lowercase = source.to_ascii_lowercase();
+    if lowercase == "islamic"
+        || lowercase.contains("[u-ca=islamic]")
+        || lowercase.contains("[!u-ca=islamic]")
+    {
+        return Err(NativeFailure::Abrupt(temporal_pending_exception(
+            realm,
+            origin,
+            ExceptionKind::RangeError,
+            "the islamic calendar identifier is not supported by Temporal",
+        )?));
+    }
+    match Calendar::from_str(&source) {
+        Ok(calendar) => Ok(calendar),
+        Err(error) => Err(NativeFailure::Abrupt(temporal_exception_from_error(
+            realm, origin, error,
+        )?)),
+    }
+}
 
 pub(in crate::vm) fn temporal_zoned_date_time_time_zone_from_value(
     runtime: &Runtime,

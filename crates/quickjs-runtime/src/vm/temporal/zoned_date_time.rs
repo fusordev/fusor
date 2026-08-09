@@ -7,7 +7,7 @@ use super::*;
 use crate::runtime::{TemporalZonedDateTimePrototypeMethod, TemporalZonedDateTimeStaticMethod};
 use core::str::FromStr;
 use temporal_rs::{
-    Calendar, MonthCode, PlainDate, PlainTime, TimeZone, UtcOffset, ZonedDateTime,
+    Calendar, MonthCode, PlainDate, PlainTime, TimeZone, TinyAsciiStr, UtcOffset, ZonedDateTime,
     fields::{CalendarFields, ZonedDateTimeFields},
     options::{
         DifferenceSettings, Disambiguation, DisplayCalendar, DisplayOffset, DisplayTimeZone,
@@ -37,9 +37,11 @@ pub(in crate::vm) struct TemporalZonedDateTimeConstructorContinuation {
     new_target: FunctionId,
 }
 
-const TEMPORAL_ZONED_DATE_TIME_BAG_FIELDS: [&str; 13] = [
+const TEMPORAL_ZONED_DATE_TIME_BAG_FIELDS: [&str; 15] = [
     "calendar",
     "day",
+    "era",
+    "eraYear",
     "hour",
     "microsecond",
     "millisecond",
@@ -56,10 +58,12 @@ const TEMPORAL_ZONED_DATE_TIME_BAG_FIELDS: [&str; 13] = [
 /// The `with` field order: `calendar` and `timeZone` are observed first by
 /// `RejectObjectWithCalendarOrTimeZone`, then the partial fields in
 /// alphabetical order.
-const TEMPORAL_ZONED_DATE_TIME_WITH_FIELDS: [&str; 13] = [
+const TEMPORAL_ZONED_DATE_TIME_WITH_FIELDS: [&str; 15] = [
     "calendar",
     "timeZone",
     "day",
+    "era",
+    "eraYear",
     "hour",
     "microsecond",
     "millisecond",
@@ -141,6 +145,8 @@ impl TemporalZonedDateTimeLikeTarget {
 struct TemporalZonedDateTimeBagFields {
     calendar: Calendar,
     day: Option<JsNumber>,
+    era: Option<TinyAsciiStr<19>>,
+    era_year: Option<JsNumber>,
     hour: Option<JsNumber>,
     microsecond: Option<JsNumber>,
     millisecond: Option<JsNumber>,
@@ -161,6 +167,8 @@ struct TemporalZonedDateTimeBagFields {
 /// deferred until all options have been observed.
 struct TemporalZonedDateTimeWithFields {
     year: Option<i32>,
+    era: Option<TinyAsciiStr<19>>,
+    era_year: Option<i32>,
     month: Option<u8>,
     month_code: Option<MonthCode>,
     day: Option<u8>,
@@ -176,6 +184,8 @@ struct TemporalZonedDateTimeWithFields {
 impl TemporalZonedDateTimeWithFields {
     const fn is_empty(&self) -> bool {
         self.year.is_none()
+            && self.era.is_none()
+            && self.era_year.is_none()
             && self.month.is_none()
             && self.month_code.is_none()
             && self.day.is_none()
@@ -201,8 +211,11 @@ fn temporal_zoned_date_time_with_fields_from_bag(
                 .and_then(|value| temporal_plain_date_time_i32(value, realm, origin))
         })
         .transpose()?;
+    let era_year = temporal_plain_date_time_optional_i32(fields.era_year, realm, origin)?;
     Ok(TemporalZonedDateTimeWithFields {
         year,
+        era: fields.era,
+        era_year,
         month: temporal_plain_date_time_optional_u8(fields.month, realm, origin)?,
         month_code: fields.month_code,
         day: temporal_plain_date_time_optional_u8(fields.day, realm, origin)?,
@@ -224,6 +237,8 @@ pub(in crate::vm) struct TemporalZonedDateTimeBagContinuation {
     base: StoredValue,
     calendar: Option<Calendar>,
     day: Option<JsNumber>,
+    era: Option<TinyAsciiStr<19>>,
+    era_year: Option<JsNumber>,
     hour: Option<JsNumber>,
     microsecond: Option<JsNumber>,
     millisecond: Option<JsNumber>,
@@ -256,6 +271,8 @@ impl TemporalZonedDateTimeBagContinuation {
         TemporalZonedDateTimeBagFields {
             calendar: self.calendar.clone().unwrap_or_default(),
             day: self.day,
+            era: self.era,
+            era_year: self.era_year,
             hour: self.hour,
             microsecond: self.microsecond,
             millisecond: self.millisecond,
@@ -721,6 +738,8 @@ pub(in crate::vm) fn begin_temporal_zoned_date_time_like(
                 base: value,
                 calendar: None,
                 day: None,
+                era: None,
+                era_year: None,
                 hour: None,
                 microsecond: None,
                 millisecond: None,
@@ -1161,6 +1180,8 @@ fn finish_temporal_zoned_date_time_from_options(
         }
         TemporalZonedDateTimeFromTarget::With { receiver, fields } => {
             let calendar_fields = CalendarFields::new()
+                .with_era(fields.era)
+                .with_era_year(fields.era_year)
                 .with_optional_year(fields.year)
                 .with_optional_month(fields.month)
                 .with_optional_month_code(fields.month_code)
@@ -1222,6 +1243,11 @@ pub(in crate::vm) fn advance_temporal_zoned_date_time_property_bag(
                             )
                         }
                         TemporalZonedDateTimeLikeTarget::With { receiver, options } => {
+                            let mut fields = fields;
+                            if !temporal_calendar_supports_eras(receiver.calendar()) {
+                                fields.era = None;
+                                fields.era_year = None;
+                            }
                             let fields = temporal_zoned_date_time_with_fields_from_bag(
                                 &fields,
                                 state.realm,
@@ -1386,9 +1412,9 @@ pub(in crate::vm) fn advance_temporal_zoned_date_time_property_bag(
                 }
                 state.stage = TemporalZonedDateTimeBagStage::AwaitConversion;
                 let hint = match field {
-                    "monthCode" | "offset" => OperatorPrimitiveHint::String,
-                    "day" | "hour" | "microsecond" | "millisecond" | "minute" | "month"
-                    | "nanosecond" | "second" | "year" => OperatorPrimitiveHint::Number,
+                    "era" | "monthCode" | "offset" => OperatorPrimitiveHint::String,
+                    "day" | "eraYear" | "hour" | "microsecond" | "millisecond" | "minute"
+                    | "month" | "nanosecond" | "second" | "year" => OperatorPrimitiveHint::Number,
                     _ => {
                         return Err(EngineFault::RuntimeInvariant {
                             message: "unknown Temporal.ZonedDateTime property bag field",
@@ -1414,6 +1440,21 @@ pub(in crate::vm) fn advance_temporal_zoned_date_time_property_bag(
                     message: "Temporal.ZonedDateTime property bag conversion resumed without a value",
                 })?;
                 match temporal_zoned_date_time_property_bag_fields(&state.target)[state.next] {
+                    "era" => {
+                        let StoredValue::String(value) = value else {
+                            return temporal_type_error(
+                                state.realm,
+                                &state.origin,
+                                "Temporal.ZonedDateTime era must be a string",
+                            );
+                        };
+                        state.era =
+                            Some(temporal_calendar_era(&value, state.realm, &state.origin)?);
+                    }
+                    "eraYear" => {
+                        state.era_year =
+                            Some(operator_to_number(value, state.realm, &state.origin)?);
+                    }
                     "monthCode" => {
                         let StoredValue::String(value) = value else {
                             return temporal_type_error(
@@ -1507,12 +1548,7 @@ fn temporal_zoned_date_time_calendar_from_value(
     origin: &JsStackFrame,
 ) -> Result<Calendar, NativeFailure> {
     match value {
-        StoredValue::String(value) => match Calendar::from_str(&value.to_utf8_lossy()?) {
-            Ok(calendar) => Ok(calendar),
-            Err(error) => Err(NativeFailure::Abrupt(temporal_exception_from_error(
-                realm, origin, error,
-            )?)),
-        },
+        StoredValue::String(value) => temporal_calendar_from_string(&value, realm, origin),
         StoredValue::Object(object) => {
             if let Some(value) = runtime.temporal_plain_date(object)? {
                 return Ok(value.calendar().clone());
@@ -1550,14 +1586,18 @@ fn temporal_zoned_date_time_calendar_from_value(
     reason = "all prepared property-bag fields are passed explicitly into temporal_rs"
 )]
 fn temporal_zoned_date_time_from_bag_fields(
-    fields: TemporalZonedDateTimeBagFields,
+    mut fields: TemporalZonedDateTimeBagFields,
     overflow: Overflow,
     disambiguation: Disambiguation,
     offset_option: OffsetDisambiguation,
     realm: RealmId,
     origin: &JsStackFrame,
 ) -> Result<ZonedDateTime, NativeFailure> {
-    if fields.year.is_none()
+    if !temporal_calendar_supports_eras(&fields.calendar) {
+        fields.era = None;
+        fields.era_year = None;
+    }
+    if (fields.year.is_none() && (fields.era.is_none() || fields.era_year.is_none()))
         || fields.day.is_none()
         || (fields.month.is_none() && fields.month_code.is_none())
     {
@@ -1576,11 +1616,8 @@ fn temporal_zoned_date_time_from_bag_fields(
             "Temporal.ZonedDateTime property bag is missing timeZone",
         )?));
     };
-    let year = temporal_plain_date_time_i32(
-        temporal_plain_date_time_required_field(fields.year, realm, origin)?,
-        realm,
-        origin,
-    )?;
+    let year = temporal_plain_date_time_optional_i32(fields.year, realm, origin)?;
+    let era_year = temporal_plain_date_time_optional_i32(fields.era_year, realm, origin)?;
     let day = temporal_plain_date_time_u8(
         temporal_plain_date_time_required_field(fields.day, realm, origin)?,
         realm,
@@ -1594,7 +1631,9 @@ fn temporal_zoned_date_time_from_bag_fields(
     let microsecond = temporal_plain_date_time_optional_u16(fields.microsecond, realm, origin)?;
     let nanosecond = temporal_plain_date_time_optional_u16(fields.nanosecond, realm, origin)?;
     let calendar_fields = CalendarFields::new()
-        .with_year(year)
+        .with_era(fields.era)
+        .with_era_year(era_year)
+        .with_optional_year(year)
         .with_optional_month(month)
         .with_optional_month_code(fields.month_code)
         .with_day(day);
@@ -1635,7 +1674,9 @@ fn temporal_plain_date_from_relative_to_bag_fields(
     realm: RealmId,
     origin: &JsStackFrame,
 ) -> Result<PlainDate, NativeFailure> {
-    if fields.year.is_none()
+    let supports_eras = temporal_calendar_supports_eras(&fields.calendar);
+    if (fields.year.is_none()
+        && (!supports_eras || fields.era.is_none() || fields.era_year.is_none()))
         || fields.day.is_none()
         || (fields.month.is_none() && fields.month_code.is_none())
     {
@@ -1659,11 +1700,12 @@ fn temporal_plain_date_from_relative_to_bag_fields(
     {
         temporal_plain_date_time_integer(value, realm, origin)?;
     }
-    let year = temporal_plain_date_time_i32(
-        temporal_plain_date_time_required_field(fields.year, realm, origin)?,
-        realm,
-        origin,
-    )?;
+    let year = temporal_plain_date_time_optional_i32(fields.year, realm, origin)?;
+    let era_year = if supports_eras {
+        temporal_plain_date_time_optional_i32(fields.era_year, realm, origin)?
+    } else {
+        None
+    };
     let day = temporal_plain_date_time_u8(
         temporal_plain_date_time_required_field(fields.day, realm, origin)?,
         realm,
@@ -1672,7 +1714,9 @@ fn temporal_plain_date_from_relative_to_bag_fields(
     let month = temporal_plain_date_time_optional_u8(fields.month, realm, origin)?;
     let partial = PartialDate::new()
         .with_calendar(fields.calendar.clone())
-        .with_year(Some(year))
+        .with_era(if supports_eras { fields.era } else { None })
+        .with_era_year(era_year)
+        .with_year(year)
         .with_month(month)
         .with_month_code(fields.month_code)
         .with_day(Some(day));
@@ -1966,9 +2010,19 @@ pub(in crate::vm) fn dispatch_temporal_zoned_date_time_prototype(
             origin.clone(),
             execution_budget,
         ),
-        TemporalZonedDateTimePrototypeMethod::ToJson
-        | TemporalZonedDateTimePrototypeMethod::ToLocaleString => {
+        TemporalZonedDateTimePrototypeMethod::ToJson => {
             render_temporal_zoned_date_time(&date_time, realm, origin)
+        }
+        TemporalZonedDateTimePrototypeMethod::ToLocaleString => {
+            begin_intl_temporal_to_locale_string(
+                runtime,
+                IntlDateTimeFormatLocaleValue::ZonedDateTime(date_time),
+                arguments,
+                realm,
+                return_to,
+                origin.clone(),
+                execution_budget,
+            )
         }
         TemporalZonedDateTimePrototypeMethod::ValueOf => temporal_type_error(
             realm,
@@ -2021,6 +2075,8 @@ fn begin_temporal_zoned_date_time_with(
             base: fields,
             calendar: None,
             day: None,
+            era: None,
+            era_year: None,
             hour: None,
             microsecond: None,
             millisecond: None,

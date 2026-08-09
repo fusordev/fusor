@@ -354,6 +354,7 @@ impl Runtime {
                 promise,
                 regexp,
                 date,
+                intl,
                 temporal,
                 symbol,
                 iterators,
@@ -392,6 +393,103 @@ impl Runtime {
                     &mut marked_objects,
                     &mut work,
                 );
+                mark_heap_reference(
+                    HeapReference::Object(intl.namespace),
+                    &mut marked_functions,
+                    &mut marked_objects,
+                    &mut work,
+                );
+                mark_heap_reference(
+                    HeapReference::Object(intl.collator_prototype),
+                    &mut marked_functions,
+                    &mut marked_objects,
+                    &mut work,
+                );
+                mark_heap_reference(
+                    HeapReference::Function(intl.collator_constructor),
+                    &mut marked_functions,
+                    &mut marked_objects,
+                    &mut work,
+                );
+                mark_heap_reference(
+                    HeapReference::Function(intl.collator_compare),
+                    &mut marked_functions,
+                    &mut marked_objects,
+                    &mut work,
+                );
+                mark_heap_reference(
+                    HeapReference::Object(intl.number_format_prototype),
+                    &mut marked_functions,
+                    &mut marked_objects,
+                    &mut work,
+                );
+                mark_heap_reference(
+                    HeapReference::Function(intl.number_format_constructor),
+                    &mut marked_functions,
+                    &mut marked_objects,
+                    &mut work,
+                );
+                mark_heap_reference(
+                    HeapReference::Function(intl.number_format_format),
+                    &mut marked_functions,
+                    &mut marked_objects,
+                    &mut work,
+                );
+                mark_heap_reference(
+                    HeapReference::Object(intl.date_time_format_prototype),
+                    &mut marked_functions,
+                    &mut marked_objects,
+                    &mut work,
+                );
+                mark_heap_reference(
+                    HeapReference::Function(intl.date_time_format_constructor),
+                    &mut marked_functions,
+                    &mut marked_objects,
+                    &mut work,
+                );
+                mark_heap_reference(
+                    HeapReference::Function(intl.date_time_format_format),
+                    &mut marked_functions,
+                    &mut marked_objects,
+                    &mut work,
+                );
+                mark_heap_reference(
+                    HeapReference::Object(intl.plural_rules_prototype),
+                    &mut marked_functions,
+                    &mut marked_objects,
+                    &mut work,
+                );
+                mark_heap_reference(
+                    HeapReference::Function(intl.plural_rules_constructor),
+                    &mut marked_functions,
+                    &mut marked_objects,
+                    &mut work,
+                );
+                mark_heap_reference(
+                    HeapReference::Object(intl.locale_prototype),
+                    &mut marked_functions,
+                    &mut marked_objects,
+                    &mut work,
+                );
+                mark_heap_reference(
+                    HeapReference::Function(intl.locale_constructor),
+                    &mut marked_functions,
+                    &mut marked_objects,
+                    &mut work,
+                );
+                for reference in [
+                    HeapReference::Object(intl.segmenter_prototype),
+                    HeapReference::Object(intl.segments_prototype),
+                    HeapReference::Object(intl.segment_iterator_prototype),
+                    HeapReference::Function(intl.segmenter_constructor),
+                ] {
+                    mark_heap_reference(
+                        reference,
+                        &mut marked_functions,
+                        &mut marked_objects,
+                        &mut work,
+                    );
+                }
                 for reference in [
                     HeapReference::Object(temporal.namespace),
                     HeapReference::Object(temporal.duration_prototype),
@@ -1154,6 +1252,55 @@ impl Runtime {
                             if let Some(array) = object.typed_array_state() {
                                 mark_heap_reference(
                                     HeapReference::Object(array.buffer()),
+                                    &mut marked_functions,
+                                    &mut marked_objects,
+                                    &mut work,
+                                );
+                            }
+                            if let Some(compare) = object
+                                .intl_collator_state()
+                                .and_then(|state| state.bound_compare)
+                            {
+                                mark_heap_reference(
+                                    HeapReference::Function(compare),
+                                    &mut marked_functions,
+                                    &mut marked_objects,
+                                    &mut work,
+                                );
+                            }
+                            if let Some(format) = object
+                                .intl_number_format_state()
+                                .and_then(|state| state.bound_format)
+                            {
+                                mark_heap_reference(
+                                    HeapReference::Function(format),
+                                    &mut marked_functions,
+                                    &mut marked_objects,
+                                    &mut work,
+                                );
+                            }
+                            if let Some(format) = object
+                                .intl_date_time_format_state()
+                                .and_then(|state| state.bound_format)
+                            {
+                                mark_heap_reference(
+                                    HeapReference::Function(format),
+                                    &mut marked_functions,
+                                    &mut marked_objects,
+                                    &mut work,
+                                );
+                            }
+                            if let Some(segments) = object.intl_segments_state() {
+                                mark_heap_reference(
+                                    HeapReference::Object(segments.segmenter),
+                                    &mut marked_functions,
+                                    &mut marked_objects,
+                                    &mut work,
+                                );
+                            }
+                            if let Some(iterator) = object.intl_segment_iterator_state() {
+                                mark_heap_reference(
+                                    HeapReference::Object(iterator.segments),
                                     &mut marked_functions,
                                     &mut marked_objects,
                                     &mut work,

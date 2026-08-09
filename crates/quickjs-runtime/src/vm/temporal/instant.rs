@@ -458,7 +458,8 @@ pub(in crate::vm) fn finish_temporal_instant_constructor_wrapper(
 
 #[allow(
     clippy::too_many_arguments,
-    reason = "the shared prototype dispatcher preserves explicit call, return, source, and fuel context"
+    clippy::too_many_lines,
+    reason = "the closed Temporal.Instant prototype dispatcher preserves receiver validation and explicit call context"
 )]
 pub(in crate::vm) fn dispatch_temporal_instant_prototype(
     runtime: &mut Runtime,
@@ -538,17 +539,24 @@ pub(in crate::vm) fn dispatch_temporal_instant_prototype(
             origin.clone(),
             execution_budget,
         ),
-        TemporalInstantPrototypeMethod::ToJson | TemporalInstantPrototypeMethod::ToLocaleString => {
-            complete_temporal_instant_to_string(
-                instant,
-                Precision::Auto,
-                RoundingMode::Trunc,
-                None,
-                StoredValue::Undefined,
-                realm,
-                origin,
-            )
-        }
+        TemporalInstantPrototypeMethod::ToJson => complete_temporal_instant_to_string(
+            instant,
+            Precision::Auto,
+            RoundingMode::Trunc,
+            None,
+            StoredValue::Undefined,
+            realm,
+            origin,
+        ),
+        TemporalInstantPrototypeMethod::ToLocaleString => begin_intl_temporal_to_locale_string(
+            runtime,
+            IntlDateTimeFormatLocaleValue::Instant(instant),
+            arguments,
+            realm,
+            return_to,
+            origin.clone(),
+            execution_budget,
+        ),
         TemporalInstantPrototypeMethod::ToZonedDateTimeISO => {
             let value = arguments.take_first_or_undefined();
             let time_zone =

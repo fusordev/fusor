@@ -4,9 +4,14 @@ use crate::{
     Atom,
     runtime::{
         ArrayBufferPrototypeMethod, AtomicsMethod, DataViewPrototypeMethod, DatePrototypeMethod,
-        DateStaticMethod, SharedArrayBufferPrototypeMethod, TemporalDurationPrototypeMethod,
-        TemporalDurationStaticMethod, TemporalInstantPrototypeMethod, TemporalInstantStaticMethod,
-        TemporalNowMethod, TemporalPlainDatePrototypeMethod, TemporalPlainDateStaticMethod,
+        DateStaticMethod, IntlCollatorPrototypeMethod, IntlDateTimeFormatPrototypeMethod,
+        IntlDisplayNamesPrototypeMethod, IntlDurationFormatPrototypeMethod,
+        IntlListFormatPrototypeMethod, IntlLocalePrototypeMethod, IntlNumberFormatPrototypeMethod,
+        IntlPluralRulesPrototypeMethod, IntlRelativeTimeFormatPrototypeMethod,
+        IntlSegmenterPrototypeMethod, SharedArrayBufferPrototypeMethod,
+        TemporalDurationPrototypeMethod, TemporalDurationStaticMethod,
+        TemporalInstantPrototypeMethod, TemporalInstantStaticMethod, TemporalNowMethod,
+        TemporalPlainDatePrototypeMethod, TemporalPlainDateStaticMethod,
         TemporalPlainDateTimePrototypeMethod, TemporalPlainDateTimeStaticMethod,
         TemporalPlainMonthDayPrototypeMethod, TemporalPlainMonthDayStaticMethod,
         TemporalPlainTimePrototypeMethod, TemporalPlainTimeStaticMethod,
@@ -432,12 +437,67 @@ fn visit_core_name_order(
         RealmNameId::Description,
         RealmNameId::IsError,
         RealmNameId::Bind,
+        RealmNameId::Intl,
+        RealmNameId::IntlGetCanonicalLocales,
+        RealmNameId::IntlSupportedValuesOf,
+        RealmNameId::Collator,
+        RealmNameId::IntlCollatorSupportedLocalesOf,
+        RealmNameId::IntlNumberFormat,
+        RealmNameId::IntlNumberFormatSupportedLocalesOf,
+        RealmNameId::IntlDateTimeFormat,
+        RealmNameId::IntlDateTimeFormatSupportedLocalesOf,
+        RealmNameId::IntlPluralRules,
+        RealmNameId::IntlPluralRulesSupportedLocalesOf,
+        RealmNameId::IntlRelativeTimeFormat,
+        RealmNameId::IntlRelativeTimeFormatSupportedLocalesOf,
+        RealmNameId::IntlListFormat,
+        RealmNameId::IntlListFormatSupportedLocalesOf,
+        RealmNameId::IntlDisplayNames,
+        RealmNameId::IntlDisplayNamesSupportedLocalesOf,
+        RealmNameId::IntlDurationFormat,
+        RealmNameId::IntlDurationFormatSupportedLocalesOf,
+        RealmNameId::IntlSegmenter,
+        RealmNameId::IntlSegmenterSupportedLocalesOf,
+        RealmNameId::IntlSegmentsContaining,
+        RealmNameId::Locale,
         RealmNameId::Deref,
         RealmNameId::Register,
         RealmNameId::Unregister,
         RealmNameId::ProxyRevocable,
     ] {
         visit(id)?;
+    }
+    for method in IntlCollatorPrototypeMethod::ALL {
+        visit(RealmNameId::IntlCollatorPrototype(method))?;
+    }
+    for method in IntlNumberFormatPrototypeMethod::ALL {
+        visit(RealmNameId::IntlNumberFormatPrototype(method))?;
+    }
+    for method in IntlDateTimeFormatPrototypeMethod::ALL {
+        visit(RealmNameId::IntlDateTimeFormatPrototype(method))?;
+    }
+    for method in IntlPluralRulesPrototypeMethod::ALL {
+        visit(RealmNameId::IntlPluralRulesPrototype(method))?;
+    }
+    for method in IntlRelativeTimeFormatPrototypeMethod::ALL {
+        visit(RealmNameId::IntlRelativeTimeFormatPrototype(method))?;
+    }
+    for method in IntlListFormatPrototypeMethod::ALL {
+        visit(RealmNameId::IntlListFormatPrototype(method))?;
+    }
+    for method in IntlDisplayNamesPrototypeMethod::ALL {
+        visit(RealmNameId::IntlDisplayNamesPrototype(method))?;
+    }
+    for method in IntlDurationFormatPrototypeMethod::ALL {
+        visit(RealmNameId::IntlDurationFormatPrototype(method))?;
+    }
+    for method in IntlSegmenterPrototypeMethod::ALL {
+        visit(RealmNameId::IntlSegmenterPrototype(method))?;
+    }
+    for method in IntlLocalePrototypeMethod::ALL {
+        if !matches!(method, IntlLocalePrototypeMethod::ToString) {
+            visit(RealmNameId::IntlLocalePrototype(method))?;
+        }
     }
     Ok(())
 }
@@ -494,6 +554,39 @@ fn realm_name_description(id: RealmNameId) -> &'static str {
         RealmNameId::Description => "description",
         RealmNameId::IsError => "isError",
         RealmNameId::Bind => "bind",
+        RealmNameId::Intl => "Intl",
+        RealmNameId::IntlGetCanonicalLocales => "getCanonicalLocales",
+        RealmNameId::IntlSupportedValuesOf => "supportedValuesOf",
+        RealmNameId::Collator => "Collator",
+        RealmNameId::IntlCollatorSupportedLocalesOf
+        | RealmNameId::IntlNumberFormatSupportedLocalesOf
+        | RealmNameId::IntlDateTimeFormatSupportedLocalesOf
+        | RealmNameId::IntlPluralRulesSupportedLocalesOf
+        | RealmNameId::IntlRelativeTimeFormatSupportedLocalesOf
+        | RealmNameId::IntlListFormatSupportedLocalesOf
+        | RealmNameId::IntlDisplayNamesSupportedLocalesOf
+        | RealmNameId::IntlDurationFormatSupportedLocalesOf
+        | RealmNameId::IntlSegmenterSupportedLocalesOf => "supportedLocalesOf",
+        RealmNameId::IntlCollatorPrototype(method) => method.name(),
+        RealmNameId::IntlNumberFormat => "NumberFormat",
+        RealmNameId::IntlNumberFormatPrototype(method) => method.name(),
+        RealmNameId::IntlDateTimeFormat => "DateTimeFormat",
+        RealmNameId::IntlDateTimeFormatPrototype(method) => method.name(),
+        RealmNameId::IntlPluralRules => "PluralRules",
+        RealmNameId::IntlPluralRulesPrototype(method) => method.name(),
+        RealmNameId::IntlRelativeTimeFormat => "RelativeTimeFormat",
+        RealmNameId::IntlRelativeTimeFormatPrototype(method) => method.name(),
+        RealmNameId::IntlListFormat => "ListFormat",
+        RealmNameId::IntlListFormatPrototype(method) => method.name(),
+        RealmNameId::IntlDisplayNames => "DisplayNames",
+        RealmNameId::IntlDisplayNamesPrototype(method) => method.name(),
+        RealmNameId::IntlDurationFormat => "DurationFormat",
+        RealmNameId::IntlDurationFormatPrototype(method) => method.name(),
+        RealmNameId::IntlSegmenter => "Segmenter",
+        RealmNameId::IntlSegmenterPrototype(method) => method.name(),
+        RealmNameId::IntlSegmentsContaining => "containing",
+        RealmNameId::Locale => "Locale",
+        RealmNameId::IntlLocalePrototype(method) => method.name(),
         RealmNameId::Deref => "deref",
         RealmNameId::Register => "register",
         RealmNameId::Unregister => "unregister",
@@ -620,8 +713,8 @@ mod tests {
         let schema = RealmIntrinsicSchema::try_new().expect("Realm schema");
         let plan = RealmAtomPlan::try_new(&schema).expect("atom plan");
 
-        assert_eq!(plan.len(), 359);
-        assert_eq!(plan.description_code_units(), 3_148);
+        assert_eq!(plan.len(), 404);
+        assert_eq!(plan.description_code_units(), 3_633);
     }
 
     #[test]

@@ -439,7 +439,8 @@ pub(in crate::vm) fn finish_temporal_duration_constructor_wrapper(
 
 #[allow(
     clippy::too_many_arguments,
-    reason = "the native method may suspend while retaining its explicit call context"
+    clippy::too_many_lines,
+    reason = "the closed Temporal.Duration prototype dispatcher keeps receiver validation and all method routes together"
 )]
 pub(in crate::vm) fn dispatch_temporal_duration_prototype(
     runtime: &mut Runtime,
@@ -535,14 +536,22 @@ pub(in crate::vm) fn dispatch_temporal_duration_prototype(
             origin.clone(),
             execution_budget,
         ),
-        TemporalDurationPrototypeMethod::ToJson
-        | TemporalDurationPrototypeMethod::ToLocaleString => complete_temporal_duration_to_string(
+        TemporalDurationPrototypeMethod::ToJson => complete_temporal_duration_to_string(
             duration,
             Precision::Auto,
             RoundingMode::Trunc,
             None,
             realm,
             origin,
+        ),
+        TemporalDurationPrototypeMethod::ToLocaleString => begin_intl_duration_to_locale_string(
+            runtime,
+            duration,
+            arguments,
+            realm,
+            return_to,
+            origin.clone(),
+            execution_budget,
         ),
         TemporalDurationPrototypeMethod::ValueOf => temporal_type_error(
             realm,

@@ -321,7 +321,6 @@ Usage:
   cargo xtask weak-collections-differential --oracle QJS_PATH [OPTIONS]
   cargo xtask weak-references-differential --oracle QJS_PATH [OPTIONS]
   cargo xtask test262 --suite TEST262_PATH [OPTIONS]
-
 Options:
   --corpus PATH       Corpus directory (runtime default: {DEFAULT_CORPUS};
                       parser default: {DEFAULT_PARSER_CORPUS};
@@ -348,6 +347,7 @@ Options:
   --baseline PATH     Test262 baseline artifacts (default: tests/test262/upstream)
   --filter PATH       Restrict Test262 to one file or subtree below test/
   --admit-feature N   Admit one baseline-skipped feature within --filter
+  --admit-intl402     Admit ECMA-402 policy skips within an Intl-only --filter
   --limit N           Stop Test262 inventory after N matching source files
   --report PATH       Write the deterministic Test262 JSON report
   --inventory-only    Verify and classify Test262 without executing cases
@@ -357,7 +357,14 @@ Options:
   --progress-every N Print aggregate Test262 progress every N completed cases
   -v, --verbose       Stream selection, skip counts, and each case result to the CI log
   -h, --help          Show this help
+"
+    );
+    print_oracle_usage();
+}
 
+fn print_oracle_usage() {
+    println!(
+        "\
 Dynamic Function --oracle must be the pinned QuickJS 2026-06-04 qjsc compiler.
 It is invoked with -c only; generated code is never compiled or executed.
 Number radix --oracle must be the pinned QuickJS 2026-06-04 qjs interpreter.

@@ -35,9 +35,9 @@ use super::{
     is_supported_instruction, is_supported_opcode, usize_to_u64,
 };
 
-const REALM_OBJECT_SLOTS: u64 = 70;
-const REALM_PROPERTY_SLOTS: u64 = 2_421;
-const REALM_FUNCTION_SLOTS: u64 = 727;
+const REALM_OBJECT_SLOTS: u64 = 84;
+const REALM_PROPERTY_SLOTS: u64 = 2_707;
+const REALM_FUNCTION_SLOTS: u64 = 811;
 
 #[test]
 fn finalization_job_limit_failure_does_not_clear_weak_targets() {
@@ -2067,6 +2067,7 @@ fn realm_installs_the_exact_function_intrinsic_graph() {
         finalization_registry: _,
         regexp: _,
         date: _,
+        intl: _,
         temporal: _,
         array_buffer: _,
         shared_array_buffer: _,
@@ -2085,9 +2086,9 @@ fn realm_installs_the_exact_function_intrinsic_graph() {
     assert_eq!(
         runtime.atom_usage(),
         AtomUsage {
-            live_atoms: PREDEFINED_ATOM_COUNT + 323,
-            live_description_code_units: PREDEFINED_DESCRIPTION_CODE_UNITS + 2_761,
-            interner_slots: PREDEFINED_INTERNER_SLOTS + 323,
+            live_atoms: PREDEFINED_ATOM_COUNT + 398,
+            live_description_code_units: PREDEFINED_DESCRIPTION_CODE_UNITS + 3_610,
+            interner_slots: PREDEFINED_INTERNER_SLOTS + 398,
         }
     );
 
@@ -2741,9 +2742,9 @@ fn function_call_is_realm_owned_while_its_dynamic_atom_is_reused() {
     assert_eq!(
         runtime.atom_usage(),
         AtomUsage {
-            live_atoms: PREDEFINED_ATOM_COUNT + 323,
-            live_description_code_units: PREDEFINED_DESCRIPTION_CODE_UNITS + 2_761,
-            interner_slots: PREDEFINED_INTERNER_SLOTS + 323,
+            live_atoms: PREDEFINED_ATOM_COUNT + 398,
+            live_description_code_units: PREDEFINED_DESCRIPTION_CODE_UNITS + 3_610,
+            interner_slots: PREDEFINED_INTERNER_SLOTS + 398,
         }
     );
 }
@@ -2790,9 +2791,9 @@ fn function_apply_is_realm_owned_while_its_predefined_atom_is_reused() {
     assert_eq!(
         runtime.atom_usage(),
         AtomUsage {
-            live_atoms: PREDEFINED_ATOM_COUNT + 323,
-            live_description_code_units: PREDEFINED_DESCRIPTION_CODE_UNITS + 2_761,
-            interner_slots: PREDEFINED_INTERNER_SLOTS + 323,
+            live_atoms: PREDEFINED_ATOM_COUNT + 398,
+            live_description_code_units: PREDEFINED_DESCRIPTION_CODE_UNITS + 3_610,
+            interner_slots: PREDEFINED_INTERNER_SLOTS + 398,
         }
     );
 }
@@ -3832,6 +3833,66 @@ fn realm_function_intrinsics_remain_roots_during_collection() {
             .expect("realm state")
             .intrinsics,
         expected_intrinsics
+    );
+}
+
+#[test]
+fn realm_segmenter_hidden_intrinsics_remain_roots_during_collection() {
+    let mut runtime = Runtime::try_new(RuntimeLimits::default()).expect("runtime");
+    let realm = runtime.create_realm().expect("realm");
+    let realm_id = realm.0.id;
+    let segmenter_prototype = runtime
+        .realm_intl_segmenter_prototype(realm_id)
+        .expect("Intl.Segmenter.prototype");
+    let segments_prototype = runtime
+        .realm_intl_segments_prototype(realm_id)
+        .expect("Intl Segments prototype");
+    let segment_iterator_prototype = runtime
+        .realm_intl_segment_iterator_prototype(realm_id)
+        .expect("Intl Segment Iterator prototype");
+
+    let report = runtime.collect_cycles().expect("collection");
+
+    assert_eq!(report.objects(), 0);
+    assert_eq!(runtime.usage().heap_objects(), REALM_OBJECT_SLOTS);
+    assert_eq!(
+        runtime
+            .realm_intl_segmenter_prototype(realm_id)
+            .expect("rooted Intl.Segmenter.prototype"),
+        segmenter_prototype
+    );
+    assert_eq!(
+        runtime
+            .realm_intl_segments_prototype(realm_id)
+            .expect("rooted Intl Segments prototype"),
+        segments_prototype
+    );
+    assert_eq!(
+        runtime
+            .realm_intl_segment_iterator_prototype(realm_id)
+            .expect("rooted Intl Segment Iterator prototype"),
+        segment_iterator_prototype
+    );
+}
+
+#[test]
+fn realm_duration_format_hidden_intrinsic_remains_a_root_during_collection() {
+    let mut runtime = Runtime::try_new(RuntimeLimits::default()).expect("runtime");
+    let realm = runtime.create_realm().expect("realm");
+    let realm_id = realm.0.id;
+    let duration_format_prototype = runtime
+        .realm_intl_duration_format_prototype(realm_id)
+        .expect("Intl.DurationFormat.prototype");
+
+    let report = runtime.collect_cycles().expect("collection");
+
+    assert_eq!(report.objects(), 0);
+    assert_eq!(runtime.usage().heap_objects(), REALM_OBJECT_SLOTS);
+    assert_eq!(
+        runtime
+            .realm_intl_duration_format_prototype(realm_id)
+            .expect("rooted Intl.DurationFormat.prototype"),
+        duration_format_prototype
     );
 }
 

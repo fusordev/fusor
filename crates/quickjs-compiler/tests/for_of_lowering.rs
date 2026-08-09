@@ -316,6 +316,32 @@ fn destructuring_heads_emit_the_nested_verified_record_shape() {
 }
 
 #[test]
+fn captured_object_destructuring_heads_allow_block_lexicals() {
+    let compiled = compile(
+        "function captured(values){\
+            for(const {left,right,args} of values){\
+                const spy={read(){return [left,right].concat(args)}};\
+                spy.read();\
+            }\
+        }",
+        "captured",
+    );
+    let instructions = opcodes(&compiled);
+    assert_eq!(
+        instructions
+            .iter()
+            .filter(|(opcode, _)| *opcode == FinalOpcode::ForOfStart)
+            .count(),
+        1
+    );
+    assert!(
+        instructions
+            .iter()
+            .any(|(opcode, _)| *opcode == FinalOpcode::CloseLoc)
+    );
+}
+
+#[test]
 fn for_await_remains_typed_fail_closed_at_the_async_function() {
     let source = "async function awaited(values){for await(const value of values){}}";
     let LeafCompilationError::Unsupported { feature, span } = compile_error(source, "awaited")

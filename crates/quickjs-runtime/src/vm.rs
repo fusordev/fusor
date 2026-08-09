@@ -71,8 +71,12 @@ use crate::{
         DataViewElementType, DataViewPrototypeMethod, DatePrototypeMethod, DateStaticMethod,
         EnvironmentBinding, FinalizationRegistryMethod, FrameBindingAddress,
         FunctionImplementation, GlobalNumericFunction, HeapFunction, InstalledCode,
-        InstalledConstant, InstalledRoot, InstalledTemplate, LocaleStringMethod, MapMethod,
-        MathMethod, NativeFunction, NativeFunctionKind, NumberFormat, NumberPredicate,
+        InstalledConstant, InstalledRoot, InstalledTemplate, IntlCollatorPrototypeMethod,
+        IntlDateTimeFormatPrototypeMethod, IntlDisplayNamesPrototypeMethod,
+        IntlDurationFormatPrototypeMethod, IntlListFormatPrototypeMethod,
+        IntlLocalePrototypeMethod, IntlNumberFormatPrototypeMethod, IntlPluralRulesPrototypeMethod,
+        IntlRelativeTimeFormatPrototypeMethod, IntlSegmenterPrototypeMethod, LocaleStringMethod,
+        MapMethod, MathMethod, NativeFunction, NativeFunctionKind, NumberFormat, NumberPredicate,
         PreparedIteratorResultPlan, PromiseCapabilityCapture, PromiseCapabilityExecutor,
         PromiseCombinatorElementFunction, PromiseCombinatorElementKind, PromiseCombinatorKind,
         PromiseCombinatorShared, PromiseFinallyFunction, PromiseFinallyThunkKind, PromiseJob,
@@ -129,6 +133,7 @@ mod from_entries;
 mod generator;
 mod group_by;
 mod instanceof;
+mod intl;
 mod iterators;
 mod json_parse;
 mod json_stringify;
@@ -170,10 +175,10 @@ use {
     array_statics::*, async_from_sync::*, async_generator::*, atomics::*, bigint_intrinsics::*,
     bindings::*, conversions::*, data_view::*, date::*, define_property_intrinsics::*, dynamic::*,
     error_stack::*, errors::*, exceptions::*, execution::*, for_in::*, from_entries::*,
-    generator::*, group_by::*, iterators::*, json_parse::*, json_stringify::*, locale_string::*,
-    map::*, math::*, math_sum_precise::*, native::*, object_intrinsics::*, promise::*,
-    promise_combinators::*, properties::*, proxy::*, reflect::*, regexp::*, set::*, stack::*,
-    string_methods::*, string_raw::*, string_replace::*, string_split::*, temporal::*,
+    generator::*, group_by::*, intl::*, iterators::*, json_parse::*, json_stringify::*,
+    locale_string::*, map::*, math::*, math_sum_precise::*, native::*, object_intrinsics::*,
+    promise::*, promise_combinators::*, properties::*, proxy::*, reflect::*, regexp::*, set::*,
+    stack::*, string_methods::*, string_raw::*, string_replace::*, string_split::*, temporal::*,
     typed_array::*, uri::*, weak_collections::*, weak_references::*,
 };
 
@@ -873,6 +878,32 @@ enum NativeContinuation {
     StringSplit(Box<StringSplitContinuation>),
     RegExp(Box<RegExpContinuation>),
     LocaleString(Box<LocaleStringContinuation>),
+    IntlLocaleList(Box<IntlLocaleListContinuation>),
+    IntlCollatorConstructor(Box<IntlCollatorConstructorContinuation>),
+    IntlCollatorSupportedLocalesOf(Box<IntlCollatorSupportedLocalesContinuation>),
+    IntlNumberFormatConstructor(Box<IntlNumberFormatConstructorContinuation>),
+    IntlNumberFormatUnwrap(Box<IntlNumberFormatUnwrapContinuation>),
+    IntlNumberFormatSupportedLocalesOf(Box<IntlNumberFormatSupportedLocalesContinuation>),
+    IntlDateTimeFormatConstructor(Box<IntlDateTimeFormatConstructorContinuation>),
+    IntlDateTimeFormatUnwrap(Box<IntlDateTimeFormatUnwrapContinuation>),
+    IntlDateTimeFormatSupportedLocalesOf(Box<IntlDateTimeFormatSupportedLocalesContinuation>),
+    IntlPluralRulesConstructor(Box<IntlPluralRulesConstructorContinuation>),
+    IntlPluralRulesSupportedLocalesOf(Box<IntlPluralRulesSupportedLocalesContinuation>),
+    IntlRelativeTimeFormatConstructor(Box<IntlRelativeTimeFormatConstructorContinuation>),
+    IntlRelativeTimeFormatSupportedLocalesOf(
+        Box<IntlRelativeTimeFormatSupportedLocalesContinuation>,
+    ),
+    IntlListFormatConstructor(Box<IntlListFormatConstructorContinuation>),
+    IntlListFormatSupportedLocalesOf(Box<IntlListFormatSupportedLocalesContinuation>),
+    IntlListFormatValue(Box<IntlListFormatValueContinuation>),
+    IntlDisplayNamesConstructor(Box<IntlDisplayNamesConstructorContinuation>),
+    IntlDisplayNamesSupportedLocalesOf(Box<IntlDisplayNamesSupportedLocalesContinuation>),
+    IntlDurationFormatConstructor(Box<IntlDurationFormatConstructorContinuation>),
+    IntlDurationFormatSupportedLocalesOf(Box<IntlDurationFormatSupportedLocalesContinuation>),
+    IntlDurationFormatValue(Box<IntlDurationFormatValueContinuation>),
+    IntlSegmenterConstructor(Box<IntlSegmenterConstructorContinuation>),
+    IntlSegmenterSupportedLocalesOf(Box<IntlSegmenterSupportedLocalesContinuation>),
+    IntlLocaleConstructor(Box<IntlLocaleConstructorContinuation>),
     DefineProperty(Box<DefinePropertyContinuation>),
     DefineProperties(Box<DefinePropertiesContinuation>),
     InstanceOf(InstanceOfContinuation),
@@ -1100,6 +1131,36 @@ impl NativeContinuation {
             Self::StringSplit(state) => state.retained_values(),
             Self::RegExp(state) => state.retained_values(),
             Self::LocaleString(state) => state.retained_values(),
+            Self::IntlLocaleList(state) => state.retained_values(),
+            Self::IntlCollatorConstructor(state) => state.retained_values(),
+            Self::IntlCollatorSupportedLocalesOf(state) => state.retained_values(),
+            Self::IntlNumberFormatConstructor(state) => state.retained_values(),
+            Self::IntlNumberFormatUnwrap(_) => {
+                IntlNumberFormatUnwrapContinuation::retained_values()
+            }
+            Self::IntlNumberFormatSupportedLocalesOf(state) => state.retained_values(),
+            Self::IntlDateTimeFormatConstructor(state) => state.retained_values(),
+            Self::IntlDateTimeFormatUnwrap(_) => {
+                IntlDateTimeFormatUnwrapContinuation::retained_values()
+            }
+            Self::IntlDateTimeFormatSupportedLocalesOf(state) => state.retained_values(),
+            Self::IntlPluralRulesConstructor(state) => state.retained_values(),
+            Self::IntlPluralRulesSupportedLocalesOf(state) => state.retained_values(),
+            Self::IntlRelativeTimeFormatConstructor(state) => state.retained_values(),
+            Self::IntlRelativeTimeFormatSupportedLocalesOf(state) => state.retained_values(),
+            Self::IntlListFormatConstructor(state) => state.retained_values(),
+            Self::IntlListFormatSupportedLocalesOf(state) => state.retained_values(),
+            Self::IntlListFormatValue(state) => state.retained_values(),
+            Self::IntlDisplayNamesConstructor(state) => state.retained_values(),
+            Self::IntlDisplayNamesSupportedLocalesOf(state) => state.retained_values(),
+            Self::IntlDurationFormatConstructor(state) => state.retained_values(),
+            Self::IntlDurationFormatSupportedLocalesOf(state) => state.retained_values(),
+            Self::IntlDurationFormatValue(_) => {
+                IntlDurationFormatValueContinuation::retained_values()
+            }
+            Self::IntlSegmenterConstructor(state) => state.retained_values(),
+            Self::IntlSegmenterSupportedLocalesOf(state) => state.retained_values(),
+            Self::IntlLocaleConstructor(state) => state.retained_values(),
             Self::DefineProperty(state) => state.retained_values(),
             Self::DefineProperties(state) => state.retained_values(),
             Self::InstanceOf(state) => state.retained_values(),
@@ -2470,6 +2531,74 @@ enum OperatorPrimitiveTarget {
     ArrayFlattenValue(Box<ArrayFlattenContinuation>),
     /// An array-like `Array.from` length awaiting `ToNumber`.
     ArrayStaticLength(Box<ArrayStaticContinuation>),
+    /// `CanonicalizeLocaleList`'s array-like length awaiting `ToNumber`.
+    IntlLocaleListLength(Box<IntlLocaleListContinuation>),
+    /// One `CanonicalizeLocaleList` element awaiting `ToString`.
+    IntlLocaleListElement(Box<IntlLocaleListContinuation>),
+    /// `%Intl.Locale%` tag or string-valued option awaiting `ToString`.
+    IntlLocaleConstructor(Box<IntlLocaleConstructorContinuation>),
+    /// One `%Intl.Collator%` string-valued option awaiting `ToString`.
+    IntlCollatorConstructor(Box<IntlCollatorConstructorContinuation>),
+    /// `Intl.Collator.supportedLocalesOf`'s matcher awaiting `ToString`.
+    IntlCollatorSupportedLocalesOf(Box<IntlCollatorSupportedLocalesContinuation>),
+    /// One `%Intl.NumberFormat%` option awaiting primitive conversion.
+    IntlNumberFormatConstructor(Box<IntlNumberFormatConstructorContinuation>),
+    /// `Intl.NumberFormat.supportedLocalesOf` matcher awaiting `ToString`.
+    IntlNumberFormatSupportedLocalesOf(Box<IntlNumberFormatSupportedLocalesContinuation>),
+    /// A `NumberFormat` operand awaiting `ToPrimitive(number)`.
+    IntlNumberFormatValue(Box<IntlNumberFormatValueContinuation>),
+    /// One `%Intl.DateTimeFormat%` option awaiting primitive conversion.
+    IntlDateTimeFormatConstructor(Box<IntlDateTimeFormatConstructorContinuation>),
+    /// `Intl.DateTimeFormat.supportedLocalesOf` matcher awaiting `ToString`.
+    IntlDateTimeFormatSupportedLocalesOf(Box<IntlDateTimeFormatSupportedLocalesContinuation>),
+    /// A `DateTimeFormat` operand awaiting `ToPrimitive(number)`.
+    IntlDateTimeFormatValue(Box<IntlDateTimeFormatValueContinuation>),
+    /// One `%Intl.PluralRules%` option awaiting primitive conversion.
+    IntlPluralRulesConstructor(Box<IntlPluralRulesConstructorContinuation>),
+    /// `Intl.PluralRules.supportedLocalesOf` matcher awaiting `ToString`.
+    IntlPluralRulesSupportedLocalesOf(Box<IntlPluralRulesSupportedLocalesContinuation>),
+    /// A `PluralRules` operand awaiting `ToPrimitive(number)`.
+    IntlPluralRulesValue(Box<IntlPluralRulesValueContinuation>),
+    /// One `%Intl.RelativeTimeFormat%` option awaiting primitive conversion.
+    IntlRelativeTimeFormatConstructor(Box<IntlRelativeTimeFormatConstructorContinuation>),
+    /// `Intl.RelativeTimeFormat.supportedLocalesOf` matcher awaiting `ToString`.
+    IntlRelativeTimeFormatSupportedLocalesOf(
+        Box<IntlRelativeTimeFormatSupportedLocalesContinuation>,
+    ),
+    /// One `%Intl.ListFormat%` option awaiting primitive conversion.
+    IntlListFormatConstructor(Box<IntlListFormatConstructorContinuation>),
+    /// `Intl.ListFormat.supportedLocalesOf` matcher awaiting `ToString`.
+    IntlListFormatSupportedLocalesOf(Box<IntlListFormatSupportedLocalesContinuation>),
+    /// One `%Intl.DisplayNames%` option awaiting primitive conversion.
+    IntlDisplayNamesConstructor(Box<IntlDisplayNamesConstructorContinuation>),
+    /// `Intl.DisplayNames.supportedLocalesOf` matcher awaiting `ToString`.
+    IntlDisplayNamesSupportedLocalesOf(Box<IntlDisplayNamesSupportedLocalesContinuation>),
+    /// An `Intl.DisplayNames.prototype.of` code awaiting `ToString`.
+    IntlDisplayNamesOf(Box<IntlDisplayNamesOfContinuation>),
+    /// One `%Intl.DurationFormat%` option awaiting primitive conversion.
+    IntlDurationFormatConstructor(Box<IntlDurationFormatConstructorContinuation>),
+    /// `Intl.DurationFormat.supportedLocalesOf` matcher awaiting `ToString`.
+    IntlDurationFormatSupportedLocalesOf(Box<IntlDurationFormatSupportedLocalesContinuation>),
+    /// One duration-record property awaiting `ToNumber`.
+    IntlDurationFormatValue(Box<IntlDurationFormatValueContinuation>),
+    /// One `%Intl.Segmenter%` option awaiting primitive conversion.
+    IntlSegmenterConstructor(Box<IntlSegmenterConstructorContinuation>),
+    /// `Intl.Segmenter.supportedLocalesOf` matcher awaiting `ToString`.
+    IntlSegmenterSupportedLocalesOf(Box<IntlSegmenterSupportedLocalesContinuation>),
+    /// An `Intl.Segmenter.prototype.segment` input awaiting `ToString`.
+    IntlSegmenterSegment(Box<IntlSegmenterSegmentContinuation>),
+    /// A `%IntlSegmentsPrototype%.containing` index awaiting `ToNumber`.
+    IntlSegmentsContaining(Box<IntlSegmentsContainingContinuation>),
+    /// A `RelativeTimeFormat` numeric operand awaiting `ToPrimitive(number)`.
+    IntlRelativeTimeFormatValue(Box<IntlRelativeTimeFormatValueContinuation>),
+    /// A `RelativeTimeFormat` unit awaiting `ToPrimitive(string)`.
+    IntlRelativeTimeFormatUnit(Box<IntlRelativeTimeFormatValueContinuation>),
+    /// The first bound Collator comparison operand awaiting `ToString`.
+    IntlCollatorCompareFirst(Box<IntlCollatorCompareContinuation>),
+    /// The second bound Collator comparison operand awaiting `ToString`.
+    IntlCollatorCompareSecond(Box<IntlCollatorCompareContinuation>),
+    /// `Intl.supportedValuesOf` key awaiting `ToString`.
+    IntlSupportedValuesOf,
     /// An array-like `Array.fromAsync` length awaiting `ToNumber`.
     ArrayFromAsyncLength {
         operation: ObjectId,
@@ -2520,6 +2649,7 @@ impl OperatorPrimitiveTarget {
             | Self::StringIteratorIntrinsic
             | Self::JsonRawJsonText
             | Self::GlobalNumeric(_)
+            | Self::IntlSupportedValuesOf
             | Self::MathUnary(_)
             | Self::GlobalUri(_)
             | Self::BigIntToString { .. }
@@ -2800,6 +2930,45 @@ impl OperatorPrimitiveTarget {
             Self::ArraySpliceArgument(state) => state.retained_values(),
             Self::ArraySortValue(state) => state.retained_values(),
             Self::ArrayFlattenValue(state) => state.retained_values(),
+            Self::IntlLocaleListLength(state) | Self::IntlLocaleListElement(state) => {
+                state.retained_values()
+            }
+            Self::IntlLocaleConstructor(state) => state.retained_values(),
+            Self::IntlCollatorConstructor(state) => state.retained_values(),
+            Self::IntlCollatorSupportedLocalesOf(state) => state.retained_values(),
+            Self::IntlNumberFormatConstructor(state) => state.retained_values(),
+            Self::IntlNumberFormatSupportedLocalesOf(state) => state.retained_values(),
+            Self::IntlNumberFormatValue(state) => state.retained_values(),
+            Self::IntlDateTimeFormatConstructor(state) => state.retained_values(),
+            Self::IntlDateTimeFormatSupportedLocalesOf(state) => state.retained_values(),
+            Self::IntlDateTimeFormatValue(state) => state.retained_values(),
+            Self::IntlPluralRulesConstructor(state) => state.retained_values(),
+            Self::IntlPluralRulesSupportedLocalesOf(state) => state.retained_values(),
+            Self::IntlPluralRulesValue(state) => state.retained_values(),
+            Self::IntlRelativeTimeFormatConstructor(state) => state.retained_values(),
+            Self::IntlRelativeTimeFormatSupportedLocalesOf(state) => state.retained_values(),
+            Self::IntlRelativeTimeFormatValue(state) | Self::IntlRelativeTimeFormatUnit(state) => {
+                state.retained_values()
+            }
+            Self::IntlListFormatConstructor(state) => state.retained_values(),
+            Self::IntlListFormatSupportedLocalesOf(state) => state.retained_values(),
+            Self::IntlDisplayNamesConstructor(state) => state.retained_values(),
+            Self::IntlDisplayNamesSupportedLocalesOf(state) => state.retained_values(),
+            Self::IntlDisplayNamesOf(_) => IntlDisplayNamesOfContinuation::retained_values(),
+            Self::IntlDurationFormatConstructor(state) => state.retained_values(),
+            Self::IntlDurationFormatSupportedLocalesOf(state) => state.retained_values(),
+            Self::IntlDurationFormatValue(_) => {
+                IntlDurationFormatValueContinuation::retained_values()
+            }
+            Self::IntlSegmenterConstructor(state) => state.retained_values(),
+            Self::IntlSegmenterSupportedLocalesOf(state) => state.retained_values(),
+            Self::IntlSegmenterSegment(_) => IntlSegmenterSegmentContinuation::retained_values(),
+            Self::IntlSegmentsContaining(_) => {
+                IntlSegmentsContainingContinuation::retained_values()
+            }
+            Self::IntlCollatorCompareFirst(state) | Self::IntlCollatorCompareSecond(state) => {
+                state.retained_values()
+            }
             Self::StringRawValue(state) => state.retained_values(),
             Self::StringReplaceValue(state) => state.retained_values(),
             Self::StringSplitValue(state) => state.retained_values(),
@@ -2985,6 +3154,7 @@ fn trace_operator_primitive_target_roots(
         | OperatorPrimitiveTarget::JsonRawJsonText
         | OperatorPrimitiveTarget::BigIntToString { .. }
         | OperatorPrimitiveTarget::BigIntTruncationValue { .. }
+        | OperatorPrimitiveTarget::IntlSupportedValuesOf
         // The converted left Number carries no heap edge.
         | OperatorPrimitiveTarget::MathBinaryFinish { .. } => {}
         OperatorPrimitiveTarget::DateSetTime { object }
@@ -3227,6 +3397,54 @@ fn trace_operator_primitive_target_roots(
         OperatorPrimitiveTarget::ArraySpliceArgument(state) => state.trace_roots(mark),
         OperatorPrimitiveTarget::ArraySortValue(state) => state.trace_roots(mark),
         OperatorPrimitiveTarget::ArrayFlattenValue(state) => state.trace_roots(mark),
+        OperatorPrimitiveTarget::IntlLocaleListLength(state)
+        | OperatorPrimitiveTarget::IntlLocaleListElement(state) => state.trace_roots(mark),
+        OperatorPrimitiveTarget::IntlLocaleConstructor(state) => state.trace_roots(mark),
+        OperatorPrimitiveTarget::IntlCollatorConstructor(state) => state.trace_roots(mark),
+        OperatorPrimitiveTarget::IntlCollatorSupportedLocalesOf(state) => state.trace_roots(mark),
+        OperatorPrimitiveTarget::IntlNumberFormatConstructor(state) => state.trace_roots(mark),
+        OperatorPrimitiveTarget::IntlNumberFormatSupportedLocalesOf(state) => {
+            state.trace_roots(mark);
+        }
+        OperatorPrimitiveTarget::IntlNumberFormatValue(state) => state.trace_roots(mark),
+        OperatorPrimitiveTarget::IntlDateTimeFormatConstructor(state) => state.trace_roots(mark),
+        OperatorPrimitiveTarget::IntlDateTimeFormatSupportedLocalesOf(state) => {
+            state.trace_roots(mark);
+        }
+        OperatorPrimitiveTarget::IntlDateTimeFormatValue(state) => state.trace_roots(mark),
+        OperatorPrimitiveTarget::IntlPluralRulesConstructor(state) => state.trace_roots(mark),
+        OperatorPrimitiveTarget::IntlPluralRulesSupportedLocalesOf(state) => {
+            state.trace_roots(mark);
+        }
+        OperatorPrimitiveTarget::IntlPluralRulesValue(state) => state.trace_roots(mark),
+        OperatorPrimitiveTarget::IntlRelativeTimeFormatConstructor(state) => {
+            state.trace_roots(mark);
+        }
+        OperatorPrimitiveTarget::IntlRelativeTimeFormatSupportedLocalesOf(state) => {
+            state.trace_roots(mark);
+        }
+        OperatorPrimitiveTarget::IntlRelativeTimeFormatValue(state)
+        | OperatorPrimitiveTarget::IntlRelativeTimeFormatUnit(state) => state.trace_roots(mark),
+        OperatorPrimitiveTarget::IntlListFormatConstructor(state) => state.trace_roots(mark),
+        OperatorPrimitiveTarget::IntlListFormatSupportedLocalesOf(state) => {
+            state.trace_roots(mark);
+        }
+        OperatorPrimitiveTarget::IntlDisplayNamesConstructor(state) => state.trace_roots(mark),
+        OperatorPrimitiveTarget::IntlDisplayNamesSupportedLocalesOf(state) => {
+            state.trace_roots(mark);
+        }
+        OperatorPrimitiveTarget::IntlDisplayNamesOf(state) => state.trace_roots(mark),
+        OperatorPrimitiveTarget::IntlDurationFormatConstructor(state) => state.trace_roots(mark),
+        OperatorPrimitiveTarget::IntlDurationFormatSupportedLocalesOf(state) => {
+            state.trace_roots(mark);
+        }
+        OperatorPrimitiveTarget::IntlDurationFormatValue(state) => state.trace_roots(mark),
+        OperatorPrimitiveTarget::IntlSegmenterConstructor(state) => state.trace_roots(mark),
+        OperatorPrimitiveTarget::IntlSegmenterSupportedLocalesOf(state) => state.trace_roots(mark),
+        OperatorPrimitiveTarget::IntlSegmenterSegment(state) => state.trace_roots(mark),
+        OperatorPrimitiveTarget::IntlSegmentsContaining(state) => state.trace_roots(mark),
+        OperatorPrimitiveTarget::IntlCollatorCompareFirst(state)
+        | OperatorPrimitiveTarget::IntlCollatorCompareSecond(state) => state.trace_roots(mark),
         OperatorPrimitiveTarget::ArrayFromAsyncLength { operation } => {
             mark(CollectionRoot::Heap(HeapReference::Object(*operation)));
         }
@@ -3330,6 +3548,34 @@ fn trace_native_continuation_roots(
         NativeContinuation::StringSplit(state) => state.trace_roots(mark),
         NativeContinuation::RegExp(state) => state.trace_roots(mark),
         NativeContinuation::LocaleString(state) => state.trace_roots(mark),
+        NativeContinuation::IntlLocaleList(state) => state.trace_roots(mark),
+        NativeContinuation::IntlCollatorConstructor(state) => state.trace_roots(mark),
+        NativeContinuation::IntlCollatorSupportedLocalesOf(state) => state.trace_roots(mark),
+        NativeContinuation::IntlNumberFormatConstructor(state) => state.trace_roots(mark),
+        NativeContinuation::IntlNumberFormatUnwrap(state) => state.trace_roots(mark),
+        NativeContinuation::IntlNumberFormatSupportedLocalesOf(state) => state.trace_roots(mark),
+        NativeContinuation::IntlDateTimeFormatConstructor(state) => state.trace_roots(mark),
+        NativeContinuation::IntlDateTimeFormatUnwrap(state) => state.trace_roots(mark),
+        NativeContinuation::IntlDateTimeFormatSupportedLocalesOf(state) => {
+            state.trace_roots(mark);
+        }
+        NativeContinuation::IntlPluralRulesConstructor(state) => state.trace_roots(mark),
+        NativeContinuation::IntlPluralRulesSupportedLocalesOf(state) => state.trace_roots(mark),
+        NativeContinuation::IntlRelativeTimeFormatConstructor(state) => state.trace_roots(mark),
+        NativeContinuation::IntlRelativeTimeFormatSupportedLocalesOf(state) => {
+            state.trace_roots(mark);
+        }
+        NativeContinuation::IntlListFormatConstructor(state) => state.trace_roots(mark),
+        NativeContinuation::IntlListFormatSupportedLocalesOf(state) => state.trace_roots(mark),
+        NativeContinuation::IntlListFormatValue(state) => state.trace_roots(mark),
+        NativeContinuation::IntlDisplayNamesConstructor(state) => state.trace_roots(mark),
+        NativeContinuation::IntlDisplayNamesSupportedLocalesOf(state) => state.trace_roots(mark),
+        NativeContinuation::IntlDurationFormatConstructor(state) => state.trace_roots(mark),
+        NativeContinuation::IntlDurationFormatSupportedLocalesOf(state) => state.trace_roots(mark),
+        NativeContinuation::IntlDurationFormatValue(state) => state.trace_roots(mark),
+        NativeContinuation::IntlSegmenterConstructor(state) => state.trace_roots(mark),
+        NativeContinuation::IntlSegmenterSupportedLocalesOf(state) => state.trace_roots(mark),
+        NativeContinuation::IntlLocaleConstructor(state) => state.trace_roots(mark),
         NativeContinuation::DefineProperty(state) => state.trace_roots(mark),
         NativeContinuation::FunctionBind(state) => {
             trace_function_bind_roots(state, mark);
