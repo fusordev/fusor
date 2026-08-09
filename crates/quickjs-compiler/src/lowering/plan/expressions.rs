@@ -4730,13 +4730,14 @@ impl<'compiler, 'unit, 'arena, 'scope> ExpressionPlanner<'compiler, 'unit, 'aren
             tree_layout,
         )?;
         self.validate_lowered_mutation_reference(reference, needs_read, identifier.span)?;
-        let inferred_name = if matches!(
-            assignment.operator,
-            AssignmentOperator::Assign
-                | AssignmentOperator::LogicalOr
-                | AssignmentOperator::LogicalAnd
-                | AssignmentOperator::LogicalNullish
-        ) {
+        let inferred_name = if assignment.span.start == identifier.span.start
+            && matches!(
+                assignment.operator,
+                AssignmentOperator::Assign
+                    | AssignmentOperator::LogicalOr
+                    | AssignmentOperator::LogicalAnd
+                    | AssignmentOperator::LogicalNullish
+            ) {
             Self::plan_inferred_reference_name_for_initializer(
                 reference,
                 &assignment.right,

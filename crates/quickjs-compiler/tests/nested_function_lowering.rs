@@ -309,6 +309,16 @@ fn anonymous_identifier_assignments_emit_adjacent_inferred_name_pairs() {
 }
 
 #[test]
+fn parenthesized_assignment_targets_do_not_trigger_named_evaluation() {
+    let tree = compile_tree(
+        "function outer(){let direct,parenthesized;direct=function(){};(parenthesized)=function(){};return [direct,parenthesized];}",
+        "outer",
+    );
+
+    assert_eq!(inferred_names(tree.root()), ["direct"]);
+}
+
+#[test]
 fn anonymous_destructuring_assignment_defaults_emit_only_identifier_names() {
     let tree = compile_tree(
         "function outer(){\

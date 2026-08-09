@@ -883,10 +883,17 @@ impl<'arena> CompilationContext<'_, 'arena, '_> {
             });
         }
         match &assignment.left {
-            super::AssignmentTarget::AssignmentTargetIdentifier(identifier) => Ok((
-                compiler_identifier_string(identifier.name.as_str(), identifier.span)?,
-                identifier.span,
-            )),
+            super::AssignmentTarget::AssignmentTargetIdentifier(identifier)
+                if assignment.span.start == identifier.span.start =>
+            {
+                Ok((
+                    compiler_identifier_string(identifier.name.as_str(), identifier.span)?,
+                    identifier.span,
+                ))
+            }
+            super::AssignmentTarget::AssignmentTargetIdentifier(_) => {
+                Ok((compiler_identifier_string("", class.span)?, class.span))
+            }
             // Assignment NamedEvaluation applies only to identifier references.
             // A static member assignment still creates the class through the
             // typed class-definition path, but its default name is the empty
