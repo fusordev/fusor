@@ -1353,7 +1353,9 @@ pub(super) fn create_closure(
             environment_eval_shadows: capture_eval_shadows,
             eval_environment: frame.eval_environment.as_ref().map(Rc::clone),
             lexical_receiver: lexical.then(|| frame.receiver.duplicate()),
-            lexical_eval_in_function: lexical && frame.eval_in_function,
+            lexical_eval_in_function: lexical && frame.eval_context.in_function,
+            lexical_eval_in_class_field_initializer: lexical
+                && frame.eval_context.in_class_field_initializer,
             lexical_new_target: if lexical { frame.new_target } else { None },
             lexical_derived_constructor,
             lexical_derived_this: lexical_derived_this_cell,

@@ -1819,6 +1819,8 @@ pub enum FrontendDiagnosticCode {
     OxcParser,
     /// An Oxc semantic/early-error diagnostic.
     OxcSemantic,
+    /// Direct eval in a class field initializer contained an `arguments` reference.
+    DirectEvalContainsArguments,
     /// The project-owned `RegExp` grammar rejected a literal as an early error.
     InvalidRegExpLiteral,
     /// A labeled `continue` chain does not terminate in an iteration statement.
@@ -1876,6 +1878,9 @@ impl FrontendDiagnosticCode {
             Self::AsyncScriptImportMeta => "quickjs::frontend::async_script::import_meta",
             Self::OxcParser => "quickjs::frontend::oxc::parser",
             Self::OxcSemantic => "quickjs::frontend::oxc::semantic",
+            Self::DirectEvalContainsArguments => {
+                "quickjs::frontend::semantic::direct_eval_contains_arguments"
+            }
             Self::InvalidRegExpLiteral => "quickjs::frontend::regexp::invalid_literal",
             Self::InvalidChainedContinueTarget => {
                 "quickjs::frontend::semantic::invalid_chained_continue_target"
@@ -1921,6 +1926,7 @@ impl FrontendDiagnosticCode {
             | Self::AsyncScriptImportMeta
             | Self::OxcParser
             | Self::OxcSemantic
+            | Self::DirectEvalContainsArguments
             | Self::InvalidRegExpLiteral
             | Self::InvalidChainedContinueTarget
             | Self::ModuleSyntaxLowering => None,
@@ -2234,6 +2240,26 @@ impl FrontendError {
                     span,
                     message: Some(
                         "this label chain does not terminate in an iteration statement".to_owned(),
+                    ),
+                }],
+            }],
+            parser_panicked: false,
+            unsupported_goal: None,
+            limit_error: None,
+        }
+    }
+
+    fn direct_eval_contains_arguments(span: Span) -> Self {
+        Self {
+            stage: DiagnosticStage::Semantic,
+            diagnostics: vec![FrontendDiagnostic {
+                code: FrontendDiagnosticCode::DirectEvalContainsArguments,
+                message: "direct eval in a class field initializer cannot contain `arguments`"
+                    .to_owned(),
+                labels: vec![DiagnosticLabel {
+                    span,
+                    message: Some(
+                        "this reference is rejected by PerformEval before evaluation".to_owned(),
                     ),
                 }],
             }],
@@ -3113,11 +3139,11 @@ fn parse_in_mode<'arena, 'scope>(
         .with_build_nodes(true)
         .build(program);
     if let CompilationGoal::DirectEval(context) = goal {
-        remove_admitted_direct_eval_diagnostics(
+        apply_direct_eval_context(
             &mut semantic.diagnostics,
             &semantic.semantic,
             context.capabilities(),
-        );
+        )?;
     }
     if allow_top_level_await
         && let Some(span) = async_script_await_identifier_span(&semantic.semantic)
@@ -3160,6 +3186,20 @@ fn parse_in_mode<'arena, 'scope>(
         module_syntax,
         synthetic_strict_directive,
     })
+}
+
+fn apply_direct_eval_context(
+    diagnostics: &mut Diagnostics,
+    semantic: &Semantic<'_>,
+    capabilities: DirectEvalCapabilities,
+) -> Result<(), FrontendError> {
+    remove_admitted_direct_eval_diagnostics(diagnostics, semantic, capabilities);
+    if !capabilities.allows_arguments()
+        && let Some(span) = direct_eval_contains_arguments_span(semantic.nodes())
+    {
+        return Err(FrontendError::direct_eval_contains_arguments(span));
+    }
+    Ok(())
 }
 
 fn remove_admitted_direct_eval_diagnostics(
@@ -3273,6 +3313,27 @@ fn is_admitted_direct_eval_super_diagnostic(
             nodes.kind(ancestor),
             AstKind::Function(_) | AstKind::StaticBlock(_)
         )
+    })
+}
+
+/// Implements `ContainsArguments` for a direct-eval `ScriptBody`.
+///
+/// Ordinary, generator, and async functions are grammar boundaries. Arrow
+/// functions deliberately are not, so their lexical `arguments` context is
+/// inherited from the class field initializer that called `eval`.
+fn direct_eval_contains_arguments_span(nodes: &AstNodes<'_>) -> Option<Span> {
+    nodes.iter_enumerated().find_map(|(node_id, node)| {
+        let AstKind::IdentifierReference(identifier) = node.kind() else {
+            return None;
+        };
+        if identifier.name != "arguments"
+            || nodes
+                .ancestor_kinds(node_id)
+                .any(|ancestor| matches!(ancestor, AstKind::Function(_)))
+        {
+            return None;
+        }
+        Some(identifier.span)
     })
 }
 

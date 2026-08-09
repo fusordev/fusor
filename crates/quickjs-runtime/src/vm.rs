@@ -358,6 +358,12 @@ impl ConstructorProfile {
     }
 }
 
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+struct EvalGrammarContext {
+    in_function: bool,
+    in_class_field_initializer: bool,
+}
+
 pub(crate) struct Frame {
     function: FunctionId,
     code: InstalledCodeId,
@@ -370,7 +376,7 @@ pub(crate) struct Frame {
     inherited_eval_environment: Option<SharedEvalVariableEnvironment>,
     parameter_eval_boundary: Option<SharedEvalVariableEnvironment>,
     receiver: StoredValue,
-    eval_in_function: bool,
+    eval_context: EvalGrammarContext,
     new_target: Option<FunctionId>,
     instruction: InstructionIndex,
     return_to: Option<CallReturn>,
@@ -4264,7 +4270,7 @@ struct FramePlan {
     reserved_values: u64,
     arguments_snapshot_use: ArgumentsSnapshotUse,
     entry: FrameEntryKind,
-    eval_in_function: bool,
+    eval_context: EvalGrammarContext,
     constructor_profile: ConstructorProfile,
     strict: bool,
     receiver_access: ReceiverAccess,

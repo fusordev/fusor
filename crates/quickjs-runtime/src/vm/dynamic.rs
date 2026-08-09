@@ -496,7 +496,7 @@ pub(super) fn finish_direct_eval(
     frame.eval_environment = caller.eval_environment.as_ref().map(Rc::clone);
     frame.eval_declaration_environment =
         caller.eval_declaration_environment.as_ref().map(Rc::clone);
-    frame.eval_in_function = caller.eval_in_function;
+    frame.eval_context = caller.eval_context;
     if let Some((constructor, this_cell)) = inherited_derived_environment {
         frame.derived_constructor = Some(constructor);
         frame.derived_this_cell = Some(this_cell);
@@ -1336,10 +1336,10 @@ pub(super) fn direct_eval_compile_request(
         .with_bindings(bindings.into())
         .with_scope_index(scope_index)
         .with_variable_environment(variable_environment)
-        .with_new_target(frame.eval_in_function)
+        .with_new_target(frame.eval_context.in_function)
         .with_super_property(function_code.home_object.is_some())
         .with_super_call(allows_super_call)
-        .with_arguments_allowed(function_context))
+        .with_arguments_allowed(!frame.eval_context.in_class_field_initializer))
 }
 
 /// Resolves the caller's active `this` binding for a direct eval.

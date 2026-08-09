@@ -587,6 +587,10 @@ pub(crate) struct BytecodeFunction {
     /// Record. Direct eval uses this independently of the current `new.target`
     /// value when applying `PerformEval`'s contextual early errors.
     pub(crate) lexical_eval_in_function: bool,
+    /// Whether an arrow's lexical `this` chain reaches a class field
+    /// initializer Function Environment Record. `PerformEval` uses this to
+    /// apply the initializer-only `ContainsArguments` early error.
+    pub(crate) lexical_eval_in_class_field_initializer: bool,
     pub(crate) lexical_new_target: Option<FunctionId>,
     /// The derived constructor whose mutable `this` environment is retained
     /// by this arrow, paired with `lexical_derived_this`.

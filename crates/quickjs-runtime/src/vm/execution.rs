@@ -139,15 +139,21 @@ pub(super) fn plan_frame(
 
     let control_flow = verified.function().control_flow();
     let executable_kind = verified.metadata().executable_kind();
-    let eval_in_function = !matches!(
-        executable_kind,
-        CompilerExecutableKind::GlobalScript
-            | CompilerExecutableKind::IndirectEvalScript
-            | CompilerExecutableKind::DirectEvalScript
-            | CompilerExecutableKind::DynamicFunctionScript
-            | CompilerExecutableKind::OrdinaryArrow
-            | CompilerExecutableKind::AsyncArrow
-    );
+    let eval_context = EvalGrammarContext {
+        in_function: !matches!(
+            executable_kind,
+            CompilerExecutableKind::GlobalScript
+                | CompilerExecutableKind::IndirectEvalScript
+                | CompilerExecutableKind::DirectEvalScript
+                | CompilerExecutableKind::DynamicFunctionScript
+                | CompilerExecutableKind::OrdinaryArrow
+                | CompilerExecutableKind::AsyncArrow
+        ),
+        in_class_field_initializer: matches!(
+            executable_kind,
+            CompilerExecutableKind::ClassInstanceInitializer
+        ),
+    };
     let asynchronous = control_flow.function_header().kind() == FunctionKind::Async;
     let constructor_profile = if control_flow
         .function_header()
@@ -237,7 +243,7 @@ pub(super) fn plan_frame(
         reserved_values: frame_values,
         arguments_snapshot_use,
         entry,
-        eval_in_function,
+        eval_context,
         constructor_profile,
         strict,
         receiver_access,
@@ -463,7 +469,10 @@ pub(super) fn create_frame(
         .lexical_receiver
         .as_ref()
         .map(StoredValue::duplicate);
-    let lexical_eval_in_function = bytecode.lexical_eval_in_function;
+    let lexical_eval_context = EvalGrammarContext {
+        in_function: bytecode.lexical_eval_in_function,
+        in_class_field_initializer: bytecode.lexical_eval_in_class_field_initializer,
+    };
     let lexical_new_target = bytecode.lexical_new_target;
     let lexical_derived_constructor = bytecode.lexical_derived_constructor;
     let lexical_derived_this = bytecode.lexical_derived_this;
@@ -697,7 +706,7 @@ pub(super) fn create_frame(
             additional: plan.stack_capacity,
         })?;
 
-    let (receiver, eval_in_function, new_target) =
+    let (receiver, eval_context, new_target) =
         if matches!(plan.receiver_access, ReceiverAccess::Lexical) {
             if plan.entry.is_construction() || new_target.is_some() {
                 return Err(EngineFault::RuntimeInvariant {
@@ -716,10 +725,10 @@ pub(super) fn create_frame(
                 }
                 .into());
             }
-            (receiver, lexical_eval_in_function, lexical_new_target)
+            (receiver, lexical_eval_context, lexical_new_target)
         } else {
             if lexical_receiver.is_some()
-                || lexical_eval_in_function
+                || lexical_eval_context != EvalGrammarContext::default()
                 || lexical_new_target.is_some()
                 || lexical_derived_constructor.is_some()
                 || lexical_derived_this.is_some()
@@ -731,7 +740,7 @@ pub(super) fn create_frame(
             }
             (
                 normalize_receiver(runtime, realm, plan.receiver_access, receiver)?,
-                plan.eval_in_function,
+                plan.eval_context,
                 new_target,
             )
         };
@@ -808,7 +817,7 @@ pub(super) fn create_frame(
         inherited_eval_environment: inherited_eval_environment_marker,
         parameter_eval_boundary,
         receiver,
-        eval_in_function,
+        eval_context,
         new_target,
         instruction: plan.instruction,
         return_to,

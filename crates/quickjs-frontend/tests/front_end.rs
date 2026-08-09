@@ -531,6 +531,69 @@ fn direct_eval_admits_only_lexically_inherited_super_property_context() {
 }
 
 #[test]
+fn direct_eval_enforces_class_field_contains_arguments_boundaries() {
+    let denied = DirectEvalContext::new(
+        DirectEvalCapabilities::new().with_arguments_allowed(false),
+        DirectEvalScopeSnapshot::default(),
+    );
+    for source in [
+        "arguments;",
+        "(() => arguments)();",
+        "({ [arguments]() {} });",
+        "class C { [arguments]() {} }",
+    ] {
+        let allocator = Allocator::new();
+        let error = parse(
+            &allocator,
+            source,
+            FrontendOptions::for_goal(CompilationGoal::DirectEval(denied)),
+        )
+        .expect_err("class field direct eval ContainsArguments early error");
+
+        assert_eq!(error.stage(), DiagnosticStage::Semantic, "{source}");
+        assert_eq!(error.diagnostics().len(), 1, "{source}");
+        assert_eq!(
+            error.diagnostics()[0].code,
+            FrontendDiagnosticCode::DirectEvalContainsArguments,
+            "{source}"
+        );
+        let label = &error.diagnostics()[0].labels[0];
+        assert_eq!(
+            &source[label.span.start as usize..label.span.end as usize],
+            "arguments",
+            "{source}"
+        );
+    }
+
+    for source in [
+        "function nested() { return arguments; }",
+        "(function () { return arguments; });",
+        "({ method() { return arguments; } });",
+        "class C { method() { return arguments; } }",
+    ] {
+        let allocator = Allocator::new();
+        parse(
+            &allocator,
+            source,
+            FrontendOptions::for_goal(CompilationGoal::DirectEval(denied)),
+        )
+        .expect("ordinary functions stop ContainsArguments");
+    }
+
+    let allowed = DirectEvalContext::new(
+        DirectEvalCapabilities::new().with_arguments_allowed(true),
+        DirectEvalScopeSnapshot::default(),
+    );
+    let allocator = Allocator::new();
+    parse(
+        &allocator,
+        "arguments; (() => arguments)();",
+        FrontendOptions::for_goal(CompilationGoal::DirectEval(allowed)),
+    )
+    .expect("non-initializer direct eval admits arguments references");
+}
+
+#[test]
 fn source_byte_limits_reject_malformed_input_before_oxc_for_every_entry() {
     let source = "function {";
     let limits = FrontendLimits::new(source.len() - 1);
