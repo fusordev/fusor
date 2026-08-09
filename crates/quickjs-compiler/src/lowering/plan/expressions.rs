@@ -3109,61 +3109,118 @@ impl<'compiler, 'unit, 'arena, 'scope> ExpressionPlanner<'compiler, 'unit, 'aren
         } else {
             None
         };
+        let super_root =
+            matches!(root, Expression::Super(_)) && steps.first().is_some_and(Step::is_member);
 
         let end = flow.new_label(chain.span)?;
         let mut planned = Vec::new();
-        match root_member {
-            Some(MemberCallee::Static(member)) => {
-                planned.push(ExpressionWork::Visit(&member.object));
-                planned.push(ExpressionWork::Emit(PlannedInstruction::new(
-                    FinalOpcode::GetField2,
-                    Operands::Atom(constants.property_atom_index(member.property.span)?),
-                    member.span,
-                )));
+        if super_root {
+            let first = steps
+                .first()
+                .ok_or(LeafCompilationError::SemanticInvariant {
+                    invariant: "optional super chain has an initial member step",
+                    span: Some(chain.span),
+                })?;
+            let preserve_receiver = steps.get(1).is_some_and(Step::is_call)
+                || (steps.len() == 1 && preserve_final_reference);
+            match first {
+                Step::Static(member) => {
+                    planned.push(ExpressionWork::SuperPropertyBase {
+                        span: member.object.span(),
+                        call_receiver: preserve_receiver,
+                    });
+                    planned.push(ExpressionWork::Emit(PlannedInstruction::new(
+                        FinalOpcode::PushAtomValue,
+                        Operands::Atom(constants.property_atom_index(member.property.span)?),
+                        member.property.span,
+                    )));
+                    planned.push(ExpressionWork::Emit(PlannedInstruction::new(
+                        FinalOpcode::GetSuperValue,
+                        Operands::None,
+                        member.span,
+                    )));
+                }
+                Step::Computed(member) => {
+                    planned.push(ExpressionWork::SuperPropertyReceiver {
+                        span: member.object.span(),
+                        call_receiver: preserve_receiver,
+                    });
+                    planned.push(ExpressionWork::Visit(&member.expression));
+                    planned.push(ExpressionWork::SuperPropertyBaseAfterKey {
+                        span: member.object.span(),
+                    });
+                    planned.push(ExpressionWork::Emit(PlannedInstruction::new(
+                        FinalOpcode::ToPropKey,
+                        Operands::None,
+                        member.expression.span(),
+                    )));
+                    planned.push(ExpressionWork::Emit(PlannedInstruction::new(
+                        FinalOpcode::GetSuperValue,
+                        Operands::None,
+                        member.span,
+                    )));
+                }
+                Step::Private(_) | Step::Call(_) => {
+                    return Err(LeafCompilationError::SemanticInvariant {
+                        invariant: "optional super chain begins with a public member",
+                        span: Some(first.span()),
+                    });
+                }
             }
-            Some(MemberCallee::Computed(member)) => {
-                planned.push(ExpressionWork::Visit(&member.object));
-                planned.push(ExpressionWork::Visit(&member.expression));
-                planned.push(ExpressionWork::Emit(PlannedInstruction::new(
-                    FinalOpcode::GetArrayEl2,
-                    Operands::None,
-                    member.span,
-                )));
+        } else {
+            match root_member {
+                Some(MemberCallee::Static(member)) => {
+                    planned.push(ExpressionWork::Visit(&member.object));
+                    planned.push(ExpressionWork::Emit(PlannedInstruction::new(
+                        FinalOpcode::GetField2,
+                        Operands::Atom(constants.property_atom_index(member.property.span)?),
+                        member.span,
+                    )));
+                }
+                Some(MemberCallee::Computed(member)) => {
+                    planned.push(ExpressionWork::Visit(&member.object));
+                    planned.push(ExpressionWork::Visit(&member.expression));
+                    planned.push(ExpressionWork::Emit(PlannedInstruction::new(
+                        FinalOpcode::GetArrayEl2,
+                        Operands::None,
+                        member.span,
+                    )));
+                }
+                Some(MemberCallee::Chain(chain)) => {
+                    planned.push(ExpressionWork::VisitOptionalChain {
+                        chain,
+                        preserve_final_reference: true,
+                    });
+                }
+                Some(MemberCallee::Private(member)) => {
+                    let (binding, slot) = self.private_name_binding_for_access(
+                        member.node_id.get(),
+                        member.field.name.as_str(),
+                        member.span,
+                        layout,
+                    )?;
+                    planned.push(ExpressionWork::Visit(&member.object));
+                    planned.push(ExpressionWork::Emit(PlannedInstruction::new(
+                        FinalOpcode::Dup,
+                        Operands::None,
+                        member.object.span(),
+                    )));
+                    planned.push(ExpressionWork::Emit(self.plan_read_slot(
+                        binding,
+                        slot,
+                        member.field.span,
+                    )?));
+                    planned.push(ExpressionWork::Emit(PlannedInstruction::new(
+                        FinalOpcode::GetPrivateField,
+                        Operands::None,
+                        member.span,
+                    )));
+                }
+                None => planned.push(ExpressionWork::Visit(root)),
             }
-            Some(MemberCallee::Chain(chain)) => {
-                planned.push(ExpressionWork::VisitOptionalChain {
-                    chain,
-                    preserve_final_reference: true,
-                });
-            }
-            Some(MemberCallee::Private(member)) => {
-                let (binding, slot) = self.private_name_binding_for_access(
-                    member.node_id.get(),
-                    member.field.name.as_str(),
-                    member.span,
-                    layout,
-                )?;
-                planned.push(ExpressionWork::Visit(&member.object));
-                planned.push(ExpressionWork::Emit(PlannedInstruction::new(
-                    FinalOpcode::Dup,
-                    Operands::None,
-                    member.object.span(),
-                )));
-                planned.push(ExpressionWork::Emit(self.plan_read_slot(
-                    binding,
-                    slot,
-                    member.field.span,
-                )?));
-                planned.push(ExpressionWork::Emit(PlannedInstruction::new(
-                    FinalOpcode::GetPrivateField,
-                    Operands::None,
-                    member.span,
-                )));
-            }
-            None => planned.push(ExpressionWork::Visit(root)),
         }
 
-        for (index, step) in steps.iter().enumerate() {
+        for (index, step) in steps.iter().enumerate().skip(usize::from(super_root)) {
             let method = step.is_call()
                 && if index == 0 {
                     root_member.is_some()

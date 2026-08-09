@@ -386,6 +386,31 @@ fn class_super_properties_lower_through_home_object_and_receiver_aware_opcodes()
 }
 
 #[test]
+fn optional_and_spread_super_method_calls_keep_the_actual_receiver() {
+    let tree = compile(
+        "function make(){class Base{method(...values){return values.length;}get missing(){return null;}}class Derived extends Base{staticCall(){return super.method?.(1);}computedCall(key){return super[key]?.(2);}missingCall(effect){return super.missing?.(effect());}spread(values){return super.method(...values);}computedSpread(key,values){return super[key](...values);}read(){return super[0]?.value;}}return Derived;}",
+        "make",
+    );
+    let opcodes = tree
+        .functions()
+        .iter()
+        .flat_map(|function| function.control_flow().instructions())
+        .map(|instruction| instruction.decoded().instruction().opcode())
+        .collect::<Vec<_>>();
+
+    assert!(opcodes.contains(&FinalOpcode::IsUndefinedOrNull));
+    assert!(
+        opcodes
+            .iter()
+            .filter(|&&opcode| opcode == FinalOpcode::GetSuperValue)
+            .count()
+            >= 6
+    );
+    assert!(opcodes.contains(&FinalOpcode::CallMethod));
+    assert!(opcodes.contains(&FinalOpcode::Apply));
+}
+
+#[test]
 fn super_destructuring_and_iteration_targets_keep_complete_references() {
     let tree = compile(
         "function make(){class Base{}class Derived extends Base{write(source,key){[super.value,super[key],...super.rest]=source;({first:super.value,second:super[key],...super.rest}=source);for(super.value in source){}for(super[key] of source){}}}return Derived;}",
