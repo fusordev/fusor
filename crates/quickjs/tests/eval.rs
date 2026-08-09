@@ -47,6 +47,42 @@ fn eval_intrinsic_has_the_standard_global_descriptor() {
 }
 
 #[test]
+fn direct_eval_binding_defaults_apply_named_evaluation_to_anonymous_definitions() {
+    evaluate(
+        r#"
+        let definitions = [
+            ["function() {}", false],
+            ["function named() {}", true],
+            ["function*() {}", false],
+            ["function* named() {}", true],
+            ["async function() {}", false],
+            ["async function named() {}", true],
+            ["() => {}", false],
+            ["async () => {}", false],
+            ["class {}", false],
+            ["class named {}", true],
+        ];
+        let failures = [];
+        function check(actual, expected, context) {
+            if (actual !== expected) failures.push(context + ":" + actual + "!=" + expected);
+        }
+        for (let [definition, named] of definitions) {
+            let property = eval(`(function({ value = ${definition} }) { return value; })`);
+            check(property({}).name, named ? "named" : "value", "property " + definition);
+            let element = eval(`(function([value = ${definition}]) { return value; })`);
+            check(element([]).name, named ? "named" : "value", "element " + definition);
+            let parameter = eval(`(function(value = ${definition}) { return value; })`);
+            check(parameter().name, named ? "named" : "value", "parameter " + definition);
+        }
+        let pattern = eval(`(function({ name } = class {}) { return name; })`);
+        check(pattern(), "", "pattern class");
+        failures.join("|");
+        "#,
+        |value| assert_eq!(string(value), ""),
+    );
+}
+
+#[test]
 fn closed_direct_eval_returns_the_script_completion() {
     evaluate(
         "function local(){return eval('let answer=40+2;answer;');} local();",

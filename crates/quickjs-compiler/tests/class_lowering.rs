@@ -612,6 +612,36 @@ fn anonymous_base_class_binding_defaults_use_their_binding_names() {
 }
 
 #[test]
+fn anonymous_base_class_formal_parameter_defaults_respect_the_binding_shape() {
+    let tree = compile(
+        "function make(Result=class{static answer(){return 7;}},{}=class{}){return Result;}",
+        "make",
+    );
+    let names = tree
+        .root()
+        .control_flow()
+        .instructions()
+        .iter()
+        .filter_map(|instruction| {
+            let instruction = instruction.decoded().instruction();
+            match (instruction.opcode(), instruction.operands()) {
+                (FinalOpcode::DefineClass, quickjs_bytecode::Operands::AtomU8 { atom, .. }) => {
+                    Some(
+                        tree.root().atoms()[atom.get() as usize]
+                            .string()
+                            .code_units()
+                            .collect::<Vec<_>>(),
+                    )
+                }
+                _ => None,
+            }
+        })
+        .collect::<Vec<_>>();
+
+    assert_eq!(names, ["Result".encode_utf16().collect::<Vec<_>>(), vec![]]);
+}
+
+#[test]
 fn anonymous_base_class_assignment_defaults_use_their_target_names() {
     let tree = compile(
         "function make(){let ArrayName;[ArrayName=class{}]=[];let ObjectName;({value:ObjectName=class{}}={});return [ArrayName,ObjectName];}",

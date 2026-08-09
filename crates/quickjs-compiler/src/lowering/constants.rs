@@ -777,6 +777,9 @@ impl<'arena> CompilationContext<'_, 'arena, '_> {
                 AstKind::AssignmentTargetWithDefault(assignment) => {
                     return Self::direct_class_assignment_default_name(node_id, class, assignment);
                 }
+                AstKind::FormalParameter(parameter) => {
+                    return Self::class_formal_parameter_default_name(node_id, class, parameter);
+                }
                 _ => {
                     // The remaining expression contexts do not perform
                     // NamedEvaluation. Their anonymous class value retains
@@ -935,6 +938,43 @@ impl<'arena> CompilationContext<'_, 'arena, '_> {
         if initializer.node_id() != node_id {
             return Err(LeafCompilationError::SemanticInvariant {
                 invariant: "anonymous class name is inferred from its direct binding default",
+                span: Some(class.span),
+            });
+        }
+        Ok((
+            compiler_identifier_string(identifier.name.as_str(), identifier.span)?,
+            identifier.span,
+        ))
+    }
+
+    fn class_formal_parameter_default_name(
+        node_id: NodeId,
+        class: &super::Class<'arena>,
+        parameter: &super::FormalParameter<'arena>,
+    ) -> Result<(CompilerString, Span), LeafCompilationError> {
+        let BindingPattern::BindingIdentifier(identifier) = &parameter.pattern else {
+            // `BindingElement : BindingPattern Initializer` uses ordinary
+            // evaluation. Only `SingleNameBinding` performs NamedEvaluation.
+            return Ok((compiler_identifier_string("", class.span)?, class.span));
+        };
+        let Some(mut initializer) = parameter.initializer.as_deref() else {
+            return Err(LeafCompilationError::SemanticInvariant {
+                invariant: "anonymous class formal parameter has a default initializer",
+                span: Some(class.span),
+            });
+        };
+        while let Expression::ParenthesizedExpression(parenthesized) = initializer {
+            initializer = &parenthesized.expression;
+        }
+        let Expression::ClassExpression(initializer) = initializer else {
+            return Err(LeafCompilationError::SemanticInvariant {
+                invariant: "anonymous class remains the direct formal parameter initializer",
+                span: Some(class.span),
+            });
+        };
+        if initializer.node_id() != node_id {
+            return Err(LeafCompilationError::SemanticInvariant {
+                invariant: "anonymous class name is inferred from its formal parameter binding",
                 span: Some(class.span),
             });
         }
