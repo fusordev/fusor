@@ -1994,10 +1994,14 @@ impl<'compiler, 'unit, 'arena, 'scope> ExpressionPlanner<'compiler, 'unit, 'aren
         let mut state = StatementPlanningState {
             work: vec![
                 StatementWork::PopScope(scope),
+                StatementWork::PopStatementStackBase { span: block.span },
+                StatementWork::PopStatementStackBase { span: block.span },
                 StatementWork::VisitList {
                     statements: &block.body,
                     next: 0,
                 },
+                StatementWork::PushStatementStackBase { span: block.span },
+                StatementWork::PushStatementStackBase { span: block.span },
                 StatementWork::PushScope {
                     scope,
                     creator: block.node_id.get(),
@@ -2006,7 +2010,10 @@ impl<'compiler, 'unit, 'arena, 'scope> ExpressionPlanner<'compiler, 'unit, 'aren
             ],
             // The class scope is already active for the surrounding class
             // definition. It provides the synthetic lexical class receiver
-            // used by `this` and `super` in the block.
+            // used by `this` and `super` in the block. The constructor and
+            // prototype pair below the block's statement operands is tracked
+            // as part of the statement stack base so nested handlers and
+            // control-flow labels retain their exact physical depth.
             active_scopes: vec![class.scope_id()],
             controls: StatementControlStack::default(),
             abrupt_markers: Vec::new(),

@@ -1073,6 +1073,25 @@ fn static_blocks_lower_in_class_element_order_with_a_lexical_receiver() {
 }
 
 #[test]
+fn static_block_throw_can_abandon_the_in_progress_class_stack() {
+    let tree = compile(
+        "function run(){let subsequent=false;try{class Failed{static{throw 7;}static x=subsequent=true;}}catch(error){if(error!==7)return false;}class Recovered{static{try{throw 3;}catch(error){this.x=error;}}static y=4;}return !subsequent&&Recovered.x===3&&Recovered.y===4;}",
+        "run",
+    );
+    assert!(tree.functions().iter().any(|function| {
+        function
+            .control_flow()
+            .instructions()
+            .iter()
+            .any(|instruction| instruction.decoded().instruction().opcode() == FinalOpcode::Throw)
+    }));
+    compile(
+        "function run(){class Failed{static{throw 1;}static x=2;}}",
+        "run",
+    );
+}
+
+#[test]
 fn derived_super_spread_uses_the_typed_constructor_apply_form() {
     let tree = compile(
         "function make(Base){return class Derived extends Base{constructor(args){super(...args);}}}",

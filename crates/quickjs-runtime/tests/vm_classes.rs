@@ -716,6 +716,29 @@ fn anonymous_class_static_field_receivers_use_the_created_constructor() {
 }
 
 #[test]
+fn static_block_throw_abandons_or_retains_the_class_stack_at_the_right_handler() {
+    run_with(
+        "function run(){let subsequent=false;try{class Failed{static{throw 7;}static x=subsequent=true;}}catch(error){if(error!==7)return false;}class Recovered{static{try{throw 3;}catch(error){this.x=error;}}static y=4;}return !subsequent&&Recovered.x===3&&Recovered.y===4;}",
+        |result| {
+            let value = result.expect("static block abrupt execution");
+            assert_eq!(value.as_boolean().expect("live Boolean"), Some(true));
+        },
+    );
+    run_with(
+        "function run(){class Failed{static{throw 11;}static x=2;}}",
+        |result| {
+            let ExecutionError::Exception(exception) = result.expect_err("uncaught static throw")
+            else {
+                panic!("expected JavaScript exception");
+            };
+            let thrown = exception.thrown_value().expect("explicit throw");
+            let number = thrown.as_number().expect("live Number").expect("number");
+            assert!(number.strict_equals(JsNumber::from_i32(11)));
+        },
+    );
+}
+
+#[test]
 fn derived_super_spread_preserves_the_active_new_target_and_receiver_timing() {
     run_with(
         "function run(){let events=[];function args(){events.push('args');return [2,3];}class Base{constructor(...values){events.push('base');this.values=values.join(':');this.target=new.target;}}class Derived extends Base{constructor(){events.push('before');super(1,...args(),4);events.push('after');this.ready=true;}}class Leaf extends Derived{}let value=new Leaf;return value.values==='1:2:3:4'&&value.target===Leaf&&value.ready&&events.join(',')==='before,args,base,after';}",

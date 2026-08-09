@@ -208,7 +208,7 @@ fn explicit_throw_underflow_is_rejected_at_the_terminal() {
 }
 
 #[test]
-fn compiler_throw_rejects_values_stranded_below_the_thrown_value() {
+fn compiler_throw_accepts_values_abandoned_below_the_thrown_value() {
     let bytecode = encode(&[
         (FinalOpcode::Undefined, Operands::None),
         (FinalOpcode::Undefined, Operands::None),
@@ -216,7 +216,7 @@ fn compiler_throw_rejects_values_stranded_below_the_thrown_value() {
     ]);
     verify(bytecode.clone(), 2, FunctionIndexDomains::default());
 
-    let error = verify_compiler_control_flow(
+    let verified = verify_compiler_control_flow(
         UnverifiedCompilerFunctionBody::new(
             bytecode,
             FunctionIndexDomains::default(),
@@ -224,13 +224,8 @@ fn compiler_throw_rejects_values_stranded_below_the_thrown_value() {
         ),
         VerificationLimits::default(),
     )
-    .expect_err("compiler terminals must not strand an ordinary value below the throw");
-    assert_eq!(
-        error.kind(),
-        &VerificationErrorKind::NonEmptyCompilerExitStack { remaining: 1 }
-    );
-    assert_eq!(error.pc(), Some(BytecodePc::new(2)));
-    assert_eq!(error.opcode(), Some(FinalOpcode::Throw));
+    .expect("throw abandons the surrounding ordinary expression stack");
+    assert_eq!(verified.instructions()[2].entry_stack_depth(), Some(2));
 }
 
 #[test]

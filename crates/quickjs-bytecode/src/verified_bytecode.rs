@@ -9502,6 +9502,7 @@ fn verify_internal_stack_exit(
         let mut cursor = 0;
         while cursor < state.len() {
             match state[cursor] {
+                value if value.is_javascript_value() => cursor += 1,
                 InternalStackValue::CatchMarker { .. } => cursor += 1,
                 InternalStackValue::ForOfIterator(site) => {
                     if !matches!(

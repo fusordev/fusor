@@ -3552,7 +3552,7 @@ fn catch_marker_certificate_accepts_normal_throw_and_nested_for_in_cleanup() {
 }
 
 #[test]
-fn catch_marker_certificate_rejects_ordinary_values_stranded_by_throw() {
+fn catch_marker_certificate_accepts_ordinary_values_abandoned_by_throw() {
     let instructions = [
         (FinalOpcode::Catch, Operands::Label(7)),
         (FinalOpcode::Push1, Operands::NoneInt),
@@ -3562,21 +3562,22 @@ fn catch_marker_certificate_rejects_ordinary_values_stranded_by_throw() {
         (FinalOpcode::ReturnUndef, Operands::None),
     ];
 
-    let error = verify_compiler_bytecode_graph(
+    verify_compiler_bytecode_graph(
         typed_stack_input(&instructions, &[], &[]),
         BytecodeGraphVerificationLimits::default(),
     )
-    .expect_err("throw may retain active catch markers but no ordinary operand values");
-    assert!(
-        matches!(
-            error.kind(),
-            BytecodeVerificationErrorKind::CatchMarkerStackMismatch {
-                opcode: FinalOpcode::Throw,
-                ..
-            }
-        ),
-        "{error:?}"
-    );
+    .expect("throw abandons ordinary operand values when unwinding to its catch marker");
+
+    let without_handler = [
+        (FinalOpcode::Push1, Operands::NoneInt),
+        (FinalOpcode::Push2, Operands::NoneInt),
+        (FinalOpcode::Throw, Operands::None),
+    ];
+    verify_compiler_bytecode_graph(
+        typed_stack_input(&without_handler, &[], &[]),
+        BytecodeGraphVerificationLimits::default(),
+    )
+    .expect("an uncaught throw abandons ordinary values with its frame");
 }
 
 #[test]

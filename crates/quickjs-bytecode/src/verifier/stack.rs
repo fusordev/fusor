@@ -41,12 +41,6 @@ pub(super) fn analyze_ordinary_stack(
 
     let mut computed_max = 0_u32;
     let mut evaluations = 0_u64;
-    let has_catch_marker = instructions.iter().any(|instruction| {
-        matches!(
-            instruction.decoded.instruction().opcode(),
-            FinalOpcode::Catch | FinalOpcode::ForOfStart | FinalOpcode::ForAwaitOfStart
-        )
-    });
     let has_gosub = instructions
         .iter()
         .any(|instruction| instruction.decoded.instruction().opcode() == FinalOpcode::Gosub);
@@ -235,11 +229,15 @@ pub(super) fn analyze_ordinary_stack(
                 )?;
             }
             VerifiedSuccessorsRepr::Terminate => {
-                let protected_throw = has_catch_marker
-                    && matches!(
-                        current.decoded.instruction().opcode(),
-                        FinalOpcode::Throw | FinalOpcode::ThrowError
-                    );
+                // An abrupt throw abandons the surrounding expression stack.
+                // A same-frame handler truncates to its certified marker; an
+                // uncaught throw discards the frame. The whole-bytecode typed
+                // pass still rejects forged markers and malformed iterator
+                // records, so ordinary depth alone need not be zero here.
+                let abandons_expression = matches!(
+                    current.decoded.instruction().opcode(),
+                    FinalOpcode::Throw | FinalOpcode::ThrowError
+                );
                 let returns_from_finally =
                     current.decoded.instruction().opcode() == FinalOpcode::Ret;
                 // Resuming a suspended `yield` with `generator.return(value)`
@@ -265,7 +263,7 @@ pub(super) fn analyze_ordinary_stack(
                     );
                 if require_empty_exits
                     && output_depth != 0
-                    && !protected_throw
+                    && !abandons_expression
                     && !returns_from_finally
                     && !abandons_generator_expression
                     && !defers_typed_finally_exit
