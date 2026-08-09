@@ -36,7 +36,7 @@ use super::{
 };
 
 const REALM_OBJECT_SLOTS: u64 = 84;
-const REALM_PROPERTY_SLOTS: u64 = 2_706;
+const REALM_PROPERTY_SLOTS: u64 = 2_707;
 const REALM_FUNCTION_SLOTS: u64 = 811;
 
 #[test]

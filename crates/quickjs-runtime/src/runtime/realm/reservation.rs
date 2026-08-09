@@ -141,7 +141,7 @@ mod tests {
         assert_eq!(plan.objects, 84);
         assert_eq!(plan.functions, 811);
         assert_eq!(plan.global_bindings, 0);
-        assert_eq!(plan.object_properties, 2_706);
+        assert_eq!(plan.object_properties, 2_707);
         assert_eq!(plan.journal_entries, 1_300);
     }
 }
