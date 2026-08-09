@@ -224,6 +224,7 @@ const fn super_member_update_permutation(prefix: bool) -> FinalOpcode {
 
 pub(in crate::lowering) enum ExpressionWork<'expression, 'arena> {
     Visit(&'expression Expression<'arena>),
+    VisitCallExpression(&'expression CallExpression<'arena>),
     VisitOptionalChain {
         chain: &'expression ChainExpression<'arena>,
         preserve_final_reference: bool,
@@ -342,6 +343,9 @@ impl<'compiler, 'unit, 'arena, 'scope> ExpressionPlanner<'compiler, 'unit, 'aren
         while let Some(task) = work.pop() {
             match task {
                 ExpressionWork::Emit(instruction) => flow.emit(instruction)?,
+                ExpressionWork::VisitCallExpression(call) => {
+                    self.plan_call_expression(call, layout, tree_layout, constants, &mut work)?;
+                }
                 ExpressionWork::VisitOptionalChain {
                     chain,
                     preserve_final_reference,
@@ -3109,12 +3113,14 @@ impl<'compiler, 'unit, 'arena, 'scope> ExpressionPlanner<'compiler, 'unit, 'aren
         } else {
             None
         };
-        let super_root =
+        let super_member_root =
             matches!(root, Expression::Super(_)) && steps.first().is_some_and(Step::is_member);
+        let super_call_root =
+            matches!(root, Expression::Super(_)) && steps.first().is_some_and(Step::is_call);
 
         let end = flow.new_label(chain.span)?;
         let mut planned = Vec::new();
-        if super_root {
+        if super_member_root {
             let first = steps
                 .first()
                 .ok_or(LeafCompilationError::SemanticInvariant {
@@ -3167,6 +3173,14 @@ impl<'compiler, 'unit, 'arena, 'scope> ExpressionPlanner<'compiler, 'unit, 'aren
                     });
                 }
             }
+        } else if super_call_root {
+            let Some(Step::Call(call)) = steps.first() else {
+                return Err(LeafCompilationError::SemanticInvariant {
+                    invariant: "optional super-call chain has an initial call step",
+                    span: Some(chain.span),
+                });
+            };
+            planned.push(ExpressionWork::VisitCallExpression(call));
         } else {
             match root_member {
                 Some(MemberCallee::Static(member)) => {
@@ -3220,7 +3234,11 @@ impl<'compiler, 'unit, 'arena, 'scope> ExpressionPlanner<'compiler, 'unit, 'aren
             }
         }
 
-        for (index, step) in steps.iter().enumerate().skip(usize::from(super_root)) {
+        for (index, step) in steps
+            .iter()
+            .enumerate()
+            .skip(usize::from(super_member_root || super_call_root))
+        {
             let method = step.is_call()
                 && if index == 0 {
                     root_member.is_some()
