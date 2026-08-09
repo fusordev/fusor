@@ -182,7 +182,64 @@ fn type_error(
     })
 }
 
-/// `Object(value)` and `new Object(value)`.
+/// Starts `Object(value)` or `new Object(value)`.
+///
+/// A subclass construction ignores `value` and performs the observable
+/// `Get(NewTarget, "prototype")` required by `OrdinaryCreateFromConstructor`.
+/// Direct calls and construction with `%Object%` retain the conversion path.
+#[allow(
+    clippy::too_many_arguments,
+    reason = "the resumable constructor boundary retains active function, NewTarget, caller continuation, source origin, and execution authority"
+)]
+pub(super) fn begin_object_constructor(
+    runtime: &mut Runtime,
+    function: FunctionId,
+    realm: RealmId,
+    argument: Option<StoredValue>,
+    new_target: Option<FunctionId>,
+    return_to: Option<CallReturn>,
+    origin: Option<JsStackFrame>,
+    execution_budget: &mut ExecutionBudget,
+) -> Result<NativeDispatch, NativeFailure> {
+    if let Some(new_target) = new_target
+        && new_target != function
+    {
+        let prototype_key = runtime.predefined_property_key(PredefinedAtom::Prototype);
+        return begin_intrinsic_get(
+            runtime,
+            realm,
+            HeapReference::Function(new_target),
+            StoredValue::Function(new_target),
+            &prototype_key,
+            IntrinsicGetContinuation::ObjectConstructor { new_target },
+            return_to,
+            origin,
+            execution_budget,
+        );
+    }
+    object_constructor(runtime, realm, argument)
+}
+
+/// Finishes the subclass-only `OrdinaryCreateFromConstructor` path.
+pub(super) fn finish_object_constructor_wrapper(
+    runtime: &mut Runtime,
+    new_target: FunctionId,
+    requested: &StoredValue,
+) -> Result<NativeDispatch, NativeFailure> {
+    let prototype = requested.heap_reference().map_or_else(
+        || {
+            let target_realm = runtime.function_realm(new_target)?;
+            runtime
+                .realm_object_prototype(target_realm)
+                .map(HeapReference::Object)
+        },
+        Ok,
+    )?;
+    let object = runtime.allocate_ordinary_object_with_prototype(prototype)?;
+    Ok(NativeDispatch::Immediate(StoredValue::Object(object)))
+}
+
+/// Performs the direct `%Object%` conversion path.
 ///
 /// A `null` or `undefined` argument produces a fresh ordinary object; every
 /// other value is coerced with `ToObject`, so an object argument is returned

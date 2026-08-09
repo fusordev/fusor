@@ -215,6 +215,7 @@ fn the_object_constructor_has_the_pinned_identity() {
 #[test]
 fn the_object_constructor_coerces_with_to_object() {
     assert!(boolean("var o={};return Object(o)===o;"));
+    assert!(boolean("var o={};return new Object(o)===o;"));
     assert!(boolean("var a=Object(null);var b=Object();return a!==b;"));
     assert!(boolean("return Object(5) instanceof Number;"));
 }
@@ -1674,15 +1675,27 @@ fn proxy_get_drives_intrinsic_tags_and_wrapper_new_target_prototypes() {
              var boolean=Reflect.construct(Boolean,[true],newTarget);\
              var number=Reflect.construct(Number,[7],newTarget);\
              var string=Reflect.construct(String,['x'],newTarget);\
+             var object=Reflect.construct(Object,[{ignored:true}],newTarget);\
              return Boolean.prototype.valueOf.call(boolean)+'|'+\
                     Number.prototype.valueOf.call(number)+'|'+\
                     String.prototype.valueOf.call(string)+'|'+\
                     (Object.getPrototypeOf(boolean)===proto)+'|'+\
                     (Object.getPrototypeOf(number)===proto)+'|'+\
-                    (Object.getPrototypeOf(string)===proto)+'|'+log;"
+                    (Object.getPrototypeOf(string)===proto)+'|'+\
+                    (Object.getPrototypeOf(object)===proto)+'|'+log;"
         ),
-        "true|7|x|true|true|true|ppp"
+        "true|7|x|true|true|true|true|pppp"
     );
+    assert!(boolean(
+        "var newTarget=new Proxy(function(){},{get(target,key,receiver){\
+           if(key==='prototype')return 1;return Reflect.get(target,key,receiver);}});\
+         var value=Reflect.construct(Object,[],newTarget);\
+         return Object.getPrototypeOf(value)===Object.prototype;"
+    ));
+    assert!(boolean(
+        "var newTarget=new Proxy(function(){},{get(){throw 42;}});\
+         try{Reflect.construct(Object,[],newTarget);}catch(error){return error===42;}return false;"
+    ));
     assert_eq!(
         text(
             "var log='';function construct(Target,args){\

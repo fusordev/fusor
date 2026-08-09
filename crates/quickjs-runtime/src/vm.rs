@@ -1479,6 +1479,9 @@ impl PromiseContinuation {
 }
 
 enum IntrinsicGetContinuation {
+    ObjectConstructor {
+        new_target: FunctionId,
+    },
     BooleanConstructor {
         new_target: FunctionId,
         value: bool,
@@ -1586,7 +1589,8 @@ enum IntrinsicGetContinuation {
 impl IntrinsicGetContinuation {
     fn retained_values(&self) -> u64 {
         match self {
-            Self::BooleanConstructor { .. }
+            Self::ObjectConstructor { .. }
+            | Self::BooleanConstructor { .. }
             | Self::NumberConstructor { .. }
             | Self::DateConstructor { .. }
             | Self::ArrayBufferConstructor { .. }
@@ -3704,7 +3708,8 @@ fn trace_native_continuation_roots(
         NativeContinuation::TemporalInstantDifferenceOptions(state) => state.trace_roots(mark),
         NativeContinuation::TemporalInstantToStringOptions(state) => state.trace_roots(mark),
         NativeContinuation::IntrinsicGet(state) => match state {
-            IntrinsicGetContinuation::BooleanConstructor { new_target, .. }
+            IntrinsicGetContinuation::ObjectConstructor { new_target }
+            | IntrinsicGetContinuation::BooleanConstructor { new_target, .. }
             | IntrinsicGetContinuation::NumberConstructor { new_target, .. }
             | IntrinsicGetContinuation::DateConstructor { new_target, .. }
             | IntrinsicGetContinuation::ArrayBufferConstructor { new_target, .. }

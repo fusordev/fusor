@@ -131,6 +131,17 @@ fn a_default_derived_constructor_forwards_arguments_and_installs_both_inheritanc
 }
 
 #[test]
+fn an_object_subclass_allocates_from_the_derived_new_target() {
+    run_with(
+        "function run(){class Derived extends ({}).constructor{value(){return 42;}}let ignored={};let instance=new Derived(ignored);return instance!==ignored&&instance.value()===42&&instance.constructor===Derived&&instance instanceof Derived&&instance instanceof ({}).constructor;}",
+        |result| {
+            let value = result.expect("Object subclass construction");
+            assert_eq!(value.as_boolean().expect("live Boolean"), Some(true));
+        },
+    );
+}
+
+#[test]
 fn initializer_free_public_instance_fields_define_on_each_receiver_at_constructor_entry() {
     run_with(
         "function run(){class Empty{empty;}class Base{base;constructor(){this.baseBeforeBody=this.base===void 0;}}class Explicit extends Base{own;constructor(){super();this.ownBeforeBody=this.own===void 0;}}class Default extends Base{forward;}let empty=new Empty;let base=new Base;let explicit=new Explicit;let forwarded=new Default;let fields=empty.empty===void 0&&base.base===void 0&&base.baseBeforeBody&&explicit.base===void 0&&explicit.own===void 0&&explicit.baseBeforeBody&&explicit.ownBeforeBody&&forwarded.base===void 0&&forwarded.forward===void 0;let descriptors=empty.hasOwnProperty('empty')&&empty.propertyIsEnumerable('empty')&&delete empty.empty&&!empty.hasOwnProperty('empty')&&base.hasOwnProperty('base')&&base.propertyIsEnumerable('base')&&delete base.base&&!base.hasOwnProperty('base')&&explicit.hasOwnProperty('own')&&explicit.propertyIsEnumerable('own')&&delete explicit.own&&!explicit.hasOwnProperty('own')&&forwarded.hasOwnProperty('forward')&&forwarded.propertyIsEnumerable('forward');return fields&&descriptors;}",

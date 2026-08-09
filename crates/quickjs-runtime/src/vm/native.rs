@@ -2605,10 +2605,16 @@ pub(super) fn dispatch_native_call_with_frames(
             };
             Ok(NativeDispatch::Immediate(StoredValue::Boolean(is_error)))
         }
-        NativeFunctionKind::ObjectConstructor => {
-            let mut arguments = inputs.arguments;
-            object_constructor(runtime, native.realm, arguments.take_first())
-        }
+        NativeFunctionKind::ObjectConstructor => begin_object_constructor(
+            runtime,
+            function,
+            native.realm,
+            inputs.arguments.take_first(),
+            inputs.new_target,
+            return_to,
+            origin,
+            execution_budget,
+        ),
         NativeFunctionKind::ObjectGetPrototypeOf => {
             let mut arguments = inputs.arguments;
             get_prototype_of(

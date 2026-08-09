@@ -515,6 +515,9 @@ pub(super) fn finish_intrinsic_get(
     outer_continuations: &[NativeContinuation],
 ) -> Result<NativeDispatch, NativeFailure> {
     match continuation {
+        IntrinsicGetContinuation::ObjectConstructor { new_target } => {
+            finish_object_constructor_wrapper(runtime, new_target, &value)
+        }
         IntrinsicGetContinuation::BooleanConstructor {
             new_target,
             value: boolean_value,
