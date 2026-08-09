@@ -295,17 +295,76 @@ fn object_prototype_has_immutable_prototype_exotic_semantics() {
 }
 
 #[test]
-fn annex_b_object_prototype_extensions_are_absent() {
+fn object_prototype_installs_proto_but_not_the_other_legacy_accessors() {
     assert_eq!(
         text(
             "let proto=Object.prototype;\
-             let names=['__proto__','__defineGetter__','__defineSetter__','__lookupGetter__','__lookupSetter__'];\
+             let names=['__defineGetter__','__defineSetter__','__lookupGetter__','__lookupSetter__'];\
              return Object.getOwnPropertyNames(proto).join('|')+'#'+\
                  names.every(function(name){return proto[name]===undefined&&\
                    Object.getOwnPropertyDescriptor(proto,name)===undefined;});"
         ),
-        "toString|toLocaleString|valueOf|hasOwnProperty|isPrototypeOf|propertyIsEnumerable|constructor#true"
+        "toString|toLocaleString|valueOf|hasOwnProperty|isPrototypeOf|propertyIsEnumerable|__proto__|constructor#true"
     );
+    assert!(boolean(
+        "var descriptor=Object.getOwnPropertyDescriptor(Object.prototype,'__proto__');\
+         return descriptor.get.name==='get __proto__'&&descriptor.get.length===0&&\
+           descriptor.set.name==='set __proto__'&&descriptor.set.length===1&&\
+           !descriptor.enumerable&&descriptor.configurable;"
+    ));
+}
+
+#[test]
+fn object_prototype_proto_getter_coerces_and_observes_proxy_receivers() {
+    assert!(boolean(
+        "var descriptor=Object.getOwnPropertyDescriptor(Object.prototype,'__proto__');\
+         var expected={},log='';var proxy=new Proxy({},\
+           {getPrototypeOf:function getPrototypeOf(){log=log+'g';return expected;}});\
+         var {__proto__: numberPrototype}=42;\
+         return descriptor.get.call({})===Object.prototype&&\
+           descriptor.get.call(42)===Number.prototype&&numberPrototype===Number.prototype&&\
+           descriptor.get.call(proxy)===expected&&log==='g';"
+    ));
+    assert_eq!(
+        type_error_message(
+            "var get=Object.getOwnPropertyDescriptor(Object.prototype,'__proto__').get;\
+             return get.call(null);"
+        ),
+        "cannot convert to object"
+    );
+}
+
+#[test]
+fn object_prototype_proto_setter_follows_legacy_noop_and_internal_method_rules() {
+    assert!(boolean(
+        "var set=Object.getOwnPropertyDescriptor(Object.prototype,'__proto__').set;\
+         var original=Object.prototype,prototype={marker:1},target={};\
+         var result=set.call(target,prototype);set.call(target,7);\
+         return result===undefined&&Object.getPrototypeOf(target)===prototype&&\
+           target.marker===1&&set.call(42,prototype)===undefined&&\
+           Object.getPrototypeOf(target)===prototype&&Object.getPrototypeOf(target)!==original;"
+    ));
+    assert_eq!(
+        type_error_message(
+            "var set=Object.getOwnPropertyDescriptor(Object.prototype,'__proto__').set;\
+             return set.call(null,{});"
+        ),
+        "cannot convert to object"
+    );
+    assert_eq!(
+        type_error_message(
+            "var set=Object.getOwnPropertyDescriptor(Object.prototype,'__proto__').set;\
+             var target=Object.preventExtensions({});return set.call(target,null);"
+        ),
+        "object is not extensible"
+    );
+    assert!(boolean(
+        "var set=Object.getOwnPropertyDescriptor(Object.prototype,'__proto__').set;\
+         var log='',expected={};var proxy=new Proxy({},\
+           {setPrototypeOf:function setPrototypeOf(target,prototype){\
+             log=log+(prototype===expected?'s':'x');return true;}});\
+         return set.call(proxy,expected)===undefined&&log==='s';"
+    ));
 }
 
 #[test]

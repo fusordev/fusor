@@ -2333,6 +2333,34 @@ fn realm_installs_the_exact_function_intrinsic_graph() {
         PredefinedAtom::ValueOf,
         0,
     );
+    let proto_accessors = match object_prototype
+        .own_property(&runtime.predefined_property_key(PredefinedAtom::Proto))
+    {
+        Some(OwnProperty::Accessor {
+            layout,
+            getter: Some(getter),
+            setter: Some(setter),
+        }) if layout == PropertyLayout::accessor(false, true) => (getter, setter),
+        _ => panic!("Object.prototype.__proto__ is not the expected accessor"),
+    };
+    assert_native_method_named(
+        &runtime,
+        proto_accessors.0,
+        function_prototype,
+        realm_id,
+        NativeFunctionKind::ObjectPrototypeProtoGetter,
+        &JsString::from_utf8("get __proto__").expect("getter name"),
+        0,
+    );
+    assert_native_method_named(
+        &runtime,
+        proto_accessors.1,
+        function_prototype,
+        realm_id,
+        NativeFunctionKind::ObjectPrototypeProtoSetter,
+        &JsString::from_utf8("set __proto__").expect("setter name"),
+        1,
+    );
 
     assert_data_property(
         &constructor.object,

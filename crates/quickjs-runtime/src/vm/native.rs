@@ -2913,6 +2913,27 @@ pub(super) fn dispatch_native_call_with_frames(
                 execution_budget,
             )
         }
+        NativeFunctionKind::ObjectPrototypeProtoGetter => object_prototype_proto_getter(
+            runtime,
+            native.realm,
+            inputs.receiver,
+            return_to,
+            origin.unwrap_or_else(native_function_host_origin),
+            execution_budget,
+        ),
+        NativeFunctionKind::ObjectPrototypeProtoSetter => {
+            let mut arguments = inputs.arguments;
+            let requested = arguments.take_first_or_undefined();
+            object_prototype_proto_setter(
+                runtime,
+                native.realm,
+                &inputs.receiver,
+                &requested,
+                return_to,
+                origin.unwrap_or_else(native_function_host_origin),
+                execution_budget,
+            )
+        }
         NativeFunctionKind::Reflect(method) => begin_reflect_method(
             runtime,
             native.realm,

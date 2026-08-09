@@ -1296,6 +1296,8 @@ pub(crate) enum NativeFunctionKind {
     ObjectCreate,
     ObjectPrototypeToString,
     ObjectPrototypeValueOf,
+    ObjectPrototypeProtoGetter,
+    ObjectPrototypeProtoSetter,
     ObjectPrototypeHasOwnProperty,
     ObjectPrototypeIsPrototypeOf,
     ObjectPrototypePropertyIsEnumerable,

@@ -119,6 +119,16 @@ fn visit_object_functions(visit: FunctionSink<'_>) {
             IntrinsicNameSpec::Predefined(PredefinedAtom::ValueOf),
             0,
         ),
+        (
+            NativeFunctionKind::ObjectPrototypeProtoGetter,
+            IntrinsicNameSpec::Literal("get __proto__"),
+            0,
+        ),
+        (
+            NativeFunctionKind::ObjectPrototypeProtoSetter,
+            IntrinsicNameSpec::Literal("set __proto__"),
+            1,
+        ),
     ] {
         visit(ordinary(kind, name, length));
     }
@@ -162,6 +172,17 @@ fn visit_object_prototype_properties(visit: PropertySink<'_>) {
             function,
         ));
     }
+    visit(accessor(
+        prototype,
+        IntrinsicKeySpec::PredefinedString(PredefinedAtom::Proto),
+        PropertyLayout::accessor(false, true),
+        Some(IntrinsicFunctionId(
+            NativeFunctionKind::ObjectPrototypeProtoGetter,
+        )),
+        Some(IntrinsicFunctionId(
+            NativeFunctionKind::ObjectPrototypeProtoSetter,
+        )),
+    ));
     visit(method(
         prototype,
         IntrinsicKeySpec::PredefinedString(PredefinedAtom::Constructor),

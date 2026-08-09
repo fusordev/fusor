@@ -558,6 +558,94 @@ fn heap_reference_value(reference: Option<HeapReference>) -> StoredValue {
     }
 }
 
+/// The legacy `Object.prototype.__proto__` getter.
+///
+/// This is deliberately routed through the receiver's observable
+/// `[[GetPrototypeOf]]` internal method after `ToObject`, including for Proxy
+/// receivers. Primitive receivers are boxed only long enough to query their
+/// intrinsic prototype.
+pub(super) fn object_prototype_proto_getter(
+    runtime: &mut Runtime,
+    realm: RealmId,
+    receiver: StoredValue,
+    return_to: Option<CallReturn>,
+    origin: JsStackFrame,
+    execution_budget: &mut ExecutionBudget,
+) -> Result<NativeDispatch, NativeFailure> {
+    let reference = object_prototype_to_object(runtime, realm, receiver, &origin)?
+        .heap_reference()
+        .ok_or(EngineFault::RuntimeInvariant {
+            message: "Object.prototype.__proto__ getter lost its boxed receiver",
+        })?;
+    begin_internal_get_prototype_of(
+        runtime,
+        reference,
+        realm,
+        return_to,
+        origin,
+        execution_budget,
+    )
+}
+
+/// The legacy `Object.prototype.__proto__` setter.
+///
+/// `RequireObjectCoercible` precedes prototype validation. Non-object
+/// prototype values and primitive receivers are successful no-ops; object
+/// receivers delegate to their observable `[[SetPrototypeOf]]` internal
+/// method and throw when that method rejects the change.
+pub(super) fn object_prototype_proto_setter(
+    runtime: &mut Runtime,
+    realm: RealmId,
+    receiver: &StoredValue,
+    requested: &StoredValue,
+    return_to: Option<CallReturn>,
+    origin: JsStackFrame,
+    execution_budget: &mut ExecutionBudget,
+) -> Result<NativeDispatch, NativeFailure> {
+    if matches!(receiver, StoredValue::Undefined | StoredValue::Null) {
+        return Err(NativeFailure::Abrupt(type_error(
+            realm,
+            Some(&origin),
+            "Object.prototype.__proto__",
+            "cannot convert to object",
+        )?));
+    }
+    let prototype = match requested {
+        StoredValue::Null => None,
+        StoredValue::Function(function) => Some(HeapReference::Function(*function)),
+        StoredValue::Object(object) => Some(HeapReference::Object(*object)),
+        StoredValue::Undefined
+        | StoredValue::Boolean(_)
+        | StoredValue::Number(_)
+        | StoredValue::BigInt(_)
+        | StoredValue::String(_)
+        | StoredValue::Symbol(_) => {
+            return Ok(NativeDispatch::Immediate(StoredValue::Undefined));
+        }
+    };
+    let Some(reference) = receiver.heap_reference() else {
+        return Ok(NativeDispatch::Immediate(StoredValue::Undefined));
+    };
+    let dispatch = begin_internal_set_prototype_of(
+        runtime,
+        reference,
+        prototype,
+        realm,
+        return_to,
+        origin.clone(),
+        execution_budget,
+    )?;
+    continue_object_meta_after(
+        dispatch,
+        ObjectMetaContinuation {
+            completion: StoredValue::Undefined,
+            failure: ObjectMetaFailure::NonExtensible,
+            realm,
+            origin,
+        },
+    )
+}
+
 /// `Object.setPrototypeOf(target, prototype)`.
 ///
 /// The target is returned unchanged. A primitive target is a no-op, while a
