@@ -899,6 +899,9 @@ pub(crate) enum StringArgument {
     OptionalString,
     /// `ToNumber`, kept as a Number so `NaN` remains distinguishable.
     Number,
+    /// Preserve the original ECMAScript value for an ECMA-402 operation that
+    /// performs its own resumable coercion and property access.
+    Value,
 }
 
 /// One `String.prototype` method's identity and argument shape.
@@ -968,8 +971,6 @@ impl StringMethod {
             | Self::TrimStart
             | Self::IsWellFormed
             | Self::ToWellFormed
-            | Self::ToLocaleLowerCase
-            | Self::ToLocaleUpperCase
             | Self::ToLowerCase
             | Self::ToUpperCase
             | Self::Concat
@@ -998,7 +999,12 @@ impl StringMethod {
             Self::Slice | Self::Substring => {
                 &[StringArgument::Integer, StringArgument::OptionalInteger]
             }
-            Self::LocaleCompare => &[StringArgument::String],
+            Self::LocaleCompare => &[
+                StringArgument::String,
+                StringArgument::Value,
+                StringArgument::Value,
+            ],
+            Self::ToLocaleLowerCase | Self::ToLocaleUpperCase => &[StringArgument::Value],
             Self::Normalize => &[StringArgument::OptionalString],
         }
     }

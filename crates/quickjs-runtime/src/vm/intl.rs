@@ -170,6 +170,7 @@ enum IntlLocaleListStage {
 
 enum IntlLocaleListTarget {
     ReturnArray,
+    StringCase(Box<IntlStringCaseContinuation>),
     CollatorConstructor(Box<IntlCollatorConstructorContinuation>),
     CollatorSupportedLocalesOf(Box<IntlCollatorSupportedLocalesContinuation>),
     NumberFormatConstructor(Box<IntlNumberFormatConstructorContinuation>),
@@ -194,6 +195,7 @@ impl IntlLocaleListTarget {
     fn retained_values(&self) -> u64 {
         match self {
             Self::ReturnArray => 0,
+            Self::StringCase(_) => IntlStringCaseContinuation::retained_values(),
             Self::CollatorConstructor(state) => state.retained_values(),
             Self::CollatorSupportedLocalesOf(state) => state.retained_values(),
             Self::NumberFormatConstructor(state) => state.retained_values(),
@@ -218,6 +220,7 @@ impl IntlLocaleListTarget {
     fn trace_roots(&self, mark: &mut dyn FnMut(CollectionRoot)) {
         match self {
             Self::ReturnArray => {}
+            Self::StringCase(_) => IntlStringCaseContinuation::trace_roots(mark),
             Self::CollatorConstructor(state) => state.trace_roots(mark),
             Self::CollatorSupportedLocalesOf(state) => state.trace_roots(mark),
             Self::NumberFormatConstructor(state) => state.trace_roots(mark),
@@ -238,6 +241,19 @@ impl IntlLocaleListTarget {
             Self::SegmenterSupportedLocalesOf(state) => state.trace_roots(mark),
         }
     }
+}
+
+struct IntlStringCaseContinuation {
+    subject: JsString,
+    uppercase: bool,
+}
+
+impl IntlStringCaseContinuation {
+    const fn retained_values() -> u64 {
+        1
+    }
+
+    fn trace_roots(_mark: &mut dyn FnMut(CollectionRoot)) {}
 }
 
 /// One suspended `CanonicalizeLocaleList` operation.
@@ -315,8 +331,28 @@ impl IntlCollatorOption {
     }
 }
 
+enum IntlCollatorTarget {
+    Constructor { new_target: FunctionId },
+    LocaleCompare { first: JsString, second: JsString },
+}
+
+impl IntlCollatorTarget {
+    const fn retained_values(&self) -> u64 {
+        match self {
+            Self::Constructor { .. } => 1,
+            Self::LocaleCompare { .. } => 2,
+        }
+    }
+
+    fn trace_roots(&self, mark: &mut dyn FnMut(CollectionRoot)) {
+        if let Self::Constructor { new_target } = self {
+            mark(CollectionRoot::Heap(HeapReference::Function(*new_target)));
+        }
+    }
+}
+
 pub(super) struct IntlCollatorConstructorContinuation {
-    new_target: FunctionId,
+    target: IntlCollatorTarget,
     options_argument: StoredValue,
     options_object: Option<StoredValue>,
     requested_locales: Vec<String>,
@@ -330,13 +366,13 @@ pub(super) struct IntlCollatorConstructorContinuation {
 
 impl IntlCollatorConstructorContinuation {
     pub(super) fn retained_values(&self) -> u64 {
-        2_u64.saturating_add(u64::from(self.options_object.is_some()))
+        1_u64
+            .saturating_add(self.target.retained_values())
+            .saturating_add(u64::from(self.options_object.is_some()))
     }
 
     pub(super) fn trace_roots(&self, mark: &mut dyn FnMut(CollectionRoot)) {
-        mark(CollectionRoot::Heap(HeapReference::Function(
-            self.new_target,
-        )));
+        self.target.trace_roots(mark);
         trace_stored_value_root(&self.options_argument, mark);
         if let Some(options) = &self.options_object {
             trace_stored_value_root(options, mark);
@@ -2393,7 +2429,7 @@ pub(super) fn begin_intl_collator_constructor(
     let locales = inputs.arguments.take_first_or_undefined();
     let options_argument = inputs.arguments.take_first_or_undefined();
     let state = IntlCollatorConstructorContinuation {
-        new_target,
+        target: IntlCollatorTarget::Constructor { new_target },
         options_argument,
         options_object: None,
         requested_locales: Vec::new(),
@@ -2408,6 +2444,70 @@ pub(super) fn begin_intl_collator_constructor(
         runtime,
         locales,
         IntlLocaleListTarget::CollatorConstructor(Box::new(state)),
+        realm,
+        return_to,
+        origin,
+        execution_budget,
+    )
+}
+
+#[expect(
+    clippy::too_many_arguments,
+    reason = "localeCompare carries both converted strings plus its raw ECMA-402 arguments and native resumption context"
+)]
+pub(super) fn begin_intl_string_locale_compare(
+    runtime: &mut Runtime,
+    first: JsString,
+    second: JsString,
+    locales: StoredValue,
+    options_argument: StoredValue,
+    realm: RealmId,
+    return_to: Option<CallReturn>,
+    origin: JsStackFrame,
+    execution_budget: &mut ExecutionBudget,
+) -> Result<NativeDispatch, NativeFailure> {
+    let state = IntlCollatorConstructorContinuation {
+        target: IntlCollatorTarget::LocaleCompare { first, second },
+        options_argument,
+        options_object: None,
+        requested_locales: Vec::new(),
+        options: CollatorRequestOptions::default(),
+        resolved: None,
+        option_index: 0,
+        realm,
+        stage: IntlCollatorConstructorStage::ReadOption,
+        origin: origin.clone(),
+    };
+    begin_intl_locale_list(
+        runtime,
+        locales,
+        IntlLocaleListTarget::CollatorConstructor(Box::new(state)),
+        realm,
+        return_to,
+        origin,
+        execution_budget,
+    )
+}
+
+#[expect(
+    clippy::too_many_arguments,
+    reason = "locale-sensitive case conversion carries its converted subject, raw locales, direction, and native resumption context"
+)]
+pub(super) fn begin_intl_string_case_mapping(
+    runtime: &mut Runtime,
+    subject: JsString,
+    locales: StoredValue,
+    uppercase: bool,
+    realm: RealmId,
+    return_to: Option<CallReturn>,
+    origin: JsStackFrame,
+    execution_budget: &mut ExecutionBudget,
+) -> Result<NativeDispatch, NativeFailure> {
+    let state = IntlStringCaseContinuation { subject, uppercase };
+    begin_intl_locale_list(
+        runtime,
+        locales,
+        IntlLocaleListTarget::StringCase(Box::new(state)),
         realm,
         return_to,
         origin,
@@ -2530,6 +2630,12 @@ pub(super) fn advance_intl_collator_constructor(
                 advance_intl_collator_option(&mut state);
             }
             IntlCollatorConstructorStage::AwaitPrototype => {
+                let IntlCollatorTarget::Constructor { new_target } = state.target else {
+                    return Err(EngineFault::RuntimeInvariant {
+                        message: "String.prototype.localeCompare awaited a Collator prototype",
+                    }
+                    .into());
+                };
                 let requested = take_intl_collator_constructor_completion(&mut completion)?;
                 let prototype = match requested {
                     StoredValue::Function(function) => HeapReference::Function(function),
@@ -2541,7 +2647,7 @@ pub(super) fn advance_intl_collator_constructor(
                     | StoredValue::BigInt(_)
                     | StoredValue::String(_)
                     | StoredValue::Symbol(_) => {
-                        let target_realm = runtime.function_realm(state.new_target)?;
+                        let target_realm = runtime.function_realm(new_target)?;
                         HeapReference::Object(runtime.realm_intl_collator_prototype(target_realm)?)
                     }
                 };
@@ -2657,15 +2763,39 @@ fn finish_intl_collator_options(
 ) -> Result<NativeDispatch, NativeFailure> {
     execution_budget
         .charge_instructions(usize_to_u64(state.requested_locales.len()).saturating_add(1))?;
-    state.resolved = Some(
+    let resolved =
         resolve_collator(&state.requested_locales, state.options.clone()).map_err(|_| {
             EngineFault::RuntimeInvariant {
                 message: "canonical Collator inputs failed locale resolution",
             }
-        })?,
-    );
+        })?;
+    if let IntlCollatorTarget::LocaleCompare { first, second } = &state.target {
+        execution_budget.charge_instructions(
+            u64::from(first.len())
+                .saturating_add(u64::from(second.len()))
+                .saturating_add(1),
+        )?;
+        let ordering =
+            compare_with_collator(&resolved, &first.to_utf8_lossy()?, &second.to_utf8_lossy()?)
+                .map_err(|_| EngineFault::RuntimeInvariant {
+                    message: "localeCompare Collator slots failed ICU comparison",
+                })?;
+        let result = match ordering {
+            core::cmp::Ordering::Less => -1,
+            core::cmp::Ordering::Equal => 0,
+            core::cmp::Ordering::Greater => 1,
+        };
+        return Ok(NativeDispatch::Immediate(StoredValue::Number(
+            JsNumber::from_i32(result),
+        )));
+    }
+    let IntlCollatorTarget::Constructor { new_target } = state.target else {
+        unreachable!("localeCompare returned before Collator allocation")
+    };
+    state.target = IntlCollatorTarget::Constructor { new_target };
+    state.resolved = Some(resolved);
     state.stage = IntlCollatorConstructorStage::AwaitPrototype;
-    let base = StoredValue::Function(state.new_target);
+    let base = StoredValue::Function(new_target);
     charge_heap_property_lookup(runtime, &base, execution_budget)?;
     let key = runtime.predefined_property_key(PredefinedAtom::Prototype);
     let dispatch = begin_value_get(
@@ -12323,6 +12453,19 @@ fn finish_intl_locale_list(
     };
     let requested_locales = intl_locale_strings(locales)?;
     match target {
+        IntlLocaleListTarget::StringCase(state) => {
+            let locale = requested_locales.first().map_or("en-US", String::as_str);
+            let components =
+                locale_components(locale).map_err(|_| EngineFault::RuntimeInvariant {
+                    message: "canonical String case locale failed component parsing",
+                })?;
+            finish_locale_case_mapping(
+                &state.subject,
+                &components.language,
+                state.uppercase,
+                execution_budget,
+            )
+        }
         IntlLocaleListTarget::CollatorConstructor(mut state) => {
             state.requested_locales = requested_locales;
             begin_intl_collator_options(runtime, *state, return_to, execution_budget)
