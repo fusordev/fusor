@@ -577,6 +577,7 @@ pub struct CompilerSource {
     function_span: SourceByteSpan,
     name_span: Option<SourceByteSpan>,
     mappings: Arc<[PcSourceSpan]>,
+    strict_mode_pcs: Option<Arc<[BytecodePc]>>,
 }
 
 impl CompilerSource {
@@ -595,7 +596,16 @@ impl CompilerSource {
             function_span,
             name_span,
             mappings,
+            strict_mode_pcs: None,
         }
+    }
+
+    /// Attaches the sorted instruction PCs whose source regions are strict
+    /// even though their surrounding executable is not.
+    #[must_use]
+    pub fn with_strict_mode_pcs(mut self, strict_mode_pcs: Arc<[BytecodePc]>) -> Self {
+        self.strict_mode_pcs = (!strict_mode_pcs.is_empty()).then_some(strict_mode_pcs);
+        self
     }
 }
 
@@ -707,6 +717,7 @@ pub struct VerifiedCompilerSource {
     function_span: SourceByteSpan,
     name_span: Option<SourceByteSpan>,
     mappings: Arc<[PcSourceSpan]>,
+    strict_mode_pcs: Option<Arc<[BytecodePc]>>,
 }
 
 impl VerifiedCompilerSource {
@@ -758,6 +769,15 @@ impl VerifiedCompilerSource {
     #[must_use]
     pub fn mappings(&self) -> &[PcSourceSpan] {
         &self.mappings
+    }
+
+    /// Returns whether this instruction belongs to a nested strict source
+    /// region inside an otherwise non-strict executable.
+    #[must_use]
+    pub fn is_strict_mode_pc(&self, pc: BytecodePc) -> bool {
+        self.strict_mode_pcs
+            .as_deref()
+            .is_some_and(|strict_mode_pcs| strict_mode_pcs.binary_search(&pc).is_ok())
     }
 }
 
@@ -1632,6 +1652,29 @@ pub enum BytecodeVerificationErrorKind {
         /// Supplied mappings.
         mappings: u64,
     },
+    /// More strict-source PCs were supplied than verified instructions.
+    StrictModeInstructionCountOutOfBounds {
+        /// Supplied strict-source PCs.
+        strict_instructions: u64,
+        /// Verified instructions.
+        instructions: u64,
+    },
+    /// Strict-source PCs are not strictly increasing.
+    StrictModePcNotIncreasing {
+        /// Position of the rejected PC.
+        index: u32,
+        /// Previous PC.
+        previous: BytecodePc,
+        /// Rejected PC.
+        current: BytecodePc,
+    },
+    /// A strict-source PC is not a verified instruction boundary.
+    StrictModePcNotInstruction {
+        /// Position of the rejected PC.
+        index: u32,
+        /// Rejected PC.
+        pc: BytecodePc,
+    },
     /// A mapping PC differs from the corresponding verified instruction.
     SourcePcMismatch {
         /// Mapping position.
@@ -2076,6 +2119,25 @@ impl fmt::Display for BytecodeVerificationErrorKind {
             } => write!(
                 formatter,
                 "source mapping count {mappings} does not equal instruction count {instructions}"
+            ),
+            Self::StrictModeInstructionCountOutOfBounds {
+                strict_instructions,
+                instructions,
+            } => write!(
+                formatter,
+                "strict-source instruction count {strict_instructions} exceeds instruction count {instructions}"
+            ),
+            Self::StrictModePcNotIncreasing {
+                index,
+                previous,
+                current,
+            } => write!(
+                formatter,
+                "strict-source PC {index} uses {current}, which does not follow {previous}"
+            ),
+            Self::StrictModePcNotInstruction { index, pc } => write!(
+                formatter,
+                "strict-source PC {index} uses {pc}, which is not an instruction boundary"
             ),
             Self::SourcePcMismatch {
                 mapping,
@@ -2629,6 +2691,7 @@ fn verify_function_metadata(
             function_span: metadata.source.function_span,
             name_span: metadata.source.name_span,
             mappings: Arc::clone(&metadata.source.mappings),
+            strict_mode_pcs: metadata.source.strict_mode_pcs.as_ref().map(Arc::clone),
         },
         internal_stack,
     })
@@ -4416,6 +4479,42 @@ fn verify_source(
                 mappings: usize_to_u64(source.mappings.len()),
             },
         ));
+    }
+    let strict_mode_pcs = source.strict_mode_pcs.as_deref().unwrap_or_default();
+    if strict_mode_pcs.len() > flow.instructions().len() {
+        return Err(BytecodeVerificationError::function(
+            id,
+            BytecodeVerificationErrorKind::StrictModeInstructionCountOutOfBounds {
+                strict_instructions: usize_to_u64(strict_mode_pcs.len()),
+                instructions: usize_to_u64(flow.instructions().len()),
+            },
+        ));
+    }
+    for (index, window) in strict_mode_pcs.windows(2).enumerate() {
+        let [previous, current] = window else {
+            unreachable!("two-entry strict-source window")
+        };
+        if previous >= current {
+            return Err(BytecodeVerificationError::function(
+                id,
+                BytecodeVerificationErrorKind::StrictModePcNotIncreasing {
+                    index: usize_to_u32(index + 1),
+                    previous: *previous,
+                    current: *current,
+                },
+            ));
+        }
+    }
+    for (index, pc) in strict_mode_pcs.iter().copied().enumerate() {
+        if !flow.is_instruction_start(pc) {
+            return Err(BytecodeVerificationError::function(
+                id,
+                BytecodeVerificationErrorKind::StrictModePcNotInstruction {
+                    index: usize_to_u32(index),
+                    pc,
+                },
+            ));
+        }
     }
     for (index, (mapping, instruction)) in
         source.mappings.iter().zip(flow.instructions()).enumerate()

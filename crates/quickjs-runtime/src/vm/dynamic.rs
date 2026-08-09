@@ -1279,6 +1279,7 @@ pub(super) fn direct_eval_compile_request(
     frame: &Frame,
     source: JsString,
     scope_index: u16,
+    strict: bool,
 ) -> Result<DirectEvalCompileRequest, ExecutionError> {
     let installed_code = code(runtime, frame.code)?;
     let template = installed_code.authority.function(frame.template).ok_or(
@@ -1331,7 +1332,7 @@ pub(super) fn direct_eval_compile_request(
         }
         None => false,
     };
-    Ok(DirectEvalCompileRequest::new(source, frame.strict)
+    Ok(DirectEvalCompileRequest::new(source, strict)
         .with_bindings(bindings.into())
         .with_scope_index(scope_index)
         .with_variable_environment(variable_environment)

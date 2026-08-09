@@ -330,6 +330,7 @@ const fn binding_write_action(
 fn local_write_action(
     runtime: &Runtime,
     frame: &Frame,
+    strict: bool,
     index: u32,
     unchecked_tdz_initialization: bool,
 ) -> Result<BindingWriteAction, EngineFault> {
@@ -356,21 +357,19 @@ fn local_write_action(
     if unchecked_tdz_initialization && definition.policy().has_temporal_dead_zone() {
         return Ok(BindingWriteAction::Write);
     }
-    Ok(binding_write_action(
-        definition.policy().writes(),
-        frame.strict,
-    ))
+    Ok(binding_write_action(definition.policy().writes(), strict))
 }
 
 fn apply_local_write(
     runtime: &mut Runtime,
     frame: &mut Frame,
+    strict: bool,
     index: u32,
     source_pc: BytecodePc,
     preserve_value: bool,
     unchecked_tdz_initialization: bool,
 ) -> Result<Option<Step>, ExecutionError> {
-    match local_write_action(runtime, frame, index, unchecked_tdz_initialization)? {
+    match local_write_action(runtime, frame, strict, index, unchecked_tdz_initialization)? {
         BindingWriteAction::Throw => Ok(Some(Step::Abrupt(immutable_binding_exception(
             runtime,
             frame,
@@ -398,6 +397,7 @@ fn apply_local_write(
 fn captured_write_action(
     runtime: &Runtime,
     frame: &Frame,
+    strict: bool,
     index: u32,
 ) -> Result<BindingWriteAction, EngineFault> {
     let code = code(runtime, frame.code)?;
@@ -418,7 +418,7 @@ fn captured_write_action(
             function: frame.template,
         });
     };
-    Ok(binding_write_action(policy.writes(), frame.strict))
+    Ok(binding_write_action(policy.writes(), strict))
 }
 
 #[allow(
@@ -850,7 +850,13 @@ pub(super) fn execute_one(
     frame: &mut Frame,
     execution_budget: &mut ExecutionBudget,
 ) -> Result<Step, ExecutionError> {
-    let (verified_instruction, source_pc, parameter_initialization_end, eval_reference_call) = {
+    let (
+        verified_instruction,
+        source_pc,
+        parameter_initialization_end,
+        eval_reference_call,
+        strict_mode_override,
+    ) = {
         let code = code(runtime, frame.code)?;
         let function = code.authority.function(frame.template).ok_or(
             EngineFault::InvalidClosureEnvironment {
@@ -873,8 +879,13 @@ pub(super) fn execute_one(
             function
                 .function()
                 .is_eval_reference_call(frame.instruction),
+            function
+                .metadata()
+                .source()
+                .is_strict_mode_pc(instruction.decoded().pc()),
         )
     };
+    let strict = frame.strict || strict_mode_override;
 
     if parameter_initialization_end.is_some_and(|boundary| frame.instruction.get() >= boundary)
         && let Some(body) = frame.body_eval_environment.take()
@@ -1062,7 +1073,7 @@ pub(super) fn execute_one(
                     property.key,
                     property.name,
                     value != 0,
-                    frame.strict,
+                    strict,
                     realm,
                     Some(return_to),
                     origin,
@@ -1074,7 +1085,7 @@ pub(super) fn execute_one(
                     property.key,
                     property.name,
                     value != 0,
-                    frame.strict,
+                    strict,
                     realm,
                     Some(return_to),
                     origin,
@@ -1127,7 +1138,7 @@ pub(super) fn execute_one(
                     property.key,
                     property.name,
                     value,
-                    frame.strict,
+                    strict,
                     realm,
                     Some(return_to),
                     origin,
@@ -1658,6 +1669,7 @@ pub(super) fn execute_one(
                 function: *function,
                 inputs,
                 scope_index,
+                strict,
                 return_to,
                 source_pc,
             });
@@ -1836,7 +1848,7 @@ pub(super) fn execute_one(
                     property.name,
                     value,
                     receiver,
-                    frame.strict,
+                    strict,
                     false,
                     realm,
                     Some(return_to),
@@ -2104,7 +2116,7 @@ pub(super) fn execute_one(
                     key,
                     PropertyKeyTarget::Delete {
                         base,
-                        strict: frame.strict,
+                        strict,
                         realm,
                     },
                     realm,
@@ -2201,7 +2213,7 @@ pub(super) fn execute_one(
                     PropertyKeyTarget::Write {
                         base,
                         value,
-                        strict: frame.strict,
+                        strict,
                         realm,
                     },
                     realm,
@@ -2526,7 +2538,7 @@ pub(super) fn execute_one(
                         property.name,
                         value,
                         base,
-                        frame.strict,
+                        strict,
                         false,
                         realm,
                         Some(return_to),
@@ -2545,8 +2557,7 @@ pub(super) fn execute_one(
                         },
                     )?);
                 let origin = instruction_location(runtime, frame, source_pc)?;
-                let target =
-                    array_length_write_target(base, property.name, frame.strict, false, &value);
+                let target = array_length_write_target(base, property.name, strict, false, &value);
                 return native_step(
                     begin_operator_primitive_conversion(
                         runtime,
@@ -2563,7 +2574,7 @@ pub(super) fn execute_one(
             }
             if let Some((object, key)) = typed_array_indexed_key(runtime, &base, &property.key)? {
                 if runtime.is_typed_array_backing_buffer_immutable(object)? {
-                    if frame.strict {
+                    if strict {
                         return Ok(Step::Abrupt(property_exception(
                             runtime,
                             frame,
@@ -2603,7 +2614,7 @@ pub(super) fn execute_one(
                 &base,
                 property.key,
                 value,
-                frame.strict,
+                strict,
                 execution_budget,
             )? {
                 PropertyWriteOutcome::Complete => {}
@@ -3051,7 +3062,7 @@ pub(super) fn execute_one(
             let global = global_reference_operand(runtime, frame, index)?;
             let name = global.name.clone();
             let value = pop(frame)?;
-            match write_realm_global(runtime, global, value, frame.strict, execution_budget)? {
+            match write_realm_global(runtime, global, value, strict, execution_budget)? {
                 RealmGlobalWriteOutcome::Complete => {}
                 RealmGlobalWriteOutcome::Setter {
                     function,
@@ -3136,7 +3147,9 @@ pub(super) fn execute_one(
         | FinalOpcode::PutLoc2
         | FinalOpcode::PutLoc3 => {
             let index = local_index(opcode, operands)?;
-            if let Some(step) = apply_local_write(runtime, frame, index, source_pc, false, true)? {
+            if let Some(step) =
+                apply_local_write(runtime, frame, strict, index, source_pc, false, true)?
+            {
                 return Ok(step);
             }
         }
@@ -3147,7 +3160,9 @@ pub(super) fn execute_one(
         | FinalOpcode::SetLoc2
         | FinalOpcode::SetLoc3 => {
             let index = local_index(opcode, operands)?;
-            if let Some(step) = apply_local_write(runtime, frame, index, source_pc, true, true)? {
+            if let Some(step) =
+                apply_local_write(runtime, frame, strict, index, source_pc, true, true)?
+            {
                 return Ok(step);
             }
         }
@@ -3204,7 +3219,7 @@ pub(super) fn execute_one(
         | FinalOpcode::PutVarRef2
         | FinalOpcode::PutVarRef3 => {
             let index = closure_index(opcode, operands)?;
-            match captured_write_action(runtime, frame, index)? {
+            match captured_write_action(runtime, frame, strict, index)? {
                 BindingWriteAction::Throw => {
                     return Ok(Step::Abrupt(immutable_binding_exception(
                         runtime,
@@ -3228,7 +3243,7 @@ pub(super) fn execute_one(
         | FinalOpcode::SetVarRef2
         | FinalOpcode::SetVarRef3 => {
             let index = closure_index(opcode, operands)?;
-            match captured_write_action(runtime, frame, index)? {
+            match captured_write_action(runtime, frame, strict, index)? {
                 BindingWriteAction::Throw => {
                     return Ok(Step::Abrupt(immutable_binding_exception(
                         runtime,
@@ -3274,7 +3289,9 @@ pub(super) fn execute_one(
                     source_pc,
                 )?));
             }
-            if let Some(step) = apply_local_write(runtime, frame, index, source_pc, false, false)? {
+            if let Some(step) =
+                apply_local_write(runtime, frame, strict, index, source_pc, false, false)?
+            {
                 return Ok(step);
             }
         }
@@ -3301,7 +3318,9 @@ pub(super) fn execute_one(
                     source_pc,
                 )?));
             }
-            if let Some(step) = apply_local_write(runtime, frame, index, source_pc, true, false)? {
+            if let Some(step) =
+                apply_local_write(runtime, frame, strict, index, source_pc, true, false)?
+            {
                 return Ok(step);
             }
         }
@@ -3339,7 +3358,7 @@ pub(super) fn execute_one(
                     source_pc,
                 )?));
             }
-            match captured_write_action(runtime, frame, index)? {
+            match captured_write_action(runtime, frame, strict, index)? {
                 BindingWriteAction::Throw => {
                     return Ok(Step::Abrupt(immutable_binding_exception(
                         runtime,

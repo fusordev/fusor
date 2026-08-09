@@ -301,6 +301,24 @@ fn source_for_flow(
     )
 }
 
+fn strict_source(strict_mode_pcs: &[u32]) -> CompilerSource {
+    let full_span = SourceByteSpan::new(0, 1);
+    source(
+        "f",
+        full_span,
+        Some(full_span),
+        &[(0, full_span), (5, full_span), (6, full_span)],
+    )
+    .with_strict_mode_pcs(
+        strict_mode_pcs
+            .iter()
+            .copied()
+            .map(BytecodePc::new)
+            .collect::<Vec<_>>()
+            .into(),
+    )
+}
+
 fn verified_single(
     instructions: &[(FinalOpcode, Operands)],
     atoms: &[CompilerAtom],
@@ -311,6 +329,123 @@ fn verified_single(
         single_input(instructions, atoms, variables, source),
         BytecodeGraphVerificationLimits::default(),
     )
+}
+
+#[test]
+fn final_authority_rejects_strict_source_pc_inside_an_operand() {
+    let instructions = [
+        (FinalOpcode::PushI32, Operands::I32(1)),
+        (FinalOpcode::Drop, Operands::None),
+        (FinalOpcode::ReturnUndef, Operands::None),
+    ];
+
+    let error = verify_compiler_bytecode_graph(
+        shaped_input(
+            &instructions,
+            &[atom("f")],
+            &[],
+            0,
+            0,
+            &[],
+            strict_source(&[1]),
+        ),
+        BytecodeGraphVerificationLimits::default(),
+    )
+    .expect_err("strict-source PCs must name verified instructions");
+    assert!(matches!(
+        error.kind(),
+        BytecodeVerificationErrorKind::StrictModePcNotInstruction {
+            index: 0,
+            pc,
+        } if *pc == BytecodePc::new(1)
+    ));
+}
+
+#[test]
+fn final_authority_rejects_duplicate_strict_source_pcs() {
+    let instructions = [
+        (FinalOpcode::PushI32, Operands::I32(1)),
+        (FinalOpcode::Drop, Operands::None),
+        (FinalOpcode::ReturnUndef, Operands::None),
+    ];
+
+    let error = verify_compiler_bytecode_graph(
+        shaped_input(
+            &instructions,
+            &[atom("f")],
+            &[],
+            0,
+            0,
+            &[],
+            strict_source(&[0, 0]),
+        ),
+        BytecodeGraphVerificationLimits::default(),
+    )
+    .expect_err("strict-source PCs must be strictly increasing");
+    assert!(matches!(
+        error.kind(),
+        BytecodeVerificationErrorKind::StrictModePcNotIncreasing {
+            index: 1,
+            previous,
+            current,
+        } if *previous == BytecodePc::ZERO && *current == BytecodePc::ZERO
+    ));
+}
+
+#[test]
+fn final_authority_bounds_strict_source_pc_count_before_traversal() {
+    let instructions = [
+        (FinalOpcode::PushI32, Operands::I32(1)),
+        (FinalOpcode::Drop, Operands::None),
+        (FinalOpcode::ReturnUndef, Operands::None),
+    ];
+
+    let error = verify_compiler_bytecode_graph(
+        shaped_input(
+            &instructions,
+            &[atom("f")],
+            &[],
+            0,
+            0,
+            &[],
+            strict_source(&[0, 5, 6, 7]),
+        ),
+        BytecodeGraphVerificationLimits::default(),
+    )
+    .expect_err("strict-source metadata is bounded by verified instructions");
+    assert!(matches!(
+        error.kind(),
+        BytecodeVerificationErrorKind::StrictModeInstructionCountOutOfBounds {
+            strict_instructions: 4,
+            instructions: 3,
+        }
+    ));
+}
+
+#[test]
+fn final_authority_retains_verified_strict_source_pcs() {
+    let instructions = [
+        (FinalOpcode::PushI32, Operands::I32(1)),
+        (FinalOpcode::Drop, Operands::None),
+        (FinalOpcode::ReturnUndef, Operands::None),
+    ];
+
+    let verified = verify_compiler_bytecode_graph(
+        shaped_input(
+            &instructions,
+            &[atom("f")],
+            &[],
+            0,
+            0,
+            &[],
+            strict_source(&[5]),
+        ),
+        BytecodeGraphVerificationLimits::default(),
+    )
+    .expect("one sorted instruction PC is a valid strict-source certificate");
+    let source = verified.root().metadata().source();
+    assert!(source.is_strict_mode_pc(BytecodePc::new(5)));
+    assert!(!source.is_strict_mode_pc(BytecodePc::ZERO));
 }
 
 #[test]

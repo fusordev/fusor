@@ -71,6 +71,31 @@ fn class_field_direct_eval_resolves_the_initialized_inner_name_binding() {
 }
 
 #[test]
+fn direct_eval_in_inline_class_code_inherits_strictness() {
+    evaluate(
+        "function check(){try{class Box{static[eval(\"Object.preventExtensions({}).value=1\")];}return false;}catch(error){return error.name==='TypeError';}}check();",
+        |value| assert_eq!(value.as_boolean(), Ok(Some(true))),
+    );
+}
+
+#[test]
+fn inline_class_regions_use_strict_reference_semantics() {
+    evaluate(
+        "let computed=false;try{let target=Object.preventExtensions({});class C{[target.value=1](){}}}catch(error){computed=error.name==='TypeError';}\
+         let heritage=false;try{let target=Object.preventExtensions({});let Base=function(){};class C extends(target.value=Base){}}catch(error){heritage=error.name==='TypeError';}\
+         let field=false;try{let target=Object.preventExtensions({});class C{static value=(target.value=1);}}catch(error){field=error.name==='TypeError';}\
+         let block=false;try{let target=Object.preventExtensions({});class C{static{target.value=1;}}}catch(error){block=error.name==='TypeError';}\
+         let superWrite=false;try{class Base{}Object.defineProperty(Base,'value',{value:1,writable:false});class C extends Base{static value=(super.value=2);}}catch(error){superWrite=error.name==='TypeError';}\
+         let functionName=false;try{(function self(){class C{static[self=1];}})();}catch(error){functionName=error.name==='TypeError';}\
+         let unresolved=false;try{class C{static[__class_strict_missing__=1];}}catch(error){unresolved=error.name==='ReferenceError';}\
+         delete globalThis.__class_strict_missing__;\
+         let deletion=false;try{let target={};Object.defineProperty(target,'value',{value:1,configurable:false});class C{static[delete target.value];}}catch(error){deletion=error.name==='TypeError';}\
+         computed&&heritage&&field&&block&&superWrite&&functionName&&unresolved&&deletion;",
+        |value| assert_eq!(value.as_boolean(), Ok(Some(true))),
+    );
+}
+
+#[test]
 fn eval_preserves_lone_surrogates_in_legacy_regexp_literals() {
     evaluate(
         "let unit=String.fromCharCode(0xD800);\

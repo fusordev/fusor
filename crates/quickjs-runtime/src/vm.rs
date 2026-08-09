@@ -4458,6 +4458,7 @@ enum Step {
         function: FunctionId,
         inputs: CallInputSource,
         scope_index: u16,
+        strict: bool,
         return_to: CallReturn,
         source_pc: BytecodePc,
     },
@@ -5223,6 +5224,7 @@ fn execute_frame_loop(
                 function,
                 inputs,
                 scope_index,
+                strict,
                 return_to,
                 source_pc,
             } => {
@@ -5250,7 +5252,8 @@ fn execute_frame_loop(
                 })?;
                 let realm = code(runtime, caller.code)?.realm;
                 let origin = instruction_location(runtime, caller, source_pc)?;
-                let request = direct_eval_compile_request(runtime, caller, source, scope_index)?;
+                let request =
+                    direct_eval_compile_request(runtime, caller, source, scope_index, strict)?;
                 let receiver = direct_eval_receiver(runtime, caller, scope_index)?;
                 let active_frames = active_execution_frames(frames);
                 frames

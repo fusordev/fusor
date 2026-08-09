@@ -1315,6 +1315,16 @@ impl CompilationContext<'_, '_, '_> {
                 PcSourceSpan::new(instruction.pc(), source_byte_span(instruction.span()))
             })
             .collect::<Vec<_>>();
+        let strict_mode_pcs = if strict {
+            Arc::from([])
+        } else {
+            source_instructions
+                .iter()
+                .filter(|instruction| self.span_has_class_strict_context(instruction.span()))
+                .map(|instruction| instruction.pc())
+                .collect::<Vec<_>>()
+                .into()
+        };
         let metadata = UnverifiedFunctionMetadata::new(
             function_name,
             variable_definitions.into(),
@@ -1325,7 +1335,8 @@ impl CompilationContext<'_, '_, '_> {
                 function_span,
                 function_name_span,
                 source_mappings.into(),
-            ),
+            )
+            .with_strict_mode_pcs(strict_mode_pcs),
         )
         .with_executable_kind(executable_kind);
 
