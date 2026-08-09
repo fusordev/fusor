@@ -1,6 +1,9 @@
 //! `%Intl%` object allocation and Locale internal-slot access.
 
-use quickjs_intl::{CollatorState, DateTimeFormatState, NumberFormatState, PluralRulesState};
+use quickjs_intl::{
+    CollatorState, DateTimeFormatState, NumberFormatState, PluralRulesState,
+    RelativeTimeFormatState,
+};
 
 use super::{
     Atom, BoundFunction, FunctionId, FunctionImplementation, HeapFunction, HeapObject,
@@ -10,6 +13,83 @@ use super::{
 };
 
 impl Runtime {
+    pub(crate) fn allocate_intl_relative_time_format(
+        &mut self,
+        prototype: HeapReference,
+        resolved: RelativeTimeFormatState,
+    ) -> Result<ObjectId, crate::ExecutionError> {
+        if !self.heap_reference_is_live(prototype) {
+            return Err(stale_heap_reference(prototype).into());
+        }
+        check_execution_limit(
+            RuntimeResource::HeapObjects,
+            self.limits.max_heap_objects,
+            usize_to_u64(self.objects.len()).saturating_add(1),
+        )?;
+        self.objects
+            .try_reserve(1)
+            .map_err(|_| crate::ExecutionError::AllocationFailed {
+                resource: RuntimeResource::HeapObjects,
+                additional: 1,
+            })?;
+        let object = self
+            .insert_heap_object(HeapObject::intl_relative_time_format(
+                ObjectRecord::empty(Some(prototype)),
+                resolved,
+            ))
+            .map_err(|_| crate::ExecutionError::AllocationFailed {
+                resource: RuntimeResource::HeapObjects,
+                additional: 1,
+            })?;
+        self.collection_pending = true;
+        Ok(object)
+    }
+
+    pub(crate) fn intl_relative_time_format_state(
+        &self,
+        object: ObjectId,
+    ) -> Result<Option<&RelativeTimeFormatState>, crate::EngineFault> {
+        self.objects
+            .get(object)
+            .ok_or(crate::EngineFault::StaleHeapEdge {
+                edge: "Intl.RelativeTimeFormat object",
+                index: object.index(),
+                generation: object.generation(),
+            })
+            .map(HeapObject::intl_relative_time_format_state)
+    }
+
+    pub(crate) fn realm_intl_relative_time_format_prototype(
+        &self,
+        realm: RealmId,
+    ) -> Result<ObjectId, crate::EngineFault> {
+        let state = self
+            .realms
+            .get(realm)
+            .ok_or(crate::EngineFault::StaleHeapEdge {
+                edge: "realm",
+                index: realm.index(),
+                generation: realm.generation(),
+            })?;
+        let RealmIntrinsics::Ready { intl, .. } = state.intrinsics else {
+            return Err(crate::EngineFault::RuntimeInvariant {
+                message: "realm Intl intrinsics are not initialized",
+            });
+        };
+        if self
+            .objects
+            .get(intl.relative_time_format_prototype)
+            .is_none()
+        {
+            return Err(crate::EngineFault::StaleHeapEdge {
+                edge: "Intl.RelativeTimeFormat.prototype intrinsic",
+                index: intl.relative_time_format_prototype.index(),
+                generation: intl.relative_time_format_prototype.generation(),
+            });
+        }
+        Ok(intl.relative_time_format_prototype)
+    }
+
     pub(crate) fn allocate_intl_plural_rules(
         &mut self,
         prototype: HeapReference,

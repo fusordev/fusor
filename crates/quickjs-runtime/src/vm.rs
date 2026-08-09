@@ -73,8 +73,9 @@ use crate::{
         FunctionImplementation, GlobalNumericFunction, HeapFunction, InstalledCode,
         InstalledConstant, InstalledRoot, InstalledTemplate, IntlCollatorPrototypeMethod,
         IntlDateTimeFormatPrototypeMethod, IntlLocalePrototypeMethod,
-        IntlNumberFormatPrototypeMethod, IntlPluralRulesPrototypeMethod, LocaleStringMethod,
-        MapMethod, MathMethod, NativeFunction, NativeFunctionKind, NumberFormat, NumberPredicate,
+        IntlNumberFormatPrototypeMethod, IntlPluralRulesPrototypeMethod,
+        IntlRelativeTimeFormatPrototypeMethod, LocaleStringMethod, MapMethod, MathMethod,
+        NativeFunction, NativeFunctionKind, NumberFormat, NumberPredicate,
         PreparedIteratorResultPlan, PromiseCapabilityCapture, PromiseCapabilityExecutor,
         PromiseCombinatorElementFunction, PromiseCombinatorElementKind, PromiseCombinatorKind,
         PromiseCombinatorShared, PromiseFinallyFunction, PromiseFinallyThunkKind, PromiseJob,
@@ -881,6 +882,10 @@ enum NativeContinuation {
     IntlDateTimeFormatSupportedLocalesOf(Box<IntlDateTimeFormatSupportedLocalesContinuation>),
     IntlPluralRulesConstructor(Box<IntlPluralRulesConstructorContinuation>),
     IntlPluralRulesSupportedLocalesOf(Box<IntlPluralRulesSupportedLocalesContinuation>),
+    IntlRelativeTimeFormatConstructor(Box<IntlRelativeTimeFormatConstructorContinuation>),
+    IntlRelativeTimeFormatSupportedLocalesOf(
+        Box<IntlRelativeTimeFormatSupportedLocalesContinuation>,
+    ),
     IntlLocaleConstructor(Box<IntlLocaleConstructorContinuation>),
     DefineProperty(Box<DefinePropertyContinuation>),
     DefineProperties(Box<DefinePropertiesContinuation>),
@@ -1124,6 +1129,8 @@ impl NativeContinuation {
             Self::IntlDateTimeFormatSupportedLocalesOf(state) => state.retained_values(),
             Self::IntlPluralRulesConstructor(state) => state.retained_values(),
             Self::IntlPluralRulesSupportedLocalesOf(state) => state.retained_values(),
+            Self::IntlRelativeTimeFormatConstructor(state) => state.retained_values(),
+            Self::IntlRelativeTimeFormatSupportedLocalesOf(state) => state.retained_values(),
             Self::IntlLocaleConstructor(state) => state.retained_values(),
             Self::DefineProperty(state) => state.retained_values(),
             Self::DefineProperties(state) => state.retained_values(),
@@ -2520,6 +2527,16 @@ enum OperatorPrimitiveTarget {
     IntlPluralRulesSupportedLocalesOf(Box<IntlPluralRulesSupportedLocalesContinuation>),
     /// A `PluralRules` operand awaiting `ToPrimitive(number)`.
     IntlPluralRulesValue(Box<IntlPluralRulesValueContinuation>),
+    /// One `%Intl.RelativeTimeFormat%` option awaiting primitive conversion.
+    IntlRelativeTimeFormatConstructor(Box<IntlRelativeTimeFormatConstructorContinuation>),
+    /// `Intl.RelativeTimeFormat.supportedLocalesOf` matcher awaiting `ToString`.
+    IntlRelativeTimeFormatSupportedLocalesOf(
+        Box<IntlRelativeTimeFormatSupportedLocalesContinuation>,
+    ),
+    /// A `RelativeTimeFormat` numeric operand awaiting `ToPrimitive(number)`.
+    IntlRelativeTimeFormatValue(Box<IntlRelativeTimeFormatValueContinuation>),
+    /// A `RelativeTimeFormat` unit awaiting `ToPrimitive(string)`.
+    IntlRelativeTimeFormatUnit(Box<IntlRelativeTimeFormatValueContinuation>),
     /// The first bound Collator comparison operand awaiting `ToString`.
     IntlCollatorCompareFirst(Box<IntlCollatorCompareContinuation>),
     /// The second bound Collator comparison operand awaiting `ToString`.
@@ -2870,6 +2887,11 @@ impl OperatorPrimitiveTarget {
             Self::IntlPluralRulesConstructor(state) => state.retained_values(),
             Self::IntlPluralRulesSupportedLocalesOf(state) => state.retained_values(),
             Self::IntlPluralRulesValue(state) => state.retained_values(),
+            Self::IntlRelativeTimeFormatConstructor(state) => state.retained_values(),
+            Self::IntlRelativeTimeFormatSupportedLocalesOf(state) => state.retained_values(),
+            Self::IntlRelativeTimeFormatValue(state) | Self::IntlRelativeTimeFormatUnit(state) => {
+                state.retained_values()
+            }
             Self::IntlCollatorCompareFirst(state) | Self::IntlCollatorCompareSecond(state) => {
                 state.retained_values()
             }
@@ -3320,6 +3342,14 @@ fn trace_operator_primitive_target_roots(
             state.trace_roots(mark);
         }
         OperatorPrimitiveTarget::IntlPluralRulesValue(state) => state.trace_roots(mark),
+        OperatorPrimitiveTarget::IntlRelativeTimeFormatConstructor(state) => {
+            state.trace_roots(mark);
+        }
+        OperatorPrimitiveTarget::IntlRelativeTimeFormatSupportedLocalesOf(state) => {
+            state.trace_roots(mark);
+        }
+        OperatorPrimitiveTarget::IntlRelativeTimeFormatValue(state)
+        | OperatorPrimitiveTarget::IntlRelativeTimeFormatUnit(state) => state.trace_roots(mark),
         OperatorPrimitiveTarget::IntlCollatorCompareFirst(state)
         | OperatorPrimitiveTarget::IntlCollatorCompareSecond(state) => state.trace_roots(mark),
         OperatorPrimitiveTarget::ArrayFromAsyncLength { operation } => {
@@ -3438,6 +3468,10 @@ fn trace_native_continuation_roots(
         }
         NativeContinuation::IntlPluralRulesConstructor(state) => state.trace_roots(mark),
         NativeContinuation::IntlPluralRulesSupportedLocalesOf(state) => state.trace_roots(mark),
+        NativeContinuation::IntlRelativeTimeFormatConstructor(state) => state.trace_roots(mark),
+        NativeContinuation::IntlRelativeTimeFormatSupportedLocalesOf(state) => {
+            state.trace_roots(mark);
+        }
         NativeContinuation::IntlLocaleConstructor(state) => state.trace_roots(mark),
         NativeContinuation::DefineProperty(state) => state.trace_roots(mark),
         NativeContinuation::FunctionBind(state) => {

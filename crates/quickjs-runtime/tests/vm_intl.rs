@@ -474,6 +474,57 @@ fn plural_rules_selection_ranges_and_operand_coercions_are_spec_shaped() {
 }
 
 #[test]
+fn relative_time_format_constructor_options_and_descriptors_are_spec_shaped() {
+    assert_eq!(
+        rendered(
+            "var log=[];
+             var options={
+               get localeMatcher(){log.push('localeMatcher');return {toString:function(){log.push('localeMatcher string');return 'lookup'}}},
+               get numberingSystem(){log.push('numberingSystem');return 'latn'},
+               get style(){log.push('style');return 'short'},
+               get numeric(){log.push('numeric');return 'auto'}
+             };
+             class CustomRelativeTimeFormat extends Intl.RelativeTimeFormat{}
+             var rtf=new CustomRelativeTimeFormat('en-u-nu-arab',options);
+             var ro=rtf.resolvedOptions();
+             var d=Object.getOwnPropertyDescriptor(Intl.RelativeTimeFormat.prototype,'format');
+             var supported=Intl.RelativeTimeFormat.supportedLocalesOf(['tlh','en-u-nu-arab'],{localeMatcher:'lookup'});
+             return [Intl.RelativeTimeFormat.length,Intl.RelativeTimeFormat.name,
+               Object.getPrototypeOf(rtf)===CustomRelativeTimeFormat.prototype,
+               Object.keys(ro).join(','),ro.locale,ro.style,ro.numeric,ro.numberingSystem,
+               d.value.length,d.writable,d.enumerable,d.configurable,
+               supported.join(','),log.join(',')].join('|');"
+        ),
+        "0|RelativeTimeFormat|true|locale,style,numeric,numberingSystem|en|short|auto|latn|2|true|false|true|en-u-nu-arab|localeMatcher,localeMatcher string,numberingSystem,style,numeric"
+    );
+}
+
+#[test]
+fn relative_time_format_values_parts_and_coercion_order_are_spec_shaped() {
+    assert_eq!(
+        rendered(
+            "var always=new Intl.RelativeTimeFormat('en-US',{numeric:'always'});
+             var auto=new Intl.RelativeTimeFormat('en-US',{numeric:'auto'});
+             var parts=always.formatToParts(-1234.5,'days');
+             var log=[];
+             var value={valueOf:function(){log.push('value');return Infinity}};
+             var unit={toString:function(){log.push('unit');return 'day'}};
+             var finite,invalid,brand;
+             try{always.format(value,unit)}catch(error){finite=error.name}
+             try{always.format(1,'century')}catch(error){invalid=error.name}
+             try{Intl.RelativeTimeFormat.prototype.format.call({},
+               {valueOf:function(){log.push('bad brand');return 1}},'day')}catch(error){brand=error.name}
+             return [always.format(-1,'day'),always.format(2,'weeks'),
+               auto.format(-1,'day'),auto.format(0,'day'),auto.format(1,'day'),
+               parts.map(function(part){return part.type+':'+part.value+(part.unit?':'+part.unit:'')}).join(','),
+               parts.map(function(part){return part.value}).join('')===always.format(-1234.5,'day'),
+               log.join(','),finite,invalid,brand].join('|');"
+        ),
+        "1 day ago|in 2 weeks|yesterday|today|tomorrow|integer:1:day,group:,:day,integer:234:day,decimal:.:day,fraction:5:day,literal: days ago|true|value,unit|RangeError|RangeError|TypeError"
+    );
+}
+
+#[test]
 fn date_time_format_constructor_reads_options_in_normative_order() {
     assert_eq!(
         rendered(

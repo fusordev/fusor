@@ -16,6 +16,7 @@ use crate::runtime::realm::{
 use crate::runtime::{
     IntlCollatorPrototypeMethod, IntlDateTimeFormatPrototypeMethod, IntlLocalePrototypeMethod,
     IntlNumberFormatPrototypeMethod, IntlPluralRulesPrototypeMethod,
+    IntlRelativeTimeFormatPrototypeMethod,
 };
 
 pub(super) fn visit_objects(visit: ObjectSink<'_>) {
@@ -25,6 +26,7 @@ pub(super) fn visit_objects(visit: ObjectSink<'_>) {
         IntrinsicObjectId::IntlNumberFormatPrototype,
         IntrinsicObjectId::IntlDateTimeFormatPrototype,
         IntrinsicObjectId::IntlPluralRulesPrototype,
+        IntrinsicObjectId::IntlRelativeTimeFormatPrototype,
         IntrinsicObjectId::IntlLocalePrototype,
     ] {
         visit(object(
@@ -149,6 +151,23 @@ pub(super) fn visit_functions(visit: FunctionSink<'_>) {
         ));
     }
     visit(ordinary(
+        NativeFunctionKind::IntlRelativeTimeFormatConstructor,
+        IntrinsicNameSpec::RealmName(RealmNameId::IntlRelativeTimeFormat),
+        0,
+    ));
+    visit(ordinary(
+        NativeFunctionKind::IntlRelativeTimeFormatSupportedLocalesOf,
+        IntrinsicNameSpec::RealmName(RealmNameId::IntlRelativeTimeFormatSupportedLocalesOf),
+        1,
+    ));
+    for method in IntlRelativeTimeFormatPrototypeMethod::ALL {
+        visit(ordinary(
+            NativeFunctionKind::IntlRelativeTimeFormatPrototype(method),
+            IntrinsicNameSpec::RealmName(RealmNameId::IntlRelativeTimeFormatPrototype(method)),
+            method.length(),
+        ));
+    }
+    visit(ordinary(
         NativeFunctionKind::IntlLocaleConstructor,
         IntrinsicNameSpec::RealmName(RealmNameId::Locale),
         1,
@@ -194,6 +213,11 @@ pub(super) fn visit_properties(visit: PropertySink<'_>) {
     ));
     let plural_rules_prototype =
         IntrinsicIdentity::Object(IntrinsicObjectId::IntlPluralRulesPrototype);
+    let relative_time_format_constructor = IntrinsicIdentity::Function(IntrinsicFunctionId(
+        NativeFunctionKind::IntlRelativeTimeFormatConstructor,
+    ));
+    let relative_time_format_prototype =
+        IntrinsicIdentity::Object(IntrinsicObjectId::IntlRelativeTimeFormatPrototype);
     let locale_constructor = IntrinsicIdentity::Function(IntrinsicFunctionId(
         NativeFunctionKind::IntlLocaleConstructor,
     ));
@@ -222,6 +246,11 @@ pub(super) fn visit_properties(visit: PropertySink<'_>) {
         intl,
         IntrinsicKeySpec::InternedString(RealmNameId::IntlPluralRules),
         NativeFunctionKind::IntlPluralRulesConstructor,
+    ));
+    visit(method(
+        intl,
+        IntrinsicKeySpec::InternedString(RealmNameId::IntlRelativeTimeFormat),
+        NativeFunctionKind::IntlRelativeTimeFormatConstructor,
     ));
     visit(method(
         intl,
@@ -405,6 +434,38 @@ pub(super) fn visit_properties(visit: PropertySink<'_>) {
         IntrinsicKeySpec::WellKnownSymbol(PredefinedAtom::SymbolToStringTag),
         PropertyLayout::data(false, false, true),
         IntrinsicValueSpec::String(IntrinsicStringSpec::Literal("Intl.PluralRules")),
+    ));
+
+    visit(data(
+        relative_time_format_constructor,
+        IntrinsicKeySpec::PredefinedString(PredefinedAtom::Prototype),
+        CONSTRUCTOR_PROTOTYPE_PROPERTY,
+        IntrinsicValueSpec::Object(IntrinsicObjectId::IntlRelativeTimeFormatPrototype),
+    ));
+    visit(method(
+        relative_time_format_constructor,
+        IntrinsicKeySpec::InternedString(RealmNameId::IntlRelativeTimeFormatSupportedLocalesOf),
+        NativeFunctionKind::IntlRelativeTimeFormatSupportedLocalesOf,
+    ));
+    visit(method(
+        relative_time_format_prototype,
+        IntrinsicKeySpec::PredefinedString(PredefinedAtom::Constructor),
+        NativeFunctionKind::IntlRelativeTimeFormatConstructor,
+    ));
+    for method_id in IntlRelativeTimeFormatPrototypeMethod::ALL {
+        visit(method(
+            relative_time_format_prototype,
+            IntrinsicKeySpec::InternedString(RealmNameId::IntlRelativeTimeFormatPrototype(
+                method_id,
+            )),
+            NativeFunctionKind::IntlRelativeTimeFormatPrototype(method_id),
+        ));
+    }
+    visit(data(
+        relative_time_format_prototype,
+        IntrinsicKeySpec::WellKnownSymbol(PredefinedAtom::SymbolToStringTag),
+        PropertyLayout::data(false, false, true),
+        IntrinsicValueSpec::String(IntrinsicStringSpec::Literal("Intl.RelativeTimeFormat")),
     ));
 
     visit(data(

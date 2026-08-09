@@ -17,16 +17,19 @@ use quickjs_intl::{
     NumberFormatRoundingMode, NumberFormatRoundingPriority, NumberFormatSignDisplay,
     NumberFormatState, NumberFormatStyle, NumberFormatTrailingZeroDisplay, NumberFormatUnitDisplay,
     NumberFormatUseGrouping, PluralRuleType, PluralRulesRequestOptions, PluralRulesState,
-    apply_locale_options, calendars_of_locale, canonicalize_locale, canonicalize_locale_option,
-    canonicalize_time_zone, collations_of_locale, collator_supported_locales,
-    compare_with_collator, date_time_format_supported_locales, format_datetime,
-    format_datetime_to_parts, format_number, format_number_to_parts, hour_cycles_of_locale,
-    intl_mathematical_value_from_f64, is_well_formed_currency_code, is_well_formed_unit_identifier,
-    locale_components, maximize_locale, minimize_locale, number_format_supported_locales,
-    numbering_systems_of_locale, parse_intl_mathematical_value, plural_rules_supported_locales,
-    resolve_collator, resolve_date_time_format, resolve_number_format, resolve_plural_rules,
-    select_plural, select_plural_range, supported_values, text_direction_of_locale,
-    time_zones_of_locale, week_info_of_locale,
+    RelativeTimeFormatError, RelativeTimeFormatNumeric, RelativeTimeFormatRequestOptions,
+    RelativeTimeFormatState, RelativeTimeFormatStyle, RelativeTimeUnit, apply_locale_options,
+    calendars_of_locale, canonicalize_locale, canonicalize_locale_option, canonicalize_time_zone,
+    collations_of_locale, collator_supported_locales, compare_with_collator,
+    date_time_format_supported_locales, format_datetime, format_datetime_to_parts, format_number,
+    format_number_to_parts, format_relative_time, format_relative_time_to_parts,
+    hour_cycles_of_locale, intl_mathematical_value_from_f64, is_well_formed_currency_code,
+    is_well_formed_unit_identifier, locale_components, maximize_locale, minimize_locale,
+    number_format_supported_locales, numbering_systems_of_locale, parse_intl_mathematical_value,
+    plural_rules_supported_locales, relative_time_format_supported_locales, resolve_collator,
+    resolve_date_time_format, resolve_number_format, resolve_plural_rules,
+    resolve_relative_time_format, select_plural, select_plural_range, supported_values,
+    text_direction_of_locale, time_zones_of_locale, week_info_of_locale,
 };
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -165,6 +168,8 @@ enum IntlLocaleListTarget {
     DateTimeFormatSupportedLocalesOf(Box<IntlDateTimeFormatSupportedLocalesContinuation>),
     PluralRulesConstructor(Box<IntlPluralRulesConstructorContinuation>),
     PluralRulesSupportedLocalesOf(Box<IntlPluralRulesSupportedLocalesContinuation>),
+    RelativeTimeFormatConstructor(Box<IntlRelativeTimeFormatConstructorContinuation>),
+    RelativeTimeFormatSupportedLocalesOf(Box<IntlRelativeTimeFormatSupportedLocalesContinuation>),
 }
 
 impl IntlLocaleListTarget {
@@ -179,6 +184,8 @@ impl IntlLocaleListTarget {
             Self::DateTimeFormatSupportedLocalesOf(state) => state.retained_values(),
             Self::PluralRulesConstructor(state) => state.retained_values(),
             Self::PluralRulesSupportedLocalesOf(state) => state.retained_values(),
+            Self::RelativeTimeFormatConstructor(state) => state.retained_values(),
+            Self::RelativeTimeFormatSupportedLocalesOf(state) => state.retained_values(),
         }
     }
 
@@ -193,6 +200,8 @@ impl IntlLocaleListTarget {
             Self::DateTimeFormatSupportedLocalesOf(state) => state.trace_roots(mark),
             Self::PluralRulesConstructor(state) => state.trace_roots(mark),
             Self::PluralRulesSupportedLocalesOf(state) => state.trace_roots(mark),
+            Self::RelativeTimeFormatConstructor(state) => state.trace_roots(mark),
+            Self::RelativeTimeFormatSupportedLocalesOf(state) => state.trace_roots(mark),
         }
     }
 }
@@ -763,6 +772,126 @@ impl IntlPluralRulesValueContinuation {
         )));
         if let Some(second) = &self.second {
             trace_stored_value_root(second, mark);
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum IntlRelativeTimeFormatConstructorStage {
+    ReadOption,
+    AwaitOption,
+    AwaitOptionPrimitive,
+    AwaitPrototype,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum IntlRelativeTimeFormatOption {
+    LocaleMatcher,
+    NumberingSystem,
+    Style,
+    Numeric,
+}
+
+impl IntlRelativeTimeFormatOption {
+    const ALL: [Self; 4] = [
+        Self::LocaleMatcher,
+        Self::NumberingSystem,
+        Self::Style,
+        Self::Numeric,
+    ];
+
+    const fn name(self) -> &'static str {
+        match self {
+            Self::LocaleMatcher => "localeMatcher",
+            Self::NumberingSystem => "numberingSystem",
+            Self::Style => "style",
+            Self::Numeric => "numeric",
+        }
+    }
+}
+
+pub(super) struct IntlRelativeTimeFormatConstructorContinuation {
+    new_target: FunctionId,
+    options_argument: StoredValue,
+    options_object: Option<StoredValue>,
+    requested_locales: Vec<String>,
+    options: RelativeTimeFormatRequestOptions,
+    resolved: Option<RelativeTimeFormatState>,
+    option_index: usize,
+    realm: RealmId,
+    stage: IntlRelativeTimeFormatConstructorStage,
+    origin: JsStackFrame,
+}
+
+impl IntlRelativeTimeFormatConstructorContinuation {
+    pub(super) fn retained_values(&self) -> u64 {
+        2_u64.saturating_add(u64::from(self.options_object.is_some()))
+    }
+
+    pub(super) fn trace_roots(&self, mark: &mut dyn FnMut(CollectionRoot)) {
+        mark(CollectionRoot::Heap(HeapReference::Function(
+            self.new_target,
+        )));
+        trace_stored_value_root(&self.options_argument, mark);
+        if let Some(options) = &self.options_object {
+            trace_stored_value_root(options, mark);
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum IntlRelativeTimeFormatSupportedLocalesStage {
+    ReadLocaleMatcher,
+    AwaitLocaleMatcher,
+    AwaitLocaleMatcherPrimitive,
+}
+
+pub(super) struct IntlRelativeTimeFormatSupportedLocalesContinuation {
+    options_argument: StoredValue,
+    options_object: Option<StoredValue>,
+    requested_locales: Vec<String>,
+    realm: RealmId,
+    stage: IntlRelativeTimeFormatSupportedLocalesStage,
+    origin: JsStackFrame,
+}
+
+impl IntlRelativeTimeFormatSupportedLocalesContinuation {
+    pub(super) fn retained_values(&self) -> u64 {
+        1_u64.saturating_add(u64::from(self.options_object.is_some()))
+    }
+
+    pub(super) fn trace_roots(&self, mark: &mut dyn FnMut(CollectionRoot)) {
+        trace_stored_value_root(&self.options_argument, mark);
+        if let Some(options) = &self.options_object {
+            trace_stored_value_root(options, mark);
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum IntlRelativeTimeFormatOperation {
+    Format,
+    FormatToParts,
+}
+
+pub(super) struct IntlRelativeTimeFormatValueContinuation {
+    formatter: ObjectId,
+    operation: IntlRelativeTimeFormatOperation,
+    unit: Option<StoredValue>,
+    value: Option<f64>,
+    realm: RealmId,
+    origin: JsStackFrame,
+}
+
+impl IntlRelativeTimeFormatValueContinuation {
+    pub(super) fn retained_values(&self) -> u64 {
+        1_u64.saturating_add(u64::from(self.unit.is_some()))
+    }
+
+    pub(super) fn trace_roots(&self, mark: &mut dyn FnMut(CollectionRoot)) {
+        mark(CollectionRoot::Heap(HeapReference::Object(self.formatter)));
+        if let Some(unit) = &self.unit {
+            trace_stored_value_root(unit, mark);
         }
     }
 }
@@ -5034,6 +5163,791 @@ fn intl_plural_rules_brand_error<T>(
     )
 }
 
+pub(super) fn begin_intl_relative_time_format_constructor(
+    runtime: &mut Runtime,
+    mut inputs: CallInputs,
+    realm: RealmId,
+    return_to: Option<CallReturn>,
+    origin: JsStackFrame,
+    execution_budget: &mut ExecutionBudget,
+) -> Result<NativeDispatch, NativeFailure> {
+    let Some(new_target) = inputs.new_target else {
+        return intl_locale_list_error(
+            realm,
+            origin,
+            ExceptionKind::TypeError,
+            "Intl.RelativeTimeFormat requires 'new'",
+        );
+    };
+    let locales = inputs.arguments.take_first_or_undefined();
+    let options_argument = inputs.arguments.take_first_or_undefined();
+    let state = IntlRelativeTimeFormatConstructorContinuation {
+        new_target,
+        options_argument,
+        options_object: None,
+        requested_locales: Vec::new(),
+        options: RelativeTimeFormatRequestOptions::default(),
+        resolved: None,
+        option_index: 0,
+        realm,
+        stage: IntlRelativeTimeFormatConstructorStage::ReadOption,
+        origin: origin.clone(),
+    };
+    begin_intl_locale_list(
+        runtime,
+        locales,
+        IntlLocaleListTarget::RelativeTimeFormatConstructor(Box::new(state)),
+        realm,
+        return_to,
+        origin,
+        execution_budget,
+    )
+}
+
+fn begin_intl_relative_time_format_options(
+    runtime: &mut Runtime,
+    mut state: IntlRelativeTimeFormatConstructorContinuation,
+    return_to: Option<CallReturn>,
+    execution_budget: &mut ExecutionBudget,
+) -> Result<NativeDispatch, NativeFailure> {
+    if matches!(state.options_argument, StoredValue::Undefined) {
+        return finish_intl_relative_time_format_options(
+            runtime,
+            state,
+            return_to,
+            execution_budget,
+        );
+    }
+    let options_argument = state.options_argument.duplicate();
+    state.options_object = Some(
+        match to_object_value(runtime, state.realm, options_argument, state.origin.clone())? {
+            Ok(options) => options,
+            Err(exception) => return Err(NativeFailure::Abrupt(exception)),
+        },
+    );
+    advance_intl_relative_time_format_constructor(runtime, state, None, return_to, execution_budget)
+}
+
+#[allow(
+    clippy::too_many_lines,
+    reason = "RelativeTimeFormat option Gets and resumable conversions stay in normative order"
+)]
+pub(super) fn advance_intl_relative_time_format_constructor(
+    runtime: &mut Runtime,
+    mut state: IntlRelativeTimeFormatConstructorContinuation,
+    completion: Option<StoredValue>,
+    return_to: Option<CallReturn>,
+    execution_budget: &mut ExecutionBudget,
+) -> Result<NativeDispatch, NativeFailure> {
+    let mut completion = completion;
+    loop {
+        match state.stage {
+            IntlRelativeTimeFormatConstructorStage::ReadOption => {
+                let Some(option) = IntlRelativeTimeFormatOption::ALL
+                    .get(state.option_index)
+                    .copied()
+                else {
+                    return finish_intl_relative_time_format_options(
+                        runtime,
+                        state,
+                        return_to,
+                        execution_budget,
+                    );
+                };
+                let base = state
+                    .options_object
+                    .as_ref()
+                    .ok_or(EngineFault::RuntimeInvariant {
+                        message: "Intl.RelativeTimeFormat option iteration lost its options object",
+                    })?
+                    .duplicate();
+                charge_heap_property_lookup(runtime, &base, execution_budget)?;
+                let name = JsString::from_utf8(option.name())?;
+                let key = runtime.property_key_from_string(&name)?;
+                state.stage = IntlRelativeTimeFormatConstructorStage::AwaitOption;
+                let dispatch = begin_value_get(
+                    runtime,
+                    &base,
+                    key,
+                    Some(&name),
+                    state.realm,
+                    return_to,
+                    state.origin.clone(),
+                    execution_budget,
+                )?;
+                return continue_intl_relative_time_format_constructor_after(
+                    dispatch,
+                    state,
+                    runtime,
+                    return_to,
+                    execution_budget,
+                );
+            }
+            IntlRelativeTimeFormatConstructorStage::AwaitOption => {
+                let value = take_intl_relative_time_format_constructor_completion(&mut completion)?;
+                let option = IntlRelativeTimeFormatOption::ALL[state.option_index];
+                if matches!(value, StoredValue::Undefined) {
+                    advance_intl_relative_time_format_option(&mut state);
+                    continue;
+                }
+                if matches!(value, StoredValue::Function(_) | StoredValue::Object(_)) {
+                    state.stage = IntlRelativeTimeFormatConstructorStage::AwaitOptionPrimitive;
+                    let realm = state.realm;
+                    let origin = state.origin.clone();
+                    return begin_operator_primitive_conversion(
+                        runtime,
+                        value,
+                        OperatorPrimitiveHint::String,
+                        OperatorPrimitiveTarget::IntlRelativeTimeFormatConstructor(Box::new(state)),
+                        realm,
+                        return_to,
+                        origin,
+                        execution_budget,
+                    );
+                }
+                let text = operator_primitive_to_string(value, state.realm, &state.origin)?;
+                store_intl_relative_time_format_option(&mut state, option, &text)?;
+                advance_intl_relative_time_format_option(&mut state);
+            }
+            IntlRelativeTimeFormatConstructorStage::AwaitOptionPrimitive => {
+                let value = take_intl_relative_time_format_constructor_completion(&mut completion)?;
+                let option = IntlRelativeTimeFormatOption::ALL[state.option_index];
+                let text = operator_primitive_to_string(value, state.realm, &state.origin)?;
+                store_intl_relative_time_format_option(&mut state, option, &text)?;
+                advance_intl_relative_time_format_option(&mut state);
+            }
+            IntlRelativeTimeFormatConstructorStage::AwaitPrototype => {
+                let requested =
+                    take_intl_relative_time_format_constructor_completion(&mut completion)?;
+                let prototype = match requested {
+                    StoredValue::Function(function) => HeapReference::Function(function),
+                    StoredValue::Object(object) => HeapReference::Object(object),
+                    StoredValue::Undefined
+                    | StoredValue::Null
+                    | StoredValue::Boolean(_)
+                    | StoredValue::Number(_)
+                    | StoredValue::BigInt(_)
+                    | StoredValue::String(_)
+                    | StoredValue::Symbol(_) => {
+                        let target_realm = runtime.function_realm(state.new_target)?;
+                        HeapReference::Object(
+                            runtime.realm_intl_relative_time_format_prototype(target_realm)?,
+                        )
+                    }
+                };
+                let resolved = state.resolved.ok_or(EngineFault::RuntimeInvariant {
+                    message: "Intl.RelativeTimeFormat allocation lost its resolved slots",
+                })?;
+                let object = runtime.allocate_intl_relative_time_format(prototype, resolved)?;
+                return Ok(NativeDispatch::Immediate(StoredValue::Object(object)));
+            }
+        }
+    }
+}
+
+fn advance_intl_relative_time_format_option(
+    state: &mut IntlRelativeTimeFormatConstructorContinuation,
+) {
+    state.option_index = state.option_index.saturating_add(1);
+    state.stage = IntlRelativeTimeFormatConstructorStage::ReadOption;
+}
+
+fn store_intl_relative_time_format_option(
+    state: &mut IntlRelativeTimeFormatConstructorContinuation,
+    option: IntlRelativeTimeFormatOption,
+    text: &JsString,
+) -> Result<(), NativeFailure> {
+    let value = text.to_utf8_lossy()?;
+    match option {
+        IntlRelativeTimeFormatOption::LocaleMatcher => {
+            if !matches!(value.as_str(), "lookup" | "best fit") {
+                return invalid_intl_relative_time_format_option(state, option);
+            }
+        }
+        IntlRelativeTimeFormatOption::NumberingSystem => {
+            let Some(numbering_system) = canonical_unicode_locale_type(&value) else {
+                return invalid_intl_relative_time_format_option(state, option);
+            };
+            state.options.numbering_system = Some(numbering_system);
+        }
+        IntlRelativeTimeFormatOption::Style => {
+            state.options.style = Some(match value.as_str() {
+                "long" => RelativeTimeFormatStyle::Long,
+                "short" => RelativeTimeFormatStyle::Short,
+                "narrow" => RelativeTimeFormatStyle::Narrow,
+                _ => return invalid_intl_relative_time_format_option(state, option),
+            });
+        }
+        IntlRelativeTimeFormatOption::Numeric => {
+            state.options.numeric = Some(match value.as_str() {
+                "always" => RelativeTimeFormatNumeric::Always,
+                "auto" => RelativeTimeFormatNumeric::Auto,
+                _ => return invalid_intl_relative_time_format_option(state, option),
+            });
+        }
+    }
+    Ok(())
+}
+
+fn invalid_intl_relative_time_format_option<T>(
+    state: &IntlRelativeTimeFormatConstructorContinuation,
+    option: IntlRelativeTimeFormatOption,
+) -> Result<T, NativeFailure> {
+    intl_locale_list_error(
+        state.realm,
+        state.origin.clone(),
+        ExceptionKind::RangeError,
+        &format!("invalid Intl.RelativeTimeFormat {} option", option.name()),
+    )
+}
+
+fn finish_intl_relative_time_format_options(
+    runtime: &mut Runtime,
+    mut state: IntlRelativeTimeFormatConstructorContinuation,
+    return_to: Option<CallReturn>,
+    execution_budget: &mut ExecutionBudget,
+) -> Result<NativeDispatch, NativeFailure> {
+    execution_budget
+        .charge_instructions(usize_to_u64(state.requested_locales.len()).saturating_add(1))?;
+    state.resolved = Some(
+        resolve_relative_time_format(&state.requested_locales, state.options.clone()).map_err(
+            |_| EngineFault::RuntimeInvariant {
+                message: "canonical RelativeTimeFormat inputs failed locale resolution",
+            },
+        )?,
+    );
+    state.stage = IntlRelativeTimeFormatConstructorStage::AwaitPrototype;
+    let base = StoredValue::Function(state.new_target);
+    charge_heap_property_lookup(runtime, &base, execution_budget)?;
+    let key = runtime.predefined_property_key(PredefinedAtom::Prototype);
+    let dispatch = begin_value_get(
+        runtime,
+        &base,
+        key,
+        None,
+        state.realm,
+        return_to,
+        state.origin.clone(),
+        execution_budget,
+    )?;
+    continue_intl_relative_time_format_constructor_after(
+        dispatch,
+        state,
+        runtime,
+        return_to,
+        execution_budget,
+    )
+}
+
+fn continue_intl_relative_time_format_constructor_after(
+    dispatch: NativeDispatch,
+    state: IntlRelativeTimeFormatConstructorContinuation,
+    runtime: &mut Runtime,
+    return_to: Option<CallReturn>,
+    execution_budget: &mut ExecutionBudget,
+) -> Result<NativeDispatch, NativeFailure> {
+    continue_get_after(
+        dispatch,
+        state,
+        |state| NativeContinuation::IntlRelativeTimeFormatConstructor(Box::new(state)),
+        |state, value| {
+            advance_intl_relative_time_format_constructor(
+                runtime,
+                state,
+                Some(value),
+                return_to,
+                execution_budget,
+            )
+        },
+        "Intl.RelativeTimeFormat property Get produced a structured result",
+    )
+}
+
+fn take_intl_relative_time_format_constructor_completion(
+    completion: &mut Option<StoredValue>,
+) -> Result<StoredValue, EngineFault> {
+    completion.take().ok_or(EngineFault::RuntimeInvariant {
+        message: "Intl.RelativeTimeFormat constructor resumed without a completion",
+    })
+}
+
+pub(super) fn begin_intl_relative_time_format_supported_locales_of(
+    runtime: &mut Runtime,
+    mut arguments: CallArguments,
+    realm: RealmId,
+    return_to: Option<CallReturn>,
+    origin: JsStackFrame,
+    execution_budget: &mut ExecutionBudget,
+) -> Result<NativeDispatch, NativeFailure> {
+    let locales = arguments.take_first_or_undefined();
+    let options_argument = arguments.take_first_or_undefined();
+    let state = IntlRelativeTimeFormatSupportedLocalesContinuation {
+        options_argument,
+        options_object: None,
+        requested_locales: Vec::new(),
+        realm,
+        stage: IntlRelativeTimeFormatSupportedLocalesStage::ReadLocaleMatcher,
+        origin: origin.clone(),
+    };
+    begin_intl_locale_list(
+        runtime,
+        locales,
+        IntlLocaleListTarget::RelativeTimeFormatSupportedLocalesOf(Box::new(state)),
+        realm,
+        return_to,
+        origin,
+        execution_budget,
+    )
+}
+
+fn begin_intl_relative_time_format_supported_locales_options(
+    runtime: &mut Runtime,
+    mut state: IntlRelativeTimeFormatSupportedLocalesContinuation,
+    return_to: Option<CallReturn>,
+    execution_budget: &mut ExecutionBudget,
+) -> Result<NativeDispatch, NativeFailure> {
+    if matches!(state.options_argument, StoredValue::Undefined) {
+        return finish_intl_relative_time_format_supported_locales(runtime, &state);
+    }
+    let options_argument = state.options_argument.duplicate();
+    state.options_object = Some(
+        match to_object_value(runtime, state.realm, options_argument, state.origin.clone())? {
+            Ok(options) => options,
+            Err(exception) => return Err(NativeFailure::Abrupt(exception)),
+        },
+    );
+    advance_intl_relative_time_format_supported_locales(
+        runtime,
+        state,
+        None,
+        return_to,
+        execution_budget,
+    )
+}
+
+pub(super) fn advance_intl_relative_time_format_supported_locales(
+    runtime: &mut Runtime,
+    mut state: IntlRelativeTimeFormatSupportedLocalesContinuation,
+    completion: Option<StoredValue>,
+    return_to: Option<CallReturn>,
+    execution_budget: &mut ExecutionBudget,
+) -> Result<NativeDispatch, NativeFailure> {
+    let mut completion = completion;
+    match state.stage {
+        IntlRelativeTimeFormatSupportedLocalesStage::ReadLocaleMatcher => {
+            let base = state
+                .options_object
+                .as_ref()
+                .ok_or(EngineFault::RuntimeInvariant {
+                    message: "Intl.RelativeTimeFormat.supportedLocalesOf lost its options object",
+                })?
+                .duplicate();
+            charge_heap_property_lookup(runtime, &base, execution_budget)?;
+            let name = JsString::from_utf8("localeMatcher")?;
+            let key = runtime.property_key_from_string(&name)?;
+            state.stage = IntlRelativeTimeFormatSupportedLocalesStage::AwaitLocaleMatcher;
+            let dispatch = begin_value_get(
+                runtime,
+                &base,
+                key,
+                Some(&name),
+                state.realm,
+                return_to,
+                state.origin.clone(),
+                execution_budget,
+            )?;
+            continue_intl_relative_time_format_supported_locales_after(
+                dispatch,
+                state,
+                runtime,
+                return_to,
+                execution_budget,
+            )
+        }
+        IntlRelativeTimeFormatSupportedLocalesStage::AwaitLocaleMatcher => {
+            let value =
+                take_intl_relative_time_format_supported_locales_completion(&mut completion)?;
+            if matches!(value, StoredValue::Undefined) {
+                return finish_intl_relative_time_format_supported_locales(runtime, &state);
+            }
+            if matches!(value, StoredValue::Function(_) | StoredValue::Object(_)) {
+                state.stage =
+                    IntlRelativeTimeFormatSupportedLocalesStage::AwaitLocaleMatcherPrimitive;
+                let realm = state.realm;
+                let origin = state.origin.clone();
+                return begin_operator_primitive_conversion(
+                    runtime,
+                    value,
+                    OperatorPrimitiveHint::String,
+                    OperatorPrimitiveTarget::IntlRelativeTimeFormatSupportedLocalesOf(Box::new(
+                        state,
+                    )),
+                    realm,
+                    return_to,
+                    origin,
+                    execution_budget,
+                );
+            }
+            validate_intl_relative_time_format_locale_matcher(&state, value)?;
+            finish_intl_relative_time_format_supported_locales(runtime, &state)
+        }
+        IntlRelativeTimeFormatSupportedLocalesStage::AwaitLocaleMatcherPrimitive => {
+            let value =
+                take_intl_relative_time_format_supported_locales_completion(&mut completion)?;
+            validate_intl_relative_time_format_locale_matcher(&state, value)?;
+            finish_intl_relative_time_format_supported_locales(runtime, &state)
+        }
+    }
+}
+
+fn validate_intl_relative_time_format_locale_matcher(
+    state: &IntlRelativeTimeFormatSupportedLocalesContinuation,
+    value: StoredValue,
+) -> Result<(), NativeFailure> {
+    let text = operator_primitive_to_string(value, state.realm, &state.origin)?;
+    if matches!(text.to_utf8_lossy()?.as_str(), "lookup" | "best fit") {
+        return Ok(());
+    }
+    intl_locale_list_error(
+        state.realm,
+        state.origin.clone(),
+        ExceptionKind::RangeError,
+        "invalid Intl.RelativeTimeFormat localeMatcher option",
+    )
+}
+
+fn finish_intl_relative_time_format_supported_locales(
+    runtime: &mut Runtime,
+    state: &IntlRelativeTimeFormatSupportedLocalesContinuation,
+) -> Result<NativeDispatch, NativeFailure> {
+    intl_locale_string_array(
+        runtime,
+        state.realm,
+        relative_time_format_supported_locales(&state.requested_locales),
+    )
+}
+
+fn continue_intl_relative_time_format_supported_locales_after(
+    dispatch: NativeDispatch,
+    state: IntlRelativeTimeFormatSupportedLocalesContinuation,
+    runtime: &mut Runtime,
+    return_to: Option<CallReturn>,
+    execution_budget: &mut ExecutionBudget,
+) -> Result<NativeDispatch, NativeFailure> {
+    continue_get_after(
+        dispatch,
+        state,
+        |state| NativeContinuation::IntlRelativeTimeFormatSupportedLocalesOf(Box::new(state)),
+        |state, value| {
+            advance_intl_relative_time_format_supported_locales(
+                runtime,
+                state,
+                Some(value),
+                return_to,
+                execution_budget,
+            )
+        },
+        "Intl.RelativeTimeFormat.supportedLocalesOf Get produced a structured result",
+    )
+}
+
+fn take_intl_relative_time_format_supported_locales_completion(
+    completion: &mut Option<StoredValue>,
+) -> Result<StoredValue, EngineFault> {
+    completion.take().ok_or(EngineFault::RuntimeInvariant {
+        message: "Intl.RelativeTimeFormat.supportedLocalesOf resumed without a completion",
+    })
+}
+
+#[allow(
+    clippy::too_many_arguments,
+    reason = "native dispatch keeps receiver, arguments, realm, return target, origin, and budget explicit"
+)]
+pub(super) fn begin_intl_relative_time_format_prototype(
+    runtime: &mut Runtime,
+    method: IntlRelativeTimeFormatPrototypeMethod,
+    receiver: &StoredValue,
+    mut arguments: CallArguments,
+    realm: RealmId,
+    return_to: Option<CallReturn>,
+    origin: JsStackFrame,
+    execution_budget: &mut ExecutionBudget,
+) -> Result<NativeDispatch, NativeFailure> {
+    let StoredValue::Object(formatter) = receiver else {
+        return intl_relative_time_format_brand_error(realm, origin);
+    };
+    let Some(resolved) = runtime
+        .intl_relative_time_format_state(*formatter)?
+        .cloned()
+    else {
+        return intl_relative_time_format_brand_error(realm, origin);
+    };
+    match method {
+        IntlRelativeTimeFormatPrototypeMethod::ResolvedOptions => {
+            intl_relative_time_format_resolved_options(runtime, realm, &resolved)
+        }
+        IntlRelativeTimeFormatPrototypeMethod::Format
+        | IntlRelativeTimeFormatPrototypeMethod::FormatToParts => {
+            let value = arguments.take_first_or_undefined();
+            let unit = arguments.take_first_or_undefined();
+            begin_intl_relative_time_format_value(
+                runtime,
+                IntlRelativeTimeFormatValueContinuation {
+                    formatter: *formatter,
+                    operation: if matches!(method, IntlRelativeTimeFormatPrototypeMethod::Format) {
+                        IntlRelativeTimeFormatOperation::Format
+                    } else {
+                        IntlRelativeTimeFormatOperation::FormatToParts
+                    },
+                    unit: Some(unit),
+                    value: None,
+                    realm,
+                    origin,
+                },
+                value,
+                return_to,
+                execution_budget,
+            )
+        }
+    }
+}
+
+fn begin_intl_relative_time_format_value(
+    runtime: &mut Runtime,
+    state: IntlRelativeTimeFormatValueContinuation,
+    value: StoredValue,
+    return_to: Option<CallReturn>,
+    execution_budget: &mut ExecutionBudget,
+) -> Result<NativeDispatch, NativeFailure> {
+    if matches!(value, StoredValue::Function(_) | StoredValue::Object(_)) {
+        let realm = state.realm;
+        let origin = state.origin.clone();
+        return begin_operator_primitive_conversion(
+            runtime,
+            value,
+            OperatorPrimitiveHint::Number,
+            OperatorPrimitiveTarget::IntlRelativeTimeFormatValue(Box::new(state)),
+            realm,
+            return_to,
+            origin,
+            execution_budget,
+        );
+    }
+    finish_intl_relative_time_format_value_primitive(
+        runtime,
+        state,
+        value,
+        return_to,
+        execution_budget,
+    )
+}
+
+pub(super) fn finish_intl_relative_time_format_value_primitive(
+    runtime: &mut Runtime,
+    mut state: IntlRelativeTimeFormatValueContinuation,
+    value: StoredValue,
+    return_to: Option<CallReturn>,
+    execution_budget: &mut ExecutionBudget,
+) -> Result<NativeDispatch, NativeFailure> {
+    state.value = Some(operator_to_number(value, state.realm, &state.origin)?.as_f64());
+    let unit = state.unit.take().ok_or(EngineFault::RuntimeInvariant {
+        message: "Intl.RelativeTimeFormat operation lost its unit",
+    })?;
+    begin_intl_relative_time_format_unit(runtime, state, unit, return_to, execution_budget)
+}
+
+fn begin_intl_relative_time_format_unit(
+    runtime: &mut Runtime,
+    state: IntlRelativeTimeFormatValueContinuation,
+    unit: StoredValue,
+    return_to: Option<CallReturn>,
+    execution_budget: &mut ExecutionBudget,
+) -> Result<NativeDispatch, NativeFailure> {
+    if matches!(unit, StoredValue::Function(_) | StoredValue::Object(_)) {
+        let realm = state.realm;
+        let origin = state.origin.clone();
+        return begin_operator_primitive_conversion(
+            runtime,
+            unit,
+            OperatorPrimitiveHint::String,
+            OperatorPrimitiveTarget::IntlRelativeTimeFormatUnit(Box::new(state)),
+            realm,
+            return_to,
+            origin,
+            execution_budget,
+        );
+    }
+    finish_intl_relative_time_format_unit_primitive(runtime, &state, unit)
+}
+
+pub(super) fn finish_intl_relative_time_format_unit_primitive(
+    runtime: &mut Runtime,
+    state: &IntlRelativeTimeFormatValueContinuation,
+    unit: StoredValue,
+) -> Result<NativeDispatch, NativeFailure> {
+    let unit = operator_primitive_to_string(unit, state.realm, &state.origin)?.to_utf8_lossy()?;
+    let unit = parse_intl_relative_time_unit(state, &unit)?;
+    let value = state.value.ok_or(EngineFault::RuntimeInvariant {
+        message: "Intl.RelativeTimeFormat operation lost its numeric operand",
+    })?;
+    let resolved = runtime
+        .intl_relative_time_format_state(state.formatter)?
+        .ok_or(EngineFault::RuntimeInvariant {
+            message: "Intl.RelativeTimeFormat operation lost its branded receiver",
+        })?;
+    match state.operation {
+        IntlRelativeTimeFormatOperation::Format => {
+            let formatted = format_relative_time(resolved, value, unit)
+                .map_err(|error| intl_relative_time_format_operation_error(state, error))?;
+            Ok(NativeDispatch::Immediate(StoredValue::String(
+                JsString::from_utf8(&formatted)?,
+            )))
+        }
+        IntlRelativeTimeFormatOperation::FormatToParts => {
+            let parts = format_relative_time_to_parts(resolved, value, unit)
+                .map_err(|error| intl_relative_time_format_operation_error(state, error))?;
+            intl_relative_time_format_parts_array(runtime, state.realm, parts)
+        }
+    }
+}
+
+fn parse_intl_relative_time_unit(
+    state: &IntlRelativeTimeFormatValueContinuation,
+    unit: &str,
+) -> Result<RelativeTimeUnit, NativeFailure> {
+    match unit {
+        "second" | "seconds" => Ok(RelativeTimeUnit::Second),
+        "minute" | "minutes" => Ok(RelativeTimeUnit::Minute),
+        "hour" | "hours" => Ok(RelativeTimeUnit::Hour),
+        "day" | "days" => Ok(RelativeTimeUnit::Day),
+        "week" | "weeks" => Ok(RelativeTimeUnit::Week),
+        "month" | "months" => Ok(RelativeTimeUnit::Month),
+        "quarter" | "quarters" => Ok(RelativeTimeUnit::Quarter),
+        "year" | "years" => Ok(RelativeTimeUnit::Year),
+        _ => intl_locale_list_error(
+            state.realm,
+            state.origin.clone(),
+            ExceptionKind::RangeError,
+            "invalid Intl.RelativeTimeFormat unit",
+        ),
+    }
+}
+
+fn intl_relative_time_format_operation_error(
+    state: &IntlRelativeTimeFormatValueContinuation,
+    error: RelativeTimeFormatError,
+) -> NativeFailure {
+    match error {
+        RelativeTimeFormatError::NonFinite | RelativeTimeFormatError::InvalidOption => {
+            NativeFailure::Abrupt(PendingException {
+                realm: state.realm,
+                payload: PendingExceptionPayload::EngineError {
+                    kind: ExceptionKind::RangeError,
+                    message: JsString::from_utf8("Intl.RelativeTimeFormat value must be finite")
+                        .expect("static Intl error is valid UTF-8"),
+                },
+                origin: state.origin.clone(),
+            })
+        }
+        RelativeTimeFormatError::InvalidLocale | RelativeTimeFormatError::Data => {
+            EngineFault::RuntimeInvariant {
+                message: "resolved Intl.RelativeTimeFormat slots failed ICU formatting",
+            }
+            .into()
+        }
+    }
+}
+
+fn intl_relative_time_format_parts_array(
+    runtime: &mut Runtime,
+    realm: RealmId,
+    parts: Vec<quickjs_intl::RelativeTimeFormatPart>,
+) -> Result<NativeDispatch, NativeFailure> {
+    let mut values = Vec::new();
+    values
+        .try_reserve_exact(parts.len())
+        .map_err(|_| ExecutionError::AllocationFailed {
+            resource: RuntimeResource::FrameValues,
+            additional: parts.len(),
+        })?;
+    for part in parts {
+        let object = runtime.allocate_ordinary_object(runtime.realm_object_prototype(realm)?)?;
+        let mut properties = vec![
+            ("type", StoredValue::String(JsString::from_utf8(part.kind)?)),
+            (
+                "value",
+                StoredValue::String(JsString::from_utf8(&part.value)?),
+            ),
+        ];
+        if let Some(unit) = part.unit {
+            properties.push(("unit", StoredValue::String(JsString::from_utf8(unit)?)));
+        }
+        for (name, value) in properties {
+            let name = JsString::from_utf8(name)?;
+            let key = runtime.property_key_from_string(&name)?;
+            runtime.append_data_property(
+                HeapReference::Object(object),
+                key,
+                PropertyLayout::data(true, true, true),
+                value,
+            )?;
+        }
+        values.push(StoredValue::Object(object));
+    }
+    Ok(NativeDispatch::Immediate(StoredValue::Object(
+        runtime.allocate_array(realm, values)?,
+    )))
+}
+
+fn intl_relative_time_format_resolved_options(
+    runtime: &mut Runtime,
+    realm: RealmId,
+    state: &RelativeTimeFormatState,
+) -> Result<NativeDispatch, NativeFailure> {
+    let object = runtime.allocate_ordinary_object(runtime.realm_object_prototype(realm)?)?;
+    let properties = [
+        (
+            "locale",
+            StoredValue::String(JsString::from_utf8(&state.locale)?),
+        ),
+        (
+            "style",
+            StoredValue::String(JsString::from_utf8(state.style.as_str())?),
+        ),
+        (
+            "numeric",
+            StoredValue::String(JsString::from_utf8(state.numeric.as_str())?),
+        ),
+        (
+            "numberingSystem",
+            StoredValue::String(JsString::from_utf8(&state.numbering_system)?),
+        ),
+    ];
+    for (name, value) in properties {
+        let name = JsString::from_utf8(name)?;
+        let key = runtime.property_key_from_string(&name)?;
+        runtime.append_data_property(
+            HeapReference::Object(object),
+            key,
+            PropertyLayout::data(true, true, true),
+            value,
+        )?;
+    }
+    Ok(NativeDispatch::Immediate(StoredValue::Object(object)))
+}
+
+fn intl_relative_time_format_brand_error<T>(
+    realm: RealmId,
+    origin: JsStackFrame,
+) -> Result<T, NativeFailure> {
+    intl_locale_list_error(
+        realm,
+        origin,
+        ExceptionKind::TypeError,
+        "Intl.RelativeTimeFormat method called on incompatible receiver",
+    )
+}
+
 pub(super) fn begin_intl_date_time_format_constructor(
     runtime: &mut Runtime,
     function: FunctionId,
@@ -7453,6 +8367,19 @@ fn finish_intl_locale_list(
         IntlLocaleListTarget::PluralRulesSupportedLocalesOf(mut state) => {
             state.requested_locales = intl_locale_strings(locales)?;
             begin_intl_plural_rules_supported_locales_options(
+                runtime,
+                *state,
+                return_to,
+                execution_budget,
+            )
+        }
+        IntlLocaleListTarget::RelativeTimeFormatConstructor(mut state) => {
+            state.requested_locales = intl_locale_strings(locales)?;
+            begin_intl_relative_time_format_options(runtime, *state, return_to, execution_budget)
+        }
+        IntlLocaleListTarget::RelativeTimeFormatSupportedLocalesOf(mut state) => {
+            state.requested_locales = intl_locale_strings(locales)?;
+            begin_intl_relative_time_format_supported_locales_options(
                 runtime,
                 *state,
                 return_to,

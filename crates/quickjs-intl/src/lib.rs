@@ -17,6 +17,7 @@ mod locale;
 mod locale_info;
 mod number_format;
 mod plural_rules;
+mod relative_time_format;
 mod supported_values;
 
 pub use collator::{
@@ -52,6 +53,12 @@ pub use number_format::{
 pub use plural_rules::{
     PluralCategory, PluralRuleType, PluralRulesError, PluralRulesRequestOptions, PluralRulesState,
     plural_rules_supported_locales, resolve_plural_rules, select_plural, select_plural_range,
+};
+pub use relative_time_format::{
+    RelativeTimeFormatError, RelativeTimeFormatNumeric, RelativeTimeFormatPart,
+    RelativeTimeFormatRequestOptions, RelativeTimeFormatState, RelativeTimeFormatStyle,
+    RelativeTimeUnit, format_relative_time, format_relative_time_to_parts,
+    relative_time_format_supported_locales, resolve_relative_time_format,
 };
 pub use supported_values::supported_values;
 

@@ -703,6 +703,12 @@ impl RealmBuildTransaction<'_> {
                 date_time_format_format: function(NativeFunctionKind::IntlDateTimeFormatFormat),
                 plural_rules_prototype: object(IntrinsicObjectId::IntlPluralRulesPrototype),
                 plural_rules_constructor: function(NativeFunctionKind::IntlPluralRulesConstructor),
+                relative_time_format_prototype: object(
+                    IntrinsicObjectId::IntlRelativeTimeFormatPrototype,
+                ),
+                relative_time_format_constructor: function(
+                    NativeFunctionKind::IntlRelativeTimeFormatConstructor,
+                ),
                 locale_prototype: object(IntrinsicObjectId::IntlLocalePrototype),
                 locale_constructor: function(NativeFunctionKind::IntlLocaleConstructor),
             },

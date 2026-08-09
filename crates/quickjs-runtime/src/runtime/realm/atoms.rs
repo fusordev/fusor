@@ -6,9 +6,10 @@ use crate::{
         ArrayBufferPrototypeMethod, AtomicsMethod, DataViewPrototypeMethod, DatePrototypeMethod,
         DateStaticMethod, IntlCollatorPrototypeMethod, IntlDateTimeFormatPrototypeMethod,
         IntlLocalePrototypeMethod, IntlNumberFormatPrototypeMethod, IntlPluralRulesPrototypeMethod,
-        SharedArrayBufferPrototypeMethod, TemporalDurationPrototypeMethod,
-        TemporalDurationStaticMethod, TemporalInstantPrototypeMethod, TemporalInstantStaticMethod,
-        TemporalNowMethod, TemporalPlainDatePrototypeMethod, TemporalPlainDateStaticMethod,
+        IntlRelativeTimeFormatPrototypeMethod, SharedArrayBufferPrototypeMethod,
+        TemporalDurationPrototypeMethod, TemporalDurationStaticMethod,
+        TemporalInstantPrototypeMethod, TemporalInstantStaticMethod, TemporalNowMethod,
+        TemporalPlainDatePrototypeMethod, TemporalPlainDateStaticMethod,
         TemporalPlainDateTimePrototypeMethod, TemporalPlainDateTimeStaticMethod,
         TemporalPlainMonthDayPrototypeMethod, TemporalPlainMonthDayStaticMethod,
         TemporalPlainTimePrototypeMethod, TemporalPlainTimeStaticMethod,
@@ -445,6 +446,8 @@ fn visit_core_name_order(
         RealmNameId::IntlDateTimeFormatSupportedLocalesOf,
         RealmNameId::IntlPluralRules,
         RealmNameId::IntlPluralRulesSupportedLocalesOf,
+        RealmNameId::IntlRelativeTimeFormat,
+        RealmNameId::IntlRelativeTimeFormatSupportedLocalesOf,
         RealmNameId::Locale,
         RealmNameId::Deref,
         RealmNameId::Register,
@@ -464,6 +467,9 @@ fn visit_core_name_order(
     }
     for method in IntlPluralRulesPrototypeMethod::ALL {
         visit(RealmNameId::IntlPluralRulesPrototype(method))?;
+    }
+    for method in IntlRelativeTimeFormatPrototypeMethod::ALL {
+        visit(RealmNameId::IntlRelativeTimeFormatPrototype(method))?;
     }
     for method in IntlLocalePrototypeMethod::ALL {
         if !matches!(method, IntlLocalePrototypeMethod::ToString) {
@@ -532,7 +538,8 @@ fn realm_name_description(id: RealmNameId) -> &'static str {
         RealmNameId::IntlCollatorSupportedLocalesOf
         | RealmNameId::IntlNumberFormatSupportedLocalesOf
         | RealmNameId::IntlDateTimeFormatSupportedLocalesOf
-        | RealmNameId::IntlPluralRulesSupportedLocalesOf => "supportedLocalesOf",
+        | RealmNameId::IntlPluralRulesSupportedLocalesOf
+        | RealmNameId::IntlRelativeTimeFormatSupportedLocalesOf => "supportedLocalesOf",
         RealmNameId::IntlCollatorPrototype(method) => method.name(),
         RealmNameId::IntlNumberFormat => "NumberFormat",
         RealmNameId::IntlNumberFormatPrototype(method) => method.name(),
@@ -540,6 +547,8 @@ fn realm_name_description(id: RealmNameId) -> &'static str {
         RealmNameId::IntlDateTimeFormatPrototype(method) => method.name(),
         RealmNameId::IntlPluralRules => "PluralRules",
         RealmNameId::IntlPluralRulesPrototype(method) => method.name(),
+        RealmNameId::IntlRelativeTimeFormat => "RelativeTimeFormat",
+        RealmNameId::IntlRelativeTimeFormatPrototype(method) => method.name(),
         RealmNameId::Locale => "Locale",
         RealmNameId::IntlLocalePrototype(method) => method.name(),
         RealmNameId::Deref => "deref",
@@ -668,8 +677,8 @@ mod tests {
         let schema = RealmIntrinsicSchema::try_new().expect("Realm schema");
         let plan = RealmAtomPlan::try_new(&schema).expect("atom plan");
 
-        assert_eq!(plan.len(), 392);
-        assert_eq!(plan.description_code_units(), 3_498);
+        assert_eq!(plan.len(), 393);
+        assert_eq!(plan.description_code_units(), 3_516);
     }
 
     #[test]
