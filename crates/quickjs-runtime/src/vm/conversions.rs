@@ -4504,6 +4504,36 @@ fn finish_property_key_target(
             });
             Ok(NativeDispatch::Immediate(StoredValue::Boolean(enumerable)))
         }
+        PropertyKeyTarget::LegacyDefineAccessor {
+            target,
+            accessor,
+            kind,
+            realm,
+        } => finish_legacy_define_accessor(
+            runtime,
+            &target,
+            property.key,
+            accessor,
+            kind,
+            realm,
+            return_to,
+            origin.clone(),
+            execution_budget,
+        ),
+        PropertyKeyTarget::LegacyLookupAccessor {
+            target,
+            kind,
+            realm,
+        } => finish_legacy_lookup_accessor(
+            runtime,
+            &target,
+            property.key,
+            kind,
+            realm,
+            return_to,
+            origin.clone(),
+            execution_budget,
+        ),
         PropertyKeyTarget::ReflectHas { target, realm }
         | PropertyKeyTarget::In { target, realm } => {
             let reference = target

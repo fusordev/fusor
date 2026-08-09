@@ -963,6 +963,8 @@ enum NativeContinuation {
     IntegrityLevel(Box<IntegrityLevelContinuation>),
     IsPrototypeOf(Box<IsPrototypeOfContinuation>),
     ObjectMeta(ObjectMetaContinuation),
+    LegacyAccessorLookup(Box<LegacyAccessorLookupContinuation>),
+    LegacyDefineAccessor,
     OwnDescriptorQuery(OwnDescriptorQueryContinuation),
     AsyncAwait {
         origin: JsStackFrame,
@@ -1230,7 +1232,9 @@ impl NativeContinuation {
             Self::IntegrityLevel(state) => state.retained_values(),
             Self::IsPrototypeOf(_) => IsPrototypeOfContinuation::retained_values(),
             Self::ObjectMeta(_) => ObjectMetaContinuation::retained_values(),
+            Self::LegacyAccessorLookup(_) => LegacyAccessorLookupContinuation::retained_values(),
             Self::OwnDescriptorQuery(_)
+            | Self::LegacyDefineAccessor
             | Self::AsyncAwait { .. }
             | Self::ReflectSet
             | Self::ProxyWrite
@@ -2034,6 +2038,19 @@ enum PropertyKeyTarget {
         target: StoredValue,
         realm: RealmId,
     },
+    /// A legacy `__defineGetter__` or `__defineSetter__` key conversion.
+    LegacyDefineAccessor {
+        target: StoredValue,
+        accessor: FunctionId,
+        kind: LegacyAccessorKind,
+        realm: RealmId,
+    },
+    /// A legacy `__lookupGetter__` or `__lookupSetter__` key conversion.
+    LegacyLookupAccessor {
+        target: StoredValue,
+        kind: LegacyAccessorKind,
+        realm: RealmId,
+    },
     /// The `delete` operator's key, awaiting `ToPropertyKey`.
     Delete {
         base: StoredValue,
@@ -2079,12 +2096,14 @@ impl PropertyKeyTarget {
             | Self::OwnPropertyDescriptor { .. }
             | Self::HasOwnProperty { .. }
             | Self::PropertyIsEnumerable { .. }
+            | Self::LegacyLookupAccessor { .. }
             | Self::ReflectOwnPropertyDescriptor { .. }
             | Self::ReflectHas { .. }
             | Self::In { .. } => 1,
             Self::Write { .. }
             | Self::DefineMethod { .. }
             | Self::DefineProperty { .. }
+            | Self::LegacyDefineAccessor { .. }
             | Self::ReflectGet { .. }
             | Self::ReflectDefineProperty { .. } => 2,
             Self::ReflectSet { .. } => 3,
@@ -3164,6 +3183,7 @@ fn trace_property_key_target_roots(
         | PropertyKeyTarget::OwnPropertyDescriptor { target: base, .. }
         | PropertyKeyTarget::HasOwnProperty { target: base, .. }
         | PropertyKeyTarget::PropertyIsEnumerable { target: base, .. }
+        | PropertyKeyTarget::LegacyLookupAccessor { target: base, .. }
         | PropertyKeyTarget::ReflectOwnPropertyDescriptor { target: base, .. }
         | PropertyKeyTarget::ReflectHas { target: base, .. }
         | PropertyKeyTarget::In { target: base, .. } => {
@@ -3177,6 +3197,12 @@ fn trace_property_key_target_roots(
         } => {
             trace_stored_value_root(target, mark);
             trace_stored_value_root(descriptor, mark);
+        }
+        PropertyKeyTarget::LegacyDefineAccessor {
+            target, accessor, ..
+        } => {
+            trace_stored_value_root(target, mark);
+            mark(CollectionRoot::Heap(HeapReference::Function(*accessor)));
         }
         PropertyKeyTarget::Write { base, value, .. } => {
             trace_stored_value_root(base, mark);
@@ -4051,10 +4077,12 @@ fn trace_native_continuation_roots(
         NativeContinuation::IntegrityLevel(state) => state.trace_roots(mark),
         NativeContinuation::IsPrototypeOf(state) => state.trace_roots(mark),
         NativeContinuation::ObjectMeta(state) => trace_stored_value_root(&state.completion, mark),
+        NativeContinuation::LegacyAccessorLookup(state) => state.trace_roots(mark),
         NativeContinuation::AsyncGeneratorReturnAwait { completion, .. } => {
             trace_stored_value_root(completion, mark);
         }
         NativeContinuation::OwnDescriptorQuery(_)
+        | NativeContinuation::LegacyDefineAccessor
         | NativeContinuation::AsyncAwait { .. }
         | NativeContinuation::ReflectSet
         | NativeContinuation::ProxyWrite

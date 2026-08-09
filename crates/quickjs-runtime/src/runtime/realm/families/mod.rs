@@ -882,6 +882,10 @@ pub(super) const fn is_kernel_function(id: IntrinsicFunctionId) -> bool {
             | NativeFunctionKind::ObjectPrototypeValueOf
             | NativeFunctionKind::ObjectPrototypeProtoGetter
             | NativeFunctionKind::ObjectPrototypeProtoSetter
+            | NativeFunctionKind::ObjectPrototypeDefineGetter
+            | NativeFunctionKind::ObjectPrototypeDefineSetter
+            | NativeFunctionKind::ObjectPrototypeLookupGetter
+            | NativeFunctionKind::ObjectPrototypeLookupSetter
             | NativeFunctionKind::ObjectPrototypeHasOwnProperty
             | NativeFunctionKind::ObjectPrototypeIsPrototypeOf
             | NativeFunctionKind::ObjectPrototypePropertyIsEnumerable

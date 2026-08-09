@@ -2372,8 +2372,11 @@ pub(super) fn execute_one(
             } else {
                 peek(frame)?.duplicate()
             };
-            if let Some(reference) = base.heap_reference()
-                && runtime.proxy_state(reference)?.is_some()
+            let outcome = read_observable_static_property(runtime, realm, &base, &property.key)?;
+            if let ObservablePropertyReadOutcome::Proxy {
+                reference,
+                receiver,
+            } = outcome
             {
                 let return_to =
                     CallReturn::push(verified_instruction.successors().fallthrough().ok_or(
@@ -2387,7 +2390,7 @@ pub(super) fn execute_one(
                     begin_internal_get(
                         runtime,
                         reference,
-                        base,
+                        receiver,
                         property.key,
                         realm,
                         Some(return_to),
@@ -2397,7 +2400,10 @@ pub(super) fn execute_one(
                     return_to,
                 );
             }
-            match read_static_property(runtime, realm, &base, &property.key)? {
+            let ObservablePropertyReadOutcome::Complete(outcome) = outcome else {
+                unreachable!("observable static property read classification is exhaustive")
+            };
+            match outcome {
                 PropertyReadOutcome::Value(value) => push(frame, value),
                 PropertyReadOutcome::Getter { function, receiver } => {
                     let return_to =

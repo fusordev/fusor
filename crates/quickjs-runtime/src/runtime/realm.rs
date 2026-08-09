@@ -319,6 +319,30 @@ const OBJECT_PROTOTYPE_REFLECTION: [(&str, NativeFunctionKind, i32); 3] = [
     ),
 ];
 
+/// The normative-optional legacy `Object.prototype` accessor methods.
+const OBJECT_PROTOTYPE_LEGACY_ACCESSORS: [(&str, NativeFunctionKind, i32); 4] = [
+    (
+        "__defineGetter__",
+        NativeFunctionKind::ObjectPrototypeDefineGetter,
+        2,
+    ),
+    (
+        "__defineSetter__",
+        NativeFunctionKind::ObjectPrototypeDefineSetter,
+        2,
+    ),
+    (
+        "__lookupGetter__",
+        NativeFunctionKind::ObjectPrototypeLookupGetter,
+        1,
+    ),
+    (
+        "__lookupSetter__",
+        NativeFunctionKind::ObjectPrototypeLookupSetter,
+        1,
+    ),
+];
+
 /// The `Array.prototype` searches this profile installs.
 ///
 /// Each reports arity 1, which the pinned oracle confirms.

@@ -296,16 +296,23 @@ fn object_prototype_has_immutable_prototype_exotic_semantics() {
 }
 
 #[test]
-fn object_prototype_installs_proto_but_not_the_other_legacy_accessors() {
+fn object_prototype_installs_the_normative_optional_legacy_accessors() {
     assert_eq!(
         text(
             "let proto=Object.prototype;\
              let names=['__defineGetter__','__defineSetter__','__lookupGetter__','__lookupSetter__'];\
              return Object.getOwnPropertyNames(proto).join('|')+'#'+\
-                 names.every(function(name){return proto[name]===undefined&&\
-                   Object.getOwnPropertyDescriptor(proto,name)===undefined;});"
+                 names.map(function(name){let descriptor=Object.getOwnPropertyDescriptor(proto,name);\
+                   return typeof proto[name]+':'+proto[name].name+':'+proto[name].length+':'+\
+                     descriptor.writable+':'+descriptor.enumerable+':'+descriptor.configurable;\
+                 }).join('|');"
         ),
-        "toString|toLocaleString|valueOf|hasOwnProperty|isPrototypeOf|propertyIsEnumerable|__proto__|constructor#true"
+        "toString|toLocaleString|valueOf|hasOwnProperty|isPrototypeOf|propertyIsEnumerable|\
+         __proto__|__defineGetter__|__defineSetter__|__lookupGetter__|__lookupSetter__|constructor#\
+         function:__defineGetter__:2:true:false:true|\
+         function:__defineSetter__:2:true:false:true|\
+         function:__lookupGetter__:1:true:false:true|\
+         function:__lookupSetter__:1:true:false:true"
     );
     assert!(boolean(
         "var descriptor=Object.getOwnPropertyDescriptor(Object.prototype,'__proto__');\
@@ -313,6 +320,46 @@ fn object_prototype_installs_proto_but_not_the_other_legacy_accessors() {
            descriptor.set.name==='set __proto__'&&descriptor.set.length===1&&\
            !descriptor.enumerable&&descriptor.configurable;"
     ));
+}
+
+#[test]
+fn legacy_object_accessors_define_merge_and_lookup_without_invoking() {
+    assert!(boolean(
+        "let getterCalls=0,setterCalls=0;\
+         function getter(){getterCalls++;return 7;}\
+         function setter(value){setterCalls++;this.seen=value;}\
+         let prototype={};prototype.__defineGetter__('value',getter);\
+         prototype.__defineSetter__('value',setter);\
+         let descriptor=Object.getOwnPropertyDescriptor(prototype,'value');\
+         let child=Object.create(prototype);\
+         let found=child.__lookupGetter__('value')===getter&&\
+           child.__lookupSetter__('value')===setter&&getterCalls===0&&setterCalls===0;\
+         child.value=9;let read=child.value;\
+         let symbol=Symbol('legacy');prototype.__defineGetter__(symbol,getter);\
+         return found&&descriptor.get===getter&&descriptor.set===setter&&\
+           descriptor.enumerable&&descriptor.configurable&&child.seen===9&&read===7&&\
+           child.__lookupGetter__(symbol)===getter&&\
+           Object.defineProperty(child,'value',{value:1}).__lookupGetter__('value')===undefined;"
+    ));
+}
+
+#[test]
+fn legacy_accessor_lookup_preserves_nested_proxy_abrupt_completions() {
+    assert_eq!(
+        text(
+            "let error={};let root=Object.defineProperty({},'target',{get:function(){}});\
+         function caught(subject){try{subject.__lookupGetter__('target');}\
+           catch(reason){return reason===error?'same':typeof reason+':'+reason;}return 'none';}\
+         let own=new Proxy(root,{getOwnPropertyDescriptor:function(){throw error;}});\
+         let descriptorProxy=new Proxy(Object.create(root),\
+           {getOwnPropertyDescriptor:function(){throw error;}});\
+         let prototypeProxy=new Proxy(Object.create(root),\
+           {getPrototypeOf:function(){throw error;}});\
+         return [caught(own),caught(Object.create(descriptorProxy)),\
+           caught(Object.create(prototypeProxy))].join('|');"
+        ),
+        "same|same|same"
+    );
 }
 
 #[test]

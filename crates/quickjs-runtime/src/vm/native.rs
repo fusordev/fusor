@@ -1588,6 +1588,16 @@ pub(super) fn resume_native_continuations(
                 execution_budget,
             )?,
             NativeContinuation::ObjectMeta(state) => advance_object_meta(state, &value)?,
+            NativeContinuation::LegacyAccessorLookup(state) => advance_legacy_lookup_accessor(
+                runtime,
+                *state,
+                value.duplicate(),
+                return_to,
+                execution_budget,
+            )?,
+            NativeContinuation::LegacyDefineAccessor => {
+                NativeDispatch::Immediate(StoredValue::Undefined)
+            }
             NativeContinuation::OwnDescriptorQuery(state) => {
                 advance_own_descriptor_query(runtime, state, value.duplicate())?
             }
@@ -2934,6 +2944,48 @@ pub(super) fn dispatch_native_call_with_frames(
                     PropertyKeyTarget::HasOwnProperty { target, realm }
                 },
                 realm,
+                return_to,
+                origin.unwrap_or_else(native_function_host_origin),
+                execution_budget,
+            )
+        }
+        NativeFunctionKind::ObjectPrototypeDefineGetter
+        | NativeFunctionKind::ObjectPrototypeDefineSetter => {
+            let mut arguments = inputs.arguments;
+            let key = arguments.take_first_or_undefined();
+            let accessor = arguments.take_first_or_undefined();
+            let kind = if matches!(native.kind, NativeFunctionKind::ObjectPrototypeDefineGetter) {
+                LegacyAccessorKind::Getter
+            } else {
+                LegacyAccessorKind::Setter
+            };
+            begin_legacy_define_accessor(
+                runtime,
+                native.realm,
+                inputs.receiver,
+                key,
+                &accessor,
+                kind,
+                return_to,
+                origin.unwrap_or_else(native_function_host_origin),
+                execution_budget,
+            )
+        }
+        NativeFunctionKind::ObjectPrototypeLookupGetter
+        | NativeFunctionKind::ObjectPrototypeLookupSetter => {
+            let mut arguments = inputs.arguments;
+            let key = arguments.take_first_or_undefined();
+            let kind = if matches!(native.kind, NativeFunctionKind::ObjectPrototypeLookupGetter) {
+                LegacyAccessorKind::Getter
+            } else {
+                LegacyAccessorKind::Setter
+            };
+            begin_legacy_lookup_accessor(
+                runtime,
+                native.realm,
+                inputs.receiver,
+                key,
+                kind,
                 return_to,
                 origin.unwrap_or_else(native_function_host_origin),
                 execution_budget,

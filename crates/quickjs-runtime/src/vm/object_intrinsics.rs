@@ -615,6 +615,355 @@ fn heap_reference_value(reference: Option<HeapReference>) -> StoredValue {
     }
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) enum LegacyAccessorKind {
+    Getter,
+    Setter,
+}
+
+impl LegacyAccessorKind {
+    const fn define_name(self) -> &'static str {
+        match self {
+            Self::Getter => "__defineGetter__",
+            Self::Setter => "__defineSetter__",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum LegacyAccessorLookupStage {
+    Descriptor,
+    Prototype,
+}
+
+pub(super) struct LegacyAccessorLookupContinuation {
+    current: HeapReference,
+    key: PropertyKey,
+    kind: LegacyAccessorKind,
+    realm: RealmId,
+    origin: JsStackFrame,
+    stage: LegacyAccessorLookupStage,
+}
+
+impl LegacyAccessorLookupContinuation {
+    pub(super) const fn retained_values() -> u64 {
+        1
+    }
+
+    pub(super) fn trace_roots(&self, mark: &mut dyn FnMut(CollectionRoot)) {
+        mark(CollectionRoot::Heap(self.current));
+    }
+}
+
+enum LegacyAccessorLookupDispatch {
+    Resume(LegacyAccessorLookupContinuation, StoredValue),
+    Suspend(Box<NativeDispatch>),
+}
+
+/// Starts `Object.prototype.__defineGetter__` or `__defineSetter__`.
+///
+/// `ToObject(this)` and callability validation both precede observable key
+/// conversion, as required by the normative-optional legacy algorithm.
+#[allow(
+    clippy::too_many_arguments,
+    reason = "the native boundary retains the receiver, key, accessor, realm, return target, source origin, and budget"
+)]
+pub(super) fn begin_legacy_define_accessor(
+    runtime: &mut Runtime,
+    realm: RealmId,
+    receiver: StoredValue,
+    key: StoredValue,
+    accessor: &StoredValue,
+    kind: LegacyAccessorKind,
+    return_to: Option<CallReturn>,
+    origin: JsStackFrame,
+    execution_budget: &mut ExecutionBudget,
+) -> Result<NativeDispatch, NativeFailure> {
+    let target = object_prototype_to_object(runtime, realm, receiver, &origin)?;
+    let StoredValue::Function(accessor) = accessor else {
+        return Err(NativeFailure::Abrupt(type_error(
+            realm,
+            Some(&origin),
+            kind.define_name(),
+            "accessor is not callable",
+        )?));
+    };
+    begin_property_key_conversion(
+        runtime,
+        key,
+        PropertyKeyTarget::LegacyDefineAccessor {
+            target,
+            accessor: *accessor,
+            kind,
+            realm,
+        },
+        realm,
+        return_to,
+        origin,
+        execution_budget,
+    )
+}
+
+/// Applies the completed property key for one legacy accessor definition.
+#[allow(
+    clippy::too_many_arguments,
+    reason = "the property-key continuation restores the target, accessor, realm, return target, source origin, and budget"
+)]
+pub(super) fn finish_legacy_define_accessor(
+    runtime: &mut Runtime,
+    target: &StoredValue,
+    key: PropertyKey,
+    accessor: FunctionId,
+    kind: LegacyAccessorKind,
+    realm: RealmId,
+    return_to: Option<CallReturn>,
+    origin: JsStackFrame,
+    execution_budget: &mut ExecutionBudget,
+) -> Result<NativeDispatch, NativeFailure> {
+    let reference = target
+        .heap_reference()
+        .ok_or(EngineFault::RuntimeInvariant {
+            message: "legacy accessor definition lost its object receiver",
+        })?;
+    let (getter, setter) = match kind {
+        LegacyAccessorKind::Getter => (Requested::Present(Some(accessor)), Requested::Absent),
+        LegacyAccessorKind::Setter => (Requested::Absent, Requested::Present(Some(accessor))),
+    };
+    let definition = PropertyDefinition::accessor(getter, setter)
+        .with_enumerable(Requested::Present(true))
+        .with_configurable(Requested::Present(true));
+    let dispatch = begin_internal_define_own_property(
+        runtime,
+        reference,
+        key,
+        definition,
+        realm,
+        return_to,
+        origin,
+        execution_budget,
+        DefinePropertyResult::Target,
+    )?;
+    continue_legacy_define_accessor_after(dispatch)
+}
+
+fn continue_legacy_define_accessor_after(
+    dispatch: NativeDispatch,
+) -> Result<NativeDispatch, NativeFailure> {
+    match dispatch {
+        NativeDispatch::Immediate(_) => Ok(NativeDispatch::Immediate(StoredValue::Undefined)),
+        NativeDispatch::Call(mut call) => {
+            prepend_native_continuations(
+                &mut call,
+                vec![NativeContinuation::LegacyDefineAccessor],
+            )?;
+            Ok(NativeDispatch::Call(call))
+        }
+        NativeDispatch::Frame(mut frame) => {
+            attach_native_continuations(
+                &mut frame,
+                vec![NativeContinuation::LegacyDefineAccessor],
+            )?;
+            Ok(NativeDispatch::Frame(frame))
+        }
+        NativeDispatch::Pair(_, _)
+        | NativeDispatch::ForOfRecord { .. }
+        | NativeDispatch::ForOfStep { .. }
+        | NativeDispatch::ForOfClosed
+        | NativeDispatch::CopyDataPropertiesDone
+        | NativeDispatch::AsyncAwait { .. } => Err(EngineFault::RuntimeInvariant {
+            message: "legacy accessor definition produced a structured result",
+        }
+        .into()),
+    }
+}
+
+/// Starts `Object.prototype.__lookupGetter__` or `__lookupSetter__`.
+#[allow(
+    clippy::too_many_arguments,
+    reason = "the native boundary retains the receiver, key, accessor half, realm, return target, source origin, and budget"
+)]
+pub(super) fn begin_legacy_lookup_accessor(
+    runtime: &mut Runtime,
+    realm: RealmId,
+    receiver: StoredValue,
+    key: StoredValue,
+    kind: LegacyAccessorKind,
+    return_to: Option<CallReturn>,
+    origin: JsStackFrame,
+    execution_budget: &mut ExecutionBudget,
+) -> Result<NativeDispatch, NativeFailure> {
+    let target = object_prototype_to_object(runtime, realm, receiver, &origin)?;
+    begin_property_key_conversion(
+        runtime,
+        key,
+        PropertyKeyTarget::LegacyLookupAccessor {
+            target,
+            kind,
+            realm,
+        },
+        realm,
+        return_to,
+        origin,
+        execution_budget,
+    )
+}
+
+/// Applies the completed property key and walks observable prototype internal
+/// methods without invoking the discovered property.
+#[allow(
+    clippy::too_many_arguments,
+    reason = "the lookup loop carries its object, key, accessor half, realm, return target, source origin, and budget"
+)]
+pub(super) fn finish_legacy_lookup_accessor(
+    runtime: &mut Runtime,
+    target: &StoredValue,
+    key: PropertyKey,
+    kind: LegacyAccessorKind,
+    realm: RealmId,
+    return_to: Option<CallReturn>,
+    origin: JsStackFrame,
+    execution_budget: &mut ExecutionBudget,
+) -> Result<NativeDispatch, NativeFailure> {
+    let current = target
+        .heap_reference()
+        .ok_or(EngineFault::RuntimeInvariant {
+            message: "legacy accessor lookup lost its object receiver",
+        })?;
+    let state = LegacyAccessorLookupContinuation {
+        current,
+        key: key.clone(),
+        kind,
+        realm,
+        origin: origin.clone(),
+        stage: LegacyAccessorLookupStage::Descriptor,
+    };
+    execution_budget.charge_instructions(1)?;
+    let dispatch = begin_internal_get_own_property(
+        runtime,
+        current,
+        key,
+        realm,
+        return_to,
+        origin,
+        execution_budget,
+    )?;
+    match continue_legacy_lookup_accessor_after(dispatch, state)? {
+        LegacyAccessorLookupDispatch::Resume(state, completion) => {
+            advance_legacy_lookup_accessor(runtime, state, completion, return_to, execution_budget)
+        }
+        LegacyAccessorLookupDispatch::Suspend(dispatch) => Ok(*dispatch),
+    }
+}
+
+fn continue_legacy_lookup_accessor_after(
+    dispatch: NativeDispatch,
+    state: LegacyAccessorLookupContinuation,
+) -> Result<LegacyAccessorLookupDispatch, NativeFailure> {
+    match dispatch {
+        NativeDispatch::Immediate(value) => Ok(LegacyAccessorLookupDispatch::Resume(state, value)),
+        NativeDispatch::Call(mut call) => {
+            prepend_native_continuations(
+                &mut call,
+                vec![NativeContinuation::LegacyAccessorLookup(Box::new(state))],
+            )?;
+            Ok(LegacyAccessorLookupDispatch::Suspend(Box::new(
+                NativeDispatch::Call(call),
+            )))
+        }
+        NativeDispatch::Frame(mut frame) => {
+            attach_native_continuations(
+                &mut frame,
+                vec![NativeContinuation::LegacyAccessorLookup(Box::new(state))],
+            )?;
+            Ok(LegacyAccessorLookupDispatch::Suspend(Box::new(
+                NativeDispatch::Frame(frame),
+            )))
+        }
+        NativeDispatch::Pair(_, _)
+        | NativeDispatch::ForOfRecord { .. }
+        | NativeDispatch::ForOfStep { .. }
+        | NativeDispatch::ForOfClosed
+        | NativeDispatch::CopyDataPropertiesDone
+        | NativeDispatch::AsyncAwait { .. } => Err(EngineFault::RuntimeInvariant {
+            message: "legacy accessor lookup internal method produced a structured result",
+        }
+        .into()),
+    }
+}
+
+pub(super) fn advance_legacy_lookup_accessor(
+    runtime: &mut Runtime,
+    mut state: LegacyAccessorLookupContinuation,
+    mut completion: StoredValue,
+    return_to: Option<CallReturn>,
+    execution_budget: &mut ExecutionBudget,
+) -> Result<NativeDispatch, NativeFailure> {
+    loop {
+        match state.stage {
+            LegacyAccessorLookupStage::Descriptor => {
+                if let Some(property) = internal_complete_own_property(runtime, &completion)? {
+                    let accessor = match property {
+                        OwnProperty::Accessor { getter, setter, .. } => match state.kind {
+                            LegacyAccessorKind::Getter => getter,
+                            LegacyAccessorKind::Setter => setter,
+                        },
+                        OwnProperty::Data { .. } => None,
+                    };
+                    return Ok(NativeDispatch::Immediate(
+                        accessor.map_or(StoredValue::Undefined, StoredValue::Function),
+                    ));
+                }
+                state.stage = LegacyAccessorLookupStage::Prototype;
+                execution_budget.charge_instructions(1)?;
+                let dispatch = begin_internal_get_prototype_of(
+                    runtime,
+                    state.current,
+                    state.realm,
+                    return_to,
+                    state.origin.clone(),
+                    execution_budget,
+                )?;
+                match continue_legacy_lookup_accessor_after(dispatch, state)? {
+                    LegacyAccessorLookupDispatch::Resume(next_state, next_completion) => {
+                        state = next_state;
+                        completion = next_completion;
+                    }
+                    LegacyAccessorLookupDispatch::Suspend(dispatch) => return Ok(*dispatch),
+                }
+            }
+            LegacyAccessorLookupStage::Prototype => {
+                if matches!(completion, StoredValue::Null) {
+                    return Ok(NativeDispatch::Immediate(StoredValue::Undefined));
+                }
+                let current = completion
+                    .heap_reference()
+                    .ok_or(EngineFault::RuntimeInvariant {
+                        message: "legacy accessor lookup prototype was neither object nor null",
+                    })?;
+                state.current = current;
+                state.stage = LegacyAccessorLookupStage::Descriptor;
+                execution_budget.charge_instructions(1)?;
+                let dispatch = begin_internal_get_own_property(
+                    runtime,
+                    current,
+                    state.key.clone(),
+                    state.realm,
+                    return_to,
+                    state.origin.clone(),
+                    execution_budget,
+                )?;
+                match continue_legacy_lookup_accessor_after(dispatch, state)? {
+                    LegacyAccessorLookupDispatch::Resume(next_state, next_completion) => {
+                        state = next_state;
+                        completion = next_completion;
+                    }
+                    LegacyAccessorLookupDispatch::Suspend(dispatch) => return Ok(*dispatch),
+                }
+            }
+        }
+    }
+}
+
 /// The legacy `Object.prototype.__proto__` getter.
 ///
 /// This is deliberately routed through the receiver's observable
