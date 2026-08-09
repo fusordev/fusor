@@ -2330,6 +2330,50 @@ fn finish_ordinary_set_receiver(
     )?))
 }
 
+#[derive(Clone, Copy)]
+enum IntegerIndexedSetAction {
+    Complete,
+    RejectImmutable,
+    Store {
+        object: ObjectId,
+        key: TypedArrayPropertyKey,
+    },
+}
+
+/// Applies the typed-array prefix of `[[Set]]` at every object reached by an
+/// ordinary prototype walk. `None` means the valid alternate-receiver case
+/// must continue through `OrdinarySet` with the virtual element descriptor.
+fn integer_indexed_set_action(
+    runtime: &Runtime,
+    reference: HeapReference,
+    key: &PropertyKey,
+    receiver: &StoredValue,
+) -> Result<Option<IntegerIndexedSetAction>, NativeFailure> {
+    let HeapReference::Object(object) = reference else {
+        return Ok(None);
+    };
+    let Some(key) = runtime.typed_array_property_key(object, key)? else {
+        return Ok(None);
+    };
+    if key == TypedArrayPropertyKey::Ordinary {
+        return Ok(None);
+    }
+    if runtime.is_typed_array_backing_buffer_immutable(object)? {
+        return Ok(Some(IntegerIndexedSetAction::RejectImmutable));
+    }
+    if receiver.strict_equals(&StoredValue::Object(object)) {
+        return Ok(Some(IntegerIndexedSetAction::Store { object, key }));
+    }
+    let valid = match key {
+        TypedArrayPropertyKey::Index(index) => {
+            runtime.typed_array_read_index(object, index)?.is_some()
+        }
+        TypedArrayPropertyKey::Invalid => false,
+        TypedArrayPropertyKey::Ordinary => unreachable!("filtered above"),
+    };
+    Ok((!valid).then_some(IntegerIndexedSetAction::Complete))
+}
+
 #[allow(
     clippy::too_many_arguments,
     reason = "Proxy [[Set]] keeps target, receiver, key, value, completion mode, and resume authority explicit"
@@ -2348,56 +2392,6 @@ pub(super) fn begin_internal_set(
     origin: JsStackFrame,
     execution_budget: &mut ExecutionBudget,
 ) -> Result<NativeDispatch, NativeFailure> {
-    if let HeapReference::Object(object) = reference
-        && let Some(key) = runtime.typed_array_property_key(object, &key)?
-        && key != TypedArrayPropertyKey::Ordinary
-    {
-        if runtime.is_typed_array_backing_buffer_immutable(object)? {
-            if boolean_result {
-                return Ok(NativeDispatch::Immediate(StoredValue::Boolean(false)));
-            }
-            if !strict {
-                return Ok(NativeDispatch::Immediate(StoredValue::Undefined));
-            }
-            return Err(NativeFailure::Abrupt(property_exception_at(
-                realm,
-                origin,
-                Some(&name),
-                PropertyFailure::ReadOnly,
-            )?));
-        }
-        if receiver.strict_equals(&StoredValue::Object(object)) {
-            return begin_typed_array_element_set(
-                runtime,
-                object,
-                key,
-                value,
-                if boolean_result {
-                    TypedArraySetCompletion::ReflectSet
-                } else {
-                    TypedArraySetCompletion::LanguageWrite
-                },
-                realm,
-                return_to,
-                origin,
-                execution_budget,
-            );
-        }
-        let valid = match key {
-            TypedArrayPropertyKey::Index(index) => {
-                runtime.typed_array_read_index(object, index)?.is_some()
-            }
-            TypedArrayPropertyKey::Invalid => false,
-            TypedArrayPropertyKey::Ordinary => unreachable!("filtered above"),
-        };
-        if !valid {
-            return Ok(NativeDispatch::Immediate(if boolean_result {
-                StoredValue::Boolean(true)
-            } else {
-                StoredValue::Undefined
-            }));
-        }
-    }
     let completion = if boolean_result {
         ProxyBooleanCompletion::Boolean
     } else {
@@ -2431,6 +2425,48 @@ pub(super) fn begin_internal_set(
                 origin,
                 execution_budget,
             );
+        }
+        if let Some(action) = integer_indexed_set_action(runtime, current, &key, &receiver)? {
+            match action {
+                IntegerIndexedSetAction::Complete => {
+                    return Ok(NativeDispatch::Immediate(if boolean_result {
+                        StoredValue::Boolean(true)
+                    } else {
+                        StoredValue::Undefined
+                    }));
+                }
+                IntegerIndexedSetAction::RejectImmutable => {
+                    if boolean_result {
+                        return Ok(NativeDispatch::Immediate(StoredValue::Boolean(false)));
+                    }
+                    if !strict {
+                        return Ok(NativeDispatch::Immediate(StoredValue::Undefined));
+                    }
+                    return Err(NativeFailure::Abrupt(property_exception_at(
+                        realm,
+                        origin,
+                        Some(&name),
+                        PropertyFailure::ReadOnly,
+                    )?));
+                }
+                IntegerIndexedSetAction::Store { object, key } => {
+                    return begin_typed_array_element_set(
+                        runtime,
+                        object,
+                        key,
+                        value,
+                        if boolean_result {
+                            TypedArraySetCompletion::ReflectSet
+                        } else {
+                            TypedArraySetCompletion::LanguageWrite
+                        },
+                        realm,
+                        return_to,
+                        origin,
+                        execution_budget,
+                    );
+                }
+            }
         }
         let own = heap_own_property(runtime, current, &key)?;
         if own.is_some() {

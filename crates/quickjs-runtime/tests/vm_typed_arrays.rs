@@ -127,6 +127,36 @@ fn typed_array_constructors_allocate_fixed_views_and_expose_the_shared_accessors
 }
 
 #[test]
+fn typed_array_integer_indexed_set_short_circuits_invalid_prototype_keys() {
+    assert_eq!(
+        rendered(
+            "var typedArray=new Int32Array(1);\
+             var valid=Object.create(typedArray),outOfBounds=Object.create(typedArray),nan=Object.create(typedArray);\
+             var validResult=Reflect.set(valid,'0',42,valid);\
+             var outOfBoundsResult=Reflect.set(outOfBounds,'1',42,outOfBounds);\
+             var nanResult=Reflect.set(nan,'NaN',42,nan);\
+             return [validResult,Object.hasOwn(valid,'0'),valid[0],typedArray[0],\
+               outOfBoundsResult,Object.hasOwn(outOfBounds,'1'),\
+               nanResult,Object.hasOwn(nan,'NaN')].join('|');"
+        ),
+        "true|true|42|0|true|false|true|false"
+    );
+}
+
+#[test]
+fn typed_array_integer_indexed_set_defines_a_valid_alternate_receiver() {
+    assert_eq!(
+        rendered(
+            "var target=new Int32Array([0]),receiver=new Int32Array([1]),short=new Int32Array(0);\
+             var updated=Reflect.set(target,'0',42,receiver);\
+             var rejected=Reflect.set(target,'0',43,short);\
+             return [updated,target[0],receiver[0],rejected,short.length].join('|');"
+        ),
+        "true|0|42|false|0"
+    );
+}
+
+#[test]
 fn typed_array_constructors_require_new_and_validate_the_length() {
     assert_eq!(thrown("return Int8Array(1);"), ExceptionKind::TypeError);
     assert_eq!(

@@ -401,28 +401,31 @@ pub(super) fn reflect_set_property(
     let Some(receiver_reference) = receiver.heap_reference() else {
         return Ok(NativeDispatch::Immediate(StoredValue::Boolean(false)));
     };
-    match own_property_of(runtime, receiver_reference, &key)? {
+    let definition = match own_property_of(runtime, receiver_reference, &key)? {
         Some(OwnProperty::Accessor { .. }) => {
-            Ok(NativeDispatch::Immediate(StoredValue::Boolean(false)))
+            return Ok(NativeDispatch::Immediate(StoredValue::Boolean(false)));
         }
         Some(OwnProperty::Data { layout, .. }) if layout.writable() != Some(true) => {
-            Ok(NativeDispatch::Immediate(StoredValue::Boolean(false)))
+            return Ok(NativeDispatch::Immediate(StoredValue::Boolean(false)));
         }
         Some(OwnProperty::Data { .. }) => {
-            let definition = PropertyDefinition::data(Requested::Present(value), Requested::Absent);
-            let outcome =
-                define_own_property(runtime, &receiver, key, &definition, execution_budget)?;
-            Ok(NativeDispatch::Immediate(StoredValue::Boolean(matches!(
-                outcome,
-                PropertyDefinitionOutcome::Complete
-            ))))
+            PropertyDefinition::data(Requested::Present(value), Requested::Absent)
         }
-        None => reflect_set_outcome(
-            define_static_property(runtime, &receiver, key, value, execution_budget)?,
-            return_to,
-            origin,
-        ),
-    }
+        None => PropertyDefinition::data(Requested::Present(value), Requested::Present(true))
+            .with_enumerable(Requested::Present(true))
+            .with_configurable(Requested::Present(true)),
+    };
+    begin_internal_define_own_property(
+        runtime,
+        receiver_reference,
+        key,
+        definition,
+        realm,
+        return_to,
+        origin,
+        execution_budget,
+        DefinePropertyResult::Boolean,
+    )
 }
 
 fn reflect_set_outcome(

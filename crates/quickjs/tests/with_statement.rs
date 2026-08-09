@@ -205,3 +205,11 @@ fn captured_strict_with_assignment_rechecks_binding_existence() {
         |value| assert_eq!(value.as_boolean(), Ok(Some(true))),
     );
 }
+
+#[test]
+fn sloppy_with_assignment_does_not_recreate_a_deleted_typed_array_index_name() {
+    evaluate(
+        "var typedArray=new Int32Array(10);var env=Object.create(typedArray);Object.defineProperty(env,'NaN',{configurable:true,value:100});with(env){NaN=(delete env.NaN,0);}Object.getOwnPropertyDescriptor(env,'NaN')===undefined;",
+        |value| assert_eq!(value.as_boolean(), Ok(Some(true))),
+    );
+}
