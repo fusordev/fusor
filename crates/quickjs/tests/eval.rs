@@ -91,6 +91,38 @@ fn closed_direct_eval_returns_the_script_completion() {
 }
 
 #[test]
+fn spread_direct_eval_materializes_the_iterator_and_evaluates_only_the_first_argument() {
+    evaluate(
+        "let elements=['x=1;','x=2;'],nextCount=0;let iterable={[Symbol.iterator](){return{next(){let index=nextCount++;return index<elements.length?{done:false,value:elements[index]}:{done:true};}};}};let result=(function(){let x='local';eval(...iterable);return x;})();result===1&&nextCount===3;",
+        |value| assert_eq!(value.as_boolean(), Ok(Some(true))),
+    );
+}
+
+#[test]
+fn empty_spreads_around_direct_eval_preserve_argument_list_order() {
+    evaluate(
+        "let nextCount=0;let empty={[Symbol.iterator](){return{next(){nextCount++;return{done:true};}};}};let missing=eval(...empty);let x=1;eval(...empty,'x=2;');eval('x=3;',...empty);missing===undefined&&x===3&&nextCount===3;",
+        |value| assert_eq!(value.as_boolean(), Ok(Some(true))),
+    );
+}
+
+#[test]
+fn spread_eval_identity_fallback_preserves_bare_and_with_reference_receivers() {
+    evaluate(
+        "let bareThis,withThis;let replacement=function(a,b){'use strict';bareThis=this;return a+b;};let bare=(function(eval){return eval(...[20,22]);})(replacement);let object={eval:function(a,b){'use strict';withThis=this;return a+b;}};let referenced;with(object){referenced=eval(...[19,23]);}bare===42&&referenced===42&&bareThis===undefined&&withThis===object;",
+        |value| assert_eq!(value.as_boolean(), Ok(Some(true))),
+    );
+}
+
+#[test]
+fn canonical_spread_eval_from_with_remains_direct_and_cleans_its_reference_receiver() {
+    evaluate(
+        "let object={answer:1,eval};let result;with(object){result=eval(...['answer=42;answer;']);}result===42&&object.answer===42;",
+        |value| assert_eq!(value.as_boolean(), Ok(Some(true))),
+    );
+}
+
+#[test]
 fn static_initializer_direct_eval_inherits_the_class_this_binding() {
     evaluate(
         "let block;let Box=class{static value='test';static direct=eval('this.value')+'262';static arrow=(()=>eval('this'))();static{block=eval('this');}static ordinary=(function(){return eval('this');}).call({marker:7});};Box.direct==='test262'&&Box.arrow===Box&&block===Box&&Box.ordinary.marker===7;",

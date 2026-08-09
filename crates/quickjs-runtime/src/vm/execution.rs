@@ -1676,7 +1676,69 @@ pub(super) fn execute_one(
             }
             return Ok(Step::DirectEval {
                 function: *function,
-                inputs,
+                inputs: DirectEvalInputSource::Call(inputs),
+                scope_index,
+                strict,
+                return_to,
+                source_pc,
+            });
+        }
+        FinalOpcode::ApplyEval => {
+            let Operands::U16(scope_index) = operands else {
+                return unsupported_dispatch(opcode);
+            };
+            let required = if eval_reference_call { 3 } else { 2 };
+            if frame.stack.len() < required {
+                return Err(EngineFault::StackDepthMismatch {
+                    function: frame.template,
+                    pc: source_pc,
+                    expected: u32::try_from(required).unwrap_or(u32::MAX),
+                    actual: frame.stack.len(),
+                }
+                .into());
+            }
+            let callee_index = frame.stack.len() - 2;
+            let StoredValue::Function(function) = stack_value_at(frame, callee_index)? else {
+                return Ok(Step::Abrupt(not_callable_exception(
+                    runtime, frame, source_pc,
+                )?));
+            };
+            let function = *function;
+            let array_like = stack_value_at(frame, callee_index + 1)?.duplicate();
+            let receiver = if eval_reference_call {
+                stack_value_at(frame, callee_index - 1)?.duplicate()
+            } else {
+                StoredValue::Undefined
+            };
+            let return_to =
+                CallReturn::push(verified_instruction.successors().fallthrough().ok_or(
+                    EngineFault::InvalidSuccessor {
+                        function: frame.template,
+                        pc: source_pc,
+                    },
+                )?);
+            let realm = code(runtime, frame.code)?.realm;
+            frame.stack.truncate(callee_index);
+            if !is_canonical_realm_eval(runtime, function, realm)? {
+                return Ok(Step::Apply {
+                    function,
+                    receiver,
+                    array_like,
+                    magic: 0,
+                    return_to,
+                    source_pc,
+                });
+            }
+            let StoredValue::Object(arguments) = array_like else {
+                return Err(EngineFault::RuntimeInvariant {
+                    message: "verified apply_eval argument list is not an Array",
+                }
+                .into());
+            };
+            let argument = verified_apply_eval_first_argument(runtime, arguments)?;
+            return Ok(Step::DirectEval {
+                function,
+                inputs: DirectEvalInputSource::FirstArgument(argument),
                 scope_index,
                 strict,
                 return_to,
@@ -4215,6 +4277,41 @@ pub(super) fn execute_one(
                 pc: source_pc,
             })?;
     Ok(Step::Continue)
+}
+
+/// Reads the first value from the fresh dense Array certified by spread-call
+/// lowering. A hand-authored compiler graph that substitutes a sparse or
+/// exotic list fails closed instead of bypassing observable indexed `Get`.
+fn verified_apply_eval_first_argument(
+    runtime: &Runtime,
+    array: ObjectId,
+) -> Result<StoredValue, EngineFault> {
+    let object = runtime
+        .objects
+        .get(array)
+        .ok_or(EngineFault::StaleHeapEdge {
+            edge: "object",
+            index: array.index(),
+            generation: array.generation(),
+        })?;
+    let state = object.array_state().ok_or(EngineFault::RuntimeInvariant {
+        message: "verified apply_eval argument list is not an Array",
+    })?;
+    if !state.is_dense()
+        || usize::try_from(state.length()).ok() != Some(state.dense_property_count())
+    {
+        return Err(EngineFault::RuntimeInvariant {
+            message: "verified apply_eval argument list is not a packed dense Array",
+        });
+    }
+    if state.length() == 0 {
+        return Ok(StoredValue::Undefined);
+    }
+    state
+        .dense_value(ArrayIndex::new(0).expect("zero is an Array index"))
+        .ok_or(EngineFault::RuntimeInvariant {
+            message: "verified apply_eval argument list lost its first dense element",
+        })
 }
 
 /// Converts the VM-only private-symbol value into the backing key used by the

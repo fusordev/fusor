@@ -5757,6 +5757,7 @@ const fn is_supported_opcode(opcode: FinalOpcode) -> bool {
             | FinalOpcode::CallConstructor
             | FinalOpcode::Apply
             | FinalOpcode::Eval
+            | FinalOpcode::ApplyEval
             | FinalOpcode::CheckCtorReturn
             | FinalOpcode::CheckCtor
             | FinalOpcode::InitCtor

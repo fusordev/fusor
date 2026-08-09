@@ -4413,6 +4413,11 @@ enum CallInputSource {
     Prepared(CallInputs),
 }
 
+enum DirectEvalInputSource {
+    Call(CallInputSource),
+    FirstArgument(StoredValue),
+}
+
 impl CallInputSource {
     const fn is_construction(&self) -> bool {
         match self {
@@ -4498,7 +4503,7 @@ enum Step {
     Continue,
     DirectEval {
         function: FunctionId,
-        inputs: CallInputSource,
+        inputs: DirectEvalInputSource,
         scope_index: u16,
         strict: bool,
         return_to: CallReturn,
@@ -5270,16 +5275,21 @@ fn execute_frame_loop(
                 return_to,
                 source_pc,
             } => {
-                let inputs = take_call_inputs(
-                    frames.last_mut().ok_or(EngineFault::MissingInstruction {
-                        function: FunctionTemplateId::new(0),
-                        instruction: 0,
-                    })?,
-                    function,
-                    inputs,
-                )?;
-                let mut arguments = inputs.arguments;
-                let argument = arguments.take_first_or_undefined();
+                let argument = match inputs {
+                    DirectEvalInputSource::Call(inputs) => {
+                        let inputs = take_call_inputs(
+                            frames.last_mut().ok_or(EngineFault::MissingInstruction {
+                                function: FunctionTemplateId::new(0),
+                                instruction: 0,
+                            })?,
+                            function,
+                            inputs,
+                        )?;
+                        let mut arguments = inputs.arguments;
+                        arguments.take_first_or_undefined()
+                    }
+                    DirectEvalInputSource::FirstArgument(argument) => argument,
+                };
                 let StoredValue::String(source) = argument else {
                     let parent = frames.last_mut().ok_or(EngineFault::MissingInstruction {
                         function: FunctionTemplateId::new(0),
