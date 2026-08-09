@@ -13,6 +13,7 @@ use icu::locale::{
 
 mod collator;
 mod date_time_format;
+mod list_format;
 mod locale;
 mod locale_info;
 mod number_format;
@@ -32,6 +33,11 @@ pub use date_time_format::{
     resolve_date_time_format,
 };
 
+pub use list_format::{
+    ListFormatError, ListFormatPart, ListFormatRequestOptions, ListFormatState, ListFormatStyle,
+    ListFormatType, format_list, format_list_to_parts, list_format_supported_locales,
+    resolve_list_format,
+};
 pub use locale::{
     LocaleComponents, LocaleOptionKind, LocaleOptions, apply_locale_options,
     canonicalize_locale_option, locale_components, maximize_locale, minimize_locale,

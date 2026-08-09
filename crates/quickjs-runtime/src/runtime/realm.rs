@@ -709,6 +709,8 @@ impl RealmBuildTransaction<'_> {
                 relative_time_format_constructor: function(
                     NativeFunctionKind::IntlRelativeTimeFormatConstructor,
                 ),
+                list_format_prototype: object(IntrinsicObjectId::IntlListFormatPrototype),
+                list_format_constructor: function(NativeFunctionKind::IntlListFormatConstructor),
                 locale_prototype: object(IntrinsicObjectId::IntlLocalePrototype),
                 locale_constructor: function(NativeFunctionKind::IntlLocaleConstructor),
             },

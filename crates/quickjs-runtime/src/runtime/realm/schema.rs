@@ -15,16 +15,17 @@ use crate::object::TypedArrayElementType;
 use crate::runtime::{
     ArrayBufferPrototypeMethod, AtomicsMethod, DataViewPrototypeMethod, DatePrototypeMethod,
     DateStaticMethod, IntlCollatorPrototypeMethod, IntlDateTimeFormatPrototypeMethod,
-    IntlLocalePrototypeMethod, IntlNumberFormatPrototypeMethod, IntlPluralRulesPrototypeMethod,
-    IntlRelativeTimeFormatPrototypeMethod, SharedArrayBufferPrototypeMethod,
-    TemporalDurationPrototypeMethod, TemporalDurationStaticMethod, TemporalInstantPrototypeMethod,
-    TemporalInstantStaticMethod, TemporalNowMethod, TemporalPlainDatePrototypeMethod,
-    TemporalPlainDateStaticMethod, TemporalPlainDateTimePrototypeMethod,
-    TemporalPlainDateTimeStaticMethod, TemporalPlainMonthDayPrototypeMethod,
-    TemporalPlainMonthDayStaticMethod, TemporalPlainTimePrototypeMethod,
-    TemporalPlainTimeStaticMethod, TemporalPlainYearMonthPrototypeMethod,
-    TemporalPlainYearMonthStaticMethod, TemporalZonedDateTimePrototypeMethod,
-    TemporalZonedDateTimeStaticMethod, TypedArrayPrototypeMethod,
+    IntlListFormatPrototypeMethod, IntlLocalePrototypeMethod, IntlNumberFormatPrototypeMethod,
+    IntlPluralRulesPrototypeMethod, IntlRelativeTimeFormatPrototypeMethod,
+    SharedArrayBufferPrototypeMethod, TemporalDurationPrototypeMethod,
+    TemporalDurationStaticMethod, TemporalInstantPrototypeMethod, TemporalInstantStaticMethod,
+    TemporalNowMethod, TemporalPlainDatePrototypeMethod, TemporalPlainDateStaticMethod,
+    TemporalPlainDateTimePrototypeMethod, TemporalPlainDateTimeStaticMethod,
+    TemporalPlainMonthDayPrototypeMethod, TemporalPlainMonthDayStaticMethod,
+    TemporalPlainTimePrototypeMethod, TemporalPlainTimeStaticMethod,
+    TemporalPlainYearMonthPrototypeMethod, TemporalPlainYearMonthStaticMethod,
+    TemporalZonedDateTimePrototypeMethod, TemporalZonedDateTimeStaticMethod,
+    TypedArrayPrototypeMethod,
 };
 
 /// Stable identity of an object allocated by Realm bootstrap.
@@ -87,6 +88,7 @@ pub(in crate::runtime) enum IntrinsicObjectId {
     IntlDateTimeFormatPrototype,
     IntlPluralRulesPrototype,
     IntlRelativeTimeFormatPrototype,
+    IntlListFormatPrototype,
     IntlLocalePrototype,
     Reflect,
     Json,
@@ -95,7 +97,7 @@ pub(in crate::runtime) enum IntrinsicObjectId {
 }
 
 impl IntrinsicObjectId {
-    pub(in crate::runtime) const ALL: [Self; 78] = [
+    pub(in crate::runtime) const ALL: [Self; 79] = [
         Self::ObjectPrototype,
         Self::GlobalObject,
         Self::ErrorPrototype(ErrorIntrinsicKind::Error),
@@ -169,6 +171,7 @@ impl IntrinsicObjectId {
         Self::IntlDateTimeFormatPrototype,
         Self::IntlPluralRulesPrototype,
         Self::IntlRelativeTimeFormatPrototype,
+        Self::IntlListFormatPrototype,
         Self::IntlLocalePrototype,
         Self::Reflect,
         Self::Json,
@@ -213,6 +216,9 @@ pub(in crate::runtime) enum RealmNameId {
     IntlRelativeTimeFormat,
     IntlRelativeTimeFormatSupportedLocalesOf,
     IntlRelativeTimeFormatPrototype(IntlRelativeTimeFormatPrototypeMethod),
+    IntlListFormat,
+    IntlListFormatSupportedLocalesOf,
+    IntlListFormatPrototype(IntlListFormatPrototypeMethod),
     Locale,
     IntlLocalePrototype(IntlLocalePrototypeMethod),
     Reflect,

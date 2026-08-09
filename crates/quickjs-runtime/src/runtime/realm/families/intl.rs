@@ -14,8 +14,8 @@ use crate::runtime::realm::{
     },
 };
 use crate::runtime::{
-    IntlCollatorPrototypeMethod, IntlDateTimeFormatPrototypeMethod, IntlLocalePrototypeMethod,
-    IntlNumberFormatPrototypeMethod, IntlPluralRulesPrototypeMethod,
+    IntlCollatorPrototypeMethod, IntlDateTimeFormatPrototypeMethod, IntlListFormatPrototypeMethod,
+    IntlLocalePrototypeMethod, IntlNumberFormatPrototypeMethod, IntlPluralRulesPrototypeMethod,
     IntlRelativeTimeFormatPrototypeMethod,
 };
 
@@ -27,6 +27,7 @@ pub(super) fn visit_objects(visit: ObjectSink<'_>) {
         IntrinsicObjectId::IntlDateTimeFormatPrototype,
         IntrinsicObjectId::IntlPluralRulesPrototype,
         IntrinsicObjectId::IntlRelativeTimeFormatPrototype,
+        IntrinsicObjectId::IntlListFormatPrototype,
         IntrinsicObjectId::IntlLocalePrototype,
     ] {
         visit(object(
@@ -168,6 +169,23 @@ pub(super) fn visit_functions(visit: FunctionSink<'_>) {
         ));
     }
     visit(ordinary(
+        NativeFunctionKind::IntlListFormatConstructor,
+        IntrinsicNameSpec::RealmName(RealmNameId::IntlListFormat),
+        0,
+    ));
+    visit(ordinary(
+        NativeFunctionKind::IntlListFormatSupportedLocalesOf,
+        IntrinsicNameSpec::RealmName(RealmNameId::IntlListFormatSupportedLocalesOf),
+        1,
+    ));
+    for method in IntlListFormatPrototypeMethod::ALL {
+        visit(ordinary(
+            NativeFunctionKind::IntlListFormatPrototype(method),
+            IntrinsicNameSpec::RealmName(RealmNameId::IntlListFormatPrototype(method)),
+            method.length(),
+        ));
+    }
+    visit(ordinary(
         NativeFunctionKind::IntlLocaleConstructor,
         IntrinsicNameSpec::RealmName(RealmNameId::Locale),
         1,
@@ -218,6 +236,11 @@ pub(super) fn visit_properties(visit: PropertySink<'_>) {
     ));
     let relative_time_format_prototype =
         IntrinsicIdentity::Object(IntrinsicObjectId::IntlRelativeTimeFormatPrototype);
+    let list_format_constructor = IntrinsicIdentity::Function(IntrinsicFunctionId(
+        NativeFunctionKind::IntlListFormatConstructor,
+    ));
+    let list_format_prototype =
+        IntrinsicIdentity::Object(IntrinsicObjectId::IntlListFormatPrototype);
     let locale_constructor = IntrinsicIdentity::Function(IntrinsicFunctionId(
         NativeFunctionKind::IntlLocaleConstructor,
     ));
@@ -251,6 +274,11 @@ pub(super) fn visit_properties(visit: PropertySink<'_>) {
         intl,
         IntrinsicKeySpec::InternedString(RealmNameId::IntlRelativeTimeFormat),
         NativeFunctionKind::IntlRelativeTimeFormatConstructor,
+    ));
+    visit(method(
+        intl,
+        IntrinsicKeySpec::InternedString(RealmNameId::IntlListFormat),
+        NativeFunctionKind::IntlListFormatConstructor,
     ));
     visit(method(
         intl,
@@ -466,6 +494,36 @@ pub(super) fn visit_properties(visit: PropertySink<'_>) {
         IntrinsicKeySpec::WellKnownSymbol(PredefinedAtom::SymbolToStringTag),
         PropertyLayout::data(false, false, true),
         IntrinsicValueSpec::String(IntrinsicStringSpec::Literal("Intl.RelativeTimeFormat")),
+    ));
+
+    visit(data(
+        list_format_constructor,
+        IntrinsicKeySpec::PredefinedString(PredefinedAtom::Prototype),
+        CONSTRUCTOR_PROTOTYPE_PROPERTY,
+        IntrinsicValueSpec::Object(IntrinsicObjectId::IntlListFormatPrototype),
+    ));
+    visit(method(
+        list_format_constructor,
+        IntrinsicKeySpec::InternedString(RealmNameId::IntlListFormatSupportedLocalesOf),
+        NativeFunctionKind::IntlListFormatSupportedLocalesOf,
+    ));
+    visit(method(
+        list_format_prototype,
+        IntrinsicKeySpec::PredefinedString(PredefinedAtom::Constructor),
+        NativeFunctionKind::IntlListFormatConstructor,
+    ));
+    for method_id in IntlListFormatPrototypeMethod::ALL {
+        visit(method(
+            list_format_prototype,
+            IntrinsicKeySpec::InternedString(RealmNameId::IntlListFormatPrototype(method_id)),
+            NativeFunctionKind::IntlListFormatPrototype(method_id),
+        ));
+    }
+    visit(data(
+        list_format_prototype,
+        IntrinsicKeySpec::WellKnownSymbol(PredefinedAtom::SymbolToStringTag),
+        PropertyLayout::data(false, false, true),
+        IntrinsicValueSpec::String(IntrinsicStringSpec::Literal("Intl.ListFormat")),
     ));
 
     visit(data(

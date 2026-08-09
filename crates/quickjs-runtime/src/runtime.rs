@@ -312,6 +312,8 @@ struct IntlIntrinsics {
     plural_rules_constructor: FunctionId,
     relative_time_format_prototype: ObjectId,
     relative_time_format_constructor: FunctionId,
+    list_format_prototype: ObjectId,
+    list_format_constructor: FunctionId,
     locale_prototype: ObjectId,
     locale_constructor: FunctionId,
 }
@@ -1283,6 +1285,12 @@ pub(crate) enum NativeFunctionKind {
     IntlRelativeTimeFormatSupportedLocalesOf,
     /// One `%Intl.RelativeTimeFormat.prototype%` method.
     IntlRelativeTimeFormatPrototype(IntlRelativeTimeFormatPrototypeMethod),
+    /// The `%Intl.ListFormat%` constructor.
+    IntlListFormatConstructor,
+    /// `Intl.ListFormat.supportedLocalesOf`.
+    IntlListFormatSupportedLocalesOf,
+    /// One `%Intl.ListFormat.prototype%` method.
+    IntlListFormatPrototype(IntlListFormatPrototypeMethod),
     /// The `%Intl.Locale%` constructor.
     IntlLocaleConstructor,
     /// One `%Intl.Locale.prototype%` accessor or method.
@@ -1690,6 +1698,32 @@ pub(crate) enum IntlRelativeTimeFormatPrototypeMethod {
     ResolvedOptions,
     Format,
     FormatToParts,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum IntlListFormatPrototypeMethod {
+    ResolvedOptions,
+    Format,
+    FormatToParts,
+}
+
+impl IntlListFormatPrototypeMethod {
+    pub(crate) const ALL: [Self; 3] = [Self::ResolvedOptions, Self::Format, Self::FormatToParts];
+
+    pub(crate) const fn name(self) -> &'static str {
+        match self {
+            Self::ResolvedOptions => "resolvedOptions",
+            Self::Format => "format",
+            Self::FormatToParts => "formatToParts",
+        }
+    }
+
+    pub(crate) const fn length(self) -> i32 {
+        match self {
+            Self::ResolvedOptions => 0,
+            Self::Format | Self::FormatToParts => 1,
+        }
+    }
 }
 
 impl IntlRelativeTimeFormatPrototypeMethod {
@@ -4437,6 +4471,7 @@ impl NativeFunctionKind {
                 | Self::IntlDateTimeFormatConstructor
                 | Self::IntlPluralRulesConstructor
                 | Self::IntlRelativeTimeFormatConstructor
+                | Self::IntlListFormatConstructor
                 | Self::IntlLocaleConstructor
                 | Self::TemporalDurationConstructor
                 | Self::TemporalInstantConstructor

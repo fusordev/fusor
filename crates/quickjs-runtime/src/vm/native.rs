@@ -1356,6 +1356,31 @@ pub(super) fn resume_native_continuations(
                     execution_budget,
                 )?
             }
+            NativeContinuation::IntlListFormatConstructor(state) => {
+                advance_intl_list_format_constructor(
+                    runtime,
+                    *state,
+                    Some(value.duplicate()),
+                    return_to,
+                    execution_budget,
+                )?
+            }
+            NativeContinuation::IntlListFormatSupportedLocalesOf(state) => {
+                advance_intl_list_format_supported_locales(
+                    runtime,
+                    *state,
+                    Some(value.duplicate()),
+                    return_to,
+                    execution_budget,
+                )?
+            }
+            NativeContinuation::IntlListFormatValue(state) => advance_intl_list_format_value(
+                runtime,
+                *state,
+                value.duplicate(),
+                return_to,
+                execution_budget,
+            )?,
             NativeContinuation::IntlLocaleConstructor(state) => advance_intl_locale_constructor(
                 runtime,
                 *state,
@@ -3005,6 +3030,34 @@ pub(super) fn dispatch_native_call_with_frames(
                 execution_budget,
             )
         }
+        NativeFunctionKind::IntlListFormatConstructor => begin_intl_list_format_constructor(
+            runtime,
+            inputs,
+            native.realm,
+            return_to,
+            origin.unwrap_or_else(native_function_host_origin),
+            execution_budget,
+        ),
+        NativeFunctionKind::IntlListFormatSupportedLocalesOf => {
+            begin_intl_list_format_supported_locales_of(
+                runtime,
+                inputs.arguments,
+                native.realm,
+                return_to,
+                origin.unwrap_or_else(native_function_host_origin),
+                execution_budget,
+            )
+        }
+        NativeFunctionKind::IntlListFormatPrototype(method) => begin_intl_list_format_prototype(
+            runtime,
+            method,
+            &inputs.receiver,
+            inputs.arguments,
+            native.realm,
+            return_to,
+            origin.unwrap_or_else(native_function_host_origin),
+            execution_budget,
+        ),
         NativeFunctionKind::IntlLocaleConstructor => begin_intl_locale_constructor(
             runtime,
             inputs,

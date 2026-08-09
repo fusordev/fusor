@@ -525,6 +525,62 @@ fn relative_time_format_values_parts_and_coercion_order_are_spec_shaped() {
 }
 
 #[test]
+fn list_format_constructor_options_and_descriptors_are_spec_shaped() {
+    assert_eq!(
+        rendered(
+            "var log=[];
+             var options={
+               get localeMatcher(){log.push('localeMatcher');return {toString:function(){log.push('localeMatcher string');return 'lookup'}}},
+               get type(){log.push('type');return 'disjunction'},
+               get style(){log.push('style');return 'short'}
+             };
+             class CustomListFormat extends Intl.ListFormat{}
+             var lf=new CustomListFormat('en-US',options);var ro=lf.resolvedOptions();
+             var d=Object.getOwnPropertyDescriptor(Intl.ListFormat.prototype,'formatToParts');
+             var supported=Intl.ListFormat.supportedLocalesOf(['tlh','en-u-ca-gregory'],{localeMatcher:'lookup'});
+             var primitive;
+             try{new Intl.ListFormat([],true)}catch(error){primitive=error.name}
+             return [Intl.ListFormat.length,Intl.ListFormat.name,
+               Object.getPrototypeOf(lf)===CustomListFormat.prototype,
+               Object.keys(ro).join(','),ro.locale,ro.type,ro.style,
+               d.value.length,d.writable,d.enumerable,d.configurable,
+               supported.join(','),primitive,log.join(',')].join('|');"
+        ),
+        "0|ListFormat|true|locale,type,style|en-US|disjunction|short|1|true|false|true|en-u-ca-gregory|TypeError|localeMatcher,localeMatcher string,type,style"
+    );
+}
+
+#[test]
+fn list_format_iterables_parts_and_iterator_close_are_spec_shaped() {
+    assert_eq!(
+        rendered(
+            "var lf=new Intl.ListFormat('en-US');
+             var iterable={index:0,values:['Motorcycle','Bus','Car'],
+               [Symbol.iterator]:function(){return this},
+               next:function(){return this.index<this.values.length
+                 ?{done:false,value:this.values[this.index++]}:{done:true}}};
+             var formatted=lf.format(iterable);
+             var parts=lf.formatToParts(['Motorcycle','Bus','Car']);
+             var closed=false;
+             var invalid={index:0,[Symbol.iterator]:function(){return this},
+               next:function(){this.index++;return this.index===3
+                 ?{done:false,value:3}:{done:false,value:String(this.index)}},
+               return:function(){closed=true;return {done:true}}};
+             var invalidError,brandError,brandGet=false;
+             try{lf.format(invalid)}catch(error){invalidError=error.name}
+             var brandedItems={get [Symbol.iterator](){brandGet=true;return function(){}}};
+             try{Intl.ListFormat.prototype.format.call({},brandedItems)}catch(error){brandError=error.name}
+             return [formatted,
+               parts.map(function(part){return part.type+':'+part.value}).join(','),
+               parts.map(function(part){return part.value}).join('')===formatted,
+               lf.format(undefined),lf.formatToParts(undefined).length,
+               invalid.index,closed,invalidError,brandGet,brandError].join('|');"
+        ),
+        "Motorcycle, Bus, and Car|element:Motorcycle,literal:, ,element:Bus,literal:, and ,element:Car|true||0|3|true|TypeError|false|TypeError"
+    );
+}
+
+#[test]
 fn date_time_format_constructor_reads_options_in_normative_order() {
     assert_eq!(
         rendered(

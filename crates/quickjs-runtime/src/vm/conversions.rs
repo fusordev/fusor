@@ -3244,6 +3244,24 @@ fn finish_operator_primitive_target(
         OperatorPrimitiveTarget::IntlRelativeTimeFormatUnit(state) => {
             finish_intl_relative_time_format_unit_primitive(runtime, &state, value)
         }
+        OperatorPrimitiveTarget::IntlListFormatConstructor(state) => {
+            advance_intl_list_format_constructor(
+                runtime,
+                *state,
+                Some(value),
+                return_to,
+                execution_budget,
+            )
+        }
+        OperatorPrimitiveTarget::IntlListFormatSupportedLocalesOf(state) => {
+            advance_intl_list_format_supported_locales(
+                runtime,
+                *state,
+                Some(value),
+                return_to,
+                execution_budget,
+            )
+        }
         OperatorPrimitiveTarget::IntlCollatorCompareFirst(state) => {
             finish_intl_collator_compare_first(runtime, *state, value, return_to, execution_budget)
         }
