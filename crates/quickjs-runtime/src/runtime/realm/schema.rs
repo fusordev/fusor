@@ -17,15 +17,16 @@ use crate::runtime::{
     DateStaticMethod, IntlCollatorPrototypeMethod, IntlDateTimeFormatPrototypeMethod,
     IntlDisplayNamesPrototypeMethod, IntlListFormatPrototypeMethod, IntlLocalePrototypeMethod,
     IntlNumberFormatPrototypeMethod, IntlPluralRulesPrototypeMethod,
-    IntlRelativeTimeFormatPrototypeMethod, SharedArrayBufferPrototypeMethod,
-    TemporalDurationPrototypeMethod, TemporalDurationStaticMethod, TemporalInstantPrototypeMethod,
-    TemporalInstantStaticMethod, TemporalNowMethod, TemporalPlainDatePrototypeMethod,
-    TemporalPlainDateStaticMethod, TemporalPlainDateTimePrototypeMethod,
-    TemporalPlainDateTimeStaticMethod, TemporalPlainMonthDayPrototypeMethod,
-    TemporalPlainMonthDayStaticMethod, TemporalPlainTimePrototypeMethod,
-    TemporalPlainTimeStaticMethod, TemporalPlainYearMonthPrototypeMethod,
-    TemporalPlainYearMonthStaticMethod, TemporalZonedDateTimePrototypeMethod,
-    TemporalZonedDateTimeStaticMethod, TypedArrayPrototypeMethod,
+    IntlRelativeTimeFormatPrototypeMethod, IntlSegmenterPrototypeMethod,
+    SharedArrayBufferPrototypeMethod, TemporalDurationPrototypeMethod,
+    TemporalDurationStaticMethod, TemporalInstantPrototypeMethod, TemporalInstantStaticMethod,
+    TemporalNowMethod, TemporalPlainDatePrototypeMethod, TemporalPlainDateStaticMethod,
+    TemporalPlainDateTimePrototypeMethod, TemporalPlainDateTimeStaticMethod,
+    TemporalPlainMonthDayPrototypeMethod, TemporalPlainMonthDayStaticMethod,
+    TemporalPlainTimePrototypeMethod, TemporalPlainTimeStaticMethod,
+    TemporalPlainYearMonthPrototypeMethod, TemporalPlainYearMonthStaticMethod,
+    TemporalZonedDateTimePrototypeMethod, TemporalZonedDateTimeStaticMethod,
+    TypedArrayPrototypeMethod,
 };
 
 /// Stable identity of an object allocated by Realm bootstrap.
@@ -90,6 +91,9 @@ pub(in crate::runtime) enum IntrinsicObjectId {
     IntlRelativeTimeFormatPrototype,
     IntlListFormatPrototype,
     IntlDisplayNamesPrototype,
+    IntlSegmenterPrototype,
+    IntlSegmentsPrototype,
+    IntlSegmentIteratorPrototype,
     IntlLocalePrototype,
     Reflect,
     Json,
@@ -98,7 +102,7 @@ pub(in crate::runtime) enum IntrinsicObjectId {
 }
 
 impl IntrinsicObjectId {
-    pub(in crate::runtime) const ALL: [Self; 80] = [
+    pub(in crate::runtime) const ALL: [Self; 83] = [
         Self::ObjectPrototype,
         Self::GlobalObject,
         Self::ErrorPrototype(ErrorIntrinsicKind::Error),
@@ -174,6 +178,9 @@ impl IntrinsicObjectId {
         Self::IntlRelativeTimeFormatPrototype,
         Self::IntlListFormatPrototype,
         Self::IntlDisplayNamesPrototype,
+        Self::IntlSegmenterPrototype,
+        Self::IntlSegmentsPrototype,
+        Self::IntlSegmentIteratorPrototype,
         Self::IntlLocalePrototype,
         Self::Reflect,
         Self::Json,
@@ -224,6 +231,10 @@ pub(in crate::runtime) enum RealmNameId {
     IntlDisplayNames,
     IntlDisplayNamesSupportedLocalesOf,
     IntlDisplayNamesPrototype(IntlDisplayNamesPrototypeMethod),
+    IntlSegmenter,
+    IntlSegmenterSupportedLocalesOf,
+    IntlSegmenterPrototype(IntlSegmenterPrototypeMethod),
+    IntlSegmentsContaining,
     Locale,
     IntlLocalePrototype(IntlLocalePrototypeMethod),
     Reflect,

@@ -25,7 +25,7 @@
 
 use quickjs_intl::{
     CollatorState, DateTimeFormatState, DisplayNamesState, ListFormatState, NumberFormatState,
-    PluralRulesState, RelativeTimeFormatState,
+    PluralRulesState, RelativeTimeFormatState, SegmentBoundary, SegmenterState,
 };
 use std::{
     cell::RefCell,
@@ -2668,6 +2668,12 @@ pub(crate) enum HeapObjectKind {
     IntlListFormat(ListFormatState),
     /// An ECMA-402 `Intl.DisplayNames` object.
     IntlDisplayNames(DisplayNamesState),
+    /// An ECMA-402 `Intl.Segmenter` object.
+    IntlSegmenter(SegmenterState),
+    /// An ECMA-402 Segments object returned by `Intl.Segmenter.prototype.segment`.
+    IntlSegments(IntlSegmentsObjectState),
+    /// An ECMA-402 Segment Iterator object.
+    IntlSegmentIterator(IntlSegmentIteratorObjectState),
     /// An ECMAScript `ArrayBuffer` object with its byte-data block slots.
     ArrayBuffer(ArrayBufferState),
     /// An ECMAScript `DataView` object with its view and buffer slots.
@@ -2723,6 +2729,17 @@ pub(crate) struct IntlNumberFormatObjectState {
 pub(crate) struct IntlDateTimeFormatObjectState {
     pub(crate) resolved: DateTimeFormatState,
     pub(crate) bound_format: Option<FunctionId>,
+}
+
+pub(crate) struct IntlSegmentsObjectState {
+    pub(crate) segmenter: ObjectId,
+    pub(crate) input: JsString,
+    pub(crate) boundaries: Vec<SegmentBoundary>,
+}
+
+pub(crate) struct IntlSegmentIteratorObjectState {
+    pub(crate) segments: ObjectId,
+    pub(crate) next_segment: usize,
 }
 
 /// Specification-level Proxy slots shared by callable and non-callable proxy
@@ -2855,6 +2872,9 @@ impl HeapObjectKind {
             | Self::IntlRelativeTimeFormat(_)
             | Self::IntlListFormat(_)
             | Self::IntlDisplayNames(_)
+            | Self::IntlSegmenter(_)
+            | Self::IntlSegments(_)
+            | Self::IntlSegmentIterator(_)
             | Self::ArrayBuffer(_)
             | Self::DataView(_)
             | Self::TypedArray(_)
@@ -2903,6 +2923,9 @@ impl HeapObjectKind {
             | Self::IntlRelativeTimeFormat(_)
             | Self::IntlListFormat(_)
             | Self::IntlDisplayNames(_)
+            | Self::IntlSegmenter(_)
+            | Self::IntlSegments(_)
+            | Self::IntlSegmentIterator(_)
             | Self::ArrayBuffer(_)
             | Self::DataView(_)
             | Self::TypedArray(_)
@@ -2950,6 +2973,9 @@ impl HeapObjectKind {
             | Self::IntlRelativeTimeFormat(_)
             | Self::IntlListFormat(_)
             | Self::IntlDisplayNames(_)
+            | Self::IntlSegmenter(_)
+            | Self::IntlSegments(_)
+            | Self::IntlSegmentIterator(_)
             | Self::ArrayBuffer(_)
             | Self::DataView(_)
             | Self::TypedArray(_)
@@ -2997,6 +3023,9 @@ impl HeapObjectKind {
             | Self::IntlRelativeTimeFormat(_)
             | Self::IntlListFormat(_)
             | Self::IntlDisplayNames(_)
+            | Self::IntlSegmenter(_)
+            | Self::IntlSegments(_)
+            | Self::IntlSegmentIterator(_)
             | Self::ArrayBuffer(_)
             | Self::DataView(_)
             | Self::TypedArray(_)
@@ -3044,6 +3073,9 @@ impl HeapObjectKind {
             | Self::IntlRelativeTimeFormat(_)
             | Self::IntlListFormat(_)
             | Self::IntlDisplayNames(_)
+            | Self::IntlSegmenter(_)
+            | Self::IntlSegments(_)
+            | Self::IntlSegmentIterator(_)
             | Self::ArrayBuffer(_)
             | Self::DataView(_)
             | Self::TypedArray(_)
@@ -3091,6 +3123,9 @@ impl HeapObjectKind {
             | Self::IntlRelativeTimeFormat(_)
             | Self::IntlListFormat(_)
             | Self::IntlDisplayNames(_)
+            | Self::IntlSegmenter(_)
+            | Self::IntlSegments(_)
+            | Self::IntlSegmentIterator(_)
             | Self::ArrayBuffer(_)
             | Self::DataView(_)
             | Self::TypedArray(_)
@@ -3138,6 +3173,9 @@ impl HeapObjectKind {
             | Self::IntlRelativeTimeFormat(_)
             | Self::IntlListFormat(_)
             | Self::IntlDisplayNames(_)
+            | Self::IntlSegmenter(_)
+            | Self::IntlSegments(_)
+            | Self::IntlSegmentIterator(_)
             | Self::ArrayBuffer(_)
             | Self::DataView(_)
             | Self::TypedArray(_)
@@ -3199,6 +3237,9 @@ impl HeapObjectKind {
             | Self::IntlRelativeTimeFormat(_)
             | Self::IntlListFormat(_)
             | Self::IntlDisplayNames(_)
+            | Self::IntlSegmenter(_)
+            | Self::IntlSegments(_)
+            | Self::IntlSegmentIterator(_)
             | Self::ArrayBuffer(_)
             | Self::DataView(_)
             | Self::TypedArray(_)
@@ -3246,6 +3287,9 @@ impl HeapObjectKind {
             | Self::IntlRelativeTimeFormat(_)
             | Self::IntlListFormat(_)
             | Self::IntlDisplayNames(_)
+            | Self::IntlSegmenter(_)
+            | Self::IntlSegments(_)
+            | Self::IntlSegmentIterator(_)
             | Self::ArrayBuffer(_)
             | Self::DataView(_)
             | Self::TypedArray(_)
@@ -3665,6 +3709,39 @@ impl HeapObject {
     }
 
     #[must_use]
+    pub(crate) const fn intl_segmenter(record: ObjectRecord, resolved: SegmenterState) -> Self {
+        Self {
+            kind: HeapObjectKind::IntlSegmenter(resolved),
+            record,
+            public_roots: 0,
+        }
+    }
+
+    #[must_use]
+    pub(crate) const fn intl_segments(
+        record: ObjectRecord,
+        state: IntlSegmentsObjectState,
+    ) -> Self {
+        Self {
+            kind: HeapObjectKind::IntlSegments(state),
+            record,
+            public_roots: 0,
+        }
+    }
+
+    #[must_use]
+    pub(crate) const fn intl_segment_iterator(
+        record: ObjectRecord,
+        state: IntlSegmentIteratorObjectState,
+    ) -> Self {
+        Self {
+            kind: HeapObjectKind::IntlSegmentIterator(state),
+            record,
+            public_roots: 0,
+        }
+    }
+
+    #[must_use]
     pub(crate) fn array_buffer(record: ObjectRecord, state: ArrayBufferState) -> Self {
         Self {
             kind: HeapObjectKind::ArrayBuffer(state),
@@ -3997,6 +4074,38 @@ impl HeapObject {
         }
     }
 
+    pub(crate) const fn intl_segmenter_state(&self) -> Option<&SegmenterState> {
+        match &self.kind {
+            HeapObjectKind::IntlSegmenter(state) => Some(state),
+            _ => None,
+        }
+    }
+
+    pub(crate) const fn intl_segments_state(&self) -> Option<&IntlSegmentsObjectState> {
+        match &self.kind {
+            HeapObjectKind::IntlSegments(state) => Some(state),
+            _ => None,
+        }
+    }
+
+    pub(crate) const fn intl_segment_iterator_state(
+        &self,
+    ) -> Option<&IntlSegmentIteratorObjectState> {
+        match &self.kind {
+            HeapObjectKind::IntlSegmentIterator(state) => Some(state),
+            _ => None,
+        }
+    }
+
+    pub(crate) const fn intl_segment_iterator_state_mut(
+        &mut self,
+    ) -> Option<&mut IntlSegmentIteratorObjectState> {
+        match &mut self.kind {
+            HeapObjectKind::IntlSegmentIterator(state) => Some(state),
+            _ => None,
+        }
+    }
+
     pub(crate) const fn array_buffer_state(&self) -> Option<&ArrayBufferState> {
         match &self.kind {
             HeapObjectKind::ArrayBuffer(state) => Some(state),
@@ -4114,6 +4223,9 @@ impl HeapObject {
             | HeapObjectKind::IntlRelativeTimeFormat(_)
             | HeapObjectKind::IntlListFormat(_)
             | HeapObjectKind::IntlDisplayNames(_)
+            | HeapObjectKind::IntlSegmenter(_)
+            | HeapObjectKind::IntlSegments(_)
+            | HeapObjectKind::IntlSegmentIterator(_)
             | HeapObjectKind::ArrayBuffer(_)
             | HeapObjectKind::DataView(_)
             | HeapObjectKind::TypedArray(_)
@@ -4161,6 +4273,9 @@ impl HeapObject {
             | HeapObjectKind::IntlRelativeTimeFormat(_)
             | HeapObjectKind::IntlListFormat(_)
             | HeapObjectKind::IntlDisplayNames(_)
+            | HeapObjectKind::IntlSegmenter(_)
+            | HeapObjectKind::IntlSegments(_)
+            | HeapObjectKind::IntlSegmentIterator(_)
             | HeapObjectKind::ArrayBuffer(_)
             | HeapObjectKind::DataView(_)
             | HeapObjectKind::TypedArray(_)
@@ -4210,6 +4325,9 @@ impl HeapObject {
             | HeapObjectKind::IntlRelativeTimeFormat(_)
             | HeapObjectKind::IntlListFormat(_)
             | HeapObjectKind::IntlDisplayNames(_)
+            | HeapObjectKind::IntlSegmenter(_)
+            | HeapObjectKind::IntlSegments(_)
+            | HeapObjectKind::IntlSegmentIterator(_)
             | HeapObjectKind::ArrayBuffer(_)
             | HeapObjectKind::DataView(_)
             | HeapObjectKind::TypedArray(_)

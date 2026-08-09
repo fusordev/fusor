@@ -20,6 +20,7 @@ mod locale_info;
 mod number_format;
 mod plural_rules;
 mod relative_time_format;
+mod segmenter;
 mod supported_values;
 
 pub use collator::{
@@ -72,6 +73,10 @@ pub use relative_time_format::{
     RelativeTimeFormatRequestOptions, RelativeTimeFormatState, RelativeTimeFormatStyle,
     RelativeTimeUnit, format_relative_time, format_relative_time_to_parts,
     relative_time_format_supported_locales, resolve_relative_time_format,
+};
+pub use segmenter::{
+    SegmentBoundary, SegmenterError, SegmenterGranularity, SegmenterRequestOptions, SegmenterState,
+    resolve_segmenter, segment_boundaries, segmenter_supported_locales,
 };
 pub use supported_values::supported_values;
 

@@ -48,10 +48,11 @@ use crate::{
     interrupt::InterruptState,
     object::{
         ArrayBufferState, ArrayIterator, ArrayIteratorKind, ArrayState, BoxedPrimitive,
-        DataViewState, DateState, ForInIterator, ForInSnapshot, HeapObject, KeyPhases,
-        ObjectRecord, OwnProperty, PromiseCapability, PromiseReaction, PropertyDeletion,
-        ProxyState, RegExpState, RegExpStringIterator, ShapeInterner, StringIterator,
-        TypedArrayElementType, TypedArrayState,
+        DataViewState, DateState, ForInIterator, ForInSnapshot, HeapObject,
+        IntlSegmentIteratorObjectState, IntlSegmentsObjectState, KeyPhases, ObjectRecord,
+        OwnProperty, PromiseCapability, PromiseReaction, PropertyDeletion, ProxyState, RegExpState,
+        RegExpStringIterator, ShapeInterner, StringIterator, TypedArrayElementType,
+        TypedArrayState,
     },
     value::{HeapReference, PrimitiveValue, ReleaseMailbox, RootTarget, SlotValue, StoredValue},
 };
@@ -316,6 +317,10 @@ struct IntlIntrinsics {
     list_format_constructor: FunctionId,
     display_names_prototype: ObjectId,
     display_names_constructor: FunctionId,
+    segmenter_prototype: ObjectId,
+    segments_prototype: ObjectId,
+    segment_iterator_prototype: ObjectId,
+    segmenter_constructor: FunctionId,
     locale_prototype: ObjectId,
     locale_constructor: FunctionId,
 }
@@ -1299,6 +1304,18 @@ pub(crate) enum NativeFunctionKind {
     IntlDisplayNamesSupportedLocalesOf,
     /// One `%Intl.DisplayNames.prototype%` method.
     IntlDisplayNamesPrototype(IntlDisplayNamesPrototypeMethod),
+    /// The `%Intl.Segmenter%` constructor.
+    IntlSegmenterConstructor,
+    /// `Intl.Segmenter.supportedLocalesOf`.
+    IntlSegmenterSupportedLocalesOf,
+    /// One `%Intl.Segmenter.prototype%` method.
+    IntlSegmenterPrototype(IntlSegmenterPrototypeMethod),
+    /// `%IntlSegmentsPrototype%.containing`.
+    IntlSegmentsContaining,
+    /// `%IntlSegmentsPrototype%[@@iterator]`.
+    IntlSegmentsIterator,
+    /// `%IntlSegmentIteratorPrototype%.next`.
+    IntlSegmentIteratorNext,
     /// The `%Intl.Locale%` constructor.
     IntlLocaleConstructor,
     /// One `%Intl.Locale.prototype%` accessor or method.
@@ -1719,6 +1736,30 @@ pub(crate) enum IntlListFormatPrototypeMethod {
 pub(crate) enum IntlDisplayNamesPrototypeMethod {
     ResolvedOptions,
     Of,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum IntlSegmenterPrototypeMethod {
+    ResolvedOptions,
+    Segment,
+}
+
+impl IntlSegmenterPrototypeMethod {
+    pub(crate) const ALL: [Self; 2] = [Self::ResolvedOptions, Self::Segment];
+
+    pub(crate) const fn name(self) -> &'static str {
+        match self {
+            Self::ResolvedOptions => "resolvedOptions",
+            Self::Segment => "segment",
+        }
+    }
+
+    pub(crate) const fn length(self) -> i32 {
+        match self {
+            Self::ResolvedOptions => 0,
+            Self::Segment => 1,
+        }
+    }
 }
 
 impl IntlDisplayNamesPrototypeMethod {
@@ -4505,6 +4546,7 @@ impl NativeFunctionKind {
                 | Self::IntlRelativeTimeFormatConstructor
                 | Self::IntlListFormatConstructor
                 | Self::IntlDisplayNamesConstructor
+                | Self::IntlSegmenterConstructor
                 | Self::IntlLocaleConstructor
                 | Self::TemporalDurationConstructor
                 | Self::TemporalInstantConstructor

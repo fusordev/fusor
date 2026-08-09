@@ -3283,6 +3283,30 @@ fn finish_operator_primitive_target(
         OperatorPrimitiveTarget::IntlDisplayNamesOf(state) => {
             finish_intl_display_names_of_primitive(runtime, &state, value)
         }
+        OperatorPrimitiveTarget::IntlSegmenterConstructor(state) => {
+            advance_intl_segmenter_constructor(
+                runtime,
+                *state,
+                Some(value),
+                return_to,
+                execution_budget,
+            )
+        }
+        OperatorPrimitiveTarget::IntlSegmenterSupportedLocalesOf(state) => {
+            advance_intl_segmenter_supported_locales(
+                runtime,
+                *state,
+                Some(value),
+                return_to,
+                execution_budget,
+            )
+        }
+        OperatorPrimitiveTarget::IntlSegmenterSegment(state) => {
+            finish_intl_segmenter_segment_primitive(runtime, &state, value)
+        }
+        OperatorPrimitiveTarget::IntlSegmentsContaining(state) => {
+            finish_intl_segments_containing_primitive(runtime, &state, value)
+        }
         OperatorPrimitiveTarget::IntlCollatorCompareFirst(state) => {
             finish_intl_collator_compare_first(runtime, *state, value, return_to, execution_budget)
         }

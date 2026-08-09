@@ -477,6 +477,19 @@ impl Runtime {
                     &mut work,
                 );
                 for reference in [
+                    HeapReference::Object(intl.segmenter_prototype),
+                    HeapReference::Object(intl.segments_prototype),
+                    HeapReference::Object(intl.segment_iterator_prototype),
+                    HeapReference::Function(intl.segmenter_constructor),
+                ] {
+                    mark_heap_reference(
+                        reference,
+                        &mut marked_functions,
+                        &mut marked_objects,
+                        &mut work,
+                    );
+                }
+                for reference in [
                     HeapReference::Object(temporal.namespace),
                     HeapReference::Object(temporal.duration_prototype),
                     HeapReference::Function(temporal.duration_constructor),
@@ -1263,6 +1276,22 @@ impl Runtime {
                             {
                                 mark_heap_reference(
                                     HeapReference::Function(format),
+                                    &mut marked_functions,
+                                    &mut marked_objects,
+                                    &mut work,
+                                );
+                            }
+                            if let Some(segments) = object.intl_segments_state() {
+                                mark_heap_reference(
+                                    HeapReference::Object(segments.segmenter),
+                                    &mut marked_functions,
+                                    &mut marked_objects,
+                                    &mut work,
+                                );
+                            }
+                            if let Some(iterator) = object.intl_segment_iterator_state() {
+                                mark_heap_reference(
+                                    HeapReference::Object(iterator.segments),
                                     &mut marked_functions,
                                     &mut marked_objects,
                                     &mut work,

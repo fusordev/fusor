@@ -10,14 +10,14 @@ use crate::runtime::realm::{
     schema::{
         IntrinsicFunctionId, IntrinsicIdentity, IntrinsicKeySpec, IntrinsicNameSpec,
         IntrinsicObjectId, IntrinsicObjectKind, IntrinsicStringSpec, IntrinsicValueSpec,
-        RealmNameId,
+        PrototypeSpec, RealmNameId,
     },
 };
 use crate::runtime::{
     IntlCollatorPrototypeMethod, IntlDateTimeFormatPrototypeMethod,
     IntlDisplayNamesPrototypeMethod, IntlListFormatPrototypeMethod, IntlLocalePrototypeMethod,
     IntlNumberFormatPrototypeMethod, IntlPluralRulesPrototypeMethod,
-    IntlRelativeTimeFormatPrototypeMethod,
+    IntlRelativeTimeFormatPrototypeMethod, IntlSegmenterPrototypeMethod,
 };
 
 pub(super) fn visit_objects(visit: ObjectSink<'_>) {
@@ -30,6 +30,8 @@ pub(super) fn visit_objects(visit: ObjectSink<'_>) {
         IntrinsicObjectId::IntlRelativeTimeFormatPrototype,
         IntrinsicObjectId::IntlListFormatPrototype,
         IntrinsicObjectId::IntlDisplayNamesPrototype,
+        IntrinsicObjectId::IntlSegmenterPrototype,
+        IntrinsicObjectId::IntlSegmentsPrototype,
         IntrinsicObjectId::IntlLocalePrototype,
     ] {
         visit(object(
@@ -38,6 +40,13 @@ pub(super) fn visit_objects(visit: ObjectSink<'_>) {
             IntrinsicObjectKind::Ordinary,
         ));
     }
+    visit(object(
+        IntrinsicObjectId::IntlSegmentIteratorPrototype,
+        PrototypeSpec::Intrinsic(IntrinsicIdentity::Object(
+            IntrinsicObjectId::IteratorPrototype,
+        )),
+        IntrinsicObjectKind::Ordinary,
+    ));
 }
 
 #[allow(
@@ -205,6 +214,38 @@ pub(super) fn visit_functions(visit: FunctionSink<'_>) {
         ));
     }
     visit(ordinary(
+        NativeFunctionKind::IntlSegmenterConstructor,
+        IntrinsicNameSpec::RealmName(RealmNameId::IntlSegmenter),
+        0,
+    ));
+    visit(ordinary(
+        NativeFunctionKind::IntlSegmenterSupportedLocalesOf,
+        IntrinsicNameSpec::RealmName(RealmNameId::IntlSegmenterSupportedLocalesOf),
+        1,
+    ));
+    for method in IntlSegmenterPrototypeMethod::ALL {
+        visit(ordinary(
+            NativeFunctionKind::IntlSegmenterPrototype(method),
+            IntrinsicNameSpec::RealmName(RealmNameId::IntlSegmenterPrototype(method)),
+            method.length(),
+        ));
+    }
+    visit(ordinary(
+        NativeFunctionKind::IntlSegmentsContaining,
+        IntrinsicNameSpec::RealmName(RealmNameId::IntlSegmentsContaining),
+        1,
+    ));
+    visit(ordinary(
+        NativeFunctionKind::IntlSegmentsIterator,
+        IntrinsicNameSpec::Literal("[Symbol.iterator]"),
+        0,
+    ));
+    visit(ordinary(
+        NativeFunctionKind::IntlSegmentIteratorNext,
+        IntrinsicNameSpec::Predefined(PredefinedAtom::Next),
+        0,
+    ));
+    visit(ordinary(
         NativeFunctionKind::IntlLocaleConstructor,
         IntrinsicNameSpec::RealmName(RealmNameId::Locale),
         1,
@@ -265,6 +306,13 @@ pub(super) fn visit_properties(visit: PropertySink<'_>) {
     ));
     let display_names_prototype =
         IntrinsicIdentity::Object(IntrinsicObjectId::IntlDisplayNamesPrototype);
+    let segmenter_constructor = IntrinsicIdentity::Function(IntrinsicFunctionId(
+        NativeFunctionKind::IntlSegmenterConstructor,
+    ));
+    let segmenter_prototype = IntrinsicIdentity::Object(IntrinsicObjectId::IntlSegmenterPrototype);
+    let segments_prototype = IntrinsicIdentity::Object(IntrinsicObjectId::IntlSegmentsPrototype);
+    let segment_iterator_prototype =
+        IntrinsicIdentity::Object(IntrinsicObjectId::IntlSegmentIteratorPrototype);
     let locale_constructor = IntrinsicIdentity::Function(IntrinsicFunctionId(
         NativeFunctionKind::IntlLocaleConstructor,
     ));
@@ -308,6 +356,11 @@ pub(super) fn visit_properties(visit: PropertySink<'_>) {
         intl,
         IntrinsicKeySpec::InternedString(RealmNameId::IntlDisplayNames),
         NativeFunctionKind::IntlDisplayNamesConstructor,
+    ));
+    visit(method(
+        intl,
+        IntrinsicKeySpec::InternedString(RealmNameId::IntlSegmenter),
+        NativeFunctionKind::IntlSegmenterConstructor,
     ));
     visit(method(
         intl,
@@ -583,6 +636,57 @@ pub(super) fn visit_properties(visit: PropertySink<'_>) {
         IntrinsicKeySpec::WellKnownSymbol(PredefinedAtom::SymbolToStringTag),
         PropertyLayout::data(false, false, true),
         IntrinsicValueSpec::String(IntrinsicStringSpec::Literal("Intl.DisplayNames")),
+    ));
+
+    visit(data(
+        segmenter_constructor,
+        IntrinsicKeySpec::PredefinedString(PredefinedAtom::Prototype),
+        CONSTRUCTOR_PROTOTYPE_PROPERTY,
+        IntrinsicValueSpec::Object(IntrinsicObjectId::IntlSegmenterPrototype),
+    ));
+    visit(method(
+        segmenter_constructor,
+        IntrinsicKeySpec::InternedString(RealmNameId::IntlSegmenterSupportedLocalesOf),
+        NativeFunctionKind::IntlSegmenterSupportedLocalesOf,
+    ));
+    visit(method(
+        segmenter_prototype,
+        IntrinsicKeySpec::PredefinedString(PredefinedAtom::Constructor),
+        NativeFunctionKind::IntlSegmenterConstructor,
+    ));
+    for method_id in IntlSegmenterPrototypeMethod::ALL {
+        visit(method(
+            segmenter_prototype,
+            IntrinsicKeySpec::InternedString(RealmNameId::IntlSegmenterPrototype(method_id)),
+            NativeFunctionKind::IntlSegmenterPrototype(method_id),
+        ));
+    }
+    visit(data(
+        segmenter_prototype,
+        IntrinsicKeySpec::WellKnownSymbol(PredefinedAtom::SymbolToStringTag),
+        PropertyLayout::data(false, false, true),
+        IntrinsicValueSpec::String(IntrinsicStringSpec::Literal("Intl.Segmenter")),
+    ));
+    visit(method(
+        segments_prototype,
+        IntrinsicKeySpec::InternedString(RealmNameId::IntlSegmentsContaining),
+        NativeFunctionKind::IntlSegmentsContaining,
+    ));
+    visit(method(
+        segments_prototype,
+        IntrinsicKeySpec::WellKnownSymbol(PredefinedAtom::SymbolIterator),
+        NativeFunctionKind::IntlSegmentsIterator,
+    ));
+    visit(method(
+        segment_iterator_prototype,
+        IntrinsicKeySpec::PredefinedString(PredefinedAtom::Next),
+        NativeFunctionKind::IntlSegmentIteratorNext,
+    ));
+    visit(data(
+        segment_iterator_prototype,
+        IntrinsicKeySpec::WellKnownSymbol(PredefinedAtom::SymbolToStringTag),
+        PropertyLayout::data(false, false, true),
+        IntrinsicValueSpec::String(IntrinsicStringSpec::Literal("Segmenter String Iterator")),
     ));
 
     visit(data(

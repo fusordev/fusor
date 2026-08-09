@@ -139,12 +139,12 @@ impl RealmIntrinsicSchema {
             FamilyCardinality {
                 family: "Realm intrinsic objects",
                 actual: self.objects.len(),
-                expected: 80,
+                expected: 83,
             },
             FamilyCardinality {
                 family: "Realm native functions",
                 actual: self.specs.len(),
-                expected: 793,
+                expected: 800,
             },
         ];
         validate_intrinsic_schema(IntrinsicSchema {
@@ -216,6 +216,9 @@ pub(super) const fn is_declarative_object(id: IntrinsicObjectId) -> bool {
             | IntrinsicObjectId::IntlRelativeTimeFormatPrototype
             | IntrinsicObjectId::IntlListFormatPrototype
             | IntrinsicObjectId::IntlDisplayNamesPrototype
+            | IntrinsicObjectId::IntlSegmenterPrototype
+            | IntrinsicObjectId::IntlSegmentsPrototype
+            | IntrinsicObjectId::IntlSegmentIteratorPrototype
             | IntrinsicObjectId::IntlLocalePrototype
             | IntrinsicObjectId::Reflect
             | IntrinsicObjectId::Json
@@ -374,6 +377,12 @@ pub(super) const fn is_declarative_function(id: IntrinsicFunctionId) -> bool {
             | NativeFunctionKind::IntlDisplayNamesConstructor
             | NativeFunctionKind::IntlDisplayNamesSupportedLocalesOf
             | NativeFunctionKind::IntlDisplayNamesPrototype(_)
+            | NativeFunctionKind::IntlSegmenterConstructor
+            | NativeFunctionKind::IntlSegmenterSupportedLocalesOf
+            | NativeFunctionKind::IntlSegmenterPrototype(_)
+            | NativeFunctionKind::IntlSegmentsContaining
+            | NativeFunctionKind::IntlSegmentsIterator
+            | NativeFunctionKind::IntlSegmentIteratorNext
             | NativeFunctionKind::IntlLocaleConstructor
             | NativeFunctionKind::IntlLocalePrototype(_)
             | NativeFunctionKind::Math(_)
@@ -1250,8 +1259,8 @@ mod tests {
     #[test]
     fn complete_function_schema_has_characterized_cardinality_and_unique_ids() {
         let schema = RealmIntrinsicSchema::try_new().expect("function schema");
-        assert_eq!(schema.specs().len(), 793);
-        assert_eq!(schema.constructor_prototypes.len(), 62);
+        assert_eq!(schema.specs().len(), 800);
+        assert_eq!(schema.constructor_prototypes.len(), 63);
         for (index, spec) in schema.specs().iter().enumerate() {
             assert!(
                 schema.specs()[..index]

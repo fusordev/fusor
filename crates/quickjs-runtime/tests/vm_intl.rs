@@ -633,6 +633,68 @@ fn display_names_lookup_canonicalization_and_brand_order_are_spec_shaped() {
 }
 
 #[test]
+fn segmenter_constructor_descriptors_and_hidden_prototypes_are_spec_shaped() {
+    assert_eq!(
+        rendered(
+            "var log=[];
+             var options={
+               get localeMatcher(){log.push('localeMatcher');return {toString:function(){log.push('localeMatcher string');return 'lookup'}}},
+               get granularity(){log.push('granularity');return 'word'}
+             };
+             class CustomSegmenter extends Intl.Segmenter{}
+             var segmenter=new CustomSegmenter(['xyz','en-u-ca-gregory'],options);
+             var ro=segmenter.resolvedOptions();
+             var d=Object.getOwnPropertyDescriptor(Intl.Segmenter.prototype,'segment');
+             var supported=Intl.Segmenter.supportedLocalesOf(['xyz','en-u-ca-gregory'],{
+               get localeMatcher(){log.push('supported matcher');return 'lookup'}
+             });
+             var segments=segmenter.segment('abc');
+             var iterator=segments[Symbol.iterator]();
+             var arrayIterator=[][Symbol.iterator]();
+             return [Intl.Segmenter.length,Intl.Segmenter.name,
+               Object.getPrototypeOf(segmenter)===CustomSegmenter.prototype,
+               Object.keys(ro).join(','),ro.locale,ro.granularity,
+               d.value.length,d.writable,d.enumerable,d.configurable,supported.join(','),
+               Object.getPrototypeOf(segments)===Object.getPrototypeOf(segmenter.segment('x')),
+               Object.getPrototypeOf(iterator)===Object.getPrototypeOf(segments[Symbol.iterator]()),
+               Object.getPrototypeOf(Object.getPrototypeOf(iterator))===Object.getPrototypeOf(Object.getPrototypeOf(arrayIterator)),
+               Object.prototype.toString.call(iterator),log.join(',')].join('|');"
+        ),
+        "0|Segmenter|true|locale,granularity|en|word|1|true|false|true|en-u-ca-gregory|true|true|true|[object Segmenter String Iterator]|localeMatcher,localeMatcher string,granularity,supported matcher"
+    );
+}
+
+#[test]
+fn segmenter_boundaries_containing_and_iterators_are_utf16_exact() {
+    assert_eq!(
+        rendered(
+            "var grapheme=new Intl.Segmenter('en',{granularity:'grapheme'});
+             var input='A\\uD800\\uD83D\\uDE00B';
+             var segments=grapheme.segment(input);
+             var records=Array.from(segments).map(function(part){
+               return [part.segment.length,part.index,part.segment.charCodeAt(0).toString(16),
+                 part.input===input,'isWordLike' in part,Object.keys(part).join(',')].join(':')
+             }).join(';');
+             var middle=segments.containing(3.9);
+             var absent=[segments.containing(-1),segments.containing(input.length),
+               segments.containing(Infinity)].every(function(value){return value===undefined});
+             var first=grapheme.segment('ab');var a=first[Symbol.iterator]();var b=first[Symbol.iterator]();
+             var independent=[a.next().value.segment,a.next().value.segment,b.next().value.segment].join(',');
+             var words=Array.from(new Intl.Segmenter('en',{granularity:'word'}).segment('hello 42!'))
+               .map(function(part){return part.segment+':'+part.isWordLike}).join(',');
+             var sentences=Array.from(new Intl.Segmenter('en',{granularity:'sentence'}).segment('Hi! Bye.'))
+               .map(function(part){return part.segment}).join('/');
+             var coerced=false,brand;
+             try{Object.getPrototypeOf(segments).containing.call({},
+               {valueOf:function(){coerced=true;return 0}})}catch(error){brand=error.name}
+             return [records,middle.index,middle.segment.length,absent,independent,
+               words,sentences,brand,coerced].join('|');"
+        ),
+        "1:0:41:true:false:segment,index,input;1:1:d800:true:false:segment,index,input;2:2:d83d:true:false:segment,index,input;1:4:42:true:false:segment,index,input|2|2|true|a,b,a|hello:true, :false,42:true,!:false|Hi! /Bye.|TypeError|false"
+    );
+}
+
+#[test]
 fn date_time_format_constructor_reads_options_in_normative_order() {
     assert_eq!(
         rendered(

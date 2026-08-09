@@ -1399,6 +1399,24 @@ pub(super) fn resume_native_continuations(
                     execution_budget,
                 )?
             }
+            NativeContinuation::IntlSegmenterConstructor(state) => {
+                advance_intl_segmenter_constructor(
+                    runtime,
+                    *state,
+                    Some(value.duplicate()),
+                    return_to,
+                    execution_budget,
+                )?
+            }
+            NativeContinuation::IntlSegmenterSupportedLocalesOf(state) => {
+                advance_intl_segmenter_supported_locales(
+                    runtime,
+                    *state,
+                    Some(value.duplicate()),
+                    return_to,
+                    execution_budget,
+                )?
+            }
             NativeContinuation::IntlLocaleConstructor(state) => advance_intl_locale_constructor(
                 runtime,
                 *state,
@@ -3106,6 +3124,55 @@ pub(super) fn dispatch_native_call_with_frames(
                 execution_budget,
             )
         }
+        NativeFunctionKind::IntlSegmenterConstructor => begin_intl_segmenter_constructor(
+            runtime,
+            inputs,
+            native.realm,
+            return_to,
+            origin.unwrap_or_else(native_function_host_origin),
+            execution_budget,
+        ),
+        NativeFunctionKind::IntlSegmenterSupportedLocalesOf => {
+            begin_intl_segmenter_supported_locales_of(
+                runtime,
+                inputs.arguments,
+                native.realm,
+                return_to,
+                origin.unwrap_or_else(native_function_host_origin),
+                execution_budget,
+            )
+        }
+        NativeFunctionKind::IntlSegmenterPrototype(method) => begin_intl_segmenter_prototype(
+            runtime,
+            method,
+            &inputs.receiver,
+            inputs.arguments,
+            native.realm,
+            return_to,
+            origin.unwrap_or_else(native_function_host_origin),
+            execution_budget,
+        ),
+        NativeFunctionKind::IntlSegmentsContaining => begin_intl_segments_containing(
+            runtime,
+            &inputs.receiver,
+            inputs.arguments,
+            native.realm,
+            return_to,
+            origin.unwrap_or_else(native_function_host_origin),
+            execution_budget,
+        ),
+        NativeFunctionKind::IntlSegmentsIterator => begin_intl_segments_iterator(
+            runtime,
+            &inputs.receiver,
+            native.realm,
+            origin.unwrap_or_else(native_function_host_origin),
+        ),
+        NativeFunctionKind::IntlSegmentIteratorNext => begin_intl_segment_iterator_next(
+            runtime,
+            &inputs.receiver,
+            native.realm,
+            origin.unwrap_or_else(native_function_host_origin),
+        ),
         NativeFunctionKind::IntlLocaleConstructor => begin_intl_locale_constructor(
             runtime,
             inputs,

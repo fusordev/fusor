@@ -21,19 +21,21 @@ use quickjs_intl::{
     NumberFormatState, NumberFormatStyle, NumberFormatTrailingZeroDisplay, NumberFormatUnitDisplay,
     NumberFormatUseGrouping, PluralRuleType, PluralRulesRequestOptions, PluralRulesState,
     RelativeTimeFormatError, RelativeTimeFormatNumeric, RelativeTimeFormatRequestOptions,
-    RelativeTimeFormatState, RelativeTimeFormatStyle, RelativeTimeUnit, apply_locale_options,
-    calendars_of_locale, canonicalize_locale, canonicalize_locale_option, canonicalize_time_zone,
-    collations_of_locale, collator_supported_locales, compare_with_collator,
-    date_time_format_supported_locales, display_name, display_names_supported_locales,
-    format_datetime, format_datetime_to_parts, format_list, format_list_to_parts, format_number,
-    format_number_to_parts, format_relative_time, format_relative_time_to_parts,
-    hour_cycles_of_locale, intl_mathematical_value_from_f64, is_well_formed_currency_code,
-    is_well_formed_unit_identifier, list_format_supported_locales, locale_components,
-    maximize_locale, minimize_locale, number_format_supported_locales, numbering_systems_of_locale,
-    parse_intl_mathematical_value, plural_rules_supported_locales,
+    RelativeTimeFormatState, RelativeTimeFormatStyle, RelativeTimeUnit, SegmentBoundary,
+    SegmenterError, SegmenterGranularity, SegmenterRequestOptions, SegmenterState,
+    apply_locale_options, calendars_of_locale, canonicalize_locale, canonicalize_locale_option,
+    canonicalize_time_zone, collations_of_locale, collator_supported_locales,
+    compare_with_collator, date_time_format_supported_locales, display_name,
+    display_names_supported_locales, format_datetime, format_datetime_to_parts, format_list,
+    format_list_to_parts, format_number, format_number_to_parts, format_relative_time,
+    format_relative_time_to_parts, hour_cycles_of_locale, intl_mathematical_value_from_f64,
+    is_well_formed_currency_code, is_well_formed_unit_identifier, list_format_supported_locales,
+    locale_components, maximize_locale, minimize_locale, number_format_supported_locales,
+    numbering_systems_of_locale, parse_intl_mathematical_value, plural_rules_supported_locales,
     relative_time_format_supported_locales, resolve_collator, resolve_date_time_format,
     resolve_display_names, resolve_list_format, resolve_number_format, resolve_plural_rules,
-    resolve_relative_time_format, select_plural, select_plural_range, supported_values,
+    resolve_relative_time_format, resolve_segmenter, segment_boundaries,
+    segmenter_supported_locales, select_plural, select_plural_range, supported_values,
     text_direction_of_locale, time_zones_of_locale, week_info_of_locale,
 };
 
@@ -179,6 +181,8 @@ enum IntlLocaleListTarget {
     ListFormatSupportedLocalesOf(Box<IntlListFormatSupportedLocalesContinuation>),
     DisplayNamesConstructor(Box<IntlDisplayNamesConstructorContinuation>),
     DisplayNamesSupportedLocalesOf(Box<IntlDisplayNamesSupportedLocalesContinuation>),
+    SegmenterConstructor(Box<IntlSegmenterConstructorContinuation>),
+    SegmenterSupportedLocalesOf(Box<IntlSegmenterSupportedLocalesContinuation>),
 }
 
 impl IntlLocaleListTarget {
@@ -199,6 +203,8 @@ impl IntlLocaleListTarget {
             Self::ListFormatSupportedLocalesOf(state) => state.retained_values(),
             Self::DisplayNamesConstructor(state) => state.retained_values(),
             Self::DisplayNamesSupportedLocalesOf(state) => state.retained_values(),
+            Self::SegmenterConstructor(state) => state.retained_values(),
+            Self::SegmenterSupportedLocalesOf(state) => state.retained_values(),
         }
     }
 
@@ -219,6 +225,8 @@ impl IntlLocaleListTarget {
             Self::ListFormatSupportedLocalesOf(state) => state.trace_roots(mark),
             Self::DisplayNamesConstructor(state) => state.trace_roots(mark),
             Self::DisplayNamesSupportedLocalesOf(state) => state.trace_roots(mark),
+            Self::SegmenterConstructor(state) => state.trace_roots(mark),
+            Self::SegmenterSupportedLocalesOf(state) => state.trace_roots(mark),
         }
     }
 }
@@ -1118,6 +1126,131 @@ impl IntlDisplayNamesOfContinuation {
         mark(CollectionRoot::Heap(HeapReference::Object(
             self.display_names,
         )));
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum IntlSegmenterConstructorStage {
+    AwaitPrototype,
+    ReadOption,
+    AwaitOption,
+    AwaitOptionPrimitive,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum IntlSegmenterOption {
+    LocaleMatcher,
+    Granularity,
+}
+
+impl IntlSegmenterOption {
+    const ALL: [Self; 2] = [Self::LocaleMatcher, Self::Granularity];
+
+    const fn name(self) -> &'static str {
+        match self {
+            Self::LocaleMatcher => "localeMatcher",
+            Self::Granularity => "granularity",
+        }
+    }
+}
+
+pub(super) struct IntlSegmenterConstructorContinuation {
+    new_target: FunctionId,
+    locales_argument: Option<StoredValue>,
+    options_argument: StoredValue,
+    options_object: Option<StoredValue>,
+    prototype: Option<HeapReference>,
+    requested_locales: Vec<String>,
+    options: SegmenterRequestOptions,
+    option_index: usize,
+    realm: RealmId,
+    stage: IntlSegmenterConstructorStage,
+    origin: JsStackFrame,
+}
+
+impl IntlSegmenterConstructorContinuation {
+    pub(super) fn retained_values(&self) -> u64 {
+        2_u64
+            .saturating_add(u64::from(self.locales_argument.is_some()))
+            .saturating_add(u64::from(self.options_object.is_some()))
+            .saturating_add(u64::from(self.prototype.is_some()))
+    }
+
+    pub(super) fn trace_roots(&self, mark: &mut dyn FnMut(CollectionRoot)) {
+        mark(CollectionRoot::Heap(HeapReference::Function(
+            self.new_target,
+        )));
+        if let Some(locales) = &self.locales_argument {
+            trace_stored_value_root(locales, mark);
+        }
+        trace_stored_value_root(&self.options_argument, mark);
+        if let Some(options) = &self.options_object {
+            trace_stored_value_root(options, mark);
+        }
+        if let Some(prototype) = self.prototype {
+            mark(CollectionRoot::Heap(prototype));
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum IntlSegmenterSupportedLocalesStage {
+    ReadLocaleMatcher,
+    AwaitLocaleMatcher,
+    AwaitLocaleMatcherPrimitive,
+}
+
+pub(super) struct IntlSegmenterSupportedLocalesContinuation {
+    options_argument: StoredValue,
+    options_object: Option<StoredValue>,
+    requested_locales: Vec<String>,
+    realm: RealmId,
+    stage: IntlSegmenterSupportedLocalesStage,
+    origin: JsStackFrame,
+}
+
+impl IntlSegmenterSupportedLocalesContinuation {
+    pub(super) fn retained_values(&self) -> u64 {
+        1_u64.saturating_add(u64::from(self.options_object.is_some()))
+    }
+
+    pub(super) fn trace_roots(&self, mark: &mut dyn FnMut(CollectionRoot)) {
+        trace_stored_value_root(&self.options_argument, mark);
+        if let Some(options) = &self.options_object {
+            trace_stored_value_root(options, mark);
+        }
+    }
+}
+
+pub(super) struct IntlSegmenterSegmentContinuation {
+    segmenter: ObjectId,
+    realm: RealmId,
+    origin: JsStackFrame,
+}
+
+impl IntlSegmenterSegmentContinuation {
+    pub(super) const fn retained_values() -> u64 {
+        1
+    }
+
+    pub(super) fn trace_roots(&self, mark: &mut dyn FnMut(CollectionRoot)) {
+        mark(CollectionRoot::Heap(HeapReference::Object(self.segmenter)));
+    }
+}
+
+pub(super) struct IntlSegmentsContainingContinuation {
+    segments: ObjectId,
+    realm: RealmId,
+    origin: JsStackFrame,
+}
+
+impl IntlSegmentsContainingContinuation {
+    pub(super) const fn retained_values() -> u64 {
+        1
+    }
+
+    pub(super) fn trace_roots(&self, mark: &mut dyn FnMut(CollectionRoot)) {
+        mark(CollectionRoot::Heap(HeapReference::Object(self.segments)));
     }
 }
 
@@ -7819,6 +7952,788 @@ fn intl_display_names_brand_error<T>(
     )
 }
 
+pub(super) fn begin_intl_segmenter_constructor(
+    runtime: &mut Runtime,
+    mut inputs: CallInputs,
+    realm: RealmId,
+    return_to: Option<CallReturn>,
+    origin: JsStackFrame,
+    execution_budget: &mut ExecutionBudget,
+) -> Result<NativeDispatch, NativeFailure> {
+    let Some(new_target) = inputs.new_target else {
+        return intl_locale_list_error(
+            realm,
+            origin,
+            ExceptionKind::TypeError,
+            "Intl.Segmenter requires 'new'",
+        );
+    };
+    let locales_argument = inputs.arguments.take_first_or_undefined();
+    let options_argument = inputs.arguments.take_first_or_undefined();
+    let state = IntlSegmenterConstructorContinuation {
+        new_target,
+        locales_argument: Some(locales_argument),
+        options_argument,
+        options_object: None,
+        prototype: None,
+        requested_locales: Vec::new(),
+        options: SegmenterRequestOptions::default(),
+        option_index: 0,
+        realm,
+        stage: IntlSegmenterConstructorStage::AwaitPrototype,
+        origin,
+    };
+    let base = StoredValue::Function(new_target);
+    charge_heap_property_lookup(runtime, &base, execution_budget)?;
+    let key = runtime.predefined_property_key(PredefinedAtom::Prototype);
+    let dispatch = begin_value_get(
+        runtime,
+        &base,
+        key,
+        None,
+        realm,
+        return_to,
+        state.origin.clone(),
+        execution_budget,
+    )?;
+    continue_intl_segmenter_constructor_after(dispatch, state, runtime, return_to, execution_budget)
+}
+
+fn begin_intl_segmenter_options(
+    runtime: &mut Runtime,
+    mut state: IntlSegmenterConstructorContinuation,
+    return_to: Option<CallReturn>,
+    execution_budget: &mut ExecutionBudget,
+) -> Result<NativeDispatch, NativeFailure> {
+    if matches!(state.options_argument, StoredValue::Undefined) {
+        return finish_intl_segmenter_options(runtime, &state);
+    }
+    let options_argument = state.options_argument.duplicate();
+    state.options_object = Some(
+        match to_object_value(runtime, state.realm, options_argument, state.origin.clone())? {
+            Ok(options) => options,
+            Err(exception) => return Err(NativeFailure::Abrupt(exception)),
+        },
+    );
+    state.stage = IntlSegmenterConstructorStage::ReadOption;
+    advance_intl_segmenter_constructor(runtime, state, None, return_to, execution_budget)
+}
+
+pub(super) fn advance_intl_segmenter_constructor(
+    runtime: &mut Runtime,
+    mut state: IntlSegmenterConstructorContinuation,
+    completion: Option<StoredValue>,
+    return_to: Option<CallReturn>,
+    execution_budget: &mut ExecutionBudget,
+) -> Result<NativeDispatch, NativeFailure> {
+    let mut completion = completion;
+    loop {
+        match state.stage {
+            IntlSegmenterConstructorStage::AwaitPrototype => {
+                return finish_intl_segmenter_prototype_lookup(
+                    runtime,
+                    state,
+                    &mut completion,
+                    return_to,
+                    execution_budget,
+                );
+            }
+            IntlSegmenterConstructorStage::ReadOption => {
+                let Some(option) = IntlSegmenterOption::ALL.get(state.option_index).copied() else {
+                    return finish_intl_segmenter_options(runtime, &state);
+                };
+                let base = state
+                    .options_object
+                    .as_ref()
+                    .ok_or(EngineFault::RuntimeInvariant {
+                        message: "Intl.Segmenter option iteration lost its options object",
+                    })?
+                    .duplicate();
+                charge_heap_property_lookup(runtime, &base, execution_budget)?;
+                let name = JsString::from_utf8(option.name())?;
+                let key = runtime.property_key_from_string(&name)?;
+                state.stage = IntlSegmenterConstructorStage::AwaitOption;
+                let dispatch = begin_value_get(
+                    runtime,
+                    &base,
+                    key,
+                    Some(&name),
+                    state.realm,
+                    return_to,
+                    state.origin.clone(),
+                    execution_budget,
+                )?;
+                return continue_intl_segmenter_constructor_after(
+                    dispatch,
+                    state,
+                    runtime,
+                    return_to,
+                    execution_budget,
+                );
+            }
+            IntlSegmenterConstructorStage::AwaitOption => {
+                let value = take_intl_segmenter_constructor_completion(&mut completion)?;
+                let option = IntlSegmenterOption::ALL[state.option_index];
+                if matches!(value, StoredValue::Undefined) {
+                    advance_intl_segmenter_option(&mut state);
+                    continue;
+                }
+                if matches!(value, StoredValue::Function(_) | StoredValue::Object(_)) {
+                    state.stage = IntlSegmenterConstructorStage::AwaitOptionPrimitive;
+                    let realm = state.realm;
+                    let origin = state.origin.clone();
+                    return begin_operator_primitive_conversion(
+                        runtime,
+                        value,
+                        OperatorPrimitiveHint::String,
+                        OperatorPrimitiveTarget::IntlSegmenterConstructor(Box::new(state)),
+                        realm,
+                        return_to,
+                        origin,
+                        execution_budget,
+                    );
+                }
+                let text = operator_primitive_to_string(value, state.realm, &state.origin)?;
+                store_intl_segmenter_option(&mut state, option, &text)?;
+                advance_intl_segmenter_option(&mut state);
+            }
+            IntlSegmenterConstructorStage::AwaitOptionPrimitive => {
+                let value = take_intl_segmenter_constructor_completion(&mut completion)?;
+                let option = IntlSegmenterOption::ALL[state.option_index];
+                let text = operator_primitive_to_string(value, state.realm, &state.origin)?;
+                store_intl_segmenter_option(&mut state, option, &text)?;
+                advance_intl_segmenter_option(&mut state);
+            }
+        }
+    }
+}
+
+fn finish_intl_segmenter_prototype_lookup(
+    runtime: &mut Runtime,
+    mut state: IntlSegmenterConstructorContinuation,
+    completion: &mut Option<StoredValue>,
+    return_to: Option<CallReturn>,
+    execution_budget: &mut ExecutionBudget,
+) -> Result<NativeDispatch, NativeFailure> {
+    let requested = take_intl_segmenter_constructor_completion(completion)?;
+    state.prototype = Some(match requested {
+        StoredValue::Function(function) => HeapReference::Function(function),
+        StoredValue::Object(object) => HeapReference::Object(object),
+        StoredValue::Undefined
+        | StoredValue::Null
+        | StoredValue::Boolean(_)
+        | StoredValue::Number(_)
+        | StoredValue::BigInt(_)
+        | StoredValue::String(_)
+        | StoredValue::Symbol(_) => {
+            let target_realm = runtime.function_realm(state.new_target)?;
+            HeapReference::Object(runtime.realm_intl_segmenter_prototype(target_realm)?)
+        }
+    });
+    let locales = state
+        .locales_argument
+        .take()
+        .ok_or(EngineFault::RuntimeInvariant {
+            message: "Intl.Segmenter constructor lost its locales argument",
+        })?;
+    state.stage = IntlSegmenterConstructorStage::ReadOption;
+    let realm = state.realm;
+    let origin = state.origin.clone();
+    begin_intl_locale_list(
+        runtime,
+        locales,
+        IntlLocaleListTarget::SegmenterConstructor(Box::new(state)),
+        realm,
+        return_to,
+        origin,
+        execution_budget,
+    )
+}
+
+fn advance_intl_segmenter_option(state: &mut IntlSegmenterConstructorContinuation) {
+    state.option_index = state.option_index.saturating_add(1);
+    state.stage = IntlSegmenterConstructorStage::ReadOption;
+}
+
+fn store_intl_segmenter_option(
+    state: &mut IntlSegmenterConstructorContinuation,
+    option: IntlSegmenterOption,
+    text: &JsString,
+) -> Result<(), NativeFailure> {
+    let value = text.to_utf8_lossy()?;
+    match option {
+        IntlSegmenterOption::LocaleMatcher => {
+            if !matches!(value.as_str(), "lookup" | "best fit") {
+                return invalid_intl_segmenter_option(state, option);
+            }
+        }
+        IntlSegmenterOption::Granularity => {
+            state.options.granularity = Some(match value.as_str() {
+                "grapheme" => SegmenterGranularity::Grapheme,
+                "word" => SegmenterGranularity::Word,
+                "sentence" => SegmenterGranularity::Sentence,
+                _ => return invalid_intl_segmenter_option(state, option),
+            });
+        }
+    }
+    Ok(())
+}
+
+fn invalid_intl_segmenter_option<T>(
+    state: &IntlSegmenterConstructorContinuation,
+    option: IntlSegmenterOption,
+) -> Result<T, NativeFailure> {
+    intl_locale_list_error(
+        state.realm,
+        state.origin.clone(),
+        ExceptionKind::RangeError,
+        &format!("invalid Intl.Segmenter {} option", option.name()),
+    )
+}
+
+fn finish_intl_segmenter_options(
+    runtime: &mut Runtime,
+    state: &IntlSegmenterConstructorContinuation,
+) -> Result<NativeDispatch, NativeFailure> {
+    let resolved =
+        resolve_segmenter(&state.requested_locales, state.options).map_err(
+            |error| match error {
+                SegmenterError::InvalidLocale | SegmenterError::Data => {
+                    EngineFault::RuntimeInvariant {
+                        message: "canonical Segmenter inputs failed locale resolution",
+                    }
+                }
+            },
+        )?;
+    let prototype = state.prototype.ok_or(EngineFault::RuntimeInvariant {
+        message: "Intl.Segmenter allocation lost its prototype",
+    })?;
+    let object = runtime.allocate_intl_segmenter(prototype, resolved)?;
+    Ok(NativeDispatch::Immediate(StoredValue::Object(object)))
+}
+
+fn continue_intl_segmenter_constructor_after(
+    dispatch: NativeDispatch,
+    state: IntlSegmenterConstructorContinuation,
+    runtime: &mut Runtime,
+    return_to: Option<CallReturn>,
+    execution_budget: &mut ExecutionBudget,
+) -> Result<NativeDispatch, NativeFailure> {
+    continue_get_after(
+        dispatch,
+        state,
+        |state| NativeContinuation::IntlSegmenterConstructor(Box::new(state)),
+        |state, value| {
+            advance_intl_segmenter_constructor(
+                runtime,
+                state,
+                Some(value),
+                return_to,
+                execution_budget,
+            )
+        },
+        "Intl.Segmenter property Get produced a structured result",
+    )
+}
+
+fn take_intl_segmenter_constructor_completion(
+    completion: &mut Option<StoredValue>,
+) -> Result<StoredValue, EngineFault> {
+    completion.take().ok_or(EngineFault::RuntimeInvariant {
+        message: "Intl.Segmenter constructor resumed without a completion",
+    })
+}
+
+pub(super) fn begin_intl_segmenter_supported_locales_of(
+    runtime: &mut Runtime,
+    mut arguments: CallArguments,
+    realm: RealmId,
+    return_to: Option<CallReturn>,
+    origin: JsStackFrame,
+    execution_budget: &mut ExecutionBudget,
+) -> Result<NativeDispatch, NativeFailure> {
+    let locales = arguments.take_first_or_undefined();
+    let options_argument = arguments.take_first_or_undefined();
+    let state = IntlSegmenterSupportedLocalesContinuation {
+        options_argument,
+        options_object: None,
+        requested_locales: Vec::new(),
+        realm,
+        stage: IntlSegmenterSupportedLocalesStage::ReadLocaleMatcher,
+        origin: origin.clone(),
+    };
+    begin_intl_locale_list(
+        runtime,
+        locales,
+        IntlLocaleListTarget::SegmenterSupportedLocalesOf(Box::new(state)),
+        realm,
+        return_to,
+        origin,
+        execution_budget,
+    )
+}
+
+fn begin_intl_segmenter_supported_locales_options(
+    runtime: &mut Runtime,
+    mut state: IntlSegmenterSupportedLocalesContinuation,
+    return_to: Option<CallReturn>,
+    execution_budget: &mut ExecutionBudget,
+) -> Result<NativeDispatch, NativeFailure> {
+    if matches!(state.options_argument, StoredValue::Undefined) {
+        return finish_intl_segmenter_supported_locales(runtime, &state);
+    }
+    let options_argument = state.options_argument.duplicate();
+    state.options_object = Some(
+        match to_object_value(runtime, state.realm, options_argument, state.origin.clone())? {
+            Ok(options) => options,
+            Err(exception) => return Err(NativeFailure::Abrupt(exception)),
+        },
+    );
+    advance_intl_segmenter_supported_locales(runtime, state, None, return_to, execution_budget)
+}
+
+pub(super) fn advance_intl_segmenter_supported_locales(
+    runtime: &mut Runtime,
+    mut state: IntlSegmenterSupportedLocalesContinuation,
+    completion: Option<StoredValue>,
+    return_to: Option<CallReturn>,
+    execution_budget: &mut ExecutionBudget,
+) -> Result<NativeDispatch, NativeFailure> {
+    let mut completion = completion;
+    match state.stage {
+        IntlSegmenterSupportedLocalesStage::ReadLocaleMatcher => {
+            let base = state
+                .options_object
+                .as_ref()
+                .ok_or(EngineFault::RuntimeInvariant {
+                    message: "Intl.Segmenter.supportedLocalesOf lost its options object",
+                })?
+                .duplicate();
+            charge_heap_property_lookup(runtime, &base, execution_budget)?;
+            let name = JsString::from_utf8("localeMatcher")?;
+            let key = runtime.property_key_from_string(&name)?;
+            state.stage = IntlSegmenterSupportedLocalesStage::AwaitLocaleMatcher;
+            let dispatch = begin_value_get(
+                runtime,
+                &base,
+                key,
+                Some(&name),
+                state.realm,
+                return_to,
+                state.origin.clone(),
+                execution_budget,
+            )?;
+            continue_intl_segmenter_supported_locales_after(
+                dispatch,
+                state,
+                runtime,
+                return_to,
+                execution_budget,
+            )
+        }
+        IntlSegmenterSupportedLocalesStage::AwaitLocaleMatcher => {
+            let value = take_intl_segmenter_supported_locales_completion(&mut completion)?;
+            if matches!(value, StoredValue::Undefined) {
+                return finish_intl_segmenter_supported_locales(runtime, &state);
+            }
+            if matches!(value, StoredValue::Function(_) | StoredValue::Object(_)) {
+                state.stage = IntlSegmenterSupportedLocalesStage::AwaitLocaleMatcherPrimitive;
+                let realm = state.realm;
+                let origin = state.origin.clone();
+                return begin_operator_primitive_conversion(
+                    runtime,
+                    value,
+                    OperatorPrimitiveHint::String,
+                    OperatorPrimitiveTarget::IntlSegmenterSupportedLocalesOf(Box::new(state)),
+                    realm,
+                    return_to,
+                    origin,
+                    execution_budget,
+                );
+            }
+            validate_intl_segmenter_locale_matcher(&state, value)?;
+            finish_intl_segmenter_supported_locales(runtime, &state)
+        }
+        IntlSegmenterSupportedLocalesStage::AwaitLocaleMatcherPrimitive => {
+            let value = take_intl_segmenter_supported_locales_completion(&mut completion)?;
+            validate_intl_segmenter_locale_matcher(&state, value)?;
+            finish_intl_segmenter_supported_locales(runtime, &state)
+        }
+    }
+}
+
+fn validate_intl_segmenter_locale_matcher(
+    state: &IntlSegmenterSupportedLocalesContinuation,
+    value: StoredValue,
+) -> Result<(), NativeFailure> {
+    let text = operator_primitive_to_string(value, state.realm, &state.origin)?;
+    if matches!(text.to_utf8_lossy()?.as_str(), "lookup" | "best fit") {
+        return Ok(());
+    }
+    intl_locale_list_error(
+        state.realm,
+        state.origin.clone(),
+        ExceptionKind::RangeError,
+        "invalid Intl.Segmenter localeMatcher option",
+    )
+}
+
+fn finish_intl_segmenter_supported_locales(
+    runtime: &mut Runtime,
+    state: &IntlSegmenterSupportedLocalesContinuation,
+) -> Result<NativeDispatch, NativeFailure> {
+    intl_locale_string_array(
+        runtime,
+        state.realm,
+        segmenter_supported_locales(&state.requested_locales),
+    )
+}
+
+fn continue_intl_segmenter_supported_locales_after(
+    dispatch: NativeDispatch,
+    state: IntlSegmenterSupportedLocalesContinuation,
+    runtime: &mut Runtime,
+    return_to: Option<CallReturn>,
+    execution_budget: &mut ExecutionBudget,
+) -> Result<NativeDispatch, NativeFailure> {
+    continue_get_after(
+        dispatch,
+        state,
+        |state| NativeContinuation::IntlSegmenterSupportedLocalesOf(Box::new(state)),
+        |state, value| {
+            advance_intl_segmenter_supported_locales(
+                runtime,
+                state,
+                Some(value),
+                return_to,
+                execution_budget,
+            )
+        },
+        "Intl.Segmenter.supportedLocalesOf Get produced a structured result",
+    )
+}
+
+fn take_intl_segmenter_supported_locales_completion(
+    completion: &mut Option<StoredValue>,
+) -> Result<StoredValue, EngineFault> {
+    completion.take().ok_or(EngineFault::RuntimeInvariant {
+        message: "Intl.Segmenter.supportedLocalesOf resumed without a completion",
+    })
+}
+
+#[allow(
+    clippy::too_many_arguments,
+    reason = "native dispatch keeps receiver, arguments, realm, return target, origin, and budget explicit"
+)]
+pub(super) fn begin_intl_segmenter_prototype(
+    runtime: &mut Runtime,
+    method: IntlSegmenterPrototypeMethod,
+    receiver: &StoredValue,
+    mut arguments: CallArguments,
+    realm: RealmId,
+    return_to: Option<CallReturn>,
+    origin: JsStackFrame,
+    execution_budget: &mut ExecutionBudget,
+) -> Result<NativeDispatch, NativeFailure> {
+    let StoredValue::Object(segmenter) = receiver else {
+        return intl_segmenter_brand_error(realm, origin);
+    };
+    let Some(resolved) = runtime.intl_segmenter_state(*segmenter)?.cloned() else {
+        return intl_segmenter_brand_error(realm, origin);
+    };
+    match method {
+        IntlSegmenterPrototypeMethod::ResolvedOptions => {
+            intl_segmenter_resolved_options(runtime, realm, &resolved)
+        }
+        IntlSegmenterPrototypeMethod::Segment => {
+            let input = arguments.take_first_or_undefined();
+            begin_intl_segmenter_segment(
+                runtime,
+                IntlSegmenterSegmentContinuation {
+                    segmenter: *segmenter,
+                    realm,
+                    origin,
+                },
+                input,
+                return_to,
+                execution_budget,
+            )
+        }
+    }
+}
+
+fn begin_intl_segmenter_segment(
+    runtime: &mut Runtime,
+    state: IntlSegmenterSegmentContinuation,
+    input: StoredValue,
+    return_to: Option<CallReturn>,
+    execution_budget: &mut ExecutionBudget,
+) -> Result<NativeDispatch, NativeFailure> {
+    if matches!(input, StoredValue::Function(_) | StoredValue::Object(_)) {
+        let realm = state.realm;
+        let origin = state.origin.clone();
+        return begin_operator_primitive_conversion(
+            runtime,
+            input,
+            OperatorPrimitiveHint::String,
+            OperatorPrimitiveTarget::IntlSegmenterSegment(Box::new(state)),
+            realm,
+            return_to,
+            origin,
+            execution_budget,
+        );
+    }
+    finish_intl_segmenter_segment_primitive(runtime, &state, input)
+}
+
+pub(super) fn finish_intl_segmenter_segment_primitive(
+    runtime: &mut Runtime,
+    state: &IntlSegmenterSegmentContinuation,
+    input: StoredValue,
+) -> Result<NativeDispatch, NativeFailure> {
+    let input = operator_primitive_to_string(input, state.realm, &state.origin)?;
+    let resolved =
+        runtime
+            .intl_segmenter_state(state.segmenter)?
+            .ok_or(EngineFault::RuntimeInvariant {
+                message: "Intl.Segmenter.segment lost its branded receiver",
+            })?;
+    let code_units = input.code_units().collect::<Vec<_>>();
+    let boundaries = segment_boundaries(resolved, &code_units).map_err(|error| match error {
+        SegmenterError::InvalidLocale | SegmenterError::Data => EngineFault::RuntimeInvariant {
+            message: "resolved Intl.Segmenter slots failed segmentation",
+        },
+    })?;
+    let prototype = runtime.realm_intl_segments_prototype(state.realm)?;
+    let object = runtime.allocate_intl_segments(prototype, state.segmenter, input, boundaries)?;
+    Ok(NativeDispatch::Immediate(StoredValue::Object(object)))
+}
+
+fn intl_segmenter_resolved_options(
+    runtime: &mut Runtime,
+    realm: RealmId,
+    state: &SegmenterState,
+) -> Result<NativeDispatch, NativeFailure> {
+    let object = runtime.allocate_ordinary_object(runtime.realm_object_prototype(realm)?)?;
+    for (name, value) in [
+        ("locale", state.locale.as_str()),
+        ("granularity", state.granularity.as_str()),
+    ] {
+        let name = JsString::from_utf8(name)?;
+        let key = runtime.property_key_from_string(&name)?;
+        runtime.append_data_property(
+            HeapReference::Object(object),
+            key,
+            PropertyLayout::data(true, true, true),
+            StoredValue::String(JsString::from_utf8(value)?),
+        )?;
+    }
+    Ok(NativeDispatch::Immediate(StoredValue::Object(object)))
+}
+
+pub(super) fn begin_intl_segments_containing(
+    runtime: &mut Runtime,
+    receiver: &StoredValue,
+    mut arguments: CallArguments,
+    realm: RealmId,
+    return_to: Option<CallReturn>,
+    origin: JsStackFrame,
+    execution_budget: &mut ExecutionBudget,
+) -> Result<NativeDispatch, NativeFailure> {
+    let StoredValue::Object(segments) = receiver else {
+        return intl_segments_brand_error(realm, origin);
+    };
+    if runtime.intl_segments_state(*segments)?.is_none() {
+        return intl_segments_brand_error(realm, origin);
+    }
+    let index = arguments.take_first_or_undefined();
+    let state = IntlSegmentsContainingContinuation {
+        segments: *segments,
+        realm,
+        origin,
+    };
+    if matches!(index, StoredValue::Function(_) | StoredValue::Object(_)) {
+        let realm = state.realm;
+        let origin = state.origin.clone();
+        return begin_operator_primitive_conversion(
+            runtime,
+            index,
+            OperatorPrimitiveHint::Number,
+            OperatorPrimitiveTarget::IntlSegmentsContaining(Box::new(state)),
+            realm,
+            return_to,
+            origin,
+            execution_budget,
+        );
+    }
+    finish_intl_segments_containing_primitive(runtime, &state, index)
+}
+
+#[expect(
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss,
+    reason = "ToIntegerOrInfinity is non-negative and bounded by the UTF-16 string length"
+)]
+pub(super) fn finish_intl_segments_containing_primitive(
+    runtime: &mut Runtime,
+    state: &IntlSegmentsContainingContinuation,
+    index: StoredValue,
+) -> Result<NativeDispatch, NativeFailure> {
+    let integer =
+        number_to_integer_or_infinity(operator_to_number(index, state.realm, &state.origin)?);
+    let Some((input, boundary)) = ({
+        let segments =
+            runtime
+                .intl_segments_state(state.segments)?
+                .ok_or(EngineFault::RuntimeInvariant {
+                    message: "Intl Segments.containing lost its branded receiver",
+                })?;
+        if integer < 0.0 || integer >= f64::from(segments.input.len()) {
+            None
+        } else {
+            let index = integer as usize;
+            segments
+                .boundaries
+                .iter()
+                .copied()
+                .find(|boundary| boundary.start <= index && index < boundary.end)
+                .map(|boundary| (segments.input.clone(), boundary))
+        }
+    }) else {
+        return Ok(NativeDispatch::Immediate(StoredValue::Undefined));
+    };
+    create_intl_segment_data_object(runtime, state.realm, &input, boundary)
+}
+
+pub(super) fn begin_intl_segments_iterator(
+    runtime: &mut Runtime,
+    receiver: &StoredValue,
+    realm: RealmId,
+    origin: JsStackFrame,
+) -> Result<NativeDispatch, NativeFailure> {
+    let StoredValue::Object(segments) = receiver else {
+        return intl_segments_brand_error(realm, origin);
+    };
+    if runtime.intl_segments_state(*segments)?.is_none() {
+        return intl_segments_brand_error(realm, origin);
+    }
+    let prototype = runtime.realm_intl_segment_iterator_prototype(realm)?;
+    let iterator = runtime.allocate_intl_segment_iterator(prototype, *segments)?;
+    Ok(NativeDispatch::Immediate(StoredValue::Object(iterator)))
+}
+
+pub(super) fn begin_intl_segment_iterator_next(
+    runtime: &mut Runtime,
+    receiver: &StoredValue,
+    realm: RealmId,
+    origin: JsStackFrame,
+) -> Result<NativeDispatch, NativeFailure> {
+    let StoredValue::Object(iterator) = receiver else {
+        return intl_segment_iterator_brand_error(realm, origin);
+    };
+    let Some((segments_id, next_segment)) = runtime
+        .intl_segment_iterator_state(*iterator)?
+        .map(|state| (state.segments, state.next_segment))
+    else {
+        return intl_segment_iterator_brand_error(realm, origin);
+    };
+    let segment = {
+        let segments =
+            runtime
+                .intl_segments_state(segments_id)?
+                .ok_or(EngineFault::RuntimeInvariant {
+                    message: "Intl Segment Iterator lost its Segments object",
+                })?;
+        segments
+            .boundaries
+            .get(next_segment)
+            .copied()
+            .map(|boundary| (segments.input.clone(), boundary))
+    };
+    let Some((input, boundary)) = segment else {
+        return iterator_result(runtime, realm, StoredValue::Undefined, true);
+    };
+    let iterator_state = runtime.intl_segment_iterator_state_mut(*iterator)?.ok_or(
+        EngineFault::RuntimeInvariant {
+            message: "Intl Segment Iterator lost its branded state",
+        },
+    )?;
+    iterator_state.next_segment = next_segment.saturating_add(1);
+    let NativeDispatch::Immediate(value) =
+        create_intl_segment_data_object(runtime, realm, &input, boundary)?
+    else {
+        return Err(EngineFault::RuntimeInvariant {
+            message: "segment data creation returned a structured dispatch",
+        }
+        .into());
+    };
+    iterator_result(runtime, realm, value, false)
+}
+
+fn create_intl_segment_data_object(
+    runtime: &mut Runtime,
+    realm: RealmId,
+    input: &JsString,
+    boundary: SegmentBoundary,
+) -> Result<NativeDispatch, NativeFailure> {
+    let start = u32::try_from(boundary.start).map_err(|_| EngineFault::RuntimeInvariant {
+        message: "Intl segment start exceeds the JavaScript string domain",
+    })?;
+    let end = u32::try_from(boundary.end).map_err(|_| EngineFault::RuntimeInvariant {
+        message: "Intl segment end exceeds the JavaScript string domain",
+    })?;
+    let object = runtime.allocate_ordinary_object(runtime.realm_object_prototype(realm)?)?;
+    let mut properties = vec![
+        ("segment", StoredValue::String(input.slice(start..end)?)),
+        ("index", StoredValue::Number(JsNumber::from_u32(start))),
+        ("input", StoredValue::String(input.clone())),
+    ];
+    if let Some(is_word_like) = boundary.is_word_like {
+        properties.push(("isWordLike", StoredValue::Boolean(is_word_like)));
+    }
+    for (name, value) in properties {
+        let name = JsString::from_utf8(name)?;
+        let key = runtime.property_key_from_string(&name)?;
+        runtime.append_data_property(
+            HeapReference::Object(object),
+            key,
+            PropertyLayout::data(true, true, true),
+            value,
+        )?;
+    }
+    Ok(NativeDispatch::Immediate(StoredValue::Object(object)))
+}
+
+fn intl_segmenter_brand_error<T>(realm: RealmId, origin: JsStackFrame) -> Result<T, NativeFailure> {
+    intl_locale_list_error(
+        realm,
+        origin,
+        ExceptionKind::TypeError,
+        "Intl.Segmenter method called on incompatible receiver",
+    )
+}
+
+fn intl_segments_brand_error<T>(realm: RealmId, origin: JsStackFrame) -> Result<T, NativeFailure> {
+    intl_locale_list_error(
+        realm,
+        origin,
+        ExceptionKind::TypeError,
+        "Intl Segments method called on incompatible receiver",
+    )
+}
+
+fn intl_segment_iterator_brand_error<T>(
+    realm: RealmId,
+    origin: JsStackFrame,
+) -> Result<T, NativeFailure> {
+    intl_locale_list_error(
+        realm,
+        origin,
+        ExceptionKind::TypeError,
+        "Intl Segment Iterator.next called on incompatible receiver",
+    )
+}
+
 pub(super) fn begin_intl_date_time_format_constructor(
     runtime: &mut Runtime,
     function: FunctionId,
@@ -10180,6 +11095,10 @@ fn canonicalize_js_locale(
     Ok(JsString::from_utf8(&canonical)?)
 }
 
+#[allow(
+    clippy::too_many_lines,
+    reason = "one exhaustive match routes canonical locale lists to every ECMA-402 continuation"
+)]
 fn finish_intl_locale_list(
     runtime: &mut Runtime,
     realm: RealmId,
@@ -10188,16 +11107,22 @@ fn finish_intl_locale_list(
     return_to: Option<CallReturn>,
     execution_budget: &mut ExecutionBudget,
 ) -> Result<NativeDispatch, NativeFailure> {
+    let target = match target {
+        IntlLocaleListTarget::ReturnArray => {
+            return Ok(NativeDispatch::Immediate(StoredValue::Object(
+                runtime.allocate_array(realm, locales)?,
+            )));
+        }
+        target => target,
+    };
+    let requested_locales = intl_locale_strings(locales)?;
     match target {
-        IntlLocaleListTarget::ReturnArray => Ok(NativeDispatch::Immediate(StoredValue::Object(
-            runtime.allocate_array(realm, locales)?,
-        ))),
         IntlLocaleListTarget::CollatorConstructor(mut state) => {
-            state.requested_locales = intl_locale_strings(locales)?;
+            state.requested_locales = requested_locales;
             begin_intl_collator_options(runtime, *state, return_to, execution_budget)
         }
         IntlLocaleListTarget::CollatorSupportedLocalesOf(mut state) => {
-            state.requested_locales = intl_locale_strings(locales)?;
+            state.requested_locales = requested_locales;
             begin_intl_collator_supported_locales_options(
                 runtime,
                 *state,
@@ -10206,11 +11131,11 @@ fn finish_intl_locale_list(
             )
         }
         IntlLocaleListTarget::NumberFormatConstructor(mut state) => {
-            state.requested_locales = intl_locale_strings(locales)?;
+            state.requested_locales = requested_locales;
             begin_intl_number_format_options(runtime, *state, return_to, execution_budget)
         }
         IntlLocaleListTarget::NumberFormatSupportedLocalesOf(mut state) => {
-            state.requested_locales = intl_locale_strings(locales)?;
+            state.requested_locales = requested_locales;
             begin_intl_number_format_supported_locales_options(
                 runtime,
                 *state,
@@ -10219,11 +11144,11 @@ fn finish_intl_locale_list(
             )
         }
         IntlLocaleListTarget::DateTimeFormatConstructor(mut state) => {
-            state.requested_locales = intl_locale_strings(locales)?;
+            state.requested_locales = requested_locales;
             begin_intl_date_time_format_options(runtime, *state, return_to, execution_budget)
         }
         IntlLocaleListTarget::DateTimeFormatSupportedLocalesOf(mut state) => {
-            state.requested_locales = intl_locale_strings(locales)?;
+            state.requested_locales = requested_locales;
             begin_intl_date_time_format_supported_locales_options(
                 runtime,
                 *state,
@@ -10232,11 +11157,11 @@ fn finish_intl_locale_list(
             )
         }
         IntlLocaleListTarget::PluralRulesConstructor(mut state) => {
-            state.requested_locales = intl_locale_strings(locales)?;
+            state.requested_locales = requested_locales;
             begin_intl_plural_rules_options(runtime, *state, return_to, execution_budget)
         }
         IntlLocaleListTarget::PluralRulesSupportedLocalesOf(mut state) => {
-            state.requested_locales = intl_locale_strings(locales)?;
+            state.requested_locales = requested_locales;
             begin_intl_plural_rules_supported_locales_options(
                 runtime,
                 *state,
@@ -10245,11 +11170,11 @@ fn finish_intl_locale_list(
             )
         }
         IntlLocaleListTarget::RelativeTimeFormatConstructor(mut state) => {
-            state.requested_locales = intl_locale_strings(locales)?;
+            state.requested_locales = requested_locales;
             begin_intl_relative_time_format_options(runtime, *state, return_to, execution_budget)
         }
         IntlLocaleListTarget::RelativeTimeFormatSupportedLocalesOf(mut state) => {
-            state.requested_locales = intl_locale_strings(locales)?;
+            state.requested_locales = requested_locales;
             begin_intl_relative_time_format_supported_locales_options(
                 runtime,
                 *state,
@@ -10258,11 +11183,11 @@ fn finish_intl_locale_list(
             )
         }
         IntlLocaleListTarget::ListFormatConstructor(mut state) => {
-            state.requested_locales = intl_locale_strings(locales)?;
+            state.requested_locales = requested_locales;
             begin_intl_list_format_options(runtime, *state, return_to, execution_budget)
         }
         IntlLocaleListTarget::ListFormatSupportedLocalesOf(mut state) => {
-            state.requested_locales = intl_locale_strings(locales)?;
+            state.requested_locales = requested_locales;
             begin_intl_list_format_supported_locales_options(
                 runtime,
                 *state,
@@ -10271,11 +11196,11 @@ fn finish_intl_locale_list(
             )
         }
         IntlLocaleListTarget::DisplayNamesConstructor(mut state) => {
-            state.requested_locales = intl_locale_strings(locales)?;
+            state.requested_locales = requested_locales;
             begin_intl_display_names_options(runtime, *state, return_to, execution_budget)
         }
         IntlLocaleListTarget::DisplayNamesSupportedLocalesOf(mut state) => {
-            state.requested_locales = intl_locale_strings(locales)?;
+            state.requested_locales = requested_locales;
             begin_intl_display_names_supported_locales_options(
                 runtime,
                 *state,
@@ -10283,6 +11208,20 @@ fn finish_intl_locale_list(
                 execution_budget,
             )
         }
+        IntlLocaleListTarget::SegmenterConstructor(mut state) => {
+            state.requested_locales = requested_locales;
+            begin_intl_segmenter_options(runtime, *state, return_to, execution_budget)
+        }
+        IntlLocaleListTarget::SegmenterSupportedLocalesOf(mut state) => {
+            state.requested_locales = requested_locales;
+            begin_intl_segmenter_supported_locales_options(
+                runtime,
+                *state,
+                return_to,
+                execution_budget,
+            )
+        }
+        IntlLocaleListTarget::ReturnArray => unreachable!("ReturnArray returned before dispatch"),
     }
 }
 

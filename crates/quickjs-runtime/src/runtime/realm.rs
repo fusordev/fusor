@@ -715,6 +715,10 @@ impl RealmBuildTransaction<'_> {
                 display_names_constructor: function(
                     NativeFunctionKind::IntlDisplayNamesConstructor,
                 ),
+                segmenter_prototype: object(IntrinsicObjectId::IntlSegmenterPrototype),
+                segments_prototype: object(IntrinsicObjectId::IntlSegmentsPrototype),
+                segment_iterator_prototype: object(IntrinsicObjectId::IntlSegmentIteratorPrototype),
+                segmenter_constructor: function(NativeFunctionKind::IntlSegmenterConstructor),
                 locale_prototype: object(IntrinsicObjectId::IntlLocalePrototype),
                 locale_constructor: function(NativeFunctionKind::IntlLocaleConstructor),
             },
