@@ -122,3 +122,18 @@ fn global_script_certifies_const_for_of_destructuring_iteration_heads() {
                 == FinalOpcode::ForOfStart)
     );
 }
+
+#[test]
+fn global_script_allows_looped_destructuring_reassignment_of_a_block_let() {
+    let tree = compile(
+        "for (const pair of [[[1], [2]]]) {\
+             let [value] = pair[0];\
+             [value] = pair[1];\
+             value;\
+         }",
+    );
+    assert_eq!(
+        tree.verified_bytecode().root().metadata().executable_kind(),
+        CompilerExecutableKind::GlobalScript
+    );
+}
