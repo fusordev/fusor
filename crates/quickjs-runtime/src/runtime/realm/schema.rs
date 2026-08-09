@@ -22,7 +22,7 @@ use crate::runtime::{
     TemporalPlainTimePrototypeMethod, TemporalPlainTimeStaticMethod,
     TemporalPlainYearMonthPrototypeMethod, TemporalPlainYearMonthStaticMethod,
     TemporalZonedDateTimePrototypeMethod, TemporalZonedDateTimeStaticMethod,
-    TypedArrayPrototypeMethod,
+    TypedArrayPrototypeMethod, Uint8ArrayMethod,
 };
 
 /// Stable identity of an object allocated by Realm bootstrap.
@@ -217,6 +217,7 @@ pub(in crate::runtime) enum RealmNameId {
     SharedArrayBufferPrototype(SharedArrayBufferPrototypeMethod),
     DataViewPrototype(DataViewPrototypeMethod),
     TypedArrayPrototype(TypedArrayPrototypeMethod),
+    Uint8ArrayMethod(Uint8ArrayMethod),
     TypedArrayBytesPerElement,
     DateStatic(DateStaticMethod),
     DatePrototype(DatePrototypeMethod),

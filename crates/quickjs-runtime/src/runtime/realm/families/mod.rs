@@ -250,6 +250,7 @@ pub(super) const fn is_declarative_function(id: IntrinsicFunctionId) -> bool {
             | NativeFunctionKind::TypedArrayStatic(_)
             | NativeFunctionKind::TypedArraySpeciesGetter
             | NativeFunctionKind::TypedArrayPrototype(_)
+            | NativeFunctionKind::Uint8Array(_)
             | NativeFunctionKind::ArrayPrototypeJoin
             | NativeFunctionKind::ArrayPrototypeToString
             | NativeFunctionKind::ArrayPrototypeSearch(_)
@@ -877,6 +878,7 @@ const fn is_array_function(id: IntrinsicFunctionId) -> bool {
             | NativeFunctionKind::TypedArrayStatic(_)
             | NativeFunctionKind::TypedArraySpeciesGetter
             | NativeFunctionKind::TypedArrayPrototype(_)
+            | NativeFunctionKind::Uint8Array(_)
             | NativeFunctionKind::ArrayPrototypeJoin
             | NativeFunctionKind::ArrayPrototypeToString
             | NativeFunctionKind::ArrayPrototypeSearch(_)

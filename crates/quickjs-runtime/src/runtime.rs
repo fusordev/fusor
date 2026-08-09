@@ -1294,6 +1294,7 @@ pub(crate) enum NativeFunctionKind {
     TypedArrayStatic(ArrayStatic),
     TypedArraySpeciesGetter,
     TypedArrayPrototype(TypedArrayPrototypeMethod),
+    Uint8Array(Uint8ArrayMethod),
     DateConstructor,
     DateStatic(DateStaticMethod),
     DatePrototype(DatePrototypeMethod),
@@ -1488,6 +1489,51 @@ pub(crate) enum AtomicsMethod {
     WaitAsync,
     Xor,
     Pause,
+}
+
+/// Additional methods installed only on `%Uint8Array%` and
+/// `%Uint8Array.prototype%`.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum Uint8ArrayMethod {
+    FromBase64,
+    FromHex,
+    SetFromBase64,
+    SetFromHex,
+    ToBase64,
+    ToHex,
+}
+
+impl Uint8ArrayMethod {
+    pub(crate) const ALL: [Self; 6] = [
+        Self::FromBase64,
+        Self::FromHex,
+        Self::SetFromBase64,
+        Self::SetFromHex,
+        Self::ToBase64,
+        Self::ToHex,
+    ];
+
+    pub(crate) const fn name(self) -> &'static str {
+        match self {
+            Self::FromBase64 => "fromBase64",
+            Self::FromHex => "fromHex",
+            Self::SetFromBase64 => "setFromBase64",
+            Self::SetFromHex => "setFromHex",
+            Self::ToBase64 => "toBase64",
+            Self::ToHex => "toHex",
+        }
+    }
+
+    pub(crate) const fn length(self) -> i32 {
+        match self {
+            Self::FromBase64 | Self::FromHex | Self::SetFromBase64 | Self::SetFromHex => 1,
+            Self::ToBase64 | Self::ToHex => 0,
+        }
+    }
+
+    pub(crate) const fn is_static(self) -> bool {
+        matches!(self, Self::FromBase64 | Self::FromHex)
+    }
 }
 
 impl AtomicsMethod {

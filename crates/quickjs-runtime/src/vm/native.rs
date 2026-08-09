@@ -548,6 +548,13 @@ pub(super) fn resume_native_continuations(
                     execution_budget,
                 )?
             }
+            NativeContinuation::Uint8ArrayBase64(state) => advance_uint8_array_base64_options(
+                runtime,
+                *state,
+                value,
+                return_to,
+                execution_budget,
+            )?,
             NativeContinuation::ArrayBufferSlice(state) => {
                 advance_array_buffer_slice(runtime, *state, value, return_to, execution_budget)?
             }
@@ -2850,6 +2857,16 @@ pub(super) fn dispatch_native_call_with_frames(
             execution_budget,
         ),
         NativeFunctionKind::TypedArrayPrototype(method) => dispatch_typed_array_prototype(
+            runtime,
+            method,
+            native.realm,
+            &inputs.receiver,
+            inputs.arguments,
+            return_to,
+            origin.unwrap_or_else(native_function_host_origin),
+            execution_budget,
+        ),
+        NativeFunctionKind::Uint8Array(method) => dispatch_uint8_array_method(
             runtime,
             method,
             native.realm,

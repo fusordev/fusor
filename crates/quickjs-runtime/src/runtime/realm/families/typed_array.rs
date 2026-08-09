@@ -13,7 +13,9 @@ use crate::runtime::realm::{
 };
 use crate::{
     object::TypedArrayElementType,
-    runtime::{ArrayStatic, PredefinedAtom, PropertyLayout, TypedArrayPrototypeMethod},
+    runtime::{
+        ArrayStatic, PredefinedAtom, PropertyLayout, TypedArrayPrototypeMethod, Uint8ArrayMethod,
+    },
 };
 
 pub(super) fn visit_objects(visit: ObjectSink<'_>) {
@@ -65,6 +67,13 @@ pub(super) fn visit_functions(visit: FunctionSink<'_>) {
             NativeFunctionKind::TypedArrayPrototype(method),
             IntrinsicNameSpec::Literal(method.accessor_name()),
             method.arity(),
+        ));
+    }
+    for method in Uint8ArrayMethod::ALL {
+        visit(ordinary(
+            NativeFunctionKind::Uint8Array(method),
+            IntrinsicNameSpec::Literal(method.name()),
+            method.length(),
         ));
     }
     visit(ordinary(
@@ -208,6 +217,20 @@ fn visit_concrete_typed_array_properties(visit: PropertySink<'_>, element: Typed
         PropertyLayout::data(false, false, false),
         width,
     ));
+    if element == TypedArrayElementType::Uint8 {
+        for uint8_method in Uint8ArrayMethod::ALL {
+            let holder = if uint8_method.is_static() {
+                constructor
+            } else {
+                prototype
+            };
+            visit(method(
+                holder,
+                IntrinsicKeySpec::InternedString(RealmNameId::Uint8ArrayMethod(uint8_method)),
+                NativeFunctionKind::Uint8Array(uint8_method),
+            ));
+        }
+    }
 }
 
 const fn constructor_atom(element: TypedArrayElementType) -> PredefinedAtom {

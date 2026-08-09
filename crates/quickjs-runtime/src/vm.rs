@@ -91,8 +91,8 @@ use crate::{
         TemporalPlainTimePrototypeMethod, TemporalPlainTimeStaticMethod,
         TemporalPlainYearMonthPrototypeMethod, TemporalPlainYearMonthStaticMethod,
         TypedArrayElementValue, TypedArrayOwnProperty, TypedArrayPropertyKey,
-        TypedArrayPrototypeMethod, TypedArrayStoreOutcome, TypedArrayView, UriFunction,
-        WeakMapMethod, WeakSetMethod, array_length_from_number, check_execution_limit,
+        TypedArrayPrototypeMethod, TypedArrayStoreOutcome, TypedArrayView, Uint8ArrayMethod,
+        UriFunction, WeakMapMethod, WeakSetMethod, array_length_from_number, check_execution_limit,
         global_declaration_error, runtime_string, typed_array_element_byte_index,
         typed_array_read_element, typed_array_write_element, usize_to_u64,
     },
@@ -157,6 +157,7 @@ mod string_replace;
 mod string_split;
 mod temporal;
 mod typed_array;
+mod uint8_array;
 mod uri;
 mod weak_collections;
 mod weak_references;
@@ -180,7 +181,8 @@ use {
     map::*, math::*, math_sum_precise::*, native::*, object_intrinsics::*, promise::*,
     promise_combinators::*, properties::*, proxy::*, reflect::*, regexp::*, set::*, stack::*,
     string_methods::*, string_raw::*, string_replace::*, string_split::*, temporal::*,
-    typed_array::*, uri::*, weak_collections::*, weak_references::*, with_environment::*,
+    typed_array::*, uint8_array::*, uri::*, weak_collections::*, weak_references::*,
+    with_environment::*,
 };
 
 /// Inclusive per-call interpreter limits.
@@ -810,6 +812,7 @@ enum NativeContinuation {
     TypedArrayPrototypeSlice(Box<TypedArrayPrototypeSliceState>),
     TypedArrayPrototypeMap(Box<TypedArrayPrototypeMapState>),
     TypedArrayPrototypeFilter(Box<TypedArrayPrototypeFilterState>),
+    Uint8ArrayBase64(Box<Uint8ArrayBase64Continuation>),
     DateToJson(DateToJsonContinuation),
     TemporalPlainDateBag(Box<TemporalPlainDateBagContinuation>),
     TemporalPlainMonthDayBag(Box<TemporalPlainMonthDayBagContinuation>),
@@ -974,6 +977,7 @@ impl NativeContinuation {
             Self::TypedArrayPrototypeSlice(_) => TypedArrayPrototypeSliceState::retained_values(),
             Self::TypedArrayPrototypeMap(_) => TypedArrayPrototypeMapState::retained_values(),
             Self::TypedArrayPrototypeFilter(state) => state.retained_values(),
+            Self::Uint8ArrayBase64(state) => state.retained_values(),
             Self::DateToJson(_) => DateToJsonContinuation::retained_values(),
             Self::TemporalPlainDateBag(_) => TemporalPlainDateBagContinuation::retained_values(),
             Self::TemporalPlainMonthDayBag(_) => {
@@ -3402,6 +3406,7 @@ fn trace_native_continuation_roots(
         NativeContinuation::TypedArrayPrototypeSlice(state) => state.trace_roots(mark),
         NativeContinuation::TypedArrayPrototypeMap(state) => state.trace_roots(mark),
         NativeContinuation::TypedArrayPrototypeFilter(state) => state.trace_roots(mark),
+        NativeContinuation::Uint8ArrayBase64(state) => state.trace_roots(mark),
         NativeContinuation::DateToJson(state) => state.trace_roots(mark),
         NativeContinuation::TemporalPlainDateBag(state) => state.trace_roots(mark),
         NativeContinuation::TemporalPlainMonthDayBag(state) => state.trace_roots(mark),

@@ -12,7 +12,7 @@ use crate::{
         TemporalPlainTimePrototypeMethod, TemporalPlainTimeStaticMethod,
         TemporalPlainYearMonthPrototypeMethod, TemporalPlainYearMonthStaticMethod,
         TemporalZonedDateTimePrototypeMethod, TemporalZonedDateTimeStaticMethod,
-        TypedArrayPrototypeMethod,
+        TypedArrayPrototypeMethod, Uint8ArrayMethod,
     },
 };
 
@@ -274,6 +274,9 @@ fn visit_realm_name_order(
         if method != TypedArrayPrototypeMethod::ToStringTag {
             visit(RealmNameId::TypedArrayPrototype(method))?;
         }
+    }
+    for method in Uint8ArrayMethod::ALL {
+        visit(RealmNameId::Uint8ArrayMethod(method))?;
     }
     visit(RealmNameId::TypedArrayBytesPerElement)?;
     for method in DateStaticMethod::ALL {
@@ -576,6 +579,7 @@ fn realm_name_description(id: RealmNameId) -> &'static str {
         RealmNameId::SharedArrayBufferPrototype(method) => method.name(),
         RealmNameId::DataViewPrototype(method) => method.name(),
         RealmNameId::TypedArrayPrototype(method) => method.name(),
+        RealmNameId::Uint8ArrayMethod(method) => method.name(),
         RealmNameId::TypedArrayBytesPerElement => "BYTES_PER_ELEMENT",
         RealmNameId::DateStatic(method) => method.name(),
         RealmNameId::DatePrototype(method) => method.name(),
