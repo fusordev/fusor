@@ -2153,15 +2153,24 @@ struct FunctionApplyContinuation {
     reason = "the Await prefix marks every observable Function bind suspension boundary"
 )]
 enum FunctionBindStage {
+    AwaitPrototype,
     AwaitLengthDescriptor,
     AwaitLengthValue,
     AwaitNameValue,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum FunctionBindPrototype {
+    Pending,
+    Null,
+    Heap(HeapReference),
 }
 
 struct FunctionBindContinuation {
     target: FunctionId,
     bound_this: StoredValue,
     bound_arguments: Vec<StoredValue>,
+    prototype: FunctionBindPrototype,
     length: JsNumber,
     realm: RealmId,
     stage: FunctionBindStage,
@@ -2212,7 +2221,12 @@ impl FunctionApplyContinuation {
 
 impl FunctionBindContinuation {
     fn retained_values(&self) -> u64 {
-        2_u64.saturating_add(usize_to_u64(self.bound_arguments.len()))
+        2_u64
+            .saturating_add(u64::from(matches!(
+                self.prototype,
+                FunctionBindPrototype::Heap(_)
+            )))
+            .saturating_add(usize_to_u64(self.bound_arguments.len()))
     }
 }
 
@@ -3553,6 +3567,9 @@ fn trace_function_bind_roots(
     mark: &mut dyn FnMut(CollectionRoot),
 ) {
     mark(CollectionRoot::Heap(HeapReference::Function(state.target)));
+    if let FunctionBindPrototype::Heap(prototype) = state.prototype {
+        mark(CollectionRoot::Heap(prototype));
+    }
     trace_stored_value_root(&state.bound_this, mark);
     for argument in &state.bound_arguments {
         trace_stored_value_root(argument, mark);

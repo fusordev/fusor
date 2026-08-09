@@ -5685,24 +5685,49 @@ fn begin_function_bind(
         target,
         bound_this,
         bound_arguments,
+        prototype: FunctionBindPrototype::Pending,
         length: JsNumber::from_i32(0),
         realm,
-        stage: FunctionBindStage::AwaitLengthValue,
+        stage: FunctionBindStage::AwaitPrototype,
         origin,
     };
-    let target_value = StoredValue::Function(target);
+    let dispatch = begin_internal_get_prototype_of(
+        runtime,
+        HeapReference::Function(target),
+        realm,
+        return_to,
+        state.origin.clone(),
+        execution_budget,
+    )?;
+    continue_get_after(
+        dispatch,
+        state,
+        NativeContinuation::FunctionBind,
+        |state, value| {
+            advance_function_bind(runtime, state, Some(value), return_to, execution_budget)
+        },
+        "Function bind [[GetPrototypeOf]] produced a structured result",
+    )
+}
+
+fn begin_function_bind_length(
+    runtime: &mut Runtime,
+    mut state: FunctionBindContinuation,
+    return_to: Option<CallReturn>,
+    execution_budget: &mut ExecutionBudget,
+) -> Result<NativeDispatch, NativeFailure> {
+    let target_value = StoredValue::Function(state.target);
     let length_key = runtime.predefined_property_key(PredefinedAtom::Length);
     if runtime
-        .proxy_state(HeapReference::Function(target))?
+        .proxy_state(HeapReference::Function(state.target))?
         .is_some()
     {
-        let mut state = state;
         state.stage = FunctionBindStage::AwaitLengthDescriptor;
         let dispatch = begin_internal_get_own_property(
             runtime,
-            HeapReference::Function(target),
+            HeapReference::Function(state.target),
             length_key,
-            realm,
+            state.realm,
             return_to,
             state.origin.clone(),
             execution_budget,
@@ -5718,13 +5743,14 @@ fn begin_function_bind(
         );
     }
     let has_length = runtime
-        .object_record(HeapReference::Function(target))
+        .object_record(HeapReference::Function(state.target))
         .map_err(NativeFailure::from)?
         .own_property(&length_key)
         .is_some();
     if !has_length {
         return bind_name_read(runtime, state, return_to, execution_budget);
     }
+    state.stage = FunctionBindStage::AwaitLengthValue;
     begin_function_bind_get(
         runtime,
         state,
@@ -5754,6 +5780,31 @@ fn advance_function_bind(
         .into());
     };
     match state.stage {
+        FunctionBindStage::AwaitPrototype => {
+            let prototype = match value {
+                StoredValue::Null => FunctionBindPrototype::Null,
+                StoredValue::Function(function) => {
+                    FunctionBindPrototype::Heap(HeapReference::Function(function))
+                }
+                StoredValue::Object(object) => {
+                    FunctionBindPrototype::Heap(HeapReference::Object(object))
+                }
+                StoredValue::Undefined
+                | StoredValue::Boolean(_)
+                | StoredValue::Number(_)
+                | StoredValue::BigInt(_)
+                | StoredValue::String(_)
+                | StoredValue::Symbol(_) => {
+                    return Err(EngineFault::RuntimeInvariant {
+                        message: "Function bind [[GetPrototypeOf]] returned neither object nor null",
+                    }
+                    .into());
+                }
+            };
+            let mut state = state;
+            state.prototype = prototype;
+            begin_function_bind_length(runtime, state, return_to, execution_budget)
+        }
         FunctionBindStage::AwaitLengthDescriptor => {
             if matches!(value, StoredValue::Undefined) {
                 return bind_name_read(runtime, state, return_to, execution_budget);
@@ -5890,9 +5941,16 @@ fn bind_name_value(
         | StoredValue::Object(_) => JsString::empty(),
     };
     let name = JsString::from_utf8("bound ")?.concat(&name)?;
-    let prototype = runtime
-        .realm_function_prototype(state.realm)
-        .map_err(NativeFailure::from)?;
+    let prototype = match state.prototype {
+        FunctionBindPrototype::Pending => {
+            return Err(EngineFault::RuntimeInvariant {
+                message: "Function bind allocation lost the target prototype",
+            }
+            .into());
+        }
+        FunctionBindPrototype::Null => None,
+        FunctionBindPrototype::Heap(prototype) => Some(prototype),
+    };
     check_execution_limit(
         RuntimeResource::HeapFunctions,
         runtime.limits.max_heap_functions,
@@ -5912,7 +5970,7 @@ fn bind_name_value(
         })?;
     let length_key = runtime.predefined_property_key(PredefinedAtom::Length);
     let name_key = runtime.predefined_property_key(PredefinedAtom::Name);
-    let mut object = crate::object::ObjectRecord::empty(Some(HeapReference::Function(prototype)));
+    let mut object = crate::object::ObjectRecord::empty(prototype);
     object
         .try_reserve_data(2)
         .map_err(|_| ExecutionError::AllocationFailed {
