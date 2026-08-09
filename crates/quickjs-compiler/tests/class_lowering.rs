@@ -402,7 +402,7 @@ fn class_super_properties_lower_through_home_object_and_receiver_aware_opcodes()
 #[test]
 fn optional_and_spread_super_method_calls_keep_the_actual_receiver() {
     let tree = compile(
-        "function make(){class Base{method(...values){return values.length;}get missing(){return null;}}class Derived extends Base{constructor(){super()?.missing;}staticCall(){return super.method?.(1);}computedCall(key){return super[key]?.(2);}missingCall(effect){return super.missing?.(effect());}spread(values){return super.method(...values);}computedSpread(key,values){return super[key](...values);}read(){return super[0]?.value;}}return Derived;}",
+        "function make(){class Base{method(...values){return values.length;}get missing(){return null;}}class Derived extends Base{constructor(){super()?.missing;}staticCall(){return super.method?.(1);}computedCall(key){return super[key]?.(2);}parenthesizedCall(){return (super.method)?.();}parenthesizedComputedCall(key){return (super[key])?.();}missingCall(effect){return super.missing?.(effect());}spread(values){return super.method(...values);}computedSpread(key,values){return super[key](...values);}read(){return super[0]?.value;}}return Derived;}",
         "make",
     );
     let opcodes = tree

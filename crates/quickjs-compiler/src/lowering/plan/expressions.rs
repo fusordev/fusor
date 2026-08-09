@@ -3254,11 +3254,51 @@ impl<'compiler, 'unit, 'arena, 'scope> ExpressionPlanner<'compiler, 'unit, 'aren
             planned.push(ExpressionWork::VisitCallExpression(call));
         } else {
             match root_member {
+                Some(MemberCallee::Static(member))
+                    if matches!(&member.object, Expression::Super(_)) =>
+                {
+                    planned.push(ExpressionWork::SuperPropertyBase {
+                        span: member.object.span(),
+                        call_receiver: true,
+                    });
+                    planned.push(ExpressionWork::Emit(PlannedInstruction::new(
+                        FinalOpcode::PushAtomValue,
+                        Operands::Atom(constants.property_atom_index(member.property.span)?),
+                        member.property.span,
+                    )));
+                    planned.push(ExpressionWork::Emit(PlannedInstruction::new(
+                        FinalOpcode::GetSuperValue,
+                        Operands::None,
+                        member.span,
+                    )));
+                }
                 Some(MemberCallee::Static(member)) => {
                     planned.push(ExpressionWork::Visit(&member.object));
                     planned.push(ExpressionWork::Emit(PlannedInstruction::new(
                         FinalOpcode::GetField2,
                         Operands::Atom(constants.property_atom_index(member.property.span)?),
+                        member.span,
+                    )));
+                }
+                Some(MemberCallee::Computed(member))
+                    if matches!(&member.object, Expression::Super(_)) =>
+                {
+                    planned.push(ExpressionWork::SuperPropertyReceiver {
+                        span: member.object.span(),
+                        call_receiver: true,
+                    });
+                    planned.push(ExpressionWork::Visit(&member.expression));
+                    planned.push(ExpressionWork::SuperPropertyBaseAfterKey {
+                        span: member.object.span(),
+                    });
+                    planned.push(ExpressionWork::Emit(PlannedInstruction::new(
+                        FinalOpcode::ToPropKey,
+                        Operands::None,
+                        member.expression.span(),
+                    )));
+                    planned.push(ExpressionWork::Emit(PlannedInstruction::new(
+                        FinalOpcode::GetSuperValue,
+                        Operands::None,
                         member.span,
                     )));
                 }

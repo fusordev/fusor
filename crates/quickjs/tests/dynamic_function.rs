@@ -24,6 +24,23 @@ fn source_kind<'source>(
 }
 
 #[test]
+fn dynamic_function_compiles_parenthesized_super_member_optional_calls() {
+    let mut runtime = Runtime::try_new(RuntimeLimits::default()).expect("runtime");
+    let realm = runtime.create_realm().expect("realm");
+    let mut context = runtime.context(&realm).expect("context");
+
+    construct_dynamic_function(
+        &mut context,
+        source(
+            &[],
+            "class C{constructor(key){void ((super[key])?.());void ((super.value)?.());}}",
+        ),
+        DynamicFunctionLimits::default(),
+    )
+    .expect("parenthesized super references remain valid optional-call callees");
+}
+
+#[test]
 fn dynamic_generator_function_compiles_and_executes_through_the_facade() {
     let mut runtime = Runtime::try_new(RuntimeLimits::default()).expect("runtime");
     let realm = runtime.create_realm().expect("realm");

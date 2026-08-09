@@ -64,7 +64,7 @@ fn field_initializer_arrows_capture_the_lexical_super_home_object() {
 #[test]
 fn optional_and_spread_super_calls_preserve_receiver_and_short_circuiting() {
     run_with(
-        "function run(){let effects=0;class Base{method(...values){return this.value+values[0]+values[1];}get missing(){return null;}}Base.prototype[0]={answer:7};class Derived extends Base{constructor(){super()?.missing;this.value=10;}test(){let direct=super.method?.(1,2)===13;let computed=super['method']?.(3,4)===17;let missing=super.missing?.(effects++)===void 0&&effects===0;let spread=super.method(...[5,6])===21;let computedSpread=super['method'](...[7,8])===25;let chained=super[0]?.answer===7;return direct&&computed&&missing&&spread&&computedSpread&&chained;}}return new Derived().test();}",
+        "function run(){let effects=0;class Base{method(...values){return this.value+values[0]+values[1];}get missing(){return null;}}Base.prototype[0]={answer:7};class Derived extends Base{constructor(){super()?.missing;this.value=10;}test(){let direct=super.method?.(1,2)===13;let computed=super['method']?.(3,4)===17;let parenthesized=(super.method)?.(1,2)===13;let parenthesizedComputed=(super['method'])?.(3,4)===17;let missing=super.missing?.(effects++)===void 0&&effects===0;let spread=super.method(...[5,6])===21;let computedSpread=super['method'](...[7,8])===25;let chained=super[0]?.answer===7;return direct&&computed&&parenthesized&&parenthesizedComputed&&missing&&spread&&computedSpread&&chained;}}return new Derived().test();}",
         |result| {
             let value = result.expect("optional and spread super call execution");
             assert_eq!(value.as_boolean().expect("live Boolean"), Some(true));
