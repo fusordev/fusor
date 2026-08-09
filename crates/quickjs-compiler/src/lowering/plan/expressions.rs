@@ -242,7 +242,10 @@ pub(in crate::lowering) enum ExpressionWork<'expression, 'arena> {
         span: Span,
         call_receiver: bool,
     },
-    InitializeInstanceFields,
+    InitializeInstanceFields {
+        constructor: ExecutableId,
+        span: Span,
+    },
     Emit(PlannedInstruction),
     Branch {
         kind: BranchKind,
@@ -381,14 +384,8 @@ impl<'compiler, 'unit, 'arena, 'scope> ExpressionPlanner<'compiler, 'unit, 'aren
                     span,
                     call_receiver,
                 } => self.plan_super_property_base(span, call_receiver, layout, flow)?,
-                ExpressionWork::InitializeInstanceFields => {
-                    self.plan_instance_field_initializations(
-                        layout.executable,
-                        layout,
-                        tree_layout,
-                        constants,
-                        flow,
-                    )?;
+                ExpressionWork::InitializeInstanceFields { constructor, span } => {
+                    self.plan_call_instance_initializer(constructor, layout, span, flow)?;
                 }
                 ExpressionWork::Branch { kind, target, span } => {
                     flow.branch(kind, &target, span)?;
@@ -805,7 +802,7 @@ impl<'compiler, 'unit, 'arena, 'scope> ExpressionPlanner<'compiler, 'unit, 'aren
         Ok(())
     }
 
-    fn private_name_binding_for_access(
+    pub(in crate::lowering) fn private_name_binding_for_access(
         &self,
         access_node: NodeId,
         name: &str,
@@ -1262,6 +1259,9 @@ impl<'compiler, 'unit, 'arena, 'scope> ExpressionPlanner<'compiler, 'unit, 'aren
             },
             class.span,
         ))?;
+        if Self::class_has_instance_elements(class) {
+            self.plan_class_instance_initializer(class, layout, tree_layout, constants, flow)?;
+        }
         if self.class_uses_computed_name_context(class) {
             // Before elements install methods or fields, the evaluated key is
             // immediately below the fresh constructor/prototype pair:
@@ -1395,6 +1395,89 @@ impl<'compiler, 'unit, 'arena, 'scope> ExpressionPlanner<'compiler, 'unit, 'aren
                 span: method.key.span(),
             });
         }
+        Ok(())
+    }
+
+    fn plan_class_instance_initializer(
+        &self,
+        class: &Class<'arena>,
+        layout: &FrameLayout,
+        tree_layout: &FunctionTreeLayout,
+        constants: &CompiledConstantPool,
+        flow: &mut PlannedControlFlow,
+    ) -> Result<(), LeafCompilationError> {
+        let class_node = class.node_id.get();
+        let child = self
+            .planned
+            .identities
+            .class_instance_initializers
+            .get(&class_node)
+            .copied()
+            .ok_or(LeafCompilationError::SemanticInvariant {
+                invariant: "class with instance elements has a hidden initializer template",
+                span: Some(class.span),
+            })?;
+        let binding = self
+            .planned
+            .identities
+            .class_instance_initializer_bindings
+            .get(&class_node)
+            .copied()
+            .ok_or(LeafCompilationError::SemanticInvariant {
+                invariant: "class with instance elements has an initializer cell",
+                span: Some(class.span),
+            })?;
+        let storage =
+            self.planned
+                .plan
+                .binding(binding)
+                .ok_or(LeafCompilationError::SemanticInvariant {
+                    invariant: "class instance initializer binding exists",
+                    span: Some(class.span),
+                })?;
+        if storage.policy().kind() != DeclarationKind::ClassInstanceInitializer
+            || storage.placement() != StoragePlacement::Local
+        {
+            return Err(LeafCompilationError::SemanticInvariant {
+                invariant: "class definition owns one immutable local initializer cell",
+                span: Some(class.span),
+            });
+        }
+        let slot = layout
+            .slot(binding)
+            .ok_or(LeafCompilationError::SemanticInvariant {
+                invariant: "class instance initializer binding has a local slot",
+                span: Some(class.span),
+            })?;
+        if !matches!(slot, FrameSlot::Local(_)) {
+            return Err(LeafCompilationError::SemanticInvariant {
+                invariant: "class definition stores its initializer locally",
+                span: Some(class.span),
+            });
+        }
+        flow.emit(self.plan_child_function_closure(
+            child,
+            layout.executable,
+            class.body.span,
+            tree_layout,
+            constants,
+        )?)?;
+        // `[constructor, prototype, initializer]` becomes
+        // `[constructor, initializer, prototype]` for `set_home_object`, then
+        // returns to the canonical class-definition stack before storing the
+        // hidden method in its immutable cell.
+        for opcode in [
+            FinalOpcode::Swap,
+            FinalOpcode::SetHomeObject,
+            FinalOpcode::Swap,
+        ] {
+            flow.emit(PlannedInstruction::new(
+                opcode,
+                Operands::None,
+                class.body.span,
+            ))?;
+        }
+        flow.emit(plan_put_slot(slot, class.body.span))?;
         Ok(())
     }
 
@@ -2068,6 +2151,136 @@ impl<'compiler, 'unit, 'arena, 'scope> ExpressionPlanner<'compiler, 'unit, 'aren
             }
         }
         Ok(())
+    }
+
+    pub(in crate::lowering) fn plan_call_instance_initializer(
+        &self,
+        constructor: ExecutableId,
+        layout: &FrameLayout,
+        span: Span,
+        flow: &mut PlannedControlFlow,
+    ) -> Result<(), LeafCompilationError> {
+        let class = self.instance_initializer_class_for_constructor(constructor)?;
+        let binding = self
+            .planned
+            .identities
+            .class_instance_initializer_bindings
+            .get(&class.node_id.get())
+            .copied()
+            .ok_or(LeafCompilationError::SemanticInvariant {
+                invariant: "constructor class has an initializer cell",
+                span: Some(class.span),
+            })?;
+        let storage =
+            self.planned
+                .plan
+                .binding(binding)
+                .ok_or(LeafCompilationError::SemanticInvariant {
+                    invariant: "constructor initializer binding exists",
+                    span: Some(class.span),
+                })?;
+        if storage.policy().kind() != DeclarationKind::ClassInstanceInitializer {
+            return Err(LeafCompilationError::SemanticInvariant {
+                invariant: "constructor captures the immutable initializer cell",
+                span: Some(class.span),
+            });
+        }
+        let slot = layout
+            .slot(binding)
+            .ok_or(LeafCompilationError::SemanticInvariant {
+                invariant: "initializer caller has the initializer capture",
+                span: Some(class.span),
+            })?;
+        if !matches!(slot, FrameSlot::Capture(_)) {
+            return Err(LeafCompilationError::SemanticInvariant {
+                invariant: "constructor and arrow initializer calls use captured storage",
+                span: Some(class.span),
+            });
+        }
+        flow.emit(self.plan_read_slot(binding, slot, span)?)?;
+        flow.emit(PlannedInstruction::new(
+            FinalOpcode::PushThis,
+            Operands::None,
+            span,
+        ))?;
+        flow.emit(PlannedInstruction::new(
+            FinalOpcode::Swap,
+            Operands::None,
+            span,
+        ))?;
+        flow.emit(PlannedInstruction::new(
+            FinalOpcode::CallMethod,
+            Operands::NPop { argument_count: 0 },
+            span,
+        ))?;
+        flow.emit(PlannedInstruction::new(
+            FinalOpcode::Drop,
+            Operands::None,
+            span,
+        ))?;
+        Ok(())
+    }
+
+    fn instance_initializer_class_for_constructor(
+        &self,
+        constructor: ExecutableId,
+    ) -> Result<&Class<'arena>, LeafCompilationError> {
+        let node_id = self
+            .planned
+            .identities
+            .node_by_executable
+            .get(constructor.index())
+            .copied()
+            .ok_or(LeafCompilationError::InvalidExecutable {
+                executable: constructor,
+            })?;
+        let nodes = self.unit.semantic().nodes();
+        let class = match nodes.kind(node_id) {
+            AstKind::Function(function) => {
+                let AstKind::MethodDefinition(method) = nodes.parent_kind(function.node_id.get())
+                else {
+                    return Err(LeafCompilationError::SemanticInvariant {
+                        invariant: "instance-initializing constructor belongs to a class method",
+                        span: Some(function.span),
+                    });
+                };
+                let AstKind::ClassBody(body) = nodes.parent_kind(method.node_id.get()) else {
+                    return Err(LeafCompilationError::SemanticInvariant {
+                        invariant: "instance-initializing constructor belongs to a class body",
+                        span: Some(method.span),
+                    });
+                };
+                let AstKind::Class(class) = nodes.parent_kind(body.node_id.get()) else {
+                    return Err(LeafCompilationError::SemanticInvariant {
+                        invariant: "instance-initializing constructor belongs to a class",
+                        span: Some(body.span),
+                    });
+                };
+                class
+            }
+            AstKind::Class(class)
+                if self
+                    .planned
+                    .identities
+                    .default_class_constructors
+                    .get(&node_id)
+                    .copied()
+                    == Some(constructor) =>
+            {
+                class
+            }
+            _ => {
+                return Err(LeafCompilationError::SemanticInvariant {
+                    invariant: "instance initializer call names a class constructor",
+                    span: self
+                        .planned
+                        .plan
+                        .executable(constructor)
+                        .map(crate::storage::Executable::span),
+                });
+            }
+        };
+        Ok(class)
     }
 
     fn plan_instance_field_initialization(

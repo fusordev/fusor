@@ -1183,6 +1183,7 @@ fn frontend_direct_eval_policy(
         CompilerBindingKind::Catch => (FrontendDirectEvalBindingKind::Catch, true, false),
         CompilerBindingKind::WithObject => (FrontendDirectEvalBindingKind::WithObject, true, true),
         CompilerBindingKind::ClassFieldKey
+        | CompilerBindingKind::ClassInstanceInitializer
         | CompilerBindingKind::ClassPrivateName
         | CompilerBindingKind::ClassStaticReceiver
         | CompilerBindingKind::GlobalReference => {

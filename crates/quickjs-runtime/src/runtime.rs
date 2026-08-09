@@ -5636,6 +5636,7 @@ fn require_root_kind(
             "source function cannot execute as a dynamic-function Script"
         }
         CompilerExecutableKind::OrdinaryMethod
+        | CompilerExecutableKind::ClassInstanceInitializer
         | CompilerExecutableKind::ClassConstructor
         | CompilerExecutableKind::OrdinaryArrow
         | CompilerExecutableKind::GeneratorFunction

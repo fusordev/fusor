@@ -69,7 +69,7 @@ pub(in crate::lowering) enum StatementWork<'statement, 'arena> {
         body_scope: ScopeId,
     },
     Expression(&'statement Expression<'arena>),
-    InitializeInstanceFields,
+    InitializeInstanceFields(Span),
     Emit(PlannedInstruction),
     Branch {
         kind: BranchKind,
@@ -322,12 +322,11 @@ impl<'arena> CompilationContext<'_, 'arena, '_> {
                 &state.abrupt_markers,
                 flow,
             )?,
-            StatementWork::InitializeInstanceFields => {
-                ExpressionPlanner::new(self).plan_instance_field_initializations(
+            StatementWork::InitializeInstanceFields(span) => {
+                ExpressionPlanner::new(self).plan_call_instance_initializer(
                     planning.executable,
                     planning.layout,
-                    planning.tree_layout,
-                    planning.constants,
+                    span,
                     flow,
                 )?;
             }

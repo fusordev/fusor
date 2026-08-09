@@ -34,6 +34,7 @@ fn verified_binding_policy(
         DeclarationKind::Const => VerifiedBindingKind::Const,
         DeclarationKind::ClassName => VerifiedBindingKind::ClassName,
         DeclarationKind::ClassFieldKey => VerifiedBindingKind::ClassFieldKey,
+        DeclarationKind::ClassInstanceInitializer => VerifiedBindingKind::ClassInstanceInitializer,
         DeclarationKind::ClassPrivateName => VerifiedBindingKind::ClassPrivateName,
         DeclarationKind::ClassStaticReceiver => VerifiedBindingKind::ClassStaticReceiver,
         DeclarationKind::WithObject => VerifiedBindingKind::WithObject,
@@ -138,6 +139,7 @@ pub(in crate::lowering) const fn binding_has_scope(policy: DeclarationPolicy) ->
             | DeclarationKind::Const
             | DeclarationKind::ClassName
             | DeclarationKind::ClassFieldKey
+            | DeclarationKind::ClassInstanceInitializer
             | DeclarationKind::ClassPrivateName
             | DeclarationKind::ClassStaticReceiver
             | DeclarationKind::WithObject

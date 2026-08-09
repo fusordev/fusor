@@ -114,6 +114,9 @@ pub enum ExecutableKind {
     /// A compiler-synthesized base-class constructor for a class without a
     /// source-written constructor.
     ClassDefaultConstructor,
+    /// The compiler-synthesized method that performs one class's instance
+    /// element initialization after `this` has been bound.
+    ClassInstanceInitializer,
 }
 
 /// Planner state for syntactic direct eval within one executable.
@@ -281,6 +284,9 @@ pub enum DeclarationKind {
     /// The compiler-created immutable cell that retains one evaluated
     /// computed public instance-field key for its class definition.
     ClassFieldKey,
+    /// The compiler-created immutable class-scope cell retaining the hidden
+    /// instance-element initializer method.
+    ClassInstanceInitializer,
     /// The compiler-created immutable class-scope cell that holds one fresh
     /// private-name identity for a private class element.
     ClassPrivateName,
@@ -627,6 +633,9 @@ pub(crate) struct OxcIdentityMap {
     /// Synthesized default constructor template for each eligible named base
     /// class that lacks a source-written constructor.
     pub(crate) default_class_constructors: HashMap<NodeId, ExecutableId>,
+    /// Hidden instance-element initializer template for each class that has
+    /// instance fields or private instance methods/accessors.
+    pub(crate) class_instance_initializers: HashMap<NodeId, ExecutableId>,
     /// The synthetic immutable class-name cell for each named class.  Oxc
     /// resolves member references to the declaration symbol, but ECMAScript
     /// gives a class body a distinct inner binding; storage redirects those
@@ -636,6 +645,8 @@ pub(crate) struct OxcIdentityMap {
     /// field. Constructors capture these cells so field construction never
     /// re-evaluates an observable key expression.
     pub(crate) class_field_key_bindings: HashMap<NodeId, BindingId>,
+    /// Immutable class-scope cell holding the hidden initializer closure.
+    pub(crate) class_instance_initializer_bindings: HashMap<NodeId, BindingId>,
     /// The immutable class-scope private-name cell for each supported private
     /// field or instance method. Constructors and member closures capture the
     /// cell when they need the fresh identity from a class evaluation.
@@ -883,6 +894,7 @@ struct BindingDraft {
     primary_symbol_binding: bool,
     class_node: Option<NodeId>,
     class_field_node: Option<NodeId>,
+    class_instance_initializer_node: Option<NodeId>,
     class_private_name_nodes: Arc<[NodeId]>,
     class_private_method_node: Option<NodeId>,
     class_static_receiver_node: Option<NodeId>,
@@ -907,6 +919,7 @@ struct FrozenBindings {
     by_declaration: HashMap<(SymbolId, u32, u32), BindingId>,
     class_name_bindings: HashMap<NodeId, BindingId>,
     class_field_key_bindings: HashMap<NodeId, BindingId>,
+    class_instance_initializer_bindings: HashMap<NodeId, BindingId>,
     class_private_name_bindings: HashMap<NodeId, BindingId>,
     class_private_method_bindings: HashMap<NodeId, BindingId>,
     class_static_receiver_bindings: HashMap<NodeId, BindingId>,
@@ -1030,6 +1043,7 @@ struct Planner<'unit, 'arena, 'scope> {
     scope_executables: Vec<Option<ExecutableId>>,
     parameter_storage: HashMap<SymbolId, ParameterStorage>,
     default_class_constructors: HashMap<NodeId, ExecutableId>,
+    class_instance_initializers: HashMap<NodeId, ExecutableId>,
 }
 
 fn is_derived_class_constructor(nodes: &AstNodes<'_>, function_node: NodeId) -> bool {
@@ -1051,6 +1065,23 @@ fn is_derived_class_constructor(nodes: &AstNodes<'_>, function_node: NodeId) -> 
         return false;
     };
     class.super_class.is_some()
+}
+
+fn class_has_instance_elements(class: &oxc_ast::ast::Class<'_>) -> bool {
+    class.body.body.iter().any(|element| match element {
+        ClassElement::PropertyDefinition(field) => !field.r#static,
+        ClassElement::MethodDefinition(method) => {
+            !method.r#static
+                && matches!(method.key, PropertyKey::PrivateIdentifier(_))
+                && matches!(
+                    method.kind,
+                    MethodDefinitionKind::Method
+                        | MethodDefinitionKind::Get
+                        | MethodDefinitionKind::Set
+                )
+        }
+        _ => false,
+    })
 }
 
 fn is_home_object_method(nodes: &AstNodes<'_>, function_node: NodeId) -> bool {
@@ -1117,6 +1148,7 @@ impl<'unit, 'arena, 'scope> Planner<'unit, 'arena, 'scope> {
             scope_executables: vec![None; semantic.scoping().scopes_len()],
             parameter_storage: HashMap::new(),
             default_class_constructors: HashMap::new(),
+            class_instance_initializers: HashMap::new(),
         })
     }
 
@@ -1138,6 +1170,7 @@ impl<'unit, 'arena, 'scope> Planner<'unit, 'arena, 'scope> {
         self.add_synthetic_default_binding(&mut binding_drafts)?;
         self.add_class_name_bindings(&mut binding_drafts)?;
         self.add_class_field_key_bindings(&mut binding_drafts)?;
+        self.add_class_instance_initializer_bindings(&mut binding_drafts)?;
         self.add_class_private_name_bindings(&mut binding_drafts)?;
         self.add_class_private_method_bindings(&mut binding_drafts)?;
         self.add_class_static_receiver_bindings(&mut binding_drafts)?;
@@ -1163,6 +1196,7 @@ impl<'unit, 'arena, 'scope> Planner<'unit, 'arena, 'scope> {
             by_declaration: declaration_bindings,
             class_name_bindings,
             class_field_key_bindings,
+            class_instance_initializer_bindings,
             class_private_name_bindings,
             class_private_method_bindings,
             class_static_receiver_bindings,
@@ -1180,6 +1214,7 @@ impl<'unit, 'arena, 'scope> Planner<'unit, 'arena, 'scope> {
             &source_symbols,
             &class_name_bindings,
             &class_field_key_bindings,
+            &class_instance_initializer_bindings,
             &class_private_name_bindings,
             &class_private_method_bindings,
             &class_static_receiver_bindings,
@@ -1219,6 +1254,11 @@ impl<'unit, 'arena, 'scope> Planner<'unit, 'arena, 'scope> {
         });
         let class_field_key_captures =
             self.class_field_key_capture_requests(&class_field_key_bindings, &bindings)?;
+        let class_instance_initializer_captures = self
+            .class_instance_initializer_capture_requests(
+                &class_instance_initializer_bindings,
+                &bindings,
+            )?;
         let class_private_name_captures =
             self.class_private_name_capture_requests(&class_private_name_bindings, &bindings)?;
         let class_private_method_captures =
@@ -1235,6 +1275,7 @@ impl<'unit, 'arena, 'scope> Planner<'unit, 'arena, 'scope> {
             &bindings,
         )?;
         let mut synthetic_captures = class_field_key_captures;
+        synthetic_captures.extend(class_instance_initializer_captures);
         synthetic_captures.extend(class_private_name_captures);
         synthetic_captures.extend(class_private_method_captures);
         synthetic_captures.extend(class_static_receiver_captures);
@@ -1309,8 +1350,10 @@ impl<'unit, 'arena, 'scope> Planner<'unit, 'arena, 'scope> {
                 binding_by_declaration: declaration_bindings,
                 annex_b_functions,
                 default_class_constructors: self.default_class_constructors,
+                class_instance_initializers: self.class_instance_initializers,
                 class_name_bindings,
                 class_field_key_bindings,
+                class_instance_initializer_bindings,
                 class_private_name_bindings,
                 class_private_method_bindings,
                 class_static_receiver_bindings,
@@ -1512,6 +1555,7 @@ impl<'unit, 'arena, 'scope> Planner<'unit, 'arena, 'scope> {
 
     #[allow(
         clippy::too_many_arguments,
+        clippy::too_many_lines,
         reason = "all synthetic binding maps must be assigned against the same frozen scope table"
     )]
     fn binding_scope_map(
@@ -1520,6 +1564,7 @@ impl<'unit, 'arena, 'scope> Planner<'unit, 'arena, 'scope> {
         source_symbols: &[Option<SymbolId>],
         class_name_bindings: &HashMap<NodeId, BindingId>,
         class_field_key_bindings: &HashMap<NodeId, BindingId>,
+        class_instance_initializer_bindings: &HashMap<NodeId, BindingId>,
         class_private_name_bindings: &HashMap<NodeId, BindingId>,
         class_private_method_bindings: &HashMap<NodeId, BindingId>,
         class_static_receiver_bindings: &HashMap<NodeId, BindingId>,
@@ -1596,6 +1641,10 @@ impl<'unit, 'arena, 'scope> Planner<'unit, 'arena, 'scope> {
             }
         }
         self.bind_class_field_key_scopes(&mut scopes, class_field_key_bindings)?;
+        self.bind_class_instance_initializer_scopes(
+            &mut scopes,
+            class_instance_initializer_bindings,
+        )?;
         self.bind_class_private_name_scopes(&mut scopes, class_private_name_bindings)?;
         self.bind_class_private_method_scopes(&mut scopes, class_private_method_bindings)?;
         self.bind_class_static_receiver_scopes(&mut scopes, class_static_receiver_bindings)?;
@@ -1626,6 +1675,35 @@ impl<'unit, 'arena, 'scope> Planner<'unit, 'arena, 'scope> {
             }
         }
         Ok(scopes)
+    }
+
+    fn bind_class_instance_initializer_scopes(
+        &self,
+        scopes: &mut [Option<ScopeId>],
+        bindings: &HashMap<NodeId, BindingId>,
+    ) -> Result<(), CompilerError> {
+        for (&node_id, &binding) in bindings {
+            let AstKind::Class(class) = self.unit.semantic().nodes().kind(node_id) else {
+                return Err(CompilerError::SemanticInvariant {
+                    invariant: "instance-initializer binding belongs to a class",
+                    span: None,
+                });
+            };
+            let target =
+                scopes
+                    .get_mut(binding.index())
+                    .ok_or(CompilerError::SemanticInvariant {
+                        invariant: "instance-initializer binding scope index is in range",
+                        span: Some(class.span),
+                    })?;
+            if target.replace(class.scope_id()).is_some() {
+                return Err(CompilerError::SemanticInvariant {
+                    invariant: "instance-initializer binding has one class scope",
+                    span: Some(class.span),
+                });
+            }
+        }
+        Ok(())
     }
 
     fn bind_with_object_scopes(
@@ -1786,6 +1864,7 @@ impl<'unit, 'arena, 'scope> Planner<'unit, 'arena, 'scope> {
                 || matches!(
                     binding.policy.kind,
                     DeclarationKind::ClassFieldKey
+                        | DeclarationKind::ClassInstanceInitializer
                         | DeclarationKind::ClassPrivateName
                         | DeclarationKind::ClassStaticReceiver
                         | DeclarationKind::WithObject
@@ -2113,7 +2192,12 @@ impl<'unit, 'arena, 'scope> Planner<'unit, 'arena, 'scope> {
         for (node_id, node) in nodes.iter_enumerated() {
             if let AstKind::Class(class) = node.kind()
                 && class.decorators.is_empty()
-                && let Some(constructor) =
+            {
+                // Class elements are visited in source order, so a field initializer can
+                // precede a written constructor. Reserve the constructor executable at
+                // the class boundary: field-created closures must close over the
+                // hidden initializer environment, not the surrounding source function.
+                if let Some(constructor) =
                     class.body.body.iter().find_map(|element| match element {
                         ClassElement::MethodDefinition(method)
                             if method.kind == MethodDefinitionKind::Constructor =>
@@ -2122,15 +2206,41 @@ impl<'unit, 'arena, 'scope> Planner<'unit, 'arena, 'scope> {
                         }
                         _ => None,
                     })
-            {
-                // Class elements are visited in source order, so a field initializer can
-                // precede a written constructor. Reserve the constructor executable at
-                // the class boundary: field-created closures must close over the
-                // constructor environment, not the surrounding source function.
-                self.inventory_source_function(
-                    constructor.value.node_id.get(),
-                    &constructor.value,
-                )?;
+                {
+                    self.inventory_source_function(
+                        constructor.value.node_id.get(),
+                        &constructor.value,
+                    )?;
+                } else {
+                    self.inventory_executable(
+                        node_id,
+                        ExecutableKind::ClassDefaultConstructor,
+                        class.scope_id(),
+                        class.span,
+                        None,
+                        None,
+                        ParameterLayout {
+                            simple: true,
+                            ..ParameterLayout::default()
+                        },
+                        false,
+                    )?;
+                }
+                if class_has_instance_elements(class) {
+                    self.inventory_executable(
+                        node_id,
+                        ExecutableKind::ClassInstanceInitializer,
+                        class.scope_id(),
+                        class.span,
+                        None,
+                        None,
+                        ParameterLayout {
+                            simple: true,
+                            ..ParameterLayout::default()
+                        },
+                        false,
+                    )?;
+                }
             }
 
             match node.kind() {
@@ -2162,30 +2272,6 @@ impl<'unit, 'arena, 'scope> Planner<'unit, 'arena, 'scope> {
                         None,
                         parameters,
                         true,
-                    )?;
-                }
-                AstKind::Class(class)
-                    if class.decorators.is_empty()
-                        && !class.body.body.iter().any(|element| {
-                            matches!(
-                                element,
-                                ClassElement::MethodDefinition(method)
-                                    if method.kind == MethodDefinitionKind::Constructor
-                            )
-                        }) =>
-                {
-                    self.inventory_executable(
-                        node_id,
-                        ExecutableKind::ClassDefaultConstructor,
-                        class.scope_id(),
-                        class.span,
-                        None,
-                        None,
-                        ParameterLayout {
-                            simple: true,
-                            ..ParameterLayout::default()
-                        },
-                        false,
                     )?;
                 }
                 _ => {}
@@ -2295,15 +2381,32 @@ impl<'unit, 'arena, 'scope> Planner<'unit, 'arena, 'scope> {
         if source_executable {
             self.node_executables[node_id.index()] = Some(id);
             self.exact_scope_executables[scope_id.index()] = Some(id);
-        } else if self
-            .default_class_constructors
-            .insert(node_id, id)
-            .is_some()
-        {
-            return Err(CompilerError::SemanticInvariant {
-                invariant: "one synthesized default constructor per class",
-                span: Some(span),
-            });
+        } else {
+            let (map, invariant) = match kind {
+                ExecutableKind::ClassDefaultConstructor => (
+                    &mut self.default_class_constructors,
+                    "one synthesized default constructor per class",
+                ),
+                ExecutableKind::ClassInstanceInitializer => (
+                    &mut self.class_instance_initializers,
+                    "one synthesized instance initializer per class",
+                ),
+                ExecutableKind::Script { .. }
+                | ExecutableKind::Module
+                | ExecutableKind::Function { .. }
+                | ExecutableKind::Arrow { .. } => {
+                    return Err(CompilerError::SemanticInvariant {
+                        invariant: "only class helper executables are source-less",
+                        span: Some(span),
+                    });
+                }
+            };
+            if map.insert(node_id, id).is_some() {
+                return Err(CompilerError::SemanticInvariant {
+                    invariant,
+                    span: Some(span),
+                });
+            }
         }
         self.executable_drafts.push(ExecutableDraft {
             executable,
@@ -2507,7 +2610,8 @@ impl<'unit, 'arena, 'scope> Planner<'unit, 'arena, 'scope> {
                         },
                     )?;
                     match candidate.executable.kind {
-                        ExecutableKind::Function { .. } => break,
+                        ExecutableKind::Function { .. }
+                        | ExecutableKind::ClassInstanceInitializer => break,
                         ExecutableKind::Arrow { .. } => {
                             let Some(parent) = candidate.executable.parent else {
                                 return Err(CompilerError::SemanticInvariant {
@@ -2553,17 +2657,10 @@ impl<'unit, 'arena, 'scope> Planner<'unit, 'arena, 'scope> {
                 return unsupported(UnsupportedFeature::FunctionSyntheticBinding, span);
             }
             if direct_super_call
-                && let Some(constructor) =
-                    self.executable_lexically_has_derived_constructor(owner, span)?
+                && self
+                    .executable_lexically_has_derived_constructor(owner, span)?
+                    .is_some()
             {
-                if constructor != owner
-                    && self.derived_constructor_has_instance_initializers(constructor, span)?
-                {
-                    // Arrow-contained first-super field initialization needs
-                    // the reusable initializer body tracked separately from
-                    // this mutable derived-this environment tranche.
-                    return unsupported(UnsupportedFeature::FunctionSyntheticBinding, span);
-                }
                 continue;
             }
             let direct_super_property = match nodes.parent_kind(node_id) {
@@ -2620,7 +2717,9 @@ impl<'unit, 'arena, 'scope> Planner<'unit, 'arena, 'scope> {
                     return Ok(is_derived_class_constructor(nodes, candidate.node_id)
                         .then_some(executable));
                 }
-                ExecutableKind::ClassDefaultConstructor | ExecutableKind::Module => {
+                ExecutableKind::ClassDefaultConstructor
+                | ExecutableKind::ClassInstanceInitializer
+                | ExecutableKind::Module => {
                     return Ok(None);
                 }
                 ExecutableKind::Script { .. } => {
@@ -2633,58 +2732,6 @@ impl<'unit, 'arena, 'scope> Planner<'unit, 'arena, 'scope> {
                 }
             }
         }
-    }
-
-    fn derived_constructor_has_instance_initializers(
-        &self,
-        executable: ExecutableId,
-        span: Span,
-    ) -> Result<bool, CompilerError> {
-        let nodes = self.unit.semantic().nodes();
-        let candidate = self.executable_drafts.get(executable.index()).ok_or(
-            CompilerError::SemanticInvariant {
-                invariant: "derived constructor executable exists",
-                span: Some(span),
-            },
-        )?;
-        let AstKind::Function(function) = nodes.kind(candidate.node_id) else {
-            return Err(CompilerError::SemanticInvariant {
-                invariant: "source derived constructor remains a function",
-                span: Some(span),
-            });
-        };
-        let AstKind::MethodDefinition(method) = nodes.parent_kind(function.node_id.get()) else {
-            return Err(CompilerError::SemanticInvariant {
-                invariant: "derived constructor remains a class method",
-                span: Some(span),
-            });
-        };
-        let AstKind::ClassBody(body) = nodes.parent_kind(method.node_id.get()) else {
-            return Err(CompilerError::SemanticInvariant {
-                invariant: "derived constructor remains in a class body",
-                span: Some(span),
-            });
-        };
-        let AstKind::Class(class) = nodes.parent_kind(body.node_id.get()) else {
-            return Err(CompilerError::SemanticInvariant {
-                invariant: "derived constructor class body remains in a class",
-                span: Some(span),
-            });
-        };
-        Ok(class.body.body.iter().any(|element| match element {
-            ClassElement::PropertyDefinition(field) => !field.r#static,
-            ClassElement::MethodDefinition(method) => {
-                !method.r#static
-                    && matches!(method.key, PropertyKey::PrivateIdentifier(_))
-                    && matches!(
-                        method.kind,
-                        MethodDefinitionKind::Method
-                            | MethodDefinitionKind::Get
-                            | MethodDefinitionKind::Set
-                    )
-            }
-            _ => false,
-        }))
     }
 
     fn executable_lexically_has_home_object(
@@ -2713,7 +2760,8 @@ impl<'unit, 'arena, 'scope> Planner<'unit, 'arena, 'scope> {
                 ExecutableKind::Function { .. } => {
                     return Ok(is_home_object_method(nodes, candidate.node_id));
                 }
-                ExecutableKind::ClassDefaultConstructor => return Ok(true),
+                ExecutableKind::ClassDefaultConstructor
+                | ExecutableKind::ClassInstanceInitializer => return Ok(true),
                 ExecutableKind::Script { .. } => {
                     return Ok(matches!(
                         self.unit.goal(),
@@ -3046,6 +3094,7 @@ impl<'unit, 'arena, 'scope> Planner<'unit, 'arena, 'scope> {
                         primary_symbol_binding: true,
                         class_node: None,
                         class_field_node: None,
+                        class_instance_initializer_node: None,
                         class_private_name_nodes: Arc::from([]),
                         class_private_method_node: None,
                         class_static_receiver_node: None,
@@ -3073,6 +3122,7 @@ impl<'unit, 'arena, 'scope> Planner<'unit, 'arena, 'scope> {
                     primary_symbol_binding: !split_frontend_symbol,
                     class_node: None,
                     class_field_node: None,
+                    class_instance_initializer_node: None,
                     class_private_name_nodes: Arc::from([]),
                     class_private_method_node: None,
                     class_static_receiver_node: None,
@@ -3116,6 +3166,7 @@ impl<'unit, 'arena, 'scope> Planner<'unit, 'arena, 'scope> {
                     primary_symbol_binding: false,
                     class_node: None,
                     class_field_node: None,
+                    class_instance_initializer_node: None,
                     class_private_name_nodes: Arc::from([]),
                     class_private_method_node: None,
                     class_static_receiver_node: None,
@@ -3139,6 +3190,7 @@ impl<'unit, 'arena, 'scope> Planner<'unit, 'arena, 'scope> {
                     primary_symbol_binding: true,
                     class_node: None,
                     class_field_node: None,
+                    class_instance_initializer_node: None,
                     class_private_name_nodes: Arc::from([]),
                     class_private_method_node: None,
                     class_static_receiver_node: None,
@@ -3166,6 +3218,7 @@ impl<'unit, 'arena, 'scope> Planner<'unit, 'arena, 'scope> {
                 primary_symbol_binding: true,
                 class_node: None,
                 class_field_node: None,
+                class_instance_initializer_node: None,
                 class_private_name_nodes: Arc::from([]),
                 class_private_method_node: None,
                 class_static_receiver_node: None,
@@ -3244,6 +3297,7 @@ impl<'unit, 'arena, 'scope> Planner<'unit, 'arena, 'scope> {
                 primary_symbol_binding,
                 class_node: None,
                 class_field_node: None,
+                class_instance_initializer_node: None,
                 class_private_name_nodes: Arc::from([]),
                 class_private_method_node: None,
                 class_static_receiver_node: None,
@@ -3477,6 +3531,7 @@ impl<'unit, 'arena, 'scope> Planner<'unit, 'arena, 'scope> {
                 DeclarationKind::FunctionName
                 | DeclarationKind::ClassName
                 | DeclarationKind::ClassFieldKey
+                | DeclarationKind::ClassInstanceInitializer
                 | DeclarationKind::ClassPrivateName
                 | DeclarationKind::ClassStaticReceiver
                 | DeclarationKind::WithObject
@@ -3500,6 +3555,7 @@ impl<'unit, 'arena, 'scope> Planner<'unit, 'arena, 'scope> {
                 DeclarationKind::FunctionName
                 | DeclarationKind::ClassName
                 | DeclarationKind::ClassFieldKey
+                | DeclarationKind::ClassInstanceInitializer
                 | DeclarationKind::ClassPrivateName
                 | DeclarationKind::ClassStaticReceiver
                 | DeclarationKind::WithObject
@@ -3540,6 +3596,7 @@ impl<'unit, 'arena, 'scope> Planner<'unit, 'arena, 'scope> {
             DeclarationKind::Const
             | DeclarationKind::ClassName
             | DeclarationKind::ClassFieldKey
+            | DeclarationKind::ClassInstanceInitializer
             | DeclarationKind::ClassPrivateName
             | DeclarationKind::ClassStaticReceiver
             | DeclarationKind::WithObject => (
@@ -3626,6 +3683,7 @@ impl<'unit, 'arena, 'scope> Planner<'unit, 'arena, 'scope> {
             primary_symbol_binding: false,
             class_node: None,
             class_field_node: None,
+            class_instance_initializer_node: None,
             class_private_name_nodes: Arc::from([]),
             class_private_method_node: None,
             class_static_receiver_node: None,
@@ -3665,6 +3723,7 @@ impl<'unit, 'arena, 'scope> Planner<'unit, 'arena, 'scope> {
                 primary_symbol_binding: false,
                 class_node: Some(node_id),
                 class_field_node: None,
+                class_instance_initializer_node: None,
                 class_private_name_nodes: Arc::from([]),
                 class_private_method_node: None,
                 class_static_receiver_node: None,
@@ -3708,6 +3767,7 @@ impl<'unit, 'arena, 'scope> Planner<'unit, 'arena, 'scope> {
                     primary_symbol_binding: false,
                     class_node: None,
                     class_field_node: Some(field_node),
+                    class_instance_initializer_node: None,
                     class_private_name_nodes: Arc::from([]),
                     class_private_method_node: None,
                     class_static_receiver_node: None,
@@ -3723,6 +3783,145 @@ impl<'unit, 'arena, 'scope> Planner<'unit, 'arena, 'scope> {
             }
         }
         Ok(())
+    }
+
+    /// Adds the immutable class-scope cell used by every constructor and
+    /// lexical arrow `super()` site to invoke the one reusable instance
+    /// element initializer method.
+    fn add_class_instance_initializer_bindings(
+        &self,
+        bindings: &mut Vec<BindingDraft>,
+    ) -> Result<(), CompilerError> {
+        let nodes = self.unit.semantic().nodes();
+        for (&class_node, &initializer) in &self.class_instance_initializers {
+            let AstKind::Class(class) = nodes.kind(class_node) else {
+                return Err(CompilerError::SemanticInvariant {
+                    invariant: "instance initializer executable belongs to a class",
+                    span: None,
+                });
+            };
+            if !class_has_instance_elements(class) {
+                return Err(CompilerError::SemanticInvariant {
+                    invariant: "instance initializer class has instance elements",
+                    span: Some(class.span),
+                });
+            }
+            let owner =
+                self.class_definition_owner(class.node_id.get(), class.scope_id(), class.span)?;
+            if initializer == owner {
+                return Err(CompilerError::SemanticInvariant {
+                    invariant: "instance initializer is distinct from its class definition owner",
+                    span: Some(class.span),
+                });
+            }
+            bindings.push(BindingDraft {
+                symbol_id: None,
+                primary_symbol_binding: false,
+                class_node: None,
+                class_field_node: None,
+                class_instance_initializer_node: Some(class_node),
+                class_private_name_nodes: Arc::from([]),
+                class_private_method_node: None,
+                class_static_receiver_node: None,
+                with_statement_node: None,
+                executable: owner,
+                name: Arc::from(format!(
+                    "[[class-instance-initializer:{}]]",
+                    class_node.index()
+                )),
+                declaration_spans: Arc::from([class.body.span]),
+                declaration_identity_spans: Arc::from([class.body.span]),
+                placement: StoragePlacement::Local,
+                policy: self.declaration_policy(
+                    owner,
+                    DeclarationKind::ClassInstanceInitializer,
+                    false,
+                ),
+                arguments_object: false,
+            });
+        }
+        Ok(())
+    }
+
+    fn class_instance_initializer_capture_requests(
+        &self,
+        initializer_bindings: &HashMap<NodeId, BindingId>,
+        bindings: &[BindingStorage],
+    ) -> Result<Vec<CaptureRequest>, CompilerError> {
+        let nodes = self.unit.semantic().nodes();
+        let mut requests = Vec::new();
+        for (&class_node, &binding) in initializer_bindings {
+            let AstKind::Class(class) = nodes.kind(class_node) else {
+                return Err(CompilerError::SemanticInvariant {
+                    invariant: "instance-initializer binding belongs to a class",
+                    span: None,
+                });
+            };
+            let storage =
+                bindings
+                    .get(binding.index())
+                    .ok_or(CompilerError::SemanticInvariant {
+                        invariant: "instance-initializer binding exists",
+                        span: Some(class.span),
+                    })?;
+            if storage.placement != StoragePlacement::Local
+                || storage.policy.kind != DeclarationKind::ClassInstanceInitializer
+            {
+                return Err(CompilerError::SemanticInvariant {
+                    invariant: "instance-initializer binding uses immutable local storage",
+                    span: Some(class.span),
+                });
+            }
+            let constructor = self.instance_field_constructor_owner(class_node, class)?;
+            if constructor != storage.executable {
+                requests.push(CaptureRequest {
+                    executable: constructor,
+                    binding,
+                    span: class.body.span,
+                });
+            }
+
+            for (super_node, node) in nodes.iter_enumerated() {
+                let AstKind::Super(super_expression) = node.kind() else {
+                    continue;
+                };
+                let direct_call = matches!(
+                    nodes.parent_kind(super_node),
+                    AstKind::CallExpression(call)
+                        if matches!(
+                            &call.callee,
+                            Expression::Super(expression)
+                                if expression.node_id.get() == super_node
+                        )
+                );
+                if !direct_call {
+                    continue;
+                }
+                let owner = self.scope_owner(node.scope_id(), Some(super_expression.span))?;
+                if self
+                    .executable_lexically_has_derived_constructor(owner, super_expression.span)?
+                    != Some(constructor)
+                    || owner == storage.executable
+                {
+                    continue;
+                }
+                requests.push(CaptureRequest {
+                    executable: owner,
+                    binding,
+                    span: super_expression.span,
+                });
+            }
+        }
+        requests.sort_unstable_by_key(|request| {
+            (
+                request.executable.index(),
+                request.binding.index(),
+                request.span.start,
+                request.span.end,
+            )
+        });
+        requests.dedup_by_key(|request| (request.executable, request.binding));
+        Ok(requests)
     }
 
     fn class_field_key_capture_requests(
@@ -3775,15 +3974,22 @@ impl<'unit, 'arena, 'scope> Planner<'unit, 'arena, 'scope> {
             if field.r#static {
                 continue;
             }
-            let constructor = self.instance_field_constructor_owner(class.node_id.get(), class)?;
-            if constructor == storage.executable {
+            let initializer = self
+                .class_instance_initializers
+                .get(&class.node_id.get())
+                .copied()
+                .ok_or(CompilerError::SemanticInvariant {
+                    invariant: "computed instance field has a hidden initializer",
+                    span: Some(field.span),
+                })?;
+            if initializer == storage.executable {
                 return Err(CompilerError::SemanticInvariant {
-                    invariant: "class constructor captures a distinct class-scope key binding",
+                    invariant: "class initializer captures a distinct class-scope key binding",
                     span: Some(field.key.span()),
                 });
             }
             requests.push(CaptureRequest {
-                executable: constructor,
+                executable: initializer,
                 binding,
                 span: field.key.span(),
             });
@@ -3878,6 +4084,7 @@ impl<'unit, 'arena, 'scope> Planner<'unit, 'arena, 'scope> {
                     primary_symbol_binding: false,
                     class_node: None,
                     class_field_node: None,
+                    class_instance_initializer_node: None,
                     class_private_name_nodes: name_nodes.into(),
                     class_private_method_node: None,
                     class_static_receiver_node: None,
@@ -3935,6 +4142,7 @@ impl<'unit, 'arena, 'scope> Planner<'unit, 'arena, 'scope> {
                     primary_symbol_binding: false,
                     class_node: None,
                     class_field_node: None,
+                    class_instance_initializer_node: None,
                     class_private_name_nodes: Arc::from([]),
                     class_private_method_node: Some(method_node),
                     class_static_receiver_node: None,
@@ -4026,15 +4234,22 @@ impl<'unit, 'arena, 'scope> Planner<'unit, 'arena, 'scope> {
                     span: Some(element_span),
                 });
             }
-            let constructor = self.instance_field_constructor_owner(class.node_id.get(), class)?;
-            if constructor == storage.executable {
+            let initializer = self
+                .class_instance_initializers
+                .get(&class.node_id.get())
+                .copied()
+                .ok_or(CompilerError::SemanticInvariant {
+                    invariant: "private instance element has a hidden initializer",
+                    span: Some(element_span),
+                })?;
+            if initializer == storage.executable {
                 return Err(CompilerError::SemanticInvariant {
-                    invariant: "class constructor captures a distinct class private-name binding",
+                    invariant: "class initializer captures a distinct class private-name binding",
                     span: Some(element_span),
                 });
             }
             requests.push(CaptureRequest {
-                executable: constructor,
+                executable: initializer,
                 binding,
                 span: element_span,
             });
@@ -4143,15 +4358,22 @@ impl<'unit, 'arena, 'scope> Planner<'unit, 'arena, 'scope> {
                     span: Some(method.span),
                 });
             }
-            let constructor = self.instance_field_constructor_owner(class.node_id.get(), class)?;
-            if constructor == storage.executable {
+            let initializer = self
+                .class_instance_initializers
+                .get(&class.node_id.get())
+                .copied()
+                .ok_or(CompilerError::SemanticInvariant {
+                    invariant: "private instance method has a hidden initializer",
+                    span: Some(method.span),
+                })?;
+            if initializer == storage.executable {
                 return Err(CompilerError::SemanticInvariant {
-                    invariant: "class constructor captures a distinct class private-method binding",
+                    invariant: "class initializer captures a distinct class private-method binding",
                     span: Some(method.span),
                 });
             }
             requests.push(CaptureRequest {
-                executable: constructor,
+                executable: initializer,
                 binding,
                 span: method.span,
             });
@@ -4227,6 +4449,7 @@ impl<'unit, 'arena, 'scope> Planner<'unit, 'arena, 'scope> {
                 primary_symbol_binding: false,
                 class_node: None,
                 class_field_node: None,
+                class_instance_initializer_node: None,
                 class_private_name_nodes: Arc::from([]),
                 class_private_method_node: None,
                 class_static_receiver_node: Some(class_node),
@@ -4264,6 +4487,7 @@ impl<'unit, 'arena, 'scope> Planner<'unit, 'arena, 'scope> {
                 primary_symbol_binding: false,
                 class_node: None,
                 class_field_node: None,
+                class_instance_initializer_node: None,
                 class_private_name_nodes: Arc::from([]),
                 class_private_method_node: None,
                 class_static_receiver_node: None,
@@ -4861,6 +5085,7 @@ impl<'unit, 'arena, 'scope> Planner<'unit, 'arena, 'scope> {
                 primary_symbol_binding: false,
                 class_node: None,
                 class_field_node: None,
+                class_instance_initializer_node: None,
                 class_private_name_nodes: Arc::from([]),
                 class_private_method_node: None,
                 class_static_receiver_node: None,
@@ -5250,6 +5475,7 @@ impl<'unit, 'arena, 'scope> Planner<'unit, 'arena, 'scope> {
                             })?;
                 }
                 ExecutableKind::ClassDefaultConstructor
+                | ExecutableKind::ClassInstanceInitializer
                 | ExecutableKind::Script { .. }
                 | ExecutableKind::Module => return Ok(None),
             }
@@ -5316,7 +5542,13 @@ impl<'unit, 'arena, 'scope> Planner<'unit, 'arena, 'scope> {
                         });
                     };
                     return self
-                        .instance_field_constructor_owner(class.node_id.get(), class)
+                        .class_instance_initializers
+                        .get(&class.node_id.get())
+                        .copied()
+                        .ok_or(CompilerError::SemanticInvariant {
+                            invariant: "class with an instance field has a hidden initializer",
+                            span: Some(class.span),
+                        })
                         .map(Some);
                 }
                 _ => {}
@@ -5482,6 +5714,7 @@ fn freeze_bindings(
     let mut declaration_bindings = HashMap::new();
     let mut class_name_bindings = HashMap::new();
     let mut class_field_key_bindings = HashMap::new();
+    let mut class_instance_initializer_bindings = HashMap::new();
     let mut class_private_name_bindings = HashMap::new();
     let mut class_private_method_bindings = HashMap::new();
     let mut class_static_receiver_bindings = HashMap::new();
@@ -5529,6 +5762,16 @@ fn freeze_bindings(
         {
             return Err(CompilerError::SemanticInvariant {
                 invariant: "one synthetic class-field key binding per field node",
+                span: draft.declaration_spans.first().copied(),
+            });
+        }
+        if let Some(class_node) = draft.class_instance_initializer_node
+            && class_instance_initializer_bindings
+                .insert(class_node, id)
+                .is_some()
+        {
+            return Err(CompilerError::SemanticInvariant {
+                invariant: "one synthetic instance-initializer binding per class node",
                 span: draft.declaration_spans.first().copied(),
             });
         }
@@ -5596,6 +5839,7 @@ fn freeze_bindings(
         by_declaration: declaration_bindings,
         class_name_bindings,
         class_field_key_bindings,
+        class_instance_initializer_bindings,
         class_private_name_bindings,
         class_private_method_bindings,
         class_static_receiver_bindings,

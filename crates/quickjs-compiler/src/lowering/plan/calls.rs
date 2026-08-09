@@ -304,14 +304,11 @@ impl<'arena> ExpressionPlanner<'_, '_, 'arena, '_> {
                         span: Some(call.span),
                     });
                 }
-                if constructor != layout.executable && !instance_fields.elements.is_empty() {
-                    return Err(LeafCompilationError::SemanticInvariant {
-                        invariant: "storage rejects arrow super calls that need reusable instance initialization",
-                        span: Some(call.span),
+                if !instance_fields.elements.is_empty() {
+                    work.push(ExpressionWork::InitializeInstanceFields {
+                        constructor,
+                        span: call.span,
                     });
-                }
-                if constructor == layout.executable && !instance_fields.elements.is_empty() {
-                    work.push(ExpressionWork::InitializeInstanceFields);
                 }
             }
             work.push(ExpressionWork::Emit(PlannedInstruction::new(
@@ -690,14 +687,11 @@ impl<'arena> ExpressionPlanner<'_, '_, 'arena, '_> {
                     span: Some(call.span),
                 });
             }
-            if constructor != layout.executable && !instance_fields.elements.is_empty() {
-                return Err(LeafCompilationError::SemanticInvariant {
-                    invariant: "storage rejects arrow super calls that need reusable instance initialization",
-                    span: Some(call.span),
+            if !instance_fields.elements.is_empty() {
+                work.push(ExpressionWork::InitializeInstanceFields {
+                    constructor,
+                    span: call.span,
                 });
-            }
-            if constructor == layout.executable && !instance_fields.elements.is_empty() {
-                work.push(ExpressionWork::InitializeInstanceFields);
             }
         }
         work.push(ExpressionWork::Emit(PlannedInstruction::new(

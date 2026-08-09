@@ -5542,6 +5542,9 @@ fn define_method_input_with_root_arguments(
                     0,
                 )
             }
+            CompilerExecutableKind::ClassInstanceInitializer => {
+                panic!("a define_method child cannot be a hidden class initializer")
+            }
             CompilerExecutableKind::ClassConstructor => {
                 UnverifiedFunctionHeader::class_constructor_with_variable_references(
                     true,

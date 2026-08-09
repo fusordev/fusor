@@ -962,7 +962,7 @@ impl<'arena> CompilationContext<'_, 'arena, '_> {
                         Operands::U8(depth),
                         element.span(),
                     )));
-                    Self::plan_assignment_target_prelude(target, constants, work)?;
+                    self.plan_assignment_target_prelude(target, layout, constants, work)?;
                 }
             }
         }
@@ -1001,6 +1001,14 @@ impl<'arena> CompilationContext<'_, 'arena, '_> {
             AssignmentTarget::ComputedMemberExpression(member) if !member.optional => {
                 work.push(ExpressionWork::Emit(PlannedInstruction::new(
                     FinalOpcode::PutArrayEl,
+                    Operands::None,
+                    member.span,
+                )));
+                Ok(())
+            }
+            AssignmentTarget::PrivateFieldExpression(member) if !member.optional => {
+                work.push(ExpressionWork::Emit(PlannedInstruction::new(
+                    FinalOpcode::PutPrivateField,
                     Operands::None,
                     member.span,
                 )));
@@ -1226,7 +1234,8 @@ impl<'arena> CompilationContext<'_, 'arena, '_> {
                             )?;
                         }
                         AssignmentTarget::StaticMemberExpression(_)
-                        | AssignmentTarget::ComputedMemberExpression(_) => {
+                        | AssignmentTarget::ComputedMemberExpression(_)
+                        | AssignmentTarget::PrivateFieldExpression(_) => {
                             self.plan_assignment_target_value(
                                 target,
                                 work,
@@ -1235,13 +1244,12 @@ impl<'arena> CompilationContext<'_, 'arena, '_> {
                                 tree_layout,
                                 constants,
                             )?;
-                            Self::push_object_assignment_member_prelude(target, constants, work)?;
+                            Self::push_object_assignment_reference_postlude(target, work)?;
                         }
                         AssignmentTarget::TSAsExpression(_)
                         | AssignmentTarget::TSSatisfiesExpression(_)
                         | AssignmentTarget::TSNonNullExpression(_)
-                        | AssignmentTarget::TSTypeAssertion(_)
-                        | AssignmentTarget::PrivateFieldExpression(_) => {
+                        | AssignmentTarget::TSTypeAssertion(_) => {
                             return unsupported(
                                 UnsupportedLeafFeature::UnsupportedPattern,
                                 property.span,
@@ -1279,6 +1287,7 @@ impl<'arena> CompilationContext<'_, 'arena, '_> {
                             Operands::None,
                             property.span,
                         )));
+                        self.push_object_assignment_reference_prelude(target, true, layout, work)?;
                         if has_rest {
                             Self::push_object_rest_computed_key_record(property.span, work);
                         } else {
@@ -1296,6 +1305,7 @@ impl<'arena> CompilationContext<'_, 'arena, '_> {
                             property.span,
                             work,
                         )?;
+                        self.push_object_assignment_reference_prelude(target, false, layout, work)?;
                         if has_rest {
                             Self::push_object_rest_static_key_record(
                                 constants.property_atom_index(property.name.span())?,
@@ -1454,6 +1464,160 @@ impl<'arena> CompilationContext<'_, 'arena, '_> {
         }
     }
 
+    /// Evaluates a non-pattern object-destructuring target before reading the
+    /// source property, as required by `KeyedDestructuringAssignmentEvaluation`.
+    /// The source (and a computed source key, when present) is rotated above
+    /// the retained reference so `get_field2`/`get_array_el2` can preserve it.
+    fn push_object_assignment_reference_prelude<'pattern>(
+        &self,
+        target: &'pattern AssignmentTarget<'arena>,
+        computed_source: bool,
+        layout: &FrameLayout,
+        work: &mut Vec<ExpressionWork<'pattern, 'arena>>,
+    ) -> Result<(), LeafCompilationError> {
+        match target {
+            AssignmentTarget::StaticMemberExpression(member) if !member.optional => {
+                if computed_source {
+                    // [source, sourceKey, base] -> [base, source, sourceKey]
+                    work.push(ExpressionWork::Emit(PlannedInstruction::new(
+                        FinalOpcode::Perm3,
+                        Operands::None,
+                        member.span,
+                    )));
+                    work.push(ExpressionWork::Emit(PlannedInstruction::new(
+                        FinalOpcode::Swap,
+                        Operands::None,
+                        member.span,
+                    )));
+                } else {
+                    // [source, base] -> [base, source]
+                    work.push(ExpressionWork::Emit(PlannedInstruction::new(
+                        FinalOpcode::Swap,
+                        Operands::None,
+                        member.span,
+                    )));
+                }
+                work.push(ExpressionWork::Visit(&member.object));
+                Ok(())
+            }
+            AssignmentTarget::ComputedMemberExpression(member) if !member.optional => {
+                Self::push_object_assignment_two_slot_reference_rotation(
+                    computed_source,
+                    member.span,
+                    work,
+                );
+                // Property-key conversion remains part of PutValue, after the
+                // source getter and any default initializer have run.
+                work.push(ExpressionWork::Visit(&member.expression));
+                work.push(ExpressionWork::Visit(&member.object));
+                Ok(())
+            }
+            AssignmentTarget::PrivateFieldExpression(member) if !member.optional => {
+                let planner = ExpressionPlanner::new(self);
+                let (binding, slot) = planner.private_name_binding_for_access(
+                    member.node_id.get(),
+                    member.field.name.as_str(),
+                    member.span,
+                    layout,
+                )?;
+                Self::push_object_assignment_two_slot_reference_rotation(
+                    computed_source,
+                    member.span,
+                    work,
+                );
+                work.push(ExpressionWork::Emit(planner.plan_read_slot(
+                    binding,
+                    slot,
+                    member.field.span,
+                )?));
+                work.push(ExpressionWork::Visit(&member.object));
+                Ok(())
+            }
+            AssignmentTarget::AssignmentTargetIdentifier(_)
+            | AssignmentTarget::ArrayAssignmentTarget(_)
+            | AssignmentTarget::ObjectAssignmentTarget(_) => Ok(()),
+            AssignmentTarget::StaticMemberExpression(_)
+            | AssignmentTarget::ComputedMemberExpression(_)
+            | AssignmentTarget::PrivateFieldExpression(_)
+            | AssignmentTarget::TSAsExpression(_)
+            | AssignmentTarget::TSSatisfiesExpression(_)
+            | AssignmentTarget::TSNonNullExpression(_)
+            | AssignmentTarget::TSTypeAssertion(_) => {
+                unsupported(UnsupportedLeafFeature::UnsupportedPattern, target.span())
+            }
+        }
+    }
+
+    /// Rotates a computed or private two-slot reference below the source.
+    /// Work is LIFO, so these instructions are pushed in reverse execution
+    /// order.
+    fn push_object_assignment_two_slot_reference_rotation<'pattern>(
+        computed_source: bool,
+        span: Span,
+        work: &mut Vec<ExpressionWork<'pattern, 'arena>>,
+    ) {
+        if computed_source {
+            // [source, sourceKey, base, targetKey] ->
+            // [base, targetKey, source, sourceKey]
+            for opcode in [FinalOpcode::Perm3, FinalOpcode::Swap, FinalOpcode::Perm4] {
+                work.push(ExpressionWork::Emit(PlannedInstruction::new(
+                    opcode,
+                    Operands::None,
+                    span,
+                )));
+            }
+        } else {
+            // [source, base, targetKey] -> [base, targetKey, source]
+            work.push(ExpressionWork::Emit(PlannedInstruction::new(
+                FinalOpcode::Swap,
+                Operands::None,
+                span,
+            )));
+            work.push(ExpressionWork::Emit(PlannedInstruction::new(
+                FinalOpcode::Perm3,
+                Operands::None,
+                span,
+            )));
+        }
+    }
+
+    /// After the source property value (and optional default) is ready,
+    /// restores the source below the retained reference for `PutValue`.
+    fn push_object_assignment_reference_postlude<'pattern>(
+        target: &'pattern AssignmentTarget<'arena>,
+        work: &mut Vec<ExpressionWork<'pattern, 'arena>>,
+    ) -> Result<(), LeafCompilationError> {
+        let (opcode, span) = match target {
+            AssignmentTarget::StaticMemberExpression(member) if !member.optional => {
+                (FinalOpcode::Perm3, member.span)
+            }
+            AssignmentTarget::ComputedMemberExpression(member) if !member.optional => {
+                (FinalOpcode::Perm4, member.span)
+            }
+            AssignmentTarget::PrivateFieldExpression(member) if !member.optional => {
+                (FinalOpcode::Perm4, member.span)
+            }
+            AssignmentTarget::AssignmentTargetIdentifier(_)
+            | AssignmentTarget::ArrayAssignmentTarget(_)
+            | AssignmentTarget::ObjectAssignmentTarget(_) => return Ok(()),
+            AssignmentTarget::StaticMemberExpression(_)
+            | AssignmentTarget::ComputedMemberExpression(_)
+            | AssignmentTarget::PrivateFieldExpression(_)
+            | AssignmentTarget::TSAsExpression(_)
+            | AssignmentTarget::TSSatisfiesExpression(_)
+            | AssignmentTarget::TSNonNullExpression(_)
+            | AssignmentTarget::TSTypeAssertion(_) => {
+                return unsupported(UnsupportedLeafFeature::UnsupportedPattern, target.span());
+            }
+        };
+        work.push(ExpressionWork::Emit(PlannedInstruction::new(
+            opcode,
+            Operands::None,
+            span,
+        )));
+        Ok(())
+    }
+
     /// Returns the assignment target underlying an element (skipping any
     /// default wrapper).
     fn assignment_element_target<'pattern>(
@@ -1480,6 +1644,7 @@ impl<'arena> CompilationContext<'_, 'arena, '_> {
             | AssignmentTarget::ObjectAssignmentTarget(_) => Ok(0),
             AssignmentTarget::StaticMemberExpression(member) if !member.optional => Ok(1),
             AssignmentTarget::ComputedMemberExpression(member) if !member.optional => Ok(2),
+            AssignmentTarget::PrivateFieldExpression(member) if !member.optional => Ok(2),
             AssignmentTarget::StaticMemberExpression(_)
             | AssignmentTarget::ComputedMemberExpression(_)
             | AssignmentTarget::TSAsExpression(_)
@@ -1496,7 +1661,9 @@ impl<'arena> CompilationContext<'_, 'arena, '_> {
     /// assignment target below the incoming value. Pushed last so it runs
     /// before the element's `for_of_next` step.
     fn plan_assignment_target_prelude<'pattern>(
+        &self,
         target: &'pattern AssignmentTarget<'arena>,
+        layout: &FrameLayout,
         _constants: &CompiledConstantPool,
         work: &mut Vec<ExpressionWork<'pattern, 'arena>>,
     ) -> Result<(), LeafCompilationError> {
@@ -1510,6 +1677,22 @@ impl<'arena> CompilationContext<'_, 'arena, '_> {
             }
             AssignmentTarget::ComputedMemberExpression(member) if !member.optional => {
                 work.push(ExpressionWork::Visit(&member.expression));
+                work.push(ExpressionWork::Visit(&member.object));
+                Ok(())
+            }
+            AssignmentTarget::PrivateFieldExpression(member) if !member.optional => {
+                let planner = ExpressionPlanner::new(self);
+                let (binding, slot) = planner.private_name_binding_for_access(
+                    member.node_id.get(),
+                    member.field.name.as_str(),
+                    member.span,
+                    layout,
+                )?;
+                work.push(ExpressionWork::Emit(planner.plan_read_slot(
+                    binding,
+                    slot,
+                    member.field.span,
+                )?));
                 work.push(ExpressionWork::Visit(&member.object));
                 Ok(())
             }
@@ -1625,7 +1808,7 @@ impl<'arena> CompilationContext<'_, 'arena, '_> {
         )));
         // The member base (and computed key) execute before `array_from`
         // and stay below the fresh array for the store.
-        Self::plan_assignment_target_prelude(&rest.target, constants, work)?;
+        self.plan_assignment_target_prelude(&rest.target, layout, constants, work)?;
         Ok(())
     }
 }

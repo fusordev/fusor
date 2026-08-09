@@ -1703,6 +1703,7 @@ const fn direct_eval_local_scope(kind: CompilerBindingKind) -> DirectEvalCallerB
         | CompilerBindingKind::Function => DirectEvalCallerBindingScope::Variable,
         CompilerBindingKind::FunctionName
         | CompilerBindingKind::ClassFieldKey
+        | CompilerBindingKind::ClassInstanceInitializer
         | CompilerBindingKind::ClassPrivateName
         | CompilerBindingKind::ClassStaticReceiver
         | CompilerBindingKind::GlobalReference => DirectEvalCallerBindingScope::Outer,
@@ -1720,6 +1721,7 @@ fn push_direct_eval_caller_binding(
     if matches!(
         policy.kind(),
         CompilerBindingKind::ClassFieldKey
+            | CompilerBindingKind::ClassInstanceInitializer
             | CompilerBindingKind::ClassPrivateName
             | CompilerBindingKind::ClassStaticReceiver
             | CompilerBindingKind::GlobalReference

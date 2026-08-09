@@ -16,6 +16,60 @@ pub(in crate::lowering) enum OrdinaryFunctionForm {
 }
 
 impl<'arena> CompilationContext<'_, 'arena, '_> {
+    pub(in crate::lowering) fn selected_class_instance_initializer(
+        &self,
+        executable_id: ExecutableId,
+    ) -> Result<(&Executable, &Class<'arena>), LeafCompilationError> {
+        let executable = self.planned.plan.executable(executable_id).ok_or(
+            LeafCompilationError::InvalidExecutable {
+                executable: executable_id,
+            },
+        )?;
+        let node_id = self
+            .planned
+            .identities
+            .node_by_executable
+            .get(executable_id.index())
+            .copied()
+            .ok_or(LeafCompilationError::SemanticInvariant {
+                invariant: "class instance initializer has an Oxc class identity",
+                span: Some(executable.span()),
+            })?;
+        let AstKind::Class(class) = self.unit.semantic().nodes().kind(node_id) else {
+            return Err(LeafCompilationError::SemanticInvariant {
+                invariant: "class instance initializer belongs to a class node",
+                span: Some(executable.span()),
+            });
+        };
+        if self
+            .planned
+            .identities
+            .class_instance_initializers
+            .get(&node_id)
+            .copied()
+            != Some(executable_id)
+            || executable.kind() != ExecutableKind::ClassInstanceInitializer
+            || executable.parameter_count() != 0
+            || executable.defined_parameter_count() != 0
+            || !executable.has_simple_parameter_list()
+            || executable.has_parameter_expressions()
+            || !executable.is_strict()
+            || !class.decorators.is_empty()
+        {
+            return Err(LeafCompilationError::SemanticInvariant {
+                invariant: "hidden instance initializer has strict method metadata",
+                span: Some(class.span),
+            });
+        }
+        if self.planned.plan.kind() != CompilationUnitKind::Script {
+            return unsupported(
+                UnsupportedLeafFeature::UnsupportedCompilationUnit,
+                class.span,
+            );
+        }
+        Ok((executable, class))
+    }
+
     pub(in crate::lowering) fn selected_default_class_constructor(
         &self,
         executable_id: ExecutableId,

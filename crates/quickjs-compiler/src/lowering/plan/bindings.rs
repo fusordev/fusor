@@ -1232,7 +1232,7 @@ impl<'arena> CompilationContext<'_, 'arena, '_> {
                         | ExpressionWork::IdentifierDelete { .. }
                         | ExpressionWork::CallAfterCallee { .. }
                         | ExpressionWork::SuperPropertyBase { .. }
-                        | ExpressionWork::InitializeInstanceFields => {
+                        | ExpressionWork::InitializeInstanceFields { .. } => {
                             return Err(LeafCompilationError::SemanticInvariant {
                                 invariant: "assignment-target scheduling delegates complete expressions",
                                 span: Some(target.span()),

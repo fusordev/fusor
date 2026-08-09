@@ -52,6 +52,9 @@ pub enum CompilerBindingKind {
     /// The compiler-created immutable class-scope cell for one evaluated
     /// computed public field key.
     ClassFieldKey,
+    /// The compiler-created immutable class-scope cell holding the hidden
+    /// instance-element initializer method.
+    ClassInstanceInitializer,
     /// The compiler-created immutable class-scope cell for one fresh private
     /// instance-field name.
     ClassPrivateName,
@@ -167,6 +170,7 @@ impl CompilerBindingPolicy {
                 | CompilerBindingKind::Const
                 | CompilerBindingKind::ClassName
                 | CompilerBindingKind::ClassFieldKey
+                | CompilerBindingKind::ClassInstanceInitializer
                 | CompilerBindingKind::ClassPrivateName
                 | CompilerBindingKind::ClassStaticReceiver
                 | CompilerBindingKind::WithObject
@@ -200,6 +204,7 @@ impl CompilerBindingPolicy {
             CompilerBindingKind::Const
             | CompilerBindingKind::ClassName
             | CompilerBindingKind::ClassFieldKey
+            | CompilerBindingKind::ClassInstanceInitializer
             | CompilerBindingKind::ClassPrivateName
             | CompilerBindingKind::ClassStaticReceiver
             | CompilerBindingKind::WithObject => {
@@ -610,6 +615,9 @@ pub enum CompilerExecutableKind {
     OrdinaryArrow,
     /// A nonconstructable ordinary object-literal method, getter, or setter.
     OrdinaryMethod,
+    /// The hidden strict method that initializes one class's instance
+    /// elements. It is retained only in a compiler-owned class-scope cell.
+    ClassInstanceInitializer,
     /// A strict constructable base-class constructor. Its public prototype
     /// object is installed by the paired `define_class` instruction.
     ClassConstructor,
@@ -2692,6 +2700,7 @@ fn verify_executable_kind(
             Ok(())
         }
         CompilerExecutableKind::OrdinaryMethod
+        | CompilerExecutableKind::ClassInstanceInitializer
         | CompilerExecutableKind::GeneratorMethod
         | CompilerExecutableKind::AsyncMethod
         | CompilerExecutableKind::AsyncGeneratorMethod
@@ -2878,6 +2887,19 @@ fn verify_header(
                         defined: header.defined_argument_count(),
                         arguments,
                     },
+                ));
+            }
+        }
+        CompilerExecutableKind::ClassInstanceInitializer => {
+            if header.kind() != FunctionKind::Normal
+                || header.flags().bits() != 0x0742
+                || !header.mode().is_strict()
+                || header.defined_argument_count() != 0
+                || arguments != 0
+            {
+                return Err(BytecodeVerificationError::function(
+                    id,
+                    BytecodeVerificationErrorKind::UnsupportedFunctionHeader,
                 ));
             }
         }
@@ -4258,6 +4280,7 @@ const fn realm_global_policy_supported(policy: CompilerBindingPolicy) -> bool {
         | CompilerBindingKind::FunctionName
         | CompilerBindingKind::ClassName
         | CompilerBindingKind::ClassFieldKey
+        | CompilerBindingKind::ClassInstanceInitializer
         | CompilerBindingKind::ClassPrivateName
         | CompilerBindingKind::ClassStaticReceiver
         | CompilerBindingKind::WithObject
@@ -4757,7 +4780,9 @@ fn verify_class_field_key_bindings(
                         },
                     ));
                 };
-                if child_metadata.executable_kind != CompilerExecutableKind::ClassConstructor {
+                if child_metadata.executable_kind
+                    != CompilerExecutableKind::ClassInstanceInitializer
+                {
                     return Err(BytecodeVerificationError::function(
                         *child_id,
                         BytecodeVerificationErrorKind::ClosureMetadataMismatch {
@@ -4820,6 +4845,12 @@ fn verify_method_definitions(
         BytecodeGraphResource::VerifiedMetadata,
     )?;
     let mut class_definition_counts = try_filled_vec(
+        graph.root_id(),
+        graph.functions().len(),
+        0_u32,
+        BytecodeGraphResource::VerifiedMetadata,
+    )?;
+    let mut instance_initializer_counts = try_filled_vec(
         graph.root_id(),
         graph.functions().len(),
         0_u32,
@@ -4893,6 +4924,7 @@ fn verify_method_definitions(
                     && index == 0
                     && derived_default_constructor_pair(
                         parent,
+                        &metadata[parent_index],
                         &predecessor_counts,
                         internal_stack,
                     );
@@ -4937,6 +4969,7 @@ fn verify_method_definitions(
                         .is_derived_class_constructor()
                     && derived_default_constructor_pair(
                         parent,
+                        &metadata[parent_index],
                         &predecessor_counts,
                         internal_stack,
                     ))
@@ -4965,6 +4998,38 @@ fn verify_method_definitions(
             else {
                 continue;
             };
+            if child_metadata.executable_kind == CompilerExecutableKind::ClassInstanceInitializer {
+                if class_instance_initializer_pair(
+                    parent,
+                    &metadata[parent_index],
+                    metadata,
+                    instructions,
+                    &predecessor_counts,
+                    internal_stack,
+                    index,
+                ) != Some(*child)
+                {
+                    return Err(BytecodeVerificationError::function(
+                        parent_id,
+                        BytecodeVerificationErrorKind::OrdinaryMethodTemplatePlacementMismatch {
+                            pc: decoded.pc(),
+                            child: *child,
+                        },
+                    ));
+                }
+                let child_index = usize::try_from(child.get()).map_err(|_| {
+                    BytecodeVerificationError::function(
+                        *child,
+                        BytecodeVerificationErrorKind::OrdinaryMethodTemplatePlacementMismatch {
+                            pc: decoded.pc(),
+                            child: *child,
+                        },
+                    )
+                })?;
+                instance_initializer_counts[child_index] =
+                    instance_initializer_counts[child_index].saturating_add(1);
+                continue;
+            }
             if child_metadata.executable_kind == CompilerExecutableKind::ClassConstructor {
                 let pair = index.checked_add(1).and_then(|definition_index| {
                     class_definition_pair(
@@ -5114,6 +5179,25 @@ fn verify_method_definitions(
             ));
         }
     }
+    for (index, (metadata, &definitions)) in metadata
+        .iter()
+        .zip(&instance_initializer_counts)
+        .enumerate()
+    {
+        if metadata.executable_kind != CompilerExecutableKind::ClassInstanceInitializer {
+            continue;
+        }
+        let child = function_id(index)?;
+        if definitions != 1 {
+            return Err(BytecodeVerificationError::function(
+                child,
+                BytecodeVerificationErrorKind::OrdinaryMethodTemplateOwnershipMismatch {
+                    child,
+                    definitions,
+                },
+            ));
+        }
+    }
     Ok(())
 }
 
@@ -5197,6 +5281,7 @@ fn verify_inferred_function_names(
             if opcode == FinalOpcode::SetHomeObject
                 && !private_method_home_object_pair(
                     parent,
+                    &metadata[parent_index],
                     metadata,
                     instructions,
                     &predecessor_counts,
@@ -5424,8 +5509,90 @@ fn private_method_name_pair(
     })
 }
 
+/// Certifies the hidden instance-element initializer closure created
+/// immediately after its class definition. The fresh class prototype becomes
+/// the method's home object, and the closure is then published only into the
+/// compiler-owned immutable initializer cell.
+fn class_instance_initializer_pair(
+    parent: &VerifiedCompilerFunction,
+    parent_metadata: &VerifiedFunctionMetadata,
+    metadata: &[VerifiedFunctionMetadata],
+    instructions: &[VerifiedInstruction],
+    predecessor_counts: &[u32],
+    internal_stack: &InternalStackCertificate,
+    closure_index: usize,
+) -> Option<FunctionTemplateId> {
+    let class_index = closure_index.checked_sub(1)?;
+    let class_instruction = instructions.get(class_index)?.decoded().instruction();
+    if !matches!(
+        (class_instruction.opcode(), class_instruction.operands()),
+        (FinalOpcode::DefineClass, Operands::AtomU8 { value, .. }) if value & 2 != 0
+    ) {
+        return None;
+    }
+    let closure = instructions.get(closure_index)?.decoded().instruction();
+    if !matches!(
+        closure.opcode(),
+        FinalOpcode::FClosure | FinalOpcode::FClosure8
+    ) {
+        return None;
+    }
+    let swap_home_index = closure_index.checked_add(1)?;
+    let home_index = closure_index.checked_add(2)?;
+    let swap_store_index = closure_index.checked_add(3)?;
+    let store_index = closure_index.checked_add(4)?;
+    for (index, opcode) in [
+        (swap_home_index, FinalOpcode::Swap),
+        (home_index, FinalOpcode::SetHomeObject),
+        (swap_store_index, FinalOpcode::Swap),
+    ] {
+        if instructions.get(index)?.decoded().instruction().opcode() != opcode
+            || predecessor_counts.get(index) != Some(&1)
+        {
+            return None;
+        }
+    }
+    let store = instructions.get(store_index)?.decoded().instruction();
+    if !is_unchecked_local_put(store.opcode()) {
+        return None;
+    }
+    let local = local_operand(store.opcode(), store.operands())?;
+    let arguments = parent.control_flow().domains().argument_count() as usize;
+    if parent_metadata
+        .variables
+        .get(arguments.checked_add(local as usize)?)?
+        .policy()
+        .kind()
+        != CompilerBindingKind::ClassInstanceInitializer
+        || predecessor_counts.get(store_index) != Some(&1)
+    {
+        return None;
+    }
+    for from in class_index..store_index {
+        if !internal_stack.has_effective_successor(
+            instructions,
+            from,
+            usize_to_u32(from.checked_add(1)?),
+        ) {
+            return None;
+        }
+    }
+    let constant = closure_constant(closure.opcode(), closure.operands())?;
+    let crate::CompilerConstant::Function(child) = parent.constants().get(constant as usize)?
+    else {
+        return None;
+    };
+    let child_metadata = usize::try_from(child.get())
+        .ok()
+        .and_then(|index| metadata.get(index))?;
+    (child_metadata.executable_kind == CompilerExecutableKind::ClassInstanceInitializer
+        && child_metadata.function_name.is_none())
+    .then_some(*child)
+}
+
 fn private_method_home_object_pair(
     parent: &VerifiedCompilerFunction,
+    parent_metadata: &VerifiedFunctionMetadata,
     metadata: &[VerifiedFunctionMetadata],
     instructions: &[VerifiedInstruction],
     predecessor_counts: &[u32],
@@ -5458,7 +5625,21 @@ fn private_method_home_object_pair(
             )
         })
         .is_some();
-    instance || r#static
+    let initializer = home_object_index
+        .checked_sub(2)
+        .is_some_and(|closure_index| {
+            class_instance_initializer_pair(
+                parent,
+                parent_metadata,
+                metadata,
+                instructions,
+                predecessor_counts,
+                internal_stack,
+                closure_index,
+            )
+            .is_some()
+        });
+    instance || r#static || initializer
 }
 
 fn inferred_function_name_pair(
@@ -5939,223 +6120,69 @@ fn derived_class_heritage_pair(
         && predecessor_counts.get(closure_index) == Some(&2)
 }
 
-/// The synthesized derived constructor body is intentionally restricted to
-/// `super(...args)`, followed by zero or more no-op-delimited public field
-/// initialization regions, then the final result drop. The delimiter exists
-/// only in source-less default constructors and keeps accepted field
-/// expressions from being confused with surrounding constructor code. Source
-/// derived constructors are separately certified through the typed
-/// `special_object(4); get_super; special_object(3); call_constructor;
-/// check_ctor_return; drop` provenance transfer above.
-#[allow(
-    clippy::too_many_lines,
-    reason = "the paired default-constructor certificate keeps its complete control-flow boundary audit together"
-)]
+/// Certifies the complete source-less derived-constructor body. Instance
+/// elements are delegated to one compiler-owned hidden method; they are never
+/// inlined into the constructor or duplicated at an arrow `super()` site.
 fn derived_default_constructor_pair(
     function: &VerifiedCompilerFunction,
+    metadata: &VerifiedFunctionMetadata,
     predecessor_counts: &[u32],
     internal_stack: &InternalStackCertificate,
 ) -> bool {
     let instructions = function.control_flow().instructions();
-    let Some((check_constructor, tail)) = instructions.split_first() else {
-        return false;
+    let has_opcodes = |expected: &[FinalOpcode]| {
+        instructions.len() == expected.len()
+            && instructions
+                .iter()
+                .zip(expected)
+                .all(|(actual, expected)| actual.decoded().instruction().opcode() == *expected)
     };
-    let Some((initialize_constructor, tail)) = tail.split_first() else {
-        return false;
-    };
-    let Some((return_undefined, tail)) = tail.split_last() else {
-        return false;
-    };
-    let Some((drop_result, fields)) = tail.split_last() else {
-        return false;
-    };
-    if check_constructor.decoded().instruction().opcode() != FinalOpcode::CheckCtor
-        || initialize_constructor.decoded().instruction().opcode() != FinalOpcode::InitCtor
-        || drop_result.decoded().instruction().opcode() != FinalOpcode::Drop
-        || return_undefined.decoded().instruction().opcode() != FinalOpcode::ReturnUndef
-    {
-        return false;
-    }
-    if predecessor_counts.len() != instructions.len()
-        || predecessor_counts.first() != Some(&0)
-        || predecessor_counts.get(1) != Some(&1)
-        || !has_only_effective_successor(internal_stack, instructions, 0, 1)
-    {
-        return false;
-    }
-
-    let final_drop_index = instructions.len().saturating_sub(2);
-    let return_index = instructions.len().saturating_sub(1);
-    let fields_start = 2;
-    let fields_end = final_drop_index.saturating_sub(1);
-    let first_after_init = if fields.is_empty() {
-        final_drop_index
-    } else {
-        fields_start
-    };
-    if predecessor_counts.get(final_drop_index) != Some(&1)
-        || predecessor_counts.get(return_index) != Some(&1)
-        || !has_only_effective_successor(
-            internal_stack,
-            instructions,
-            1,
-            usize_to_u32(first_after_init),
-        )
-        || !has_only_effective_successor(
-            internal_stack,
-            instructions,
-            final_drop_index,
-            usize_to_u32(return_index),
-        )
-    {
-        return false;
-    }
-    if fields.is_empty() {
-        return true;
-    }
-
-    for source in 0..instructions.len() {
-        for edge in internal_stack.effective_successors(instructions, source) {
-            let target = edge.target.get() as usize;
-            let source_is_field = (fields_start..=fields_end).contains(&source);
-            let target_is_field = (fields_start..=fields_end).contains(&target);
-            if target_is_field && !source_is_field && (source != 1 || target != fields_start) {
-                return false;
-            }
-            if source_is_field
-                && !target_is_field
-                && (source != fields_end || target != final_drop_index)
-            {
-                return false;
-            }
-        }
-    }
-
-    let mut next = 0;
-    while next < fields.len() {
-        if fields[next].decoded().instruction().opcode() != FinalOpcode::Nop {
-            return false;
-        }
-        let Some(close) = fields
-            .get(next.saturating_add(1)..)
-            .and_then(|tail| {
-                tail.iter().position(|instruction| {
-                    instruction.decoded().instruction().opcode() == FinalOpcode::Nop
+    let no_initializer = has_opcodes(&[
+        FinalOpcode::CheckCtor,
+        FinalOpcode::InitCtor,
+        FinalOpcode::Drop,
+        FinalOpcode::ReturnUndef,
+    ]);
+    let initializer = has_opcodes(&[
+        FinalOpcode::CheckCtor,
+        FinalOpcode::InitCtor,
+        FinalOpcode::GetVarRefCheck,
+        FinalOpcode::PushThis,
+        FinalOpcode::Swap,
+        FinalOpcode::CallMethod,
+        FinalOpcode::Drop,
+        FinalOpcode::Drop,
+        FinalOpcode::ReturnUndef,
+    ]) && matches!(
+        instructions
+            .get(5)
+            .map(|instruction| instruction.decoded().instruction().operands()),
+        Some(Operands::NPop { argument_count: 0 })
+    ) && instructions.get(2).is_some_and(|instruction| {
+        let instruction = instruction.decoded().instruction();
+        closure_operand(instruction.opcode(), instruction.operands()).is_some_and(|slot| {
+            metadata
+                .closures()
+                .get(slot as usize)
+                .is_some_and(|definition| {
+                    definition.policy().kind() == CompilerBindingKind::ClassInstanceInitializer
                 })
-            })
-            .and_then(|offset| next.checked_add(offset.saturating_add(1)))
-        else {
-            return false;
-        };
-        let Some(region) = fields.get(next.saturating_add(1)..close) else {
-            return false;
-        };
-        let static_field_region = matches!(
-            region,
-            [push_this, .., define, drop]
-                if push_this.decoded().instruction().opcode() == FinalOpcode::PushThis
-                    && matches!(
-                        (define.decoded().instruction().opcode(), define.decoded().instruction().operands()),
-                        (FinalOpcode::DefineField, Operands::Atom(_))
-                    )
-                    && drop.decoded().instruction().opcode() == FinalOpcode::Drop
-        );
-        let computed_field_region = matches!(
-            region,
-            [push_this, key, .., define, first_drop, second_drop]
-                if push_this.decoded().instruction().opcode() == FinalOpcode::PushThis
-                    && key.decoded().instruction().opcode() == FinalOpcode::GetVarRefCheck
-                    && matches!(
-                        (define.decoded().instruction().opcode(), define.decoded().instruction().operands()),
-                        (FinalOpcode::DefineArrayEl, Operands::None)
-                    )
-                    && first_drop.decoded().instruction().opcode() == FinalOpcode::Drop
-                    && second_drop.decoded().instruction().opcode() == FinalOpcode::Drop
-        );
-        let private_field_region = matches!(
-            region,
-            [push_this, private_name, .., define, drop]
-                if push_this.decoded().instruction().opcode() == FinalOpcode::PushThis
-                    && private_name.decoded().instruction().opcode() == FinalOpcode::GetVarRefCheck
-                    && matches!(
-                        (define.decoded().instruction().opcode(), define.decoded().instruction().operands()),
-                        (FinalOpcode::DefinePrivateField, Operands::U8(0..=3))
-                    )
-                    && drop.decoded().instruction().opcode() == FinalOpcode::Drop
-        );
-        if !static_field_region && !computed_field_region && !private_field_region {
-            return false;
-        }
-        let open_index = fields_start.saturating_add(next);
-        let push_this_index = open_index.saturating_add(1);
-        let close_index = fields_start.saturating_add(close);
-        let define_index = if computed_field_region {
-            close_index.saturating_sub(3)
-        } else {
-            close_index.saturating_sub(2)
-        };
-        let first_drop_index = computed_field_region.then(|| close_index.saturating_sub(2));
-        let drop_index = close_index.saturating_sub(1);
-        let next_after_close = if close_index == fields_end {
-            final_drop_index
-        } else {
-            close_index.saturating_add(1)
-        };
-        if predecessor_counts.get(open_index) != Some(&1)
-            || predecessor_counts.get(push_this_index) != Some(&1)
-            || first_drop_index.is_some_and(|index| predecessor_counts.get(index) != Some(&1))
-            || predecessor_counts.get(drop_index) != Some(&1)
-            || predecessor_counts.get(close_index) != Some(&1)
-            || !has_only_effective_successor(
-                internal_stack,
-                instructions,
-                open_index,
-                usize_to_u32(push_this_index),
-            )
-            || !has_only_effective_successor(
-                internal_stack,
-                instructions,
-                define_index,
-                usize_to_u32(first_drop_index.unwrap_or(drop_index)),
-            )
-            || first_drop_index.is_some_and(|index| {
-                !has_only_effective_successor(
-                    internal_stack,
-                    instructions,
-                    index,
-                    usize_to_u32(drop_index),
-                )
-            })
-            || !has_only_effective_successor(
-                internal_stack,
-                instructions,
-                drop_index,
-                usize_to_u32(close_index),
-            )
-            || !has_only_effective_successor(
-                internal_stack,
-                instructions,
-                close_index,
-                usize_to_u32(next_after_close),
-            )
-        {
-            return false;
-        }
-        for source in push_this_index..=drop_index {
-            for edge in internal_stack.effective_successors(instructions, source) {
-                let target = edge.target.get() as usize;
-                if source == drop_index {
-                    if target != close_index {
-                        return false;
-                    }
-                } else if !(push_this_index..=drop_index).contains(&target) {
-                    return false;
-                }
-            }
-        }
-        next = close.saturating_add(1);
+        })
+    });
+    if !no_initializer && !initializer {
+        return false;
     }
-    true
+    predecessor_counts.len() == instructions.len()
+        && predecessor_counts.first() == Some(&0)
+        && predecessor_counts.iter().skip(1).all(|count| *count == 1)
+        && (0..instructions.len().saturating_sub(1)).all(|source| {
+            has_only_effective_successor(
+                internal_stack,
+                instructions,
+                source,
+                usize_to_u32(source.saturating_add(1)),
+            )
+        })
 }
 
 fn has_only_effective_successor(
@@ -6348,6 +6375,7 @@ fn verify_supported_opcodes(
                     executable_kind,
                     CompilerExecutableKind::OrdinaryArrow
                         | CompilerExecutableKind::OrdinaryMethod
+                        | CompilerExecutableKind::ClassInstanceInitializer
                         | CompilerExecutableKind::GeneratorMethod
                         | CompilerExecutableKind::AsyncMethod
                         | CompilerExecutableKind::AsyncGeneratorMethod
@@ -6472,6 +6500,7 @@ fn compiler_special_object_is_authorized(
             | CompilerExecutableKind::OrdinaryFunction
             | CompilerExecutableKind::OrdinaryArrow
             | CompilerExecutableKind::OrdinaryMethod
+            | CompilerExecutableKind::ClassInstanceInitializer
             | CompilerExecutableKind::ClassConstructor
             | CompilerExecutableKind::GeneratorFunction
             | CompilerExecutableKind::GeneratorMethod
@@ -6516,6 +6545,7 @@ fn compiler_special_object_is_authorized(
                     executable_kind,
                     CompilerExecutableKind::OrdinaryArrow
                         | CompilerExecutableKind::OrdinaryMethod
+                        | CompilerExecutableKind::ClassInstanceInitializer
                         | CompilerExecutableKind::GeneratorMethod
                         | CompilerExecutableKind::AsyncMethod
                         | CompilerExecutableKind::AsyncGeneratorMethod

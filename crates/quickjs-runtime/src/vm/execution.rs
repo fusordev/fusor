@@ -716,6 +716,7 @@ pub(super) fn create_frame(
             | CompilerExecutableKind::OrdinaryFunction
             | CompilerExecutableKind::OrdinaryArrow
             | CompilerExecutableKind::OrdinaryMethod
+            | CompilerExecutableKind::ClassInstanceInitializer
             | CompilerExecutableKind::GeneratorFunction
             | CompilerExecutableKind::GeneratorMethod
             | CompilerExecutableKind::AsyncFunction

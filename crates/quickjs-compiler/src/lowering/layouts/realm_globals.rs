@@ -499,6 +499,7 @@ impl<'plan> RealmGlobalLayoutBuilder<'plan> {
             DeclarationKind::FunctionName
             | DeclarationKind::ClassName
             | DeclarationKind::ClassFieldKey
+            | DeclarationKind::ClassInstanceInitializer
             | DeclarationKind::ClassPrivateName
             | DeclarationKind::ClassStaticReceiver
             | DeclarationKind::WithObject

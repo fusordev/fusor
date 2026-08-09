@@ -164,8 +164,11 @@ fn private_fields_after_optional_chains_lower_with_brand_checked_reads() {
             .iter()
             .filter(|&&opcode| opcode == FinalOpcode::CallMethod)
             .count(),
-        2
+        3
     );
+    assert!(tree.verified_bytecode().functions().any(|function| {
+        function.metadata().executable_kind() == CompilerExecutableKind::ClassInstanceInitializer
+    }));
 }
 
 #[test]
@@ -619,7 +622,7 @@ fn static_class_fields_lower_to_the_typed_field_definition_path() {
 }
 
 #[test]
-fn initializer_free_public_instance_fields_lower_into_each_constructor() {
+fn initializer_free_public_instance_fields_lower_into_hidden_initializers() {
     let tree = compile(
         "function make(){class Empty{empty;}class Base{base;constructor(){}}class Explicit extends Base{own;constructor(){super();}}class Default extends Base{forward;}return [Empty,Base,Explicit,Default];}",
         "make",
@@ -632,6 +635,16 @@ fn initializer_free_public_instance_fields_lower_into_each_constructor() {
         })
         .collect::<Vec<_>>();
     assert_eq!(constructors.len(), 4);
+    assert_eq!(
+        tree.verified_bytecode()
+            .functions()
+            .filter(|function| {
+                function.metadata().executable_kind()
+                    == CompilerExecutableKind::ClassInstanceInitializer
+            })
+            .count(),
+        4
+    );
     assert_eq!(
         tree.functions()
             .iter()
@@ -1001,7 +1014,7 @@ fn private_accessors_share_one_name_and_lower_to_accessor_kinds() {
 }
 
 #[test]
-fn uncomputed_public_instance_field_initializers_lower_into_each_constructor() {
+fn uncomputed_public_instance_fields_lower_into_hidden_initializers() {
     let tree = compile(
         "function make(seed){class Base{value=seed;constructor(){}}class Derived extends Base{next=seed+1;constructor(){super();}}class Default extends Base{forward=seed+2;}return [Base,Derived,Default];}",
         "make",
@@ -1033,6 +1046,16 @@ fn uncomputed_public_instance_field_initializers_lower_into_each_constructor() {
         })
         .collect::<Vec<_>>();
     assert_eq!(class_flags, [2, 3, 3]);
+    assert_eq!(
+        tree.verified_bytecode()
+            .functions()
+            .filter(|function| {
+                function.metadata().executable_kind()
+                    == CompilerExecutableKind::ClassInstanceInitializer
+            })
+            .count(),
+        3
+    );
 }
 
 #[test]
@@ -1066,6 +1089,35 @@ fn computed_public_instance_fields_capture_a_once_evaluated_class_key() {
                     )
             })
     );
+    let initializer_index = tree
+        .functions()
+        .iter()
+        .enumerate()
+        .find_map(|(index, _)| {
+            (tree
+                .verified_bytecode()
+                .function(quickjs_bytecode::FunctionTemplateId::new(
+                    u32::try_from(index).expect("template index"),
+                ))
+                .expect("verified function")
+                .metadata()
+                .executable_kind()
+                == CompilerExecutableKind::ClassInstanceInitializer)
+                .then_some(index)
+        })
+        .expect("class instance initializer");
+    let opcodes = tree.functions()[initializer_index]
+        .control_flow()
+        .instructions()
+        .iter()
+        .map(|instruction| instruction.decoded().instruction().opcode())
+        .collect::<Vec<_>>();
+    assert!(
+        opcodes
+            .windows(2)
+            .any(|pair| { pair == [FinalOpcode::PushThis, FinalOpcode::GetVarRefCheck] })
+    );
+    assert!(opcodes.contains(&FinalOpcode::DefineArrayEl));
     let constructor_index = tree
         .functions()
         .iter()
@@ -1083,18 +1135,25 @@ fn computed_public_instance_fields_capture_a_once_evaluated_class_key() {
                 .then_some(index)
         })
         .expect("class constructor");
-    let opcodes = tree.functions()[constructor_index]
-        .control_flow()
-        .instructions()
-        .iter()
-        .map(|instruction| instruction.decoded().instruction().opcode())
-        .collect::<Vec<_>>();
+    let constructor = &tree.functions()[constructor_index];
     assert!(
-        opcodes
-            .windows(2)
-            .any(|pair| { pair == [FinalOpcode::PushThis, FinalOpcode::GetVarRefCheck] })
+        constructor
+            .control_flow()
+            .instructions()
+            .iter()
+            .any(|instruction| {
+                instruction.decoded().instruction().opcode() == FinalOpcode::CallMethod
+            })
     );
-    assert!(opcodes.contains(&FinalOpcode::DefineArrayEl));
+    assert!(
+        !constructor
+            .control_flow()
+            .instructions()
+            .iter()
+            .any(|instruction| {
+                instruction.decoded().instruction().opcode() == FinalOpcode::DefineArrayEl
+            })
+    );
 }
 
 #[test]

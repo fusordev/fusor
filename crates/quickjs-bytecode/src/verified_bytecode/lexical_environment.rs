@@ -129,6 +129,7 @@ pub(super) fn verify_lexical_arrow_environments(
             matches!(
                 kind,
                 CompilerExecutableKind::OrdinaryMethod
+                    | CompilerExecutableKind::ClassInstanceInitializer
                     | CompilerExecutableKind::GeneratorMethod
                     | CompilerExecutableKind::AsyncMethod
                     | CompilerExecutableKind::AsyncGeneratorMethod

@@ -332,7 +332,7 @@ impl<'arena> CompilationContext<'_, 'arena, '_> {
                         });
                     };
                     return self
-                        .instance_field_constructor_owner(class.node_id.get(), class)
+                        .class_instance_initializer_owner(class.node_id.get(), class)
                         .map(Some);
                 }
                 _ => {}
@@ -609,7 +609,7 @@ impl<'arena> CompilationContext<'_, 'arena, '_> {
                                 && field.decorators.is_empty() =>
                         {
                             let field_owner =
-                                self.instance_field_constructor_owner(node_id, class)?;
+                                self.class_instance_initializer_owner(node_id, class)?;
                             if let Some(key) = compiled_static_property_key(&field.key)? {
                                 record_property_candidate(
                                     field_owner,
@@ -707,37 +707,18 @@ impl<'arena> CompilationContext<'_, 'arena, '_> {
         Ok(())
     }
 
-    fn instance_field_constructor_owner(
+    fn class_instance_initializer_owner(
         &self,
         class_node: NodeId,
         class: &super::Class<'arena>,
     ) -> Result<ExecutableId, LeafCompilationError> {
-        for element in &class.body.body {
-            let super::ClassElement::MethodDefinition(method) = element else {
-                continue;
-            };
-            if method.kind != super::MethodDefinitionKind::Constructor {
-                continue;
-            }
-            return self
-                .planned
-                .identities
-                .executable_by_node
-                .get(method.value.node_id.get().index())
-                .copied()
-                .flatten()
-                .ok_or(LeafCompilationError::SemanticInvariant {
-                    invariant: "class constructor owns its public field atoms",
-                    span: Some(method.span),
-                });
-        }
         self.planned
             .identities
-            .default_class_constructors
+            .class_instance_initializers
             .get(&class_node)
             .copied()
             .ok_or(LeafCompilationError::SemanticInvariant {
-                invariant: "class without a source constructor owns a synthesized field template",
+                invariant: "class with an instance field has a hidden initializer",
                 span: Some(class.span),
             })
     }

@@ -425,7 +425,11 @@ fn transfer_object_definition_provenance(
     match instruction.opcode() {
         FinalOpcode::Undefined => state.push(ObjectDefinitionProvenance::LiteralUndefined),
         FinalOpcode::PushThis
-            if metadata.executable_kind == CompilerExecutableKind::ClassConstructor =>
+            if matches!(
+                metadata.executable_kind,
+                CompilerExecutableKind::ClassConstructor
+                    | CompilerExecutableKind::ClassInstanceInitializer
+            ) =>
         {
             state.push(ObjectDefinitionProvenance::ClassFieldReceiver(
                 usize_to_u32(instruction_index),

@@ -307,9 +307,9 @@ fn interleaved_computed_fields_evaluate_all_keys_before_static_initializers() {
 }
 
 #[test]
-fn uncomputed_instance_field_initializers_observe_this_super_and_new_target() {
+fn uncomputed_instance_field_initializers_observe_this_super_and_undefined_new_target() {
     run_with(
-        "function run(){class Base{constructor(value){this._value=value;}get value(){return this._value;}}class Derived extends Base{fromSuper=super.value;target=new.target;constructor(value){super(value);this.bodySeesFields=this.fromSuper===value&&this.target===Derived;}}let value=new Derived(7);return value.fromSuper===7&&value.target===Derived&&value.bodySeesFields;}",
+        "function run(){class Base{constructor(value){this._value=value;}get value(){return this._value;}}class Derived extends Base{fromSuper=super.value;target=new.target;constructor(value){super(value);this.bodySeesFields=this.fromSuper===value&&this.target===void 0;}}let value=new Derived(7);return value.fromSuper===7&&value.target===void 0&&value.bodySeesFields;}",
         |result| {
             let value = result.expect("this, super, and new.target field execution");
             assert_eq!(value.as_boolean().expect("live Boolean"), Some(true));
@@ -318,9 +318,9 @@ fn uncomputed_instance_field_initializers_observe_this_super_and_new_target() {
 }
 
 #[test]
-fn uncomputed_instance_field_initializers_create_closures_in_the_constructor_environment() {
+fn uncomputed_instance_field_initializers_create_closures_in_the_hidden_environment() {
     run_with(
-        "function run(){let seed=2;class Default{value=3;read=()=>this.value+seed;readFunction=function(){return this.value+seed;};}class Explicit{value=4;read=()=>this.value+seed;constructor(){}}class Parent{value=5;}class Derived extends Parent{read=()=>this.value+seed;selected=seed?this.value+seed:0;}let defaultBox=new Default;let explicitBox=new Explicit;let derivedBox=new Derived;return defaultBox.read()===5&&defaultBox.read.name==='read'&&defaultBox.readFunction()===5&&defaultBox.readFunction.name==='readFunction'&&explicitBox.read()===6&&explicitBox.read.name==='read'&&derivedBox.read()===7&&derivedBox.read.name==='read'&&derivedBox.selected===7;}",
+        "function run(){let seed=2;class Default{value=3;read=()=>this.value+seed;target=()=>new.target;readFunction=function(){return this.value+seed;};}class Explicit{value=4;read=()=>this.value+seed;constructor(){}}class Parent{value=5;}class Derived extends Parent{read=()=>this.value+seed;selected=seed?this.value+seed:0;}let defaultBox=new Default;let explicitBox=new Explicit;let derivedBox=new Derived;return defaultBox.read()===5&&defaultBox.read.name==='read'&&defaultBox.target()===void 0&&defaultBox.readFunction()===5&&defaultBox.readFunction.name==='readFunction'&&explicitBox.read()===6&&explicitBox.read.name==='read'&&derivedBox.read()===7&&derivedBox.read.name==='read'&&derivedBox.selected===7;}",
         |result| {
             let value = result.expect("field initializer closure execution");
             assert_eq!(value.as_boolean().expect("live Boolean"), Some(true));
@@ -356,6 +356,28 @@ fn derived_constructor_arrows_share_the_mutable_this_binding_for_super_calls() {
         "function run(){let calls=0;let escaped;class Base{constructor(){calls++;}}class First extends Base{constructor(){let call=()=>super();let receiver=call();this.same=receiver===this;}}class Nested extends Base{constructor(){let call=()=>()=>super();call()();this.ready=true;}}class After extends Base{constructor(){let read=()=>this;super();this.arrowSeesReceiver=read()===this;}}class Before extends Base{constructor(){let read=()=>this;let early=false;try{read();}catch(error){early=error.name==='ReferenceError';}super();this.early=early;}}class Override extends Base{constructor(){escaped=()=>this;return {};}}class Twice extends Base{constructor(){let call=()=>super();super();call();}}class DirectTwice extends Base{constructor(){super();super();}}let first=new First;let nested=new Nested;let after=new After;let before=new Before;new Override;let escapedThrows=false;let repeated=false;let directRepeated=false;try{escaped();}catch(error){escapedThrows=error.name==='ReferenceError';}try{new Twice;}catch(error){repeated=error.name==='ReferenceError';}try{new DirectTwice;}catch(error){directRepeated=error.name==='ReferenceError';}return first.same&&nested.ready&&after.arrowSeesReceiver&&before.early&&escapedThrows&&repeated&&directRepeated&&calls===8;}",
         |result| {
             let value = result.expect("derived constructor arrow super execution");
+            assert_eq!(value.as_boolean().expect("live Boolean"), Some(true));
+        },
+    );
+}
+
+#[test]
+fn arrow_super_calls_run_instance_initializers_once_after_binding_this() {
+    run_with(
+        "function run(){let baseCalls=0;let fieldCalls=0;class Base{constructor(){baseCalls++;}}class First extends Base{field=++fieldCalls;constructor(){let call=()=>super();let receiver=call();this.same=receiver===this;}}class Twice extends Base{field=++fieldCalls;constructor(){super();let call=()=>super();let repeated=false;try{call();}catch(error){repeated=error.name==='ReferenceError';}this.repeated=repeated;}}let first=new First;let twice=new Twice;return first.same&&first.field===1&&twice.repeated&&twice.field===2&&baseCalls===3&&fieldCalls===2;}",
+        |result| {
+            let value = result.expect("arrow super instance initialization");
+            assert_eq!(value.as_boolean().expect("live Boolean"), Some(true));
+        },
+    );
+}
+
+#[test]
+fn private_destructuring_target_checks_this_before_invoking_the_source_getter() {
+    run_with(
+        "function run(){let getterCalls=0;let baseCalls=0;class Base{constructor(){baseCalls++;}}class Box extends Base{#field;constructor(){let initialize=()=>super();let source={get value(){getterCalls++;initialize();}};({value:this.#field}=source);}}let reference=false;try{new Box;}catch(error){reference=error.name==='ReferenceError';}return reference&&getterCalls===0&&baseCalls===0;}",
+        |result| {
+            let value = result.expect("private assignment target evaluation order");
             assert_eq!(value.as_boolean().expect("live Boolean"), Some(true));
         },
     );
