@@ -34,6 +34,45 @@ fn runtime() -> Runtime {
 }
 
 #[test]
+fn immutable_local_and_captured_writes_follow_declarative_environment_semantics() {
+    let authority = compile(
+        "function run(){\
+            const local=1;\
+            let localResult;\
+            try{local=2;}catch(error){localResult=error.name+':'+local;}\
+            const captured=3;\
+            function writeCaptured(){\
+                try{captured=4;}catch(error){return error.name+':'+captured;}\
+            }\
+            let sloppy=function self(){self=0;return self===sloppy;};\
+            let strict=function self(){\
+                'use strict';\
+                try{self=0;}catch(error){return error.name+':'+(self===strict);}\
+            };\
+            return localResult+'|'+writeCaptured()+'|'+sloppy()+'|'+strict();\
+        }",
+        "run",
+    );
+    let mut runtime = runtime();
+    let realm = runtime.create_realm().expect("realm");
+    let mut context = runtime.context(&realm).expect("context");
+    let function = context.instantiate(authority).expect("function");
+
+    let result = context
+        .call(&function, &[], ExecutionLimits::default())
+        .expect("immutable writes are catchable language exceptions");
+    assert_eq!(
+        result
+            .as_string()
+            .expect("live result")
+            .expect("string")
+            .to_utf8_lossy()
+            .expect("UTF-8"),
+        "TypeError:1|TypeError:3|true|TypeError:true"
+    );
+}
+
+#[test]
 fn regexp_literal_opcode_allocates_a_branded_runtime_object() {
     let authority = compile("function make(){return /a+/giu;}", "make");
     let mut runtime = runtime();

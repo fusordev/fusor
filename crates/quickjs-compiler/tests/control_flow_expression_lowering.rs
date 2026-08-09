@@ -4,9 +4,7 @@ use quickjs_bytecode::{
     AssemblerError, AssemblerResource, BytecodePc, EncodeError, FinalOpcode, Operands,
     VerificationLimits,
 };
-use quickjs_compiler::{
-    CompilationContext, CompiledLeafFunction, LeafCompilationError, UnsupportedLeafFeature,
-};
+use quickjs_compiler::{CompilationContext, CompiledLeafFunction, LeafCompilationError};
 use quickjs_frontend::{
     CompilationGoal, DiagnosticStage, FrontendDiagnosticCode, FrontendOptions, GlobalScriptGoal,
     with_parsed_program,
@@ -25,24 +23,6 @@ fn compile(source: &str, name: &str) -> CompiledLeafFunction {
             context
                 .compile_leaf(&executable, VerificationLimits::default())
                 .expect("control-flow expression compilation must succeed")
-        },
-    )
-    .expect("front-end acceptance")
-}
-
-fn compile_error(source: &str, name: &str) -> LeafCompilationError {
-    with_parsed_program(
-        source,
-        FrontendOptions::for_goal(CompilationGoal::GlobalScript(GlobalScriptGoal::new())),
-        |unit| {
-            let context = CompilationContext::new(unit).expect("storage planning must succeed");
-            let executable = context
-                .executables()
-                .find(|executable| executable.metadata().name() == Some(name))
-                .expect("named function executable");
-            context
-                .compile_leaf(&executable, VerificationLimits::default())
-                .expect_err("unsupported expression must fail closed")
         },
     )
     .expect("front-end acceptance")
@@ -295,15 +275,16 @@ fn optional_spread_calls_pack_arguments_only_after_the_nullish_guard() {
 }
 
 #[test]
-fn immutable_identifier_mutation_fails_closed_at_the_target() {
-    let source = "function f(){ const x=1; x++; }";
-    let error = compile_error(source, "f");
-    let LeafCompilationError::Unsupported { feature, span } = error else {
-        panic!("const mutation must fail closed");
-    };
+fn immutable_identifier_mutations_remain_runtime_checked() {
+    let compiled = compile(
+        "function f(flag){const x=1;if(flag)x=2;x++;x&&=3;return x;}",
+        "f",
+    );
+    let opcodes = opcodes(&compiled);
 
-    assert_eq!(feature, UnsupportedLeafFeature::UnsupportedReference);
-    assert_eq!(&source[span.start as usize..span.end as usize], "x");
+    assert!(opcodes.contains(&FinalOpcode::SetLocCheck));
+    assert!(opcodes.contains(&FinalOpcode::PutLocCheck));
+    assert!(opcodes.contains(&FinalOpcode::PostInc));
 }
 
 #[test]

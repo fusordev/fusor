@@ -307,17 +307,99 @@ fn duplicate_arguments_snapshot(frame: &Frame) -> Result<Vec<StoredValue>, Execu
     Ok(duplicate)
 }
 
-enum CapturedWriteAction {
+enum BindingWriteAction {
     Write,
     Ignore,
     Throw,
+}
+
+const fn binding_write_action(
+    policy: quickjs_bytecode::CompilerWritePolicy,
+    strict: bool,
+) -> BindingWriteAction {
+    match policy {
+        quickjs_bytecode::CompilerWritePolicy::Mutable => BindingWriteAction::Write,
+        quickjs_bytecode::CompilerWritePolicy::Immutable => BindingWriteAction::Throw,
+        quickjs_bytecode::CompilerWritePolicy::ImmutableInStrictCode if strict => {
+            BindingWriteAction::Throw
+        }
+        quickjs_bytecode::CompilerWritePolicy::ImmutableInStrictCode => BindingWriteAction::Ignore,
+    }
+}
+
+fn local_write_action(
+    runtime: &Runtime,
+    frame: &Frame,
+    index: u32,
+    unchecked_tdz_initialization: bool,
+) -> Result<BindingWriteAction, EngineFault> {
+    let code = code(runtime, frame.code)?;
+    let function =
+        code.authority
+            .function(frame.template)
+            .ok_or(EngineFault::InvalidClosureEnvironment {
+                function: frame.template,
+            })?;
+    let argument_count = function
+        .function()
+        .control_flow()
+        .domains()
+        .argument_count();
+    let definition = function
+        .metadata()
+        .variables()
+        .get(argument_count as usize + index as usize)
+        .ok_or(EngineFault::MissingPoolEntry {
+            pool: "local variable",
+            index,
+        })?;
+    if unchecked_tdz_initialization && definition.policy().has_temporal_dead_zone() {
+        return Ok(BindingWriteAction::Write);
+    }
+    Ok(binding_write_action(
+        definition.policy().writes(),
+        frame.strict,
+    ))
+}
+
+fn apply_local_write(
+    runtime: &mut Runtime,
+    frame: &mut Frame,
+    index: u32,
+    source_pc: BytecodePc,
+    preserve_value: bool,
+    unchecked_tdz_initialization: bool,
+) -> Result<Option<Step>, ExecutionError> {
+    match local_write_action(runtime, frame, index, unchecked_tdz_initialization)? {
+        BindingWriteAction::Throw => Ok(Some(Step::Abrupt(immutable_binding_exception(
+            runtime,
+            frame,
+            BindingName::Local(index),
+            source_pc,
+        )?))),
+        BindingWriteAction::Ignore => {
+            if !preserve_value {
+                pop(frame)?;
+            }
+            Ok(None)
+        }
+        BindingWriteAction::Write => {
+            let value = if preserve_value {
+                peek(frame)?.duplicate()
+            } else {
+                pop(frame)?
+            };
+            write_local(runtime, frame, index, SlotValue::Value(value))?;
+            Ok(None)
+        }
+    }
 }
 
 fn captured_write_action(
     runtime: &Runtime,
     frame: &Frame,
     index: u32,
-) -> Result<CapturedWriteAction, EngineFault> {
+) -> Result<BindingWriteAction, EngineFault> {
     let code = code(runtime, frame.code)?;
     let function =
         code.authority
@@ -336,14 +418,7 @@ fn captured_write_action(
             function: frame.template,
         });
     };
-    Ok(match policy.writes() {
-        quickjs_bytecode::CompilerWritePolicy::Mutable => CapturedWriteAction::Write,
-        quickjs_bytecode::CompilerWritePolicy::Immutable => CapturedWriteAction::Throw,
-        quickjs_bytecode::CompilerWritePolicy::ImmutableInStrictCode if frame.strict => {
-            CapturedWriteAction::Throw
-        }
-        quickjs_bytecode::CompilerWritePolicy::ImmutableInStrictCode => CapturedWriteAction::Ignore,
-    })
+    Ok(binding_write_action(policy.writes(), frame.strict))
 }
 
 #[allow(
@@ -3061,8 +3136,9 @@ pub(super) fn execute_one(
         | FinalOpcode::PutLoc2
         | FinalOpcode::PutLoc3 => {
             let index = local_index(opcode, operands)?;
-            let value = pop(frame)?;
-            write_local(runtime, frame, index, SlotValue::Value(value))?;
+            if let Some(step) = apply_local_write(runtime, frame, index, source_pc, false, true)? {
+                return Ok(step);
+            }
         }
         FinalOpcode::SetLoc
         | FinalOpcode::SetLoc8
@@ -3071,8 +3147,9 @@ pub(super) fn execute_one(
         | FinalOpcode::SetLoc2
         | FinalOpcode::SetLoc3 => {
             let index = local_index(opcode, operands)?;
-            let value = peek(frame)?.duplicate();
-            write_local(runtime, frame, index, SlotValue::Value(value))?;
+            if let Some(step) = apply_local_write(runtime, frame, index, source_pc, true, true)? {
+                return Ok(step);
+            }
         }
         FinalOpcode::GetVarRef
         | FinalOpcode::GetVarRef0
@@ -3128,7 +3205,7 @@ pub(super) fn execute_one(
         | FinalOpcode::PutVarRef3 => {
             let index = closure_index(opcode, operands)?;
             match captured_write_action(runtime, frame, index)? {
-                CapturedWriteAction::Throw => {
+                BindingWriteAction::Throw => {
                     return Ok(Step::Abrupt(immutable_binding_exception(
                         runtime,
                         frame,
@@ -3136,10 +3213,10 @@ pub(super) fn execute_one(
                         source_pc,
                     )?));
                 }
-                CapturedWriteAction::Ignore => {
+                BindingWriteAction::Ignore => {
                     pop(frame)?;
                 }
-                CapturedWriteAction::Write => {
+                BindingWriteAction::Write => {
                     let value = pop(frame)?;
                     write_environment(runtime, frame, index, SlotValue::Value(value))?;
                 }
@@ -3152,7 +3229,7 @@ pub(super) fn execute_one(
         | FinalOpcode::SetVarRef3 => {
             let index = closure_index(opcode, operands)?;
             match captured_write_action(runtime, frame, index)? {
-                CapturedWriteAction::Throw => {
+                BindingWriteAction::Throw => {
                     return Ok(Step::Abrupt(immutable_binding_exception(
                         runtime,
                         frame,
@@ -3160,8 +3237,8 @@ pub(super) fn execute_one(
                         source_pc,
                     )?));
                 }
-                CapturedWriteAction::Ignore => {}
-                CapturedWriteAction::Write => {
+                BindingWriteAction::Ignore => {}
+                BindingWriteAction::Write => {
                     let value = peek(frame)?.duplicate();
                     write_environment(runtime, frame, index, SlotValue::Value(value))?;
                 }
@@ -3197,8 +3274,9 @@ pub(super) fn execute_one(
                     source_pc,
                 )?));
             }
-            let value = pop(frame)?;
-            write_local(runtime, frame, index, SlotValue::Value(value))?;
+            if let Some(step) = apply_local_write(runtime, frame, index, source_pc, false, false)? {
+                return Ok(step);
+            }
         }
         FinalOpcode::SetLocCheck => {
             let index = local_index(opcode, operands)?;
@@ -3210,8 +3288,9 @@ pub(super) fn execute_one(
                     source_pc,
                 )?));
             }
-            let value = peek(frame)?.duplicate();
-            write_local(runtime, frame, index, SlotValue::Value(value))?;
+            if let Some(step) = apply_local_write(runtime, frame, index, source_pc, true, false)? {
+                return Ok(step);
+            }
         }
         FinalOpcode::GetVarRefCheck => {
             let index = closure_index(opcode, operands)?;
@@ -3248,7 +3327,7 @@ pub(super) fn execute_one(
                 )?));
             }
             match captured_write_action(runtime, frame, index)? {
-                CapturedWriteAction::Throw => {
+                BindingWriteAction::Throw => {
                     return Ok(Step::Abrupt(immutable_binding_exception(
                         runtime,
                         frame,
@@ -3256,10 +3335,10 @@ pub(super) fn execute_one(
                         source_pc,
                     )?));
                 }
-                CapturedWriteAction::Ignore => {
+                BindingWriteAction::Ignore => {
                     pop(frame)?;
                 }
-                CapturedWriteAction::Write => {
+                BindingWriteAction::Write => {
                     let value = pop(frame)?;
                     write_environment(runtime, frame, index, SlotValue::Value(value))?;
                 }

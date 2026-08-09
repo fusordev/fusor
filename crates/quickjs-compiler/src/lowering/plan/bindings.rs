@@ -1,10 +1,10 @@
 use super::super::{
     ArgumentSlot, AssignmentExpression, AssignmentOperator, AssignmentTarget, BindingId,
     BindingIdentifier, BindingPattern, BranchKind, CompilationContext, CompiledConstantPool,
-    CompilerClosureBinding, ComputedMemberExpression, DeclarationKind,
-    DestructuringBindingInitialization, ExecutableId, Expression, FinalOpcode, ForStatementLeft,
-    FrameLayout, FrameSlot, FunctionTreeLayout, GetSpan, IdentifierReference, LeafCompilationError,
-    LocalSlot, NativeReferenceId, NodeId, Operands, PlannedControlFlow, PlannedInstruction,
+    CompilerClosureBinding, ComputedMemberExpression, DestructuringBindingInitialization,
+    ExecutableId, Expression, FinalOpcode, ForStatementLeft, FrameLayout, FrameSlot,
+    FunctionTreeLayout, GetSpan, IdentifierReference, LeafCompilationError, LocalSlot,
+    NativeReferenceId, NodeId, Operands, PlannedControlFlow, PlannedInstruction,
     PrivateFieldExpression, RealmGlobalId, ReferenceAccess, ReferenceId, ScopeId, Span,
     StaticMemberExpression, StoragePlacement, SymbolId, UnresolvedGlobalId, UnsupportedLeafFeature,
     VariableDeclaration, VariableDeclarationKind, VariableDeclarator, WritePolicy,
@@ -590,9 +590,7 @@ impl<'arena> ExpressionPlanner<'_, '_, 'arena, '_> {
                     invariant: "written compiler binding exists",
                     span: Some(span),
                 })?;
-        if storage.policy().writes() != WritePolicy::Mutable
-            && storage.policy().kind() != DeclarationKind::ClassName
-        {
+        if storage.policy().writes() == WritePolicy::Internal {
             return unsupported(UnsupportedLeafFeature::UnsupportedReference, span);
         }
 
@@ -2136,9 +2134,7 @@ impl CompilationContext<'_, '_, '_> {
                         span: Some(span),
                     },
                 )?;
-                if storage.policy().writes() != WritePolicy::Mutable
-                    && storage.policy().kind() != DeclarationKind::ClassName
-                {
+                if storage.policy().writes() == WritePolicy::Internal {
                     return unsupported(UnsupportedLeafFeature::UnsupportedReference, span);
                 }
             }

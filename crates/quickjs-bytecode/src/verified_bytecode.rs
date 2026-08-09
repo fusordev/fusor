@@ -9963,10 +9963,14 @@ fn verify_local_opcode(
             BindingPolicyViolationReason::UnexpectedCheckedAccess,
         ));
     }
+    let runtime_checked_immutable_write = definition.policy.writes != CompilerWritePolicy::Mutable
+        && ((tdz && matches!(opcode, FinalOpcode::PutLocCheck | FinalOpcode::SetLocCheck))
+            || (!tdz && definition.policy.kind == CompilerBindingKind::FunctionName));
     if is_local_write(opcode)
         && !matches!(opcode, FinalOpcode::SetLocUninitialized)
         && definition.policy.writes != CompilerWritePolicy::Mutable
         && !(tdz && is_unchecked_local_put(opcode))
+        && !runtime_checked_immutable_write
     {
         return Err(policy_error(
             id,
@@ -10470,6 +10474,8 @@ fn transfer_local_state(
                     *state,
                     BindingState::UNINITIALIZED | BindingState::INITIALIZED_CLOSED,
                 )
+            } else if definition.policy.kind == CompilerBindingKind::FunctionName {
+                BindingState::only(*state, BindingState::INITIALIZED)
             } else if definition.policy.writes == CompilerWritePolicy::Mutable {
                 *state & BindingState::INACTIVE == 0
             } else {

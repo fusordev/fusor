@@ -8063,7 +8063,7 @@ fn parameter_expression_authority_requires_non_simple_reduced_length_and_local_t
 
 #[test]
 #[allow(clippy::too_many_lines)]
-fn policy_analysis_rejects_unchecked_tdz_reads_and_noncompiler_opcodes() {
+fn policy_analysis_rejects_unchecked_tdz_reads_and_retains_checked_immutable_writes() {
     let variables = [
         VariableDefinition::new(
             Some(AtomPoolIndex::new(1)),
@@ -8115,7 +8115,7 @@ fn policy_analysis_rejects_unchecked_tdz_reads_and_noncompiler_opcodes() {
             None,
         ),
     ];
-    let error = verified_single(
+    let verified = verified_single(
         &[
             (FinalOpcode::Push1, Operands::NoneInt),
             (FinalOpcode::PutLoc0, Operands::NoneLoc),
@@ -8134,14 +8134,11 @@ fn policy_analysis_rejects_unchecked_tdz_reads_and_noncompiler_opcodes() {
             ],
         ),
     )
-    .expect_err("a bytecode write cannot mutate the named-function self binding");
-    assert!(matches!(
-        error.kind(),
-        BytecodeVerificationErrorKind::BindingPolicyViolation {
-            reason: BindingPolicyViolationReason::ImmutableWrite,
-            ..
-        }
-    ));
+    .expect("a named-function self write retains immutable policy for the VM");
+    assert_eq!(
+        verified.root().metadata().variables()[1].policy(),
+        function_name_policy()
+    );
 }
 
 #[test]
