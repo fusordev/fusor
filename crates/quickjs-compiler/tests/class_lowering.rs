@@ -22,6 +22,20 @@ fn compile(source: &str, name: &str) -> CompiledFunctionTree {
     .expect("frontend")
 }
 
+fn compile_script(source: &str) -> CompiledFunctionTree {
+    with_parsed_program(
+        source,
+        FrontendOptions::for_goal(CompilationGoal::GlobalScript(GlobalScriptGoal::new())),
+        |unit| {
+            CompilationContext::new(unit)
+                .expect("storage plan")
+                .compile_global_script(VerificationLimits::default())
+                .expect("Global Script authority")
+        },
+    )
+    .expect("frontend")
+}
+
 #[test]
 fn explicit_base_class_constructor_and_public_methods_lower_to_typed_class_bytecode() {
     let tree = compile(
@@ -1382,6 +1396,34 @@ fn named_base_class_members_capture_a_distinct_immutable_class_name_cell() {
         .map(|instruction| instruction.decoded().instruction().opcode())
         .collect::<Vec<_>>();
     assert!(opcodes.contains(&FinalOpcode::CloseLoc));
+}
+
+#[test]
+fn instance_field_direct_eval_captures_the_synthetic_class_name_cell() {
+    let tree = compile_script("let Box=class Inner{field=eval('Inner');};");
+    let initializer = tree
+        .functions()
+        .iter()
+        .enumerate()
+        .find_map(|(index, function)| {
+            (tree
+                .verified_bytecode()
+                .function(quickjs_bytecode::FunctionTemplateId::new(
+                    u32::try_from(index).expect("template index"),
+                ))
+                .expect("verified function")
+                .metadata()
+                .executable_kind()
+                == CompilerExecutableKind::ClassInstanceInitializer)
+                .then_some(function)
+        })
+        .expect("class instance initializer");
+
+    assert_eq!(initializer.closure_variables().len(), 1);
+    assert_eq!(
+        initializer.closure_variables()[0].policy().kind(),
+        DeclarationKind::ClassName,
+    );
 }
 
 #[test]

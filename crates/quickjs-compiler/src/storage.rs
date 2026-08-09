@@ -1883,6 +1883,20 @@ impl<'unit, 'arena, 'scope> Planner<'unit, 'arena, 'scope> {
             )?;
             scoped.push(binding.id);
         }
+        // Oxc retains a source binding for a named class expression in the
+        // same semantic scope where the compiler installs the immutable
+        // ClassDefinitionEvaluation binding. Ordinary references are already
+        // redirected to the latter; eval-only initializers must capture that
+        // same live cell rather than the unused source duplicate.
+        for scoped in &mut bindings_by_scope {
+            scoped.sort_unstable_by_key(|id| {
+                let binding = &bindings[id.index()];
+                (
+                    binding.policy.kind != DeclarationKind::ClassName,
+                    id.index(),
+                )
+            });
+        }
 
         let nodes = semantic.nodes();
         let mut requests = Vec::new();

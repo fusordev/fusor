@@ -63,6 +63,14 @@ fn static_initializer_direct_eval_inherits_the_class_this_binding() {
 }
 
 #[test]
+fn class_field_direct_eval_resolves_the_initialized_inner_name_binding() {
+    evaluate(
+        "let Box=class Inner{field=eval('Inner');static field=eval('Inner');};Box.field===Box&&new Box().field===Box;",
+        |value| assert_eq!(value.as_boolean(), Ok(Some(true))),
+    );
+}
+
+#[test]
 fn eval_preserves_lone_surrogates_in_legacy_regexp_literals() {
     evaluate(
         "let unit=String.fromCharCode(0xD800);\
