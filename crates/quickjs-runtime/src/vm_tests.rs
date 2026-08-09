@@ -468,9 +468,10 @@ fn inactive_for_of_record_cannot_be_stepped_again_but_can_be_closed() {
     let (_, _, mut frame) = ordinary_test_frame();
     push(&mut frame, StoredValue::Number(JsNumber::from_i32(1)));
     push(&mut frame, StoredValue::Number(JsNumber::from_i32(2)));
-    frame
-        .stack
-        .push(OperandStackEntry::ForOfCatch { active: false });
+    frame.stack.push(OperandStackEntry::ForOfCatch {
+        active: false,
+        asynchronous: false,
+    });
 
     assert!(matches!(
         deactivate_for_of_record(&mut frame, false, 0),
@@ -480,10 +481,10 @@ fn inactive_for_of_record_cannot_be_stepped_again_but_can_be_closed() {
     ));
     assert!(matches!(
         frame.stack.last(),
-        Some(OperandStackEntry::ForOfCatch { active: false })
+        Some(OperandStackEntry::ForOfCatch { active: false, .. })
     ));
 
-    let (iterator, next) =
+    let (iterator, next, asynchronous) =
         deactivate_for_of_record(&mut frame, true, 0).expect("inactive record remains closable");
     assert!(
         matches!(iterator, StoredValue::Number(value) if value.strict_equals(JsNumber::from_i32(1)))
@@ -491,6 +492,7 @@ fn inactive_for_of_record_cannot_be_stepped_again_but_can_be_closed() {
     assert!(
         matches!(next, StoredValue::Number(value) if value.strict_equals(JsNumber::from_i32(2)))
     );
+    assert!(!asynchronous);
 }
 
 #[test]
@@ -540,9 +542,10 @@ fn exceptional_for_of_close_keeps_the_iterator_rooted_through_pending_collection
     let thrown = source_object(&mut runtime, realm);
     push(&mut frame, StoredValue::Object(iterator));
     push(&mut frame, StoredValue::Undefined);
-    frame
-        .stack
-        .push(OperandStackEntry::ForOfCatch { active: true });
+    frame.stack.push(OperandStackEntry::ForOfCatch {
+        active: true,
+        asynchronous: false,
+    });
     frame.transient_cleanup_pending = true;
     runtime.collection_pending = true;
 

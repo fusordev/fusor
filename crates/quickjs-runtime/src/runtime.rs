@@ -5803,6 +5803,8 @@ const fn is_supported_opcode(opcode: FinalOpcode) -> bool {
             | FinalOpcode::ForOfStart
             | FinalOpcode::ForAwaitOfStart
             | FinalOpcode::ForOfNext
+            | FinalOpcode::ForAwaitOfNext
+            | FinalOpcode::IteratorGetValueDone
             | FinalOpcode::IteratorClose
             | FinalOpcode::IteratorNext
             | FinalOpcode::IteratorCall

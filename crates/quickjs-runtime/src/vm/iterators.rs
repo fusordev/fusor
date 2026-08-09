@@ -6796,6 +6796,7 @@ pub(super) fn begin_for_of_start(
         iterable,
         iterator: None,
         async_from_sync: false,
+        asynchronous: false,
         realm,
         stage: ForOfStartStage::IteratorMethod,
         origin,
@@ -6821,6 +6822,7 @@ pub(super) fn begin_for_await_of_start(
         iterable,
         iterator: None,
         async_from_sync: false,
+        asynchronous: true,
         realm,
         stage: ForOfStartStage::AsyncIteratorMethod,
         origin,
@@ -6909,11 +6911,13 @@ pub(super) fn advance_for_of_start(
                     next: StoredValue::Function(
                         runtime.realm_async_from_sync_iterator_next(state.realm)?,
                     ),
+                    asynchronous: true,
                 });
             }
             Ok(NativeDispatch::ForOfRecord {
                 iterator,
                 next: completion,
+                asynchronous: state.asynchronous,
             })
         }
     }
@@ -7013,6 +7017,32 @@ pub(super) fn begin_for_of_next(
     )
 }
 
+pub(super) fn begin_for_await_of_result(
+    runtime: &mut Runtime,
+    state: ForOfNextContinuation,
+    return_to: Option<CallReturn>,
+    execution_budget: &mut ExecutionBudget,
+) -> Result<NativeDispatch, NativeFailure> {
+    if !matches!(
+        state.result.as_ref(),
+        Some(StoredValue::Function(_) | StoredValue::Object(_))
+    ) {
+        return Err(iterator_exception(
+            state.realm,
+            state.origin,
+            ExceptionKind::TypeError,
+            "iterator must return an object",
+        )?);
+    }
+    read_for_of_next_property(
+        runtime,
+        state,
+        &runtime.predefined_property_key(PredefinedAtom::Done),
+        return_to,
+        execution_budget,
+    )
+}
+
 pub(super) fn advance_for_of_next(
     runtime: &mut Runtime,
     mut state: ForOfNextContinuation,
@@ -7101,6 +7131,7 @@ fn read_for_of_next_property(
 pub(super) fn begin_for_of_close(
     runtime: &mut Runtime,
     iterator: StoredValue,
+    asynchronous: bool,
     realm: RealmId,
     return_to: Option<CallReturn>,
     origin: JsStackFrame,
@@ -7111,6 +7142,7 @@ pub(super) fn begin_for_of_close(
     }
     let state = ForOfCloseContinuation {
         iterator,
+        asynchronous,
         realm,
         stage: ForOfCloseStage::AwaitReturnProperty,
         origin,
@@ -7140,18 +7172,20 @@ fn read_for_of_return(
         dispatch,
         state,
         NativeContinuation::ForOfClose,
-        |state, value| advance_for_of_close(state, &value, return_to),
+        |state, value| advance_for_of_close(runtime, state, value, return_to, execution_budget),
         "for-of return Get produced a structured result",
     )
 }
 
 pub(super) fn advance_for_of_close(
+    runtime: &mut Runtime,
     mut state: ForOfCloseContinuation,
-    completion: &StoredValue,
+    completion: StoredValue,
     return_to: Option<CallReturn>,
+    execution_budget: &mut ExecutionBudget,
 ) -> Result<NativeDispatch, NativeFailure> {
     match state.stage {
-        ForOfCloseStage::AwaitReturnProperty => match completion {
+        ForOfCloseStage::AwaitReturnProperty => match &completion {
             StoredValue::Undefined | StoredValue::Null => Ok(NativeDispatch::ForOfClosed),
             StoredValue::Function(function) => {
                 let receiver = state.iterator.duplicate();
@@ -7178,7 +7212,17 @@ pub(super) fn advance_for_of_close(
             )?),
         },
         ForOfCloseStage::AwaitReturnCall => {
-            if matches!(
+            if state.asynchronous {
+                let origin = state.origin.clone();
+                begin_async_await(
+                    runtime,
+                    state.realm,
+                    completion,
+                    return_to,
+                    origin,
+                    execution_budget,
+                )
+            } else if matches!(
                 completion,
                 StoredValue::Function(_) | StoredValue::Object(_)
             ) {
@@ -7566,9 +7610,28 @@ pub(super) fn begin_exceptional_iterator_close(
     return_to: Option<CallReturn>,
     execution_budget: &mut ExecutionBudget,
 ) -> Result<NativeDispatch, NativeFailure> {
+    begin_exceptional_iterator_close_with_kind(
+        runtime,
+        iterator,
+        false,
+        original,
+        return_to,
+        execution_budget,
+    )
+}
+
+pub(super) fn begin_exceptional_iterator_close_with_kind(
+    runtime: &mut Runtime,
+    iterator: StoredValue,
+    asynchronous: bool,
+    original: PendingException,
+    return_to: Option<CallReturn>,
+    execution_budget: &mut ExecutionBudget,
+) -> Result<NativeDispatch, NativeFailure> {
     let close = IteratorCloseContinuation {
         iterator,
         original,
+        asynchronous,
         stage: IteratorCloseStage::AwaitReturnProperty,
     };
     read_iterator_return(runtime, close, return_to, execution_budget)
@@ -7602,7 +7665,7 @@ fn read_iterator_return(
         dispatch,
         close,
         NativeContinuation::IteratorClose,
-        |close, value| advance_iterator_close(close, value, return_to),
+        |close, value| advance_iterator_close(runtime, close, value, return_to, execution_budget),
         "iterator close return Get produced a structured result",
     )
 }
@@ -7612,9 +7675,11 @@ fn read_iterator_return(
     reason = "the close completion is consumed at the pending-exception boundary"
 )]
 pub(super) fn advance_iterator_close(
+    runtime: &mut Runtime,
     mut close: IteratorCloseContinuation,
     completion: StoredValue,
     return_to: Option<CallReturn>,
+    execution_budget: &mut ExecutionBudget,
 ) -> Result<NativeDispatch, NativeFailure> {
     match close.stage {
         IteratorCloseStage::AwaitReturnProperty => {
@@ -7630,6 +7695,18 @@ pub(super) fn advance_iterator_close(
                 NativeContinuation::IteratorClose(close),
                 return_to,
                 origin,
+            )
+        }
+        IteratorCloseStage::AwaitReturnCall if close.asynchronous => {
+            let realm = close.original.realm;
+            let origin = close.original.origin.clone();
+            begin_async_await(
+                runtime,
+                realm,
+                completion,
+                return_to,
+                origin,
+                execution_budget,
             )
         }
         IteratorCloseStage::AwaitReturnCall => Err(NativeFailure::Abrupt(close.original)),

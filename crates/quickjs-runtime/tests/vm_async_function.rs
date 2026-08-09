@@ -2,7 +2,10 @@ use std::sync::Arc;
 
 use quickjs_bytecode::VerificationLimits;
 use quickjs_compiler::CompilationContext;
-use quickjs_frontend::{CompilationGoal, FrontendOptions, GlobalScriptGoal, with_parsed_program};
+use quickjs_frontend::{
+    CompilationGoal, DynamicFunctionKind, DynamicFunctionSource, FrontendLimits, FrontendOptions,
+    GlobalScriptGoal, SourceFragment, with_dynamic_function_source, with_parsed_program,
+};
 use quickjs_runtime::{ExecutionLimits, Function, JsValue, Realm, Runtime, RuntimeLimits};
 
 fn compile(source: &str, root_name: &str) -> Arc<quickjs_bytecode::VerifiedBytecode> {
@@ -27,6 +30,23 @@ fn compile(source: &str, root_name: &str) -> Arc<quickjs_bytecode::VerifiedBytec
     .expect("frontend")
 }
 
+fn compile_dynamic(body: &str) -> Arc<quickjs_bytecode::VerifiedBytecode> {
+    let parameters = [];
+    let source = DynamicFunctionSource::new(
+        DynamicFunctionKind::Function,
+        &parameters,
+        SourceFragment::new(body),
+    );
+    with_dynamic_function_source(source, FrontendLimits::default(), |unit, _| {
+        let context = CompilationContext::new(unit).expect("dynamic storage plan");
+        context
+            .compile_dynamic_function_script(VerificationLimits::default())
+            .map(|tree| Arc::new(tree.verified_bytecode().clone()))
+    })
+    .expect("dynamic frontend")
+    .expect("dynamic compiler")
+}
+
 fn instantiate(runtime: &mut Runtime, realm: &Realm, source: &str, name: &str) -> Function {
     runtime
         .context(realm)
@@ -46,6 +66,39 @@ fn start_and_read(start_source: &str) -> String {
         "read",
     );
     let state: JsValue = runtime
+        .context(&realm)
+        .expect("context")
+        .call(&start, &[], ExecutionLimits::default())
+        .expect("async setup");
+    runtime
+        .context(&realm)
+        .expect("context")
+        .call(&read, &[state], ExecutionLimits::default())
+        .expect("state read")
+        .as_string()
+        .expect("live result")
+        .expect("string result")
+        .to_utf8_lossy()
+        .expect("UTF-8")
+}
+
+fn dynamic_start_and_read(body: &str) -> String {
+    let mut runtime = Runtime::try_new(RuntimeLimits::default()).expect("runtime");
+    let realm = runtime.create_realm().expect("realm");
+    let read = instantiate(
+        &mut runtime,
+        &realm,
+        "function read(state){return state.result;}",
+        "read",
+    );
+    let start = runtime
+        .context(&realm)
+        .expect("context")
+        .execute_dynamic_function_script(compile_dynamic(body), ExecutionLimits::default())
+        .expect("dynamic async function")
+        .into_function()
+        .expect("dynamic function result");
+    let state = runtime
         .context(&realm)
         .expect("context")
         .call(&start, &[], ExecutionLimits::default())
@@ -229,6 +282,166 @@ fn await_and_return_preserve_finally_before_promise_settlement() {
             }"
         ),
         "finally|then:2"
+    );
+}
+
+#[test]
+fn for_await_consumes_sync_values_and_skips_value_after_done() {
+    assert_eq!(
+        dynamic_start_and_read(
+            "let state={result:''};\
+                let iterable={\
+                    [Symbol.asyncIterator]:function(){return {\
+                        next:function(){return {\
+                            get done(){state.result=state.result+'done|';return true;},\
+                            get value(){state.result=state.result+'value|';throw 'unreachable';}\
+                        };}\
+                    };}\
+                };\
+                async function work(){\
+                    for await(const value of [1,{then:function(resolve){resolve(2);}}]){\
+                        state.result=state.result+'item:'+value+'|';\
+                    }\
+                    for await(const value of iterable){state.result=state.result+'body|';}\
+                    return 3;\
+                }\
+                work().then(function(value){state.result=state.result+'then:'+value;});\
+                return state;"
+        ),
+        "item:1|item:2|done|then:3"
+    );
+}
+
+#[test]
+fn for_await_break_awaits_the_async_iterator_return_value() {
+    assert_eq!(
+        dynamic_start_and_read(
+            "let state={result:''};\
+                let iterable={\
+                    [Symbol.asyncIterator]:function(){return {\
+                        next:function(){state.result=state.result+'next|';return {value:1,done:false};},\
+                        return:function(){\
+                            state.result=state.result+'return|';\
+                            return {then:function(resolve){\
+                                state.result=state.result+'return-await|';resolve({});\
+                            }};\
+                        }\
+                    };}\
+                };\
+                async function work(){\
+                    for await(const value of iterable){\
+                        state.result=state.result+'body:'+value+'|';break;\
+                    }\
+                    state.result=state.result+'after|';\
+                }\
+                work().then(function(){state.result=state.result+'done';});\
+                return state;"
+        ),
+        "next|body:1|return|return-await|after|done"
+    );
+}
+
+#[test]
+fn for_await_throw_preserves_the_original_completion_during_async_close() {
+    assert_eq!(
+        dynamic_start_and_read(
+            "let state={result:''};\
+                let iterable={\
+                    [Symbol.asyncIterator]:function(){return {\
+                        next:function(){return {value:1,done:false};},\
+                        return:function(){return {then:function(resolve,reject){reject('close');}};}\
+                    };}\
+                };\
+                async function work(){\
+                    try{for await(const value of iterable){throw 'body';}}\
+                    catch(error){state.result='caught:'+error;}\
+                }\
+                work().then(function(){state.result=state.result+'|done';});\
+                return state;"
+        ),
+        "caught:body|done"
+    );
+}
+
+#[test]
+fn for_await_step_errors_do_not_close_the_iterator() {
+    assert_eq!(
+        dynamic_start_and_read(
+            "let state={result:'',closes:0};\
+                function iterable(next){return {\
+                    [Symbol.asyncIterator]:function(){return {\
+                        next:next,\
+                        return:function(){state.closes=state.closes+1;return {};}\
+                    };}\
+                };}\
+                async function consume(value){\
+                    try{for await(const item of value){item;}}\
+                    catch(error){state.result=state.result+error+'|';}\
+                }\
+                async function work(){\
+                    await consume(iterable(function(){return {then:function(resolve,reject){reject('next');}};}));\
+                    await consume(iterable(function(){return {get done(){throw 'done';}};}));\
+                    await consume(iterable(function(){return {done:false,get value(){throw 'value';}};}));\
+                    state.result=state.result+'closes:'+state.closes;\
+                }\
+                work().then(function(){state.result=state.result+'|done';});\
+                return state;"
+        ),
+        "next|done|value|closes:0|done"
+    );
+}
+
+#[test]
+fn for_await_normal_close_uses_the_awaited_close_completion() {
+    assert_eq!(
+        dynamic_start_and_read(
+            "let state={result:''};\
+                function iterable(close){return {\
+                    [Symbol.asyncIterator]:function(){return {\
+                        next:function(){return {value:1,done:false};},return:close\
+                    };}\
+                };}\
+                async function work(){\
+                    try{for await(const value of iterable(function(){\
+                        return {then:function(resolve){state.result=state.result+'await-primitive|';resolve(1);}};\
+                    })){value;break;}}\
+                    catch(error){state.result=state.result+'primitive:'+error.name+'|';}\
+                    try{for await(const value of iterable(function(){\
+                        return {then:function(resolve,reject){state.result=state.result+'await-reject|';reject('close');}};\
+                    })){value;break;}}\
+                    catch(error){state.result=state.result+'reject:'+error;}\
+                }\
+                work().then(function(){state.result=state.result+'|done';});\
+                return state;"
+        ),
+        "await-primitive|primitive:TypeError|await-reject|reject:close|done"
+    );
+}
+
+#[test]
+fn for_await_in_an_async_generator_awaits_close_after_resume() {
+    assert_eq!(
+        dynamic_start_and_read(
+            "let state={result:''};\
+                let iterable={\
+                    [Symbol.asyncIterator]:function(){return {\
+                        next:function(){return {value:2,done:false};},\
+                        return:function(){return {then:function(resolve){\
+                            state.result=state.result+'close|';resolve({});\
+                        }};}\
+                    };}\
+                };\
+                async function* work(){\
+                    for await(const value of iterable){yield value+1;break;}\
+                }\
+                let iterator=work();\
+                iterator.next().then(function(first){\
+                    state.result=state.result+'yield:'+first.value+':'+first.done+'|';\
+                    return iterator.next();\
+                }).then(function(last){state.result=state.result+'done:'+last.done;});\
+                return state;"
+        ),
+        "yield:3:false|close|done:true"
     );
 }
 

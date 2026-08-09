@@ -836,6 +836,7 @@ pub(super) fn create_frame(
         generator_resume: None,
         generator_result: None,
         resume_abrupt: None,
+        pending_async_iterator_close: None,
         reserved_values: plan.reserved_values,
         arguments_snapshot_use: plan.arguments_snapshot_use,
         arguments_snapshot,
@@ -3607,7 +3608,13 @@ pub(super) fn execute_one(
                 frame.instruction = return_to.instruction;
                 return Ok(Step::Continue);
             }
-            let (iterator, next) = deactivate_for_of_record(frame, false, offset)?;
+            let (iterator, next, asynchronous) = deactivate_for_of_record(frame, false, offset)?;
+            if asynchronous {
+                return Err(EngineFault::RuntimeInvariant {
+                    message: "verified synchronous for-of step reached an async iterator record",
+                }
+                .into());
+            }
             let realm = code(runtime, frame.code)?.realm;
             let return_to =
                 CallReturn::push(verified_instruction.successors().fallthrough().ok_or(
@@ -3627,6 +3634,75 @@ pub(super) fn execute_one(
                     origin,
                     execution_budget,
                 ),
+                return_to,
+            );
+        }
+        FinalOpcode::ForAwaitOfNext => {
+            let (iterator, next, asynchronous) = deactivate_for_of_record(frame, false, 0)?;
+            if !asynchronous {
+                return Err(EngineFault::RuntimeInvariant {
+                    message: "verified async for-of step reached a synchronous iterator record",
+                }
+                .into());
+            }
+            let StoredValue::Function(function) = next else {
+                let realm = code(runtime, frame.code)?.realm;
+                return Ok(Step::Abrupt(PendingException {
+                    realm,
+                    payload: PendingExceptionPayload::EngineError {
+                        kind: ExceptionKind::TypeError,
+                        message: JsString::from_utf8("not a function")?,
+                    },
+                    origin: instruction_location(runtime, frame, source_pc)?,
+                }));
+            };
+            let return_to =
+                CallReturn::push(verified_instruction.successors().fallthrough().ok_or(
+                    EngineFault::InvalidSuccessor {
+                        function: frame.template,
+                        pc: source_pc,
+                    },
+                )?);
+            return Ok(Step::Call {
+                function,
+                inputs: CallInputSource::Prepared(CallInputs {
+                    receiver: iterator,
+                    arguments: CallArguments::from_values(Vec::new()),
+                    new_target: None,
+                }),
+                return_to,
+                source_pc,
+            });
+        }
+        FinalOpcode::IteratorGetValueDone => {
+            let result = pop(frame)?;
+            let (iterator, next, asynchronous) = deactivate_for_of_record(frame, true, 0)?;
+            if !asynchronous {
+                return Err(EngineFault::RuntimeInvariant {
+                    message: "verified async iterator result reached a synchronous record",
+                }
+                .into());
+            }
+            let realm = code(runtime, frame.code)?.realm;
+            let return_to =
+                CallReturn::push(verified_instruction.successors().fallthrough().ok_or(
+                    EngineFault::InvalidSuccessor {
+                        function: frame.template,
+                        pc: source_pc,
+                    },
+                )?);
+            let origin = instruction_location(runtime, frame, source_pc)?;
+            let state = ForOfNextContinuation {
+                iterator,
+                next,
+                result: Some(result),
+                realm,
+                stage: ForOfNextStage::Done,
+                offset: 0,
+                origin,
+            };
+            return native_step(
+                begin_for_await_of_result(runtime, state, Some(return_to), execution_budget),
                 return_to,
             );
         }
@@ -3723,7 +3799,7 @@ pub(super) fn execute_one(
             }
         }
         FinalOpcode::IteratorClose => {
-            let (iterator, _next) = deactivate_for_of_record(frame, true, 0)?;
+            let (iterator, _next, asynchronous) = deactivate_for_of_record(frame, true, 0)?;
             let realm = code(runtime, frame.code)?.realm;
             let return_to =
                 CallReturn::discard(verified_instruction.successors().fallthrough().ok_or(
@@ -3733,10 +3809,21 @@ pub(super) fn execute_one(
                     },
                 )?);
             let origin = instruction_location(runtime, frame, source_pc)?;
+            if asynchronous {
+                if frame.pending_async_iterator_close.is_some() {
+                    return Err(EngineFault::RuntimeInvariant {
+                        message: "async iterator close overlapped another pending close",
+                    }
+                    .into());
+                }
+                frame.pending_async_iterator_close = Some(PendingAsyncIteratorClose::Normal);
+                frame.instruction = return_to.instruction;
+            }
             return native_step(
                 begin_for_of_close(
                     runtime,
                     iterator,
+                    asynchronous,
                     realm,
                     Some(return_to),
                     origin,

@@ -44,6 +44,7 @@ pub(super) enum NativeDispatch {
     ForOfRecord {
         iterator: StoredValue,
         next: StoredValue,
+        asynchronous: bool,
     },
     ForOfStep {
         value: StoredValue,
@@ -1093,7 +1094,7 @@ pub(super) fn resume_native_continuations(
                 advance_for_of_next(runtime, state, value, return_to, execution_budget)?
             }
             NativeContinuation::ForOfClose(state) => {
-                advance_for_of_close(state, &value, return_to)?
+                advance_for_of_close(runtime, state, value, return_to, execution_budget)?
             }
             NativeContinuation::AsyncFromSync(state) => {
                 advance_async_from_sync(runtime, state, value, return_to, execution_budget)?
@@ -1108,7 +1109,7 @@ pub(super) fn resume_native_continuations(
                 advance_iterator_append(runtime, state, value, return_to, execution_budget)?
             }
             NativeContinuation::IteratorClose(state) => {
-                advance_iterator_close(state, value, return_to)?
+                advance_iterator_close(runtime, state, value, return_to, execution_budget)?
             }
             NativeContinuation::ForIn(state) => advance_for_in(
                 runtime,

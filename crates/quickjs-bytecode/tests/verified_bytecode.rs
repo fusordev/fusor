@@ -3257,6 +3257,22 @@ fn typed_stack_input_with_captures(
     variables: &[VariableDefinition],
     captures: &[CompilerCapturedBinding],
 ) -> UnverifiedCompilerBytecodeGraph {
+    typed_stack_input_with_profile(instructions, atoms, variables, captures, false)
+}
+
+fn typed_async_stack_input(
+    instructions: &[(FinalOpcode, Operands)],
+) -> UnverifiedCompilerBytecodeGraph {
+    typed_stack_input_with_profile(instructions, &[], &[], &[], true)
+}
+
+fn typed_stack_input_with_profile(
+    instructions: &[(FinalOpcode, Operands)],
+    atoms: &[CompilerAtom],
+    variables: &[VariableDefinition],
+    captures: &[CompilerCapturedBinding],
+    asynchronous: bool,
+) -> UnverifiedCompilerBytecodeGraph {
     let has_direct_eval = instructions
         .iter()
         .any(|(opcode, _)| matches!(opcode, FinalOpcode::Eval | FinalOpcode::ApplyEval));
@@ -3270,11 +3286,20 @@ fn typed_stack_input_with_captures(
         })
         .max();
     let locals = u32::try_from(variables.len()).expect("fixture local count");
-    let header = UnverifiedFunctionHeader::ordinary_source_function_with_variable_references(
-        false,
-        0,
-        u32::try_from(captures.len()).expect("fixture capture count"),
-    )
+    let capture_count = u32::try_from(captures.len()).expect("fixture capture count");
+    let header = if asynchronous {
+        UnverifiedFunctionHeader::async_source_function_with_variable_references(
+            false,
+            0,
+            capture_count,
+        )
+    } else {
+        UnverifiedFunctionHeader::ordinary_source_function_with_variable_references(
+            false,
+            0,
+            capture_count,
+        )
+    }
     .with_simple_parameter_list(parameter_initialization_end.is_none());
     let flow = flow_with_header(
         instructions,
@@ -3320,7 +3345,12 @@ fn typed_stack_input_with_captures(
             Arc::from(variables),
             Arc::from([]),
             source,
-        )]),
+        )
+        .with_executable_kind(if asynchronous {
+            CompilerExecutableKind::AsyncFunction
+        } else {
+            CompilerExecutableKind::OrdinaryFunction
+        })]),
     )
 }
 
@@ -4940,6 +4970,120 @@ fn for_of_marker_certificate_accepts_exact_loop_close_return_and_throw_grammars(
         BytecodeGraphVerificationLimits::default(),
     )
     .expect("a complete for-of catch record may remain for exceptional VM cleanup");
+}
+
+#[track_caller]
+fn assert_for_await_of_stack_mismatch(
+    instructions: &[(FinalOpcode, Operands)],
+    opcode: FinalOpcode,
+) {
+    let error = verify_compiler_bytecode_graph(
+        typed_async_stack_input(instructions),
+        BytecodeGraphVerificationLimits::default(),
+    )
+    .expect_err("mixed, unawaited, and multiply awaited iterator records stay fail closed");
+    assert!(
+        matches!(
+            error.kind(),
+            BytecodeVerificationErrorKind::ForOfIteratorStackMismatch {
+                opcode: actual,
+                ..
+            } if *actual == opcode
+        ),
+        "{opcode}: {error:?}"
+    );
+}
+
+#[test]
+fn for_await_of_marker_certificate_requires_the_exact_awaited_step_sequence() {
+    let loop_body = [
+        (FinalOpcode::Undefined, Operands::None),
+        (FinalOpcode::ForAwaitOfStart, Operands::None),
+        (FinalOpcode::ForAwaitOfNext, Operands::None),
+        (FinalOpcode::Await, Operands::None),
+        (FinalOpcode::IteratorGetValueDone, Operands::None),
+        (FinalOpcode::IfFalse8, Operands::Label8(5)),
+        (FinalOpcode::Drop, Operands::None),
+        (FinalOpcode::IteratorClose, Operands::None),
+        (FinalOpcode::Undefined, Operands::None),
+        (FinalOpcode::ReturnAsync, Operands::None),
+        (FinalOpcode::Drop, Operands::None),
+        (FinalOpcode::Goto8, Operands::Label8(-11)),
+    ];
+    verify_compiler_bytecode_graph(
+        typed_async_stack_input(&loop_body),
+        BytecodeGraphVerificationLimits::default(),
+    )
+    .expect("an async iterator step is awaited before value/done extraction");
+
+    let malformed = [
+        (
+            vec![
+                (FinalOpcode::Undefined, Operands::None),
+                (FinalOpcode::ForOfStart, Operands::None),
+                (FinalOpcode::ForAwaitOfNext, Operands::None),
+                (FinalOpcode::Drop, Operands::None),
+                (FinalOpcode::Drop, Operands::None),
+                (FinalOpcode::Drop, Operands::None),
+                (FinalOpcode::Drop, Operands::None),
+                (FinalOpcode::Undefined, Operands::None),
+                (FinalOpcode::ReturnAsync, Operands::None),
+            ],
+            FinalOpcode::ForAwaitOfNext,
+        ),
+        (
+            vec![
+                (FinalOpcode::Undefined, Operands::None),
+                (FinalOpcode::ForAwaitOfStart, Operands::None),
+                (FinalOpcode::ForOfNext, Operands::U8(0)),
+                (FinalOpcode::Drop, Operands::None),
+                (FinalOpcode::Drop, Operands::None),
+                (FinalOpcode::Drop, Operands::None),
+                (FinalOpcode::Drop, Operands::None),
+                (FinalOpcode::Drop, Operands::None),
+                (FinalOpcode::Undefined, Operands::None),
+                (FinalOpcode::ReturnAsync, Operands::None),
+            ],
+            FinalOpcode::ForOfNext,
+        ),
+        (
+            vec![
+                (FinalOpcode::Undefined, Operands::None),
+                (FinalOpcode::ForAwaitOfStart, Operands::None),
+                (FinalOpcode::ForAwaitOfNext, Operands::None),
+                (FinalOpcode::IteratorGetValueDone, Operands::None),
+                (FinalOpcode::Drop, Operands::None),
+                (FinalOpcode::Drop, Operands::None),
+                (FinalOpcode::Drop, Operands::None),
+                (FinalOpcode::Drop, Operands::None),
+                (FinalOpcode::Drop, Operands::None),
+                (FinalOpcode::Undefined, Operands::None),
+                (FinalOpcode::ReturnAsync, Operands::None),
+            ],
+            FinalOpcode::IteratorGetValueDone,
+        ),
+        (
+            vec![
+                (FinalOpcode::Undefined, Operands::None),
+                (FinalOpcode::ForAwaitOfStart, Operands::None),
+                (FinalOpcode::ForAwaitOfNext, Operands::None),
+                (FinalOpcode::Await, Operands::None),
+                (FinalOpcode::Await, Operands::None),
+                (FinalOpcode::IteratorGetValueDone, Operands::None),
+                (FinalOpcode::Drop, Operands::None),
+                (FinalOpcode::Drop, Operands::None),
+                (FinalOpcode::Drop, Operands::None),
+                (FinalOpcode::Drop, Operands::None),
+                (FinalOpcode::Drop, Operands::None),
+                (FinalOpcode::Undefined, Operands::None),
+                (FinalOpcode::ReturnAsync, Operands::None),
+            ],
+            FinalOpcode::IteratorGetValueDone,
+        ),
+    ];
+    for (instructions, opcode) in malformed {
+        assert_for_await_of_stack_mismatch(&instructions, opcode);
+    }
 }
 
 #[test]

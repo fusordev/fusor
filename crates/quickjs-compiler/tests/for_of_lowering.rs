@@ -1,7 +1,5 @@
 use quickjs_bytecode::{FinalOpcode, Operands, VerificationLimits};
-use quickjs_compiler::{
-    CompilationContext, CompiledFunctionTree, LeafCompilationError, UnsupportedLeafFeature,
-};
+use quickjs_compiler::{CompilationContext, CompiledFunctionTree};
 use quickjs_frontend::{CompilationGoal, FrontendOptions, GlobalScriptGoal, with_parsed_program};
 
 fn compile(source: &str, name: &str) -> CompiledFunctionTree {
@@ -16,25 +14,7 @@ fn compile(source: &str, name: &str) -> CompiledFunctionTree {
                 .expect("named function");
             context
                 .compile_tree(&executable, VerificationLimits::default())
-                .expect("ordinary synchronous for-of lowering")
-        },
-    )
-    .expect("front-end acceptance")
-}
-
-fn compile_error(source: &str, name: &str) -> LeafCompilationError {
-    with_parsed_program(
-        source,
-        FrontendOptions::for_goal(CompilationGoal::GlobalScript(GlobalScriptGoal::new())),
-        |unit| {
-            let context = CompilationContext::new(unit).expect("storage planning");
-            let executable = context
-                .executables()
-                .find(|candidate| candidate.metadata().name() == Some(name))
-                .expect("named function");
-            context
-                .compile_tree(&executable, VerificationLimits::default())
-                .expect_err("unsupported for-of head must fail closed")
+                .expect("verified for-of lowering")
         },
     )
     .expect("front-end acceptance")
@@ -342,15 +322,27 @@ fn captured_object_destructuring_heads_allow_block_lexicals() {
 }
 
 #[test]
-fn for_await_remains_typed_fail_closed_at_the_async_function() {
-    let source = "async function awaited(values){for await(const value of values){}}";
-    let LeafCompilationError::Unsupported { feature, span } = compile_error(source, "awaited")
-    else {
-        panic!("for-await must remain outside the ordinary synchronous function family");
-    };
-    assert_eq!(feature, UnsupportedLeafFeature::UnsupportedBody);
-    assert_eq!(
-        &source[span.start as usize..span.end as usize],
-        "for await(const value of values){}"
+fn for_await_uses_the_verified_async_iterator_step_sequence() {
+    let compiled = compile(
+        "async function awaited(values){for await(const value of values){value;}}",
+        "awaited",
+    );
+    let instructions = opcodes(&compiled);
+    for required in [
+        FinalOpcode::ForAwaitOfStart,
+        FinalOpcode::ForAwaitOfNext,
+        FinalOpcode::Await,
+        FinalOpcode::IteratorGetValueDone,
+        FinalOpcode::IteratorClose,
+    ] {
+        assert!(
+            instructions.iter().any(|(opcode, _)| *opcode == required),
+            "for-await lowering omitted {required:?}: {instructions:?}"
+        );
+    }
+    assert!(
+        !instructions
+            .iter()
+            .any(|(opcode, _)| *opcode == FinalOpcode::ForOfNext)
     );
 }

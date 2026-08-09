@@ -329,8 +329,13 @@ enum FrameBinding {
 enum OperandStackEntry {
     JavaScript(StoredValue),
     Catch { handler: InstructionIndex },
-    ForOfCatch { active: bool },
+    ForOfCatch { active: bool, asynchronous: bool },
     FinallyReturn { continuation: InstructionIndex },
+}
+
+enum PendingAsyncIteratorClose {
+    Normal,
+    Abrupt(PendingException),
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -390,6 +395,7 @@ pub(crate) struct Frame {
     generator_resume: Option<ObjectId>,
     generator_result: Option<ObjectId>,
     resume_abrupt: Option<PendingException>,
+    pending_async_iterator_close: Option<PendingAsyncIteratorClose>,
     reserved_values: u64,
     arguments_snapshot_use: ArgumentsSnapshotUse,
     arguments_snapshot: Option<Vec<StoredValue>>,
@@ -1701,6 +1707,7 @@ struct ForOfStartContinuation {
     iterable: StoredValue,
     iterator: Option<StoredValue>,
     async_from_sync: bool,
+    asynchronous: bool,
     realm: RealmId,
     stage: ForOfStartStage,
     origin: JsStackFrame,
@@ -1743,6 +1750,7 @@ enum ForOfCloseStage {
 
 struct ForOfCloseContinuation {
     iterator: StoredValue,
+    asynchronous: bool,
     realm: RealmId,
     stage: ForOfCloseStage,
     origin: JsStackFrame,
@@ -1939,6 +1947,7 @@ enum IteratorCloseStage {
 struct IteratorCloseContinuation {
     iterator: StoredValue,
     original: PendingException,
+    asynchronous: bool,
     stage: IteratorCloseStage,
 }
 
@@ -4155,6 +4164,11 @@ pub(crate) fn trace_frame_roots(frame: &Frame, mark: &mut dyn FnMut(CollectionRo
     {
         trace_stored_value_root(value, mark);
     }
+    if let Some(PendingAsyncIteratorClose::Abrupt(pending)) = &frame.pending_async_iterator_close
+        && let PendingExceptionPayload::ThrownValue(value) = &pending.payload
+    {
+        trace_stored_value_root(value, mark);
+    }
     if let Some(dynamic) = &frame.dynamic_return {
         mark(CollectionRoot::Heap(HeapReference::Function(
             dynamic.root.function,
@@ -4163,6 +4177,51 @@ pub(crate) fn trace_frame_roots(frame: &Frame, mark: &mut dyn FnMut(CollectionRo
             mark(CollectionRoot::Heap(HeapReference::Function(construction)));
         }
     }
+}
+
+fn resume_pending_async_iterator_close(
+    runtime: &Runtime,
+    frame: &mut Frame,
+    kind: crate::object::PromiseReactionKind,
+    argument: StoredValue,
+    origin: JsStackFrame,
+) -> Result<bool, ExecutionError> {
+    let Some(close) = frame.pending_async_iterator_close.take() else {
+        return Ok(false);
+    };
+    if let PendingAsyncIteratorClose::Abrupt(original) = close {
+        frame.resume_abrupt = Some(original);
+        return Ok(true);
+    }
+    match kind {
+        crate::object::PromiseReactionKind::Fulfill
+            if matches!(argument, StoredValue::Function(_) | StoredValue::Object(_)) =>
+        {
+            finish_for_of_close_record(frame)?;
+        }
+        crate::object::PromiseReactionKind::Fulfill => {
+            let realm = code(runtime, frame.code)?.realm;
+            frame.resume_abrupt = Some(PendingException {
+                realm,
+                payload: PendingExceptionPayload::EngineError {
+                    kind: ExceptionKind::TypeError,
+                    message: JsString::from_utf8(
+                        "async iterator return must resolve to an object",
+                    )?,
+                },
+                origin,
+            });
+        }
+        crate::object::PromiseReactionKind::Reject => {
+            let realm = code(runtime, frame.code)?.realm;
+            frame.resume_abrupt = Some(PendingException {
+                realm,
+                payload: PendingExceptionPayload::ThrownValue(argument),
+                origin,
+            });
+        }
+    }
+    Ok(true)
 }
 
 fn collect_cycles_with_execution_roots(
@@ -4559,6 +4618,36 @@ struct PendingException {
     realm: RealmId,
     payload: PendingExceptionPayload,
     origin: JsStackFrame,
+}
+
+impl PendingException {
+    fn duplicate(&self) -> Self {
+        let payload = match &self.payload {
+            PendingExceptionPayload::EngineError { kind, message } => {
+                PendingExceptionPayload::EngineError {
+                    kind: *kind,
+                    message: message.clone(),
+                }
+            }
+            PendingExceptionPayload::FrozenEngineError {
+                kind,
+                message,
+                stack,
+            } => PendingExceptionPayload::FrozenEngineError {
+                kind: *kind,
+                message: message.clone(),
+                stack: stack.clone(),
+            },
+            PendingExceptionPayload::ThrownValue(value) => {
+                PendingExceptionPayload::ThrownValue(value.duplicate())
+            }
+        };
+        Self {
+            realm: self.realm,
+            payload,
+            origin: self.origin.clone(),
+        }
+    }
 }
 
 enum FrameArguments<'a> {
@@ -6386,12 +6475,16 @@ fn execute_frame_loop(
                         })?;
                         push_operator_pair(parent, original, updated, return_to)?;
                     }
-                    Ok(NativeDispatch::ForOfRecord { iterator, next }) => {
+                    Ok(NativeDispatch::ForOfRecord {
+                        iterator,
+                        next,
+                        asynchronous,
+                    }) => {
                         let parent = frames.last_mut().ok_or(EngineFault::MissingInstruction {
                             function: FunctionTemplateId::new(0),
                             instruction: 0,
                         })?;
-                        push_for_of_record(parent, iterator, next, return_to)?;
+                        push_for_of_record(parent, iterator, next, asynchronous, return_to)?;
                     }
                     Ok(NativeDispatch::ForOfStep {
                         value,
@@ -7145,7 +7238,11 @@ fn execute_frame_loop(
                             push_operator_pair(parent, original, updated, return_to)?;
                             continue;
                         }
-                        Ok(NativeDispatch::ForOfRecord { iterator, next }) => {
+                        Ok(NativeDispatch::ForOfRecord {
+                            iterator,
+                            next,
+                            asynchronous,
+                        }) => {
                             let parent =
                                 frames.last_mut().ok_or(EngineFault::RuntimeInvariant {
                                     message: "for-of start continuation has no executing frame",
@@ -7153,7 +7250,7 @@ fn execute_frame_loop(
                             let return_to = return_to.ok_or(EngineFault::RuntimeInvariant {
                                 message: "for-of start continuation has no caller continuation",
                             })?;
-                            push_for_of_record(parent, iterator, next, return_to)?;
+                            push_for_of_record(parent, iterator, next, asynchronous, return_to)?;
                             continue;
                         }
                         Ok(NativeDispatch::ForOfStep {
@@ -7432,14 +7529,18 @@ fn resume_suspended_native_returns(
             push_operator_pair(parent, original, updated, return_to)?;
             Ok(SuspendedNativeReturn::Continued)
         }
-        Ok(NativeDispatch::ForOfRecord { iterator, next }) => {
+        Ok(NativeDispatch::ForOfRecord {
+            iterator,
+            next,
+            asynchronous,
+        }) => {
             let parent = frames.last_mut().ok_or(EngineFault::RuntimeInvariant {
                 message: "for-of start continuation has no executing frame",
             })?;
             let return_to = return_to.ok_or(EngineFault::RuntimeInvariant {
                 message: "for-of start continuation has no caller continuation",
             })?;
-            push_for_of_record(parent, iterator, next, return_to)?;
+            push_for_of_record(parent, iterator, next, asynchronous, return_to)?;
             Ok(SuspendedNativeReturn::Continued)
         }
         Ok(NativeDispatch::ForOfStep {

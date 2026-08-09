@@ -6468,7 +6468,12 @@ fn verify_supported_opcodes(
                     | FinalOpcode::AsyncYieldStar
             ) && !generator)
             || (opcode == FinalOpcode::Await && !asynchronous)
-            || (opcode == FinalOpcode::ForAwaitOfStart && !async_generator)
+            || (matches!(
+                opcode,
+                FinalOpcode::ForAwaitOfStart
+                    | FinalOpcode::ForAwaitOfNext
+                    | FinalOpcode::IteratorGetValueDone
+            ) && !asynchronous)
             || (opcode == FinalOpcode::YieldStar && async_generator)
             || (opcode == FinalOpcode::AsyncYieldStar && !async_generator)
             || (opcode == FinalOpcode::Yield && async_generator && {
@@ -6813,6 +6818,8 @@ const fn supported_compiler_opcode(opcode: FinalOpcode) -> bool {
             | FinalOpcode::ForOfStart
             | FinalOpcode::ForAwaitOfStart
             | FinalOpcode::ForOfNext
+            | FinalOpcode::ForAwaitOfNext
+            | FinalOpcode::IteratorGetValueDone
             | FinalOpcode::IteratorClose
             | FinalOpcode::IfFalse
             | FinalOpcode::IfTrue
@@ -6932,6 +6939,9 @@ enum InternalStackValue {
     ForOfIterator(BytecodePc),
     ForOfNextMethod(BytecodePc),
     ForOfCatch(BytecodePc),
+    ForOfDisabledCatch(BytecodePc),
+    ForOfAwaitResult(BytecodePc),
+    ForOfAwaitedResult(BytecodePc),
     ForOfExhaustedIterator(BytecodePc),
     ForOfExhaustedNextMethod(BytecodePc),
     ForOfExhaustedCatch(BytecodePc),
@@ -7012,6 +7022,7 @@ impl JavaScriptStackValue {
             | InternalStackValue::ForOfIterator(_)
             | InternalStackValue::ForOfNextMethod(_)
             | InternalStackValue::ForOfCatch(_)
+            | InternalStackValue::ForOfDisabledCatch(_)
             | InternalStackValue::ForOfExhaustedIterator(_)
             | InternalStackValue::ForOfExhaustedNextMethod(_)
             | InternalStackValue::ForOfExhaustedCatch(_)
@@ -7029,6 +7040,8 @@ impl JavaScriptStackValue {
             | InternalStackValue::FinallyReturn { .. } => None,
             InternalStackValue::Ordinary
             | InternalStackValue::DerivedSuperResult(_)
+            | InternalStackValue::ForOfAwaitResult(_)
+            | InternalStackValue::ForOfAwaitedResult(_)
             | InternalStackValue::YieldStarIteratorResult(_)
             | InternalStackValue::YieldStarDone(_)
             | InternalStackValue::YieldStarYieldResult(_)
@@ -7070,6 +7083,7 @@ impl InternalStackValue {
                 | Self::ForOfIterator(_)
                 | Self::ForOfNextMethod(_)
                 | Self::ForOfCatch(_)
+                | Self::ForOfDisabledCatch(_)
                 | Self::ForOfExhaustedIterator(_)
                 | Self::ForOfExhaustedNextMethod(_)
                 | Self::ForOfExhaustedCatch(_)
@@ -7105,6 +7119,9 @@ impl InternalStackValue {
             Self::ForOfIterator(_)
                 | Self::ForOfNextMethod(_)
                 | Self::ForOfCatch(_)
+                | Self::ForOfDisabledCatch(_)
+                | Self::ForOfAwaitResult(_)
+                | Self::ForOfAwaitedResult(_)
                 | Self::ForOfExhaustedIterator(_)
                 | Self::ForOfExhaustedNextMethod(_)
                 | Self::ForOfExhaustedCatch(_)
@@ -7377,6 +7394,8 @@ fn verify_internal_operand_stack(
                 | FinalOpcode::ForOfStart
                 | FinalOpcode::ForAwaitOfStart
                 | FinalOpcode::ForOfNext
+                | FinalOpcode::ForAwaitOfNext
+                | FinalOpcode::IteratorGetValueDone
                 | FinalOpcode::IteratorClose
                 | FinalOpcode::Rot3r
                 | FinalOpcode::Nip
@@ -7583,6 +7602,7 @@ fn verify_internal_operand_stack(
             decoded,
             effectively_reachable,
             instructions[index].successors().branch_target(),
+            instructions,
             &mut state,
             &mut iteration_local_puts,
             &mut catch_local_puts,
@@ -8061,6 +8081,7 @@ fn transfer_internal_operand_stack(
     decoded: crate::DecodedInstruction,
     effectively_reachable: bool,
     catch_handler: Option<InstructionIndex>,
+    instructions: &[VerifiedInstruction],
     state: &mut Vec<InternalStackValue>,
     iteration_local_puts: &mut [Option<CertifiedIterationLocalPut>],
     catch_local_puts: &mut [Option<CertifiedCatchLocalPut>],
@@ -8357,7 +8378,10 @@ fn transfer_internal_operand_stack(
             else {
                 return Err(for_of_stack_error(id, decoded.pc(), opcode));
             };
-            if iterator != next || next != catch {
+            if iterator != next
+                || next != catch
+                || for_of_start_is_async(instructions, iterator) != Some(false)
+            {
                 return Err(for_of_stack_error(id, decoded.pc(), opcode));
             }
             state.try_reserve(2).map_err(|_| {
@@ -8370,6 +8394,98 @@ fn transfer_internal_operand_stack(
                 )
             })?;
             state.push(InternalStackValue::ForOfValue(iterator));
+            state.push(InternalStackValue::ForOfDone(iterator));
+            return Ok(InternalStackTransfer {
+                normal_completion: true,
+                iteration_branch_value: None,
+                ret_finalizer: None,
+            });
+        }
+        FinalOpcode::ForAwaitOfNext => {
+            invalidate_internal_value_provenance(state);
+            let Some(base) = state.len().checked_sub(3) else {
+                return Err(for_of_stack_error(id, decoded.pc(), opcode));
+            };
+            let (
+                InternalStackValue::ForOfIterator(iterator),
+                InternalStackValue::ForOfNextMethod(next),
+                InternalStackValue::ForOfCatch(catch),
+            ) = (state[base], state[base + 1], state[base + 2])
+            else {
+                return Err(for_of_stack_error(id, decoded.pc(), opcode));
+            };
+            if iterator != next
+                || next != catch
+                || for_of_start_is_async(instructions, iterator) != Some(true)
+            {
+                return Err(for_of_stack_error(id, decoded.pc(), opcode));
+            }
+            state[base + 2] = InternalStackValue::ForOfDisabledCatch(iterator);
+            state.try_reserve(1).map_err(|_| {
+                BytecodeVerificationError::function(
+                    id,
+                    BytecodeVerificationErrorKind::AllocationFailed {
+                        resource: BytecodeGraphResource::FrameStateEntries,
+                        requested: 1,
+                    },
+                )
+            })?;
+            state.push(InternalStackValue::ForOfAwaitResult(iterator));
+            return Ok(InternalStackTransfer {
+                normal_completion: true,
+                iteration_branch_value: None,
+                ret_finalizer: None,
+            });
+        }
+        FinalOpcode::Await
+            if matches!(state.last(), Some(InternalStackValue::ForOfAwaitResult(_))) =>
+        {
+            let Some(InternalStackValue::ForOfAwaitResult(site)) = state.pop() else {
+                unreachable!("the for-await result guard established the top value")
+            };
+            state.push(InternalStackValue::ForOfAwaitedResult(site));
+            return Ok(InternalStackTransfer {
+                normal_completion: true,
+                iteration_branch_value: None,
+                ret_finalizer: None,
+            });
+        }
+        FinalOpcode::IteratorGetValueDone => {
+            let Some(base) = state.len().checked_sub(4) else {
+                return Err(for_of_stack_error(id, decoded.pc(), opcode));
+            };
+            let (
+                InternalStackValue::ForOfIterator(iterator),
+                InternalStackValue::ForOfNextMethod(next),
+                InternalStackValue::ForOfDisabledCatch(catch),
+                InternalStackValue::ForOfAwaitedResult(result),
+            ) = (
+                state[base],
+                state[base + 1],
+                state[base + 2],
+                state[base + 3],
+            )
+            else {
+                return Err(for_of_stack_error(id, decoded.pc(), opcode));
+            };
+            if iterator != next
+                || next != catch
+                || catch != result
+                || for_of_start_is_async(instructions, iterator) != Some(true)
+            {
+                return Err(for_of_stack_error(id, decoded.pc(), opcode));
+            }
+            state[base + 2] = InternalStackValue::ForOfCatch(iterator);
+            state[base + 3] = InternalStackValue::ForOfValue(iterator);
+            state.try_reserve(1).map_err(|_| {
+                BytecodeVerificationError::function(
+                    id,
+                    BytecodeVerificationErrorKind::AllocationFailed {
+                        resource: BytecodeGraphResource::FrameStateEntries,
+                        requested: 1,
+                    },
+                )
+            })?;
             state.push(InternalStackValue::ForOfDone(iterator));
             return Ok(InternalStackTransfer {
                 normal_completion: true,
@@ -9330,6 +9446,17 @@ fn transfer_internal_operand_stack(
     })
 }
 
+fn for_of_start_is_async(instructions: &[VerifiedInstruction], site: BytecodePc) -> Option<bool> {
+    let index = instructions
+        .binary_search_by_key(&site, |verified| verified.decoded().pc())
+        .ok()?;
+    match instructions[index].decoded().instruction().opcode() {
+        FinalOpcode::ForOfStart => Some(false),
+        FinalOpcode::ForAwaitOfStart => Some(true),
+        _ => None,
+    }
+}
+
 fn has_enclosing_for_of_record(state: &[InternalStackValue]) -> bool {
     state.windows(3).any(|record| {
         matches!(
@@ -9705,6 +9832,8 @@ fn internal_stack_error(
         FinalOpcode::ForOfStart
             | FinalOpcode::ForAwaitOfStart
             | FinalOpcode::ForOfNext
+            | FinalOpcode::ForAwaitOfNext
+            | FinalOpcode::IteratorGetValueDone
             | FinalOpcode::IteratorClose
             | FinalOpcode::Rot3r
     ) || state.iter().any(|value| value.is_for_of_value())

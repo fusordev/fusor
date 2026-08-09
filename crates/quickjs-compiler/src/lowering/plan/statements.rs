@@ -1347,9 +1347,6 @@ impl<'arena> CompilationContext<'_, 'arena, '_> {
         flow: &mut PlannedControlFlow,
         state: &mut StatementPlanningState<'statement, 'arena>,
     ) -> Result<(), LeafCompilationError> {
-        if statement.r#await {
-            return unsupported(UnsupportedLeafFeature::UnsupportedBody, statement.span);
-        }
         let scope = self.created_scope(
             statement.scope_id.get(),
             statement.node_id.get(),
@@ -1729,6 +1726,31 @@ impl<'arena> CompilationContext<'_, 'arena, '_> {
         Ok(())
     }
 
+    fn push_for_of_step<'statement>(
+        statement: &'statement ForOfStatement<'arena>,
+        work: &mut Vec<StatementWork<'statement, 'arena>>,
+    ) {
+        if statement.r#await {
+            for opcode in [
+                FinalOpcode::IteratorGetValueDone,
+                FinalOpcode::Await,
+                FinalOpcode::ForAwaitOfNext,
+            ] {
+                work.push(StatementWork::Emit(PlannedInstruction::new(
+                    opcode,
+                    Operands::None,
+                    statement.span,
+                )));
+            }
+        } else {
+            work.push(StatementWork::Emit(PlannedInstruction::new(
+                FinalOpcode::ForOfNext,
+                Operands::U8(0),
+                statement.span,
+            )));
+        }
+    }
+
     fn schedule_for_of_statement<'statement>(
         statement: &'statement ForOfStatement<'arena>,
         scope: ScopeId,
@@ -1803,15 +1825,15 @@ impl<'arena> CompilationContext<'_, 'arena, '_> {
             target: assign,
             span: statement.span,
         });
-        work.push(StatementWork::Emit(PlannedInstruction::new(
-            FinalOpcode::ForOfNext,
-            Operands::U8(0),
-            statement.span,
-        )));
+        Self::push_for_of_step(statement, work);
         work.push(StatementWork::IterationRotate(scope));
         work.push(StatementWork::Bind(next));
         work.push(StatementWork::Emit(PlannedInstruction::new(
-            FinalOpcode::ForOfStart,
+            if statement.r#await {
+                FinalOpcode::ForAwaitOfStart
+            } else {
+                FinalOpcode::ForOfStart
+            },
             Operands::None,
             statement.right.span(),
         )));
