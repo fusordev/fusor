@@ -6,10 +6,11 @@ use quickjs_bytecode::{
     AtomPoolIndex, BytecodeBuilder, BytecodePc, CompilerCaptureLayout, CompilerCapturedBinding,
     CompilerConstantKind, CompilerConstantLayout, ControlFlowEdge, DecodeError, FinalOpcode,
     FunctionCountDomain, FunctionIndexDomains, FunctionKind, FunctionKindRequirement,
-    InvalidControlFlowTargetReason, OperandIndexDomain, Operands, SecondaryOperandField,
-    UnsupportedVerifierFeature, UnverifiedCompilerFunctionBody, UnverifiedFunctionBody,
-    UnverifiedFunctionHeader, VerificationError, VerificationErrorKind, VerificationLimits,
-    VerificationResource, VerifiedSuccessorKind, verify_compiler_control_flow, verify_control_flow,
+    InstructionIndex, InvalidControlFlowTargetReason, OperandIndexDomain, Operands,
+    SecondaryOperandField, UnsupportedVerifierFeature, UnverifiedCompilerFunctionBody,
+    UnverifiedFunctionBody, UnverifiedFunctionHeader, VerificationError, VerificationErrorKind,
+    VerificationLimits, VerificationResource, VerifiedSuccessorKind, verify_compiler_control_flow,
+    verify_control_flow,
 };
 
 use support::snapshot_verified_control_flow;
@@ -532,7 +533,7 @@ fn with_targets_use_the_pc_plus_five_base_before_failing_closed() {
     let valid_target = reject(
         encode(&[
             (
-                FinalOpcode::WithGetVar,
+                FinalOpcode::WithPutVar,
                 Operands::AtomLabelU8 {
                     atom: AtomPoolIndex::new(0),
                     label: 5,
@@ -575,6 +576,45 @@ fn with_targets_use_the_pc_plus_five_base_before_failing_closed() {
             reason: InvalidControlFlowTargetReason::NotInstructionBoundary,
         }
     );
+}
+
+#[test]
+fn with_get_var_verifies_as_an_asymmetric_object_environment_branch() {
+    let bytecode = encode(&[
+        (FinalOpcode::PushTrue, Operands::None),
+        (FinalOpcode::ToObject, Operands::None),
+        (
+            FinalOpcode::WithGetVar,
+            Operands::AtomLabelU8 {
+                atom: AtomPoolIndex::new(0),
+                label: 6,
+                value: 1,
+            },
+        ),
+        (FinalOpcode::Push1, Operands::NoneInt),
+        (FinalOpcode::Return, Operands::None),
+    ]);
+    let verified = verify(bytecode, 1, FunctionIndexDomains::new(1, 0, 0, 0, 0));
+    let with_get = &verified.instructions()[2];
+
+    assert_eq!(with_get.entry_stack_depth(), Some(1));
+    assert_eq!(
+        with_get
+            .successors()
+            .fallthrough()
+            .map(InstructionIndex::get),
+        Some(3)
+    );
+    assert_eq!(
+        with_get
+            .successors()
+            .branch_target()
+            .map(InstructionIndex::get),
+        Some(4)
+    );
+    assert_eq!(verified.instructions()[3].entry_stack_depth(), Some(0));
+    assert_eq!(verified.instructions()[4].entry_stack_depth(), Some(1));
+    assert_eq!(verified.computed_stack_size(), 1);
 }
 
 #[test]

@@ -335,6 +335,7 @@ impl<'plan> RealmGlobalLayoutBuilder<'plan> {
             | DeclarationKind::ClassFieldKey
             | DeclarationKind::ClassPrivateName
             | DeclarationKind::ClassStaticReceiver
+            | DeclarationKind::WithObject
             | DeclarationKind::Parameter
             | DeclarationKind::Catch
             | DeclarationKind::Import

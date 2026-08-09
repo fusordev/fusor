@@ -1310,14 +1310,79 @@ fn unsupported(source: &str, mode: ParseMode) -> (UnsupportedFeature, quickjs_fr
 }
 
 #[test]
-fn unsupported_dynamic_binding_cases_fail_closed_at_exact_spans() {
-    let cases = [("with (object) value;", UnsupportedFeature::WithStatement)];
+fn with_object_environment_is_a_hidden_scoped_capture() {
+    let plan = script("function outer(object) { with (object) { return () => value; } }");
+    let outer = plan.executables()[1].id();
+    let arrow = plan.executables()[2].id();
+    let binding = plan
+        .bindings_for(outer)
+        .unwrap()
+        .iter()
+        .find(|binding| binding.policy().kind() == DeclarationKind::WithObject)
+        .expect("hidden with-object binding");
 
-    for (source, expected) in cases {
+    assert_eq!(binding.placement(), StoragePlacement::Local);
+    assert_eq!(
+        binding.policy().initialization(),
+        InitializationPolicy::AtDeclaration
+    );
+    assert_eq!(binding.policy().writes(), WritePolicy::Immutable);
+    assert!(binding.policy().has_temporal_dead_zone());
+    assert!(binding.is_frame_captured());
+    let captures = plan.frame_captures_for(arrow).unwrap();
+    assert_eq!(captures.len(), 1);
+    assert_eq!(captures[0].binding(), binding.id());
+    assert_eq!(
+        captures[0].source(),
+        CaptureSource::ParentBinding(binding.id())
+    );
+}
+
+#[test]
+fn unsupported_with_reference_forms_fail_closed_at_the_identifier() {
+    let cases = [
+        (
+            "with (object) value = 1;",
+            UnsupportedFeature::WithReferenceMutation,
+            "value",
+        ),
+        (
+            "with (object) delete value;",
+            UnsupportedFeature::WithReferenceMutation,
+            "value",
+        ),
+        (
+            "with (object) value();",
+            UnsupportedFeature::WithReferenceCall,
+            "value",
+        ),
+        (
+            "with (object) eval('value');",
+            UnsupportedFeature::WithReferenceCall,
+            "eval",
+        ),
+    ];
+
+    for (source, expected, identifier) in cases {
         let (actual, span) = unsupported(source, ParseMode::Script);
         assert_eq!(actual, expected, "{source}");
-        assert!(span.end > span.start, "{source}");
+        assert_eq!(
+            &source[span.start as usize..span.end as usize],
+            identifier,
+            "{source}"
+        );
     }
+}
+
+#[test]
+fn lexical_bindings_inside_with_shadow_the_object_environment() {
+    let plan = script("with (object) { let value = () => 1; value = () => 2; value(); }");
+    let value = plan
+        .bindings()
+        .iter()
+        .find(|binding| binding.name() == "value")
+        .expect("inner lexical binding");
+    assert_eq!(value.policy().kind(), DeclarationKind::Let);
 }
 
 #[test]

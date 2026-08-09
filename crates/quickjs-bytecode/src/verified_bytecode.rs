@@ -6555,6 +6555,7 @@ const fn supported_compiler_opcode(opcode: FinalOpcode) -> bool {
             | FinalOpcode::Apply
             | FinalOpcode::Eval
             | FinalOpcode::ApplyEval
+            | FinalOpcode::WithGetVar
             | FinalOpcode::ArrayFrom
             | FinalOpcode::CheckCtorReturn
             | FinalOpcode::CheckCtor
@@ -7200,6 +7201,7 @@ fn verify_internal_operand_stack(
                 | FinalOpcode::NipCatch
                 | FinalOpcode::Gosub
                 | FinalOpcode::Ret
+                | FinalOpcode::WithGetVar
         )
     }) {
         return Ok(InternalStackCertificate::default());
@@ -7586,6 +7588,20 @@ fn verify_internal_operand_stack(
             } else {
                 None
             };
+            let with_binding_result =
+                decoded.instruction().opcode() == FinalOpcode::WithGetVar && edge.is_branch_target;
+            if with_binding_result {
+                state.try_reserve(1).map_err(|_| {
+                    BytecodeVerificationError::function(
+                        id,
+                        BytecodeVerificationErrorKind::AllocationFailed {
+                            resource: BytecodeGraphResource::FrameStateEntries,
+                            requested: 1,
+                        },
+                    )
+                })?;
+                state.push(InternalStackValue::Ordinary);
+            }
             charge_policy_transfers(
                 id,
                 &mut evaluations,
@@ -7641,6 +7657,9 @@ fn verify_internal_operand_stack(
             }
             if let Some((marker_index, site, handler)) = catch_exception {
                 state[marker_index] = InternalStackValue::CatchMarker { site, handler };
+            }
+            if with_binding_result {
+                state.pop();
             }
             if let Some((pending_index, original)) = finally_marker {
                 match state.pop() {
@@ -10670,6 +10689,10 @@ fn collect_requirements(
             | FinalOpcode::DefineMethod
             | FinalOpcode::ForInStart => {
                 push_requirement(requirements, ExecutionRequirement::OrdinaryObjects);
+            }
+            FinalOpcode::WithGetVar => {
+                push_requirement(requirements, ExecutionRequirement::OrdinaryObjects);
+                push_requirement(requirements, ExecutionRequirement::Calls);
             }
             FinalOpcode::SpecialObject => match instruction.operands() {
                 Operands::U8(3..=5) => {

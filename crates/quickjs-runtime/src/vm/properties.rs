@@ -174,7 +174,7 @@ pub(super) fn static_property_operand(
     static_property_at(runtime, frame, index)
 }
 
-fn static_property_at(
+pub(super) fn static_property_at(
     runtime: &Runtime,
     frame: &Frame,
     index: quickjs_bytecode::AtomPoolIndex,

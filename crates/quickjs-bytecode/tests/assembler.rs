@@ -1,9 +1,68 @@
 use quickjs_bytecode::{
-    AssemblerError, AssemblerLimits, AssemblerResource, BranchKind, BytecodeAssembler, BytecodePc,
-    EncodeError, FinalOpcode, FunctionIndexDomains, InstructionDecoder, Operands,
-    UnverifiedCompilerFunctionBody, UnverifiedFunctionBody, UnverifiedFunctionHeader,
-    VerificationErrorKind, VerificationLimits, verify_compiler_control_flow, verify_control_flow,
+    AssemblerError, AssemblerLimits, AssemblerResource, AtomPoolIndex, BranchKind,
+    BytecodeAssembler, BytecodePc, EncodeError, FinalOpcode, FunctionIndexDomains,
+    InstructionDecoder, Operands, UnverifiedCompilerFunctionBody, UnverifiedFunctionBody,
+    UnverifiedFunctionHeader, VerificationErrorKind, VerificationLimits,
+    verify_compiler_control_flow, verify_control_flow,
 };
+
+#[test]
+fn symbolic_with_branches_use_the_pc_plus_five_quickjs_base() {
+    let mut forward = BytecodeAssembler::new();
+    let target = forward.new_label().expect("forward target");
+    forward
+        .with_branch(FinalOpcode::WithGetVar, AtomPoolIndex::new(0), 1, &target)
+        .expect("forward with branch");
+    forward
+        .push(FinalOpcode::Nop, Operands::None)
+        .expect("fallthrough");
+    forward.bind(&target).expect("forward target binding");
+    forward
+        .push(FinalOpcode::ReturnUndef, Operands::None)
+        .expect("target instruction");
+    assert_eq!(
+        decoded(forward.finish().expect("forward assembly").bytecode()),
+        [
+            (
+                BytecodePc::new(0),
+                FinalOpcode::WithGetVar,
+                Operands::AtomLabelU8 {
+                    atom: AtomPoolIndex::new(0),
+                    label: 6,
+                    value: 1,
+                },
+            ),
+            (BytecodePc::new(10), FinalOpcode::Nop, Operands::None),
+            (
+                BytecodePc::new(11),
+                FinalOpcode::ReturnUndef,
+                Operands::None,
+            ),
+        ]
+    );
+
+    let mut backward = BytecodeAssembler::new();
+    let target = backward.new_label().expect("backward target");
+    backward.bind(&target).expect("backward target binding");
+    backward
+        .push(FinalOpcode::Nop, Operands::None)
+        .expect("target instruction");
+    backward
+        .with_branch(FinalOpcode::WithGetVar, AtomPoolIndex::new(0), 1, &target)
+        .expect("backward with branch");
+    assert_eq!(
+        decoded(backward.finish().expect("backward assembly").bytecode())[1],
+        (
+            BytecodePc::new(1),
+            FinalOpcode::WithGetVar,
+            Operands::AtomLabelU8 {
+                atom: AtomPoolIndex::new(0),
+                label: -6,
+                value: 1,
+            },
+        )
+    );
+}
 
 fn decoded(bytecode: &[u8]) -> Vec<(BytecodePc, FinalOpcode, Operands)> {
     InstructionDecoder::new(bytecode)

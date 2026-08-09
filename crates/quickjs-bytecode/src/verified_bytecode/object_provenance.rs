@@ -289,6 +289,19 @@ pub(super) fn verify_object_definition_provenance(
         for edge in internal_stack.effective_successors(instructions, index) {
             has_successor = true;
             let successor = edge.target;
+            let with_binding_result = opcode == FinalOpcode::WithGetVar && edge.is_branch_target;
+            if with_binding_result {
+                state.try_reserve(1).map_err(|_| {
+                    BytecodeVerificationError::function(
+                        id,
+                        BytecodeVerificationErrorKind::AllocationFailed {
+                            resource: BytecodeGraphResource::FrameStateEntries,
+                            requested: 1,
+                        },
+                    )
+                })?;
+                state.push(ObjectDefinitionProvenance::Unknown);
+            }
             if edge.enters_finally {
                 state.try_reserve(1).map_err(|_| {
                     BytecodeVerificationError::function(
@@ -321,6 +334,9 @@ pub(super) fn verify_object_definition_provenance(
                 usage,
             )?;
             if edge.enters_finally {
+                state.pop();
+            }
+            if with_binding_result {
                 state.pop();
             }
         }

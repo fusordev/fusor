@@ -155,6 +155,7 @@ mod typed_array;
 mod uri;
 mod weak_collections;
 mod weak_references;
+mod with_environment;
 
 pub(crate) use array_from_async::ArrayFromAsyncRecord;
 use async_function::{begin_async_await, suspend_async_function};
@@ -173,7 +174,7 @@ use {
     map::*, math::*, math_sum_precise::*, native::*, object_intrinsics::*, promise::*,
     promise_combinators::*, properties::*, proxy::*, reflect::*, regexp::*, set::*, stack::*,
     string_methods::*, string_raw::*, string_replace::*, string_split::*, temporal::*,
-    typed_array::*, uri::*, weak_collections::*, weak_references::*,
+    typed_array::*, uri::*, weak_collections::*, weak_references::*, with_environment::*,
 };
 
 /// Inclusive per-call interpreter limits.
@@ -906,6 +907,7 @@ enum NativeContinuation {
     InstanceOf(InstanceOfContinuation),
     Promise(PromiseContinuation),
     PromiseCombinator(Box<PromiseCombinatorContinuation>),
+    WithGet(Box<WithGetContinuation>),
     ProxyGet(Box<ProxyGetContinuation>),
     ProxyCall(Box<ProxyCallContinuation>),
     ProxyBoolean(Box<ProxyBooleanContinuation>),
@@ -1133,6 +1135,7 @@ impl NativeContinuation {
             Self::InstanceOf(state) => state.retained_values(),
             Self::Promise(state) => state.retained_values(),
             Self::PromiseCombinator(state) => state.retained_values(),
+            Self::WithGet(state) => state.retained_values(),
             Self::ProxyGet(state) => state.retained_values(),
             Self::ProxyCall(state) => state.retained_values(),
             Self::ProxyBoolean(state) => state.retained_values(),
@@ -3590,6 +3593,7 @@ fn trace_native_continuation_roots(
         }
         NativeContinuation::Promise(state) => state.trace_roots(mark),
         NativeContinuation::PromiseCombinator(state) => state.trace_roots(mark),
+        NativeContinuation::WithGet(state) => state.trace_roots(mark),
         NativeContinuation::ProxyGet(state) => {
             mark(CollectionRoot::Heap(state.proxy));
             mark(CollectionRoot::Heap(state.target));
@@ -4054,6 +4058,10 @@ enum ReturnDisposition {
     Push,
     Discard,
     InitializeDerivedThis,
+    WithBinding {
+        taken: InstructionIndex,
+        not_taken: InstructionIndex,
+    },
 }
 
 #[derive(Clone, Copy)]
@@ -4081,6 +4089,13 @@ impl CallReturn {
         Self {
             instruction,
             disposition: ReturnDisposition::InitializeDerivedThis,
+        }
+    }
+
+    const fn with_binding(taken: InstructionIndex, not_taken: InstructionIndex) -> Self {
+        Self {
+            instruction: not_taken,
+            disposition: ReturnDisposition::WithBinding { taken, not_taken },
         }
     }
 }
@@ -7209,6 +7224,12 @@ fn push_call_result(
             }
             push(parent, value);
         }
+        ReturnDisposition::WithBinding { .. } => {
+            return Err(EngineFault::RuntimeInvariant {
+                message: "with-binding continuation completed without its structured result",
+            }
+            .into());
+        }
     }
     parent.instruction = return_to.instruction;
     Ok(())
@@ -7220,22 +7241,47 @@ fn push_operator_pair(
     updated: StoredValue,
     return_to: CallReturn,
 ) -> Result<(), ExecutionError> {
-    if !matches!(return_to.disposition, ReturnDisposition::Push) {
-        return Err(EngineFault::RuntimeInvariant {
-            message: "postfix operator pair reached a discarding continuation",
+    match return_to.disposition {
+        ReturnDisposition::Push => {
+            if parent.stack.capacity().saturating_sub(parent.stack.len()) < 2 {
+                return Err(EngineFault::RuntimeInvariant {
+                    message: "verified postfix operator result exceeds frame stack capacity",
+                }
+                .into());
+            }
+            push(parent, original);
+            push(parent, updated);
+            parent.instruction = return_to.instruction;
+            Ok(())
         }
-        .into());
-    }
-    if parent.stack.capacity().saturating_sub(parent.stack.len()) < 2 {
-        return Err(EngineFault::RuntimeInvariant {
-            message: "verified postfix operator result exceeds frame stack capacity",
+        ReturnDisposition::WithBinding { taken, not_taken } => {
+            let StoredValue::Boolean(found) = original else {
+                return Err(EngineFault::RuntimeInvariant {
+                    message: "with-binding continuation returned a non-Boolean status",
+                }
+                .into());
+            };
+            if found {
+                if parent.stack.len() == parent.stack.capacity() {
+                    return Err(EngineFault::RuntimeInvariant {
+                        message: "verified with-binding result exceeds frame stack capacity",
+                    }
+                    .into());
+                }
+                push(parent, updated);
+                parent.instruction = taken;
+            } else {
+                parent.instruction = not_taken;
+            }
+            Ok(())
         }
-        .into());
+        ReturnDisposition::Discard | ReturnDisposition::InitializeDerivedThis => {
+            Err(EngineFault::RuntimeInvariant {
+                message: "structured operator pair reached an incompatible continuation",
+            }
+            .into())
+        }
     }
-    push(parent, original);
-    push(parent, updated);
-    parent.instruction = return_to.instruction;
-    Ok(())
 }
 
 fn native_step(

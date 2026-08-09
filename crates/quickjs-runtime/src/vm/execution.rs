@@ -945,6 +945,43 @@ pub(super) fn execute_one(
                 Err(pending) => return Ok(Step::Abrupt(pending)),
             }
         }
+        FinalOpcode::WithGetVar => {
+            let Operands::AtomLabelU8 { atom, value, .. } = operands else {
+                return unsupported_dispatch(opcode);
+            };
+            let property = static_property_at(runtime, frame, atom)?;
+            let object = pop(frame)?;
+            let taken = verified_instruction.successors().branch_target().ok_or(
+                EngineFault::InvalidSuccessor {
+                    function: frame.template,
+                    pc: source_pc,
+                },
+            )?;
+            let not_taken = verified_instruction.successors().fallthrough().ok_or(
+                EngineFault::InvalidSuccessor {
+                    function: frame.template,
+                    pc: source_pc,
+                },
+            )?;
+            let return_to = CallReturn::with_binding(taken, not_taken);
+            let realm = code(runtime, frame.code)?.realm;
+            let origin = instruction_location(runtime, frame, source_pc)?;
+            return native_step(
+                begin_with_get(
+                    runtime,
+                    object,
+                    property.key,
+                    property.name,
+                    value != 0,
+                    frame.strict,
+                    realm,
+                    Some(return_to),
+                    origin,
+                    execution_budget,
+                ),
+                return_to,
+            );
+        }
         FinalOpcode::Rest => {
             let Operands::U16(first_argument) = operands else {
                 return unsupported_dispatch(opcode);

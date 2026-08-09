@@ -3,7 +3,7 @@ use super::super::{
     BindingIdentifier, BindingPattern, BranchKind, CompilationContext, CompiledConstantPool,
     CompilerClosureBinding, DeclarationKind, DestructuringBindingInitialization, ExecutableId,
     Expression, FinalOpcode, ForStatementLeft, FrameLayout, FrameSlot, FunctionTreeLayout, GetSpan,
-    IdentifierReference, LeafCompilationError, LocalSlot, NativeReferenceId, Operands,
+    IdentifierReference, LeafCompilationError, LocalSlot, NativeReferenceId, NodeId, Operands,
     PlannedControlFlow, PlannedInstruction, RealmGlobalId, ReferenceAccess, ReferenceId, Span,
     StoragePlacement, SymbolId, UnresolvedGlobalId, UnsupportedLeafFeature, VariableDeclaration,
     VariableDeclarationKind, VariableDeclarator, WritePolicy, anonymous_named_evaluation_span,
@@ -216,6 +216,8 @@ impl<'arena> ExpressionPlanner<'_, '_, 'arena, '_> {
         identifier: &IdentifierReference<'arena>,
         layout: &FrameLayout,
         tree_layout: &FunctionTreeLayout,
+        constants: &CompiledConstantPool,
+        unresolved_is_undefined: bool,
         flow: &mut PlannedControlFlow,
     ) -> Result<(), LeafCompilationError> {
         let reference = self.lowered_reference(
@@ -235,10 +237,28 @@ impl<'arena> ExpressionPlanner<'_, '_, 'arena, '_> {
                 self.plan_read_slot(binding, slot, identifier.span)?
             }
             LoweredReference::RealmGlobal { slot, binding, .. } => {
-                plan_external_read(binding, slot, false, identifier.span)
+                plan_external_read(binding, slot, unresolved_is_undefined, identifier.span)
             }
         };
-        flow.emit(instruction)
+        let with_objects = self
+            .with_object_bindings_for_reference(identifier.reference_id.get(), identifier.span)?;
+        if with_objects.is_empty() {
+            return flow.emit(instruction);
+        }
+        let done = flow.new_label(identifier.span)?;
+        let atom = constants.property_atom_index(identifier.span)?;
+        for binding in with_objects {
+            let slot = layout
+                .slot(binding)
+                .ok_or(LeafCompilationError::SemanticInvariant {
+                    invariant: "visible with-object binding has a frame slot",
+                    span: Some(identifier.span),
+                })?;
+            flow.emit(self.plan_read_slot(binding, slot, identifier.span)?)?;
+            flow.with_branch(FinalOpcode::WithGetVar, atom, 1, &done, identifier.span)?;
+        }
+        flow.emit(instruction)?;
+        flow.bind(&done)
     }
 
     pub(in crate::lowering) fn plan_realm_global_assignment<'expression>(
@@ -482,6 +502,83 @@ impl<'arena> ExpressionPlanner<'_, '_, 'arena, '_> {
             work.push(ExpressionWork::Emit(instruction));
         }
         Ok(())
+    }
+}
+
+impl CompilationContext<'_, '_, '_> {
+    pub(in crate::lowering) fn with_object_binding(
+        &self,
+        statement: NodeId,
+        span: Span,
+    ) -> Result<BindingId, LeafCompilationError> {
+        self.planned
+            .identities
+            .with_object_bindings
+            .get(&statement)
+            .copied()
+            .ok_or(LeafCompilationError::SemanticInvariant {
+                invariant: "with statement has a compiler object-environment binding",
+                span: Some(span),
+            })
+    }
+
+    pub(in crate::lowering) fn with_object_bindings_for_reference(
+        &self,
+        reference_id: Option<ReferenceId>,
+        span: Span,
+    ) -> Result<Vec<BindingId>, LeafCompilationError> {
+        let reference_id = reference_id.ok_or(LeafCompilationError::SemanticInvariant {
+            invariant: "identifier reference has Oxc reference identity",
+            span: Some(span),
+        })?;
+        let native = self
+            .planned
+            .identities
+            .reference_by_id
+            .get(reference_id.index())
+            .copied()
+            .flatten()
+            .ok_or(LeafCompilationError::SemanticInvariant {
+                invariant: "Oxc reference has compiler identity",
+                span: Some(span),
+            })?;
+        let stop_scope = match native {
+            NativeReferenceId::Resolved(resolved) => {
+                let binding = self
+                    .planned
+                    .plan
+                    .resolved_reference(resolved)
+                    .ok_or(LeafCompilationError::SemanticInvariant {
+                        invariant: "resolved compiler reference exists",
+                        span: Some(span),
+                    })?
+                    .binding();
+                self.planned
+                    .identities
+                    .scope_by_binding
+                    .get(binding.index())
+                    .copied()
+                    .flatten()
+            }
+            NativeReferenceId::Unresolved(_) => None,
+        };
+        let scoping = self.unit.semantic().scoping();
+        let reference = scoping.get_reference(reference_id);
+        let mut visible = Vec::new();
+        for scope in scoping.scope_ancestors(reference.scope_id()) {
+            if Some(scope) == stop_scope {
+                break;
+            }
+            if let Some(&binding) = self
+                .planned
+                .identities
+                .with_object_binding_by_scope
+                .get(&scope)
+            {
+                visible.push(binding);
+            }
+        }
+        Ok(visible)
     }
 }
 

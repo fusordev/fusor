@@ -366,7 +366,7 @@ fn required_property_name(name: Option<&JsString>) -> Result<&JsString, EngineFa
     })
 }
 
-fn named_property_message(
+pub(super) fn named_property_message(
     prefix: &str,
     name: &JsString,
     suffix: &str,

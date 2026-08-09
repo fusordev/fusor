@@ -369,7 +369,14 @@ impl<'compiler, 'unit, 'arena, 'scope> ExpressionPlanner<'compiler, 'unit, 'aren
                     }
                     match expression {
                         Expression::Identifier(identifier) => {
-                            self.plan_identifier_read(identifier, layout, tree_layout, flow)?;
+                            self.plan_identifier_read(
+                                identifier,
+                                layout,
+                                tree_layout,
+                                constants,
+                                false,
+                                flow,
+                            )?;
                         }
                         Expression::UnaryExpression(unary) => {
                             self.plan_unary_expression(
@@ -5442,7 +5449,7 @@ impl<'compiler, 'unit, 'arena, 'scope> ExpressionPlanner<'compiler, 'unit, 'aren
                 )?;
                 if let LoweredReference::RealmGlobal {
                     global,
-                    slot,
+                    slot: _,
                     binding,
                     access,
                 } = reference
@@ -5472,16 +5479,19 @@ impl<'compiler, 'unit, 'arena, 'scope> ExpressionPlanner<'compiler, 'unit, 'aren
                             identifier.span,
                         );
                     }
-                    work.push(ExpressionWork::Emit(PlannedInstruction::new(
+                    self.plan_identifier_read(
+                        identifier,
+                        layout,
+                        tree_layout,
+                        constants,
+                        true,
+                        flow,
+                    )?;
+                    flow.emit(PlannedInstruction::new(
                         FinalOpcode::Typeof,
                         Operands::None,
                         unary.span,
-                    )));
-                    work.push(ExpressionWork::Emit(PlannedInstruction::new(
-                        FinalOpcode::GetVarUndef,
-                        Operands::VarRef(slot),
-                        identifier.span,
-                    )));
+                    ))?;
                     return Ok(());
                 }
             }

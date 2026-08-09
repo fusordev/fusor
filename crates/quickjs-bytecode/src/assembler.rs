@@ -9,8 +9,8 @@
 use std::{error::Error, fmt, sync::Arc};
 
 use crate::{
-    BytecodeBuilder, BytecodePc, EncodeError, FinalOpcode, Instruction, InstructionError,
-    OperandFormat, Operands,
+    AtomPoolIndex, BytecodeBuilder, BytecodePc, EncodeError, FinalOpcode, Instruction,
+    InstructionError, OperandFormat, Operands,
 };
 
 #[derive(Debug)]
@@ -80,7 +80,16 @@ impl BranchKind {
 #[derive(Clone, Copy, Debug)]
 enum AssemblyItem {
     Instruction(Instruction),
-    Branch { kind: BranchKind, label_index: u32 },
+    Branch {
+        kind: BranchKind,
+        label_index: u32,
+    },
+    WithBranch {
+        opcode: FinalOpcode,
+        atom: AtomPoolIndex,
+        value: u8,
+        label_index: u32,
+    },
 }
 
 #[derive(Clone, Copy)]
@@ -96,6 +105,7 @@ impl AssemblyItem {
         match self {
             Self::Instruction(instruction) => instruction.encoded_size(),
             Self::Branch { kind, .. } => kind.minimum_size(),
+            Self::WithBranch { .. } => 10,
         }
     }
 }
@@ -567,6 +577,63 @@ impl BytecodeAssembler {
         Ok(instruction_index)
     }
 
+    /// Appends a symbolic `with_*` object-environment branch.
+    ///
+    /// These final opcodes retain `QuickJS`'s fixed-width `atom_label_u8`
+    /// encoding, whose displacement base is the label field at `pc + 5`
+    /// rather than the ordinary branch base at `pc + 1`.
+    ///
+    /// # Errors
+    ///
+    /// Rejects non-`with_*` opcodes, foreign or unknown labels, instruction
+    /// capacity exhaustion, and allocation failure.
+    pub fn with_branch(
+        &mut self,
+        opcode: FinalOpcode,
+        atom: AtomPoolIndex,
+        value: u8,
+        target: &AssemblerLabel,
+    ) -> Result<u32, AssemblerError> {
+        self.resolve_label(target)?;
+        let instruction_index = self.next_instruction_index()?;
+        if !matches!(
+            opcode,
+            FinalOpcode::WithGetVar
+                | FinalOpcode::WithPutVar
+                | FinalOpcode::WithDeleteVar
+                | FinalOpcode::WithMakeRef
+                | FinalOpcode::WithGetRef
+        ) {
+            return Err(AssemblerError::InvalidInstruction {
+                instruction_index,
+                source: InstructionError::OperandFormatMismatch {
+                    opcode,
+                    expected: opcode.metadata().operand_format(),
+                    actual: OperandFormat::AtomLabelU8,
+                },
+            });
+        }
+        Instruction::new(
+            opcode,
+            Operands::AtomLabelU8 {
+                atom,
+                label: 0,
+                value,
+            },
+        )
+        .map_err(|source| AssemblerError::InvalidInstruction {
+            instruction_index,
+            source,
+        })?;
+        self.push_item(AssemblyItem::WithBranch {
+            opcode,
+            atom,
+            value,
+            label_index: target.index,
+        })?;
+        Ok(instruction_index)
+    }
+
     /// Resolves labels, relaxes branches, and emits final bytecode.
     ///
     /// Branch displacement is always `target_pc - (opcode_pc + 1)`, matching
@@ -620,6 +687,32 @@ impl BytecodeAssembler {
                         instruction_index,
                         label_index,
                     )?
+                }
+                AssemblyItem::WithBranch {
+                    opcode,
+                    atom,
+                    value,
+                    label_index,
+                } => {
+                    let target_position = self.target_position(label_index)?;
+                    let displacement = with_branch_displacement(
+                        positions[position],
+                        positions[target_position],
+                        instruction_index,
+                        label_index,
+                    )?;
+                    Instruction::new(
+                        opcode,
+                        Operands::AtomLabelU8 {
+                            atom,
+                            label: displacement,
+                            value,
+                        },
+                    )
+                    .map_err(|source| AssemblerError::InvalidInstruction {
+                        instruction_index,
+                        source,
+                    })?
                 }
             };
             let actual = builder.push_instruction(instruction).map_err(|source| {
@@ -706,7 +799,9 @@ impl BytecodeAssembler {
             }
         }
         for item in &self.items {
-            if let AssemblyItem::Branch { label_index, .. } = item {
+            if let AssemblyItem::Branch { label_index, .. }
+            | AssemblyItem::WithBranch { label_index, .. } = item
+            {
                 let target = self.target_position(*label_index)?;
                 if target == self.items.len() {
                     return Err(AssemblerError::TargetAtEnd {
@@ -1001,6 +1096,31 @@ fn signed_displacement(source_pc: u64, target_pc: u64) -> Result<i64, AssemblerE
     let target = i128::from(target_pc);
     i64::try_from(target - source).map_err(|_| AssemblerError::EncodedLengthOutOfRange {
         encoded_bytes: source_pc.max(target_pc),
+    })
+}
+
+fn with_branch_displacement(
+    source_pc: u64,
+    target_pc: u64,
+    instruction_index: u32,
+    label_index: u32,
+) -> Result<i32, AssemblerError> {
+    let base = source_pc
+        .checked_add(5)
+        .ok_or(AssemblerError::EncodedLengthOutOfRange {
+            encoded_bytes: source_pc,
+        })?;
+    let displacement = i128::from(target_pc) - i128::from(base);
+    i32::try_from(displacement).map_err(|_| AssemblerError::BranchDisplacementOutOfRange {
+        instruction_index,
+        label_index,
+        displacement: i64::try_from(displacement).unwrap_or_else(|_| {
+            if displacement.is_negative() {
+                i64::MIN
+            } else {
+                i64::MAX
+            }
+        }),
     })
 }
 

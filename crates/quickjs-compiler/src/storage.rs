@@ -287,6 +287,9 @@ pub enum DeclarationKind {
     /// The compiler-created immutable class-scope cell that holds a class
     /// constructor while its static field initializers execute.
     ClassStaticReceiver,
+    /// The compiler-created immutable cell that retains the object environment
+    /// for one sloppy-mode `with` statement activation.
+    WithObject,
     /// A function declaration.
     Function,
     /// A named function-expression binding.
@@ -632,6 +635,11 @@ pub(crate) struct OxcIdentityMap {
     /// The immutable class-scope receiver cell for each class whose static
     /// field initializer lexically observes `this`.
     pub(crate) class_static_receiver_bindings: HashMap<NodeId, BindingId>,
+    /// The immutable object-environment cell for each `with` statement.
+    pub(crate) with_object_bindings: HashMap<NodeId, BindingId>,
+    /// Reverse lookup used to resolve the ordered object-environment chain
+    /// visible from one semantic reference scope.
+    pub(crate) with_object_binding_by_scope: HashMap<ScopeId, BindingId>,
     pub(crate) scope_by_binding: Box<[Option<ScopeId>]>,
     pub(crate) reference_by_id: Box<[Option<NativeReferenceId>]>,
 }
@@ -759,6 +767,12 @@ pub enum UnsupportedFeature {
     DirectEval,
     /// A `with` statement.
     WithStatement,
+    /// A write or delete whose reference may resolve through a `with`
+    /// object-environment record.
+    WithReferenceMutation,
+    /// A call or tagged-template reference whose receiver may be supplied by
+    /// a `with` object-environment record.
+    WithReferenceCall,
     /// Annex B's paired block-lexical and var-like function binding.
     AnnexBBlockFunction,
     /// An anonymous `export default class` needs the module execution layer's
@@ -863,6 +877,7 @@ struct BindingDraft {
     class_private_name_nodes: Arc<[NodeId]>,
     class_private_method_node: Option<NodeId>,
     class_static_receiver_node: Option<NodeId>,
+    with_statement_node: Option<NodeId>,
     executable: ExecutableId,
     name: Arc<str>,
     declaration_spans: Arc<[Span]>,
@@ -881,6 +896,7 @@ struct FrozenBindings {
     class_private_name_bindings: HashMap<NodeId, BindingId>,
     class_private_method_bindings: HashMap<NodeId, BindingId>,
     class_static_receiver_bindings: HashMap<NodeId, BindingId>,
+    with_object_bindings: HashMap<NodeId, BindingId>,
 }
 
 #[derive(Default)]
@@ -1085,6 +1101,7 @@ impl<'unit, 'arena, 'scope> Planner<'unit, 'arena, 'scope> {
         self.add_class_private_name_bindings(&mut binding_drafts)?;
         self.add_class_private_method_bindings(&mut binding_drafts)?;
         self.add_class_static_receiver_bindings(&mut binding_drafts)?;
+        self.add_with_object_bindings(&mut binding_drafts)?;
         binding_drafts.sort_by_key(|binding| {
             let first = binding
                 .declaration_spans
@@ -1109,6 +1126,7 @@ impl<'unit, 'arena, 'scope> Planner<'unit, 'arena, 'scope> {
             class_private_name_bindings,
             class_private_method_bindings,
             class_static_receiver_bindings,
+            with_object_bindings,
         } = self.freeze_binding_drafts(binding_drafts)?;
         let scope_by_binding = self.binding_scope_map(
             &symbol_bindings,
@@ -1118,8 +1136,11 @@ impl<'unit, 'arena, 'scope> Planner<'unit, 'arena, 'scope> {
             &class_private_name_bindings,
             &class_private_method_bindings,
             &class_static_receiver_bindings,
+            &with_object_bindings,
             &bindings,
         )?;
+        let with_object_binding_by_scope =
+            Self::with_object_binding_by_scope(&with_object_bindings, &scope_by_binding)?;
 
         let (mut resolved_drafts, parameter_outer_references) = self.resolved_drafts(
             &symbol_bindings,
@@ -1136,6 +1157,12 @@ impl<'unit, 'arena, 'scope> Planner<'unit, 'arena, 'scope> {
             &implicit_arguments_references,
         )?;
         resolved_drafts.extend(arguments_references);
+        self.validate_with_reference_uses(
+            &resolved_drafts,
+            &unresolved_drafts,
+            &scope_by_binding,
+            &with_object_binding_by_scope,
+        )?;
         resolved_drafts.sort_by_key(|reference| {
             (
                 reference.executable.index(),
@@ -1155,11 +1182,19 @@ impl<'unit, 'arena, 'scope> Planner<'unit, 'arena, 'scope> {
             .class_static_receiver_capture_requests(&class_static_receiver_bindings, &bindings)?;
         let direct_eval_captures =
             self.direct_eval_capture_requests(&scope_by_binding, &bindings)?;
+        let with_object_captures = self.with_object_capture_requests(
+            &resolved_drafts,
+            &unresolved_drafts,
+            &scope_by_binding,
+            &with_object_binding_by_scope,
+            &bindings,
+        )?;
         let mut synthetic_captures = class_field_key_captures;
         synthetic_captures.extend(class_private_name_captures);
         synthetic_captures.extend(class_private_method_captures);
         synthetic_captures.extend(class_static_receiver_captures);
         synthetic_captures.extend(direct_eval_captures);
+        synthetic_captures.extend(with_object_captures);
         synthetic_captures.sort_unstable_by_key(|request| {
             (
                 request.executable.index(),
@@ -1233,6 +1268,8 @@ impl<'unit, 'arena, 'scope> Planner<'unit, 'arena, 'scope> {
                 class_private_name_bindings,
                 class_private_method_bindings,
                 class_static_receiver_bindings,
+                with_object_bindings,
+                with_object_binding_by_scope,
                 scope_by_binding: scope_by_binding.into_boxed_slice(),
                 reference_by_id: reference_by_id.into_boxed_slice(),
             },
@@ -1259,6 +1296,7 @@ impl<'unit, 'arena, 'scope> Planner<'unit, 'arena, 'scope> {
         class_private_name_bindings: &HashMap<NodeId, BindingId>,
         class_private_method_bindings: &HashMap<NodeId, BindingId>,
         class_static_receiver_bindings: &HashMap<NodeId, BindingId>,
+        with_object_bindings: &HashMap<NodeId, BindingId>,
         bindings: &[BindingStorage],
     ) -> Result<Vec<Option<ScopeId>>, CompilerError> {
         let scoping = self.unit.semantic().scoping();
@@ -1350,7 +1388,237 @@ impl<'unit, 'arena, 'scope> Planner<'unit, 'arena, 'scope> {
         self.bind_class_private_name_scopes(&mut scopes, class_private_name_bindings)?;
         self.bind_class_private_method_scopes(&mut scopes, class_private_method_bindings)?;
         self.bind_class_static_receiver_scopes(&mut scopes, class_static_receiver_bindings)?;
+        self.bind_with_object_scopes(&mut scopes, with_object_bindings)?;
         Ok(scopes)
+    }
+
+    fn bind_with_object_scopes(
+        &self,
+        scopes: &mut [Option<ScopeId>],
+        with_object_bindings: &HashMap<NodeId, BindingId>,
+    ) -> Result<(), CompilerError> {
+        for (&node_id, &binding) in with_object_bindings {
+            let AstKind::WithStatement(statement) = self.unit.semantic().nodes().kind(node_id)
+            else {
+                return Err(CompilerError::SemanticInvariant {
+                    invariant: "with-object binding belongs to a with statement",
+                    span: None,
+                });
+            };
+            let scope = statement
+                .scope_id
+                .get()
+                .ok_or(CompilerError::SemanticInvariant {
+                    invariant: "with statement has an object-environment scope",
+                    span: Some(statement.span),
+                })?;
+            let target =
+                scopes
+                    .get_mut(binding.index())
+                    .ok_or(CompilerError::SemanticInvariant {
+                        invariant: "with-object binding scope index is in range",
+                        span: Some(statement.span),
+                    })?;
+            if target.replace(scope).is_some() {
+                return Err(CompilerError::SemanticInvariant {
+                    invariant: "with-object binding has one semantic scope",
+                    span: Some(statement.span),
+                });
+            }
+        }
+        Ok(())
+    }
+
+    fn with_object_binding_by_scope(
+        with_object_bindings: &HashMap<NodeId, BindingId>,
+        scope_by_binding: &[Option<ScopeId>],
+    ) -> Result<HashMap<ScopeId, BindingId>, CompilerError> {
+        let mut by_scope = HashMap::with_capacity(with_object_bindings.len());
+        for &binding in with_object_bindings.values() {
+            let scope = scope_by_binding
+                .get(binding.index())
+                .copied()
+                .flatten()
+                .ok_or(CompilerError::SemanticInvariant {
+                    invariant: "with-object binding has a retained scope",
+                    span: None,
+                })?;
+            if by_scope.insert(scope, binding).is_some() {
+                return Err(CompilerError::SemanticInvariant {
+                    invariant: "one with-object binding per semantic scope",
+                    span: None,
+                });
+            }
+        }
+        Ok(by_scope)
+    }
+
+    fn visible_with_object_bindings(
+        &self,
+        reference_id: ReferenceId,
+        stop_scope: Option<ScopeId>,
+        with_object_binding_by_scope: &HashMap<ScopeId, BindingId>,
+    ) -> Vec<BindingId> {
+        let scoping = self.unit.semantic().scoping();
+        let reference = scoping.get_reference(reference_id);
+        let mut visible = Vec::new();
+        for scope in scoping.scope_ancestors(reference.scope_id()) {
+            if Some(scope) == stop_scope {
+                break;
+            }
+            if let Some(&binding) = with_object_binding_by_scope.get(&scope) {
+                visible.push(binding);
+            }
+        }
+        visible
+    }
+
+    fn validate_with_reference_uses(
+        &self,
+        resolved: &[ResolvedDraft],
+        unresolved: &[UnresolvedDraft],
+        scope_by_binding: &[Option<ScopeId>],
+        with_object_binding_by_scope: &HashMap<ScopeId, BindingId>,
+    ) -> Result<(), CompilerError> {
+        let nodes = self.unit.semantic().nodes();
+        for (reference_id, binding, access, span) in resolved
+            .iter()
+            .map(|draft| {
+                (
+                    draft.reference_id,
+                    Some(draft.binding),
+                    draft.access,
+                    draft.span,
+                )
+            })
+            .chain(
+                unresolved
+                    .iter()
+                    .map(|draft| (draft.reference_id, None, draft.access, draft.span)),
+            )
+        {
+            let stop_scope = binding
+                .and_then(|binding| scope_by_binding.get(binding.index()))
+                .copied()
+                .flatten();
+            if self
+                .visible_with_object_bindings(
+                    reference_id,
+                    stop_scope,
+                    with_object_binding_by_scope,
+                )
+                .is_empty()
+            {
+                continue;
+            }
+            if access.writes() || self.with_reference_is_delete(reference_id) {
+                return unsupported(UnsupportedFeature::WithReferenceMutation, span);
+            }
+            if self.with_reference_is_call_or_tag(nodes, reference_id) {
+                return unsupported(UnsupportedFeature::WithReferenceCall, span);
+            }
+        }
+        Ok(())
+    }
+
+    fn with_reference_is_delete(&self, reference_id: ReferenceId) -> bool {
+        let semantic = self.unit.semantic();
+        let reference = semantic.scoping().get_reference(reference_id);
+        let nodes = semantic.nodes();
+        let mut node_id = reference.node_id();
+        loop {
+            let parent = nodes.parent_id(node_id);
+            match nodes.kind(parent) {
+                AstKind::ParenthesizedExpression(_) => node_id = parent,
+                AstKind::UnaryExpression(unary) => {
+                    return unary.operator == oxc_syntax::operator::UnaryOperator::Delete;
+                }
+                _ => return false,
+            }
+        }
+    }
+
+    fn with_reference_is_call_or_tag(
+        &self,
+        nodes: &AstNodes<'_>,
+        reference_id: ReferenceId,
+    ) -> bool {
+        let reference = self.unit.semantic().scoping().get_reference(reference_id);
+        let mut node_id = reference.node_id();
+        loop {
+            let parent = nodes.parent_id(node_id);
+            match nodes.kind(parent) {
+                AstKind::ParenthesizedExpression(_) => node_id = parent,
+                AstKind::CallExpression(call) => {
+                    return call.callee.span() == nodes.kind(node_id).span();
+                }
+                AstKind::TaggedTemplateExpression(tagged) => {
+                    return tagged.tag.span() == nodes.kind(node_id).span();
+                }
+                _ => return false,
+            }
+        }
+    }
+
+    fn with_object_capture_requests(
+        &self,
+        resolved: &[ResolvedDraft],
+        unresolved: &[UnresolvedDraft],
+        scope_by_binding: &[Option<ScopeId>],
+        with_object_binding_by_scope: &HashMap<ScopeId, BindingId>,
+        bindings: &[BindingStorage],
+    ) -> Result<Vec<CaptureRequest>, CompilerError> {
+        let mut requests = Vec::new();
+        for (reference_id, executable, stop_scope, span) in resolved
+            .iter()
+            .map(|draft| {
+                (
+                    draft.reference_id,
+                    draft.executable,
+                    scope_by_binding
+                        .get(draft.binding.index())
+                        .copied()
+                        .flatten(),
+                    draft.span,
+                )
+            })
+            .chain(
+                unresolved
+                    .iter()
+                    .map(|draft| (draft.reference_id, draft.executable, None, draft.span)),
+            )
+        {
+            for binding in self.visible_with_object_bindings(
+                reference_id,
+                stop_scope,
+                with_object_binding_by_scope,
+            ) {
+                let storage =
+                    bindings
+                        .get(binding.index())
+                        .ok_or(CompilerError::SemanticInvariant {
+                            invariant: "visible with-object binding exists",
+                            span: Some(span),
+                        })?;
+                if storage.executable != executable {
+                    requests.push(CaptureRequest {
+                        executable,
+                        binding,
+                        span,
+                    });
+                }
+            }
+        }
+        requests.sort_unstable_by_key(|request| {
+            (
+                request.executable.index(),
+                request.binding.index(),
+                request.span.start,
+                request.span.end,
+            )
+        });
+        requests.dedup_by_key(|request| (request.executable, request.binding));
+        Ok(requests)
     }
 
     fn direct_eval_capture_requests(
@@ -1371,6 +1639,7 @@ impl<'unit, 'arena, 'scope> Planner<'unit, 'arena, 'scope> {
                     DeclarationKind::ClassFieldKey
                         | DeclarationKind::ClassPrivateName
                         | DeclarationKind::ClassStaticReceiver
+                        | DeclarationKind::WithObject
                 )
             {
                 continue;
@@ -1656,9 +1925,6 @@ impl<'unit, 'arena, 'scope> Planner<'unit, 'arena, 'scope> {
         let nodes = semantic.nodes();
         for (node_id, node) in nodes.iter_enumerated() {
             match node.kind() {
-                AstKind::WithStatement(statement) => {
-                    return unsupported(UnsupportedFeature::WithStatement, statement.span);
-                }
                 AstKind::Function(function)
                     if function.r#type == FunctionType::FunctionDeclaration
                         && !function.r#async
@@ -2356,6 +2622,7 @@ impl<'unit, 'arena, 'scope> Planner<'unit, 'arena, 'scope> {
                     class_private_name_nodes: Arc::from([]),
                     class_private_method_node: None,
                     class_static_receiver_node: None,
+                    with_statement_node: None,
                     executable: owner,
                     name: Arc::clone(&name),
                     declaration_spans: parameter_spans.into(),
@@ -2376,6 +2643,7 @@ impl<'unit, 'arena, 'scope> Planner<'unit, 'arena, 'scope> {
                     class_private_name_nodes: Arc::from([]),
                     class_private_method_node: None,
                     class_static_receiver_node: None,
+                    with_statement_node: None,
                     executable: owner,
                     name,
                     declaration_spans: body_spans.into(),
@@ -2401,6 +2669,7 @@ impl<'unit, 'arena, 'scope> Planner<'unit, 'arena, 'scope> {
                 class_private_name_nodes: Arc::from([]),
                 class_private_method_node: None,
                 class_static_receiver_node: None,
+                with_statement_node: None,
                 executable: owner,
                 name,
                 declaration_spans,
@@ -2529,6 +2798,7 @@ impl<'unit, 'arena, 'scope> Planner<'unit, 'arena, 'scope> {
                 | DeclarationKind::ClassFieldKey
                 | DeclarationKind::ClassPrivateName
                 | DeclarationKind::ClassStaticReceiver
+                | DeclarationKind::WithObject
                 | DeclarationKind::Parameter
                 | DeclarationKind::Catch
                 | DeclarationKind::Import
@@ -2551,6 +2821,7 @@ impl<'unit, 'arena, 'scope> Planner<'unit, 'arena, 'scope> {
                 | DeclarationKind::ClassFieldKey
                 | DeclarationKind::ClassPrivateName
                 | DeclarationKind::ClassStaticReceiver
+                | DeclarationKind::WithObject
                 | DeclarationKind::Parameter
                 | DeclarationKind::Catch
                 | DeclarationKind::SyntheticDefault => Err(CompilerError::SemanticInvariant {
@@ -2589,7 +2860,8 @@ impl<'unit, 'arena, 'scope> Planner<'unit, 'arena, 'scope> {
             | DeclarationKind::ClassName
             | DeclarationKind::ClassFieldKey
             | DeclarationKind::ClassPrivateName
-            | DeclarationKind::ClassStaticReceiver => (
+            | DeclarationKind::ClassStaticReceiver
+            | DeclarationKind::WithObject => (
                 InitializationPolicy::AtDeclaration,
                 WritePolicy::Immutable,
                 true,
@@ -2675,6 +2947,7 @@ impl<'unit, 'arena, 'scope> Planner<'unit, 'arena, 'scope> {
             class_private_name_nodes: Arc::from([]),
             class_private_method_node: None,
             class_static_receiver_node: None,
+            with_statement_node: None,
             executable: ExecutableId(0),
             name: Arc::from("*default*"),
             declaration_spans: synthetic_spans.into(),
@@ -2712,6 +2985,7 @@ impl<'unit, 'arena, 'scope> Planner<'unit, 'arena, 'scope> {
                 class_private_name_nodes: Arc::from([]),
                 class_private_method_node: None,
                 class_static_receiver_node: None,
+                with_statement_node: None,
                 executable: owner,
                 name: Arc::from(identifier.name.as_str()),
                 declaration_spans: Arc::from([identifier.span]),
@@ -2753,6 +3027,7 @@ impl<'unit, 'arena, 'scope> Planner<'unit, 'arena, 'scope> {
                     class_private_name_nodes: Arc::from([]),
                     class_private_method_node: None,
                     class_static_receiver_node: None,
+                    with_statement_node: None,
                     executable: owner,
                     name: Arc::from(format!("[[class-field-key:{}]]", field_node.index())),
                     declaration_spans: Arc::from([field.key.span()]),
@@ -2921,6 +3196,7 @@ impl<'unit, 'arena, 'scope> Planner<'unit, 'arena, 'scope> {
                     class_private_name_nodes: name_nodes.into(),
                     class_private_method_node: None,
                     class_static_receiver_node: None,
+                    with_statement_node: None,
                     executable: owner,
                     name: Arc::from(format!("[[class-private-name:{}]]", element_node.index())),
                     declaration_spans: Arc::from([identifier.span]),
@@ -2976,6 +3252,7 @@ impl<'unit, 'arena, 'scope> Planner<'unit, 'arena, 'scope> {
                     class_private_name_nodes: Arc::from([]),
                     class_private_method_node: Some(method_node),
                     class_static_receiver_node: None,
+                    with_statement_node: None,
                     executable: owner,
                     name: Arc::from(format!("[[class-private-method:{}]]", method_node.index())),
                     declaration_spans: Arc::from([identifier.span]),
@@ -3266,11 +3543,48 @@ impl<'unit, 'arena, 'scope> Planner<'unit, 'arena, 'scope> {
                 class_private_name_nodes: Arc::from([]),
                 class_private_method_node: None,
                 class_static_receiver_node: Some(class_node),
+                with_statement_node: None,
                 executable: owner,
                 name: Arc::from(format!("[[class-static-receiver:{}]]", class_node.index())),
                 declaration_spans: Arc::from([class.span]),
                 placement: StoragePlacement::Local,
                 policy: self.declaration_policy(owner, DeclarationKind::ClassStaticReceiver, false),
+                arguments_object: false,
+            });
+        }
+        Ok(())
+    }
+
+    fn add_with_object_bindings(
+        &self,
+        bindings: &mut Vec<BindingDraft>,
+    ) -> Result<(), CompilerError> {
+        for (node_id, node) in self.unit.semantic().nodes().iter_enumerated() {
+            let AstKind::WithStatement(statement) = node.kind() else {
+                continue;
+            };
+            let scope = statement
+                .scope_id
+                .get()
+                .ok_or(CompilerError::SemanticInvariant {
+                    invariant: "with statement has an object-environment scope",
+                    span: Some(statement.span),
+                })?;
+            let owner = self.scope_owner(scope, Some(statement.span))?;
+            bindings.push(BindingDraft {
+                symbol_id: None,
+                primary_symbol_binding: false,
+                class_node: None,
+                class_field_node: None,
+                class_private_name_nodes: Arc::from([]),
+                class_private_method_node: None,
+                class_static_receiver_node: None,
+                with_statement_node: Some(node_id),
+                executable: owner,
+                name: Arc::from(format!("[[with-object:{}]]", node_id.index())),
+                declaration_spans: Arc::from([statement.span]),
+                placement: StoragePlacement::Local,
+                policy: self.declaration_policy(owner, DeclarationKind::WithObject, false),
                 arguments_object: false,
             });
         }
@@ -3688,6 +4002,7 @@ impl<'unit, 'arena, 'scope> Planner<'unit, 'arena, 'scope> {
                 class_private_name_nodes: Arc::from([]),
                 class_private_method_node: None,
                 class_static_receiver_node: None,
+                with_statement_node: None,
                 executable: owner,
                 name: Arc::from("arguments"),
                 declaration_spans: Arc::from([span]),
@@ -4247,6 +4562,7 @@ fn freeze_bindings(
     let mut class_private_name_bindings = HashMap::new();
     let mut class_private_method_bindings = HashMap::new();
     let mut class_static_receiver_bindings = HashMap::new();
+    let mut with_object_bindings = HashMap::new();
     for (index, draft) in drafts.into_iter().enumerate() {
         let id = u32::try_from(index)
             .map(BindingId)
@@ -4324,6 +4640,14 @@ fn freeze_bindings(
                 span: draft.declaration_spans.first().copied(),
             });
         }
+        if let Some(statement_node) = draft.with_statement_node
+            && with_object_bindings.insert(statement_node, id).is_some()
+        {
+            return Err(CompilerError::SemanticInvariant {
+                invariant: "one synthetic with-object binding per with statement",
+                span: draft.declaration_spans.first().copied(),
+            });
+        }
         source_symbols.push(draft.symbol_id);
         bindings.push(BindingStorage {
             id,
@@ -4352,6 +4676,7 @@ fn freeze_bindings(
         class_private_name_bindings,
         class_private_method_bindings,
         class_static_receiver_bindings,
+        with_object_bindings,
     })
 }
 

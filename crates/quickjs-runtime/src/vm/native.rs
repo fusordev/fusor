@@ -1258,6 +1258,13 @@ pub(super) fn resume_native_continuations(
                 return_to,
                 execution_budget,
             )?,
+            NativeContinuation::WithGet(state) => advance_with_get(
+                runtime,
+                *state,
+                value.duplicate(),
+                return_to,
+                execution_budget,
+            )?,
             NativeContinuation::ProxyGet(state) => advance_proxy_get(
                 runtime,
                 *state,

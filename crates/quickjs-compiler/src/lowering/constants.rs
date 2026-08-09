@@ -392,6 +392,21 @@ impl<'arena> CompilationContext<'_, 'arena, '_> {
                 )?;
                 record_string_candidate(owner, value, literal.span, candidates, atom_candidates)?;
             }
+            AstKind::IdentifierReference(identifier)
+                if !self
+                    .with_object_bindings_for_reference(
+                        identifier.reference_id.get(),
+                        identifier.span,
+                    )?
+                    .is_empty() =>
+            {
+                record_property_candidate(
+                    owner,
+                    compiler_identifier_string(identifier.name.as_str(), identifier.span)?,
+                    identifier.span,
+                    atom_candidates,
+                )?;
+            }
             AstKind::PrivateIdentifier(identifier)
                 if matches!(
                     nodes.parent_kind(node_id),

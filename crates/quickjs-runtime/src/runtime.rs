@@ -5119,6 +5119,7 @@ const fn is_supported_opcode(opcode: FinalOpcode) -> bool {
             | FinalOpcode::SetProto
             | FinalOpcode::ToObject
             | FinalOpcode::ToPropKey
+            | FinalOpcode::WithGetVar
             | FinalOpcode::CopyDataProperties
             | FinalOpcode::DefineField
             | FinalOpcode::DefinePrivateField

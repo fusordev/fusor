@@ -232,6 +232,26 @@ impl PlannedControlFlow {
         Ok(())
     }
 
+    pub(in crate::lowering) fn with_branch(
+        &mut self,
+        opcode: FinalOpcode,
+        atom: quickjs_bytecode::AtomPoolIndex,
+        value: u8,
+        target: &CompilerLabel,
+        span: Span,
+    ) -> Result<(), LeafCompilationError> {
+        self.assembler
+            .with_branch(opcode, atom, value, &target.assembler)
+            .map_err(|source| LeafCompilationError::BytecodeAssembly {
+                span: Some(span),
+                source,
+            })?;
+        self.instruction_spans.push(span);
+        self.last_instruction_can_fall_through = Some(true);
+        self.label_bound_after_last_instruction = false;
+        Ok(())
+    }
+
     pub(in crate::lowering) fn bind(
         &mut self,
         label: &CompilerLabel,
