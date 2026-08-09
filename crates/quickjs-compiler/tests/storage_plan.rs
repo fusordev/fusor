@@ -255,6 +255,48 @@ fn function_parameters_locals_and_named_expression_bindings_are_explicit() {
 }
 
 #[test]
+fn annex_b_catch_var_redeclaration_splits_variable_and_catch_environments() {
+    let plan = script("try{throw 1}catch(foo){var foo=2;foo;}foo;");
+    let foo = plan
+        .bindings()
+        .iter()
+        .filter(|binding| binding.name() == "foo")
+        .collect::<Vec<_>>();
+    assert_eq!(foo.len(), 2);
+
+    let catch = foo
+        .iter()
+        .copied()
+        .find(|binding| binding.policy().kind() == DeclarationKind::Catch)
+        .expect("catch-parameter binding");
+    let variable = foo
+        .iter()
+        .copied()
+        .find(|binding| binding.policy().kind() == DeclarationKind::Var)
+        .expect("variable-environment binding");
+    assert_eq!(catch.placement(), StoragePlacement::Local);
+    assert_eq!(variable.placement(), StoragePlacement::GlobalObject);
+    assert_eq!(catch.declaration_spans().len(), 1);
+    assert_eq!(variable.declaration_spans().len(), 1);
+
+    let catch_references = plan
+        .resolved_references()
+        .iter()
+        .filter(|reference| reference.binding() == catch.id())
+        .count();
+    let variable_references = plan
+        .resolved_references()
+        .iter()
+        .filter(|reference| reference.binding() == variable.id())
+        .count();
+    assert_eq!(catch_references, 1, "the in-catch read uses the parameter");
+    assert_eq!(
+        variable_references, 1,
+        "the post-catch read uses the hoisted var binding"
+    );
+}
+
+#[test]
 fn module_storage_distinguishes_namespace_imports_and_synthesizes_default_cell() {
     let plan = module(
         "import ordinary, { named } from './dep.js'; import * as namespace from './ns.js'; \
@@ -1376,13 +1418,19 @@ fn sloppy_block_functions_fail_closed_for_annex_b_dual_bindings() {
 }
 
 #[test]
-fn sloppy_labelled_function_fails_closed_for_annex_b_binding_rules() {
-    let source = "legacy: function declared() {}";
-    let (feature, span) = unsupported(source, ParseMode::Script);
-    assert_eq!(feature, UnsupportedFeature::AnnexBBlockFunction);
+fn sloppy_labelled_function_uses_the_variable_environment_binding() {
+    let plan = script("legacy: function declared() {}");
+    let binding = plan
+        .bindings()
+        .iter()
+        .find(|binding| binding.name() == "declared")
+        .expect("labelled function binding");
+
+    assert_eq!(binding.placement(), StoragePlacement::GlobalObject);
+    assert_eq!(binding.policy().kind(), DeclarationKind::Function);
     assert_eq!(
-        &source[span.start as usize..span.end as usize],
-        "function declared() {}"
+        binding.policy().initialization(),
+        InitializationPolicy::FunctionAtInstantiation
     );
 }
 

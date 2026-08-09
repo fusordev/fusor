@@ -124,10 +124,19 @@ impl CompilationContext<'_, '_, '_> {
                     && matches!(frame_slot, FrameSlot::Local(_))
             }
             VariableDeclarationKind::Var => {
-                matches!(
+                (matches!(
                     storage.policy().kind(),
                     DeclarationKind::Var | DeclarationKind::Parameter | DeclarationKind::Function
-                ) && !storage.policy().has_temporal_dead_zone()
+                ) && !storage.policy().has_temporal_dead_zone())
+                    // Annex B.3.4 evaluates the initializer through the catch
+                    // environment even though the `var` is instantiated in
+                    // the surrounding variable environment.
+                    || (storage.placement() == StoragePlacement::Local
+                        && storage.policy().kind() == DeclarationKind::Catch
+                        && storage.policy().initialization() == InitializationPolicy::Catch
+                        && storage.policy().writes() == WritePolicy::Mutable
+                        && !storage.policy().has_temporal_dead_zone()
+                        && matches!(frame_slot, FrameSlot::Local(_)))
             }
             VariableDeclarationKind::Using | VariableDeclarationKind::AwaitUsing => false,
         };

@@ -69,6 +69,45 @@ fn global_script_returns_a_directive_expression_completion() {
 }
 
 #[test]
+fn annex_b_catch_var_initializer_updates_only_the_catch_parameter() {
+    let mut runtime = Runtime::try_new(RuntimeLimits::default()).expect("runtime");
+    let realm = runtime.create_realm().expect("realm");
+    let mut context = runtime.context(&realm).expect("context");
+
+    let value = evaluate_script(
+        &mut context,
+        "foo='outer';var bar='bar-outer';function read(){return foo;}\
+         try{throw 1;}catch(foo){var foo='first';var first=foo;}\
+         try{throw 2;}catch(foo){var foo='second';var second=foo;}\
+         try{throw 3;}catch(bar){var bar='bar-inner';var third=bar;}\
+         read()+'|'+first+'|'+second+'|'+foo+'|'+third+'|'+bar;",
+        "annex-b-catch-var.js",
+        ScriptLimits::default(),
+    )
+    .expect("Annex B catch-var Script");
+    assert_eq!(
+        string(&value),
+        "outer|first|second|outer|bar-inner|bar-outer"
+    );
+}
+
+#[test]
+fn annex_b_labelled_function_is_instantiated_in_the_variable_environment() {
+    let mut runtime = Runtime::try_new(RuntimeLimits::default()).expect("runtime");
+    let realm = runtime.create_realm().expect("realm");
+    let mut context = runtime.context(&realm).expect("context");
+
+    let value = evaluate_script(
+        &mut context,
+        "outer: inner: function legacy(value) { return value + 1; } legacy(41);",
+        "annex-b-labelled-function.js",
+        ScriptLimits::default(),
+    )
+    .expect("Annex B labelled-function Script");
+    assert!(number(&value).strict_equals(JsNumber::from_i32(42)));
+}
+
+#[test]
 fn global_anonymous_function_initializers_receive_their_binding_name() {
     let mut runtime = Runtime::try_new(RuntimeLimits::default()).expect("runtime");
     let realm = runtime.create_realm().expect("realm");

@@ -1667,6 +1667,7 @@ throw new TypeError();",
     fn focused_intl402_admission_bypasses_only_intl_policy_skips() {
         let policy = BaselinePolicy {
             skipped_features: BTreeSet::from(["Intl.Locale".to_owned(), "ShadowRealm".to_owned()]),
+            inclusions: Vec::new(),
             exclusions: vec!["test/intl402/".to_owned()],
         };
         let intl = Metadata {

@@ -877,7 +877,12 @@ struct BindingDraft {
     with_statement_node: Option<NodeId>,
     executable: ExecutableId,
     name: Arc<str>,
+    // Spans whose declaration policy and storage this draft owns.
     declaration_spans: Arc<[Span]>,
+    // Oxc declaration identities routed to this draft during lowering. Annex
+    // B.3.4 intentionally maps an in-catch `var` identifier to the catch cell
+    // even though declaration instantiation belongs to the outer `var` cell.
+    declaration_identity_spans: Arc<[Span]>,
     placement: StoragePlacement,
     policy: DeclarationPolicy,
     arguments_object: bool,
@@ -894,6 +899,18 @@ struct FrozenBindings {
     class_private_method_bindings: HashMap<NodeId, BindingId>,
     class_static_receiver_bindings: HashMap<NodeId, BindingId>,
     with_object_bindings: HashMap<NodeId, BindingId>,
+}
+
+struct CatchVarDeclarations {
+    catch_spans: Arc<[Span]>,
+    var_spans: Arc<[Span]>,
+    catch_body_scope: ScopeId,
+    variable_scope: ScopeId,
+}
+
+struct SplitReferenceBindings {
+    parameters: HashMap<SymbolId, BindingId>,
+    catches: HashMap<SymbolId, BindingId>,
 }
 
 #[derive(Default)]
@@ -1142,6 +1159,7 @@ impl<'unit, 'arena, 'scope> Planner<'unit, 'arena, 'scope> {
         let (mut resolved_drafts, parameter_outer_references) = self.resolved_drafts(
             &symbol_bindings,
             &source_symbols,
+            &scope_by_binding,
             &class_name_bindings,
             &bindings,
             &implicit_arguments_references,
@@ -1274,20 +1292,10 @@ impl<'unit, 'arena, 'scope> Planner<'unit, 'arena, 'scope> {
         freeze_bindings(drafts, self.unit.semantic().scoping().symbols_len())
     }
 
-    #[allow(
-        clippy::too_many_arguments,
-        reason = "all synthetic binding maps must be assigned against the same frozen scope table"
-    )]
-    fn binding_scope_map(
+    fn source_binding_scope_map(
         &self,
         symbol_bindings: &[Option<BindingId>],
         source_symbols: &[Option<SymbolId>],
-        class_name_bindings: &HashMap<NodeId, BindingId>,
-        class_field_key_bindings: &HashMap<NodeId, BindingId>,
-        class_private_name_bindings: &HashMap<NodeId, BindingId>,
-        class_private_method_bindings: &HashMap<NodeId, BindingId>,
-        class_static_receiver_bindings: &HashMap<NodeId, BindingId>,
-        with_object_bindings: &HashMap<NodeId, BindingId>,
         bindings: &[BindingStorage],
     ) -> Result<Vec<Option<ScopeId>>, CompilerError> {
         let scoping = self.unit.semantic().scoping();
@@ -1307,7 +1315,17 @@ impl<'unit, 'arena, 'scope> Planner<'unit, 'arena, 'scope> {
             let Some(symbol) = source_symbol else {
                 continue;
             };
-            let scope = scoping.symbol_scope_id(symbol);
+            let storage = bindings
+                .get(binding)
+                .ok_or(CompilerError::SemanticInvariant {
+                    invariant: "source-backed compiler binding exists",
+                    span: Some(scoping.symbol_span(symbol)),
+                })?;
+            let scope = if storage.policy.kind == DeclarationKind::Catch {
+                self.catch_body_scope(symbol)?
+            } else {
+                scoping.symbol_scope_id(symbol)
+            };
             let span = scoping.symbol_span(symbol);
             let target = scopes
                 .get_mut(binding)
@@ -1326,6 +1344,27 @@ impl<'unit, 'arena, 'scope> Planner<'unit, 'arena, 'scope> {
                 }
             }
         }
+        Ok(scopes)
+    }
+
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "all synthetic binding maps must be assigned against the same frozen scope table"
+    )]
+    fn binding_scope_map(
+        &self,
+        symbol_bindings: &[Option<BindingId>],
+        source_symbols: &[Option<SymbolId>],
+        class_name_bindings: &HashMap<NodeId, BindingId>,
+        class_field_key_bindings: &HashMap<NodeId, BindingId>,
+        class_private_name_bindings: &HashMap<NodeId, BindingId>,
+        class_private_method_bindings: &HashMap<NodeId, BindingId>,
+        class_static_receiver_bindings: &HashMap<NodeId, BindingId>,
+        with_object_bindings: &HashMap<NodeId, BindingId>,
+        bindings: &[BindingStorage],
+    ) -> Result<Vec<Option<ScopeId>>, CompilerError> {
+        let mut scopes =
+            self.source_binding_scope_map(symbol_bindings, source_symbols, bindings)?;
         for binding in bindings.iter().filter(|binding| binding.arguments_object) {
             let scope = self
                 .executable_drafts
@@ -1836,8 +1875,11 @@ impl<'unit, 'arena, 'scope> Planner<'unit, 'arena, 'scope> {
                 {
                     let declaration_scope = node.scope_id();
                     let flags = semantic.scoping().scope_flags(declaration_scope);
-                    let single_statement_parent =
-                        is_single_statement_parent(nodes.parent_kind(node_id));
+                    let parent = nodes.parent_kind(node_id);
+                    if matches!(parent, AstKind::LabeledStatement(_)) {
+                        continue;
+                    }
+                    let single_statement_parent = is_single_statement_parent(parent);
                     if single_statement_parent || (!flags.is_var() && !flags.is_strict_mode()) {
                         return unsupported(UnsupportedFeature::AnnexBBlockFunction, function.span);
                     }
@@ -2495,6 +2537,71 @@ impl<'unit, 'arena, 'scope> Planner<'unit, 'arena, 'scope> {
             )?;
             let name = Arc::<str>::from(scoping.symbol_name(symbol_id));
             let declaration_spans = declaration_spans(scoping, symbol_id);
+            if facts.contains(DeclarationFacts::CATCH) && facts.contains(DeclarationFacts::VAR) {
+                let declarations = self.catch_var_declarations(symbol_id)?;
+                let catch_owner = self.scope_owner(
+                    declarations.catch_body_scope,
+                    declarations.catch_spans.first().copied(),
+                )?;
+                let variable_owner = self.scope_owner(
+                    declarations.variable_scope,
+                    declarations.var_spans.first().copied(),
+                )?;
+                if catch_owner != variable_owner {
+                    return Err(CompilerError::SemanticInvariant {
+                        invariant: "catch and variable environments belong to one executable",
+                        span: declarations.catch_spans.first().copied(),
+                    });
+                }
+                let outer_symbol =
+                    scoping.get_binding(declarations.variable_scope, name.as_ref().into());
+                let split_frontend_symbol = outer_symbol.is_none_or(|outer| outer == symbol_id);
+                if split_frontend_symbol {
+                    drafts.push(BindingDraft {
+                        symbol_id: Some(symbol_id),
+                        primary_symbol_binding: true,
+                        class_node: None,
+                        class_field_node: None,
+                        class_private_name_nodes: Arc::from([]),
+                        class_private_method_node: None,
+                        class_static_receiver_node: None,
+                        with_statement_node: None,
+                        executable: variable_owner,
+                        name: Arc::clone(&name),
+                        declaration_spans: Arc::clone(&declarations.var_spans),
+                        declaration_identity_spans: Arc::from([]),
+                        placement: self.placement(
+                            symbol_id,
+                            variable_owner,
+                            DeclarationKind::Var,
+                        )?,
+                        policy: self.declaration_policy(
+                            variable_owner,
+                            DeclarationKind::Var,
+                            false,
+                        ),
+                        arguments_object: false,
+                    });
+                }
+                drafts.push(BindingDraft {
+                    symbol_id: Some(symbol_id),
+                    primary_symbol_binding: !split_frontend_symbol,
+                    class_node: None,
+                    class_field_node: None,
+                    class_private_name_nodes: Arc::from([]),
+                    class_private_method_node: None,
+                    class_static_receiver_node: None,
+                    with_statement_node: None,
+                    executable: catch_owner,
+                    name,
+                    declaration_spans: declarations.catch_spans,
+                    declaration_identity_spans: declaration_spans,
+                    placement: StoragePlacement::Local,
+                    policy: self.declaration_policy(catch_owner, DeclarationKind::Catch, false),
+                    arguments_object: false,
+                });
+                continue;
+            }
             let split_parameter_environment = self.executable_drafts[owner.index()]
                 .executable
                 .has_parameter_expressions()
@@ -2518,6 +2625,7 @@ impl<'unit, 'arena, 'scope> Planner<'unit, 'arena, 'scope> {
                         span: Some(scoping.symbol_span(symbol_id)),
                     });
                 }
+                let parameter_spans: Arc<[Span]> = parameter_spans.into();
                 drafts.push(BindingDraft {
                     symbol_id: Some(symbol_id),
                     primary_symbol_binding: false,
@@ -2529,7 +2637,8 @@ impl<'unit, 'arena, 'scope> Planner<'unit, 'arena, 'scope> {
                     with_statement_node: None,
                     executable: owner,
                     name: Arc::clone(&name),
-                    declaration_spans: parameter_spans.into(),
+                    declaration_spans: Arc::clone(&parameter_spans),
+                    declaration_identity_spans: parameter_spans,
                     placement: StoragePlacement::Local,
                     policy: self.declaration_policy(owner, DeclarationKind::Parameter, false),
                     arguments_object: false,
@@ -2539,6 +2648,7 @@ impl<'unit, 'arena, 'scope> Planner<'unit, 'arena, 'scope> {
                 } else {
                     DeclarationKind::Var
                 };
+                let body_spans: Arc<[Span]> = body_spans.into();
                 drafts.push(BindingDraft {
                     symbol_id: Some(symbol_id),
                     primary_symbol_binding: true,
@@ -2550,7 +2660,8 @@ impl<'unit, 'arena, 'scope> Planner<'unit, 'arena, 'scope> {
                     with_statement_node: None,
                     executable: owner,
                     name,
-                    declaration_spans: body_spans.into(),
+                    declaration_spans: Arc::clone(&body_spans),
+                    declaration_identity_spans: body_spans,
                     placement: StoragePlacement::Local,
                     policy: self.declaration_policy(owner, body_kind, facts.function_scope_entry),
                     arguments_object: false,
@@ -2576,13 +2687,103 @@ impl<'unit, 'arena, 'scope> Planner<'unit, 'arena, 'scope> {
                 with_statement_node: None,
                 executable: owner,
                 name,
-                declaration_spans,
+                declaration_spans: Arc::clone(&declaration_spans),
+                declaration_identity_spans: declaration_spans,
                 placement,
                 policy,
                 arguments_object: false,
             });
         }
         Ok(drafts)
+    }
+
+    fn catch_body_scope(&self, symbol_id: SymbolId) -> Result<ScopeId, CompilerError> {
+        let semantic = self.unit.semantic();
+        let scoping = semantic.scoping();
+        let mut body_scope = None;
+        for declaration in scoping.symbol_declarations(symbol_id) {
+            if !matches!(
+                semantic.nodes().kind(declaration),
+                AstKind::CatchParameter(_)
+            ) {
+                continue;
+            }
+            let AstKind::CatchClause(handler) = semantic.nodes().parent_kind(declaration) else {
+                return Err(CompilerError::SemanticInvariant {
+                    invariant: "catch parameter belongs to a catch clause",
+                    span: Some(scoping.symbol_span(symbol_id)),
+                });
+            };
+            let scope = handler
+                .body
+                .scope_id
+                .get()
+                .ok_or(CompilerError::SemanticInvariant {
+                    invariant: "catch body has a semantic scope",
+                    span: Some(handler.body.span),
+                })?;
+            if body_scope.replace(scope).is_some() {
+                return Err(CompilerError::SemanticInvariant {
+                    invariant: "one catch parameter per semantic symbol",
+                    span: Some(scoping.symbol_span(symbol_id)),
+                });
+            }
+        }
+        body_scope.ok_or(CompilerError::SemanticInvariant {
+            invariant: "catch binding retains its catch parameter",
+            span: Some(scoping.symbol_span(symbol_id)),
+        })
+    }
+
+    fn catch_var_declarations(
+        &self,
+        symbol_id: SymbolId,
+    ) -> Result<CatchVarDeclarations, CompilerError> {
+        let semantic = self.unit.semantic();
+        let scoping = semantic.scoping();
+        let redeclarations = scoping.symbol_redeclarations(symbol_id);
+        let mut catch_spans = Vec::new();
+        let mut var_spans = Vec::new();
+        for declaration in scoping.symbol_declarations(symbol_id) {
+            let span = redeclarations
+                .iter()
+                .find(|redeclaration| redeclaration.declaration == declaration)
+                .map_or_else(
+                    || scoping.symbol_span(symbol_id),
+                    |redeclaration| redeclaration.span,
+                );
+            match semantic.nodes().kind(declaration) {
+                AstKind::CatchParameter(_) => {
+                    catch_spans.push(span);
+                }
+                AstKind::VariableDeclarator(declarator)
+                    if declarator.kind == VariableDeclarationKind::Var =>
+                {
+                    var_spans.push(span);
+                }
+                _ => {}
+            }
+        }
+        let catch_body_scope = self.catch_body_scope(symbol_id)?;
+        if catch_spans.is_empty() || var_spans.is_empty() {
+            return Err(CompilerError::SemanticInvariant {
+                invariant: "catch-var collision retains both declaration classes",
+                span: Some(scoping.symbol_span(symbol_id)),
+            });
+        }
+        let variable_scope = scoping
+            .scope_ancestors(catch_body_scope)
+            .find(|scope| scoping.scope_flags(*scope).is_var())
+            .ok_or(CompilerError::SemanticInvariant {
+                invariant: "catch body has a variable declaration environment",
+                span: Some(scoping.symbol_span(symbol_id)),
+            })?;
+        Ok(CatchVarDeclarations {
+            catch_spans: catch_spans.into(),
+            var_spans: var_spans.into(),
+            catch_body_scope,
+            variable_scope,
+        })
     }
 
     fn parameter_list_span(&self, executable: ExecutableId) -> Option<Span> {
@@ -2843,6 +3044,7 @@ impl<'unit, 'arena, 'scope> Planner<'unit, 'arena, 'scope> {
         synthetic_spans.sort_by_key(|span| (span.start, span.end));
         synthetic_spans.dedup();
         let policy = self.synthetic_default_policy()?;
+        let synthetic_spans: Arc<[Span]> = synthetic_spans.into();
         bindings.push(BindingDraft {
             symbol_id: None,
             primary_symbol_binding: false,
@@ -2854,7 +3056,8 @@ impl<'unit, 'arena, 'scope> Planner<'unit, 'arena, 'scope> {
             with_statement_node: None,
             executable: ExecutableId(0),
             name: Arc::from("*default*"),
-            declaration_spans: synthetic_spans.into(),
+            declaration_spans: Arc::clone(&synthetic_spans),
+            declaration_identity_spans: synthetic_spans,
             placement: StoragePlacement::ModuleLocal,
             policy,
             arguments_object: false,
@@ -2893,6 +3096,7 @@ impl<'unit, 'arena, 'scope> Planner<'unit, 'arena, 'scope> {
                 executable: owner,
                 name: Arc::from(identifier.name.as_str()),
                 declaration_spans: Arc::from([identifier.span]),
+                declaration_identity_spans: Arc::from([identifier.span]),
                 placement: StoragePlacement::Local,
                 policy: self.declaration_policy(owner, DeclarationKind::ClassName, false),
                 arguments_object: false,
@@ -2935,6 +3139,7 @@ impl<'unit, 'arena, 'scope> Planner<'unit, 'arena, 'scope> {
                     executable: owner,
                     name: Arc::from(format!("[[class-field-key:{}]]", field_node.index())),
                     declaration_spans: Arc::from([field.key.span()]),
+                    declaration_identity_spans: Arc::from([field.key.span()]),
                     placement: StoragePlacement::Local,
                     policy: self.declaration_policy(owner, DeclarationKind::ClassFieldKey, false),
                     arguments_object: false,
@@ -3104,6 +3309,7 @@ impl<'unit, 'arena, 'scope> Planner<'unit, 'arena, 'scope> {
                     executable: owner,
                     name: Arc::from(format!("[[class-private-name:{}]]", element_node.index())),
                     declaration_spans: Arc::from([identifier.span]),
+                    declaration_identity_spans: Arc::from([identifier.span]),
                     placement: StoragePlacement::Local,
                     policy: self.declaration_policy(
                         owner,
@@ -3160,6 +3366,7 @@ impl<'unit, 'arena, 'scope> Planner<'unit, 'arena, 'scope> {
                     executable: owner,
                     name: Arc::from(format!("[[class-private-method:{}]]", method_node.index())),
                     declaration_spans: Arc::from([identifier.span]),
+                    declaration_identity_spans: Arc::from([identifier.span]),
                     placement: StoragePlacement::Local,
                     policy: self.declaration_policy(
                         owner,
@@ -3451,6 +3658,7 @@ impl<'unit, 'arena, 'scope> Planner<'unit, 'arena, 'scope> {
                 executable: owner,
                 name: Arc::from(format!("[[class-static-receiver:{}]]", class_node.index())),
                 declaration_spans: Arc::from([class.span]),
+                declaration_identity_spans: Arc::from([class.span]),
                 placement: StoragePlacement::Local,
                 policy: self.declaration_policy(owner, DeclarationKind::ClassStaticReceiver, false),
                 arguments_object: false,
@@ -3487,6 +3695,7 @@ impl<'unit, 'arena, 'scope> Planner<'unit, 'arena, 'scope> {
                 executable: owner,
                 name: Arc::from(format!("[[with-object:{}]]", node_id.index())),
                 declaration_spans: Arc::from([statement.span]),
+                declaration_identity_spans: Arc::from([statement.span]),
                 placement: StoragePlacement::Local,
                 policy: self.declaration_policy(owner, DeclarationKind::WithObject, false),
                 arguments_object: false,
@@ -3681,10 +3890,48 @@ impl<'unit, 'arena, 'scope> Planner<'unit, 'arena, 'scope> {
         }
     }
 
+    fn split_reference_bindings(
+        symbol_bindings: &[Option<BindingId>],
+        source_symbols: &[Option<SymbolId>],
+        bindings: &[BindingStorage],
+    ) -> Result<SplitReferenceBindings, CompilerError> {
+        let mut parameters = HashMap::new();
+        let mut catches = HashMap::new();
+        for (binding, symbol) in bindings.iter().zip(source_symbols.iter().copied()) {
+            let Some(symbol) = symbol else {
+                continue;
+            };
+            if symbol_bindings.get(symbol.index()).copied().flatten() == Some(binding.id) {
+                continue;
+            }
+            let (targets, invariant) = match binding.policy.kind {
+                DeclarationKind::Parameter => (
+                    &mut parameters,
+                    "one split parameter binding per semantic symbol",
+                ),
+                DeclarationKind::Catch => {
+                    (&mut catches, "one split catch binding per semantic symbol")
+                }
+                _ => continue,
+            };
+            if targets.insert(symbol, binding.id).is_some() {
+                return Err(CompilerError::SemanticInvariant {
+                    invariant,
+                    span: binding.declaration_spans.first().copied(),
+                });
+            }
+        }
+        Ok(SplitReferenceBindings {
+            parameters,
+            catches,
+        })
+    }
+
     fn resolved_drafts(
         &self,
         symbol_bindings: &[Option<BindingId>],
         source_symbols: &[Option<SymbolId>],
+        scope_by_binding: &[Option<ScopeId>],
         class_name_bindings: &HashMap<NodeId, BindingId>,
         bindings: &[BindingStorage],
         implicit_arguments_references: &HashMap<ReferenceId, ExecutableId>,
@@ -3696,23 +3943,10 @@ impl<'unit, 'arena, 'scope> Planner<'unit, 'arena, 'scope> {
             .filter(|binding| binding.arguments_object)
             .map(|binding| (binding.executable, binding.id))
             .collect::<HashMap<_, _>>();
-        let mut split_parameter_bindings = HashMap::new();
-        for (binding, symbol) in bindings.iter().zip(source_symbols.iter().copied()) {
-            let Some(symbol) = symbol else {
-                continue;
-            };
-            if binding.policy.kind == DeclarationKind::Parameter
-                && symbol_bindings.get(symbol.index()).copied().flatten() != Some(binding.id)
-                && split_parameter_bindings
-                    .insert(symbol, binding.id)
-                    .is_some()
-            {
-                return Err(CompilerError::SemanticInvariant {
-                    invariant: "one split parameter binding per semantic symbol",
-                    span: binding.declaration_spans.first().copied(),
-                });
-            }
-        }
+        let SplitReferenceBindings {
+            parameters: split_parameter_bindings,
+            catches: split_catch_bindings,
+        } = Self::split_reference_bindings(symbol_bindings, source_symbols, bindings)?;
         let mut drafts = Vec::with_capacity(scoping.references_len());
         let mut parameter_outer_references = Vec::new();
         for symbol_id in scoping.symbol_ids() {
@@ -3746,6 +3980,17 @@ impl<'unit, 'arena, 'scope> Planner<'unit, 'arena, 'scope> {
                         .is_some_and(|parameters| span_within(span, parameters))
                 {
                     parameter_binding
+                } else if let Some(catch_binding) = split_catch_bindings.get(&symbol_id).copied()
+                    && scope_by_binding
+                        .get(catch_binding.index())
+                        .copied()
+                        .flatten()
+                        .is_some_and(|catch_scope| {
+                            reference.scope_id() == catch_scope
+                                || scoping.scope_is_descendant_of(reference.scope_id(), catch_scope)
+                        })
+                {
+                    catch_binding
                 } else {
                     source_binding
                 };
@@ -3910,6 +4155,7 @@ impl<'unit, 'arena, 'scope> Planner<'unit, 'arena, 'scope> {
                 executable: owner,
                 name: Arc::from("arguments"),
                 declaration_spans: Arc::from([span]),
+                declaration_identity_spans: Arc::from([span]),
                 placement: StoragePlacement::Local,
                 policy: self.declaration_policy(owner, DeclarationKind::Var, false),
                 arguments_object: true,
@@ -4485,7 +4731,7 @@ fn freeze_bindings(
                     span,
                 });
             }
-            for declaration in draft.declaration_spans.iter().copied() {
+            for declaration in draft.declaration_identity_spans.iter().copied() {
                 if declaration_bindings
                     .insert((symbol_id, declaration.start, declaration.end), id)
                     .is_some()

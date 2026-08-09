@@ -476,6 +476,80 @@ fn sloppy_direct_eval_rejects_a_function_body_lexical_collision() {
 }
 
 #[test]
+fn sloppy_direct_eval_var_initializer_resolves_to_a_matching_catch_parameter() {
+    evaluate(
+        "var err='outer',observed,escaped;\
+         try{throw 'caught';}catch(err){\
+           var completion=eval(\"var err='inner';err;\");\
+           escaped=eval(\"var err;()=>err\");\
+           observed=err+'|'+completion;\
+         }\
+         err+'|'+observed+'|'+escaped();",
+        |value| assert_eq!(string(value), "outer|inner|inner|inner"),
+    );
+}
+
+#[test]
+fn matching_catch_parameter_does_not_hide_an_outer_lexical_eval_conflict() {
+    evaluate(
+        "function local(){\
+           let err='outer lexical';\
+           try{throw 'caught';}catch(err){\
+             try{eval('var err;');return false;}\
+             catch(error){return error.constructor===SyntaxError&&err==='caught';}\
+           }\
+         }\
+         local();",
+        |value| assert_eq!(value.as_boolean(), Ok(Some(true))),
+    );
+}
+
+#[test]
+fn sloppy_direct_eval_function_declarations_install_beyond_a_matching_catch_parameter() {
+    evaluate(
+        "var observed;\
+         try{throw 'caught';}catch(err){\
+           eval(\"function err(){return 'installed';}\");\
+           observed=err;\
+         }\
+         observed+'|'+typeof err+'|'+err();",
+        |value| assert_eq!(string(value), "caught|function|installed"),
+    );
+}
+
+#[test]
+fn sloppy_direct_eval_loop_and_destructuring_writes_resolve_to_the_catch_parameter() {
+    evaluate(
+        "var err='outer',forIn,forOf,destructured;\
+         try{throw 'caught';}catch(err){\
+           eval(\"for(var err in {key:1}){}\");forIn=err;\
+           eval(\"for(var err of ['value']){}\");forOf=err;\
+           eval(\"var [err]=['pattern']\");destructured=err;\
+         }\
+         err+'|'+forIn+'|'+forOf+'|'+destructured;",
+        |value| assert_eq!(string(value), "outer|key|value|pattern"),
+    );
+}
+
+#[test]
+fn sloppy_direct_eval_orders_with_objects_around_a_matching_catch_parameter() {
+    evaluate(
+        "var err='outer',inside,observed;var inner={err:'object'},outer={err:'object'};\
+         try{throw 'caught';}catch(err){\
+           with(inner){eval(\"var err='inner-with'\");}\
+           inside=err;\
+         }\
+         with(outer){try{throw 'caught';}catch(err){\
+           eval(\"var err='inside-catch'\");observed=err;\
+         }}\
+         err+'|'+inside+'|'+inner.err+'|'+observed+'|'+outer.err;",
+        |value| {
+            assert_eq!(string(value), "outer|caught|inner-with|inside-catch|object");
+        },
+    );
+}
+
+#[test]
 fn direct_eval_resolves_outer_closures_before_realm_globals() {
     evaluate(
         "var value=1;function outer(value){return function(){return eval('value+1');};}outer(41)();",

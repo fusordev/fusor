@@ -61,7 +61,10 @@ struct DirectEvalWithObject {
 
 pub(in crate::lowering) struct RealmGlobalLayout {
     bindings: Box<[RealmGlobalBinding]>,
+    // Declaration instantiation targets, including eval's variable environment.
     by_binding: Box<[Option<RealmGlobalId>]>,
+    // Annex B.3.4 overrides for source references that still see a catch cell.
+    reference_by_binding: Box<[Option<RealmGlobalId>]>,
     by_unresolved: Box<[Option<RealmGlobalId>]>,
     import_ranges: Box<[Range<usize>]>,
     imports: Box<[RealmGlobalId]>,
@@ -75,6 +78,7 @@ struct RealmGlobalLayoutBuilder<'plan> {
     bindings: Vec<RealmGlobalBinding>,
     by_name: HashMap<Arc<str>, RealmGlobalId>,
     by_binding: Vec<Option<RealmGlobalId>>,
+    reference_by_binding: Vec<Option<RealmGlobalId>>,
     by_unresolved: Vec<Option<RealmGlobalId>>,
     needs: Vec<Vec<RealmGlobalId>>,
     direct_by_name: HashMap<Arc<str>, DirectEvalCallerBinding>,
@@ -181,6 +185,7 @@ impl<'plan> RealmGlobalLayoutBuilder<'plan> {
             bindings: Vec::new(),
             by_name: HashMap::new(),
             by_binding: vec![None; plan.bindings().len()],
+            reference_by_binding: vec![None; plan.bindings().len()],
             by_unresolved: vec![None; plan.unresolved_globals().len()],
             needs: (0..plan.executables().len()).map(|_| Vec::new()).collect(),
             direct_by_name: HashMap::new(),
@@ -235,7 +240,9 @@ impl<'plan> RealmGlobalLayoutBuilder<'plan> {
                             .entry(Arc::from(binding.name()))
                             .or_insert(caller);
                     }
-                    if binding.scope() == DirectEvalBindingScope::Lexical {
+                    if binding.scope() == DirectEvalBindingScope::Lexical
+                        && binding.kind() != DirectEvalBindingKind::Catch
+                    {
                         builder
                             .direct_lexical_names
                             .insert(Arc::from(binding.name()));
@@ -388,7 +395,7 @@ impl<'plan> RealmGlobalLayoutBuilder<'plan> {
             root_source,
             declaration: Some(binding.id()),
         })?;
-        self.by_name.insert(name, id);
+        self.by_name.insert(Arc::clone(&name), id);
         let mapping = self.by_binding.get_mut(binding.id().index()).ok_or(
             LeafCompilationError::SemanticInvariant {
                 invariant: "binding identity indexes its realm-global mapping",
@@ -401,11 +408,50 @@ impl<'plan> RealmGlobalLayoutBuilder<'plan> {
                 span: Some(first_span),
             });
         }
-        let with_objects = if binding.placement() == StoragePlacement::GlobalObject {
-            self.direct_with_objects_before_variable_environment()
+        // Annex B.3.4 skips a matching catch parameter while checking whether
+        // eval declarations may cross lexical environments. Instantiation still
+        // targets `varEnv`, but identifier resolution (including a `var`
+        // initializer) starts at `lexEnv` and therefore reaches the catch cell.
+        let direct_catch = (binding.placement() == StoragePlacement::GlobalObject)
+            .then(|| self.direct_by_name.get(&name).copied())
+            .flatten()
+            .filter(|caller| caller.policy.kind() == CompilerBindingKind::Catch);
+        let (reference, with_objects) = if let Some(caller) = direct_catch {
+            let reference = self.push_binding(RealmGlobalBinding {
+                name: Arc::clone(&name),
+                first_span,
+                policy: caller.policy,
+                binding: CompilerClosureBinding::Captured(caller.policy),
+                root_source: RealmGlobalRootSource::DirectEvalBinding {
+                    index: caller.index,
+                },
+                declaration: None,
+            })?;
+            (
+                Some(reference),
+                self.direct_with_objects_before(Some(caller.index)),
+            )
+        } else if binding.placement() == StoragePlacement::GlobalObject {
+            (None, self.direct_with_objects_before_variable_environment())
         } else {
-            Vec::new()
+            (None, Vec::new())
         };
+        if let Some(reference) = reference {
+            let mapping = self
+                .reference_by_binding
+                .get_mut(binding.id().index())
+                .ok_or(LeafCompilationError::SemanticInvariant {
+                    invariant: "binding identity indexes its direct-eval reference mapping",
+                    span: Some(first_span),
+                })?;
+            if mapping.replace(reference).is_some() {
+                return Err(LeafCompilationError::SemanticInvariant {
+                    invariant: "one direct-eval reference mapping per declared binding",
+                    span: Some(first_span),
+                });
+            }
+            self.push_need(binding.executable(), reference)?;
+        }
         let with_mapping = self.with_by_binding.get_mut(binding.id().index()).ok_or(
             LeafCompilationError::SemanticInvariant {
                 invariant: "declared binding indexes its ambient with-object mapping",
@@ -550,7 +596,20 @@ impl<'plan> RealmGlobalLayoutBuilder<'plan> {
                     span: Some(reference.span()),
                 },
             )?;
-            let with_objects = if binding.placement() == StoragePlacement::GlobalObject {
+            let reference_global = self
+                .reference_by_binding
+                .get(reference.binding().index())
+                .copied()
+                .flatten();
+            let with_objects = if reference_global.is_some() {
+                self.with_by_binding
+                    .get(reference.binding().index())
+                    .cloned()
+                    .ok_or(LeafCompilationError::SemanticInvariant {
+                        invariant: "resolved binding indexes its direct-eval with-object mapping",
+                        span: Some(reference.span()),
+                    })?
+            } else if binding.placement() == StoragePlacement::GlobalObject {
                 self.direct_with_objects_before_variable_environment()
             } else {
                 Vec::new()
@@ -573,12 +632,12 @@ impl<'plan> RealmGlobalLayoutBuilder<'plan> {
             for object in with_objects {
                 self.push_need(reference.executable(), object)?;
             }
-            let Some(global) = self
-                .by_binding
-                .get(reference.binding().index())
-                .copied()
-                .flatten()
-            else {
+            let Some(global) = reference_global.or_else(|| {
+                self.by_binding
+                    .get(reference.binding().index())
+                    .copied()
+                    .flatten()
+            }) else {
                 continue;
             };
             self.push_need(reference.executable(), global)?;
@@ -645,6 +704,7 @@ impl<'plan> RealmGlobalLayoutBuilder<'plan> {
         Ok(RealmGlobalLayout {
             bindings: self.bindings.into_boxed_slice(),
             by_binding: self.by_binding.into_boxed_slice(),
+            reference_by_binding: self.reference_by_binding.into_boxed_slice(),
             by_unresolved: self.by_unresolved.into_boxed_slice(),
             import_ranges: import_ranges.into_boxed_slice(),
             imports: imports.into_boxed_slice(),
@@ -674,6 +734,7 @@ impl RealmGlobalLayout {
             return Ok(Self {
                 bindings: Box::default(),
                 by_binding: vec![None; plan.bindings().len()].into_boxed_slice(),
+                reference_by_binding: vec![None; plan.bindings().len()].into_boxed_slice(),
                 by_unresolved: vec![None; plan.unresolved_globals().len()].into_boxed_slice(),
                 import_ranges: vec![0..0; plan.executables().len()].into_boxed_slice(),
                 imports: Box::default(),
@@ -704,6 +765,17 @@ impl RealmGlobalLayout {
 
     pub(in crate::lowering) fn for_binding(&self, id: BindingId) -> Option<RealmGlobalId> {
         self.by_binding.get(id.index()).copied().flatten()
+    }
+
+    pub(in crate::lowering) fn for_binding_reference(
+        &self,
+        id: BindingId,
+    ) -> Option<RealmGlobalId> {
+        self.reference_by_binding
+            .get(id.index())
+            .copied()
+            .flatten()
+            .or_else(|| self.for_binding(id))
     }
 
     pub(in crate::lowering) fn with_objects_for_binding(&self, id: BindingId) -> &[RealmGlobalId] {
