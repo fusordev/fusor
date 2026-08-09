@@ -3187,6 +3187,33 @@ fn finish_operator_primitive_target(
                 execution_budget,
             )
         }
+        OperatorPrimitiveTarget::IntlPluralRulesConstructor(state) => {
+            advance_intl_plural_rules_constructor(
+                runtime,
+                *state,
+                Some(value),
+                return_to,
+                execution_budget,
+            )
+        }
+        OperatorPrimitiveTarget::IntlPluralRulesSupportedLocalesOf(state) => {
+            advance_intl_plural_rules_supported_locales(
+                runtime,
+                *state,
+                Some(value),
+                return_to,
+                execution_budget,
+            )
+        }
+        OperatorPrimitiveTarget::IntlPluralRulesValue(state) => {
+            finish_intl_plural_rules_value_primitive(
+                runtime,
+                *state,
+                value,
+                return_to,
+                execution_budget,
+            )
+        }
         OperatorPrimitiveTarget::IntlCollatorCompareFirst(state) => {
             finish_intl_collator_compare_first(runtime, *state, value, return_to, execution_budget)
         }

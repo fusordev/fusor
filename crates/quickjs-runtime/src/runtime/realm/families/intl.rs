@@ -15,7 +15,7 @@ use crate::runtime::realm::{
 };
 use crate::runtime::{
     IntlCollatorPrototypeMethod, IntlDateTimeFormatPrototypeMethod, IntlLocalePrototypeMethod,
-    IntlNumberFormatPrototypeMethod,
+    IntlNumberFormatPrototypeMethod, IntlPluralRulesPrototypeMethod,
 };
 
 pub(super) fn visit_objects(visit: ObjectSink<'_>) {
@@ -24,6 +24,7 @@ pub(super) fn visit_objects(visit: ObjectSink<'_>) {
         IntrinsicObjectId::IntlCollatorPrototype,
         IntrinsicObjectId::IntlNumberFormatPrototype,
         IntrinsicObjectId::IntlDateTimeFormatPrototype,
+        IntrinsicObjectId::IntlPluralRulesPrototype,
         IntrinsicObjectId::IntlLocalePrototype,
     ] {
         visit(object(
@@ -131,6 +132,23 @@ pub(super) fn visit_functions(visit: FunctionSink<'_>) {
         1,
     ));
     visit(ordinary(
+        NativeFunctionKind::IntlPluralRulesConstructor,
+        IntrinsicNameSpec::RealmName(RealmNameId::IntlPluralRules),
+        0,
+    ));
+    visit(ordinary(
+        NativeFunctionKind::IntlPluralRulesSupportedLocalesOf,
+        IntrinsicNameSpec::RealmName(RealmNameId::IntlPluralRulesSupportedLocalesOf),
+        1,
+    ));
+    for method in IntlPluralRulesPrototypeMethod::ALL {
+        visit(ordinary(
+            NativeFunctionKind::IntlPluralRulesPrototype(method),
+            IntrinsicNameSpec::RealmName(RealmNameId::IntlPluralRulesPrototype(method)),
+            method.length(),
+        ));
+    }
+    visit(ordinary(
         NativeFunctionKind::IntlLocaleConstructor,
         IntrinsicNameSpec::RealmName(RealmNameId::Locale),
         1,
@@ -171,6 +189,11 @@ pub(super) fn visit_properties(visit: PropertySink<'_>) {
     ));
     let date_time_format_prototype =
         IntrinsicIdentity::Object(IntrinsicObjectId::IntlDateTimeFormatPrototype);
+    let plural_rules_constructor = IntrinsicIdentity::Function(IntrinsicFunctionId(
+        NativeFunctionKind::IntlPluralRulesConstructor,
+    ));
+    let plural_rules_prototype =
+        IntrinsicIdentity::Object(IntrinsicObjectId::IntlPluralRulesPrototype);
     let locale_constructor = IntrinsicIdentity::Function(IntrinsicFunctionId(
         NativeFunctionKind::IntlLocaleConstructor,
     ));
@@ -194,6 +217,11 @@ pub(super) fn visit_properties(visit: PropertySink<'_>) {
         intl,
         IntrinsicKeySpec::InternedString(RealmNameId::IntlDateTimeFormat),
         NativeFunctionKind::IntlDateTimeFormatConstructor,
+    ));
+    visit(method(
+        intl,
+        IntrinsicKeySpec::InternedString(RealmNameId::IntlPluralRules),
+        NativeFunctionKind::IntlPluralRulesConstructor,
     ));
     visit(method(
         intl,
@@ -347,6 +375,36 @@ pub(super) fn visit_properties(visit: PropertySink<'_>) {
         IntrinsicKeySpec::WellKnownSymbol(PredefinedAtom::SymbolToStringTag),
         PropertyLayout::data(false, false, true),
         IntrinsicValueSpec::String(IntrinsicStringSpec::Literal("Intl.DateTimeFormat")),
+    ));
+
+    visit(data(
+        plural_rules_constructor,
+        IntrinsicKeySpec::PredefinedString(PredefinedAtom::Prototype),
+        CONSTRUCTOR_PROTOTYPE_PROPERTY,
+        IntrinsicValueSpec::Object(IntrinsicObjectId::IntlPluralRulesPrototype),
+    ));
+    visit(method(
+        plural_rules_constructor,
+        IntrinsicKeySpec::InternedString(RealmNameId::IntlPluralRulesSupportedLocalesOf),
+        NativeFunctionKind::IntlPluralRulesSupportedLocalesOf,
+    ));
+    visit(method(
+        plural_rules_prototype,
+        IntrinsicKeySpec::PredefinedString(PredefinedAtom::Constructor),
+        NativeFunctionKind::IntlPluralRulesConstructor,
+    ));
+    for method_id in IntlPluralRulesPrototypeMethod::ALL {
+        visit(method(
+            plural_rules_prototype,
+            IntrinsicKeySpec::InternedString(RealmNameId::IntlPluralRulesPrototype(method_id)),
+            NativeFunctionKind::IntlPluralRulesPrototype(method_id),
+        ));
+    }
+    visit(data(
+        plural_rules_prototype,
+        IntrinsicKeySpec::WellKnownSymbol(PredefinedAtom::SymbolToStringTag),
+        PropertyLayout::data(false, false, true),
+        IntrinsicValueSpec::String(IntrinsicStringSpec::Literal("Intl.PluralRules")),
     ));
 
     visit(data(

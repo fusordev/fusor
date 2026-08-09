@@ -427,6 +427,53 @@ fn number_format_notations_localized_specials_and_part_boundaries_are_spec_shape
 }
 
 #[test]
+fn plural_rules_constructor_options_and_resolved_slots_are_spec_shaped() {
+    assert_eq!(
+        rendered(
+            "var names=['localeMatcher','type','notation','compactDisplay','minimumIntegerDigits',
+               'minimumFractionDigits','maximumFractionDigits','minimumSignificantDigits',
+               'maximumSignificantDigits','roundingIncrement','roundingMode','roundingPriority',
+               'trailingZeroDisplay'];
+             var values={localeMatcher:'lookup',type:'cardinal',notation:'compact',compactDisplay:'long',
+               minimumIntegerDigits:1,minimumFractionDigits:0,maximumFractionDigits:2,
+               roundingIncrement:1,roundingMode:'halfEven',roundingPriority:'auto',
+               trailingZeroDisplay:'auto'};
+             var log=[];var options={};names.forEach(function(name){
+               Object.defineProperty(options,name,{get:function(){log.push(name);return values[name]}})});
+             var pr=new Intl.PluralRules('fr-u-nu-arab',options);var ro=pr.resolvedOptions();
+             var d=Object.getOwnPropertyDescriptor(Intl.PluralRules.prototype,'selectRange');
+             return [Intl.PluralRules.length,Intl.PluralRules.name,
+               Object.getPrototypeOf(pr)===Intl.PluralRules.prototype,
+               Object.keys(ro).join(','),ro.locale,ro.type,ro.notation,ro.compactDisplay,
+               ro.pluralCategories.join(','),ro.roundingMode,d.value.length,
+               d.writable,d.enumerable,d.configurable,log.join(',')].join('|');"
+        ),
+        "0|PluralRules|true|locale,type,notation,compactDisplay,minimumIntegerDigits,minimumFractionDigits,maximumFractionDigits,pluralCategories,roundingIncrement,roundingMode,roundingPriority,trailingZeroDisplay|fr|cardinal|compact|long|one,many,other|halfEven|2|true|false|true|localeMatcher,type,notation,compactDisplay,minimumIntegerDigits,minimumFractionDigits,maximumFractionDigits,minimumSignificantDigits,maximumSignificantDigits,roundingIncrement,roundingMode,roundingPriority,trailingZeroDisplay"
+    );
+}
+
+#[test]
+fn plural_rules_selection_ranges_and_operand_coercions_are_spec_shaped() {
+    assert_eq!(
+        rendered(
+            "var standard=new Intl.PluralRules('fr');
+             var compact=new Intl.PluralRules('fr',{notation:'compact'});
+             var range=new Intl.PluralRules('en-US');var log=[];
+             var first={valueOf:function(){log.push('first');return 102}};
+             var second={valueOf:function(){log.push('second');return 201}};
+             var nan,missing,brand;
+             try{range.selectRange(NaN,1)}catch(error){nan=error.name}
+             try{range.selectRange(undefined,1)}catch(error){missing=error.name}
+             try{range.select.call({},{})}catch(error){brand=error.name}
+             return [standard.select(1500000),compact.select(1500000),
+               range.select(Infinity),range.selectRange(first,second),
+               range.selectRange(201,102),log.join(','),nan,missing,brand].join('|');"
+        ),
+        "other|many|other|other|other|first,second|RangeError|TypeError|TypeError"
+    );
+}
+
+#[test]
 fn date_time_format_constructor_reads_options_in_normative_order() {
     assert_eq!(
         rendered(

@@ -16,15 +16,17 @@ use quickjs_intl::{
     NumberFormatCurrencySign, NumberFormatError, NumberFormatNotation, NumberFormatRequestOptions,
     NumberFormatRoundingMode, NumberFormatRoundingPriority, NumberFormatSignDisplay,
     NumberFormatState, NumberFormatStyle, NumberFormatTrailingZeroDisplay, NumberFormatUnitDisplay,
-    NumberFormatUseGrouping, apply_locale_options, calendars_of_locale, canonicalize_locale,
-    canonicalize_locale_option, canonicalize_time_zone, collations_of_locale,
-    collator_supported_locales, compare_with_collator, date_time_format_supported_locales,
-    format_datetime, format_datetime_to_parts, format_number, format_number_to_parts,
-    hour_cycles_of_locale, intl_mathematical_value_from_f64, is_well_formed_currency_code,
-    is_well_formed_unit_identifier, locale_components, maximize_locale, minimize_locale,
-    number_format_supported_locales, numbering_systems_of_locale, parse_intl_mathematical_value,
-    resolve_collator, resolve_date_time_format, resolve_number_format, supported_values,
-    text_direction_of_locale, time_zones_of_locale, week_info_of_locale,
+    NumberFormatUseGrouping, PluralRuleType, PluralRulesRequestOptions, PluralRulesState,
+    apply_locale_options, calendars_of_locale, canonicalize_locale, canonicalize_locale_option,
+    canonicalize_time_zone, collations_of_locale, collator_supported_locales,
+    compare_with_collator, date_time_format_supported_locales, format_datetime,
+    format_datetime_to_parts, format_number, format_number_to_parts, hour_cycles_of_locale,
+    intl_mathematical_value_from_f64, is_well_formed_currency_code, is_well_formed_unit_identifier,
+    locale_components, maximize_locale, minimize_locale, number_format_supported_locales,
+    numbering_systems_of_locale, parse_intl_mathematical_value, plural_rules_supported_locales,
+    resolve_collator, resolve_date_time_format, resolve_number_format, resolve_plural_rules,
+    select_plural, select_plural_range, supported_values, text_direction_of_locale,
+    time_zones_of_locale, week_info_of_locale,
 };
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -161,6 +163,8 @@ enum IntlLocaleListTarget {
     NumberFormatSupportedLocalesOf(Box<IntlNumberFormatSupportedLocalesContinuation>),
     DateTimeFormatConstructor(Box<IntlDateTimeFormatConstructorContinuation>),
     DateTimeFormatSupportedLocalesOf(Box<IntlDateTimeFormatSupportedLocalesContinuation>),
+    PluralRulesConstructor(Box<IntlPluralRulesConstructorContinuation>),
+    PluralRulesSupportedLocalesOf(Box<IntlPluralRulesSupportedLocalesContinuation>),
 }
 
 impl IntlLocaleListTarget {
@@ -173,6 +177,8 @@ impl IntlLocaleListTarget {
             Self::NumberFormatSupportedLocalesOf(state) => state.retained_values(),
             Self::DateTimeFormatConstructor(state) => state.retained_values(),
             Self::DateTimeFormatSupportedLocalesOf(state) => state.retained_values(),
+            Self::PluralRulesConstructor(state) => state.retained_values(),
+            Self::PluralRulesSupportedLocalesOf(state) => state.retained_values(),
         }
     }
 
@@ -185,6 +191,8 @@ impl IntlLocaleListTarget {
             Self::NumberFormatSupportedLocalesOf(state) => state.trace_roots(mark),
             Self::DateTimeFormatConstructor(state) => state.trace_roots(mark),
             Self::DateTimeFormatSupportedLocalesOf(state) => state.trace_roots(mark),
+            Self::PluralRulesConstructor(state) => state.trace_roots(mark),
+            Self::PluralRulesSupportedLocalesOf(state) => state.trace_roots(mark),
         }
     }
 }
@@ -579,6 +587,183 @@ impl IntlNumberFormatUnwrapContinuation {
 
     pub(super) fn trace_roots(&self, mark: &mut dyn FnMut(CollectionRoot)) {
         trace_stored_value_root(&self.receiver, mark);
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum IntlPluralRulesConstructorStage {
+    ReadOption,
+    AwaitOption,
+    AwaitOptionPrimitive,
+    ConvertRawDigit,
+    AwaitRawDigitPrimitive,
+    AwaitPrototype,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum IntlPluralRulesOption {
+    LocaleMatcher,
+    Type,
+    Notation,
+    CompactDisplay,
+    MinimumIntegerDigits,
+    MinimumFractionDigits,
+    MaximumFractionDigits,
+    MinimumSignificantDigits,
+    MaximumSignificantDigits,
+    RoundingIncrement,
+    RoundingMode,
+    RoundingPriority,
+    TrailingZeroDisplay,
+}
+
+impl IntlPluralRulesOption {
+    const ALL: [Self; 13] = [
+        Self::LocaleMatcher,
+        Self::Type,
+        Self::Notation,
+        Self::CompactDisplay,
+        Self::MinimumIntegerDigits,
+        Self::MinimumFractionDigits,
+        Self::MaximumFractionDigits,
+        Self::MinimumSignificantDigits,
+        Self::MaximumSignificantDigits,
+        Self::RoundingIncrement,
+        Self::RoundingMode,
+        Self::RoundingPriority,
+        Self::TrailingZeroDisplay,
+    ];
+
+    const fn name(self) -> &'static str {
+        match self {
+            Self::LocaleMatcher => "localeMatcher",
+            Self::Type => "type",
+            Self::Notation => "notation",
+            Self::CompactDisplay => "compactDisplay",
+            Self::MinimumIntegerDigits => "minimumIntegerDigits",
+            Self::MinimumFractionDigits => "minimumFractionDigits",
+            Self::MaximumFractionDigits => "maximumFractionDigits",
+            Self::MinimumSignificantDigits => "minimumSignificantDigits",
+            Self::MaximumSignificantDigits => "maximumSignificantDigits",
+            Self::RoundingIncrement => "roundingIncrement",
+            Self::RoundingMode => "roundingMode",
+            Self::RoundingPriority => "roundingPriority",
+            Self::TrailingZeroDisplay => "trailingZeroDisplay",
+        }
+    }
+
+    const fn raw_digit_index(self) -> Option<usize> {
+        match self {
+            Self::MinimumFractionDigits => Some(0),
+            Self::MaximumFractionDigits => Some(1),
+            Self::MinimumSignificantDigits => Some(2),
+            Self::MaximumSignificantDigits => Some(3),
+            _ => None,
+        }
+    }
+
+    const fn is_immediate_number(self) -> bool {
+        matches!(self, Self::MinimumIntegerDigits | Self::RoundingIncrement)
+    }
+}
+
+pub(super) struct IntlPluralRulesConstructorContinuation {
+    new_target: FunctionId,
+    options_argument: StoredValue,
+    options_object: Option<StoredValue>,
+    requested_locales: Vec<String>,
+    options: PluralRulesRequestOptions,
+    raw_digits: [Option<StoredValue>; 4],
+    resolved: Option<PluralRulesState>,
+    option_index: usize,
+    raw_digit_index: usize,
+    realm: RealmId,
+    stage: IntlPluralRulesConstructorStage,
+    origin: JsStackFrame,
+}
+
+impl IntlPluralRulesConstructorContinuation {
+    pub(super) fn retained_values(&self) -> u64 {
+        2_u64
+            .saturating_add(u64::from(self.options_object.is_some()))
+            .saturating_add(
+                self.raw_digits
+                    .iter()
+                    .filter(|value| value.is_some())
+                    .count() as u64,
+            )
+    }
+
+    pub(super) fn trace_roots(&self, mark: &mut dyn FnMut(CollectionRoot)) {
+        mark(CollectionRoot::Heap(HeapReference::Function(
+            self.new_target,
+        )));
+        trace_stored_value_root(&self.options_argument, mark);
+        if let Some(options) = &self.options_object {
+            trace_stored_value_root(options, mark);
+        }
+        for value in self.raw_digits.iter().flatten() {
+            trace_stored_value_root(value, mark);
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum IntlPluralRulesSupportedLocalesStage {
+    ReadLocaleMatcher,
+    AwaitLocaleMatcher,
+    AwaitLocaleMatcherPrimitive,
+}
+
+pub(super) struct IntlPluralRulesSupportedLocalesContinuation {
+    options_argument: StoredValue,
+    options_object: Option<StoredValue>,
+    requested_locales: Vec<String>,
+    realm: RealmId,
+    stage: IntlPluralRulesSupportedLocalesStage,
+    origin: JsStackFrame,
+}
+
+impl IntlPluralRulesSupportedLocalesContinuation {
+    pub(super) fn retained_values(&self) -> u64 {
+        1_u64.saturating_add(u64::from(self.options_object.is_some()))
+    }
+
+    pub(super) fn trace_roots(&self, mark: &mut dyn FnMut(CollectionRoot)) {
+        trace_stored_value_root(&self.options_argument, mark);
+        if let Some(options) = &self.options_object {
+            trace_stored_value_root(options, mark);
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum IntlPluralRulesOperation {
+    Select,
+    SelectRange,
+}
+
+pub(super) struct IntlPluralRulesValueContinuation {
+    plural_rules: ObjectId,
+    operation: IntlPluralRulesOperation,
+    second: Option<StoredValue>,
+    first: Option<IntlMathematicalValue>,
+    realm: RealmId,
+    origin: JsStackFrame,
+}
+
+impl IntlPluralRulesValueContinuation {
+    pub(super) fn retained_values(&self) -> u64 {
+        1_u64.saturating_add(u64::from(self.second.is_some()))
+    }
+
+    pub(super) fn trace_roots(&self, mark: &mut dyn FnMut(CollectionRoot)) {
+        mark(CollectionRoot::Heap(HeapReference::Object(
+            self.plural_rules,
+        )));
+        if let Some(second) = &self.second {
+            trace_stored_value_root(second, mark);
+        }
     }
 }
 
@@ -3906,6 +4091,949 @@ fn intl_number_format_brand_error<T>(
     )
 }
 
+pub(super) fn begin_intl_plural_rules_constructor(
+    runtime: &mut Runtime,
+    mut inputs: CallInputs,
+    realm: RealmId,
+    return_to: Option<CallReturn>,
+    origin: JsStackFrame,
+    execution_budget: &mut ExecutionBudget,
+) -> Result<NativeDispatch, NativeFailure> {
+    let Some(new_target) = inputs.new_target else {
+        return intl_locale_list_error(
+            realm,
+            origin,
+            ExceptionKind::TypeError,
+            "Intl.PluralRules requires 'new'",
+        );
+    };
+    let locales = inputs.arguments.take_first_or_undefined();
+    let options_argument = inputs.arguments.take_first_or_undefined();
+    let state = IntlPluralRulesConstructorContinuation {
+        new_target,
+        options_argument,
+        options_object: None,
+        requested_locales: Vec::new(),
+        options: PluralRulesRequestOptions::default(),
+        raw_digits: core::array::from_fn(|_| None),
+        resolved: None,
+        option_index: 0,
+        raw_digit_index: 0,
+        realm,
+        stage: IntlPluralRulesConstructorStage::ReadOption,
+        origin: origin.clone(),
+    };
+    begin_intl_locale_list(
+        runtime,
+        locales,
+        IntlLocaleListTarget::PluralRulesConstructor(Box::new(state)),
+        realm,
+        return_to,
+        origin,
+        execution_budget,
+    )
+}
+
+fn begin_intl_plural_rules_options(
+    runtime: &mut Runtime,
+    mut state: IntlPluralRulesConstructorContinuation,
+    return_to: Option<CallReturn>,
+    execution_budget: &mut ExecutionBudget,
+) -> Result<NativeDispatch, NativeFailure> {
+    if matches!(state.options_argument, StoredValue::Undefined) {
+        state.stage = IntlPluralRulesConstructorStage::ConvertRawDigit;
+        return advance_intl_plural_rules_constructor(
+            runtime,
+            state,
+            None,
+            return_to,
+            execution_budget,
+        );
+    }
+    let options_argument = state.options_argument.duplicate();
+    state.options_object = Some(
+        match to_object_value(runtime, state.realm, options_argument, state.origin.clone())? {
+            Ok(options) => options,
+            Err(exception) => return Err(NativeFailure::Abrupt(exception)),
+        },
+    );
+    advance_intl_plural_rules_constructor(runtime, state, None, return_to, execution_budget)
+}
+
+#[allow(
+    clippy::too_many_lines,
+    reason = "PluralRules option Gets and delayed digit conversions remain in normative observable order"
+)]
+pub(super) fn advance_intl_plural_rules_constructor(
+    runtime: &mut Runtime,
+    mut state: IntlPluralRulesConstructorContinuation,
+    completion: Option<StoredValue>,
+    return_to: Option<CallReturn>,
+    execution_budget: &mut ExecutionBudget,
+) -> Result<NativeDispatch, NativeFailure> {
+    let mut completion = completion;
+    loop {
+        match state.stage {
+            IntlPluralRulesConstructorStage::ReadOption => {
+                let Some(option) = IntlPluralRulesOption::ALL.get(state.option_index).copied()
+                else {
+                    state.stage = IntlPluralRulesConstructorStage::ConvertRawDigit;
+                    continue;
+                };
+                let base = state
+                    .options_object
+                    .as_ref()
+                    .ok_or(EngineFault::RuntimeInvariant {
+                        message: "Intl.PluralRules option iteration lost its options object",
+                    })?
+                    .duplicate();
+                charge_heap_property_lookup(runtime, &base, execution_budget)?;
+                let name = JsString::from_utf8(option.name())?;
+                let key = runtime.property_key_from_string(&name)?;
+                state.stage = IntlPluralRulesConstructorStage::AwaitOption;
+                let dispatch = begin_value_get(
+                    runtime,
+                    &base,
+                    key,
+                    Some(&name),
+                    state.realm,
+                    return_to,
+                    state.origin.clone(),
+                    execution_budget,
+                )?;
+                return continue_intl_plural_rules_constructor_after(
+                    dispatch,
+                    state,
+                    runtime,
+                    return_to,
+                    execution_budget,
+                );
+            }
+            IntlPluralRulesConstructorStage::AwaitOption => {
+                let value = take_intl_plural_rules_constructor_completion(&mut completion)?;
+                let option = IntlPluralRulesOption::ALL[state.option_index];
+                if matches!(value, StoredValue::Undefined) {
+                    advance_intl_plural_rules_option(&mut state);
+                    continue;
+                }
+                if let Some(index) = option.raw_digit_index() {
+                    state.raw_digits[index] = Some(value);
+                    advance_intl_plural_rules_option(&mut state);
+                    continue;
+                }
+                if matches!(value, StoredValue::Function(_) | StoredValue::Object(_)) {
+                    state.stage = IntlPluralRulesConstructorStage::AwaitOptionPrimitive;
+                    let hint = if option.is_immediate_number() {
+                        OperatorPrimitiveHint::Number
+                    } else {
+                        OperatorPrimitiveHint::String
+                    };
+                    let realm = state.realm;
+                    let origin = state.origin.clone();
+                    return begin_operator_primitive_conversion(
+                        runtime,
+                        value,
+                        hint,
+                        OperatorPrimitiveTarget::IntlPluralRulesConstructor(Box::new(state)),
+                        realm,
+                        return_to,
+                        origin,
+                        execution_budget,
+                    );
+                }
+                store_intl_plural_rules_option(&mut state, option, value)?;
+                advance_intl_plural_rules_option(&mut state);
+            }
+            IntlPluralRulesConstructorStage::AwaitOptionPrimitive => {
+                let value = take_intl_plural_rules_constructor_completion(&mut completion)?;
+                let option = IntlPluralRulesOption::ALL[state.option_index];
+                store_intl_plural_rules_option(&mut state, option, value)?;
+                advance_intl_plural_rules_option(&mut state);
+            }
+            IntlPluralRulesConstructorStage::ConvertRawDigit => {
+                let Some(value) = state
+                    .raw_digits
+                    .get_mut(state.raw_digit_index)
+                    .and_then(Option::take)
+                else {
+                    state.raw_digit_index = state.raw_digit_index.saturating_add(1);
+                    if state.raw_digit_index >= state.raw_digits.len() {
+                        return finish_intl_plural_rules_options(
+                            runtime,
+                            state,
+                            return_to,
+                            execution_budget,
+                        );
+                    }
+                    continue;
+                };
+                if matches!(value, StoredValue::Function(_) | StoredValue::Object(_)) {
+                    state.stage = IntlPluralRulesConstructorStage::AwaitRawDigitPrimitive;
+                    let realm = state.realm;
+                    let origin = state.origin.clone();
+                    return begin_operator_primitive_conversion(
+                        runtime,
+                        value,
+                        OperatorPrimitiveHint::Number,
+                        OperatorPrimitiveTarget::IntlPluralRulesConstructor(Box::new(state)),
+                        realm,
+                        return_to,
+                        origin,
+                        execution_budget,
+                    );
+                }
+                store_intl_plural_rules_raw_digit(&mut state, value)?;
+                state.raw_digit_index = state.raw_digit_index.saturating_add(1);
+            }
+            IntlPluralRulesConstructorStage::AwaitRawDigitPrimitive => {
+                let value = take_intl_plural_rules_constructor_completion(&mut completion)?;
+                store_intl_plural_rules_raw_digit(&mut state, value)?;
+                state.raw_digit_index = state.raw_digit_index.saturating_add(1);
+                state.stage = IntlPluralRulesConstructorStage::ConvertRawDigit;
+            }
+            IntlPluralRulesConstructorStage::AwaitPrototype => {
+                let requested = take_intl_plural_rules_constructor_completion(&mut completion)?;
+                let prototype = match requested {
+                    StoredValue::Function(function) => HeapReference::Function(function),
+                    StoredValue::Object(object) => HeapReference::Object(object),
+                    StoredValue::Undefined
+                    | StoredValue::Null
+                    | StoredValue::Boolean(_)
+                    | StoredValue::Number(_)
+                    | StoredValue::BigInt(_)
+                    | StoredValue::String(_)
+                    | StoredValue::Symbol(_) => {
+                        let target_realm = runtime.function_realm(state.new_target)?;
+                        HeapReference::Object(
+                            runtime.realm_intl_plural_rules_prototype(target_realm)?,
+                        )
+                    }
+                };
+                let resolved = state.resolved.take().ok_or(EngineFault::RuntimeInvariant {
+                    message: "Intl.PluralRules allocation lost its resolved slots",
+                })?;
+                let object = runtime.allocate_intl_plural_rules(prototype, resolved)?;
+                return Ok(NativeDispatch::Immediate(StoredValue::Object(object)));
+            }
+        }
+    }
+}
+
+fn advance_intl_plural_rules_option(state: &mut IntlPluralRulesConstructorContinuation) {
+    state.option_index = state.option_index.saturating_add(1);
+    state.stage = IntlPluralRulesConstructorStage::ReadOption;
+}
+
+fn store_intl_plural_rules_option(
+    state: &mut IntlPluralRulesConstructorContinuation,
+    option: IntlPluralRulesOption,
+    value: StoredValue,
+) -> Result<(), NativeFailure> {
+    if option.is_immediate_number() {
+        let number = operator_to_number(value, state.realm, &state.origin)?.as_f64();
+        return match option {
+            IntlPluralRulesOption::MinimumIntegerDigits => {
+                state.options.minimum_integer_digits =
+                    Some(plural_rules_number_option_u8(state, option, number, 1, 21)?);
+                Ok(())
+            }
+            IntlPluralRulesOption::RoundingIncrement => {
+                let rounded = plural_rules_number_option_u16(state, option, number, 1, 5000)?;
+                if !ALLOWED_NUMBER_FORMAT_ROUNDING_INCREMENTS.contains(&rounded) {
+                    return invalid_intl_plural_rules_option(state, option);
+                }
+                state.options.rounding_increment = Some(rounded);
+                Ok(())
+            }
+            _ => Err(EngineFault::RuntimeInvariant {
+                message: "non-numeric PluralRules option reached numeric storage",
+            }
+            .into()),
+        };
+    }
+
+    let text = operator_primitive_to_string(value, state.realm, &state.origin)?;
+    let text = text.to_utf8_lossy()?;
+    match option {
+        IntlPluralRulesOption::LocaleMatcher => {
+            if !matches!(text.as_str(), "lookup" | "best fit") {
+                return invalid_intl_plural_rules_option(state, option);
+            }
+        }
+        IntlPluralRulesOption::Type => {
+            state.options.rule_type = Some(match text.as_str() {
+                "cardinal" => PluralRuleType::Cardinal,
+                "ordinal" => PluralRuleType::Ordinal,
+                _ => return invalid_intl_plural_rules_option(state, option),
+            });
+        }
+        IntlPluralRulesOption::Notation => {
+            state.options.notation = Some(match text.as_str() {
+                "standard" => NumberFormatNotation::Standard,
+                "scientific" => NumberFormatNotation::Scientific,
+                "engineering" => NumberFormatNotation::Engineering,
+                "compact" => NumberFormatNotation::Compact,
+                _ => return invalid_intl_plural_rules_option(state, option),
+            });
+        }
+        IntlPluralRulesOption::CompactDisplay => {
+            state.options.compact_display = Some(match text.as_str() {
+                "short" => NumberFormatCompactDisplay::Short,
+                "long" => NumberFormatCompactDisplay::Long,
+                _ => return invalid_intl_plural_rules_option(state, option),
+            });
+        }
+        IntlPluralRulesOption::RoundingMode => {
+            state.options.rounding_mode = Some(match text.as_str() {
+                "ceil" => NumberFormatRoundingMode::Ceil,
+                "floor" => NumberFormatRoundingMode::Floor,
+                "expand" => NumberFormatRoundingMode::Expand,
+                "trunc" => NumberFormatRoundingMode::Trunc,
+                "halfCeil" => NumberFormatRoundingMode::HalfCeil,
+                "halfFloor" => NumberFormatRoundingMode::HalfFloor,
+                "halfExpand" => NumberFormatRoundingMode::HalfExpand,
+                "halfTrunc" => NumberFormatRoundingMode::HalfTrunc,
+                "halfEven" => NumberFormatRoundingMode::HalfEven,
+                _ => return invalid_intl_plural_rules_option(state, option),
+            });
+        }
+        IntlPluralRulesOption::RoundingPriority => {
+            state.options.rounding_priority = Some(match text.as_str() {
+                "auto" => NumberFormatRoundingPriority::Auto,
+                "morePrecision" => NumberFormatRoundingPriority::MorePrecision,
+                "lessPrecision" => NumberFormatRoundingPriority::LessPrecision,
+                _ => return invalid_intl_plural_rules_option(state, option),
+            });
+        }
+        IntlPluralRulesOption::TrailingZeroDisplay => {
+            state.options.trailing_zero_display = Some(match text.as_str() {
+                "auto" => NumberFormatTrailingZeroDisplay::Auto,
+                "stripIfInteger" => NumberFormatTrailingZeroDisplay::StripIfInteger,
+                _ => return invalid_intl_plural_rules_option(state, option),
+            });
+        }
+        IntlPluralRulesOption::MinimumIntegerDigits
+        | IntlPluralRulesOption::MinimumFractionDigits
+        | IntlPluralRulesOption::MaximumFractionDigits
+        | IntlPluralRulesOption::MinimumSignificantDigits
+        | IntlPluralRulesOption::MaximumSignificantDigits
+        | IntlPluralRulesOption::RoundingIncrement => {
+            return Err(EngineFault::RuntimeInvariant {
+                message: "a non-string PluralRules option reached string storage",
+            }
+            .into());
+        }
+    }
+    Ok(())
+}
+
+fn store_intl_plural_rules_raw_digit(
+    state: &mut IntlPluralRulesConstructorContinuation,
+    value: StoredValue,
+) -> Result<(), NativeFailure> {
+    let number = operator_to_number(value, state.realm, &state.origin)?.as_f64();
+    let (minimum, maximum) = if state.raw_digit_index < 2 {
+        (0, 100)
+    } else {
+        (1, 21)
+    };
+    let option = IntlPluralRulesOption::ALL[5 + state.raw_digit_index];
+    let value = plural_rules_number_option_u8(state, option, number, minimum, maximum)?;
+    match state.raw_digit_index {
+        0 => state.options.minimum_fraction_digits = Some(value),
+        1 => state.options.maximum_fraction_digits = Some(value),
+        2 => state.options.minimum_significant_digits = Some(value),
+        3 => state.options.maximum_significant_digits = Some(value),
+        _ => {
+            return Err(EngineFault::RuntimeInvariant {
+                message: "PluralRules raw digit index is out of range",
+            }
+            .into());
+        }
+    }
+    Ok(())
+}
+
+fn plural_rules_number_option_u8(
+    state: &IntlPluralRulesConstructorContinuation,
+    option: IntlPluralRulesOption,
+    number: f64,
+    minimum: u8,
+    maximum: u8,
+) -> Result<u8, NativeFailure> {
+    if !number.is_finite() || number < f64::from(minimum) || number > f64::from(maximum) {
+        return invalid_intl_plural_rules_option(state, option);
+    }
+    #[allow(
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss,
+        reason = "the finite value is bounded to the inclusive u8 option range above"
+    )]
+    let integer = number.floor() as u8;
+    Ok(integer)
+}
+
+fn plural_rules_number_option_u16(
+    state: &IntlPluralRulesConstructorContinuation,
+    option: IntlPluralRulesOption,
+    number: f64,
+    minimum: u16,
+    maximum: u16,
+) -> Result<u16, NativeFailure> {
+    if !number.is_finite() || number < f64::from(minimum) || number > f64::from(maximum) {
+        return invalid_intl_plural_rules_option(state, option);
+    }
+    #[allow(
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss,
+        reason = "the finite value is bounded to the inclusive u16 option range above"
+    )]
+    let integer = number.floor() as u16;
+    Ok(integer)
+}
+
+fn invalid_intl_plural_rules_option<T>(
+    state: &IntlPluralRulesConstructorContinuation,
+    option: IntlPluralRulesOption,
+) -> Result<T, NativeFailure> {
+    intl_locale_list_error(
+        state.realm,
+        state.origin.clone(),
+        ExceptionKind::RangeError,
+        &format!("invalid Intl.PluralRules {} option", option.name()),
+    )
+}
+
+fn finish_intl_plural_rules_options(
+    runtime: &mut Runtime,
+    mut state: IntlPluralRulesConstructorContinuation,
+    return_to: Option<CallReturn>,
+    execution_budget: &mut ExecutionBudget,
+) -> Result<NativeDispatch, NativeFailure> {
+    if state.options.rounding_increment.unwrap_or(1) != 1
+        && (matches!(
+            state.options.rounding_priority,
+            Some(
+                NumberFormatRoundingPriority::MorePrecision
+                    | NumberFormatRoundingPriority::LessPrecision
+            )
+        ) || state.options.minimum_significant_digits.is_some()
+            || state.options.maximum_significant_digits.is_some())
+    {
+        return intl_locale_list_error(
+            state.realm,
+            state.origin,
+            ExceptionKind::TypeError,
+            "roundingIncrement is incompatible with significant-digit rounding",
+        );
+    }
+    execution_budget
+        .charge_instructions(usize_to_u64(state.requested_locales.len()).saturating_add(1))?;
+    let resolved = resolve_plural_rules(&state.requested_locales, state.options).map_err(|_| {
+        NativeFailure::Abrupt(PendingException {
+            realm: state.realm,
+            payload: PendingExceptionPayload::EngineError {
+                kind: ExceptionKind::RangeError,
+                message: JsString::from_utf8("invalid Intl.PluralRules options")
+                    .expect("static Intl error message is valid"),
+            },
+            origin: state.origin.clone(),
+        })
+    })?;
+    state.resolved = Some(resolved);
+    state.stage = IntlPluralRulesConstructorStage::AwaitPrototype;
+    let base = StoredValue::Function(state.new_target);
+    charge_heap_property_lookup(runtime, &base, execution_budget)?;
+    let key = runtime.predefined_property_key(PredefinedAtom::Prototype);
+    let dispatch = begin_value_get(
+        runtime,
+        &base,
+        key,
+        None,
+        state.realm,
+        return_to,
+        state.origin.clone(),
+        execution_budget,
+    )?;
+    continue_intl_plural_rules_constructor_after(
+        dispatch,
+        state,
+        runtime,
+        return_to,
+        execution_budget,
+    )
+}
+
+fn continue_intl_plural_rules_constructor_after(
+    dispatch: NativeDispatch,
+    state: IntlPluralRulesConstructorContinuation,
+    runtime: &mut Runtime,
+    return_to: Option<CallReturn>,
+    execution_budget: &mut ExecutionBudget,
+) -> Result<NativeDispatch, NativeFailure> {
+    continue_get_after(
+        dispatch,
+        state,
+        |state| NativeContinuation::IntlPluralRulesConstructor(Box::new(state)),
+        |state, value| {
+            advance_intl_plural_rules_constructor(
+                runtime,
+                state,
+                Some(value),
+                return_to,
+                execution_budget,
+            )
+        },
+        "Intl.PluralRules property Get produced a structured result",
+    )
+}
+
+fn take_intl_plural_rules_constructor_completion(
+    completion: &mut Option<StoredValue>,
+) -> Result<StoredValue, EngineFault> {
+    completion.take().ok_or(EngineFault::RuntimeInvariant {
+        message: "Intl.PluralRules constructor resumed without a completion",
+    })
+}
+
+pub(super) fn begin_intl_plural_rules_supported_locales_of(
+    runtime: &mut Runtime,
+    mut arguments: CallArguments,
+    realm: RealmId,
+    return_to: Option<CallReturn>,
+    origin: JsStackFrame,
+    execution_budget: &mut ExecutionBudget,
+) -> Result<NativeDispatch, NativeFailure> {
+    let locales = arguments.take_first_or_undefined();
+    let options_argument = arguments.take_first_or_undefined();
+    let state = IntlPluralRulesSupportedLocalesContinuation {
+        options_argument,
+        options_object: None,
+        requested_locales: Vec::new(),
+        realm,
+        stage: IntlPluralRulesSupportedLocalesStage::ReadLocaleMatcher,
+        origin: origin.clone(),
+    };
+    begin_intl_locale_list(
+        runtime,
+        locales,
+        IntlLocaleListTarget::PluralRulesSupportedLocalesOf(Box::new(state)),
+        realm,
+        return_to,
+        origin,
+        execution_budget,
+    )
+}
+
+fn begin_intl_plural_rules_supported_locales_options(
+    runtime: &mut Runtime,
+    mut state: IntlPluralRulesSupportedLocalesContinuation,
+    return_to: Option<CallReturn>,
+    execution_budget: &mut ExecutionBudget,
+) -> Result<NativeDispatch, NativeFailure> {
+    if matches!(state.options_argument, StoredValue::Undefined) {
+        return finish_intl_plural_rules_supported_locales(runtime, &state);
+    }
+    let options_argument = state.options_argument.duplicate();
+    state.options_object = Some(
+        match to_object_value(runtime, state.realm, options_argument, state.origin.clone())? {
+            Ok(options) => options,
+            Err(exception) => return Err(NativeFailure::Abrupt(exception)),
+        },
+    );
+    advance_intl_plural_rules_supported_locales(runtime, state, None, return_to, execution_budget)
+}
+
+pub(super) fn advance_intl_plural_rules_supported_locales(
+    runtime: &mut Runtime,
+    mut state: IntlPluralRulesSupportedLocalesContinuation,
+    completion: Option<StoredValue>,
+    return_to: Option<CallReturn>,
+    execution_budget: &mut ExecutionBudget,
+) -> Result<NativeDispatch, NativeFailure> {
+    let mut completion = completion;
+    match state.stage {
+        IntlPluralRulesSupportedLocalesStage::ReadLocaleMatcher => {
+            let base = state
+                .options_object
+                .as_ref()
+                .ok_or(EngineFault::RuntimeInvariant {
+                    message: "Intl.PluralRules.supportedLocalesOf lost its options object",
+                })?
+                .duplicate();
+            charge_heap_property_lookup(runtime, &base, execution_budget)?;
+            let name = JsString::from_utf8("localeMatcher")?;
+            let key = runtime.property_key_from_string(&name)?;
+            state.stage = IntlPluralRulesSupportedLocalesStage::AwaitLocaleMatcher;
+            let dispatch = begin_value_get(
+                runtime,
+                &base,
+                key,
+                Some(&name),
+                state.realm,
+                return_to,
+                state.origin.clone(),
+                execution_budget,
+            )?;
+            continue_intl_plural_rules_supported_locales_after(
+                dispatch,
+                state,
+                runtime,
+                return_to,
+                execution_budget,
+            )
+        }
+        IntlPluralRulesSupportedLocalesStage::AwaitLocaleMatcher => {
+            let value = take_intl_plural_rules_supported_locales_completion(&mut completion)?;
+            if matches!(value, StoredValue::Undefined) {
+                return finish_intl_plural_rules_supported_locales(runtime, &state);
+            }
+            if matches!(value, StoredValue::Function(_) | StoredValue::Object(_)) {
+                state.stage = IntlPluralRulesSupportedLocalesStage::AwaitLocaleMatcherPrimitive;
+                let realm = state.realm;
+                let origin = state.origin.clone();
+                return begin_operator_primitive_conversion(
+                    runtime,
+                    value,
+                    OperatorPrimitiveHint::String,
+                    OperatorPrimitiveTarget::IntlPluralRulesSupportedLocalesOf(Box::new(state)),
+                    realm,
+                    return_to,
+                    origin,
+                    execution_budget,
+                );
+            }
+            validate_intl_plural_rules_locale_matcher(&state, value)?;
+            finish_intl_plural_rules_supported_locales(runtime, &state)
+        }
+        IntlPluralRulesSupportedLocalesStage::AwaitLocaleMatcherPrimitive => {
+            let value = take_intl_plural_rules_supported_locales_completion(&mut completion)?;
+            validate_intl_plural_rules_locale_matcher(&state, value)?;
+            finish_intl_plural_rules_supported_locales(runtime, &state)
+        }
+    }
+}
+
+fn validate_intl_plural_rules_locale_matcher(
+    state: &IntlPluralRulesSupportedLocalesContinuation,
+    value: StoredValue,
+) -> Result<(), NativeFailure> {
+    let text = operator_primitive_to_string(value, state.realm, &state.origin)?;
+    if matches!(text.to_utf8_lossy()?.as_str(), "lookup" | "best fit") {
+        return Ok(());
+    }
+    intl_locale_list_error(
+        state.realm,
+        state.origin.clone(),
+        ExceptionKind::RangeError,
+        "invalid Intl.PluralRules localeMatcher option",
+    )
+}
+
+fn finish_intl_plural_rules_supported_locales(
+    runtime: &mut Runtime,
+    state: &IntlPluralRulesSupportedLocalesContinuation,
+) -> Result<NativeDispatch, NativeFailure> {
+    intl_locale_string_array(
+        runtime,
+        state.realm,
+        plural_rules_supported_locales(&state.requested_locales),
+    )
+}
+
+fn continue_intl_plural_rules_supported_locales_after(
+    dispatch: NativeDispatch,
+    state: IntlPluralRulesSupportedLocalesContinuation,
+    runtime: &mut Runtime,
+    return_to: Option<CallReturn>,
+    execution_budget: &mut ExecutionBudget,
+) -> Result<NativeDispatch, NativeFailure> {
+    continue_get_after(
+        dispatch,
+        state,
+        |state| NativeContinuation::IntlPluralRulesSupportedLocalesOf(Box::new(state)),
+        |state, value| {
+            advance_intl_plural_rules_supported_locales(
+                runtime,
+                state,
+                Some(value),
+                return_to,
+                execution_budget,
+            )
+        },
+        "Intl.PluralRules.supportedLocalesOf Get produced a structured result",
+    )
+}
+
+fn take_intl_plural_rules_supported_locales_completion(
+    completion: &mut Option<StoredValue>,
+) -> Result<StoredValue, EngineFault> {
+    completion.take().ok_or(EngineFault::RuntimeInvariant {
+        message: "Intl.PluralRules.supportedLocalesOf resumed without a completion",
+    })
+}
+
+#[allow(
+    clippy::too_many_arguments,
+    reason = "native dispatch keeps receiver, arguments, realm, return target, origin, and budget explicit"
+)]
+pub(super) fn begin_intl_plural_rules_prototype(
+    runtime: &mut Runtime,
+    method: IntlPluralRulesPrototypeMethod,
+    receiver: &StoredValue,
+    mut arguments: CallArguments,
+    realm: RealmId,
+    return_to: Option<CallReturn>,
+    origin: JsStackFrame,
+    execution_budget: &mut ExecutionBudget,
+) -> Result<NativeDispatch, NativeFailure> {
+    let StoredValue::Object(plural_rules) = receiver else {
+        return intl_plural_rules_brand_error(realm, origin);
+    };
+    let Some(resolved) = runtime.intl_plural_rules_state(*plural_rules)?.cloned() else {
+        return intl_plural_rules_brand_error(realm, origin);
+    };
+    match method {
+        IntlPluralRulesPrototypeMethod::ResolvedOptions => {
+            intl_plural_rules_resolved_options(runtime, realm, &resolved)
+        }
+        IntlPluralRulesPrototypeMethod::Select => {
+            let value = arguments.take_first_or_undefined();
+            begin_intl_plural_rules_value(
+                runtime,
+                IntlPluralRulesValueContinuation {
+                    plural_rules: *plural_rules,
+                    operation: IntlPluralRulesOperation::Select,
+                    second: None,
+                    first: None,
+                    realm,
+                    origin,
+                },
+                value,
+                return_to,
+                execution_budget,
+            )
+        }
+        IntlPluralRulesPrototypeMethod::SelectRange => {
+            let first = arguments.take_first_or_undefined();
+            let second = arguments.take_first_or_undefined();
+            if matches!(first, StoredValue::Undefined) || matches!(second, StoredValue::Undefined) {
+                return intl_locale_list_error(
+                    realm,
+                    origin,
+                    ExceptionKind::TypeError,
+                    "Intl.PluralRules range arguments must not be undefined",
+                );
+            }
+            begin_intl_plural_rules_value(
+                runtime,
+                IntlPluralRulesValueContinuation {
+                    plural_rules: *plural_rules,
+                    operation: IntlPluralRulesOperation::SelectRange,
+                    second: Some(second),
+                    first: None,
+                    realm,
+                    origin,
+                },
+                first,
+                return_to,
+                execution_budget,
+            )
+        }
+    }
+}
+
+fn begin_intl_plural_rules_value(
+    runtime: &mut Runtime,
+    state: IntlPluralRulesValueContinuation,
+    value: StoredValue,
+    return_to: Option<CallReturn>,
+    execution_budget: &mut ExecutionBudget,
+) -> Result<NativeDispatch, NativeFailure> {
+    if matches!(value, StoredValue::Function(_) | StoredValue::Object(_)) {
+        let realm = state.realm;
+        let origin = state.origin.clone();
+        return begin_operator_primitive_conversion(
+            runtime,
+            value,
+            OperatorPrimitiveHint::Number,
+            OperatorPrimitiveTarget::IntlPluralRulesValue(Box::new(state)),
+            realm,
+            return_to,
+            origin,
+            execution_budget,
+        );
+    }
+    finish_intl_plural_rules_value_primitive(runtime, state, value, return_to, execution_budget)
+}
+
+pub(super) fn finish_intl_plural_rules_value_primitive(
+    runtime: &mut Runtime,
+    mut state: IntlPluralRulesValueContinuation,
+    value: StoredValue,
+    return_to: Option<CallReturn>,
+    execution_budget: &mut ExecutionBudget,
+) -> Result<NativeDispatch, NativeFailure> {
+    let value = to_intl_mathematical_value(value, state.realm, &state.origin)?;
+    if state.operation == IntlPluralRulesOperation::SelectRange && state.first.is_none() {
+        state.first = Some(value);
+        let second = state.second.take().ok_or(EngineFault::RuntimeInvariant {
+            message: "Intl.PluralRules range conversion lost its second operand",
+        })?;
+        return begin_intl_plural_rules_value(runtime, state, second, return_to, execution_budget);
+    }
+    finish_intl_plural_rules_operation(runtime, state, &value)
+}
+
+fn finish_intl_plural_rules_operation(
+    runtime: &Runtime,
+    state: IntlPluralRulesValueContinuation,
+    value: &IntlMathematicalValue,
+) -> Result<NativeDispatch, NativeFailure> {
+    let resolved = runtime.intl_plural_rules_state(state.plural_rules)?.ok_or(
+        EngineFault::RuntimeInvariant {
+            message: "Intl.PluralRules operation lost its branded receiver",
+        },
+    )?;
+    let category = match state.operation {
+        IntlPluralRulesOperation::Select => select_plural(resolved, value),
+        IntlPluralRulesOperation::SelectRange => {
+            let first = state.first.ok_or(EngineFault::RuntimeInvariant {
+                message: "Intl.PluralRules range operation lost its first operand",
+            })?;
+            if matches!(first, IntlMathematicalValue::NaN)
+                || matches!(value, IntlMathematicalValue::NaN)
+            {
+                return intl_locale_list_error(
+                    state.realm,
+                    state.origin,
+                    ExceptionKind::RangeError,
+                    "Intl.PluralRules range arguments must not be NaN",
+                );
+            }
+            select_plural_range(resolved, &first, value)
+        }
+    }
+    .map_err(|_| EngineFault::RuntimeInvariant {
+        message: "resolved Intl.PluralRules slots failed plural selection",
+    })?;
+    Ok(NativeDispatch::Immediate(StoredValue::String(
+        JsString::from_utf8(category.as_str())?,
+    )))
+}
+
+#[allow(
+    clippy::too_many_lines,
+    reason = "resolvedOptions property order mirrors the ECMA-402 PluralRules algorithm"
+)]
+fn intl_plural_rules_resolved_options(
+    runtime: &mut Runtime,
+    realm: RealmId,
+    state: &PluralRulesState,
+) -> Result<NativeDispatch, NativeFailure> {
+    let object = runtime.allocate_ordinary_object(runtime.realm_object_prototype(realm)?)?;
+    let mut properties = Vec::new();
+    properties.push((
+        "locale",
+        StoredValue::String(JsString::from_utf8(&state.locale)?),
+    ));
+    properties.push((
+        "type",
+        StoredValue::String(JsString::from_utf8(state.rule_type.as_str())?),
+    ));
+    properties.push((
+        "notation",
+        StoredValue::String(JsString::from_utf8(state.notation.as_str())?),
+    ));
+    if state.notation == NumberFormatNotation::Compact {
+        properties.push((
+            "compactDisplay",
+            StoredValue::String(JsString::from_utf8(state.compact_display.as_str())?),
+        ));
+    }
+    properties.push((
+        "minimumIntegerDigits",
+        StoredValue::Number(JsNumber::from_i32(i32::from(state.minimum_integer_digits))),
+    ));
+    if let (Some(minimum), Some(maximum)) =
+        (state.minimum_fraction_digits, state.maximum_fraction_digits)
+    {
+        properties.push((
+            "minimumFractionDigits",
+            StoredValue::Number(JsNumber::from_i32(i32::from(minimum))),
+        ));
+        properties.push((
+            "maximumFractionDigits",
+            StoredValue::Number(JsNumber::from_i32(i32::from(maximum))),
+        ));
+    }
+    if let (Some(minimum), Some(maximum)) = (
+        state.minimum_significant_digits,
+        state.maximum_significant_digits,
+    ) {
+        properties.push((
+            "minimumSignificantDigits",
+            StoredValue::Number(JsNumber::from_i32(i32::from(minimum))),
+        ));
+        properties.push((
+            "maximumSignificantDigits",
+            StoredValue::Number(JsNumber::from_i32(i32::from(maximum))),
+        ));
+    }
+    let categories = state
+        .plural_categories
+        .iter()
+        .map(|category| {
+            JsString::from_utf8(category.as_str())
+                .map(StoredValue::String)
+                .map_err(NativeFailure::from)
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    properties.push((
+        "pluralCategories",
+        StoredValue::Object(runtime.allocate_array(realm, categories)?),
+    ));
+    properties.push((
+        "roundingIncrement",
+        StoredValue::Number(JsNumber::from_i32(i32::from(state.rounding_increment))),
+    ));
+    properties.push((
+        "roundingMode",
+        StoredValue::String(JsString::from_utf8(state.rounding_mode.as_str())?),
+    ));
+    properties.push((
+        "roundingPriority",
+        StoredValue::String(JsString::from_utf8(state.rounding_priority.as_str())?),
+    ));
+    properties.push((
+        "trailingZeroDisplay",
+        StoredValue::String(JsString::from_utf8(state.trailing_zero_display.as_str())?),
+    ));
+    for (name, value) in properties {
+        let name = JsString::from_utf8(name)?;
+        let key = runtime.property_key_from_string(&name)?;
+        runtime.append_data_property(
+            HeapReference::Object(object),
+            key,
+            PropertyLayout::data(true, true, true),
+            value,
+        )?;
+    }
+    Ok(NativeDispatch::Immediate(StoredValue::Object(object)))
+}
+
+fn intl_plural_rules_brand_error<T>(
+    realm: RealmId,
+    origin: JsStackFrame,
+) -> Result<T, NativeFailure> {
+    intl_locale_list_error(
+        realm,
+        origin,
+        ExceptionKind::TypeError,
+        "Intl.PluralRules method called on incompatible receiver",
+    )
+}
+
 pub(super) fn begin_intl_date_time_format_constructor(
     runtime: &mut Runtime,
     function: FunctionId,
@@ -6312,6 +7440,19 @@ fn finish_intl_locale_list(
         IntlLocaleListTarget::DateTimeFormatSupportedLocalesOf(mut state) => {
             state.requested_locales = intl_locale_strings(locales)?;
             begin_intl_date_time_format_supported_locales_options(
+                runtime,
+                *state,
+                return_to,
+                execution_budget,
+            )
+        }
+        IntlLocaleListTarget::PluralRulesConstructor(mut state) => {
+            state.requested_locales = intl_locale_strings(locales)?;
+            begin_intl_plural_rules_options(runtime, *state, return_to, execution_budget)
+        }
+        IntlLocaleListTarget::PluralRulesSupportedLocalesOf(mut state) => {
+            state.requested_locales = intl_locale_strings(locales)?;
+            begin_intl_plural_rules_supported_locales_options(
                 runtime,
                 *state,
                 return_to,

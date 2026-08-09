@@ -73,16 +73,16 @@ use crate::{
         FunctionImplementation, GlobalNumericFunction, HeapFunction, InstalledCode,
         InstalledConstant, InstalledRoot, InstalledTemplate, IntlCollatorPrototypeMethod,
         IntlDateTimeFormatPrototypeMethod, IntlLocalePrototypeMethod,
-        IntlNumberFormatPrototypeMethod, LocaleStringMethod, MapMethod, MathMethod, NativeFunction,
-        NativeFunctionKind, NumberFormat, NumberPredicate, PreparedIteratorResultPlan,
-        PromiseCapabilityCapture, PromiseCapabilityExecutor, PromiseCombinatorElementFunction,
-        PromiseCombinatorElementKind, PromiseCombinatorKind, PromiseCombinatorShared,
-        PromiseFinallyFunction, PromiseFinallyThunkKind, PromiseJob, PromiseResolvingFunction,
-        PromiseResolvingKind, PromiseStatic, RealmGlobalBindingState, ReflectMethod, RegExpFlag,
-        RegExpSymbolMethod, SetMethod, SetPrototypeOutcome, StringArgument, StringMethod,
-        TemporalDurationPrototypeMethod, TemporalDurationStaticMethod,
-        TemporalInstantPrototypeMethod, TemporalInstantStaticMethod, TemporalNowMethod,
-        TemporalPlainDatePrototypeMethod, TemporalPlainDateStaticMethod,
+        IntlNumberFormatPrototypeMethod, IntlPluralRulesPrototypeMethod, LocaleStringMethod,
+        MapMethod, MathMethod, NativeFunction, NativeFunctionKind, NumberFormat, NumberPredicate,
+        PreparedIteratorResultPlan, PromiseCapabilityCapture, PromiseCapabilityExecutor,
+        PromiseCombinatorElementFunction, PromiseCombinatorElementKind, PromiseCombinatorKind,
+        PromiseCombinatorShared, PromiseFinallyFunction, PromiseFinallyThunkKind, PromiseJob,
+        PromiseResolvingFunction, PromiseResolvingKind, PromiseStatic, RealmGlobalBindingState,
+        ReflectMethod, RegExpFlag, RegExpSymbolMethod, SetMethod, SetPrototypeOutcome,
+        StringArgument, StringMethod, TemporalDurationPrototypeMethod,
+        TemporalDurationStaticMethod, TemporalInstantPrototypeMethod, TemporalInstantStaticMethod,
+        TemporalNowMethod, TemporalPlainDatePrototypeMethod, TemporalPlainDateStaticMethod,
         TemporalPlainDateTimePrototypeMethod, TemporalPlainDateTimeStaticMethod,
         TemporalPlainMonthDayPrototypeMethod, TemporalPlainMonthDayStaticMethod,
         TemporalPlainTimePrototypeMethod, TemporalPlainTimeStaticMethod,
@@ -879,6 +879,8 @@ enum NativeContinuation {
     IntlDateTimeFormatConstructor(Box<IntlDateTimeFormatConstructorContinuation>),
     IntlDateTimeFormatUnwrap(Box<IntlDateTimeFormatUnwrapContinuation>),
     IntlDateTimeFormatSupportedLocalesOf(Box<IntlDateTimeFormatSupportedLocalesContinuation>),
+    IntlPluralRulesConstructor(Box<IntlPluralRulesConstructorContinuation>),
+    IntlPluralRulesSupportedLocalesOf(Box<IntlPluralRulesSupportedLocalesContinuation>),
     IntlLocaleConstructor(Box<IntlLocaleConstructorContinuation>),
     DefineProperty(Box<DefinePropertyContinuation>),
     DefineProperties(Box<DefinePropertiesContinuation>),
@@ -1120,6 +1122,8 @@ impl NativeContinuation {
                 IntlDateTimeFormatUnwrapContinuation::retained_values()
             }
             Self::IntlDateTimeFormatSupportedLocalesOf(state) => state.retained_values(),
+            Self::IntlPluralRulesConstructor(state) => state.retained_values(),
+            Self::IntlPluralRulesSupportedLocalesOf(state) => state.retained_values(),
             Self::IntlLocaleConstructor(state) => state.retained_values(),
             Self::DefineProperty(state) => state.retained_values(),
             Self::DefineProperties(state) => state.retained_values(),
@@ -2510,6 +2514,12 @@ enum OperatorPrimitiveTarget {
     IntlDateTimeFormatSupportedLocalesOf(Box<IntlDateTimeFormatSupportedLocalesContinuation>),
     /// A `DateTimeFormat` operand awaiting `ToPrimitive(number)`.
     IntlDateTimeFormatValue(Box<IntlDateTimeFormatValueContinuation>),
+    /// One `%Intl.PluralRules%` option awaiting primitive conversion.
+    IntlPluralRulesConstructor(Box<IntlPluralRulesConstructorContinuation>),
+    /// `Intl.PluralRules.supportedLocalesOf` matcher awaiting `ToString`.
+    IntlPluralRulesSupportedLocalesOf(Box<IntlPluralRulesSupportedLocalesContinuation>),
+    /// A `PluralRules` operand awaiting `ToPrimitive(number)`.
+    IntlPluralRulesValue(Box<IntlPluralRulesValueContinuation>),
     /// The first bound Collator comparison operand awaiting `ToString`.
     IntlCollatorCompareFirst(Box<IntlCollatorCompareContinuation>),
     /// The second bound Collator comparison operand awaiting `ToString`.
@@ -2857,6 +2867,9 @@ impl OperatorPrimitiveTarget {
             Self::IntlDateTimeFormatConstructor(state) => state.retained_values(),
             Self::IntlDateTimeFormatSupportedLocalesOf(state) => state.retained_values(),
             Self::IntlDateTimeFormatValue(state) => state.retained_values(),
+            Self::IntlPluralRulesConstructor(state) => state.retained_values(),
+            Self::IntlPluralRulesSupportedLocalesOf(state) => state.retained_values(),
+            Self::IntlPluralRulesValue(state) => state.retained_values(),
             Self::IntlCollatorCompareFirst(state) | Self::IntlCollatorCompareSecond(state) => {
                 state.retained_values()
             }
@@ -3302,6 +3315,11 @@ fn trace_operator_primitive_target_roots(
             state.trace_roots(mark);
         }
         OperatorPrimitiveTarget::IntlDateTimeFormatValue(state) => state.trace_roots(mark),
+        OperatorPrimitiveTarget::IntlPluralRulesConstructor(state) => state.trace_roots(mark),
+        OperatorPrimitiveTarget::IntlPluralRulesSupportedLocalesOf(state) => {
+            state.trace_roots(mark);
+        }
+        OperatorPrimitiveTarget::IntlPluralRulesValue(state) => state.trace_roots(mark),
         OperatorPrimitiveTarget::IntlCollatorCompareFirst(state)
         | OperatorPrimitiveTarget::IntlCollatorCompareSecond(state) => state.trace_roots(mark),
         OperatorPrimitiveTarget::ArrayFromAsyncLength { operation } => {
@@ -3418,6 +3436,8 @@ fn trace_native_continuation_roots(
         NativeContinuation::IntlDateTimeFormatSupportedLocalesOf(state) => {
             state.trace_roots(mark);
         }
+        NativeContinuation::IntlPluralRulesConstructor(state) => state.trace_roots(mark),
+        NativeContinuation::IntlPluralRulesSupportedLocalesOf(state) => state.trace_roots(mark),
         NativeContinuation::IntlLocaleConstructor(state) => state.trace_roots(mark),
         NativeContinuation::DefineProperty(state) => state.trace_roots(mark),
         NativeContinuation::FunctionBind(state) => {

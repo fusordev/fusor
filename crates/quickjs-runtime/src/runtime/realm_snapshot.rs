@@ -162,6 +162,7 @@ impl RealmSnapshot {
                 intl.date_time_format_prototype,
                 "%Intl.DateTimeFormat.prototype%",
             ),
+            (intl.plural_rules_prototype, "%Intl.PluralRules.prototype%"),
             (intl.locale_prototype, "%Intl.Locale.prototype%"),
             (temporal.namespace, "%Temporal%"),
             (temporal.now, "%Temporal.Now%"),
@@ -533,9 +534,9 @@ mod tests {
 
     use crate::runtime::{RealmIntrinsics, RuntimeLimits, RuntimeUsage};
 
-    const REALM_NODES: usize = 850;
-    const REALM_PROPERTIES: u64 = 2_576;
-    const REALM_SNAPSHOT_FINGERPRINT: u64 = 3_436_053_412_240_881_322;
+    const REALM_NODES: usize = 856;
+    const REALM_PROPERTIES: u64 = 2_594;
+    const REALM_SNAPSHOT_FINGERPRINT: u64 = 6_815_793_260_556_633_479;
 
     #[test]
     fn complete_realm_snapshot_pins_the_installed_intrinsic_graph() {
@@ -583,9 +584,9 @@ mod tests {
         assert_eq!(
             first_atoms,
             AtomUsage {
-                live_atoms: PREDEFINED_ATOM_COUNT + 384,
-                live_description_code_units: PREDEFINED_DESCRIPTION_CODE_UNITS + 3_449,
-                interner_slots: PREDEFINED_INTERNER_SLOTS + 384,
+                live_atoms: PREDEFINED_ATOM_COUNT + 387,
+                live_description_code_units: PREDEFINED_DESCRIPTION_CODE_UNITS + 3_477,
+                interner_slots: PREDEFINED_INTERNER_SLOTS + 387,
             }
         );
 

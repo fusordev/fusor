@@ -701,6 +701,8 @@ impl RealmBuildTransaction<'_> {
                     NativeFunctionKind::IntlDateTimeFormatConstructor,
                 ),
                 date_time_format_format: function(NativeFunctionKind::IntlDateTimeFormatFormat),
+                plural_rules_prototype: object(IntrinsicObjectId::IntlPluralRulesPrototype),
+                plural_rules_constructor: function(NativeFunctionKind::IntlPluralRulesConstructor),
                 locale_prototype: object(IntrinsicObjectId::IntlLocalePrototype),
                 locale_constructor: function(NativeFunctionKind::IntlLocaleConstructor),
             },

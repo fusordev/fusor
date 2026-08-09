@@ -453,6 +453,18 @@ impl Runtime {
                     &mut work,
                 );
                 mark_heap_reference(
+                    HeapReference::Object(intl.plural_rules_prototype),
+                    &mut marked_functions,
+                    &mut marked_objects,
+                    &mut work,
+                );
+                mark_heap_reference(
+                    HeapReference::Function(intl.plural_rules_constructor),
+                    &mut marked_functions,
+                    &mut marked_objects,
+                    &mut work,
+                );
+                mark_heap_reference(
                     HeapReference::Object(intl.locale_prototype),
                     &mut marked_functions,
                     &mut marked_objects,

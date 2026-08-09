@@ -16,6 +16,7 @@ mod date_time_format;
 mod locale;
 mod locale_info;
 mod number_format;
+mod plural_rules;
 mod supported_values;
 
 pub use collator::{
@@ -47,6 +48,10 @@ pub use number_format::{
     NumberFormatUnitDisplay, NumberFormatUseGrouping, format_number, format_number_to_parts,
     intl_mathematical_value_from_f64, is_well_formed_currency_code, is_well_formed_unit_identifier,
     number_format_supported_locales, parse_intl_mathematical_value, resolve_number_format,
+};
+pub use plural_rules::{
+    PluralCategory, PluralRuleType, PluralRulesError, PluralRulesRequestOptions, PluralRulesState,
+    plural_rules_supported_locales, resolve_plural_rules, select_plural, select_plural_range,
 };
 pub use supported_values::supported_values;
 

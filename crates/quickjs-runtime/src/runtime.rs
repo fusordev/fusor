@@ -308,6 +308,8 @@ struct IntlIntrinsics {
     date_time_format_prototype: ObjectId,
     date_time_format_constructor: FunctionId,
     date_time_format_format: FunctionId,
+    plural_rules_prototype: ObjectId,
+    plural_rules_constructor: FunctionId,
     locale_prototype: ObjectId,
     locale_constructor: FunctionId,
 }
@@ -1267,6 +1269,12 @@ pub(crate) enum NativeFunctionKind {
     IntlDateTimeFormatPrototype(IntlDateTimeFormatPrototypeMethod),
     /// Hidden formatting target bound by the `DateTimeFormat` `format` getter.
     IntlDateTimeFormatFormat,
+    /// The `%Intl.PluralRules%` constructor.
+    IntlPluralRulesConstructor,
+    /// `Intl.PluralRules.supportedLocalesOf`.
+    IntlPluralRulesSupportedLocalesOf,
+    /// One `%Intl.PluralRules.prototype%` method.
+    IntlPluralRulesPrototype(IntlPluralRulesPrototypeMethod),
     /// The `%Intl.Locale%` constructor.
     IntlLocaleConstructor,
     /// One `%Intl.Locale.prototype%` accessor or method.
@@ -1660,6 +1668,33 @@ pub(crate) enum IntlDateTimeFormatPrototypeMethod {
     ResolvedOptions,
     FormatRange,
     FormatRangeToParts,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum IntlPluralRulesPrototypeMethod {
+    Select,
+    SelectRange,
+    ResolvedOptions,
+}
+
+impl IntlPluralRulesPrototypeMethod {
+    pub(crate) const ALL: [Self; 3] = [Self::Select, Self::SelectRange, Self::ResolvedOptions];
+
+    pub(crate) const fn name(self) -> &'static str {
+        match self {
+            Self::Select => "select",
+            Self::SelectRange => "selectRange",
+            Self::ResolvedOptions => "resolvedOptions",
+        }
+    }
+
+    pub(crate) const fn length(self) -> i32 {
+        match self {
+            Self::Select => 1,
+            Self::SelectRange => 2,
+            Self::ResolvedOptions => 0,
+        }
+    }
 }
 
 impl IntlDateTimeFormatPrototypeMethod {
@@ -4366,6 +4401,7 @@ impl NativeFunctionKind {
                 | Self::IntlCollatorConstructor
                 | Self::IntlNumberFormatConstructor
                 | Self::IntlDateTimeFormatConstructor
+                | Self::IntlPluralRulesConstructor
                 | Self::IntlLocaleConstructor
                 | Self::TemporalDurationConstructor
                 | Self::TemporalInstantConstructor

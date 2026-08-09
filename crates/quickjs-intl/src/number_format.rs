@@ -605,7 +605,7 @@ fn format_finite(
     Ok(parts)
 }
 
-fn prepare_notation(
+pub(crate) fn prepare_notation(
     state: &NumberFormatState,
     mut value: Decimal,
 ) -> Result<(Decimal, i16), NumberFormatError> {

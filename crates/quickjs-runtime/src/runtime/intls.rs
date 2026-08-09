@@ -1,6 +1,6 @@
 //! `%Intl%` object allocation and Locale internal-slot access.
 
-use quickjs_intl::{CollatorState, DateTimeFormatState, NumberFormatState};
+use quickjs_intl::{CollatorState, DateTimeFormatState, NumberFormatState, PluralRulesState};
 
 use super::{
     Atom, BoundFunction, FunctionId, FunctionImplementation, HeapFunction, HeapObject,
@@ -10,6 +10,79 @@ use super::{
 };
 
 impl Runtime {
+    pub(crate) fn allocate_intl_plural_rules(
+        &mut self,
+        prototype: HeapReference,
+        resolved: PluralRulesState,
+    ) -> Result<ObjectId, crate::ExecutionError> {
+        if !self.heap_reference_is_live(prototype) {
+            return Err(stale_heap_reference(prototype).into());
+        }
+        check_execution_limit(
+            RuntimeResource::HeapObjects,
+            self.limits.max_heap_objects,
+            usize_to_u64(self.objects.len()).saturating_add(1),
+        )?;
+        self.objects
+            .try_reserve(1)
+            .map_err(|_| crate::ExecutionError::AllocationFailed {
+                resource: RuntimeResource::HeapObjects,
+                additional: 1,
+            })?;
+        let object = self
+            .insert_heap_object(HeapObject::intl_plural_rules(
+                ObjectRecord::empty(Some(prototype)),
+                resolved,
+            ))
+            .map_err(|_| crate::ExecutionError::AllocationFailed {
+                resource: RuntimeResource::HeapObjects,
+                additional: 1,
+            })?;
+        self.collection_pending = true;
+        Ok(object)
+    }
+
+    pub(crate) fn intl_plural_rules_state(
+        &self,
+        object: ObjectId,
+    ) -> Result<Option<&PluralRulesState>, crate::EngineFault> {
+        self.objects
+            .get(object)
+            .ok_or(crate::EngineFault::StaleHeapEdge {
+                edge: "Intl.PluralRules object",
+                index: object.index(),
+                generation: object.generation(),
+            })
+            .map(HeapObject::intl_plural_rules_state)
+    }
+
+    pub(crate) fn realm_intl_plural_rules_prototype(
+        &self,
+        realm: RealmId,
+    ) -> Result<ObjectId, crate::EngineFault> {
+        let state = self
+            .realms
+            .get(realm)
+            .ok_or(crate::EngineFault::StaleHeapEdge {
+                edge: "realm",
+                index: realm.index(),
+                generation: realm.generation(),
+            })?;
+        let RealmIntrinsics::Ready { intl, .. } = state.intrinsics else {
+            return Err(crate::EngineFault::RuntimeInvariant {
+                message: "realm Intl intrinsics are not initialized",
+            });
+        };
+        if self.objects.get(intl.plural_rules_prototype).is_none() {
+            return Err(crate::EngineFault::StaleHeapEdge {
+                edge: "Intl.PluralRules.prototype intrinsic",
+                index: intl.plural_rules_prototype.index(),
+                generation: intl.plural_rules_prototype.generation(),
+            });
+        }
+        Ok(intl.plural_rules_prototype)
+    }
+
     pub(crate) fn intl_number_format_fallback_symbol(&self) -> Atom {
         self.predefined_atom(PredefinedAtom::IntlLegacyConstructedSymbol)
     }

@@ -1320,6 +1320,24 @@ pub(super) fn resume_native_continuations(
                     execution_budget,
                 )?
             }
+            NativeContinuation::IntlPluralRulesConstructor(state) => {
+                advance_intl_plural_rules_constructor(
+                    runtime,
+                    *state,
+                    Some(value.duplicate()),
+                    return_to,
+                    execution_budget,
+                )?
+            }
+            NativeContinuation::IntlPluralRulesSupportedLocalesOf(state) => {
+                advance_intl_plural_rules_supported_locales(
+                    runtime,
+                    *state,
+                    Some(value.duplicate()),
+                    return_to,
+                    execution_budget,
+                )?
+            }
             NativeContinuation::IntlLocaleConstructor(state) => advance_intl_locale_constructor(
                 runtime,
                 *state,
@@ -2902,6 +2920,34 @@ pub(super) fn dispatch_native_call_with_frames(
         }
         NativeFunctionKind::IntlDateTimeFormatFormat => begin_intl_date_time_format_format(
             runtime,
+            &inputs.receiver,
+            inputs.arguments,
+            native.realm,
+            return_to,
+            origin.unwrap_or_else(native_function_host_origin),
+            execution_budget,
+        ),
+        NativeFunctionKind::IntlPluralRulesConstructor => begin_intl_plural_rules_constructor(
+            runtime,
+            inputs,
+            native.realm,
+            return_to,
+            origin.unwrap_or_else(native_function_host_origin),
+            execution_budget,
+        ),
+        NativeFunctionKind::IntlPluralRulesSupportedLocalesOf => {
+            begin_intl_plural_rules_supported_locales_of(
+                runtime,
+                inputs.arguments,
+                native.realm,
+                return_to,
+                origin.unwrap_or_else(native_function_host_origin),
+                execution_budget,
+            )
+        }
+        NativeFunctionKind::IntlPluralRulesPrototype(method) => begin_intl_plural_rules_prototype(
+            runtime,
+            method,
             &inputs.receiver,
             inputs.arguments,
             native.realm,
