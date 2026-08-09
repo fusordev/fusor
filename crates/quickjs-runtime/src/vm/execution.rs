@@ -2120,6 +2120,18 @@ pub(super) fn execute_one(
                 );
             }
             if let Some((object, key)) = typed_array_indexed_key(runtime, &base, &property.key)? {
+                if runtime.is_typed_array_backing_buffer_immutable(object)? {
+                    if frame.strict {
+                        return Ok(Step::Abrupt(property_exception(
+                            runtime,
+                            frame,
+                            source_pc,
+                            &property.name,
+                            PropertyFailure::ReadOnly,
+                        )?));
+                    }
+                    return Ok(Step::Continue);
+                }
                 let return_to =
                     CallReturn::discard(verified_instruction.successors().fallthrough().ok_or(
                         EngineFault::InvalidSuccessor {

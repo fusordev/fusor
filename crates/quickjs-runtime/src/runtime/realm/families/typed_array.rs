@@ -13,7 +13,7 @@ use crate::runtime::realm::{
 };
 use crate::{
     object::TypedArrayElementType,
-    runtime::{PredefinedAtom, PropertyLayout, TypedArrayPrototypeMethod},
+    runtime::{ArrayStatic, PredefinedAtom, PropertyLayout, TypedArrayPrototypeMethod},
 };
 
 pub(super) fn visit_objects(visit: ObjectSink<'_>) {
@@ -40,6 +40,17 @@ pub(super) fn visit_functions(visit: FunctionSink<'_>) {
         IntrinsicNameSpec::Literal("TypedArray"),
         0,
     ));
+    for method_id in [ArrayStatic::From, ArrayStatic::Of] {
+        visit(ordinary(
+            NativeFunctionKind::TypedArrayStatic(method_id),
+            IntrinsicNameSpec::Predefined(
+                method_id
+                    .predefined_atom()
+                    .expect("TypedArray static factories have predefined names"),
+            ),
+            method_id.length(),
+        ));
+    }
     let abstract_constructor = IntrinsicFunctionId(NativeFunctionKind::TypedArrayBaseConstructor);
     for element in TypedArrayElementType::ALL {
         visit(function(
@@ -84,6 +95,17 @@ fn visit_abstract_constructor_properties(visit: PropertySink<'_>) {
         CONSTRUCTOR_PROTOTYPE_PROPERTY,
         IntrinsicValueSpec::Object(IntrinsicObjectId::TypedArrayPrototype),
     ));
+    for method_id in [ArrayStatic::From, ArrayStatic::Of] {
+        visit(method(
+            abstract_constructor,
+            IntrinsicKeySpec::PredefinedString(
+                method_id
+                    .predefined_atom()
+                    .expect("TypedArray static factories have predefined names"),
+            ),
+            NativeFunctionKind::TypedArrayStatic(method_id),
+        ));
+    }
     visit(data(
         prototype,
         IntrinsicKeySpec::PredefinedString(PredefinedAtom::Constructor),

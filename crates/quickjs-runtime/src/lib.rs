@@ -30,6 +30,7 @@ mod predefined_atoms;
 mod promise_rejection;
 mod property;
 mod runtime;
+mod shared_array_buffer;
 mod string;
 mod value;
 mod vm;
@@ -62,6 +63,7 @@ pub use property::{
     PropertyDescriptorKind, PropertyLayout, PropertyLayoutKind,
 };
 pub use runtime::{CollectionReport, Context, Realm, Runtime, RuntimeLimits, RuntimeUsage};
+pub use shared_array_buffer::SharedArrayBufferHandle;
 pub use string::{CodeUnits, JsString, JsStringError, MAX_STRING_CODE_UNITS};
 pub use value::{Function, JsValue, Object};
 pub use vm::ExecutionLimits;

@@ -2352,6 +2352,20 @@ pub(super) fn begin_internal_set(
         && let Some(key) = runtime.typed_array_property_key(object, &key)?
         && key != TypedArrayPropertyKey::Ordinary
     {
+        if runtime.is_typed_array_backing_buffer_immutable(object)? {
+            if boolean_result {
+                return Ok(NativeDispatch::Immediate(StoredValue::Boolean(false)));
+            }
+            if !strict {
+                return Ok(NativeDispatch::Immediate(StoredValue::Undefined));
+            }
+            return Err(NativeFailure::Abrupt(property_exception_at(
+                realm,
+                origin,
+                Some(&name),
+                PropertyFailure::ReadOnly,
+            )?));
+        }
         if receiver.strict_equals(&StoredValue::Object(object)) {
             return begin_typed_array_element_set(
                 runtime,
