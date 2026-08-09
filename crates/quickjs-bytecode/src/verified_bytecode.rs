@@ -5954,11 +5954,14 @@ fn method_definition_pair(
     ) {
         return None;
     }
+    // Accessor grammar constrains the complete formal-parameter list, not
+    // the observable `length`. A setter with one defaulted parameter has one
+    // argument slot while its ExpectedArgumentCount is zero.
     let arguments = graph
         .function(*child)?
         .control_flow()
-        .function_header()
-        .defined_argument_count();
+        .domains()
+        .argument_count();
     let kind = flags & 0b11;
     if (kind == 1 && arguments != 0) || (kind == 2 && arguments != 1) {
         return None;

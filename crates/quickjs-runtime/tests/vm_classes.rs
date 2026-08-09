@@ -739,6 +739,17 @@ fn static_block_throw_abandons_or_retains_the_class_stack_at_the_right_handler()
 }
 
 #[test]
+fn class_setters_with_default_parameters_retain_formal_arity_and_zero_length() {
+    run_with(
+        "function run(){class Box{set value(next=42){this.seen=next;}static set fixed(next=7){this.staticSeen=next;}}let box=new Box;let getOwnPropertyDescriptor=({}).constructor.getOwnPropertyDescriptor;let instance=getOwnPropertyDescriptor(Box.prototype,'value').set;let staticSetter=getOwnPropertyDescriptor(Box,'fixed').set;box.value=void 0;Box.fixed=void 0;return instance.length===0&&staticSetter.length===0&&box.seen===42&&Box.staticSeen===7;}",
+        |result| {
+            let value = result.expect("defaulted class setters");
+            assert_eq!(value.as_boolean().expect("live Boolean"), Some(true));
+        },
+    );
+}
+
+#[test]
 fn derived_super_spread_preserves_the_active_new_target_and_receiver_timing() {
     run_with(
         "function run(){let events=[];function args(){events.push('args');return [2,3];}class Base{constructor(...values){events.push('base');this.values=values.join(':');this.target=new.target;}}class Derived extends Base{constructor(){events.push('before');super(1,...args(),4);events.push('after');this.ready=true;}}class Leaf extends Derived{}let value=new Leaf;return value.values==='1:2:3:4'&&value.target===Leaf&&value.ready&&events.join(',')==='before,args,base,after';}",

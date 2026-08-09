@@ -2598,6 +2598,29 @@ fn final_authority_requires_a_typed_method_closure_and_accessor_arity() {
         error.kind(),
         BytecodeVerificationErrorKind::OrdinaryMethodTemplatePlacementMismatch { .. }
     ));
+
+    let setter_with_default = [
+        (FinalOpcode::Object, Operands::None),
+        (FinalOpcode::FClosure8, Operands::Const8(0)),
+        (
+            FinalOpcode::DefineMethod,
+            Operands::AtomU8 {
+                atom: AtomPoolIndex::new(1),
+                value: 6,
+            },
+        ),
+        (FinalOpcode::Return, Operands::None),
+    ];
+    verify_compiler_bytecode_graph(
+        define_method_input_with_child_counts(
+            &setter_with_default,
+            CompilerExecutableKind::OrdinaryMethod,
+            1,
+            0,
+        ),
+        BytecodeGraphVerificationLimits::default(),
+    )
+    .expect("setter arity uses its one formal slot, not its zero observable length");
 }
 
 #[test]
@@ -5506,14 +5529,45 @@ fn define_method_input(
     define_method_input_with_root_arguments(root_instructions, child_kind, child_arguments, 0)
 }
 
-#[allow(
-    clippy::too_many_lines,
-    reason = "the two-function authority fixture keeps graph, metadata, source, and header variants together"
-)]
+fn define_method_input_with_child_counts(
+    root_instructions: &[(FinalOpcode, Operands)],
+    child_kind: CompilerExecutableKind,
+    child_arguments: u32,
+    child_defined_arguments: u32,
+) -> UnverifiedCompilerBytecodeGraph {
+    define_method_input_with_counts(
+        root_instructions,
+        child_kind,
+        child_arguments,
+        child_defined_arguments,
+        0,
+    )
+}
+
 fn define_method_input_with_root_arguments(
     root_instructions: &[(FinalOpcode, Operands)],
     child_kind: CompilerExecutableKind,
     child_arguments: u32,
+    root_arguments: u32,
+) -> UnverifiedCompilerBytecodeGraph {
+    define_method_input_with_counts(
+        root_instructions,
+        child_kind,
+        child_arguments,
+        child_arguments,
+        root_arguments,
+    )
+}
+
+#[allow(
+    clippy::too_many_lines,
+    reason = "the two-function authority fixture keeps graph, metadata, source, and header variants together"
+)]
+fn define_method_input_with_counts(
+    root_instructions: &[(FinalOpcode, Operands)],
+    child_kind: CompilerExecutableKind,
+    child_arguments: u32,
+    child_defined_arguments: u32,
     root_arguments: u32,
 ) -> UnverifiedCompilerBytecodeGraph {
     let root_flow = flow_with_header(
@@ -5526,6 +5580,48 @@ fn define_method_input_with_root_arguments(
         &[CompilerConstantKind::Function],
         UnverifiedFunctionHeader::ordinary_source_function(false, root_arguments),
     );
+    let child_header = match child_kind {
+        CompilerExecutableKind::OrdinaryFunction => {
+            UnverifiedFunctionHeader::ordinary_source_function(false, child_defined_arguments)
+        }
+        CompilerExecutableKind::OrdinaryMethod => {
+            UnverifiedFunctionHeader::ordinary_method_with_variable_references(
+                false,
+                child_defined_arguments,
+                0,
+            )
+        }
+        CompilerExecutableKind::ClassInstanceInitializer => {
+            panic!("a define_method child cannot be a hidden class initializer")
+        }
+        CompilerExecutableKind::ClassConstructor => {
+            UnverifiedFunctionHeader::class_constructor_with_variable_references(
+                true,
+                child_defined_arguments,
+                0,
+            )
+        }
+        CompilerExecutableKind::OrdinaryArrow | CompilerExecutableKind::AsyncArrow => {
+            panic!("a define_method child cannot be an arrow")
+        }
+        CompilerExecutableKind::GlobalScript
+        | CompilerExecutableKind::IndirectEvalScript
+        | CompilerExecutableKind::DirectEvalScript
+        | CompilerExecutableKind::DynamicFunctionScript => {
+            panic!("a define_method child cannot be a Script")
+        }
+        CompilerExecutableKind::GeneratorFunction | CompilerExecutableKind::GeneratorMethod => {
+            panic!("this ordinary-method fixture cannot create a generator child")
+        }
+        CompilerExecutableKind::AsyncFunction | CompilerExecutableKind::AsyncMethod => {
+            panic!("this ordinary-method fixture cannot create an async child")
+        }
+        CompilerExecutableKind::AsyncGeneratorFunction
+        | CompilerExecutableKind::AsyncGeneratorMethod => {
+            panic!("this ordinary-method fixture cannot create an async-generator child")
+        }
+    }
+    .with_simple_parameter_list(child_arguments == child_defined_arguments);
     let child_flow = flow_with_header(
         &[(FinalOpcode::ReturnUndef, Operands::None)],
         child_arguments,
@@ -5534,47 +5630,7 @@ fn define_method_input_with_root_arguments(
         &[],
         0,
         &[],
-        match child_kind {
-            CompilerExecutableKind::OrdinaryFunction => {
-                UnverifiedFunctionHeader::ordinary_source_function(false, child_arguments)
-            }
-            CompilerExecutableKind::OrdinaryMethod => {
-                UnverifiedFunctionHeader::ordinary_method_with_variable_references(
-                    false,
-                    child_arguments,
-                    0,
-                )
-            }
-            CompilerExecutableKind::ClassInstanceInitializer => {
-                panic!("a define_method child cannot be a hidden class initializer")
-            }
-            CompilerExecutableKind::ClassConstructor => {
-                UnverifiedFunctionHeader::class_constructor_with_variable_references(
-                    true,
-                    child_arguments,
-                    0,
-                )
-            }
-            CompilerExecutableKind::OrdinaryArrow | CompilerExecutableKind::AsyncArrow => {
-                panic!("a define_method child cannot be an arrow")
-            }
-            CompilerExecutableKind::GlobalScript
-            | CompilerExecutableKind::IndirectEvalScript
-            | CompilerExecutableKind::DirectEvalScript
-            | CompilerExecutableKind::DynamicFunctionScript => {
-                panic!("a define_method child cannot be a Script")
-            }
-            CompilerExecutableKind::GeneratorFunction | CompilerExecutableKind::GeneratorMethod => {
-                panic!("this ordinary-method fixture cannot create a generator child")
-            }
-            CompilerExecutableKind::AsyncFunction | CompilerExecutableKind::AsyncMethod => {
-                panic!("this ordinary-method fixture cannot create an async child")
-            }
-            CompilerExecutableKind::AsyncGeneratorFunction
-            | CompilerExecutableKind::AsyncGeneratorMethod => {
-                panic!("this ordinary-method fixture cannot create an async-generator child")
-            }
-        },
+        child_header,
     );
     let child_atoms = (0..child_arguments)
         .map(|index| atom(&format!("argument{index}")))
