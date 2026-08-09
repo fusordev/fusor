@@ -15,18 +15,18 @@ use crate::object::TypedArrayElementType;
 use crate::runtime::{
     ArrayBufferPrototypeMethod, AtomicsMethod, DataViewPrototypeMethod, DatePrototypeMethod,
     DateStaticMethod, IntlCollatorPrototypeMethod, IntlDateTimeFormatPrototypeMethod,
-    IntlDisplayNamesPrototypeMethod, IntlListFormatPrototypeMethod, IntlLocalePrototypeMethod,
-    IntlNumberFormatPrototypeMethod, IntlPluralRulesPrototypeMethod,
-    IntlRelativeTimeFormatPrototypeMethod, IntlSegmenterPrototypeMethod,
-    SharedArrayBufferPrototypeMethod, TemporalDurationPrototypeMethod,
-    TemporalDurationStaticMethod, TemporalInstantPrototypeMethod, TemporalInstantStaticMethod,
-    TemporalNowMethod, TemporalPlainDatePrototypeMethod, TemporalPlainDateStaticMethod,
-    TemporalPlainDateTimePrototypeMethod, TemporalPlainDateTimeStaticMethod,
-    TemporalPlainMonthDayPrototypeMethod, TemporalPlainMonthDayStaticMethod,
-    TemporalPlainTimePrototypeMethod, TemporalPlainTimeStaticMethod,
-    TemporalPlainYearMonthPrototypeMethod, TemporalPlainYearMonthStaticMethod,
-    TemporalZonedDateTimePrototypeMethod, TemporalZonedDateTimeStaticMethod,
-    TypedArrayPrototypeMethod,
+    IntlDisplayNamesPrototypeMethod, IntlDurationFormatPrototypeMethod,
+    IntlListFormatPrototypeMethod, IntlLocalePrototypeMethod, IntlNumberFormatPrototypeMethod,
+    IntlPluralRulesPrototypeMethod, IntlRelativeTimeFormatPrototypeMethod,
+    IntlSegmenterPrototypeMethod, SharedArrayBufferPrototypeMethod,
+    TemporalDurationPrototypeMethod, TemporalDurationStaticMethod, TemporalInstantPrototypeMethod,
+    TemporalInstantStaticMethod, TemporalNowMethod, TemporalPlainDatePrototypeMethod,
+    TemporalPlainDateStaticMethod, TemporalPlainDateTimePrototypeMethod,
+    TemporalPlainDateTimeStaticMethod, TemporalPlainMonthDayPrototypeMethod,
+    TemporalPlainMonthDayStaticMethod, TemporalPlainTimePrototypeMethod,
+    TemporalPlainTimeStaticMethod, TemporalPlainYearMonthPrototypeMethod,
+    TemporalPlainYearMonthStaticMethod, TemporalZonedDateTimePrototypeMethod,
+    TemporalZonedDateTimeStaticMethod, TypedArrayPrototypeMethod,
 };
 
 /// Stable identity of an object allocated by Realm bootstrap.
@@ -91,6 +91,7 @@ pub(in crate::runtime) enum IntrinsicObjectId {
     IntlRelativeTimeFormatPrototype,
     IntlListFormatPrototype,
     IntlDisplayNamesPrototype,
+    IntlDurationFormatPrototype,
     IntlSegmenterPrototype,
     IntlSegmentsPrototype,
     IntlSegmentIteratorPrototype,
@@ -102,7 +103,7 @@ pub(in crate::runtime) enum IntrinsicObjectId {
 }
 
 impl IntrinsicObjectId {
-    pub(in crate::runtime) const ALL: [Self; 83] = [
+    pub(in crate::runtime) const ALL: [Self; 84] = [
         Self::ObjectPrototype,
         Self::GlobalObject,
         Self::ErrorPrototype(ErrorIntrinsicKind::Error),
@@ -178,6 +179,7 @@ impl IntrinsicObjectId {
         Self::IntlRelativeTimeFormatPrototype,
         Self::IntlListFormatPrototype,
         Self::IntlDisplayNamesPrototype,
+        Self::IntlDurationFormatPrototype,
         Self::IntlSegmenterPrototype,
         Self::IntlSegmentsPrototype,
         Self::IntlSegmentIteratorPrototype,
@@ -231,6 +233,9 @@ pub(in crate::runtime) enum RealmNameId {
     IntlDisplayNames,
     IntlDisplayNamesSupportedLocalesOf,
     IntlDisplayNamesPrototype(IntlDisplayNamesPrototypeMethod),
+    IntlDurationFormat,
+    IntlDurationFormatSupportedLocalesOf,
+    IntlDurationFormatPrototype(IntlDurationFormatPrototypeMethod),
     IntlSegmenter,
     IntlSegmenterSupportedLocalesOf,
     IntlSegmenterPrototype(IntlSegmenterPrototypeMethod),

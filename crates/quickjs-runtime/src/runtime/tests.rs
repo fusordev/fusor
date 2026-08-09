@@ -35,9 +35,9 @@ use super::{
     is_supported_instruction, is_supported_opcode, usize_to_u64,
 };
 
-const REALM_OBJECT_SLOTS: u64 = 83;
-const REALM_PROPERTY_SLOTS: u64 = 2_670;
-const REALM_FUNCTION_SLOTS: u64 = 800;
+const REALM_OBJECT_SLOTS: u64 = 84;
+const REALM_PROPERTY_SLOTS: u64 = 2_688;
+const REALM_FUNCTION_SLOTS: u64 = 805;
 
 #[test]
 fn finalization_job_limit_failure_does_not_clear_weak_targets() {
@@ -3872,6 +3872,27 @@ fn realm_segmenter_hidden_intrinsics_remain_roots_during_collection() {
             .realm_intl_segment_iterator_prototype(realm_id)
             .expect("rooted Intl Segment Iterator prototype"),
         segment_iterator_prototype
+    );
+}
+
+#[test]
+fn realm_duration_format_hidden_intrinsic_remains_a_root_during_collection() {
+    let mut runtime = Runtime::try_new(RuntimeLimits::default()).expect("runtime");
+    let realm = runtime.create_realm().expect("realm");
+    let realm_id = realm.0.id;
+    let duration_format_prototype = runtime
+        .realm_intl_duration_format_prototype(realm_id)
+        .expect("Intl.DurationFormat.prototype");
+
+    let report = runtime.collect_cycles().expect("collection");
+
+    assert_eq!(report.objects(), 0);
+    assert_eq!(runtime.usage().heap_objects(), REALM_OBJECT_SLOTS);
+    assert_eq!(
+        runtime
+            .realm_intl_duration_format_prototype(realm_id)
+            .expect("rooted Intl.DurationFormat.prototype"),
+        duration_format_prototype
     );
 }
 

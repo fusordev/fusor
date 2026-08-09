@@ -633,6 +633,75 @@ fn display_names_lookup_canonicalization_and_brand_order_are_spec_shaped() {
 }
 
 #[test]
+fn duration_format_constructor_options_and_descriptors_are_spec_shaped() {
+    assert_eq!(
+        rendered(
+            "var names=['localeMatcher','numberingSystem','style',
+               'years','yearsDisplay','months','monthsDisplay','weeks','weeksDisplay',
+               'days','daysDisplay','hours','hoursDisplay','minutes','minutesDisplay',
+               'seconds','secondsDisplay','milliseconds','millisecondsDisplay',
+               'microseconds','microsecondsDisplay','nanoseconds','nanosecondsDisplay',
+               'fractionalDigits'];
+             var log=[];var options={};names.forEach(function(name){
+               Object.defineProperty(options,name,{get:function(){log.push(name)}})});
+             class CustomDurationFormat extends Intl.DurationFormat{}
+             var df=new CustomDurationFormat('en-US',options);var ro=df.resolvedOptions();
+             var d=Object.getOwnPropertyDescriptor(Intl.DurationFormat.prototype,'format');
+             var keys=['locale','numberingSystem','style'];
+             ['years','months','weeks','days','hours','minutes','seconds','milliseconds',
+               'microseconds','nanoseconds'].forEach(function(name){
+                 keys.push(name,name+'Display')});
+             var supported=Intl.DurationFormat.supportedLocalesOf(
+               ['tlh','en-u-ca-gregory'],{localeMatcher:'lookup'});
+             var noNew;try{Intl.DurationFormat()}catch(error){noNew=error.name}
+             return [Intl.DurationFormat.length,Intl.DurationFormat.name,
+               Object.getPrototypeOf(df)===CustomDurationFormat.prototype,
+               Object.keys(ro).join(',')===keys.join(','),
+               ro.locale,ro.numberingSystem,ro.style,ro.years,ro.yearsDisplay,
+               ro.nanoseconds,ro.nanosecondsDisplay,
+               d.value.length,d.writable,d.enumerable,d.configurable,
+               supported.join(','),noNew,Object.prototype.toString.call(df),
+               log.join(',')===names.join(',')].join('|');"
+        ),
+        "0|DurationFormat|true|true|en-US|latn|short|short|auto|short|auto|1|true|false|true|en-u-ca-gregory|TypeError|[object Intl.DurationFormat]|true"
+    );
+}
+
+#[test]
+fn duration_format_exact_values_parts_temporal_and_property_order_are_spec_shaped() {
+    assert_eq!(
+        rendered(
+            "var df=new Intl.DurationFormat('en',{style:'digital',fractionalDigits:4});
+             var value={hours:1,minutes:22,seconds:33,milliseconds:111,
+               microseconds:222,nanoseconds:333};
+             var text=df.format(value);var parts=df.formatToParts(value);
+             var exact=new Intl.DurationFormat('en',{seconds:'numeric'}).format({
+               seconds:10000000,nanoseconds:1});
+             var duration=new Temporal.Duration(0,0,0,0,1,22,33,111,222,333);
+             var tainted=false;
+             Object.defineProperty(Temporal.Duration.prototype,'hours',{configurable:true,
+               get:function(){tainted=true;throw new Error('poisoned')}});
+             var temporal=df.format(duration);var parsed=df.format('PT1H22M33.111222333S');
+             var names=['days','hours','microseconds','milliseconds','minutes','months',
+               'nanoseconds','seconds','weeks','years'];
+             var log=[];var bag={};names.forEach(function(name){
+               Object.defineProperty(bag,name,{get:function(){log.push(name);return name==='seconds'?1:0}})});
+             new Intl.DurationFormat('en').format(bag);
+             var coerced=false,brand;
+             try{Intl.DurationFormat.prototype.format.call({},
+               {get years(){coerced=true;return 1}})}catch(error){brand=error.name}
+             return [text,parts.map(function(part){return part.value}).join('')===text,
+               parts.every(function(part){return Object.keys(part).join(',')===
+                 (part.unit===undefined?'type,value':'type,value,unit')}),
+               parts.some(function(part){return part.type==='fraction'&&part.unit==='second'}),
+               exact,temporal===text,parsed===text,tainted,
+               log.join(',')===names.join(','),brand,coerced].join('|');"
+        ),
+        "1:22:33.1112|true|true|true|10000000.000000001|true|true|false|true|TypeError|false"
+    );
+}
+
+#[test]
 fn segmenter_constructor_descriptors_and_hidden_prototypes_are_spec_shaped() {
     assert_eq!(
         rendered(

@@ -317,6 +317,8 @@ struct IntlIntrinsics {
     list_format_constructor: FunctionId,
     display_names_prototype: ObjectId,
     display_names_constructor: FunctionId,
+    duration_format_prototype: ObjectId,
+    duration_format_constructor: FunctionId,
     segmenter_prototype: ObjectId,
     segments_prototype: ObjectId,
     segment_iterator_prototype: ObjectId,
@@ -1304,6 +1306,12 @@ pub(crate) enum NativeFunctionKind {
     IntlDisplayNamesSupportedLocalesOf,
     /// One `%Intl.DisplayNames.prototype%` method.
     IntlDisplayNamesPrototype(IntlDisplayNamesPrototypeMethod),
+    /// The `%Intl.DurationFormat%` constructor.
+    IntlDurationFormatConstructor,
+    /// `Intl.DurationFormat.supportedLocalesOf`.
+    IntlDurationFormatSupportedLocalesOf,
+    /// One `%Intl.DurationFormat.prototype%` method.
+    IntlDurationFormatPrototype(IntlDurationFormatPrototypeMethod),
     /// The `%Intl.Segmenter%` constructor.
     IntlSegmenterConstructor,
     /// `Intl.Segmenter.supportedLocalesOf`.
@@ -1739,6 +1747,13 @@ pub(crate) enum IntlDisplayNamesPrototypeMethod {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum IntlDurationFormatPrototypeMethod {
+    ResolvedOptions,
+    Format,
+    FormatToParts,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum IntlSegmenterPrototypeMethod {
     ResolvedOptions,
     Segment,
@@ -1758,6 +1773,25 @@ impl IntlSegmenterPrototypeMethod {
         match self {
             Self::ResolvedOptions => 0,
             Self::Segment => 1,
+        }
+    }
+}
+
+impl IntlDurationFormatPrototypeMethod {
+    pub(crate) const ALL: [Self; 3] = [Self::ResolvedOptions, Self::Format, Self::FormatToParts];
+
+    pub(crate) const fn name(self) -> &'static str {
+        match self {
+            Self::ResolvedOptions => "resolvedOptions",
+            Self::Format => "format",
+            Self::FormatToParts => "formatToParts",
+        }
+    }
+
+    pub(crate) const fn length(self) -> i32 {
+        match self {
+            Self::ResolvedOptions => 0,
+            Self::Format | Self::FormatToParts => 1,
         }
     }
 }
@@ -4546,6 +4580,7 @@ impl NativeFunctionKind {
                 | Self::IntlRelativeTimeFormatConstructor
                 | Self::IntlListFormatConstructor
                 | Self::IntlDisplayNamesConstructor
+                | Self::IntlDurationFormatConstructor
                 | Self::IntlSegmenterConstructor
                 | Self::IntlLocaleConstructor
                 | Self::TemporalDurationConstructor

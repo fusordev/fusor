@@ -13,9 +13,11 @@ use quickjs_intl::{
     DateTimeFormatMatcher, DateTimeFormatRequestOptions, DateTimeFormatState, DateTimeHourCycle,
     DateTimeStyle, DateTimeTimeZoneName, DisplayNamesError, DisplayNamesFallback,
     DisplayNamesLanguageDisplay, DisplayNamesRequestOptions, DisplayNamesState, DisplayNamesStyle,
-    DisplayNamesType, IntlMathematicalValue, ListFormatError, ListFormatRequestOptions,
-    ListFormatState, ListFormatStyle, ListFormatType, LocaleComponents, LocaleOptionKind,
-    LocaleOptions, LocaleWeekInfo, NumberFormatCompactDisplay, NumberFormatCurrencyDisplay,
+    DisplayNamesType, DurationDisplay, DurationFormatError, DurationFormatRequestOptions,
+    DurationFormatState, DurationFormatStyle, DurationRecord, DurationUnit, DurationUnitStyle,
+    IntlMathematicalValue, ListFormatError, ListFormatRequestOptions, ListFormatState,
+    ListFormatStyle, ListFormatType, LocaleComponents, LocaleOptionKind, LocaleOptions,
+    LocaleWeekInfo, NumberFormatCompactDisplay, NumberFormatCurrencyDisplay,
     NumberFormatCurrencySign, NumberFormatError, NumberFormatNotation, NumberFormatRequestOptions,
     NumberFormatRoundingMode, NumberFormatRoundingPriority, NumberFormatSignDisplay,
     NumberFormatState, NumberFormatStyle, NumberFormatTrailingZeroDisplay, NumberFormatUnitDisplay,
@@ -26,15 +28,16 @@ use quickjs_intl::{
     apply_locale_options, calendars_of_locale, canonicalize_locale, canonicalize_locale_option,
     canonicalize_time_zone, collations_of_locale, collator_supported_locales,
     compare_with_collator, date_time_format_supported_locales, display_name,
-    display_names_supported_locales, format_datetime, format_datetime_to_parts, format_list,
+    display_names_supported_locales, duration_format_supported_locales, format_datetime,
+    format_datetime_to_parts, format_duration, format_duration_to_parts, format_list,
     format_list_to_parts, format_number, format_number_to_parts, format_relative_time,
     format_relative_time_to_parts, hour_cycles_of_locale, intl_mathematical_value_from_f64,
     is_well_formed_currency_code, is_well_formed_unit_identifier, list_format_supported_locales,
     locale_components, maximize_locale, minimize_locale, number_format_supported_locales,
     numbering_systems_of_locale, parse_intl_mathematical_value, plural_rules_supported_locales,
     relative_time_format_supported_locales, resolve_collator, resolve_date_time_format,
-    resolve_display_names, resolve_list_format, resolve_number_format, resolve_plural_rules,
-    resolve_relative_time_format, resolve_segmenter, segment_boundaries,
+    resolve_display_names, resolve_duration_format, resolve_list_format, resolve_number_format,
+    resolve_plural_rules, resolve_relative_time_format, resolve_segmenter, segment_boundaries,
     segmenter_supported_locales, select_plural, select_plural_range, supported_values,
     text_direction_of_locale, time_zones_of_locale, week_info_of_locale,
 };
@@ -181,6 +184,8 @@ enum IntlLocaleListTarget {
     ListFormatSupportedLocalesOf(Box<IntlListFormatSupportedLocalesContinuation>),
     DisplayNamesConstructor(Box<IntlDisplayNamesConstructorContinuation>),
     DisplayNamesSupportedLocalesOf(Box<IntlDisplayNamesSupportedLocalesContinuation>),
+    DurationFormatConstructor(Box<IntlDurationFormatConstructorContinuation>),
+    DurationFormatSupportedLocalesOf(Box<IntlDurationFormatSupportedLocalesContinuation>),
     SegmenterConstructor(Box<IntlSegmenterConstructorContinuation>),
     SegmenterSupportedLocalesOf(Box<IntlSegmenterSupportedLocalesContinuation>),
 }
@@ -203,6 +208,8 @@ impl IntlLocaleListTarget {
             Self::ListFormatSupportedLocalesOf(state) => state.retained_values(),
             Self::DisplayNamesConstructor(state) => state.retained_values(),
             Self::DisplayNamesSupportedLocalesOf(state) => state.retained_values(),
+            Self::DurationFormatConstructor(state) => state.retained_values(),
+            Self::DurationFormatSupportedLocalesOf(state) => state.retained_values(),
             Self::SegmenterConstructor(state) => state.retained_values(),
             Self::SegmenterSupportedLocalesOf(state) => state.retained_values(),
         }
@@ -225,6 +232,8 @@ impl IntlLocaleListTarget {
             Self::ListFormatSupportedLocalesOf(state) => state.trace_roots(mark),
             Self::DisplayNamesConstructor(state) => state.trace_roots(mark),
             Self::DisplayNamesSupportedLocalesOf(state) => state.trace_roots(mark),
+            Self::DurationFormatConstructor(state) => state.trace_roots(mark),
+            Self::DurationFormatSupportedLocalesOf(state) => state.trace_roots(mark),
             Self::SegmenterConstructor(state) => state.trace_roots(mark),
             Self::SegmenterSupportedLocalesOf(state) => state.trace_roots(mark),
         }
@@ -1126,6 +1135,185 @@ impl IntlDisplayNamesOfContinuation {
         mark(CollectionRoot::Heap(HeapReference::Object(
             self.display_names,
         )));
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum IntlDurationFormatConstructorStage {
+    AwaitPrototype,
+    ReadOption,
+    AwaitOption,
+    AwaitOptionPrimitive,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum IntlDurationFormatOption {
+    LocaleMatcher,
+    NumberingSystem,
+    Style,
+    UnitStyle(DurationUnit),
+    UnitDisplay(DurationUnit),
+    FractionalDigits,
+}
+
+impl IntlDurationFormatOption {
+    const ALL: [Self; 24] = [
+        Self::LocaleMatcher,
+        Self::NumberingSystem,
+        Self::Style,
+        Self::UnitStyle(DurationUnit::Years),
+        Self::UnitDisplay(DurationUnit::Years),
+        Self::UnitStyle(DurationUnit::Months),
+        Self::UnitDisplay(DurationUnit::Months),
+        Self::UnitStyle(DurationUnit::Weeks),
+        Self::UnitDisplay(DurationUnit::Weeks),
+        Self::UnitStyle(DurationUnit::Days),
+        Self::UnitDisplay(DurationUnit::Days),
+        Self::UnitStyle(DurationUnit::Hours),
+        Self::UnitDisplay(DurationUnit::Hours),
+        Self::UnitStyle(DurationUnit::Minutes),
+        Self::UnitDisplay(DurationUnit::Minutes),
+        Self::UnitStyle(DurationUnit::Seconds),
+        Self::UnitDisplay(DurationUnit::Seconds),
+        Self::UnitStyle(DurationUnit::Milliseconds),
+        Self::UnitDisplay(DurationUnit::Milliseconds),
+        Self::UnitStyle(DurationUnit::Microseconds),
+        Self::UnitDisplay(DurationUnit::Microseconds),
+        Self::UnitStyle(DurationUnit::Nanoseconds),
+        Self::UnitDisplay(DurationUnit::Nanoseconds),
+        Self::FractionalDigits,
+    ];
+
+    const fn name(self) -> &'static str {
+        match self {
+            Self::LocaleMatcher => "localeMatcher",
+            Self::NumberingSystem => "numberingSystem",
+            Self::Style => "style",
+            Self::UnitStyle(unit) => unit.plural_name(),
+            Self::UnitDisplay(unit) => unit.display_name(),
+            Self::FractionalDigits => "fractionalDigits",
+        }
+    }
+
+    const fn is_number(self) -> bool {
+        matches!(self, Self::FractionalDigits)
+    }
+}
+
+pub(super) struct IntlDurationFormatConstructorContinuation {
+    new_target: FunctionId,
+    locales_argument: Option<StoredValue>,
+    options_argument: StoredValue,
+    options_object: Option<StoredValue>,
+    prototype: Option<HeapReference>,
+    requested_locales: Vec<String>,
+    options: DurationFormatRequestOptions,
+    option_index: usize,
+    realm: RealmId,
+    stage: IntlDurationFormatConstructorStage,
+    origin: JsStackFrame,
+}
+
+impl IntlDurationFormatConstructorContinuation {
+    pub(super) fn retained_values(&self) -> u64 {
+        2_u64
+            .saturating_add(u64::from(self.locales_argument.is_some()))
+            .saturating_add(u64::from(self.options_object.is_some()))
+            .saturating_add(u64::from(self.prototype.is_some()))
+    }
+
+    pub(super) fn trace_roots(&self, mark: &mut dyn FnMut(CollectionRoot)) {
+        mark(CollectionRoot::Heap(HeapReference::Function(
+            self.new_target,
+        )));
+        if let Some(locales) = &self.locales_argument {
+            trace_stored_value_root(locales, mark);
+        }
+        trace_stored_value_root(&self.options_argument, mark);
+        if let Some(options) = &self.options_object {
+            trace_stored_value_root(options, mark);
+        }
+        if let Some(prototype) = self.prototype {
+            mark(CollectionRoot::Heap(prototype));
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum IntlDurationFormatSupportedLocalesStage {
+    ReadLocaleMatcher,
+    AwaitLocaleMatcher,
+    AwaitLocaleMatcherPrimitive,
+}
+
+pub(super) struct IntlDurationFormatSupportedLocalesContinuation {
+    options_argument: StoredValue,
+    options_object: Option<StoredValue>,
+    requested_locales: Vec<String>,
+    realm: RealmId,
+    stage: IntlDurationFormatSupportedLocalesStage,
+    origin: JsStackFrame,
+}
+
+impl IntlDurationFormatSupportedLocalesContinuation {
+    pub(super) fn retained_values(&self) -> u64 {
+        1_u64.saturating_add(u64::from(self.options_object.is_some()))
+    }
+
+    pub(super) fn trace_roots(&self, mark: &mut dyn FnMut(CollectionRoot)) {
+        trace_stored_value_root(&self.options_argument, mark);
+        if let Some(options) = &self.options_object {
+            trace_stored_value_root(options, mark);
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum IntlDurationFormatOperation {
+    Format,
+    FormatToParts,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum IntlDurationFormatValueStage {
+    ReadProperty,
+    AwaitProperty,
+    AwaitPropertyPrimitive,
+}
+
+const INTL_DURATION_RECORD_PROPERTY_ORDER: [DurationUnit; 10] = [
+    DurationUnit::Days,
+    DurationUnit::Hours,
+    DurationUnit::Microseconds,
+    DurationUnit::Milliseconds,
+    DurationUnit::Minutes,
+    DurationUnit::Months,
+    DurationUnit::Nanoseconds,
+    DurationUnit::Seconds,
+    DurationUnit::Weeks,
+    DurationUnit::Years,
+];
+
+pub(super) struct IntlDurationFormatValueContinuation {
+    formatter: ObjectId,
+    input: StoredValue,
+    values: [i128; 10],
+    found: bool,
+    unit_index: usize,
+    operation: IntlDurationFormatOperation,
+    realm: RealmId,
+    stage: IntlDurationFormatValueStage,
+    origin: JsStackFrame,
+}
+
+impl IntlDurationFormatValueContinuation {
+    pub(super) const fn retained_values() -> u64 {
+        2
+    }
+
+    pub(super) fn trace_roots(&self, mark: &mut dyn FnMut(CollectionRoot)) {
+        mark(CollectionRoot::Heap(HeapReference::Object(self.formatter)));
+        trace_stored_value_root(&self.input, mark);
     }
 }
 
@@ -7952,6 +8140,1024 @@ fn intl_display_names_brand_error<T>(
     )
 }
 
+pub(super) fn begin_intl_duration_format_constructor(
+    runtime: &mut Runtime,
+    mut inputs: CallInputs,
+    realm: RealmId,
+    return_to: Option<CallReturn>,
+    origin: JsStackFrame,
+    execution_budget: &mut ExecutionBudget,
+) -> Result<NativeDispatch, NativeFailure> {
+    let Some(new_target) = inputs.new_target else {
+        return intl_locale_list_error(
+            realm,
+            origin,
+            ExceptionKind::TypeError,
+            "Intl.DurationFormat requires 'new'",
+        );
+    };
+    let locales_argument = inputs.arguments.take_first_or_undefined();
+    let options_argument = inputs.arguments.take_first_or_undefined();
+    let state = IntlDurationFormatConstructorContinuation {
+        new_target,
+        locales_argument: Some(locales_argument),
+        options_argument,
+        options_object: None,
+        prototype: None,
+        requested_locales: Vec::new(),
+        options: DurationFormatRequestOptions::default(),
+        option_index: 0,
+        realm,
+        stage: IntlDurationFormatConstructorStage::AwaitPrototype,
+        origin,
+    };
+    let base = StoredValue::Function(new_target);
+    charge_heap_property_lookup(runtime, &base, execution_budget)?;
+    let key = runtime.predefined_property_key(PredefinedAtom::Prototype);
+    let dispatch = begin_value_get(
+        runtime,
+        &base,
+        key,
+        None,
+        realm,
+        return_to,
+        state.origin.clone(),
+        execution_budget,
+    )?;
+    continue_intl_duration_format_constructor_after(
+        dispatch,
+        state,
+        runtime,
+        return_to,
+        execution_budget,
+    )
+}
+
+fn begin_intl_duration_format_options(
+    runtime: &mut Runtime,
+    mut state: IntlDurationFormatConstructorContinuation,
+    return_to: Option<CallReturn>,
+    execution_budget: &mut ExecutionBudget,
+) -> Result<NativeDispatch, NativeFailure> {
+    if matches!(state.options_argument, StoredValue::Undefined) {
+        return finish_intl_duration_format_options(runtime, &state);
+    }
+    if !matches!(
+        state.options_argument,
+        StoredValue::Function(_) | StoredValue::Object(_)
+    ) {
+        return intl_locale_list_error(
+            state.realm,
+            state.origin,
+            ExceptionKind::TypeError,
+            "Intl.DurationFormat options must be an object",
+        );
+    }
+    state.options_object = Some(state.options_argument.duplicate());
+    state.stage = IntlDurationFormatConstructorStage::ReadOption;
+    advance_intl_duration_format_constructor(runtime, state, None, return_to, execution_budget)
+}
+
+#[allow(
+    clippy::too_many_lines,
+    reason = "DurationFormat option Gets and resumable conversions stay in normative order"
+)]
+pub(super) fn advance_intl_duration_format_constructor(
+    runtime: &mut Runtime,
+    mut state: IntlDurationFormatConstructorContinuation,
+    completion: Option<StoredValue>,
+    return_to: Option<CallReturn>,
+    execution_budget: &mut ExecutionBudget,
+) -> Result<NativeDispatch, NativeFailure> {
+    let mut completion = completion;
+    loop {
+        match state.stage {
+            IntlDurationFormatConstructorStage::AwaitPrototype => {
+                let requested = take_intl_duration_format_constructor_completion(&mut completion)?;
+                state.prototype = Some(match requested {
+                    StoredValue::Function(function) => HeapReference::Function(function),
+                    StoredValue::Object(object) => HeapReference::Object(object),
+                    StoredValue::Undefined
+                    | StoredValue::Null
+                    | StoredValue::Boolean(_)
+                    | StoredValue::Number(_)
+                    | StoredValue::BigInt(_)
+                    | StoredValue::String(_)
+                    | StoredValue::Symbol(_) => {
+                        let target_realm = runtime.function_realm(state.new_target)?;
+                        HeapReference::Object(
+                            runtime.realm_intl_duration_format_prototype(target_realm)?,
+                        )
+                    }
+                });
+                let locales =
+                    state
+                        .locales_argument
+                        .take()
+                        .ok_or(EngineFault::RuntimeInvariant {
+                            message: "Intl.DurationFormat constructor lost its locales argument",
+                        })?;
+                state.stage = IntlDurationFormatConstructorStage::ReadOption;
+                let realm = state.realm;
+                let origin = state.origin.clone();
+                return begin_intl_locale_list(
+                    runtime,
+                    locales,
+                    IntlLocaleListTarget::DurationFormatConstructor(Box::new(state)),
+                    realm,
+                    return_to,
+                    origin,
+                    execution_budget,
+                );
+            }
+            IntlDurationFormatConstructorStage::ReadOption => {
+                let Some(option) = IntlDurationFormatOption::ALL
+                    .get(state.option_index)
+                    .copied()
+                else {
+                    return finish_intl_duration_format_options(runtime, &state);
+                };
+                let base = state
+                    .options_object
+                    .as_ref()
+                    .ok_or(EngineFault::RuntimeInvariant {
+                        message: "Intl.DurationFormat option iteration lost its options object",
+                    })?
+                    .duplicate();
+                charge_heap_property_lookup(runtime, &base, execution_budget)?;
+                let name = JsString::from_utf8(option.name())?;
+                let key = runtime.property_key_from_string(&name)?;
+                state.stage = IntlDurationFormatConstructorStage::AwaitOption;
+                let dispatch = begin_value_get(
+                    runtime,
+                    &base,
+                    key,
+                    Some(&name),
+                    state.realm,
+                    return_to,
+                    state.origin.clone(),
+                    execution_budget,
+                )?;
+                return continue_intl_duration_format_constructor_after(
+                    dispatch,
+                    state,
+                    runtime,
+                    return_to,
+                    execution_budget,
+                );
+            }
+            IntlDurationFormatConstructorStage::AwaitOption => {
+                let value = take_intl_duration_format_constructor_completion(&mut completion)?;
+                let option = IntlDurationFormatOption::ALL[state.option_index];
+                if matches!(value, StoredValue::Undefined) {
+                    advance_intl_duration_format_option(&mut state);
+                    continue;
+                }
+                if matches!(value, StoredValue::Function(_) | StoredValue::Object(_)) {
+                    state.stage = IntlDurationFormatConstructorStage::AwaitOptionPrimitive;
+                    let realm = state.realm;
+                    let origin = state.origin.clone();
+                    return begin_operator_primitive_conversion(
+                        runtime,
+                        value,
+                        if option.is_number() {
+                            OperatorPrimitiveHint::Number
+                        } else {
+                            OperatorPrimitiveHint::String
+                        },
+                        OperatorPrimitiveTarget::IntlDurationFormatConstructor(Box::new(state)),
+                        realm,
+                        return_to,
+                        origin,
+                        execution_budget,
+                    );
+                }
+                store_intl_duration_format_option(&mut state, option, value)?;
+                advance_intl_duration_format_option(&mut state);
+            }
+            IntlDurationFormatConstructorStage::AwaitOptionPrimitive => {
+                let value = take_intl_duration_format_constructor_completion(&mut completion)?;
+                let option = IntlDurationFormatOption::ALL[state.option_index];
+                store_intl_duration_format_option(&mut state, option, value)?;
+                advance_intl_duration_format_option(&mut state);
+            }
+        }
+    }
+}
+
+fn advance_intl_duration_format_option(state: &mut IntlDurationFormatConstructorContinuation) {
+    state.option_index = state.option_index.saturating_add(1);
+    state.stage = IntlDurationFormatConstructorStage::ReadOption;
+}
+
+fn store_intl_duration_format_option(
+    state: &mut IntlDurationFormatConstructorContinuation,
+    option: IntlDurationFormatOption,
+    value: StoredValue,
+) -> Result<(), NativeFailure> {
+    if option == IntlDurationFormatOption::FractionalDigits {
+        let number = operator_to_number(value, state.realm, &state.origin)?.as_f64();
+        if !number.is_finite() || !(0.0..=9.0).contains(&number) {
+            return invalid_intl_duration_format_option(state, option);
+        }
+        #[allow(
+            clippy::cast_possible_truncation,
+            clippy::cast_sign_loss,
+            reason = "the finite option is bounded to the inclusive u8 range before flooring"
+        )]
+        {
+            state.options.fractional_digits = Some(number.floor() as u8);
+        }
+        return Ok(());
+    }
+
+    let text = operator_primitive_to_string(value, state.realm, &state.origin)?;
+    let text = text.to_utf8_lossy()?;
+    match option {
+        IntlDurationFormatOption::LocaleMatcher => {
+            if !matches!(text.as_str(), "lookup" | "best fit") {
+                return invalid_intl_duration_format_option(state, option);
+            }
+        }
+        IntlDurationFormatOption::NumberingSystem => {
+            let Some(value) = canonical_unicode_locale_type(&text) else {
+                return invalid_intl_duration_format_option(state, option);
+            };
+            state.options.numbering_system = Some(value);
+        }
+        IntlDurationFormatOption::Style => {
+            state.options.style = Some(match text.as_str() {
+                "long" => DurationFormatStyle::Long,
+                "short" => DurationFormatStyle::Short,
+                "narrow" => DurationFormatStyle::Narrow,
+                "digital" => DurationFormatStyle::Digital,
+                _ => return invalid_intl_duration_format_option(state, option),
+            });
+        }
+        IntlDurationFormatOption::UnitStyle(unit) => {
+            let style = match text.as_str() {
+                "long" => DurationUnitStyle::Long,
+                "short" => DurationUnitStyle::Short,
+                "narrow" => DurationUnitStyle::Narrow,
+                "numeric"
+                    if !matches!(
+                        unit,
+                        DurationUnit::Years
+                            | DurationUnit::Months
+                            | DurationUnit::Weeks
+                            | DurationUnit::Days
+                    ) =>
+                {
+                    DurationUnitStyle::Numeric
+                }
+                "2-digit"
+                    if matches!(
+                        unit,
+                        DurationUnit::Hours | DurationUnit::Minutes | DurationUnit::Seconds
+                    ) =>
+                {
+                    DurationUnitStyle::TwoDigit
+                }
+                _ => return invalid_intl_duration_format_option(state, option),
+            };
+            state.options.unit_styles[unit.index()] = Some(style);
+        }
+        IntlDurationFormatOption::UnitDisplay(unit) => {
+            state.options.unit_displays[unit.index()] = Some(match text.as_str() {
+                "auto" => DurationDisplay::Auto,
+                "always" => DurationDisplay::Always,
+                _ => return invalid_intl_duration_format_option(state, option),
+            });
+        }
+        IntlDurationFormatOption::FractionalDigits => {
+            return Err(EngineFault::RuntimeInvariant {
+                message: "numeric Intl.DurationFormat option reached string storage",
+            }
+            .into());
+        }
+    }
+    Ok(())
+}
+
+fn invalid_intl_duration_format_option<T>(
+    state: &IntlDurationFormatConstructorContinuation,
+    option: IntlDurationFormatOption,
+) -> Result<T, NativeFailure> {
+    intl_locale_list_error(
+        state.realm,
+        state.origin.clone(),
+        ExceptionKind::RangeError,
+        &format!("invalid Intl.DurationFormat {} option", option.name()),
+    )
+}
+
+fn finish_intl_duration_format_options(
+    runtime: &mut Runtime,
+    state: &IntlDurationFormatConstructorContinuation,
+) -> Result<NativeDispatch, NativeFailure> {
+    let resolved =
+        resolve_duration_format(&state.requested_locales, &state.options).map_err(|error| {
+            match error {
+                DurationFormatError::InvalidOption => NativeFailure::Abrupt(PendingException {
+                    realm: state.realm,
+                    payload: PendingExceptionPayload::EngineError {
+                        kind: ExceptionKind::RangeError,
+                        message: JsString::from_utf8("invalid Intl.DurationFormat options")
+                            .expect("static Intl error is valid UTF-8"),
+                    },
+                    origin: state.origin.clone(),
+                }),
+                DurationFormatError::InvalidLocale
+                | DurationFormatError::InvalidDuration
+                | DurationFormatError::Data => EngineFault::RuntimeInvariant {
+                    message: "canonical DurationFormat inputs failed locale resolution",
+                }
+                .into(),
+            }
+        })?;
+    let prototype = state.prototype.ok_or(EngineFault::RuntimeInvariant {
+        message: "Intl.DurationFormat allocation lost its prototype",
+    })?;
+    let object = runtime.allocate_intl_duration_format(prototype, resolved)?;
+    Ok(NativeDispatch::Immediate(StoredValue::Object(object)))
+}
+
+fn continue_intl_duration_format_constructor_after(
+    dispatch: NativeDispatch,
+    state: IntlDurationFormatConstructorContinuation,
+    runtime: &mut Runtime,
+    return_to: Option<CallReturn>,
+    execution_budget: &mut ExecutionBudget,
+) -> Result<NativeDispatch, NativeFailure> {
+    continue_get_after(
+        dispatch,
+        state,
+        |state| NativeContinuation::IntlDurationFormatConstructor(Box::new(state)),
+        |state, value| {
+            advance_intl_duration_format_constructor(
+                runtime,
+                state,
+                Some(value),
+                return_to,
+                execution_budget,
+            )
+        },
+        "Intl.DurationFormat property Get produced a structured result",
+    )
+}
+
+fn take_intl_duration_format_constructor_completion(
+    completion: &mut Option<StoredValue>,
+) -> Result<StoredValue, EngineFault> {
+    completion.take().ok_or(EngineFault::RuntimeInvariant {
+        message: "Intl.DurationFormat constructor resumed without a completion",
+    })
+}
+
+pub(super) fn begin_intl_duration_format_supported_locales_of(
+    runtime: &mut Runtime,
+    mut arguments: CallArguments,
+    realm: RealmId,
+    return_to: Option<CallReturn>,
+    origin: JsStackFrame,
+    execution_budget: &mut ExecutionBudget,
+) -> Result<NativeDispatch, NativeFailure> {
+    let locales = arguments.take_first_or_undefined();
+    let options_argument = arguments.take_first_or_undefined();
+    let state = IntlDurationFormatSupportedLocalesContinuation {
+        options_argument,
+        options_object: None,
+        requested_locales: Vec::new(),
+        realm,
+        stage: IntlDurationFormatSupportedLocalesStage::ReadLocaleMatcher,
+        origin: origin.clone(),
+    };
+    begin_intl_locale_list(
+        runtime,
+        locales,
+        IntlLocaleListTarget::DurationFormatSupportedLocalesOf(Box::new(state)),
+        realm,
+        return_to,
+        origin,
+        execution_budget,
+    )
+}
+
+fn begin_intl_duration_format_supported_locales_options(
+    runtime: &mut Runtime,
+    mut state: IntlDurationFormatSupportedLocalesContinuation,
+    return_to: Option<CallReturn>,
+    execution_budget: &mut ExecutionBudget,
+) -> Result<NativeDispatch, NativeFailure> {
+    if matches!(state.options_argument, StoredValue::Undefined) {
+        return finish_intl_duration_format_supported_locales(runtime, &state);
+    }
+    if !matches!(
+        state.options_argument,
+        StoredValue::Function(_) | StoredValue::Object(_)
+    ) {
+        return intl_locale_list_error(
+            state.realm,
+            state.origin,
+            ExceptionKind::TypeError,
+            "Intl.DurationFormat.supportedLocalesOf options must be an object",
+        );
+    }
+    state.options_object = Some(state.options_argument.duplicate());
+    advance_intl_duration_format_supported_locales(
+        runtime,
+        state,
+        None,
+        return_to,
+        execution_budget,
+    )
+}
+
+pub(super) fn advance_intl_duration_format_supported_locales(
+    runtime: &mut Runtime,
+    mut state: IntlDurationFormatSupportedLocalesContinuation,
+    completion: Option<StoredValue>,
+    return_to: Option<CallReturn>,
+    execution_budget: &mut ExecutionBudget,
+) -> Result<NativeDispatch, NativeFailure> {
+    match state.stage {
+        IntlDurationFormatSupportedLocalesStage::ReadLocaleMatcher => {
+            let base = state
+                .options_object
+                .as_ref()
+                .ok_or(EngineFault::RuntimeInvariant {
+                    message: "Intl.DurationFormat.supportedLocalesOf lost its options object",
+                })?
+                .duplicate();
+            charge_heap_property_lookup(runtime, &base, execution_budget)?;
+            let name = JsString::from_utf8("localeMatcher")?;
+            let key = runtime.property_key_from_string(&name)?;
+            state.stage = IntlDurationFormatSupportedLocalesStage::AwaitLocaleMatcher;
+            let dispatch = begin_value_get(
+                runtime,
+                &base,
+                key,
+                Some(&name),
+                state.realm,
+                return_to,
+                state.origin.clone(),
+                execution_budget,
+            )?;
+            continue_intl_duration_format_supported_locales_after(
+                dispatch,
+                state,
+                runtime,
+                return_to,
+                execution_budget,
+            )
+        }
+        IntlDurationFormatSupportedLocalesStage::AwaitLocaleMatcher => {
+            let value = completion.ok_or(EngineFault::RuntimeInvariant {
+                message: "Intl.DurationFormat.supportedLocalesOf resumed without a completion",
+            })?;
+            if matches!(value, StoredValue::Undefined) {
+                return finish_intl_duration_format_supported_locales(runtime, &state);
+            }
+            if matches!(value, StoredValue::Function(_) | StoredValue::Object(_)) {
+                state.stage = IntlDurationFormatSupportedLocalesStage::AwaitLocaleMatcherPrimitive;
+                let realm = state.realm;
+                let origin = state.origin.clone();
+                return begin_operator_primitive_conversion(
+                    runtime,
+                    value,
+                    OperatorPrimitiveHint::String,
+                    OperatorPrimitiveTarget::IntlDurationFormatSupportedLocalesOf(Box::new(state)),
+                    realm,
+                    return_to,
+                    origin,
+                    execution_budget,
+                );
+            }
+            validate_intl_duration_format_locale_matcher(&state, value)?;
+            finish_intl_duration_format_supported_locales(runtime, &state)
+        }
+        IntlDurationFormatSupportedLocalesStage::AwaitLocaleMatcherPrimitive => {
+            let value = completion.ok_or(EngineFault::RuntimeInvariant {
+                message: "Intl.DurationFormat.supportedLocalesOf resumed without a completion",
+            })?;
+            validate_intl_duration_format_locale_matcher(&state, value)?;
+            finish_intl_duration_format_supported_locales(runtime, &state)
+        }
+    }
+}
+
+fn validate_intl_duration_format_locale_matcher(
+    state: &IntlDurationFormatSupportedLocalesContinuation,
+    value: StoredValue,
+) -> Result<(), NativeFailure> {
+    let text = operator_primitive_to_string(value, state.realm, &state.origin)?;
+    if matches!(text.to_utf8_lossy()?.as_str(), "lookup" | "best fit") {
+        return Ok(());
+    }
+    intl_locale_list_error(
+        state.realm,
+        state.origin.clone(),
+        ExceptionKind::RangeError,
+        "invalid Intl.DurationFormat localeMatcher option",
+    )
+}
+
+fn finish_intl_duration_format_supported_locales(
+    runtime: &mut Runtime,
+    state: &IntlDurationFormatSupportedLocalesContinuation,
+) -> Result<NativeDispatch, NativeFailure> {
+    intl_locale_string_array(
+        runtime,
+        state.realm,
+        duration_format_supported_locales(&state.requested_locales),
+    )
+}
+
+fn continue_intl_duration_format_supported_locales_after(
+    dispatch: NativeDispatch,
+    state: IntlDurationFormatSupportedLocalesContinuation,
+    runtime: &mut Runtime,
+    return_to: Option<CallReturn>,
+    execution_budget: &mut ExecutionBudget,
+) -> Result<NativeDispatch, NativeFailure> {
+    continue_get_after(
+        dispatch,
+        state,
+        |state| NativeContinuation::IntlDurationFormatSupportedLocalesOf(Box::new(state)),
+        |state, value| {
+            advance_intl_duration_format_supported_locales(
+                runtime,
+                state,
+                Some(value),
+                return_to,
+                execution_budget,
+            )
+        },
+        "Intl.DurationFormat.supportedLocalesOf Get produced a structured result",
+    )
+}
+
+#[allow(
+    clippy::too_many_arguments,
+    reason = "native dispatch keeps receiver, arguments, realm, return target, origin, and budget explicit"
+)]
+pub(super) fn begin_intl_duration_format_prototype(
+    runtime: &mut Runtime,
+    method: IntlDurationFormatPrototypeMethod,
+    receiver: &StoredValue,
+    mut arguments: CallArguments,
+    realm: RealmId,
+    return_to: Option<CallReturn>,
+    origin: JsStackFrame,
+    execution_budget: &mut ExecutionBudget,
+) -> Result<NativeDispatch, NativeFailure> {
+    let StoredValue::Object(formatter) = receiver else {
+        return intl_duration_format_brand_error(realm, origin);
+    };
+    let Some(resolved) = runtime.intl_duration_format_state(*formatter)?.cloned() else {
+        return intl_duration_format_brand_error(realm, origin);
+    };
+    match method {
+        IntlDurationFormatPrototypeMethod::ResolvedOptions => {
+            intl_duration_format_resolved_options(runtime, realm, &resolved)
+        }
+        IntlDurationFormatPrototypeMethod::Format
+        | IntlDurationFormatPrototypeMethod::FormatToParts => {
+            let input = arguments.take_first_or_undefined();
+            begin_intl_duration_format_value(
+                runtime,
+                IntlDurationFormatValueContinuation {
+                    formatter: *formatter,
+                    input: input.duplicate(),
+                    values: [0; 10],
+                    found: false,
+                    unit_index: 0,
+                    operation: if method == IntlDurationFormatPrototypeMethod::Format {
+                        IntlDurationFormatOperation::Format
+                    } else {
+                        IntlDurationFormatOperation::FormatToParts
+                    },
+                    realm,
+                    stage: IntlDurationFormatValueStage::ReadProperty,
+                    origin,
+                },
+                input,
+                return_to,
+                execution_budget,
+            )
+        }
+    }
+}
+
+fn begin_intl_duration_format_value(
+    runtime: &mut Runtime,
+    state: IntlDurationFormatValueContinuation,
+    input: StoredValue,
+    return_to: Option<CallReturn>,
+    execution_budget: &mut ExecutionBudget,
+) -> Result<NativeDispatch, NativeFailure> {
+    if let StoredValue::Object(object) = input
+        && let Some(duration) = runtime.temporal_duration(object)?
+    {
+        return finish_intl_duration_format_record(
+            runtime,
+            &state,
+            duration_record_from_temporal(duration),
+        );
+    }
+    if let StoredValue::String(input) = input {
+        let input = input.to_utf8_lossy()?;
+        let duration = input.parse::<temporal_rs::Duration>().map_err(|_| {
+            NativeFailure::Abrupt(PendingException {
+                realm: state.realm,
+                payload: PendingExceptionPayload::EngineError {
+                    kind: ExceptionKind::RangeError,
+                    message: JsString::from_utf8("invalid Temporal duration string")
+                        .expect("static Intl error is valid UTF-8"),
+                },
+                origin: state.origin.clone(),
+            })
+        })?;
+        return finish_intl_duration_format_record(
+            runtime,
+            &state,
+            duration_record_from_temporal(duration),
+        );
+    }
+    if !matches!(input, StoredValue::Function(_) | StoredValue::Object(_)) {
+        return intl_duration_format_input_type_error(&state);
+    }
+    advance_intl_duration_format_value(runtime, state, None, return_to, execution_budget)
+}
+
+pub(super) fn advance_intl_duration_format_value(
+    runtime: &mut Runtime,
+    mut state: IntlDurationFormatValueContinuation,
+    completion: Option<StoredValue>,
+    return_to: Option<CallReturn>,
+    execution_budget: &mut ExecutionBudget,
+) -> Result<NativeDispatch, NativeFailure> {
+    let mut completion = completion;
+    loop {
+        match state.stage {
+            IntlDurationFormatValueStage::ReadProperty => {
+                let Some(unit) = INTL_DURATION_RECORD_PROPERTY_ORDER
+                    .get(state.unit_index)
+                    .copied()
+                else {
+                    if !state.found {
+                        return intl_duration_format_input_type_error(&state);
+                    }
+                    return finish_intl_duration_format_record(
+                        runtime,
+                        &state,
+                        DurationRecord {
+                            values: state.values,
+                        },
+                    );
+                };
+                let base = state.input.duplicate();
+                charge_heap_property_lookup(runtime, &base, execution_budget)?;
+                let name = JsString::from_utf8(unit.plural_name())?;
+                let key = runtime.property_key_from_string(&name)?;
+                state.stage = IntlDurationFormatValueStage::AwaitProperty;
+                let dispatch = begin_value_get(
+                    runtime,
+                    &base,
+                    key,
+                    Some(&name),
+                    state.realm,
+                    return_to,
+                    state.origin.clone(),
+                    execution_budget,
+                )?;
+                return continue_intl_duration_format_value_after(
+                    dispatch,
+                    state,
+                    runtime,
+                    return_to,
+                    execution_budget,
+                );
+            }
+            IntlDurationFormatValueStage::AwaitProperty => {
+                let value = completion.take().ok_or(EngineFault::RuntimeInvariant {
+                    message: "Intl.DurationFormat duration Get resumed without a completion",
+                })?;
+                if matches!(value, StoredValue::Undefined) {
+                    advance_intl_duration_format_value_property(&mut state);
+                    continue;
+                }
+                if matches!(value, StoredValue::Function(_) | StoredValue::Object(_)) {
+                    state.stage = IntlDurationFormatValueStage::AwaitPropertyPrimitive;
+                    let realm = state.realm;
+                    let origin = state.origin.clone();
+                    return begin_operator_primitive_conversion(
+                        runtime,
+                        value,
+                        OperatorPrimitiveHint::Number,
+                        OperatorPrimitiveTarget::IntlDurationFormatValue(Box::new(state)),
+                        realm,
+                        return_to,
+                        origin,
+                        execution_budget,
+                    );
+                }
+                store_intl_duration_format_value(&mut state, value)?;
+                advance_intl_duration_format_value_property(&mut state);
+            }
+            IntlDurationFormatValueStage::AwaitPropertyPrimitive => {
+                let value = completion.take().ok_or(EngineFault::RuntimeInvariant {
+                    message: "Intl.DurationFormat duration conversion resumed without a value",
+                })?;
+                store_intl_duration_format_value(&mut state, value)?;
+                advance_intl_duration_format_value_property(&mut state);
+            }
+        }
+    }
+}
+
+fn advance_intl_duration_format_value_property(state: &mut IntlDurationFormatValueContinuation) {
+    state.unit_index = state.unit_index.saturating_add(1);
+    state.stage = IntlDurationFormatValueStage::ReadProperty;
+}
+
+fn store_intl_duration_format_value(
+    state: &mut IntlDurationFormatValueContinuation,
+    value: StoredValue,
+) -> Result<(), NativeFailure> {
+    let number = operator_to_number(value, state.realm, &state.origin)?.as_f64();
+    let Some(value) = exact_integral_f64(number) else {
+        return intl_duration_format_input_range_error(state);
+    };
+    let unit = INTL_DURATION_RECORD_PROPERTY_ORDER
+        .get(state.unit_index)
+        .copied()
+        .ok_or(EngineFault::RuntimeInvariant {
+            message: "Intl.DurationFormat duration unit index is out of range",
+        })?;
+    let slot = state
+        .values
+        .get_mut(unit.index())
+        .ok_or(EngineFault::RuntimeInvariant {
+            message: "Intl.DurationFormat duration unit index is out of range",
+        })?;
+    *slot = value;
+    state.found = true;
+    Ok(())
+}
+
+fn exact_integral_f64(value: f64) -> Option<i128> {
+    if !value.is_finite() || value.fract() != 0.0 {
+        return None;
+    }
+    if value == 0.0 {
+        return Some(0);
+    }
+    let bits = value.to_bits();
+    let negative = bits >> 63 != 0;
+    let exponent = i32::from(((bits >> 52) & 0x7ff) as u16) - 1023;
+    if !(0..=126).contains(&exponent) {
+        return None;
+    }
+    let significand = u128::from((bits & ((1_u64 << 52) - 1)) | (1_u64 << 52));
+    let magnitude = if exponent >= 52 {
+        significand.checked_shl((exponent - 52).cast_unsigned())?
+    } else {
+        let shift = (52 - exponent).cast_unsigned();
+        let discarded_mask = (1_u128 << shift) - 1;
+        if significand & discarded_mask != 0 {
+            return None;
+        }
+        significand >> shift
+    };
+    let magnitude = i128::try_from(magnitude).ok()?;
+    Some(if negative { -magnitude } else { magnitude })
+}
+
+fn duration_record_from_temporal(duration: temporal_rs::Duration) -> DurationRecord {
+    DurationRecord {
+        values: [
+            i128::from(duration.years()),
+            i128::from(duration.months()),
+            i128::from(duration.weeks()),
+            i128::from(duration.days()),
+            i128::from(duration.hours()),
+            i128::from(duration.minutes()),
+            i128::from(duration.seconds()),
+            i128::from(duration.milliseconds()),
+            duration.microseconds(),
+            duration.nanoseconds(),
+        ],
+    }
+}
+
+fn finish_intl_duration_format_record(
+    runtime: &mut Runtime,
+    state: &IntlDurationFormatValueContinuation,
+    record: DurationRecord,
+) -> Result<NativeDispatch, NativeFailure> {
+    let resolved = runtime
+        .intl_duration_format_state(state.formatter)?
+        .cloned()
+        .ok_or(EngineFault::RuntimeInvariant {
+            message: "Intl.DurationFormat operation lost its branded receiver",
+        })?;
+    match state.operation {
+        IntlDurationFormatOperation::Format => {
+            let formatted = format_duration(&resolved, record)
+                .map_err(|error| intl_duration_format_operation_error(state, error))?;
+            Ok(NativeDispatch::Immediate(StoredValue::String(
+                JsString::from_utf8(&formatted)?,
+            )))
+        }
+        IntlDurationFormatOperation::FormatToParts => {
+            let parts = format_duration_to_parts(&resolved, record)
+                .map_err(|error| intl_duration_format_operation_error(state, error))?;
+            intl_duration_format_parts_array(runtime, state.realm, parts)
+        }
+    }
+}
+
+fn intl_duration_format_operation_error(
+    state: &IntlDurationFormatValueContinuation,
+    error: DurationFormatError,
+) -> NativeFailure {
+    match error {
+        DurationFormatError::InvalidDuration => NativeFailure::Abrupt(PendingException {
+            realm: state.realm,
+            payload: PendingExceptionPayload::EngineError {
+                kind: ExceptionKind::RangeError,
+                message: JsString::from_utf8("invalid duration record")
+                    .expect("static Intl error is valid UTF-8"),
+            },
+            origin: state.origin.clone(),
+        }),
+        DurationFormatError::InvalidLocale
+        | DurationFormatError::InvalidOption
+        | DurationFormatError::Data => EngineFault::RuntimeInvariant {
+            message: "resolved Intl.DurationFormat slots failed ICU formatting",
+        }
+        .into(),
+    }
+}
+
+fn intl_duration_format_input_type_error<T>(
+    state: &IntlDurationFormatValueContinuation,
+) -> Result<T, NativeFailure> {
+    intl_locale_list_error(
+        state.realm,
+        state.origin.clone(),
+        ExceptionKind::TypeError,
+        "Intl.DurationFormat requires a duration-like value",
+    )
+}
+
+fn intl_duration_format_input_range_error<T>(
+    state: &IntlDurationFormatValueContinuation,
+) -> Result<T, NativeFailure> {
+    intl_locale_list_error(
+        state.realm,
+        state.origin.clone(),
+        ExceptionKind::RangeError,
+        "Intl.DurationFormat duration fields must be finite integers",
+    )
+}
+
+fn continue_intl_duration_format_value_after(
+    dispatch: NativeDispatch,
+    state: IntlDurationFormatValueContinuation,
+    runtime: &mut Runtime,
+    return_to: Option<CallReturn>,
+    execution_budget: &mut ExecutionBudget,
+) -> Result<NativeDispatch, NativeFailure> {
+    continue_get_after(
+        dispatch,
+        state,
+        |state| NativeContinuation::IntlDurationFormatValue(Box::new(state)),
+        |state, value| {
+            advance_intl_duration_format_value(
+                runtime,
+                state,
+                Some(value),
+                return_to,
+                execution_budget,
+            )
+        },
+        "Intl.DurationFormat duration Get produced a structured result",
+    )
+}
+
+fn intl_duration_format_parts_array(
+    runtime: &mut Runtime,
+    realm: RealmId,
+    parts: Vec<quickjs_intl::DurationFormatPart>,
+) -> Result<NativeDispatch, NativeFailure> {
+    let mut values = Vec::new();
+    values
+        .try_reserve_exact(parts.len())
+        .map_err(|_| ExecutionError::AllocationFailed {
+            resource: RuntimeResource::FrameValues,
+            additional: parts.len(),
+        })?;
+    for part in parts {
+        let object = runtime.allocate_ordinary_object(runtime.realm_object_prototype(realm)?)?;
+        let mut properties = vec![
+            ("type", StoredValue::String(JsString::from_utf8(part.kind)?)),
+            (
+                "value",
+                StoredValue::String(JsString::from_utf8(&part.value)?),
+            ),
+        ];
+        if let Some(unit) = part.unit {
+            properties.push(("unit", StoredValue::String(JsString::from_utf8(unit)?)));
+        }
+        for (name, value) in properties {
+            let name = JsString::from_utf8(name)?;
+            let key = runtime.property_key_from_string(&name)?;
+            runtime.append_data_property(
+                HeapReference::Object(object),
+                key,
+                PropertyLayout::data(true, true, true),
+                value,
+            )?;
+        }
+        values.push(StoredValue::Object(object));
+    }
+    Ok(NativeDispatch::Immediate(StoredValue::Object(
+        runtime.allocate_array(realm, values)?,
+    )))
+}
+
+fn intl_duration_format_resolved_options(
+    runtime: &mut Runtime,
+    realm: RealmId,
+    state: &DurationFormatState,
+) -> Result<NativeDispatch, NativeFailure> {
+    let object = runtime.allocate_ordinary_object(runtime.realm_object_prototype(realm)?)?;
+    for (name, value) in [
+        ("locale", state.locale.as_str()),
+        ("numberingSystem", state.numbering_system.as_str()),
+        ("style", state.style.as_str()),
+    ] {
+        append_intl_duration_format_resolved_property(runtime, object, name, value)?;
+    }
+    for unit in DurationUnit::ALL {
+        let options = state.unit(unit);
+        append_intl_duration_format_resolved_property(
+            runtime,
+            object,
+            unit.plural_name(),
+            options.style.as_str(),
+        )?;
+        append_intl_duration_format_resolved_property(
+            runtime,
+            object,
+            unit.display_name(),
+            options.display.as_str(),
+        )?;
+    }
+    if let Some(digits) = state.fractional_digits {
+        let name = JsString::from_utf8("fractionalDigits")?;
+        let key = runtime.property_key_from_string(&name)?;
+        runtime.append_data_property(
+            HeapReference::Object(object),
+            key,
+            PropertyLayout::data(true, true, true),
+            StoredValue::Number(JsNumber::from_f64(f64::from(digits))),
+        )?;
+    }
+    Ok(NativeDispatch::Immediate(StoredValue::Object(object)))
+}
+
+fn append_intl_duration_format_resolved_property(
+    runtime: &mut Runtime,
+    object: ObjectId,
+    name: &str,
+    value: &str,
+) -> Result<(), NativeFailure> {
+    let name = JsString::from_utf8(name)?;
+    let key = runtime.property_key_from_string(&name)?;
+    runtime.append_data_property(
+        HeapReference::Object(object),
+        key,
+        PropertyLayout::data(true, true, true),
+        StoredValue::String(JsString::from_utf8(value)?),
+    )?;
+    Ok(())
+}
+
+fn intl_duration_format_brand_error<T>(
+    realm: RealmId,
+    origin: JsStackFrame,
+) -> Result<T, NativeFailure> {
+    intl_locale_list_error(
+        realm,
+        origin,
+        ExceptionKind::TypeError,
+        "Intl.DurationFormat method called on incompatible receiver",
+    )
+}
+
 pub(super) fn begin_intl_segmenter_constructor(
     runtime: &mut Runtime,
     mut inputs: CallInputs,
@@ -11202,6 +12408,19 @@ fn finish_intl_locale_list(
         IntlLocaleListTarget::DisplayNamesSupportedLocalesOf(mut state) => {
             state.requested_locales = requested_locales;
             begin_intl_display_names_supported_locales_options(
+                runtime,
+                *state,
+                return_to,
+                execution_budget,
+            )
+        }
+        IntlLocaleListTarget::DurationFormatConstructor(mut state) => {
+            state.requested_locales = requested_locales;
+            begin_intl_duration_format_options(runtime, *state, return_to, execution_budget)
+        }
+        IntlLocaleListTarget::DurationFormatSupportedLocalesOf(mut state) => {
+            state.requested_locales = requested_locales;
+            begin_intl_duration_format_supported_locales_options(
                 runtime,
                 *state,
                 return_to,

@@ -1399,6 +1399,33 @@ pub(super) fn resume_native_continuations(
                     execution_budget,
                 )?
             }
+            NativeContinuation::IntlDurationFormatConstructor(state) => {
+                advance_intl_duration_format_constructor(
+                    runtime,
+                    *state,
+                    Some(value.duplicate()),
+                    return_to,
+                    execution_budget,
+                )?
+            }
+            NativeContinuation::IntlDurationFormatSupportedLocalesOf(state) => {
+                advance_intl_duration_format_supported_locales(
+                    runtime,
+                    *state,
+                    Some(value.duplicate()),
+                    return_to,
+                    execution_budget,
+                )?
+            }
+            NativeContinuation::IntlDurationFormatValue(state) => {
+                advance_intl_duration_format_value(
+                    runtime,
+                    *state,
+                    Some(value.duplicate()),
+                    return_to,
+                    execution_budget,
+                )?
+            }
             NativeContinuation::IntlSegmenterConstructor(state) => {
                 advance_intl_segmenter_constructor(
                     runtime,
@@ -3114,6 +3141,38 @@ pub(super) fn dispatch_native_call_with_frames(
         }
         NativeFunctionKind::IntlDisplayNamesPrototype(method) => {
             begin_intl_display_names_prototype(
+                runtime,
+                method,
+                &inputs.receiver,
+                inputs.arguments,
+                native.realm,
+                return_to,
+                origin.unwrap_or_else(native_function_host_origin),
+                execution_budget,
+            )
+        }
+        NativeFunctionKind::IntlDurationFormatConstructor => {
+            begin_intl_duration_format_constructor(
+                runtime,
+                inputs,
+                native.realm,
+                return_to,
+                origin.unwrap_or_else(native_function_host_origin),
+                execution_budget,
+            )
+        }
+        NativeFunctionKind::IntlDurationFormatSupportedLocalesOf => {
+            begin_intl_duration_format_supported_locales_of(
+                runtime,
+                inputs.arguments,
+                native.realm,
+                return_to,
+                origin.unwrap_or_else(native_function_host_origin),
+                execution_budget,
+            )
+        }
+        NativeFunctionKind::IntlDurationFormatPrototype(method) => {
+            begin_intl_duration_format_prototype(
                 runtime,
                 method,
                 &inputs.receiver,

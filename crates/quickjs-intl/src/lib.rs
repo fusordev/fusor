@@ -14,6 +14,7 @@ use icu::locale::{
 mod collator;
 mod date_time_format;
 mod display_names;
+mod duration_format;
 mod list_format;
 mod locale;
 mod locale_info;
@@ -39,6 +40,12 @@ pub use display_names::{
     DisplayNamesRequestOptions, DisplayNamesState, DisplayNamesStyle, DisplayNamesType,
     canonicalize_display_names_code, display_name, display_names_supported_locales,
     resolve_display_names,
+};
+pub use duration_format::{
+    DurationDisplay, DurationFormatError, DurationFormatPart, DurationFormatRequestOptions,
+    DurationFormatState, DurationFormatStyle, DurationRecord, DurationUnit, DurationUnitOptions,
+    DurationUnitStyle, duration_format_supported_locales, format_duration,
+    format_duration_to_parts, resolve_duration_format,
 };
 
 pub use list_format::{

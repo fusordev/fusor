@@ -3283,6 +3283,33 @@ fn finish_operator_primitive_target(
         OperatorPrimitiveTarget::IntlDisplayNamesOf(state) => {
             finish_intl_display_names_of_primitive(runtime, &state, value)
         }
+        OperatorPrimitiveTarget::IntlDurationFormatConstructor(state) => {
+            advance_intl_duration_format_constructor(
+                runtime,
+                *state,
+                Some(value),
+                return_to,
+                execution_budget,
+            )
+        }
+        OperatorPrimitiveTarget::IntlDurationFormatSupportedLocalesOf(state) => {
+            advance_intl_duration_format_supported_locales(
+                runtime,
+                *state,
+                Some(value),
+                return_to,
+                execution_budget,
+            )
+        }
+        OperatorPrimitiveTarget::IntlDurationFormatValue(state) => {
+            advance_intl_duration_format_value(
+                runtime,
+                *state,
+                Some(value),
+                return_to,
+                execution_budget,
+            )
+        }
         OperatorPrimitiveTarget::IntlSegmenterConstructor(state) => {
             advance_intl_segmenter_constructor(
                 runtime,

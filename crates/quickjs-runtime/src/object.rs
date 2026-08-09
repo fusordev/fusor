@@ -24,8 +24,8 @@
  */
 
 use quickjs_intl::{
-    CollatorState, DateTimeFormatState, DisplayNamesState, ListFormatState, NumberFormatState,
-    PluralRulesState, RelativeTimeFormatState, SegmentBoundary, SegmenterState,
+    CollatorState, DateTimeFormatState, DisplayNamesState, DurationFormatState, ListFormatState,
+    NumberFormatState, PluralRulesState, RelativeTimeFormatState, SegmentBoundary, SegmenterState,
 };
 use std::{
     cell::RefCell,
@@ -2668,6 +2668,8 @@ pub(crate) enum HeapObjectKind {
     IntlListFormat(ListFormatState),
     /// An ECMA-402 `Intl.DisplayNames` object.
     IntlDisplayNames(DisplayNamesState),
+    /// An ECMA-402 `Intl.DurationFormat` object.
+    IntlDurationFormat(DurationFormatState),
     /// An ECMA-402 `Intl.Segmenter` object.
     IntlSegmenter(SegmenterState),
     /// An ECMA-402 Segments object returned by `Intl.Segmenter.prototype.segment`.
@@ -2872,6 +2874,7 @@ impl HeapObjectKind {
             | Self::IntlRelativeTimeFormat(_)
             | Self::IntlListFormat(_)
             | Self::IntlDisplayNames(_)
+            | Self::IntlDurationFormat(_)
             | Self::IntlSegmenter(_)
             | Self::IntlSegments(_)
             | Self::IntlSegmentIterator(_)
@@ -2923,6 +2926,7 @@ impl HeapObjectKind {
             | Self::IntlRelativeTimeFormat(_)
             | Self::IntlListFormat(_)
             | Self::IntlDisplayNames(_)
+            | Self::IntlDurationFormat(_)
             | Self::IntlSegmenter(_)
             | Self::IntlSegments(_)
             | Self::IntlSegmentIterator(_)
@@ -2973,6 +2977,7 @@ impl HeapObjectKind {
             | Self::IntlRelativeTimeFormat(_)
             | Self::IntlListFormat(_)
             | Self::IntlDisplayNames(_)
+            | Self::IntlDurationFormat(_)
             | Self::IntlSegmenter(_)
             | Self::IntlSegments(_)
             | Self::IntlSegmentIterator(_)
@@ -3023,6 +3028,7 @@ impl HeapObjectKind {
             | Self::IntlRelativeTimeFormat(_)
             | Self::IntlListFormat(_)
             | Self::IntlDisplayNames(_)
+            | Self::IntlDurationFormat(_)
             | Self::IntlSegmenter(_)
             | Self::IntlSegments(_)
             | Self::IntlSegmentIterator(_)
@@ -3073,6 +3079,7 @@ impl HeapObjectKind {
             | Self::IntlRelativeTimeFormat(_)
             | Self::IntlListFormat(_)
             | Self::IntlDisplayNames(_)
+            | Self::IntlDurationFormat(_)
             | Self::IntlSegmenter(_)
             | Self::IntlSegments(_)
             | Self::IntlSegmentIterator(_)
@@ -3123,6 +3130,7 @@ impl HeapObjectKind {
             | Self::IntlRelativeTimeFormat(_)
             | Self::IntlListFormat(_)
             | Self::IntlDisplayNames(_)
+            | Self::IntlDurationFormat(_)
             | Self::IntlSegmenter(_)
             | Self::IntlSegments(_)
             | Self::IntlSegmentIterator(_)
@@ -3173,6 +3181,7 @@ impl HeapObjectKind {
             | Self::IntlRelativeTimeFormat(_)
             | Self::IntlListFormat(_)
             | Self::IntlDisplayNames(_)
+            | Self::IntlDurationFormat(_)
             | Self::IntlSegmenter(_)
             | Self::IntlSegments(_)
             | Self::IntlSegmentIterator(_)
@@ -3237,6 +3246,7 @@ impl HeapObjectKind {
             | Self::IntlRelativeTimeFormat(_)
             | Self::IntlListFormat(_)
             | Self::IntlDisplayNames(_)
+            | Self::IntlDurationFormat(_)
             | Self::IntlSegmenter(_)
             | Self::IntlSegments(_)
             | Self::IntlSegmentIterator(_)
@@ -3287,6 +3297,7 @@ impl HeapObjectKind {
             | Self::IntlRelativeTimeFormat(_)
             | Self::IntlListFormat(_)
             | Self::IntlDisplayNames(_)
+            | Self::IntlDurationFormat(_)
             | Self::IntlSegmenter(_)
             | Self::IntlSegments(_)
             | Self::IntlSegmentIterator(_)
@@ -3709,6 +3720,18 @@ impl HeapObject {
     }
 
     #[must_use]
+    pub(crate) const fn intl_duration_format(
+        record: ObjectRecord,
+        resolved: DurationFormatState,
+    ) -> Self {
+        Self {
+            kind: HeapObjectKind::IntlDurationFormat(resolved),
+            record,
+            public_roots: 0,
+        }
+    }
+
+    #[must_use]
     pub(crate) const fn intl_segmenter(record: ObjectRecord, resolved: SegmenterState) -> Self {
         Self {
             kind: HeapObjectKind::IntlSegmenter(resolved),
@@ -4074,6 +4097,13 @@ impl HeapObject {
         }
     }
 
+    pub(crate) const fn intl_duration_format_state(&self) -> Option<&DurationFormatState> {
+        match &self.kind {
+            HeapObjectKind::IntlDurationFormat(state) => Some(state),
+            _ => None,
+        }
+    }
+
     pub(crate) const fn intl_segmenter_state(&self) -> Option<&SegmenterState> {
         match &self.kind {
             HeapObjectKind::IntlSegmenter(state) => Some(state),
@@ -4223,6 +4253,7 @@ impl HeapObject {
             | HeapObjectKind::IntlRelativeTimeFormat(_)
             | HeapObjectKind::IntlListFormat(_)
             | HeapObjectKind::IntlDisplayNames(_)
+            | HeapObjectKind::IntlDurationFormat(_)
             | HeapObjectKind::IntlSegmenter(_)
             | HeapObjectKind::IntlSegments(_)
             | HeapObjectKind::IntlSegmentIterator(_)
@@ -4273,6 +4304,7 @@ impl HeapObject {
             | HeapObjectKind::IntlRelativeTimeFormat(_)
             | HeapObjectKind::IntlListFormat(_)
             | HeapObjectKind::IntlDisplayNames(_)
+            | HeapObjectKind::IntlDurationFormat(_)
             | HeapObjectKind::IntlSegmenter(_)
             | HeapObjectKind::IntlSegments(_)
             | HeapObjectKind::IntlSegmentIterator(_)
@@ -4325,6 +4357,7 @@ impl HeapObject {
             | HeapObjectKind::IntlRelativeTimeFormat(_)
             | HeapObjectKind::IntlListFormat(_)
             | HeapObjectKind::IntlDisplayNames(_)
+            | HeapObjectKind::IntlDurationFormat(_)
             | HeapObjectKind::IntlSegmenter(_)
             | HeapObjectKind::IntlSegments(_)
             | HeapObjectKind::IntlSegmentIterator(_)

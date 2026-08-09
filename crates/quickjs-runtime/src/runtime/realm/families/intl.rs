@@ -15,9 +15,10 @@ use crate::runtime::realm::{
 };
 use crate::runtime::{
     IntlCollatorPrototypeMethod, IntlDateTimeFormatPrototypeMethod,
-    IntlDisplayNamesPrototypeMethod, IntlListFormatPrototypeMethod, IntlLocalePrototypeMethod,
-    IntlNumberFormatPrototypeMethod, IntlPluralRulesPrototypeMethod,
-    IntlRelativeTimeFormatPrototypeMethod, IntlSegmenterPrototypeMethod,
+    IntlDisplayNamesPrototypeMethod, IntlDurationFormatPrototypeMethod,
+    IntlListFormatPrototypeMethod, IntlLocalePrototypeMethod, IntlNumberFormatPrototypeMethod,
+    IntlPluralRulesPrototypeMethod, IntlRelativeTimeFormatPrototypeMethod,
+    IntlSegmenterPrototypeMethod,
 };
 
 pub(super) fn visit_objects(visit: ObjectSink<'_>) {
@@ -30,6 +31,7 @@ pub(super) fn visit_objects(visit: ObjectSink<'_>) {
         IntrinsicObjectId::IntlRelativeTimeFormatPrototype,
         IntrinsicObjectId::IntlListFormatPrototype,
         IntrinsicObjectId::IntlDisplayNamesPrototype,
+        IntrinsicObjectId::IntlDurationFormatPrototype,
         IntrinsicObjectId::IntlSegmenterPrototype,
         IntrinsicObjectId::IntlSegmentsPrototype,
         IntrinsicObjectId::IntlLocalePrototype,
@@ -214,6 +216,23 @@ pub(super) fn visit_functions(visit: FunctionSink<'_>) {
         ));
     }
     visit(ordinary(
+        NativeFunctionKind::IntlDurationFormatConstructor,
+        IntrinsicNameSpec::RealmName(RealmNameId::IntlDurationFormat),
+        0,
+    ));
+    visit(ordinary(
+        NativeFunctionKind::IntlDurationFormatSupportedLocalesOf,
+        IntrinsicNameSpec::RealmName(RealmNameId::IntlDurationFormatSupportedLocalesOf),
+        1,
+    ));
+    for method in IntlDurationFormatPrototypeMethod::ALL {
+        visit(ordinary(
+            NativeFunctionKind::IntlDurationFormatPrototype(method),
+            IntrinsicNameSpec::RealmName(RealmNameId::IntlDurationFormatPrototype(method)),
+            method.length(),
+        ));
+    }
+    visit(ordinary(
         NativeFunctionKind::IntlSegmenterConstructor,
         IntrinsicNameSpec::RealmName(RealmNameId::IntlSegmenter),
         0,
@@ -306,6 +325,11 @@ pub(super) fn visit_properties(visit: PropertySink<'_>) {
     ));
     let display_names_prototype =
         IntrinsicIdentity::Object(IntrinsicObjectId::IntlDisplayNamesPrototype);
+    let duration_format_constructor = IntrinsicIdentity::Function(IntrinsicFunctionId(
+        NativeFunctionKind::IntlDurationFormatConstructor,
+    ));
+    let duration_format_prototype =
+        IntrinsicIdentity::Object(IntrinsicObjectId::IntlDurationFormatPrototype);
     let segmenter_constructor = IntrinsicIdentity::Function(IntrinsicFunctionId(
         NativeFunctionKind::IntlSegmenterConstructor,
     ));
@@ -356,6 +380,11 @@ pub(super) fn visit_properties(visit: PropertySink<'_>) {
         intl,
         IntrinsicKeySpec::InternedString(RealmNameId::IntlDisplayNames),
         NativeFunctionKind::IntlDisplayNamesConstructor,
+    ));
+    visit(method(
+        intl,
+        IntrinsicKeySpec::InternedString(RealmNameId::IntlDurationFormat),
+        NativeFunctionKind::IntlDurationFormatConstructor,
     ));
     visit(method(
         intl,
@@ -636,6 +665,36 @@ pub(super) fn visit_properties(visit: PropertySink<'_>) {
         IntrinsicKeySpec::WellKnownSymbol(PredefinedAtom::SymbolToStringTag),
         PropertyLayout::data(false, false, true),
         IntrinsicValueSpec::String(IntrinsicStringSpec::Literal("Intl.DisplayNames")),
+    ));
+
+    visit(data(
+        duration_format_constructor,
+        IntrinsicKeySpec::PredefinedString(PredefinedAtom::Prototype),
+        CONSTRUCTOR_PROTOTYPE_PROPERTY,
+        IntrinsicValueSpec::Object(IntrinsicObjectId::IntlDurationFormatPrototype),
+    ));
+    visit(method(
+        duration_format_constructor,
+        IntrinsicKeySpec::InternedString(RealmNameId::IntlDurationFormatSupportedLocalesOf),
+        NativeFunctionKind::IntlDurationFormatSupportedLocalesOf,
+    ));
+    visit(method(
+        duration_format_prototype,
+        IntrinsicKeySpec::PredefinedString(PredefinedAtom::Constructor),
+        NativeFunctionKind::IntlDurationFormatConstructor,
+    ));
+    for method_id in IntlDurationFormatPrototypeMethod::ALL {
+        visit(method(
+            duration_format_prototype,
+            IntrinsicKeySpec::InternedString(RealmNameId::IntlDurationFormatPrototype(method_id)),
+            NativeFunctionKind::IntlDurationFormatPrototype(method_id),
+        ));
+    }
+    visit(data(
+        duration_format_prototype,
+        IntrinsicKeySpec::WellKnownSymbol(PredefinedAtom::SymbolToStringTag),
+        PropertyLayout::data(false, false, true),
+        IntrinsicValueSpec::String(IntrinsicStringSpec::Literal("Intl.DurationFormat")),
     ));
 
     visit(data(

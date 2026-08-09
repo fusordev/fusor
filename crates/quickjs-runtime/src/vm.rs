@@ -73,18 +73,18 @@ use crate::{
         FunctionImplementation, GlobalNumericFunction, HeapFunction, InstalledCode,
         InstalledConstant, InstalledRoot, InstalledTemplate, IntlCollatorPrototypeMethod,
         IntlDateTimeFormatPrototypeMethod, IntlDisplayNamesPrototypeMethod,
-        IntlListFormatPrototypeMethod, IntlLocalePrototypeMethod, IntlNumberFormatPrototypeMethod,
-        IntlPluralRulesPrototypeMethod, IntlRelativeTimeFormatPrototypeMethod,
-        IntlSegmenterPrototypeMethod, LocaleStringMethod, MapMethod, MathMethod, NativeFunction,
-        NativeFunctionKind, NumberFormat, NumberPredicate, PreparedIteratorResultPlan,
-        PromiseCapabilityCapture, PromiseCapabilityExecutor, PromiseCombinatorElementFunction,
-        PromiseCombinatorElementKind, PromiseCombinatorKind, PromiseCombinatorShared,
-        PromiseFinallyFunction, PromiseFinallyThunkKind, PromiseJob, PromiseResolvingFunction,
-        PromiseResolvingKind, PromiseStatic, RealmGlobalBindingState, ReflectMethod, RegExpFlag,
-        RegExpSymbolMethod, SetMethod, SetPrototypeOutcome, StringArgument, StringMethod,
-        TemporalDurationPrototypeMethod, TemporalDurationStaticMethod,
-        TemporalInstantPrototypeMethod, TemporalInstantStaticMethod, TemporalNowMethod,
-        TemporalPlainDatePrototypeMethod, TemporalPlainDateStaticMethod,
+        IntlDurationFormatPrototypeMethod, IntlListFormatPrototypeMethod,
+        IntlLocalePrototypeMethod, IntlNumberFormatPrototypeMethod, IntlPluralRulesPrototypeMethod,
+        IntlRelativeTimeFormatPrototypeMethod, IntlSegmenterPrototypeMethod, LocaleStringMethod,
+        MapMethod, MathMethod, NativeFunction, NativeFunctionKind, NumberFormat, NumberPredicate,
+        PreparedIteratorResultPlan, PromiseCapabilityCapture, PromiseCapabilityExecutor,
+        PromiseCombinatorElementFunction, PromiseCombinatorElementKind, PromiseCombinatorKind,
+        PromiseCombinatorShared, PromiseFinallyFunction, PromiseFinallyThunkKind, PromiseJob,
+        PromiseResolvingFunction, PromiseResolvingKind, PromiseStatic, RealmGlobalBindingState,
+        ReflectMethod, RegExpFlag, RegExpSymbolMethod, SetMethod, SetPrototypeOutcome,
+        StringArgument, StringMethod, TemporalDurationPrototypeMethod,
+        TemporalDurationStaticMethod, TemporalInstantPrototypeMethod, TemporalInstantStaticMethod,
+        TemporalNowMethod, TemporalPlainDatePrototypeMethod, TemporalPlainDateStaticMethod,
         TemporalPlainDateTimePrototypeMethod, TemporalPlainDateTimeStaticMethod,
         TemporalPlainMonthDayPrototypeMethod, TemporalPlainMonthDayStaticMethod,
         TemporalPlainTimePrototypeMethod, TemporalPlainTimeStaticMethod,
@@ -892,6 +892,9 @@ enum NativeContinuation {
     IntlListFormatValue(Box<IntlListFormatValueContinuation>),
     IntlDisplayNamesConstructor(Box<IntlDisplayNamesConstructorContinuation>),
     IntlDisplayNamesSupportedLocalesOf(Box<IntlDisplayNamesSupportedLocalesContinuation>),
+    IntlDurationFormatConstructor(Box<IntlDurationFormatConstructorContinuation>),
+    IntlDurationFormatSupportedLocalesOf(Box<IntlDurationFormatSupportedLocalesContinuation>),
+    IntlDurationFormatValue(Box<IntlDurationFormatValueContinuation>),
     IntlSegmenterConstructor(Box<IntlSegmenterConstructorContinuation>),
     IntlSegmenterSupportedLocalesOf(Box<IntlSegmenterSupportedLocalesContinuation>),
     IntlLocaleConstructor(Box<IntlLocaleConstructorContinuation>),
@@ -1144,6 +1147,11 @@ impl NativeContinuation {
             Self::IntlListFormatValue(state) => state.retained_values(),
             Self::IntlDisplayNamesConstructor(state) => state.retained_values(),
             Self::IntlDisplayNamesSupportedLocalesOf(state) => state.retained_values(),
+            Self::IntlDurationFormatConstructor(state) => state.retained_values(),
+            Self::IntlDurationFormatSupportedLocalesOf(state) => state.retained_values(),
+            Self::IntlDurationFormatValue(_) => {
+                IntlDurationFormatValueContinuation::retained_values()
+            }
             Self::IntlSegmenterConstructor(state) => state.retained_values(),
             Self::IntlSegmenterSupportedLocalesOf(state) => state.retained_values(),
             Self::IntlLocaleConstructor(state) => state.retained_values(),
@@ -2558,6 +2566,12 @@ enum OperatorPrimitiveTarget {
     IntlDisplayNamesSupportedLocalesOf(Box<IntlDisplayNamesSupportedLocalesContinuation>),
     /// An `Intl.DisplayNames.prototype.of` code awaiting `ToString`.
     IntlDisplayNamesOf(Box<IntlDisplayNamesOfContinuation>),
+    /// One `%Intl.DurationFormat%` option awaiting primitive conversion.
+    IntlDurationFormatConstructor(Box<IntlDurationFormatConstructorContinuation>),
+    /// `Intl.DurationFormat.supportedLocalesOf` matcher awaiting `ToString`.
+    IntlDurationFormatSupportedLocalesOf(Box<IntlDurationFormatSupportedLocalesContinuation>),
+    /// One duration-record property awaiting `ToNumber`.
+    IntlDurationFormatValue(Box<IntlDurationFormatValueContinuation>),
     /// One `%Intl.Segmenter%` option awaiting primitive conversion.
     IntlSegmenterConstructor(Box<IntlSegmenterConstructorContinuation>),
     /// `Intl.Segmenter.supportedLocalesOf` matcher awaiting `ToString`.
@@ -2930,6 +2944,11 @@ impl OperatorPrimitiveTarget {
             Self::IntlDisplayNamesConstructor(state) => state.retained_values(),
             Self::IntlDisplayNamesSupportedLocalesOf(state) => state.retained_values(),
             Self::IntlDisplayNamesOf(_) => IntlDisplayNamesOfContinuation::retained_values(),
+            Self::IntlDurationFormatConstructor(state) => state.retained_values(),
+            Self::IntlDurationFormatSupportedLocalesOf(state) => state.retained_values(),
+            Self::IntlDurationFormatValue(_) => {
+                IntlDurationFormatValueContinuation::retained_values()
+            }
             Self::IntlSegmenterConstructor(state) => state.retained_values(),
             Self::IntlSegmenterSupportedLocalesOf(state) => state.retained_values(),
             Self::IntlSegmenterSegment(_) => IntlSegmenterSegmentContinuation::retained_values(),
@@ -3403,6 +3422,11 @@ fn trace_operator_primitive_target_roots(
             state.trace_roots(mark);
         }
         OperatorPrimitiveTarget::IntlDisplayNamesOf(state) => state.trace_roots(mark),
+        OperatorPrimitiveTarget::IntlDurationFormatConstructor(state) => state.trace_roots(mark),
+        OperatorPrimitiveTarget::IntlDurationFormatSupportedLocalesOf(state) => {
+            state.trace_roots(mark);
+        }
+        OperatorPrimitiveTarget::IntlDurationFormatValue(state) => state.trace_roots(mark),
         OperatorPrimitiveTarget::IntlSegmenterConstructor(state) => state.trace_roots(mark),
         OperatorPrimitiveTarget::IntlSegmenterSupportedLocalesOf(state) => state.trace_roots(mark),
         OperatorPrimitiveTarget::IntlSegmenterSegment(state) => state.trace_roots(mark),
@@ -3534,6 +3558,9 @@ fn trace_native_continuation_roots(
         NativeContinuation::IntlListFormatValue(state) => state.trace_roots(mark),
         NativeContinuation::IntlDisplayNamesConstructor(state) => state.trace_roots(mark),
         NativeContinuation::IntlDisplayNamesSupportedLocalesOf(state) => state.trace_roots(mark),
+        NativeContinuation::IntlDurationFormatConstructor(state) => state.trace_roots(mark),
+        NativeContinuation::IntlDurationFormatSupportedLocalesOf(state) => state.trace_roots(mark),
+        NativeContinuation::IntlDurationFormatValue(state) => state.trace_roots(mark),
         NativeContinuation::IntlSegmenterConstructor(state) => state.trace_roots(mark),
         NativeContinuation::IntlSegmenterSupportedLocalesOf(state) => state.trace_roots(mark),
         NativeContinuation::IntlLocaleConstructor(state) => state.trace_roots(mark),
