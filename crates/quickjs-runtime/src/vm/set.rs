@@ -381,7 +381,7 @@ pub(super) fn advance_set_constructor(
             )
         }
         SetConstructorStage::Done => {
-            if completion.is_truthy() {
+            if runtime.to_boolean(&completion)? {
                 return Ok(NativeDispatch::Immediate(StoredValue::Object(state.target)));
             }
             state.stage = SetConstructorStage::IteratorValue;
@@ -779,7 +779,7 @@ pub(super) fn advance_set_operation(
             let current = state.current.take().ok_or(EngineFault::RuntimeInvariant {
                 message: "Set operation resumed a has call without its value",
             })?;
-            let in_other = completion.is_truthy();
+            let in_other = runtime.to_boolean(&completion)?;
             match state.method {
                 SetMethod::Difference => {
                     if in_other {
@@ -854,7 +854,7 @@ pub(super) fn advance_set_operation(
             )
         }
         SetOperationStage::IteratorDone => {
-            if completion.is_truthy() {
+            if runtime.to_boolean(&completion)? {
                 return finish_set_operation(&state);
             }
             state.stage = SetOperationStage::IteratorValue;

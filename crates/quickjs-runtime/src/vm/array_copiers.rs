@@ -509,7 +509,7 @@ pub(super) fn advance_array_copier(
                         state.origin.clone(),
                     )?
                 } else {
-                    spreadable.is_truthy()
+                    runtime.to_boolean(&spreadable)?
                 };
                 state.stage = ArrayCopierStage::AwaitLength;
             }
@@ -764,7 +764,7 @@ pub(super) fn advance_array_copier(
                 ));
             }
             ArrayCopierStage::AwaitPresence => {
-                if !take_completion(&mut completion)?.is_truthy() {
+                if !runtime.to_boolean(&take_completion(&mut completion)?)? {
                     if matches!(state.copier, ArrayCopier::At) {
                         state.stage = ArrayCopierStage::Done;
                         continue;

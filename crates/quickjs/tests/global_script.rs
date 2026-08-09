@@ -92,6 +92,78 @@ fn annex_b_catch_var_initializer_updates_only_the_catch_parameter() {
 }
 
 #[test]
+fn annex_b_is_html_dda_host_object_uses_only_the_three_special_semantics() {
+    let mut runtime = Runtime::try_new(RuntimeLimits::default()).expect("runtime");
+    let realm = runtime.create_realm().expect("realm");
+    let mut context = runtime.context(&realm).expect("context");
+
+    let host_object = evaluate_script(
+        &mut context,
+        "var hostDda=function(value){if(arguments.length===0||value==='')return null;return value;};hostDda;",
+        "annex-b-is-html-dda-host-object.js",
+        ScriptLimits::default(),
+    )
+    .expect("host object fixture");
+    assert!(
+        context
+            .mark_host_defined_is_html_dda(&host_object)
+            .expect("same-runtime live host object")
+    );
+
+    let observed = evaluate_script(
+        &mut context,
+        "[Boolean(hostDda),!hostDda,hostDda==null,null==hostDda,\
+         hostDda==undefined,undefined==hostDda,hostDda===undefined,\
+         Object.is(hostDda,hostDda),typeof hostDda,(hostDda??1)===hostDda,\
+         hostDda()===null,hostDda('')===null,hostDda(3)===3,\
+         Reflect.defineProperty(new Proxy({},{defineProperty(){return hostDda;}}),\
+         'x',{value:1})===false].join('|');",
+        "annex-b-is-html-dda-semantics.js",
+        ScriptLimits::default(),
+    )
+    .expect("B.3.6 semantics");
+    assert_eq!(
+        string(&observed),
+        "false|true|true|true|true|true|false|true|undefined|true|true|true|true|true"
+    );
+
+    let ordinary_object = evaluate_script(
+        &mut context,
+        "var hostDdaObject={};hostDdaObject;",
+        "annex-b-is-html-dda-non-callable.js",
+        ScriptLimits::default(),
+    )
+    .expect("non-callable host object fixture");
+    assert!(
+        context
+            .mark_host_defined_is_html_dda(&ordinary_object)
+            .expect("same-runtime live ordinary object")
+    );
+    let ordinary_observed = evaluate_script(
+        &mut context,
+        "[Boolean(hostDdaObject),hostDdaObject==null,typeof hostDdaObject,\
+         Object.is(hostDdaObject,hostDdaObject)].join('|');",
+        "annex-b-is-html-dda-non-callable-semantics.js",
+        ScriptLimits::default(),
+    )
+    .expect("non-callable B.3.6 semantics");
+    assert_eq!(string(&ordinary_observed), "false|true|undefined|true");
+
+    let primitive = evaluate_script(
+        &mut context,
+        "1;",
+        "annex-b-is-html-dda-primitive.js",
+        ScriptLimits::default(),
+    )
+    .expect("primitive fixture");
+    assert!(
+        !context
+            .mark_host_defined_is_html_dda(&primitive)
+            .expect("same-runtime primitive")
+    );
+}
+
+#[test]
 fn annex_b_labelled_function_is_instantiated_in_the_variable_environment() {
     let mut runtime = Runtime::try_new(RuntimeLimits::default()).expect("runtime");
     let realm = runtime.create_realm().expect("realm");
@@ -105,6 +177,74 @@ fn annex_b_labelled_function_is_instantiated_in_the_variable_environment() {
     )
     .expect("Annex B labelled-function Script");
     assert!(number(&value).strict_equals(JsNumber::from_i32(42)));
+}
+
+#[test]
+fn annex_b_block_function_copies_its_lexical_closure_when_evaluated() {
+    let mut runtime = Runtime::try_new(RuntimeLimits::default()).expect("runtime");
+    let realm = runtime.create_realm().expect("realm");
+    let mut context = runtime.context(&realm).expect("context");
+
+    let value = evaluate_script(
+        &mut context,
+        "var before = typeof legacy; var inside;\
+         { inside = legacy(); function legacy() { return 41; } }\
+         before + '|' + inside + '|' + legacy();",
+        "annex-b-block-function.js",
+        ScriptLimits::default(),
+    )
+    .expect("Annex B block-function Script");
+    assert_eq!(string(&value), "undefined|41|41");
+}
+
+#[test]
+fn annex_b_if_function_uses_a_fresh_synthetic_block_binding() {
+    let mut runtime = Runtime::try_new(RuntimeLimits::default()).expect("runtime");
+    let realm = runtime.create_realm().expect("realm");
+    let mut context = runtime.context(&realm).expect("context");
+
+    let value = evaluate_script(
+        &mut context,
+        "var selected = 'outer'; if (true) function selected() { return 42; } selected();",
+        "annex-b-if-function.js",
+        ScriptLimits::default(),
+    )
+    .expect("Annex B if-function Script");
+    assert!(number(&value).strict_equals(JsNumber::from_i32(42)));
+}
+
+#[test]
+fn annex_b_arguments_function_only_updates_an_existing_variable_declaration() {
+    let mut runtime = Runtime::try_new(RuntimeLimits::default()).expect("runtime");
+    let realm = runtime.create_realm().expect("realm");
+    let mut context = runtime.context(&realm).expect("context");
+
+    let value = evaluate_script(
+        &mut context,
+        "var preserved=(function(){var original=arguments;{function arguments(){}}return arguments===original;}());\
+         var updated=(function(){var arguments='outer';{function arguments(){return 42;}}return arguments();}());\
+         preserved+'|'+updated;",
+        "annex-b-arguments-function.js",
+        ScriptLimits::default(),
+    )
+    .expect("Annex B arguments-function Script");
+    assert_eq!(string(&value), "true|42");
+}
+
+#[test]
+fn annex_b_if_function_does_not_escape_an_intervening_lexical_scope() {
+    let mut runtime = Runtime::try_new(RuntimeLimits::default()).expect("runtime");
+    let realm = runtime.create_realm().expect("realm");
+    let mut context = runtime.context(&realm).expect("context");
+
+    let value = evaluate_script(
+        &mut context,
+        "function outer(){var before=typeof f;{let f=1;if(true)function f(){return 42;}}return before+'|'+typeof f;}outer();",
+        "annex-b-blocked-if-function.js",
+        ScriptLimits::default(),
+    )
+    .expect("Annex B blocked if-function Script");
+    assert_eq!(string(&value), "undefined|undefined");
 }
 
 #[test]

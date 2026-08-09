@@ -27,6 +27,12 @@ const STRICT_PREFIX: &str = "\"use strict\";\n";
 const TEST262_DYNAMIC_COMPILATIONS: u64 = 1 << 16;
 const TEST262_WORKER_STACK_SIZE: usize = 64 * 1024 * 1024;
 const TEST262_PROGRESS_CHANNEL_PER_WORKER: usize = 2;
+const TEST262_IS_HTML_DDA_SOURCE: &str = r#"
+var $262 = {
+    IsHTMLDDA: value => value === undefined || value === "" ? null : undefined
+};
+$262.IsHTMLDDA;
+"#;
 
 #[derive(Debug, Eq, PartialEq)]
 pub struct Test262Options {
@@ -694,7 +700,24 @@ fn validate_intl402_admission_scope(options: &Test262Options) -> Result<(), Stri
 }
 
 fn requires_host_api(source: &str) -> bool {
-    source.contains("$262") || source.contains("print(")
+    if source.contains("print(") {
+        return true;
+    }
+
+    let mut remainder = source;
+    while let Some(index) = remainder.find("$262") {
+        remainder = &remainder[index + "$262".len()..];
+        let Some(after_property) = remainder.strip_prefix(".IsHTMLDDA") else {
+            return true;
+        };
+        if after_property.chars().next().is_some_and(|character| {
+            character == '$' || character == '_' || character.is_alphanumeric()
+        }) {
+            return true;
+        }
+        remainder = after_property;
+    }
+    false
 }
 
 fn safe_harness_include(root: &Path, include: &str) -> Result<PathBuf, String> {
@@ -1158,6 +1181,9 @@ fn execute_case(
         .negative
         .as_ref()
         .is_some_and(|negative| negative.phase == "parse");
+    if plan.metadata.features.contains("IsHTMLDDA") {
+        install_test262_is_html_dda(&mut context, limits)?;
+    }
     if mode != TestMode::Raw && !parse_negative {
         for (name, harness_source) in [
             ("harness/assert.js", harness.assert.as_str()),
@@ -1193,6 +1219,26 @@ fn execute_case(
         &context,
         result.as_ref().map(|_| ()),
     ))
+}
+
+fn install_test262_is_html_dda(
+    context: &mut Context<'_>,
+    limits: ScriptLimits,
+) -> Result<(), String> {
+    let host_object = evaluate_script(
+        context,
+        TEST262_IS_HTML_DDA_SOURCE,
+        "harness/$262.IsHTMLDDA.js",
+        limits,
+    )
+    .map_err(|error| format!("could not install $262.IsHTMLDDA: {error}"))?;
+    let marked = context
+        .mark_host_defined_is_html_dda(&host_object)
+        .map_err(|error| format!("could not mark $262.IsHTMLDDA: {error}"))?;
+    if !marked {
+        return Err("$262.IsHTMLDDA fixture did not produce an object".to_owned());
+    }
+    Ok(())
 }
 
 fn harness_failure(
@@ -1664,6 +1710,57 @@ throw new TypeError();",
     }
 
     #[test]
+    fn host_api_detection_admits_only_the_is_html_dda_property() {
+        assert!(!requires_host_api("var value = $262.IsHTMLDDA;"));
+        assert!(requires_host_api("$262.evalScript('0');"));
+        assert!(requires_host_api("void $262.IsHTMLDDAExtra;"));
+        assert!(requires_host_api("print('still host-defined');"));
+    }
+
+    #[test]
+    fn is_html_dda_feature_installs_the_callable_test262_host_object() {
+        let metadata = Metadata {
+            features: BTreeSet::from(["IsHTMLDDA".to_owned()]),
+            ..Metadata::default()
+        };
+        let plan = TestPlan {
+            path: PathBuf::from("is-html-dda.js"),
+            relative: "is-html-dda.js".to_owned(),
+            metadata,
+            modes: vec![TestMode::Raw],
+            skip_reason: None,
+        };
+        let harness = HarnessSources {
+            assert: String::new(),
+            sta: String::new(),
+            root: PathBuf::from("unused-harness"),
+        };
+        let source = r#"
+            var value = $262.IsHTMLDDA;
+            if (Boolean(value) || !value !== true || typeof value !== "undefined") throw 1;
+            if (value != null || value !== value || (value ?? 1) !== value) throw 2;
+            if (value() !== null || value("") !== null) throw 3;
+            var constructThrew = false;
+            try { new value(); } catch (error) { constructThrew = error instanceof TypeError; }
+            if (!constructThrew) throw 4;
+            Object.defineProperty(value, "prototype", { get: function () { return null; } });
+        "#;
+
+        assert!(
+            execute_case(
+                &plan,
+                TestMode::Raw,
+                source,
+                &harness,
+                DEFAULT_INSTRUCTION_FUEL,
+                DEFAULT_TIMEOUT_MS,
+            )
+            .expect("runner result")
+            .is_none()
+        );
+    }
+
+    #[test]
     fn focused_intl402_admission_bypasses_only_intl_policy_skips() {
         let policy = BaselinePolicy {
             skipped_features: BTreeSet::from(["Intl.Locale".to_owned(), "ShadowRealm".to_owned()]),
@@ -1754,6 +1851,17 @@ throw new TypeError();",
             !baseline
                 .policy
                 .excludes("annexB/built-ins/String/prototype/substr/basic.js")
+        );
+        assert!(
+            !baseline
+                .policy
+                .excludes("annexB/language/expressions/typeof/emulates-undefined.js")
+        );
+        assert!(
+            baseline
+                .policy
+                .excludes("annexB/language/expressions/assignmenttargettype/callexpression.js"),
+            "the intentionally excluded B.3.9 cases must not be admitted by B.3.6"
         );
     }
 

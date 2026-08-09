@@ -1007,7 +1007,8 @@ pub(super) fn advance_typed_array_constructor_sequence(
                 );
             }
             TypedArrayConstructorSequenceStage::AwaitDone => {
-                if typed_array_take_completion(&mut completion)?.is_truthy() {
+                let done = typed_array_take_completion(&mut completion)?;
+                if runtime.to_boolean(&done)? {
                     state.iterator = None;
                     state.next = None;
                     state.result = None;
@@ -4144,7 +4145,7 @@ pub(super) fn advance_typed_array_prototype_filter(
             suspend_typed_array_filter(state, callback, receiver, callback_arguments, return_to)
         }
         TypedArrayPrototypeFilterStage::AwaitCallback => {
-            if value.is_truthy() {
+            if runtime.to_boolean(&value)? {
                 let element = state.element.take().ok_or(EngineFault::RuntimeInvariant {
                     message: "TypedArray.prototype.filter lost a source element before its callback completed",
                 })?;

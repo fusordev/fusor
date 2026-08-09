@@ -607,11 +607,23 @@ pub(crate) enum NativeReferenceId {
     Unresolved(UnresolvedGlobalId),
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct AnnexBFunctionBinding {
+    pub(crate) lexical: BindingId,
+    pub(crate) variable: Option<BindingId>,
+    pub(crate) lexical_scope: ScopeId,
+    pub(crate) synthetic_block: bool,
+}
+
 pub(crate) struct OxcIdentityMap {
     pub(crate) executable_by_node: Box<[Option<ExecutableId>]>,
     pub(crate) node_by_executable: Box<[NodeId]>,
     pub(crate) binding_by_symbol: Box<[Option<BindingId>]>,
     pub(crate) binding_by_declaration: HashMap<(SymbolId, u32, u32), BindingId>,
+    /// Annex B.3.2/.3 gives each sloppy block function a lexical binding and,
+    /// when the replacement-`var` checks succeed, a separate variable target.
+    /// Oxc folds those identities together, so lowering restores the split.
+    pub(crate) annex_b_functions: HashMap<NodeId, AnnexBFunctionBinding>,
     /// Synthesized default constructor template for each eligible named base
     /// class that lacks a source-written constructor.
     pub(crate) default_class_constructors: HashMap<NodeId, ExecutableId>,
@@ -901,6 +913,18 @@ struct FrozenBindings {
     with_object_bindings: HashMap<NodeId, BindingId>,
 }
 
+#[derive(Clone)]
+struct AnnexBFunctionSource {
+    node: NodeId,
+    symbol: SymbolId,
+    name: Arc<str>,
+    declaration_span: Span,
+    lexical_scope: ScopeId,
+    variable_scope: ScopeId,
+    synthetic_block: bool,
+    variable_symbol: Option<SymbolId>,
+}
+
 struct CatchVarDeclarations {
     catch_spans: Arc<[Span]>,
     var_spans: Arc<[Span]>,
@@ -1107,8 +1131,10 @@ impl<'unit, 'arena, 'scope> Planner<'unit, 'arena, 'scope> {
         self.mark_direct_eval_executables()?;
         self.reject_synthetic_binding_uses()?;
 
-        let mut binding_drafts = self.binding_drafts()?;
-        let implicit_arguments_references = self.add_arguments_bindings(&mut binding_drafts)?;
+        let annex_b_sources = self.annex_b_function_sources()?;
+        let mut binding_drafts = self.binding_drafts(&annex_b_sources)?;
+        let implicit_arguments_references =
+            self.add_arguments_bindings(&mut binding_drafts, &annex_b_sources)?;
         self.add_synthetic_default_binding(&mut binding_drafts)?;
         self.add_class_name_bindings(&mut binding_drafts)?;
         self.add_class_field_key_bindings(&mut binding_drafts)?;
@@ -1142,6 +1168,13 @@ impl<'unit, 'arena, 'scope> Planner<'unit, 'arena, 'scope> {
             class_static_receiver_bindings,
             with_object_bindings,
         } = self.freeze_binding_drafts(binding_drafts)?;
+        let annex_b_functions = Self::freeze_annex_b_functions(
+            &annex_b_sources,
+            &symbol_bindings,
+            &declaration_bindings,
+        )?;
+        let annex_b_outer_scope_overrides =
+            self.annex_b_outer_scope_overrides(&annex_b_sources, &declaration_bindings)?;
         let scope_by_binding = self.binding_scope_map(
             &symbol_bindings,
             &source_symbols,
@@ -1151,6 +1184,8 @@ impl<'unit, 'arena, 'scope> Planner<'unit, 'arena, 'scope> {
             &class_private_method_bindings,
             &class_static_receiver_bindings,
             &with_object_bindings,
+            &annex_b_functions,
+            &annex_b_outer_scope_overrides,
             &bindings,
         )?;
         let with_object_binding_by_scope =
@@ -1161,6 +1196,7 @@ impl<'unit, 'arena, 'scope> Planner<'unit, 'arena, 'scope> {
             &source_symbols,
             &scope_by_binding,
             &class_name_bindings,
+            &annex_b_functions,
             &bindings,
             &implicit_arguments_references,
         )?;
@@ -1271,6 +1307,7 @@ impl<'unit, 'arena, 'scope> Planner<'unit, 'arena, 'scope> {
                 node_by_executable: node_by_executable.into_boxed_slice(),
                 binding_by_symbol: symbol_bindings.into_boxed_slice(),
                 binding_by_declaration: declaration_bindings,
+                annex_b_functions,
                 default_class_constructors: self.default_class_constructors,
                 class_name_bindings,
                 class_field_key_bindings,
@@ -1292,10 +1329,119 @@ impl<'unit, 'arena, 'scope> Planner<'unit, 'arena, 'scope> {
         freeze_bindings(drafts, self.unit.semantic().scoping().symbols_len())
     }
 
+    fn freeze_annex_b_functions(
+        sources: &[AnnexBFunctionSource],
+        symbol_bindings: &[Option<BindingId>],
+        declaration_bindings: &HashMap<(SymbolId, u32, u32), BindingId>,
+    ) -> Result<HashMap<NodeId, AnnexBFunctionBinding>, CompilerError> {
+        let mut functions = HashMap::with_capacity(sources.len());
+        for source in sources {
+            let lexical = declaration_bindings
+                .get(&(
+                    source.symbol,
+                    source.declaration_span.start,
+                    source.declaration_span.end,
+                ))
+                .copied()
+                .ok_or(CompilerError::SemanticInvariant {
+                    invariant: "Annex B function declaration has a lexical compiler binding",
+                    span: Some(source.declaration_span),
+                })?;
+            let variable = source
+                .variable_symbol
+                .map(|symbol| {
+                    symbol_bindings
+                        .get(symbol.index())
+                        .copied()
+                        .flatten()
+                        .ok_or(CompilerError::SemanticInvariant {
+                            invariant: "Annex B variable symbol has a compiler binding",
+                            span: Some(source.declaration_span),
+                        })
+                })
+                .transpose()?;
+            if variable == Some(lexical) {
+                return Err(CompilerError::SemanticInvariant {
+                    invariant: "Annex B lexical and variable bindings are distinct",
+                    span: Some(source.declaration_span),
+                });
+            }
+            if functions
+                .insert(
+                    source.node,
+                    AnnexBFunctionBinding {
+                        lexical,
+                        variable,
+                        lexical_scope: source.lexical_scope,
+                        synthetic_block: source.synthetic_block,
+                    },
+                )
+                .is_some()
+            {
+                return Err(CompilerError::SemanticInvariant {
+                    invariant: "one Annex B binding split per function declaration",
+                    span: Some(source.declaration_span),
+                });
+            }
+        }
+        Ok(functions)
+    }
+
+    fn annex_b_outer_scope_overrides(
+        &self,
+        sources: &[AnnexBFunctionSource],
+        declaration_bindings: &HashMap<(SymbolId, u32, u32), BindingId>,
+    ) -> Result<HashMap<BindingId, ScopeId>, CompilerError> {
+        let semantic = self.unit.semantic();
+        let scoping = semantic.scoping();
+        let excluded = sources
+            .iter()
+            .map(|source| source.node)
+            .collect::<HashSet<_>>();
+        let symbols = sources
+            .iter()
+            .map(|source| source.symbol)
+            .collect::<HashSet<_>>();
+        let mut overrides = HashMap::new();
+        for symbol in symbols {
+            for declaration in scoping.symbol_declarations(symbol) {
+                if excluded.contains(&declaration) {
+                    continue;
+                }
+                let span = symbol_declaration_span(scoping, symbol, declaration);
+                let Some(binding) = declaration_bindings
+                    .get(&(symbol, span.start, span.end))
+                    .copied()
+                else {
+                    continue;
+                };
+                let scope = if matches!(
+                    semantic.nodes().kind(declaration),
+                    AstKind::CatchParameter(_)
+                ) {
+                    self.catch_body_scope(symbol)?
+                } else {
+                    semantic.nodes().get_node(declaration).scope_id()
+                };
+                if overrides
+                    .insert(binding, scope)
+                    .is_some_and(|previous| previous != scope)
+                {
+                    return Err(CompilerError::SemanticInvariant {
+                        invariant: "one Annex B outer binding has one declaration scope",
+                        span: Some(span),
+                    });
+                }
+            }
+        }
+        Ok(overrides)
+    }
+
     fn source_binding_scope_map(
         &self,
         symbol_bindings: &[Option<BindingId>],
         source_symbols: &[Option<SymbolId>],
+        scope_overrides: &HashMap<BindingId, ScopeId>,
         bindings: &[BindingStorage],
     ) -> Result<Vec<Option<ScopeId>>, CompilerError> {
         let scoping = self.unit.semantic().scoping();
@@ -1311,6 +1457,16 @@ impl<'unit, 'arena, 'scope> Planner<'unit, 'arena, 'scope> {
                 )
             }),
         )?;
+        for (&binding, &scope) in scope_overrides {
+            let target =
+                scopes
+                    .get_mut(binding.index())
+                    .ok_or(CompilerError::SemanticInvariant {
+                        invariant: "source binding scope override index is in range",
+                        span: None,
+                    })?;
+            *target = Some(scope);
+        }
         for (binding, source_symbol) in source_symbols.iter().copied().enumerate() {
             let Some(symbol) = source_symbol else {
                 continue;
@@ -1321,11 +1477,17 @@ impl<'unit, 'arena, 'scope> Planner<'unit, 'arena, 'scope> {
                     invariant: "source-backed compiler binding exists",
                     span: Some(scoping.symbol_span(symbol)),
                 })?;
-            let scope = if storage.policy.kind == DeclarationKind::Catch {
-                self.catch_body_scope(symbol)?
-            } else {
-                scoping.symbol_scope_id(symbol)
-            };
+            let binding_id = BindingId(
+                u32::try_from(binding)
+                    .map_err(|_| CompilerError::CapacityExceeded { domain: "bindings" })?,
+            );
+            let scope = scope_overrides.get(&binding_id).copied().unwrap_or(
+                if storage.policy.kind == DeclarationKind::Catch {
+                    self.catch_body_scope(symbol)?
+                } else {
+                    scoping.symbol_scope_id(symbol)
+                },
+            );
             let span = scoping.symbol_span(symbol);
             let target = scopes
                 .get_mut(binding)
@@ -1336,6 +1498,7 @@ impl<'unit, 'arena, 'scope> Planner<'unit, 'arena, 'scope> {
             match *target {
                 None => *target = Some(scope),
                 Some(existing) if existing == scope => {}
+                Some(_) if scope_overrides.contains_key(&binding_id) => *target = Some(scope),
                 Some(_) => {
                     return Err(CompilerError::SemanticInvariant {
                         invariant: "split compiler bindings share their semantic scope",
@@ -1361,10 +1524,28 @@ impl<'unit, 'arena, 'scope> Planner<'unit, 'arena, 'scope> {
         class_private_method_bindings: &HashMap<NodeId, BindingId>,
         class_static_receiver_bindings: &HashMap<NodeId, BindingId>,
         with_object_bindings: &HashMap<NodeId, BindingId>,
+        annex_b_functions: &HashMap<NodeId, AnnexBFunctionBinding>,
+        annex_b_outer_scope_overrides: &HashMap<BindingId, ScopeId>,
         bindings: &[BindingStorage],
     ) -> Result<Vec<Option<ScopeId>>, CompilerError> {
-        let mut scopes =
-            self.source_binding_scope_map(symbol_bindings, source_symbols, bindings)?;
+        let mut scope_overrides = annex_b_outer_scope_overrides.clone();
+        for function in annex_b_functions.values() {
+            if scope_overrides
+                .insert(function.lexical, function.lexical_scope)
+                .is_some_and(|previous| previous != function.lexical_scope)
+            {
+                return Err(CompilerError::SemanticInvariant {
+                    invariant: "one Annex B lexical binding has one semantic scope",
+                    span: None,
+                });
+            }
+        }
+        let mut scopes = self.source_binding_scope_map(
+            symbol_bindings,
+            source_symbols,
+            &scope_overrides,
+            bindings,
+        )?;
         for binding in bindings.iter().filter(|binding| binding.arguments_object) {
             let scope = self
                 .executable_drafts
@@ -1419,6 +1600,31 @@ impl<'unit, 'arena, 'scope> Planner<'unit, 'arena, 'scope> {
         self.bind_class_private_method_scopes(&mut scopes, class_private_method_bindings)?;
         self.bind_class_static_receiver_scopes(&mut scopes, class_static_receiver_bindings)?;
         self.bind_with_object_scopes(&mut scopes, with_object_bindings)?;
+        for (&binding, &scope) in annex_b_outer_scope_overrides {
+            let target =
+                scopes
+                    .get_mut(binding.index())
+                    .ok_or(CompilerError::SemanticInvariant {
+                        invariant: "Annex B outer binding scope index is in range",
+                        span: None,
+                    })?;
+            *target = Some(scope);
+        }
+        for function in annex_b_functions.values() {
+            let target = scopes.get_mut(function.lexical.index()).ok_or(
+                CompilerError::SemanticInvariant {
+                    invariant: "Annex B lexical binding scope index is in range",
+                    span: None,
+                },
+            )?;
+            match *target {
+                Some(existing) if existing != function.lexical_scope => {
+                    *target = Some(function.lexical_scope);
+                }
+                None => *target = Some(function.lexical_scope),
+                Some(_) => {}
+            }
+        }
         Ok(scopes)
     }
 
@@ -1876,7 +2082,13 @@ impl<'unit, 'arena, 'scope> Planner<'unit, 'arena, 'scope> {
                     let declaration_scope = node.scope_id();
                     let flags = semantic.scoping().scope_flags(declaration_scope);
                     let parent = nodes.parent_kind(node_id);
-                    if matches!(parent, AstKind::LabeledStatement(_)) {
+                    if matches!(
+                        parent,
+                        AstKind::BlockStatement(_)
+                            | AstKind::SwitchCase(_)
+                            | AstKind::IfStatement(_)
+                            | AstKind::LabeledStatement(_)
+                    ) {
                         continue;
                     }
                     let single_statement_parent = is_single_statement_parent(parent);
@@ -2518,10 +2730,239 @@ impl<'unit, 'arena, 'scope> Planner<'unit, 'arena, 'scope> {
         clippy::too_many_lines,
         reason = "source and synthetic bindings must share one stable planning order"
     )]
-    fn binding_drafts(&self) -> Result<Vec<BindingDraft>, CompilerError> {
+    fn annex_b_function_sources(&self) -> Result<Vec<AnnexBFunctionSource>, CompilerError> {
+        let semantic = self.unit.semantic();
+        let nodes = semantic.nodes();
+        let scoping = semantic.scoping();
+        let mut sources = Vec::new();
+        for (node_id, node) in nodes.iter_enumerated() {
+            let AstKind::Function(function) = node.kind() else {
+                continue;
+            };
+            if function.r#type != FunctionType::FunctionDeclaration
+                || function.r#async
+                || function.generator
+            {
+                continue;
+            }
+            let Some(identifier) = function.id.as_ref() else {
+                continue;
+            };
+            let parent_id = nodes.parent_id(node_id);
+            let (lexical_scope, synthetic_block) = match nodes.kind(parent_id) {
+                AstKind::BlockStatement(block) => (
+                    block
+                        .scope_id
+                        .get()
+                        .ok_or(CompilerError::SemanticInvariant {
+                            invariant: "Annex B block has a semantic scope",
+                            span: Some(block.span),
+                        })?,
+                    false,
+                ),
+                AstKind::SwitchCase(case) => {
+                    let switch_id = nodes.parent_id(case.node_id.get());
+                    let AstKind::SwitchStatement(statement) = nodes.kind(switch_id) else {
+                        return Err(CompilerError::SemanticInvariant {
+                            invariant: "switch case belongs to a switch statement",
+                            span: Some(case.span),
+                        });
+                    };
+                    (
+                        statement
+                            .scope_id
+                            .get()
+                            .ok_or(CompilerError::SemanticInvariant {
+                                invariant: "Annex B switch has a semantic scope",
+                                span: Some(statement.span),
+                            })?,
+                        false,
+                    )
+                }
+                AstKind::IfStatement(_) => (nodes.get_node(parent_id).scope_id(), true),
+                _ => continue,
+            };
+            let owner = self.scope_owner(lexical_scope, Some(function.span))?;
+            if self.executable_drafts[owner.index()].executable.strict {
+                continue;
+            }
+            let variable_scope = scoping
+                .scope_ancestors(lexical_scope)
+                .find(|scope| scoping.scope_flags(*scope).is_var())
+                .ok_or(CompilerError::SemanticInvariant {
+                    invariant: "Annex B function has a variable environment",
+                    span: Some(function.span),
+                })?;
+            let symbol = identifier
+                .symbol_id
+                .get()
+                .ok_or(CompilerError::SemanticInvariant {
+                    invariant: "Annex B function has a semantic symbol",
+                    span: Some(identifier.span),
+                })?;
+            sources.push(AnnexBFunctionSource {
+                node: node_id,
+                symbol,
+                name: Arc::from(identifier.name.as_str()),
+                declaration_span: identifier.span,
+                lexical_scope,
+                variable_scope,
+                synthetic_block,
+                variable_symbol: None,
+            });
+        }
+        sources.sort_by_key(|source| {
+            (
+                source.declaration_span.start,
+                source.declaration_span.end,
+                source.node.index(),
+            )
+        });
+        for index in 0..sources.len() {
+            sources[index].variable_symbol =
+                self.annex_b_variable_symbol(&sources[index], &sources)?;
+        }
+        Ok(sources)
+    }
+
+    fn annex_b_variable_symbol(
+        &self,
+        source: &AnnexBFunctionSource,
+        sources: &[AnnexBFunctionSource],
+    ) -> Result<Option<SymbolId>, CompilerError> {
+        let semantic = self.unit.semantic();
+        let scoping = semantic.scoping();
+        let mut scope = if source.synthetic_block {
+            Some(source.lexical_scope)
+        } else {
+            scoping.scope_parent_id(source.lexical_scope)
+        };
+        while let Some(candidate_scope) = scope {
+            if sources.iter().any(|candidate| {
+                !candidate.synthetic_block
+                    && candidate.node != source.node
+                    && candidate.name == source.name
+                    && candidate.lexical_scope == candidate_scope
+            }) {
+                return Ok(None);
+            }
+            if let Some(symbol) = scoping.get_binding(candidate_scope, source.name.as_ref().into())
+                && self.annex_b_symbol_blocks_variable(symbol)?
+            {
+                return Ok(None);
+            }
+            if candidate_scope == source.variable_scope {
+                break;
+            }
+            scope = scoping.scope_parent_id(candidate_scope);
+        }
+        let variable = scoping
+            .get_binding(source.variable_scope, source.name.as_ref().into())
+            .or_else(|| {
+                (scoping.symbol_scope_id(source.symbol) == source.variable_scope)
+                    .then_some(source.symbol)
+            })
+            .ok_or(CompilerError::SemanticInvariant {
+                invariant: "Oxc retained the Annex B variable-environment symbol",
+                span: Some(source.declaration_span),
+            })?;
+        if source.name.as_ref() == "arguments"
+            && matches!(
+                self.executable_drafts[self
+                    .scope_owner(source.variable_scope, Some(source.declaration_span))?
+                    .index()]
+                .executable
+                .kind(),
+                ExecutableKind::Function { .. }
+            )
+            && !self.annex_b_has_existing_arguments_variable(variable, sources)
+        {
+            return Ok(None);
+        }
+        Ok(Some(variable))
+    }
+
+    fn annex_b_has_existing_arguments_variable(
+        &self,
+        symbol: SymbolId,
+        sources: &[AnnexBFunctionSource],
+    ) -> bool {
+        let semantic = self.unit.semantic();
+        semantic
+            .scoping()
+            .symbol_declarations(symbol)
+            .filter(|declaration| !sources.iter().any(|source| source.node == *declaration))
+            .any(|declaration| match semantic.nodes().kind(declaration) {
+                AstKind::VariableDeclarator(declarator) => {
+                    declarator.kind == VariableDeclarationKind::Var
+                }
+                AstKind::Function(function) => function.r#type == FunctionType::FunctionDeclaration,
+                _ => false,
+            })
+    }
+
+    fn annex_b_symbol_blocks_variable(&self, symbol: SymbolId) -> Result<bool, CompilerError> {
+        let semantic = self.unit.semantic();
+        for declaration in semantic.scoping().symbol_declarations(symbol) {
+            match semantic.nodes().kind(declaration) {
+                AstKind::FormalParameter(_)
+                | AstKind::FormalParameterRest(_)
+                | AstKind::Class(_)
+                | AstKind::ImportSpecifier(_)
+                | AstKind::ImportDefaultSpecifier(_)
+                | AstKind::ImportNamespaceSpecifier(_) => return Ok(true),
+                AstKind::VariableDeclarator(declarator) => {
+                    if declarator.kind != VariableDeclarationKind::Var {
+                        return Ok(true);
+                    }
+                }
+                AstKind::CatchParameter(parameter) => {
+                    if !matches!(parameter.pattern, BindingPattern::BindingIdentifier(_)) {
+                        return Ok(true);
+                    }
+                }
+                AstKind::Function(_) => {}
+                other => {
+                    return Err(CompilerError::SemanticInvariant {
+                        invariant: declaration_kind_invariant(other),
+                        span: Some(semantic.scoping().symbol_span(symbol)),
+                    });
+                }
+            }
+        }
+        Ok(false)
+    }
+
+    #[allow(
+        clippy::too_many_lines,
+        reason = "Oxc symbols, split catch/parameter environments, and Annex B dual bindings are normalized in one deterministic draft pass"
+    )]
+    fn binding_drafts(
+        &self,
+        annex_b_sources: &[AnnexBFunctionSource],
+    ) -> Result<Vec<BindingDraft>, CompilerError> {
         let semantic = self.unit.semantic();
         let scoping = semantic.scoping();
         let mut drafts = Vec::with_capacity(scoping.symbols_len());
+        let mut annex_nodes_by_symbol: HashMap<SymbolId, HashSet<NodeId>> = HashMap::new();
+        let mut annex_spans_by_symbol: HashMap<SymbolId, Vec<Span>> = HashMap::new();
+        let mut annex_variable_spans_by_symbol: HashMap<SymbolId, Vec<Span>> = HashMap::new();
+        for source in annex_b_sources {
+            annex_nodes_by_symbol
+                .entry(source.symbol)
+                .or_default()
+                .insert(source.node);
+            annex_spans_by_symbol
+                .entry(source.symbol)
+                .or_default()
+                .push(source.declaration_span);
+            if let Some(variable) = source.variable_symbol {
+                annex_variable_spans_by_symbol
+                    .entry(variable)
+                    .or_default()
+                    .push(source.declaration_span);
+            }
+        }
         for symbol_id in scoping.symbol_ids() {
             let flags = scoping.symbol_flags(symbol_id);
             if !flags.is_value() {
@@ -2530,15 +2971,58 @@ impl<'unit, 'arena, 'scope> Planner<'unit, 'arena, 'scope> {
                     span: Some(scoping.symbol_span(symbol_id)),
                 });
             }
-            let facts = self.declaration_facts(symbol_id, flags)?;
-            let owner = self.scope_owner(
-                scoping.symbol_scope_id(symbol_id),
-                Some(scoping.symbol_span(symbol_id)),
-            )?;
+            let excluded_nodes = annex_nodes_by_symbol.get(&symbol_id);
+            let mut facts = self.declaration_facts(symbol_id, flags, excluded_nodes)?;
+            let excluded_spans = annex_spans_by_symbol.get(&symbol_id);
+            let mut declaration_spans = declaration_spans(scoping, symbol_id)
+                .iter()
+                .copied()
+                .filter(|span| !excluded_spans.is_some_and(|excluded| excluded.contains(span)))
+                .collect::<Vec<_>>();
+            let variable_spans = annex_variable_spans_by_symbol
+                .get(&symbol_id)
+                .cloned()
+                .unwrap_or_default();
+            if !variable_spans.is_empty() {
+                facts.insert(DeclarationFacts::VAR);
+            }
+            let declaration_identity_spans: Arc<[Span]> = declaration_spans.clone().into();
+            declaration_spans.extend(variable_spans.iter().copied());
+            declaration_spans.sort_by_key(|span| (span.start, span.end));
+            declaration_spans.dedup();
+            let declaration_spans: Arc<[Span]> = declaration_spans.into();
+            if facts.effective_kind().is_none() {
+                continue;
+            }
+            let symbol_scope = if excluded_nodes.is_some()
+                && !facts.contains(DeclarationFacts::VAR)
+                && !facts.contains(DeclarationFacts::FUNCTION)
+            {
+                scoping
+                    .symbol_declarations(symbol_id)
+                    .find(|declaration| {
+                        !excluded_nodes.is_some_and(|excluded| excluded.contains(declaration))
+                    })
+                    .map(|declaration| {
+                        if matches!(
+                            semantic.nodes().kind(declaration),
+                            AstKind::CatchParameter(_)
+                        ) {
+                            self.catch_body_scope(symbol_id)
+                        } else {
+                            Ok(semantic.nodes().get_node(declaration).scope_id())
+                        }
+                    })
+                    .transpose()?
+                    .unwrap_or_else(|| scoping.symbol_scope_id(symbol_id))
+            } else {
+                scoping.symbol_scope_id(symbol_id)
+            };
+            let owner = self.scope_owner(symbol_scope, Some(scoping.symbol_span(symbol_id)))?;
             let name = Arc::<str>::from(scoping.symbol_name(symbol_id));
-            let declaration_spans = declaration_spans(scoping, symbol_id);
             if facts.contains(DeclarationFacts::CATCH) && facts.contains(DeclarationFacts::VAR) {
-                let declarations = self.catch_var_declarations(symbol_id)?;
+                let declarations =
+                    self.catch_var_declarations(symbol_id, excluded_nodes, &variable_spans)?;
                 let catch_owner = self.scope_owner(
                     declarations.catch_body_scope,
                     declarations.catch_spans.first().copied(),
@@ -2574,6 +3058,7 @@ impl<'unit, 'arena, 'scope> Planner<'unit, 'arena, 'scope> {
                             symbol_id,
                             variable_owner,
                             DeclarationKind::Var,
+                            declarations.variable_scope,
                         )?,
                         policy: self.declaration_policy(
                             variable_owner,
@@ -2595,7 +3080,7 @@ impl<'unit, 'arena, 'scope> Planner<'unit, 'arena, 'scope> {
                     executable: catch_owner,
                     name,
                     declaration_spans: declarations.catch_spans,
-                    declaration_identity_spans: declaration_spans,
+                    declaration_identity_spans,
                     placement: StoragePlacement::Local,
                     policy: self.declaration_policy(catch_owner, DeclarationKind::Catch, false),
                     arguments_object: false,
@@ -2674,7 +3159,7 @@ impl<'unit, 'arena, 'scope> Planner<'unit, 'arena, 'scope> {
                     invariant: "known JavaScript declaration kind",
                     span: Some(scoping.symbol_span(symbol_id)),
                 })?;
-            let placement = self.placement(symbol_id, owner, kind)?;
+            let placement = self.placement(symbol_id, owner, kind, symbol_scope)?;
             let policy = self.declaration_policy(owner, kind, facts.function_scope_entry);
             drafts.push(BindingDraft {
                 symbol_id: Some(symbol_id),
@@ -2688,13 +3173,91 @@ impl<'unit, 'arena, 'scope> Planner<'unit, 'arena, 'scope> {
                 executable: owner,
                 name,
                 declaration_spans: Arc::clone(&declaration_spans),
-                declaration_identity_spans: declaration_spans,
+                declaration_identity_spans,
                 placement,
                 policy,
                 arguments_object: false,
             });
         }
+        self.add_annex_b_lexical_bindings(&mut drafts, annex_b_sources)?;
         Ok(drafts)
+    }
+
+    fn add_annex_b_lexical_bindings(
+        &self,
+        drafts: &mut Vec<BindingDraft>,
+        sources: &[AnnexBFunctionSource],
+    ) -> Result<(), CompilerError> {
+        let mut groups: Vec<Vec<&AnnexBFunctionSource>> = Vec::new();
+        for source in sources {
+            let synthetic_node = source.synthetic_block.then_some(source.node);
+            if let Some(group) = groups.iter_mut().find(|group| {
+                let first = group[0];
+                first.symbol == source.symbol
+                    && first.lexical_scope == source.lexical_scope
+                    && first.synthetic_block.then_some(first.node) == synthetic_node
+            }) {
+                group.push(source);
+            } else {
+                groups.push(vec![source]);
+            }
+        }
+        groups.sort_by_key(|group| {
+            let first = group[0];
+            (
+                first.declaration_span.start,
+                first.declaration_span.end,
+                first.node.index(),
+            )
+        });
+        for group in groups {
+            let first = group[0];
+            if group.iter().any(|source| {
+                source.symbol != first.symbol
+                    || source.name != first.name
+                    || source.lexical_scope != first.lexical_scope
+                    || source.synthetic_block != first.synthetic_block
+            }) {
+                return Err(CompilerError::SemanticInvariant {
+                    invariant: "one Annex B lexical group has one name and scope",
+                    span: Some(first.declaration_span),
+                });
+            }
+            let mut spans = group
+                .iter()
+                .map(|source| source.declaration_span)
+                .collect::<Vec<_>>();
+            spans.sort_by_key(|span| (span.start, span.end));
+            spans.dedup();
+            let spans: Arc<[Span]> = spans.into();
+            let owner = self.scope_owner(first.lexical_scope, Some(first.declaration_span))?;
+            let primary_symbol_binding = !drafts
+                .iter()
+                .any(|draft| draft.symbol_id == Some(first.symbol) && draft.primary_symbol_binding);
+            let policy = if first.synthetic_block {
+                self.declaration_policy(owner, DeclarationKind::Let, false)
+            } else {
+                self.declaration_policy(owner, DeclarationKind::Function, true)
+            };
+            drafts.push(BindingDraft {
+                symbol_id: Some(first.symbol),
+                primary_symbol_binding,
+                class_node: None,
+                class_field_node: None,
+                class_private_name_nodes: Arc::from([]),
+                class_private_method_node: None,
+                class_static_receiver_node: None,
+                with_statement_node: None,
+                executable: owner,
+                name: Arc::clone(&first.name),
+                declaration_spans: Arc::clone(&spans),
+                declaration_identity_spans: spans,
+                placement: StoragePlacement::Local,
+                policy,
+                arguments_object: false,
+            });
+        }
+        Ok(())
     }
 
     fn catch_body_scope(&self, symbol_id: SymbolId) -> Result<ScopeId, CompilerError> {
@@ -2738,13 +3301,18 @@ impl<'unit, 'arena, 'scope> Planner<'unit, 'arena, 'scope> {
     fn catch_var_declarations(
         &self,
         symbol_id: SymbolId,
+        excluded_nodes: Option<&HashSet<NodeId>>,
+        synthetic_var_spans: &[Span],
     ) -> Result<CatchVarDeclarations, CompilerError> {
         let semantic = self.unit.semantic();
         let scoping = semantic.scoping();
         let redeclarations = scoping.symbol_redeclarations(symbol_id);
         let mut catch_spans = Vec::new();
-        let mut var_spans = Vec::new();
+        let mut var_spans = synthetic_var_spans.to_vec();
         for declaration in scoping.symbol_declarations(symbol_id) {
+            if excluded_nodes.is_some_and(|excluded| excluded.contains(&declaration)) {
+                continue;
+            }
             let span = redeclarations
                 .iter()
                 .find(|redeclaration| redeclaration.declaration == declaration)
@@ -2764,6 +3332,10 @@ impl<'unit, 'arena, 'scope> Planner<'unit, 'arena, 'scope> {
                 _ => {}
             }
         }
+        catch_spans.sort_by_key(|span| (span.start, span.end));
+        catch_spans.dedup();
+        var_spans.sort_by_key(|span| (span.start, span.end));
+        var_spans.dedup();
         let catch_body_scope = self.catch_body_scope(symbol_id)?;
         if catch_spans.is_empty() || var_spans.is_empty() {
             return Err(CompilerError::SemanticInvariant {
@@ -2799,6 +3371,7 @@ impl<'unit, 'arena, 'scope> Planner<'unit, 'arena, 'scope> {
         &self,
         symbol_id: SymbolId,
         flags: SymbolFlags,
+        excluded_nodes: Option<&HashSet<NodeId>>,
     ) -> Result<DeclarationFacts, CompilerError> {
         let semantic = self.unit.semantic();
         let scoping = semantic.scoping();
@@ -2807,6 +3380,9 @@ impl<'unit, 'arena, 'scope> Planner<'unit, 'arena, 'scope> {
             facts.insert(DeclarationFacts::FUNCTION_NAME);
         }
         for declaration in scoping.symbol_declarations(symbol_id) {
+            if excluded_nodes.is_some_and(|excluded| excluded.contains(&declaration)) {
+                continue;
+            }
             match semantic.nodes().kind(declaration) {
                 AstKind::FormalParameter(_) | AstKind::FormalParameterRest(_) => {
                     facts.insert(DeclarationFacts::PARAMETER);
@@ -2854,6 +3430,7 @@ impl<'unit, 'arena, 'scope> Planner<'unit, 'arena, 'scope> {
         symbol_id: SymbolId,
         owner: ExecutableId,
         kind: DeclarationKind,
+        symbol_scope: ScopeId,
     ) -> Result<StoragePlacement, CompilerError> {
         if let Some(parameter) = self.parameter_storage.get(&symbol_id) {
             if parameter.executable != owner {
@@ -2872,7 +3449,6 @@ impl<'unit, 'arena, 'scope> Planner<'unit, 'arena, 'scope> {
         }
         let scoping = self.unit.semantic().scoping();
         let root_scope = scoping.root_scope_id();
-        let symbol_scope = scoping.symbol_scope_id(symbol_id);
         if symbol_scope != root_scope {
             return Ok(StoragePlacement::Local);
         }
@@ -2996,7 +3572,7 @@ impl<'unit, 'arena, 'scope> Planner<'unit, 'arena, 'scope> {
                 },
                 false,
             ),
-            DeclarationKind::Catch => (InitializationPolicy::Catch, WritePolicy::Mutable, false),
+            DeclarationKind::Catch => (InitializationPolicy::Catch, WritePolicy::Mutable, true),
             DeclarationKind::Import => (
                 InitializationPolicy::ModuleImport,
                 WritePolicy::Immutable,
@@ -3927,12 +4503,18 @@ impl<'unit, 'arena, 'scope> Planner<'unit, 'arena, 'scope> {
         })
     }
 
+    #[allow(
+        clippy::too_many_arguments,
+        clippy::too_many_lines,
+        reason = "reference identities are resolved against the complete frozen storage and Annex B identity tables in one deterministic pass"
+    )]
     fn resolved_drafts(
         &self,
         symbol_bindings: &[Option<BindingId>],
         source_symbols: &[Option<SymbolId>],
         scope_by_binding: &[Option<ScopeId>],
         class_name_bindings: &HashMap<NodeId, BindingId>,
+        annex_b_functions: &HashMap<NodeId, AnnexBFunctionBinding>,
         bindings: &[BindingStorage],
         implicit_arguments_references: &HashMap<ReferenceId, ExecutableId>,
     ) -> Result<(Vec<ResolvedDraft>, Vec<UnresolvedDraft>), CompilerError> {
@@ -3972,6 +4554,13 @@ impl<'unit, 'arena, 'scope> Planner<'unit, 'arena, 'scope> {
                             span: Some(span),
                         },
                     )?
+                } else if let Some(lexical) = self.annex_b_reference_binding(
+                    reference.node_id(),
+                    reference.scope_id(),
+                    symbol_id,
+                    annex_b_functions,
+                )? {
+                    lexical
                 } else if let Some(parameter_binding) =
                     split_parameter_bindings.get(&symbol_id).copied()
                     && bindings
@@ -3992,7 +4581,27 @@ impl<'unit, 'arena, 'scope> Planner<'unit, 'arena, 'scope> {
                 {
                     catch_binding
                 } else {
-                    source_binding
+                    let Some(outer) = self.annex_b_outer_binding(
+                        symbol_id,
+                        source_binding,
+                        reference.scope_id(),
+                        scope_by_binding,
+                        annex_b_functions,
+                    )?
+                    else {
+                        parameter_outer_references.push(UnresolvedDraft {
+                            reference_id,
+                            executable,
+                            name: Arc::from(scoping.symbol_name(symbol_id)),
+                            span,
+                            access: ReferenceAccess {
+                                read: reference.is_read(),
+                                write: reference.is_write(),
+                            },
+                        });
+                        continue;
+                    };
+                    outer
                 };
                 let binding = self
                     .class_name_binding_for_reference(
@@ -4034,6 +4643,109 @@ impl<'unit, 'arena, 'scope> Planner<'unit, 'arena, 'scope> {
             }
         }
         Ok((drafts, parameter_outer_references))
+    }
+
+    fn annex_b_reference_binding(
+        &self,
+        reference_node: NodeId,
+        reference_scope: ScopeId,
+        symbol: SymbolId,
+        functions: &HashMap<NodeId, AnnexBFunctionBinding>,
+    ) -> Result<Option<BindingId>, CompilerError> {
+        let semantic = self.unit.semantic();
+        let nodes = semantic.nodes();
+        for ancestor in nodes.ancestor_ids(reference_node) {
+            let Some(function) = functions.get(&ancestor) else {
+                continue;
+            };
+            if function.synthetic_block && self.annex_b_function_symbol(ancestor)? == symbol {
+                return Ok(Some(function.lexical));
+            }
+        }
+        for scope in semantic.scoping().scope_ancestors(reference_scope) {
+            for (&node, function) in functions {
+                if !function.synthetic_block
+                    && function.lexical_scope == scope
+                    && self.annex_b_function_symbol(node)? == symbol
+                {
+                    return Ok(Some(function.lexical));
+                }
+            }
+        }
+        Ok(None)
+    }
+
+    fn annex_b_outer_binding(
+        &self,
+        symbol: SymbolId,
+        source_binding: BindingId,
+        reference_scope: ScopeId,
+        scope_by_binding: &[Option<ScopeId>],
+        functions: &HashMap<NodeId, AnnexBFunctionBinding>,
+    ) -> Result<Option<BindingId>, CompilerError> {
+        let mut saw_source = false;
+        let mut source_is_lexical = false;
+        let mut variable = None;
+        for (&node, function) in functions {
+            if self.annex_b_function_symbol(node)? != symbol {
+                continue;
+            }
+            saw_source = true;
+            source_is_lexical |= function.lexical == source_binding;
+            if let Some(candidate) = function.variable
+                && variable
+                    .replace(candidate)
+                    .is_some_and(|previous| previous != candidate)
+            {
+                return Err(CompilerError::SemanticInvariant {
+                    invariant: "one Annex B source symbol has one variable binding",
+                    span: None,
+                });
+            }
+        }
+        if !saw_source {
+            return Ok(Some(source_binding));
+        }
+        if !source_is_lexical {
+            let binding_scope = scope_by_binding
+                .get(source_binding.index())
+                .copied()
+                .flatten()
+                .ok_or(CompilerError::SemanticInvariant {
+                    invariant: "Annex B outer binding has a semantic scope",
+                    span: None,
+                })?;
+            let scoping = self.unit.semantic().scoping();
+            if reference_scope == binding_scope
+                || scoping.scope_is_descendant_of(reference_scope, binding_scope)
+            {
+                return Ok(Some(source_binding));
+            }
+        }
+        Ok(variable)
+    }
+
+    fn annex_b_function_symbol(&self, node: NodeId) -> Result<SymbolId, CompilerError> {
+        let AstKind::Function(function) = self.unit.semantic().nodes().kind(node) else {
+            return Err(CompilerError::SemanticInvariant {
+                invariant: "Annex B binding metadata belongs to a function",
+                span: None,
+            });
+        };
+        let identifier = function
+            .id
+            .as_ref()
+            .ok_or(CompilerError::SemanticInvariant {
+                invariant: "Annex B function has a binding identifier",
+                span: Some(function.span),
+            })?;
+        identifier
+            .symbol_id
+            .get()
+            .ok_or(CompilerError::SemanticInvariant {
+                invariant: "Annex B function identifier has a semantic symbol",
+                span: Some(identifier.span),
+            })
     }
 
     fn reference_precedes_body_environment(&self, binding: &BindingStorage, span: Span) -> bool {
@@ -4112,11 +4824,12 @@ impl<'unit, 'arena, 'scope> Planner<'unit, 'arena, 'scope> {
     fn add_arguments_bindings(
         &self,
         bindings: &mut Vec<BindingDraft>,
+        annex_b_sources: &[AnnexBFunctionSource],
     ) -> Result<HashMap<ReferenceId, ExecutableId>, CompilerError> {
         let ImplicitArgumentsPlan {
             reference_owners,
             first_references,
-        } = self.collect_implicit_arguments_references(bindings)?;
+        } = self.collect_implicit_arguments_references(bindings, annex_b_sources)?;
         let mut first_references = first_references.into_iter().collect::<Vec<_>>();
         first_references
             .sort_unstable_by_key(|(owner, span)| (owner.index(), span.start, span.end));
@@ -4171,6 +4884,7 @@ impl<'unit, 'arena, 'scope> Planner<'unit, 'arena, 'scope> {
     fn collect_implicit_arguments_references(
         &self,
         bindings: &[BindingDraft],
+        annex_b_sources: &[AnnexBFunctionSource],
     ) -> Result<ImplicitArgumentsPlan, CompilerError> {
         let semantic = self.unit.semantic();
         let scoping = semantic.scoping();
@@ -4224,13 +4938,26 @@ impl<'unit, 'arena, 'scope> Planner<'unit, 'arena, 'scope> {
                 let Some(owner) = self.arguments_owner(executable, span)? else {
                     continue;
                 };
-                if self.reference_uses_explicit_arguments_binding(
-                    executable,
-                    owner,
-                    binding,
-                    arguments_parameter_owners.contains(&owner),
-                    span,
-                )? {
+                let annex_b_source = annex_b_sources.iter().any(|source| source.symbol == symbol);
+                if annex_b_source
+                    && self.annex_b_source_reference_is_lexical(
+                        reference.node_id(),
+                        reference.scope_id(),
+                        symbol,
+                        annex_b_sources,
+                    )
+                {
+                    continue;
+                }
+                if !annex_b_source
+                    && self.reference_uses_explicit_arguments_binding(
+                        executable,
+                        owner,
+                        binding,
+                        arguments_parameter_owners.contains(&owner),
+                        span,
+                    )?
+                {
                     continue;
                 }
                 Self::record_implicit_arguments_reference(
@@ -4273,6 +5000,37 @@ impl<'unit, 'arena, 'scope> Planner<'unit, 'arena, 'scope> {
             reference_owners: implicit_references,
             first_references,
         })
+    }
+
+    fn annex_b_source_reference_is_lexical(
+        &self,
+        reference_node: NodeId,
+        reference_scope: ScopeId,
+        symbol: SymbolId,
+        sources: &[AnnexBFunctionSource],
+    ) -> bool {
+        let semantic = self.unit.semantic();
+        if semantic
+            .nodes()
+            .ancestor_ids(reference_node)
+            .any(|ancestor| {
+                sources.iter().any(|source| {
+                    source.synthetic_block && source.node == ancestor && source.symbol == symbol
+                })
+            })
+        {
+            return true;
+        }
+        semantic
+            .scoping()
+            .scope_ancestors(reference_scope)
+            .any(|scope| {
+                sources.iter().any(|source| {
+                    !source.synthetic_block
+                        && source.lexical_scope == scope
+                        && source.symbol == symbol
+                })
+            })
     }
 
     fn seed_direct_eval_arguments_object_requirements(
@@ -4671,6 +5429,21 @@ fn declaration_spans(scoping: &oxc_semantic::Scoping, symbol_id: SymbolId) -> Ar
     spans.sort_by_key(|span| (span.start, span.end));
     spans.dedup();
     spans.into()
+}
+
+fn symbol_declaration_span(
+    scoping: &oxc_semantic::Scoping,
+    symbol: SymbolId,
+    declaration: NodeId,
+) -> Span {
+    scoping
+        .symbol_redeclarations(symbol)
+        .iter()
+        .find(|redeclaration| redeclaration.declaration == declaration)
+        .map_or_else(
+            || scoping.symbol_span(symbol),
+            |redeclaration| redeclaration.span,
+        )
 }
 
 const fn span_within(inner: Span, outer: Span) -> bool {

@@ -348,7 +348,7 @@ pub(super) fn advance_map_constructor(
             )
         }
         MapConstructorStage::Done => {
-            if completion.is_truthy() {
+            if runtime.to_boolean(&completion)? {
                 return Ok(NativeDispatch::Immediate(StoredValue::Object(state.target)));
             }
             state.stage = MapConstructorStage::IteratorValue;

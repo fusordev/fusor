@@ -473,7 +473,7 @@ pub(super) fn finish_data_view_get_index(
     value: StoredValue,
 ) -> Result<NativeDispatch, NativeFailure> {
     let byte_index = data_view_to_index(value, state.realm, &state.origin)?;
-    let little_endian = data_view_to_boolean(&state.little_endian);
+    let little_endian = runtime.to_boolean(&state.little_endian)?;
     let view = copied_data_view_state(runtime, state.view)?;
     let (buffer, byte_offset, byte_length) =
         data_view_live_bounds(runtime, view, state.realm, &state.origin)?;
@@ -530,7 +530,7 @@ pub(super) fn finish_data_view_set_value(
     } else {
         DataViewNumeric::Number(operator_to_number(value, state.realm, &state.origin)?)
     };
-    let little_endian = data_view_to_boolean(&state.little_endian);
+    let little_endian = runtime.to_boolean(&state.little_endian)?;
     let view = copied_data_view_state(runtime, state.view)?;
     let (buffer, byte_offset, byte_length) =
         data_view_live_bounds(runtime, view, state.realm, &state.origin)?;
@@ -977,10 +977,6 @@ fn data_view_to_index(
             "DataView byte offset exceeds implementation range",
         ))
     })
-}
-
-fn data_view_to_boolean(value: &StoredValue) -> bool {
-    value.is_truthy()
 }
 
 fn data_view_length_number(length: usize) -> JsNumber {

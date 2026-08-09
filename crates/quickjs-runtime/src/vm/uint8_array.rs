@@ -297,7 +297,7 @@ pub(super) fn advance_uint8_array_base64_options(
                     operation,
                     state.alphabet,
                     LastChunkHandling::Loose,
-                    value.is_truthy(),
+                    runtime.to_boolean(&value)?,
                     state.realm,
                     &state.origin,
                     execution_budget,

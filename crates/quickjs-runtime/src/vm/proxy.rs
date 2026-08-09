@@ -1038,7 +1038,7 @@ pub(super) fn advance_proxy_define(
             finish_proxy_define_result(state, success)
         }
         ProxyDefineStage::TrapCall => {
-            if !completion.is_truthy() {
+            if !runtime.to_boolean(&completion)? {
                 return finish_proxy_define_result(state, false);
             }
             begin_proxy_define_target_descriptor(runtime, state, return_to, execution_budget)
@@ -1898,14 +1898,15 @@ pub(super) fn advance_proxy_meta(
                     state.trap_result = Some(completion);
                 }
                 ProxyMetaKind::SetPrototypeOf | ProxyMetaKind::PreventExtensions => {
-                    let result = completion.is_truthy();
+                    let result = runtime.to_boolean(&completion)?;
                     if !result {
                         return Ok(NativeDispatch::Immediate(StoredValue::Boolean(false)));
                     }
                     state.trap_result = Some(StoredValue::Boolean(true));
                 }
                 ProxyMetaKind::IsExtensible => {
-                    state.trap_result = Some(StoredValue::Boolean(completion.is_truthy()));
+                    state.trap_result =
+                        Some(StoredValue::Boolean(runtime.to_boolean(&completion)?));
                 }
             }
             state.stage = ProxyMetaStage::ExtensibleCheck;
@@ -2692,7 +2693,7 @@ pub(super) fn advance_proxy_boolean(
             }))
         }
         ProxyBooleanStage::TrapCall => {
-            let result = completion.is_truthy();
+            let result = runtime.to_boolean(&completion)?;
             let needs_target_check = match state.kind {
                 ProxyBooleanKind::Has => !result,
                 ProxyBooleanKind::Delete | ProxyBooleanKind::Set => result,

@@ -860,7 +860,7 @@ fn advance_regexp_constructor(
             let is_regexp = if matches!(completion, StoredValue::Undefined) {
                 branded
             } else {
-                completion.is_truthy()
+                runtime.to_boolean(&completion)?
             };
             state.pattern_is_branded = branded;
             finish_constructor_is_regexp(runtime, state, is_regexp, return_to, execution_budget)
@@ -1242,7 +1242,7 @@ fn advance_regexp_flags(
         .ok_or(EngineFault::RuntimeInvariant {
             message: "RegExp flags continuation advanced past its final accessor",
         })?;
-    if completion.is_truthy() {
+    if runtime.to_boolean(completion)? {
         state.result = state
             .result
             .concat(&JsString::from_code_units([flag.code_unit()])?)?;
@@ -4908,7 +4908,8 @@ fn decide_string_match_all_regexp(
     return_to: Option<CallReturn>,
     execution_budget: &mut ExecutionBudget,
 ) -> Result<NativeDispatch, NativeFailure> {
-    let is_regexp = regexp_branded_object(runtime, &state.regexp)? || completion.is_truthy();
+    let is_regexp =
+        regexp_branded_object(runtime, &state.regexp)? || runtime.to_boolean(completion)?;
     if !is_regexp {
         return read_string_regexp_method(runtime, state, false, return_to, execution_budget);
     }

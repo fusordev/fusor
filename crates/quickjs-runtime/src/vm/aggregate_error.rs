@@ -188,7 +188,7 @@ pub(super) fn advance_aggregate_error_collection(
             )
         }
         AggregateErrorStage::AwaitDone => {
-            if completion.is_truthy() {
+            if runtime.to_boolean(&completion)? {
                 return finish_aggregate_error(runtime, &state);
             }
             state.stage = AggregateErrorStage::AwaitValue;

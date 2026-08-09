@@ -207,6 +207,15 @@ fn catch_policy() -> CompilerBindingPolicy {
     )
 }
 
+fn catch_tdz_policy() -> CompilerBindingPolicy {
+    CompilerBindingPolicy::new(
+        CompilerBindingKind::Catch,
+        CompilerInitializationPolicy::Catch,
+        CompilerWritePolicy::Mutable,
+        true,
+    )
+}
+
 fn function_name_policy() -> CompilerBindingPolicy {
     CompilerBindingPolicy::new(
         CompilerBindingKind::FunctionName,
@@ -3341,6 +3350,56 @@ fn catch_binding_requires_the_exact_handler_value_initialization() {
         ),
         "{error:?}"
     );
+}
+
+#[test]
+fn destructured_catch_binding_uses_explicit_tdz_activation() {
+    let definition = VariableDefinition::new(
+        Some(AtomPoolIndex::new(0)),
+        ScopeLink::End,
+        catch_tdz_policy(),
+        true,
+        None,
+    );
+    let valid = [
+        (FinalOpcode::Catch, Operands::Label(6)),
+        (FinalOpcode::Drop, Operands::None),
+        (FinalOpcode::ReturnUndef, Operands::None),
+        (FinalOpcode::SetLocUninitialized, Operands::Loc(0)),
+        (FinalOpcode::PutLoc0, Operands::NoneLoc),
+        (FinalOpcode::ReturnUndef, Operands::None),
+    ];
+
+    verify_compiler_bytecode_graph(
+        typed_stack_input(&valid, &[atom("error")], std::slice::from_ref(&definition)),
+        BytecodeGraphVerificationLimits::default(),
+    )
+    .expect("destructured catch locals activate before binding initialization");
+
+    let missing_activation = [
+        (FinalOpcode::Catch, Operands::Label(6)),
+        (FinalOpcode::Drop, Operands::None),
+        (FinalOpcode::ReturnUndef, Operands::None),
+        (FinalOpcode::PutLoc0, Operands::NoneLoc),
+        (FinalOpcode::ReturnUndef, Operands::None),
+    ];
+    let error = verify_compiler_bytecode_graph(
+        typed_stack_input(
+            &missing_activation,
+            &[atom("error")],
+            std::slice::from_ref(&definition),
+        ),
+        BytecodeGraphVerificationLimits::default(),
+    )
+    .expect_err("TDZ catch metadata cannot omit its explicit scope activation");
+    assert!(matches!(
+        error.kind(),
+        BytecodeVerificationErrorKind::BindingPolicyViolation {
+            slot: BindingSlot::Local(0),
+            reason: BindingPolicyViolationReason::MissingLexicalScopeInitialization,
+            ..
+        }
+    ));
 }
 
 #[test]

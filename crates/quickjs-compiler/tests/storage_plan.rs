@@ -1,10 +1,9 @@
 use quickjs_compiler::{
-    CaptureSource, CompilationUnitKind, CompilerError, DeclarationKind, ExecutableKind,
-    InitializationPolicy, StoragePlacement, UnsupportedFeature, WritePolicy, build_storage_plan,
+    CaptureSource, CompilationUnitKind, DeclarationKind, ExecutableKind, InitializationPolicy,
+    StoragePlacement, WritePolicy, build_storage_plan,
 };
 use quickjs_frontend::{
-    Allocator, CompilationGoal, FrontendOptions, GlobalScriptGoal, IndirectEvalGoal, ParseMode,
-    parse, with_parsed_program,
+    CompilationGoal, FrontendOptions, GlobalScriptGoal, IndirectEvalGoal, with_parsed_program,
 };
 
 fn script(source: &str) -> quickjs_compiler::StoragePlan {
@@ -1342,15 +1341,6 @@ fn module_root_and_nested_declarations_have_distinct_storage() {
     assert_eq!(nested.placement(), StoragePlacement::Local);
 }
 
-fn unsupported(source: &str, mode: ParseMode) -> (UnsupportedFeature, quickjs_frontend::Span) {
-    let allocator = Allocator::new();
-    let unit = parse(&allocator, source, FrontendOptions::new(mode)).expect("front-end acceptance");
-    match build_storage_plan(&unit).expect_err("compiler must fail closed") {
-        CompilerError::Unsupported { feature, span } => (feature, span),
-        other => panic!("unexpected compiler error: {other:?}"),
-    }
-}
-
 #[test]
 fn with_object_environment_is_a_hidden_scoped_capture() {
     let plan = script("function outer(object) { with (object) { return () => value; } }");
@@ -1408,12 +1398,59 @@ fn lexical_bindings_inside_with_shadow_the_object_environment() {
 }
 
 #[test]
-fn sloppy_block_functions_fail_closed_for_annex_b_dual_bindings() {
-    let (feature, span) = unsupported("{ function legacy() {} }", ParseMode::Script);
-    assert_eq!(feature, UnsupportedFeature::AnnexBBlockFunction);
+fn sloppy_block_functions_split_lexical_and_variable_bindings() {
+    let plan = script("{ function legacy() {} }");
+    let mut bindings = plan
+        .bindings()
+        .iter()
+        .filter(|binding| binding.name() == "legacy");
+    let lexical = bindings.next().expect("block lexical binding");
+    let variable = bindings.next().expect("variable-environment binding");
+    assert!(bindings.next().is_none());
+
+    assert_eq!(lexical.placement(), StoragePlacement::Local);
+    assert_eq!(lexical.policy().kind(), DeclarationKind::Function);
     assert_eq!(
-        &"{ function legacy() {} }"[span.start as usize..span.end as usize],
-        "function legacy() {}"
+        lexical.policy().initialization(),
+        InitializationPolicy::FunctionAtScopeEntry
+    );
+    assert_eq!(variable.placement(), StoragePlacement::GlobalObject);
+    assert_eq!(variable.policy().kind(), DeclarationKind::Var);
+    assert_eq!(
+        variable.policy().initialization(),
+        InitializationPolicy::UndefinedAtInstantiation
+    );
+}
+
+#[test]
+fn annex_b_if_function_does_not_publish_through_an_intervening_lexical_binding() {
+    let plan = script(
+        "function outer(){typeof f;{let f=1;if(true)function f(){return f;}}return typeof f;}",
+    );
+    let outer = plan
+        .executables()
+        .iter()
+        .find(|executable| executable.name() == Some("outer"))
+        .expect("outer executable")
+        .id();
+    let bindings = plan
+        .bindings_for(outer)
+        .expect("outer bindings")
+        .iter()
+        .filter(|binding| binding.name() == "f")
+        .collect::<Vec<_>>();
+
+    assert_eq!(bindings.len(), 2, "block and synthetic-if lexical cells");
+    assert!(bindings.iter().all(|binding| {
+        binding.placement() == StoragePlacement::Local
+            && binding.policy().kind() == DeclarationKind::Let
+    }));
+    assert!(
+        plan.unresolved_globals_for(outer)
+            .expect("outer unresolved globals")
+            .iter()
+            .any(|global| global.name() == "f"),
+        "references outside the blocking lexical scope stay unresolved"
     );
 }
 

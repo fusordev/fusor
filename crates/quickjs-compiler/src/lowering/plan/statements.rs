@@ -1,13 +1,14 @@
 use std::sync::Arc;
 
 use super::super::{
-    BindingPattern, CatchClause, CompilationContext, CompiledConstantPool, DeclarationKind,
-    DoWhileStatement, ExecutableKind, ExpressionPlanner, ExpressionStatement, FinalOpcode,
-    ForInStatement, ForOfStatement, ForStatement, ForStatementInit, FrameLayout,
-    FunctionPlanningContext, FunctionTreeLayout, GetSpan, IfStatement, InitializationPolicy,
-    LabelIdentifier, LabeledStatement, LeafCompilationError, Operands, PlannedControlFlow,
-    ReturnStatement, StoragePlacement, ThrowStatement, TryStatement, UnsupportedLeafFeature,
-    WhileStatement, WritePolicy, compact_put_local, plan_put_slot, unsupported,
+    CatchClause, CompilationContext, CompiledConstantPool, DeclarationKind,
+    DestructuringBindingInitialization, DoWhileStatement, ExecutableKind, ExpressionPlanner,
+    ExpressionStatement, FinalOpcode, ForInStatement, ForOfStatement, ForStatement,
+    ForStatementInit, FrameLayout, FrameSlot, FunctionPlanningContext, FunctionTreeLayout, GetSpan,
+    IfStatement, InitializationPolicy, LabelIdentifier, LabeledStatement, LeafCompilationError,
+    Operands, PlannedControlFlow, ReturnStatement, StoragePlacement, ThrowStatement, TryStatement,
+    UnsupportedLeafFeature, WhileStatement, WritePolicy, compact_put_local, plan_put_slot,
+    unsupported,
 };
 
 use oxc_ast::ast::{
@@ -63,6 +64,10 @@ pub(in crate::lowering) enum StatementWork<'statement, 'arena> {
     ForOfAssignment(&'statement ForStatementLeft<'arena>),
     ForOfRotate(ScopeId),
     Declaration(&'statement VariableDeclaration<'arena>),
+    CatchBinding {
+        handler: &'statement CatchClause<'arena>,
+        body_scope: ScopeId,
+    },
     Expression(&'statement Expression<'arena>),
     InitializeInstanceFields,
     Emit(PlannedInstruction),
@@ -334,6 +339,18 @@ impl<'arena> CompilationContext<'_, 'arena, '_> {
                 &state.abrupt_markers,
                 flow,
             )?,
+            StatementWork::CatchBinding {
+                handler,
+                body_scope,
+            } => {
+                self.plan_catch_binding(
+                    handler,
+                    body_scope,
+                    planning,
+                    &state.abrupt_markers,
+                    flow,
+                )?;
+            }
             StatementWork::Emit(instruction) => flow.emit(instruction)?,
             StatementWork::Branch { kind, target, span } => {
                 flow.branch(kind, &target, span)?;
@@ -390,11 +407,13 @@ impl<'arena> CompilationContext<'_, 'arena, '_> {
                 self.schedule_block_statement(block, state)?;
             }
             Statement::FunctionDeclaration(function) => {
-                self.validate_function_declaration(
+                self.plan_function_declaration(
                     function,
-                    layout.executable,
+                    layout,
                     tree_layout,
+                    constants,
                     state.active_scopes.last().copied(),
+                    flow,
                 )?;
             }
             Statement::ClassDeclaration(class) => {
@@ -897,7 +916,7 @@ impl<'arena> CompilationContext<'_, 'arena, '_> {
     fn plan_catch_only_statement<'statement>(
         &self,
         statement: &'statement TryStatement<'arena>,
-        layout: &FrameLayout,
+        _layout: &FrameLayout,
         flow: &mut PlannedControlFlow,
         state: &mut StatementPlanningState<'statement, 'arena>,
     ) -> Result<(), LeafCompilationError> {
@@ -915,8 +934,6 @@ impl<'arena> CompilationContext<'_, 'arena, '_> {
             handler.body.node_id.get(),
             handler.body.span,
         )?;
-        let binding = self.plan_catch_binding(handler, catch_body_scope, layout)?;
-
         let handler_target = flow.new_statement_label_with_offset(handler.span, 1)?;
         let done = flow.new_statement_label(statement.span)?;
         state
@@ -928,7 +945,10 @@ impl<'arena> CompilationContext<'_, 'arena, '_> {
         state.work.push(StatementWork::Bind(done.clone()));
         state.work.push(StatementWork::PopScope(catch_scope));
         state.work.push(StatementWork::VisitBlock(&handler.body));
-        state.work.push(StatementWork::Emit(binding));
+        state.work.push(StatementWork::CatchBinding {
+            handler,
+            body_scope: catch_body_scope,
+        });
         state.work.push(StatementWork::PushScope {
             scope: catch_scope,
             creator: handler.node_id.get(),
@@ -999,7 +1019,7 @@ impl<'arena> CompilationContext<'_, 'arena, '_> {
     fn create_try_finally_catch_plan<'statement>(
         &self,
         statement: &'statement TryStatement<'arena>,
-        layout: &FrameLayout,
+        _layout: &FrameLayout,
         flow: &mut PlannedControlFlow,
     ) -> Result<Option<TryFinallyCatchPlan<'statement, 'arena>>, LeafCompilationError> {
         let Some(handler) = &statement.handler else {
@@ -1012,12 +1032,11 @@ impl<'arena> CompilationContext<'_, 'arena, '_> {
             handler.body.node_id.get(),
             handler.body.span,
         )?;
-        let binding = self.plan_catch_binding(handler, body_scope, layout)?;
         let rethrow = flow.new_statement_label_with_offset(handler.body.span, 1)?;
         Ok(Some(TryFinallyCatchPlan {
             handler,
             scope,
-            binding,
+            body_scope,
             rethrow,
         }))
     }
@@ -1098,7 +1117,10 @@ impl<'arena> CompilationContext<'_, 'arena, '_> {
                 target: catch.rethrow,
                 span: catch.handler.body.span,
             });
-            work.push(StatementWork::Emit(catch.binding));
+            work.push(StatementWork::CatchBinding {
+                handler: catch.handler,
+                body_scope: catch.body_scope,
+            });
             work.push(StatementWork::PushScope {
                 scope: catch.scope,
                 creator: catch.handler.node_id.get(),
@@ -1186,52 +1208,91 @@ impl<'arena> CompilationContext<'_, 'arena, '_> {
         &self,
         handler: &CatchClause<'arena>,
         catch_body_scope: ScopeId,
-        layout: &FrameLayout,
-    ) -> Result<PlannedInstruction, LeafCompilationError> {
-        Ok(match &handler.param {
-            None => PlannedInstruction::new(FinalOpcode::Drop, Operands::None, handler.span),
+        planning: &FunctionPlanningContext<'_>,
+        abrupt_markers: &[AbruptMarker],
+        flow: &mut PlannedControlFlow,
+    ) -> Result<(), LeafCompilationError> {
+        match &handler.param {
+            None => flow.emit(PlannedInstruction::new(
+                FinalOpcode::Drop,
+                Operands::None,
+                handler.span,
+            )),
             Some(parameter) => {
-                let BindingPattern::BindingIdentifier(identifier) = &parameter.pattern else {
-                    return unsupported(
-                        UnsupportedLeafFeature::UnsupportedBinding,
-                        parameter.pattern.span(),
-                    );
-                };
-                let binding =
-                    self.binding_for_identifier(identifier.symbol_id.get(), identifier.span)?;
-                let storage = self.planned.plan.binding(binding).ok_or(
-                    LeafCompilationError::SemanticInvariant {
-                        invariant: "catch binding has compiler storage",
-                        span: Some(identifier.span),
-                    },
+                self.activate_catch_pattern_bindings(
+                    catch_body_scope,
+                    planning.layout,
+                    parameter.pattern.span(),
+                    flow,
                 )?;
-                if storage.executable() != layout.executable
-                    || storage.placement() != StoragePlacement::Local
-                    || storage.policy().kind() != DeclarationKind::Catch
-                    || storage.policy().initialization() != InitializationPolicy::Catch
-                    || storage.policy().writes() != WritePolicy::Mutable
-                    || storage.policy().has_temporal_dead_zone()
-                {
-                    return unsupported(
-                        UnsupportedLeafFeature::UnsupportedBinding,
-                        identifier.span,
-                    );
-                }
-                if self.scope_for_binding(binding)? != catch_body_scope {
-                    return Err(LeafCompilationError::SemanticInvariant {
-                        invariant: "catch binding belongs to the catch-body scope",
-                        span: Some(identifier.span),
-                    });
-                }
-                let slot = layout
-                    .slot(binding)
-                    .ok_or(LeafCompilationError::Unsupported {
-                        feature: UnsupportedLeafFeature::UnsupportedBinding,
-                        span: identifier.span,
-                    })?;
-                plan_put_slot(slot, identifier.span)
+                self.plan_destructuring_pattern_value(
+                    &parameter.pattern,
+                    DestructuringBindingInitialization::Catch,
+                    planning.layout,
+                    planning.tree_layout,
+                    planning.constants,
+                    abrupt_markers,
+                    flow,
+                )
             }
-        })
+        }
+    }
+
+    fn activate_catch_pattern_bindings(
+        &self,
+        catch_body_scope: ScopeId,
+        layout: &FrameLayout,
+        pattern_span: Span,
+        flow: &mut PlannedControlFlow,
+    ) -> Result<(), LeafCompilationError> {
+        let mut locals = Vec::new();
+        let bindings = self.planned.plan.bindings_for(layout.executable).ok_or(
+            LeafCompilationError::InvalidExecutable {
+                executable: layout.executable,
+            },
+        )?;
+        for storage in bindings {
+            if storage.policy().kind() != DeclarationKind::Catch
+                || self.scope_for_binding(storage.id())? != catch_body_scope
+            {
+                continue;
+            }
+            if storage.placement() != StoragePlacement::Local
+                || storage.policy().initialization() != InitializationPolicy::Catch
+                || storage.policy().writes() != WritePolicy::Mutable
+                || !storage.policy().has_temporal_dead_zone()
+            {
+                return unsupported(UnsupportedLeafFeature::UnsupportedBinding, pattern_span);
+            }
+            let FrameSlot::Local(slot) =
+                layout
+                    .slot(storage.id())
+                    .ok_or(LeafCompilationError::SemanticInvariant {
+                        invariant: "catch-pattern binding has a local slot",
+                        span: Some(pattern_span),
+                    })?
+            else {
+                return Err(LeafCompilationError::SemanticInvariant {
+                    invariant: "catch-pattern binding uses owner-local storage",
+                    span: Some(pattern_span),
+                });
+            };
+            let span = storage
+                .declaration_spans()
+                .first()
+                .copied()
+                .unwrap_or(pattern_span);
+            locals.push((slot, span));
+        }
+        locals.sort_unstable_by_key(|(slot, _)| slot.index());
+        for (slot, span) in locals.into_iter().rev() {
+            flow.emit(PlannedInstruction::new(
+                FinalOpcode::SetLocUninitialized,
+                Operands::Loc(slot.index()),
+                span,
+            ))?;
+        }
+        Ok(())
     }
 
     fn plan_for_statement<'statement>(

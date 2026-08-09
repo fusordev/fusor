@@ -1,8 +1,5 @@
 use quickjs_bytecode::{FinalOpcode, VerificationLimits};
-use quickjs_compiler::{
-    CompilationContext, CompiledFunctionTree, CompiledLeafFunction, LeafCompilationError,
-    UnsupportedLeafFeature,
-};
+use quickjs_compiler::{CompilationContext, CompiledFunctionTree, CompiledLeafFunction};
 use quickjs_frontend::{CompilationGoal, FrontendOptions, GlobalScriptGoal, with_parsed_program};
 
 fn compile(source: &str, name: &str) -> CompiledLeafFunction {
@@ -36,24 +33,6 @@ fn compile_tree(source: &str, name: &str) -> CompiledFunctionTree {
             context
                 .compile_tree(&executable, VerificationLimits::default())
                 .expect("catch-only tree lowering")
-        },
-    )
-    .expect("front-end acceptance")
-}
-
-fn compile_error(source: &str, name: &str) -> LeafCompilationError {
-    with_parsed_program(
-        source,
-        FrontendOptions::for_goal(CompilationGoal::GlobalScript(GlobalScriptGoal::new())),
-        |unit| {
-            let context = CompilationContext::new(unit).expect("storage planning");
-            let executable = context
-                .executables()
-                .find(|candidate| candidate.metadata().name() == Some(name))
-                .expect("named function");
-            context
-                .compile_leaf(&executable, VerificationLimits::default())
-                .expect_err("unsupported catch form must fail closed")
         },
     )
     .expect("front-end acceptance")
@@ -122,18 +101,31 @@ fn catch_only_accepts_optional_and_simple_identifier_bindings() {
 }
 
 #[test]
-fn catch_only_rejects_destructuring_at_the_exact_form() {
-    let destructuring_source = "function f(){try{}catch({message}){return message;}}";
-    let LeafCompilationError::Unsupported { feature, span } =
-        compile_error(destructuring_source, "f")
-    else {
-        panic!("destructuring catch bindings must remain typed fail-closed");
-    };
-    assert_eq!(feature, UnsupportedLeafFeature::UnsupportedBinding);
-    assert_eq!(
-        &destructuring_source[span.start as usize..span.end as usize],
-        "{message}"
+fn catch_destructuring_materializes_exceptional_static_keys_for_dynamic_reads() {
+    let compiled = compile(
+        r#"function f(){try{throw {"":1,0:2,length:3};}catch({"":empty,0:zero,length}){return [empty,zero,length];}}"#,
+        "f",
     );
+    let opcodes = opcodes(&compiled);
+
+    assert_eq!(
+        opcodes
+            .iter()
+            .filter(|&&opcode| opcode == FinalOpcode::GetArrayEl2)
+            .count(),
+        2,
+        "empty and tagged-integer keys use runtime property-key reads"
+    );
+    assert_eq!(
+        opcodes
+            .iter()
+            .filter(|&&opcode| opcode == FinalOpcode::GetField2)
+            .count(),
+        1,
+        "ordinary property atoms retain the compact static read"
+    );
+    assert!(opcodes.contains(&FinalOpcode::PushEmptyString));
+    assert!(opcodes.contains(&FinalOpcode::Push0));
 }
 
 #[test]

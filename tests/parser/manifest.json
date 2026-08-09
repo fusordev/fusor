@@ -592,10 +592,10 @@
       ]
     },
     {
-      "path": "accept/script/html-comment.js",
+      "path": "candidate-reject/script/html-comment.js",
       "goal": "script",
       "quickjs": "accept",
-      "frontend": "accept",
+      "frontend": "reject",
       "families": [
         "source-lexical",
         "annex-b"
@@ -608,7 +608,12 @@
         "quickjs.c:22261",
         "test262.conf"
       ],
-      "difference": null,
+      "difference": {
+        "id": "QJS-OXC-005",
+        "direction": "frontend-reject",
+        "rationale": "Pinned QuickJS admits Annex B HTML comments in Script source, but this port intentionally excludes B.1.3 from its restored web-compatibility subset.",
+        "regression": "candidate-reject/script/html-comment.js"
+      },
       "diagnostic": null,
       "productions": [
         "annex-b.html-comment",
@@ -875,10 +880,10 @@
       ]
     },
     {
-      "path": "accept/strict-script/html-comment.js",
+      "path": "candidate-reject/strict-script/html-comment.js",
       "goal": "strict-script",
       "quickjs": "accept",
-      "frontend": "accept",
+      "frontend": "reject",
       "families": [
         "source-lexical",
         "annex-b"
@@ -890,7 +895,12 @@
       "evidence": [
         "quickjs.c:22261"
       ],
-      "difference": null,
+      "difference": {
+        "id": "QJS-OXC-006",
+        "direction": "frontend-reject",
+        "rationale": "Pinned QuickJS keeps Annex B HTML comments under host-forced strict Script parsing, but this port intentionally excludes B.1.3 in every Script profile.",
+        "regression": "candidate-reject/strict-script/html-comment.js"
+      },
       "diagnostic": null,
       "productions": [
         "annex-b.html-comment"
@@ -967,10 +977,10 @@
       "productions": []
     },
     {
-      "path": "candidate-accept/script/regexp-pattern-deferred.js",
+      "path": "reject/script/regexp-pattern-invalid.js",
       "goal": "script",
       "quickjs": "reject",
-      "frontend": "accept",
+      "frontend": "reject",
       "families": [
         "target-profile"
       ],
@@ -980,12 +990,7 @@
       "evidence": [
         "quickjs.c:47407"
       ],
-      "difference": {
-        "id": "QJS-OXC-001",
-        "direction": "frontend-accept",
-        "rationale": "The Oxc front end owns RegExp literal boundaries and flags, while QuickJS-compatible pattern parsing is deliberately delegated to the future RegExp layer.",
-        "regression": "candidate-accept/script/regexp-pattern-deferred.js"
-      },
+      "difference": null,
       "diagnostic": "regexp-pattern-compilation",
       "productions": []
     },

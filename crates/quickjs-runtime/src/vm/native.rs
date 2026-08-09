@@ -3763,7 +3763,8 @@ pub(super) fn dispatch_native_call_with_frames(
         },
         NativeFunctionKind::BooleanConstructor => {
             let mut arguments = inputs.arguments;
-            let value = arguments.take_first_or_undefined().is_truthy();
+            let argument = arguments.take_first_or_undefined();
+            let value = runtime.to_boolean(&argument)?;
             let Some(new_target) = inputs.new_target else {
                 return Ok(NativeDispatch::Immediate(StoredValue::Boolean(value)));
             };

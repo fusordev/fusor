@@ -43,6 +43,31 @@ struct ArgumentsIntrinsics {
 }
 
 impl Runtime {
+    pub(crate) fn value_has_is_html_dda(
+        &self,
+        value: &StoredValue,
+    ) -> Result<bool, crate::EngineFault> {
+        let reference = match value {
+            StoredValue::Function(function) => HeapReference::Function(*function),
+            StoredValue::Object(object) => HeapReference::Object(*object),
+            StoredValue::Undefined
+            | StoredValue::Null
+            | StoredValue::Boolean(_)
+            | StoredValue::Number(_)
+            | StoredValue::BigInt(_)
+            | StoredValue::String(_)
+            | StoredValue::Symbol(_) => return Ok(false),
+        };
+        self.object_record(reference).map(ObjectRecord::is_html_dda)
+    }
+
+    pub(crate) fn to_boolean(&self, value: &StoredValue) -> Result<bool, crate::EngineFault> {
+        if let Some(result) = value.primitive_to_boolean() {
+            return Ok(result);
+        }
+        Ok(!self.value_has_is_html_dda(value)?)
+    }
+
     pub(crate) fn validate_owner(
         &self,
         owner: &Arc<ReleaseMailbox>,

@@ -253,7 +253,7 @@ fn decide_regexp_like(
         | StoredValue::Symbol(_)
         | StoredValue::Function(_) => false,
     };
-    if !branded && (matches!(matcher, StoredValue::Undefined) || !matcher.is_truthy()) {
+    if !branded && (matches!(matcher, StoredValue::Undefined) || !runtime.to_boolean(matcher)?) {
         return read_replace_method(runtime, state, return_to, execution_budget);
     }
     read_flags_property(runtime, state, return_to, execution_budget)

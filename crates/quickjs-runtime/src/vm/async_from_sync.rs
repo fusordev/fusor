@@ -399,7 +399,7 @@ pub(super) fn advance_async_from_sync(
             )
         }
         AsyncFromSyncStage::Done => {
-            state.done = completion.is_truthy();
+            state.done = runtime.to_boolean(&completion)?;
             state.stage = AsyncFromSyncStage::Value;
             read_result_property(
                 runtime,

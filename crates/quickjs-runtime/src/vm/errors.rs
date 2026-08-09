@@ -193,7 +193,7 @@ pub(super) fn advance_error_constructor(
             begin_error_message(runtime, state, return_to, execution_budget)
         }
         ErrorConstructorStage::CausePresence => {
-            if !completion.is_truthy() {
+            if !runtime.to_boolean(&completion)? {
                 state.options = None;
                 return finish_error_constructor(runtime, state, return_to, execution_budget);
             }

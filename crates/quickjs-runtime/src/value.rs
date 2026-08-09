@@ -139,8 +139,8 @@ impl StoredValue {
         }
     }
 
-    pub(crate) fn is_truthy(&self) -> bool {
-        match self {
+    pub(crate) fn primitive_to_boolean(&self) -> Option<bool> {
+        Some(match self {
             Self::Undefined | Self::Null => false,
             Self::Boolean(value) => *value,
             Self::Number(value) => {
@@ -151,8 +151,9 @@ impl StoredValue {
             // NaN in the domain.
             Self::BigInt(value) => !value.is_zero(),
             Self::String(value) => !value.is_empty(),
-            Self::Symbol(_) | Self::Function(_) | Self::Object(_) => true,
-        }
+            Self::Symbol(_) => true,
+            Self::Function(_) | Self::Object(_) => return None,
+        })
     }
 
     pub(crate) fn strict_equals(&self, other: &Self) -> bool {
