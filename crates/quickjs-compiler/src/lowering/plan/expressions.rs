@@ -255,6 +255,9 @@ pub(in crate::lowering) enum ExpressionWork<'expression, 'arena> {
         constructor: ExecutableId,
         span: Span,
     },
+    InitializeContextualInstanceFields {
+        span: Span,
+    },
     Emit(PlannedInstruction),
     Branch {
         kind: BranchKind,
@@ -418,6 +421,9 @@ impl<'compiler, 'unit, 'arena, 'scope> ExpressionPlanner<'compiler, 'unit, 'aren
                 }
                 ExpressionWork::InitializeInstanceFields { constructor, span } => {
                     self.plan_call_instance_initializer(constructor, layout, span, flow)?;
+                }
+                ExpressionWork::InitializeContextualInstanceFields { span } => {
+                    Self::plan_call_contextual_instance_initializer(span, flow)?;
                 }
                 ExpressionWork::Branch { kind, target, span } => {
                     flow.branch(kind, &target, span)?;
@@ -2305,6 +2311,29 @@ impl<'compiler, 'unit, 'arena, 'scope> ExpressionPlanner<'compiler, 'unit, 'aren
             Operands::None,
             span,
         ))?;
+        Ok(())
+    }
+
+    fn plan_call_contextual_instance_initializer(
+        span: Span,
+        flow: &mut PlannedControlFlow,
+    ) -> Result<(), LeafCompilationError> {
+        // Direct eval cannot name the constructor's compiler-only initializer
+        // capture. Selector six resolves that already-verified capture through
+        // the inherited derived Function Environment Record. `PushThis` runs
+        // only after `check_ctor_return` has bound the shared `this` cell.
+        for (opcode, operands) in [
+            (FinalOpcode::SpecialObject, Operands::U8(6)),
+            (FinalOpcode::PushThis, Operands::None),
+            (FinalOpcode::Swap, Operands::None),
+            (
+                FinalOpcode::CallMethod,
+                Operands::NPop { argument_count: 0 },
+            ),
+            (FinalOpcode::Drop, Operands::None),
+        ] {
+            flow.emit(PlannedInstruction::new(opcode, operands, span))?;
+        }
         Ok(())
     }
 

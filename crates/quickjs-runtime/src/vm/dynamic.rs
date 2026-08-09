@@ -337,6 +337,7 @@ pub(super) fn finish_direct_eval(
     let allows_new_target = request.allows_new_target();
     let allows_super_property = request.allows_super_property();
     let allows_super_call = request.allows_super_call();
+    let has_instance_elements = request.has_instance_elements();
     let inherited_new_target = allows_new_target.then_some(caller.new_target).flatten();
     let inherited_home_object = if allows_super_property {
         Some(
@@ -389,6 +390,7 @@ pub(super) fn finish_direct_eval(
         || flags.new_target_allowed() != allows_new_target
         || flags.super_allowed() != allows_super_property
         || flags.super_call_allowed() != allows_super_call
+        || flags.direct_eval_has_instance_elements() != has_instance_elements
     {
         return Err(NativeFailure::Execution(
             EngineFault::RuntimeInvariant {
@@ -1321,16 +1323,17 @@ pub(super) fn direct_eval_compile_request(
     } else {
         frame.direct_eval_variable_environment
     };
-    let allows_super_call = match frame.derived_constructor {
-        Some(constructor) => {
-            !runtime
+    let (allows_super_call, has_instance_elements) = match frame.derived_constructor {
+        Some(constructor) => (
+            true,
+            runtime
                 .bytecode_function(constructor)
                 .ok_or(EngineFault::InvalidClosureEnvironment {
                     function: frame.template,
                 })?
-                .has_instance_elements
-        }
-        None => false,
+                .has_instance_elements,
+        ),
+        None => (false, false),
     };
     Ok(DirectEvalCompileRequest::new(source, strict)
         .with_bindings(bindings.into())
@@ -1339,6 +1342,7 @@ pub(super) fn direct_eval_compile_request(
         .with_new_target(frame.eval_context.in_function)
         .with_super_property(function_code.home_object.is_some())
         .with_super_call(allows_super_call)
+        .with_instance_elements(has_instance_elements)
         .with_arguments_allowed(!frame.eval_context.in_class_field_initializer))
 }
 

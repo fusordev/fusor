@@ -183,6 +183,7 @@ impl DirectEvalCapabilities {
     const SUPER_PROPERTY: u8 = 1 << 2;
     const SUPER_CALL: u8 = 1 << 3;
     const ARGUMENTS_ALLOWED: u8 = 1 << 4;
+    const INSTANCE_ELEMENTS: u8 = 1 << 5;
 
     /// Creates a context with no inherited capabilities.
     #[must_use]
@@ -218,6 +219,14 @@ impl DirectEvalCapabilities {
         self
     }
 
+    /// Records whether a contextual `super()` must initialize class instance
+    /// elements owned by the inherited derived-constructor environment.
+    #[must_use]
+    pub const fn with_instance_elements(mut self, yes: bool) -> Self {
+        self.set(Self::INSTANCE_ELEMENTS, yes);
+        self
+    }
+
     /// Selects whether the `arguments` identifier is syntactically allowed.
     ///
     /// This is a grammar capability inherited from the caller. It does not
@@ -250,6 +259,13 @@ impl DirectEvalCapabilities {
     #[must_use]
     pub const fn allows_super_call(self) -> bool {
         self.contains(Self::SUPER_CALL)
+    }
+
+    /// Returns whether a contextual `super()` must initialize class instance
+    /// elements after binding the inherited derived `this` environment.
+    #[must_use]
+    pub const fn has_instance_elements(self) -> bool {
+        self.contains(Self::INSTANCE_ELEMENTS)
     }
 
     /// Returns whether the `arguments` identifier is syntactically allowed.
@@ -800,11 +816,12 @@ impl UnsupportedCompilationGoal {
                 goal.forces_strict()
             ),
             Self::DirectEval(capabilities) => format!(
-                "direct eval compilation (strict={}, new_target={}, super_property={}, super_call={}, arguments_allowed={}) is not implemented",
+                "direct eval compilation (strict={}, new_target={}, super_property={}, super_call={}, instance_elements={}, arguments_allowed={}) is not implemented",
                 capabilities.is_strict(),
                 capabilities.allows_new_target(),
                 capabilities.allows_super_property(),
                 capabilities.allows_super_call(),
+                capabilities.has_instance_elements(),
                 capabilities.allows_arguments()
             ),
             Self::DynamicFunction(kind) => {
@@ -826,11 +843,12 @@ impl fmt::Display for UnsupportedCompilationGoal {
             ),
             Self::DirectEval(capabilities) => write!(
                 formatter,
-                "direct eval (strict: {}, new target: {}, super property: {}, super call: {}, arguments allowed: {})",
+                "direct eval (strict: {}, new target: {}, super property: {}, super call: {}, instance elements: {}, arguments allowed: {})",
                 capabilities.is_strict(),
                 capabilities.allows_new_target(),
                 capabilities.allows_super_property(),
                 capabilities.allows_super_call(),
+                capabilities.has_instance_elements(),
                 capabilities.allows_arguments()
             ),
             Self::DynamicFunction(kind) => write!(formatter, "dynamic function ({kind})"),

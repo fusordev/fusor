@@ -1227,6 +1227,18 @@ pub(super) fn execute_one(
                         },
                     );
                 }
+                6 => {
+                    let constructor =
+                        frame
+                            .derived_constructor
+                            .ok_or(EngineFault::RuntimeInvariant {
+                                message: "verified contextual instance initializer has no derived constructor",
+                            })?;
+                    push(
+                        frame,
+                        StoredValue::Function(class_instance_initializer(runtime, constructor)?),
+                    );
+                }
                 arguments_kind @ (0 | 1) => {
                     let arguments = if frame.arguments_snapshot_use.has_rest_parameter() {
                         let argument_count = frame

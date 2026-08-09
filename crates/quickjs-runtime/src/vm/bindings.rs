@@ -763,6 +763,101 @@ pub(super) fn define_class(
     Ok(prototype)
 }
 
+/// Resolves the compiler-only method that implements
+/// `InitializeInstanceElements` for a verified class constructor.
+///
+/// The whole-graph verifier binds exactly one
+/// `ClassInstanceInitializer` closure to a constructor that advertises
+/// instance elements. Direct eval cannot name that source-invisible binding,
+/// so contextual `super()` resolves it through the inherited constructor's
+/// certified closure environment.
+pub(super) fn class_instance_initializer(
+    runtime: &Runtime,
+    constructor: FunctionId,
+) -> Result<FunctionId, ExecutionError> {
+    let bytecode = runtime
+        .bytecode_function(constructor)
+        .ok_or(EngineFault::RuntimeInvariant {
+            message: "derived class instance initializer owner is not bytecode",
+        })?;
+    if !bytecode.has_instance_elements {
+        return Err(EngineFault::RuntimeInvariant {
+            message: "derived class constructor has no instance elements",
+        }
+        .into());
+    }
+    let installed = code(runtime, bytecode.code)?;
+    let verified = installed.authority.function(bytecode.template).ok_or(
+        EngineFault::InvalidClosureEnvironment {
+            function: bytecode.template,
+        },
+    )?;
+    if verified.metadata().closures().len() != bytecode.environment.len() {
+        return Err(EngineFault::InvalidClosureEnvironment {
+            function: bytecode.template,
+        }
+        .into());
+    }
+    let mut initializer_slot = None;
+    for (index, definition) in verified.metadata().closures().iter().enumerate() {
+        if definition.policy().kind() != CompilerBindingKind::ClassInstanceInitializer {
+            continue;
+        }
+        if initializer_slot.replace(index).is_some() {
+            return Err(EngineFault::RuntimeInvariant {
+                message: "class constructor retained multiple instance initializers",
+            }
+            .into());
+        }
+    }
+    let slot = initializer_slot.ok_or(EngineFault::RuntimeInvariant {
+        message: "class constructor lost its instance initializer capture",
+    })?;
+    let EnvironmentBinding::Captured(cell) = bytecode.environment[slot] else {
+        return Err(EngineFault::InvalidClosureEnvironment {
+            function: bytecode.template,
+        }
+        .into());
+    };
+    let SlotValue::Value(StoredValue::Function(initializer)) = &runtime
+        .cells
+        .get(cell)
+        .ok_or(EngineFault::StaleHeapEdge {
+            edge: "class instance initializer binding",
+            index: cell.index(),
+            generation: cell.generation(),
+        })?
+        .value
+    else {
+        return Err(EngineFault::InvalidClosureEnvironment {
+            function: bytecode.template,
+        }
+        .into());
+    };
+    let initializer_bytecode =
+        runtime
+            .bytecode_function(*initializer)
+            .ok_or(EngineFault::InvalidClosureEnvironment {
+                function: bytecode.template,
+            })?;
+    let initializer_metadata = code(runtime, initializer_bytecode.code)?
+        .authority
+        .function(initializer_bytecode.template)
+        .ok_or(EngineFault::InvalidClosureEnvironment {
+            function: initializer_bytecode.template,
+        })?;
+    if initializer_bytecode.code != bytecode.code
+        || initializer_metadata.metadata().executable_kind()
+            != CompilerExecutableKind::ClassInstanceInitializer
+    {
+        return Err(EngineFault::InvalidClosureEnvironment {
+            function: bytecode.template,
+        }
+        .into());
+    }
+    Ok(*initializer)
+}
+
 /// Installs the non-observable `[[HomeObject]]` edge for one compiler-created
 /// method-like closure.  A closure receives this exactly once, at its paired
 /// class or method definition site.

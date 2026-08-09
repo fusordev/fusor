@@ -179,7 +179,7 @@ fn dynamic_function_script_header_is_debug_only_and_never_eval() {
 
 #[test]
 fn each_defined_boolean_header_flag_has_a_typed_getter() {
-    for bit in [0, 1, 2, 3, 6, 7, 8, 9, 10, 11] {
+    for bit in [0, 1, 2, 3, 6, 7, 8, 9, 10, 11, 12] {
         let verified = verify(
             ordinary_body(),
             0,
@@ -201,6 +201,7 @@ fn each_defined_boolean_header_flag_has_a_typed_getter() {
             9 => assert!(flags.arguments_allowed()),
             10 => assert!(flags.has_debug()),
             11 => assert!(flags.is_eval()),
+            12 => assert!(flags.direct_eval_has_instance_elements()),
             _ => unreachable!("the table contains only defined boolean flags"),
         }
     }
@@ -208,7 +209,7 @@ fn each_defined_boolean_header_flag_has_a_typed_getter() {
 
 #[test]
 fn reserved_serialized_flag_bits_are_rejected_individually() {
-    for reserved_bit in 12..16 {
+    for reserved_bit in 13..16 {
         let value = 1_u16 << reserved_bit;
         let error = verify(
             ordinary_body(),
@@ -223,7 +224,7 @@ fn reserved_serialized_flag_bits_are_rejected_individually() {
             &VerificationErrorKind::DisallowedFunctionBits {
                 field: FunctionBitField::SerializedFlags,
                 value,
-                allowed_mask: 0x0fff,
+                allowed_mask: 0x1fff,
                 disallowed_bits: value,
             }
         );

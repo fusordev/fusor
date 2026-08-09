@@ -1430,7 +1430,8 @@ impl<'arena> CompilationContext<'_, 'arena, '_> {
                 | ExpressionWork::SuperPropertyBase { .. }
                 | ExpressionWork::SuperPropertyReceiver { .. }
                 | ExpressionWork::SuperPropertyBaseAfterKey { .. }
-                | ExpressionWork::InitializeInstanceFields { .. } => {
+                | ExpressionWork::InitializeInstanceFields { .. }
+                | ExpressionWork::InitializeContextualInstanceFields { .. } => {
                     return Err(LeafCompilationError::SemanticInvariant {
                         invariant: "assignment-target scheduling delegates complete expressions",
                         span: Some(target.span()),

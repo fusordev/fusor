@@ -30,7 +30,7 @@ use std::fmt;
 const FUNCTION_KIND_SHIFT: u32 = 4;
 const FUNCTION_KIND_MASK: u16 = 0b11 << FUNCTION_KIND_SHIFT;
 
-pub(crate) const SERIALIZED_FUNCTION_FLAGS_MASK: u16 = 0x0fff;
+pub(crate) const SERIALIZED_FUNCTION_FLAGS_MASK: u16 = 0x1fff;
 pub(crate) const JS_MODE_MASK: u8 = 0x01;
 
 /// The four function execution kinds encoded by `QuickJS`.
@@ -160,6 +160,7 @@ impl DirectEvalFunctionCapabilities {
     const NEW_TARGET: u8 = 1 << 0;
     const SUPER_PROPERTY: u8 = 1 << 1;
     const SUPER_CALL: u8 = 1 << 2;
+    const INSTANCE_ELEMENTS: u8 = 1 << 3;
 
     /// Creates the exact capability set inherited from the caller's verified
     /// `GetThisEnvironment` result.
@@ -186,6 +187,22 @@ impl DirectEvalFunctionCapabilities {
 
     const fn allows_super_call(self) -> bool {
         self.0 & Self::SUPER_CALL != 0
+    }
+
+    /// Records whether contextual `super()` must initialize the inherited
+    /// derived constructor's instance elements.
+    #[must_use]
+    pub const fn with_instance_elements(mut self, yes: bool) -> Self {
+        if yes {
+            self.0 |= Self::INSTANCE_ELEMENTS;
+        } else {
+            self.0 &= !Self::INSTANCE_ELEMENTS;
+        }
+        self
+    }
+
+    const fn has_instance_elements(self) -> bool {
+        self.0 & Self::INSTANCE_ELEMENTS != 0
     }
 }
 
@@ -559,6 +576,9 @@ impl UnverifiedFunctionHeader {
         if capabilities.allows_super_property() {
             flags |= 1 << 8;
         }
+        if capabilities.has_instance_elements() {
+            flags |= 1 << 12;
+        }
         Self::new(
             flags,
             if strict { 1 } else { 0 },
@@ -679,6 +699,13 @@ impl FunctionHeaderFlags {
     #[must_use]
     pub const fn is_eval(self) -> bool {
         self.has_bit(11)
+    }
+
+    /// Returns whether this direct-eval Script inherited a derived
+    /// constructor whose `super()` must initialize instance elements.
+    #[must_use]
+    pub const fn direct_eval_has_instance_elements(self) -> bool {
+        self.has_bit(12)
     }
 
     const fn has_bit(self, bit: u32) -> bool {

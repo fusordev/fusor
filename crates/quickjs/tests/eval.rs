@@ -854,10 +854,62 @@ fn direct_eval_super_call_initializes_the_derived_this_environment() {
 }
 
 #[test]
-fn direct_eval_super_call_with_instance_fields_fails_closed() {
+fn direct_eval_super_call_initializes_public_and_private_instance_elements() {
     evaluate(
-        "class Base{}class Derived extends Base{answer=42;constructor(){eval('super();');}}let caught;try{new Derived();}catch(error){caught=error;}caught.constructor===SyntaxError;",
-        |value| assert_eq!(value.as_boolean(), Ok(Some(true))),
+        "let order=[];\
+         class Base{constructor(...values){order.push('base:'+values.join(','));}}\
+         class Derived extends Base{\
+           answer=order.push('public');\
+           #secret=order.push('private');\
+           constructor(){let result=eval('super(...[1,2]);');order.push(result===this?'same':'different');}\
+           secret(){return this.#secret;}\
+         }\
+         let value=new Derived();order.join('|')+'|'+value.answer+'|'+value.secret();",
+        |value| assert_eq!(string(value), "base:1,2|public|private|same|2|3"),
+    );
+}
+
+#[test]
+fn nested_and_arrow_direct_eval_super_calls_initialize_instance_elements() {
+    evaluate(
+        "let count=0;class Base{}\
+         class Nested extends Base{field=++count;constructor(){eval(\"eval('super()')\");}}\
+         class EvalArrow extends Base{field=++count;constructor(){eval('(()=>super())()');}}\
+         class OuterArrow extends Base{field=++count;constructor(){(()=>eval('super()'))();}}\
+         let nested=new Nested();let evalArrow=new EvalArrow();let outerArrow=new OuterArrow();\
+         nested.field+'|'+evalArrow.field+'|'+outerArrow.field+'|'+count;",
+        |value| assert_eq!(string(value), "1|2|3|3"),
+    );
+}
+
+#[test]
+fn direct_eval_super_rejects_rebinding_without_reinitializing_elements() {
+    evaluate(
+        "let initializations=0;class Base{}class Derived extends Base{\
+           field=++initializations;\
+           constructor(){\
+             eval('super()');let repeated=false;\
+             try{eval('super()');}catch(error){repeated=error instanceof ReferenceError;}\
+             this.repeated=repeated;\
+           }\
+         }\
+         let value=new Derived();value.field+'|'+value.repeated+'|'+initializations;",
+        |value| assert_eq!(string(value), "1|true|1"),
+    );
+}
+
+#[test]
+fn abrupt_eval_super_instance_initialization_leaves_this_bound() {
+    evaluate(
+        "let initializations=0;class Base{}class Derived extends Base{\
+           field=(()=>{initializations++;throw 17;})();\
+           constructor(){\
+             let caught=false;try{eval('super()');}catch(error){caught=error===17;}\
+             this.caught=caught;\
+           }\
+         }\
+         let value=new Derived();value.caught+'|'+('field' in value)+'|'+initializations;",
+        |value| assert_eq!(string(value), "true|false|1"),
     );
 }
 

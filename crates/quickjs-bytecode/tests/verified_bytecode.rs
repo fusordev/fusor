@@ -6890,7 +6890,7 @@ fn direct_eval_contextual_special_objects_require_exact_header_authority() {
     verify_compiler_bytecode_graph(contextual, BytecodeGraphVerificationLimits::default())
         .expect("direct eval may use only the contextual capabilities certified in its header");
 
-    for selector in [3, 4, 5] {
+    for selector in [3, 4, 5, 6] {
         let missing_capability = input_for(
             &[
                 (FinalOpcode::SpecialObject, Operands::U8(selector)),
@@ -6932,6 +6932,146 @@ fn direct_eval_contextual_special_objects_require_exact_header_authority() {
             &BytecodeVerificationErrorKind::UnsupportedFunctionHeader
         );
     }
+}
+
+fn direct_eval_instance_elements_input(
+    instructions: &[(FinalOpcode, Operands)],
+    capabilities: DirectEvalFunctionCapabilities,
+    pcs: &[u32],
+) -> UnverifiedCompilerBytecodeGraph {
+    let text = "super()";
+    let function_span = SourceByteSpan::new(0, u32::try_from(text.len()).expect("source length"));
+    let mappings = pcs
+        .iter()
+        .copied()
+        .map(|pc| (pc, function_span))
+        .collect::<Vec<_>>();
+    profiled_single_input(
+        instructions,
+        UnverifiedFunctionHeader::direct_eval_script(false, 0, capabilities),
+        CompilerExecutableKind::DirectEvalScript,
+        &[],
+        None,
+        &[],
+        0,
+        0,
+        &[],
+        source(text, function_span, None, &mappings),
+    )
+}
+
+fn direct_eval_instance_elements_capabilities() -> DirectEvalFunctionCapabilities {
+    DirectEvalFunctionCapabilities::new(true, false, true).with_instance_elements(true)
+}
+
+#[test]
+fn direct_eval_instance_initializer_accepts_the_exact_compiler_sequence() {
+    let exact = [
+        (FinalOpcode::SpecialObject, Operands::U8(4)),
+        (FinalOpcode::GetSuper, Operands::None),
+        (FinalOpcode::SpecialObject, Operands::U8(3)),
+        (
+            FinalOpcode::CallConstructor,
+            Operands::NPop { argument_count: 0 },
+        ),
+        (FinalOpcode::CheckCtorReturn, Operands::None),
+        (FinalOpcode::SpecialObject, Operands::U8(6)),
+        (FinalOpcode::PushThis, Operands::None),
+        (FinalOpcode::Swap, Operands::None),
+        (
+            FinalOpcode::CallMethod,
+            Operands::NPop { argument_count: 0 },
+        ),
+        (FinalOpcode::Drop, Operands::None),
+        (FinalOpcode::Drop, Operands::None),
+        (FinalOpcode::Return, Operands::None),
+    ];
+    let exact_pcs = [0, 2, 3, 5, 8, 9, 11, 12, 13, 16, 17, 18];
+    verify_compiler_bytecode_graph(
+        direct_eval_instance_elements_input(
+            &exact,
+            direct_eval_instance_elements_capabilities(),
+            &exact_pcs,
+        ),
+        BytecodeGraphVerificationLimits::default(),
+    )
+    .expect("the compiler's contextual instance-initializer sequence is certified");
+}
+
+#[test]
+fn direct_eval_instance_initializer_header_requires_super_authority() {
+    let missing_super = direct_eval_instance_elements_input(
+        &[(FinalOpcode::ReturnUndef, Operands::None)],
+        DirectEvalFunctionCapabilities::default().with_instance_elements(true),
+        &[0],
+    );
+    let error =
+        verify_compiler_bytecode_graph(missing_super, BytecodeGraphVerificationLimits::default())
+            .expect_err(
+                "instance-element authority cannot exist without contextual super-call authority",
+            );
+    assert_eq!(
+        error.kind(),
+        &BytecodeVerificationErrorKind::UnsupportedFunctionHeader
+    );
+}
+
+#[test]
+fn direct_eval_super_return_requires_the_contextual_instance_initializer() {
+    let missing_initializer = [
+        (FinalOpcode::SpecialObject, Operands::U8(4)),
+        (FinalOpcode::GetSuper, Operands::None),
+        (FinalOpcode::SpecialObject, Operands::U8(3)),
+        (
+            FinalOpcode::CallConstructor,
+            Operands::NPop { argument_count: 0 },
+        ),
+        (FinalOpcode::CheckCtorReturn, Operands::None),
+        (FinalOpcode::Drop, Operands::None),
+        (FinalOpcode::Drop, Operands::None),
+        (FinalOpcode::ReturnUndef, Operands::None),
+    ];
+    let error = verify_compiler_bytecode_graph(
+        direct_eval_instance_elements_input(
+            &missing_initializer,
+            direct_eval_instance_elements_capabilities(),
+            &[0, 2, 3, 5, 8, 9, 10, 11],
+        ),
+        BytecodeGraphVerificationLimits::default(),
+    )
+    .expect_err("every contextual super return must run the hidden initializer");
+    assert!(matches!(
+        error.kind(),
+        BytecodeVerificationErrorKind::UnsupportedCompilerOpcode {
+            pc,
+            opcode: FinalOpcode::CheckCtorReturn,
+        } if *pc == BytecodePc::new(8)
+    ));
+}
+
+#[test]
+fn direct_eval_instance_initializer_selector_cannot_escape_its_sequence() {
+    let stray_initializer = direct_eval_instance_elements_input(
+        &[
+            (FinalOpcode::SpecialObject, Operands::U8(6)),
+            (FinalOpcode::Drop, Operands::None),
+            (FinalOpcode::ReturnUndef, Operands::None),
+        ],
+        direct_eval_instance_elements_capabilities(),
+        &[0, 2, 3],
+    );
+    let error = verify_compiler_bytecode_graph(
+        stray_initializer,
+        BytecodeGraphVerificationLimits::default(),
+    )
+    .expect_err("the hidden initializer selector is not general direct-eval authority");
+    assert!(matches!(
+        error.kind(),
+        BytecodeVerificationErrorKind::UnsupportedCompilerOpcode {
+            pc,
+            opcode: FinalOpcode::SpecialObject,
+        } if *pc == BytecodePc::ZERO
+    ));
 }
 
 fn assert_contextual_special_object_rejected(input: UnverifiedCompilerBytecodeGraph) {

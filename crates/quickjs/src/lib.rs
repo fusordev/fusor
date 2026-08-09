@@ -1113,6 +1113,7 @@ fn compile_direct_eval_source(
         .with_new_target(request.allows_new_target())
         .with_super_property(request.allows_super_property())
         .with_super_call(request.allows_super_call())
+        .with_instance_elements(request.has_instance_elements())
         .with_arguments_allowed(request.allows_arguments());
     let context = DirectEvalContext::new(capabilities, DirectEvalScopeSnapshot::new(&frames))
         .with_variable_environment(frontend_direct_eval_variable_environment(

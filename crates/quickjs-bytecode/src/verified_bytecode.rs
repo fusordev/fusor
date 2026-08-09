@@ -2864,8 +2864,9 @@ fn verify_header(
         CompilerExecutableKind::DirectEvalScript => {
             let flags = header.flags().bits();
             if header.kind() != FunctionKind::Normal
-                || flags & !0x05c0 != 0
+                || flags & !0x15c0 != 0
                 || flags & 0x0400 == 0
+                || (flags & 0x1000 != 0 && flags & 0x0080 == 0)
                 || header.mode().bits() & !1 != 0
             {
                 return Err(BytecodeVerificationError::function(
@@ -6366,6 +6367,65 @@ fn atom_contents(
     atoms.get(index).map(crate::CompilerAtom::string)
 }
 
+pub(super) fn contextual_instance_initializer_sequence(
+    flow: &VerifiedControlFlow,
+    check_index: usize,
+) -> bool {
+    let instructions = flow.instructions();
+    let expected = [
+        (FinalOpcode::CheckCtorReturn, Operands::None),
+        (FinalOpcode::SpecialObject, Operands::U8(6)),
+        (FinalOpcode::PushThis, Operands::None),
+        (FinalOpcode::Swap, Operands::None),
+        (
+            FinalOpcode::CallMethod,
+            Operands::NPop { argument_count: 0 },
+        ),
+        (FinalOpcode::Drop, Operands::None),
+        (FinalOpcode::Drop, Operands::None),
+    ];
+    for (offset, (opcode, operands)) in expected.into_iter().enumerate() {
+        let Some(index) = check_index.checked_add(offset) else {
+            return false;
+        };
+        let Some(instruction) = instructions.get(index) else {
+            return false;
+        };
+        let instruction = instruction.decoded().instruction();
+        if instruction.opcode() != opcode || instruction.operands() != operands {
+            return false;
+        }
+        if offset == 0 {
+            continue;
+        }
+        let predecessor_count = instructions
+            .iter()
+            .filter(|candidate| {
+                let successors = candidate.successors();
+                successors.fallthrough().map(InstructionIndex::get) == Some(usize_to_u32(index))
+                    || successors.branch_target().map(InstructionIndex::get)
+                        == Some(usize_to_u32(index))
+                    || successors.jump_target().map(InstructionIndex::get)
+                        == Some(usize_to_u32(index))
+            })
+            .count();
+        let Some(previous) = instructions.get(index - 1) else {
+            return false;
+        };
+        if predecessor_count != 1
+            || previous.successors().kind() != crate::VerifiedSuccessorKind::Fallthrough
+            || previous
+                .successors()
+                .fallthrough()
+                .map(InstructionIndex::get)
+                != Some(usize_to_u32(index))
+        {
+            return false;
+        }
+    }
+    true
+}
+
 #[allow(
     clippy::too_many_lines,
     reason = "opcode admission and function-kind restrictions share one auditable pass"
@@ -6517,6 +6577,13 @@ fn verify_supported_opcodes(
                             .function_header()
                             .flags()
                             .is_derived_class_constructor())))
+            || (opcode == FinalOpcode::CheckCtorReturn
+                && executable_kind == CompilerExecutableKind::DirectEvalScript
+                && flow
+                    .function_header()
+                    .flags()
+                    .direct_eval_has_instance_elements()
+                && !contextual_instance_initializer_sequence(flow, instruction_index))
             || (matches!(
                 opcode,
                 FinalOpcode::GetSuper | FinalOpcode::GetSuperValue | FinalOpcode::PutSuperValue
@@ -6534,6 +6601,11 @@ fn verify_supported_opcodes(
                         simple_parameter_list,
                     )
             )
+            || (matches!(instruction.operands(), Operands::U8(6))
+                && opcode == FinalOpcode::SpecialObject
+                && !instruction_index.checked_sub(1).is_some_and(|check_index| {
+                    contextual_instance_initializer_sequence(flow, check_index)
+                }))
             || matches!(
                 (opcode, instruction.operands()),
                 (FinalOpcode::Rest, Operands::U16(first_argument))
@@ -6693,6 +6765,17 @@ fn compiler_special_object_is_authorized(
                         | CompilerExecutableKind::AsyncMethod
                         | CompilerExecutableKind::AsyncGeneratorMethod
                         | CompilerExecutableKind::ClassConstructor
+                )
+        }
+        Operands::U8(6) => {
+            (executable_kind == CompilerExecutableKind::DirectEvalScript
+                && flow
+                    .function_header()
+                    .flags()
+                    .direct_eval_has_instance_elements())
+                || matches!(
+                    executable_kind,
+                    CompilerExecutableKind::OrdinaryArrow | CompilerExecutableKind::AsyncArrow
                 )
         }
         _ => false,
@@ -11086,7 +11169,7 @@ fn collect_requirements(
                 push_requirement(requirements, ExecutionRequirement::Calls);
             }
             FinalOpcode::SpecialObject => match instruction.operands() {
-                Operands::U8(3..=5) => {
+                Operands::U8(3..=6) => {
                     push_requirement(requirements, ExecutionRequirement::Calls);
                 }
                 Operands::U8(0 | 1) => {

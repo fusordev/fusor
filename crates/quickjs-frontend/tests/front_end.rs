@@ -358,6 +358,7 @@ fn compilation_goals_preserve_lossless_direct_eval_context() {
     assert!(direct_eval.capabilities().is_strict());
     assert!(direct_eval.capabilities().allows_new_target());
     assert!(!direct_eval.capabilities().allows_super_call());
+    assert!(!direct_eval.capabilities().has_instance_elements());
     assert!(direct_eval.capabilities().allows_arguments());
     assert_eq!(
         direct_eval.variable_environment(),

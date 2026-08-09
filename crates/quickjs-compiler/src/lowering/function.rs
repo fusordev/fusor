@@ -1109,7 +1109,8 @@ const fn direct_eval_header(
             capabilities.allows_new_target(),
             capabilities.allows_super_property(),
             capabilities.allows_super_call(),
-        ),
+        )
+        .with_instance_elements(capabilities.has_instance_elements()),
     )
 }
 

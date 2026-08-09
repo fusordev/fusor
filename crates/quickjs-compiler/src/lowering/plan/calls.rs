@@ -68,6 +68,14 @@ impl<'arena> ExpressionPlanner<'_, '_, 'arena, '_> {
             ))
     }
 
+    fn contextual_direct_eval_has_instance_elements(&self) -> bool {
+        matches!(
+            self.unit.goal(),
+            CompilationGoal::DirectEval(context)
+                if context.capabilities().has_instance_elements()
+        )
+    }
+
     fn adjusted_eval_scope_index(
         &self,
         call: &CallExpression<'arena>,
@@ -294,7 +302,13 @@ impl<'arena> ExpressionPlanner<'_, '_, 'arena, '_> {
                     span: Some(call.span),
                 },
             )?;
-            if !self.is_contextual_direct_eval_derived_constructor(constructor, call.span)? {
+            if self.is_contextual_direct_eval_derived_constructor(constructor, call.span)? {
+                if self.contextual_direct_eval_has_instance_elements() {
+                    work.push(ExpressionWork::InitializeContextualInstanceFields {
+                        span: call.span,
+                    });
+                }
+            } else {
                 let instance_fields = self.instance_field_definitions(constructor)?.ok_or(
                     LeafCompilationError::SemanticInvariant {
                         invariant: "super constructor call resolves its derived class constructor",
@@ -718,7 +732,11 @@ impl<'arena> ExpressionPlanner<'_, '_, 'arena, '_> {
                 span: Some(call.span),
             },
         )?;
-        if !self.is_contextual_direct_eval_derived_constructor(constructor, call.span)? {
+        if self.is_contextual_direct_eval_derived_constructor(constructor, call.span)? {
+            if self.contextual_direct_eval_has_instance_elements() {
+                work.push(ExpressionWork::InitializeContextualInstanceFields { span: call.span });
+            }
+        } else {
             let instance_fields = self.instance_field_definitions(constructor)?.ok_or(
                 LeafCompilationError::SemanticInvariant {
                     invariant: "super spread call resolves its derived class constructor",

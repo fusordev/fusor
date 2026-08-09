@@ -4,8 +4,8 @@ use super::{
     BytecodeGraphResource, BytecodeVerificationError, BytecodeVerificationErrorKind,
     ClosureVariableDefinition, CompilerBindingKind, CompilerExecutableKind, FinalOpcode,
     FunctionTemplateId, Operands, VariableDefinition, VerifiedCompilerFunctionGraph,
-    VerifiedControlFlow, VerifiedFunctionMetadata, VerifiedInstruction, function_id,
-    try_filled_vec,
+    VerifiedControlFlow, VerifiedFunctionMetadata, VerifiedInstruction,
+    contextual_instance_initializer_sequence, function_id, try_filled_vec,
 };
 
 fn lexical_arrow_boundary(
@@ -35,7 +35,11 @@ fn lexical_arrow_boundary(
 fn lexical_arrow_uses(
     flow: &VerifiedControlFlow,
     static_field_super: bool,
-) -> (Option<VerifiedInstruction>, Option<VerifiedInstruction>) {
+) -> (
+    Option<VerifiedInstruction>,
+    Option<VerifiedInstruction>,
+    Option<VerifiedInstruction>,
+) {
     let home_object = flow.instructions().iter().copied().find(|verified| {
         let instruction = verified.decoded().instruction();
         matches!(
@@ -56,7 +60,68 @@ fn lexical_arrow_uses(
             (FinalOpcode::SpecialObject, Operands::U8(4))
         )
     });
-    (home_object, derived_super)
+    let instance_initializer = flow.instructions().iter().copied().find(|verified| {
+        matches!(
+            (
+                verified.decoded().instruction().opcode(),
+                verified.decoded().instruction().operands(),
+            ),
+            (FinalOpcode::SpecialObject, Operands::U8(6))
+        )
+    });
+    (home_object, derived_super, instance_initializer)
+}
+
+fn direct_eval_boundary_has_instance_elements(
+    graph: &VerifiedCompilerFunctionGraph,
+    boundary: Option<(FunctionTemplateId, CompilerExecutableKind)>,
+) -> bool {
+    boundary.is_some_and(|(boundary, kind)| {
+        kind == CompilerExecutableKind::DirectEvalScript
+            && graph.function(boundary).is_some_and(|function| {
+                function
+                    .control_flow()
+                    .function_header()
+                    .flags()
+                    .direct_eval_has_instance_elements()
+            })
+    })
+}
+
+fn verify_contextual_instance_initializer(
+    id: FunctionTemplateId,
+    flow: &VerifiedControlFlow,
+    authorized: bool,
+    derived_super_call: Option<VerifiedInstruction>,
+    instance_initializer: Option<VerifiedInstruction>,
+) -> Result<(), BytecodeVerificationError> {
+    if let Some(offending) = instance_initializer
+        && !authorized
+    {
+        return Err(BytecodeVerificationError::function(
+            id,
+            BytecodeVerificationErrorKind::UnsupportedCompilerOpcode {
+                pc: offending.decoded().pc(),
+                opcode: offending.decoded().instruction().opcode(),
+            },
+        ));
+    }
+    if authorized && derived_super_call.is_some() {
+        for (instruction_index, instruction) in flow.instructions().iter().enumerate() {
+            if instruction.decoded().instruction().opcode() == FinalOpcode::CheckCtorReturn
+                && !contextual_instance_initializer_sequence(flow, instruction_index)
+            {
+                return Err(BytecodeVerificationError::function(
+                    id,
+                    BytecodeVerificationErrorKind::UnsupportedCompilerOpcode {
+                        pc: instruction.decoded().pc(),
+                        opcode: FinalOpcode::CheckCtorReturn,
+                    },
+                ));
+            }
+        }
+    }
+    Ok(())
 }
 
 /// Certifies the function-environment capabilities inherited by arrows.
@@ -106,7 +171,8 @@ pub(super) fn verify_lexical_arrow_environments(
                     .map(ClosureVariableDefinition::policy),
             )
             .any(|policy| policy.kind() == CompilerBindingKind::ClassStaticReceiver);
-        let (home_object_use, derived_super_call) = lexical_arrow_uses(flow, static_field_super);
+        let (home_object_use, derived_super_call, instance_initializer) =
+            lexical_arrow_uses(flow, static_field_super);
         let boundary = lexical_arrow_boundary(id, metadata, parents);
 
         let derived_constructor = boundary.is_some_and(|(boundary, kind)| {
@@ -129,6 +195,14 @@ pub(super) fn verify_lexical_arrow_environments(
                 },
             ));
         }
+
+        verify_contextual_instance_initializer(
+            id,
+            flow,
+            direct_eval_boundary_has_instance_elements(graph, boundary),
+            derived_super_call,
+            instance_initializer,
+        )?;
 
         let home_object_authorized = boundary.is_some_and(|(boundary, kind)| {
             matches!(

@@ -153,6 +153,7 @@ impl DirectEvalCompileRequest {
     const SUPER_PROPERTY: u8 = 1 << 2;
     const SUPER_CALL: u8 = 1 << 3;
     const ARGUMENTS_ALLOWED: u8 = 1 << 4;
+    const INSTANCE_ELEMENTS: u8 = 1 << 5;
 
     /// Creates a direct-eval request with the caller's strictness and a
     /// function-owned variable environment.
@@ -215,6 +216,14 @@ impl DirectEvalCompileRequest {
         self
     }
 
+    /// Records whether contextual `super()` must run the inherited class's
+    /// instance-element initializer after binding derived `this`.
+    #[must_use]
+    pub const fn with_instance_elements(mut self, yes: bool) -> Self {
+        self.set_capability(Self::INSTANCE_ELEMENTS, yes);
+        self
+    }
+
     /// Selects whether the caller admits the `arguments` identifier.
     #[must_use]
     pub const fn with_arguments_allowed(mut self, yes: bool) -> Self {
@@ -274,6 +283,13 @@ impl DirectEvalCompileRequest {
     #[must_use]
     pub const fn allows_super_call(&self) -> bool {
         self.has_capability(Self::SUPER_CALL)
+    }
+
+    /// Returns whether contextual `super()` must run the inherited class's
+    /// instance-element initializer after binding derived `this`.
+    #[must_use]
+    pub const fn has_instance_elements(&self) -> bool {
+        self.has_capability(Self::INSTANCE_ELEMENTS)
     }
 
     /// Returns whether the caller admits the `arguments` identifier.
@@ -502,6 +518,7 @@ mod tests {
             .with_new_target(true)
             .with_super_property(true)
             .with_super_call(true)
+            .with_instance_elements(true)
             .with_arguments_allowed(true);
 
         assert_eq!(request.source(), &source);
@@ -517,6 +534,7 @@ mod tests {
         assert!(request.allows_new_target());
         assert!(request.allows_super_property());
         assert!(request.allows_super_call());
+        assert!(request.has_instance_elements());
         assert!(request.allows_arguments());
     }
 

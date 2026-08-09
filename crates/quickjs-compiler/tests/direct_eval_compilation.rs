@@ -285,6 +285,53 @@ fn direct_eval_certifies_inherited_derived_constructor_authority() {
 }
 
 #[test]
+fn direct_eval_certifies_contextual_instance_element_initialization() {
+    let tree = compile_with_capabilities(
+        "super();",
+        DirectEvalCapabilities::new()
+            .with_new_target(true)
+            .with_super_call(true)
+            .with_instance_elements(true),
+    )
+    .expect("contextual instance-element direct eval authority");
+    let root = tree.verified_bytecode().root();
+    assert!(
+        root.function()
+            .control_flow()
+            .function_header()
+            .flags()
+            .direct_eval_has_instance_elements()
+    );
+    assert!(
+        root.function()
+            .control_flow()
+            .instructions()
+            .windows(7)
+            .any(|instructions| {
+                let expected = [
+                    (FinalOpcode::CheckCtorReturn, Operands::None),
+                    (FinalOpcode::SpecialObject, Operands::U8(6)),
+                    (FinalOpcode::PushThis, Operands::None),
+                    (FinalOpcode::Swap, Operands::None),
+                    (
+                        FinalOpcode::CallMethod,
+                        Operands::NPop { argument_count: 0 },
+                    ),
+                    (FinalOpcode::Drop, Operands::None),
+                    (FinalOpcode::Drop, Operands::None),
+                ];
+                instructions
+                    .iter()
+                    .zip(expected)
+                    .all(|(instruction, (opcode, operands))| {
+                        let instruction = instruction.decoded().instruction();
+                        instruction.opcode() == opcode && instruction.operands() == operands
+                    })
+            })
+    );
+}
+
+#[test]
 fn sloppy_direct_eval_certifies_a_new_function_variable_binding() {
     let tree = compile("var answer = 42; answer;", false)
         .expect("new caller variable-environment binding authority");
