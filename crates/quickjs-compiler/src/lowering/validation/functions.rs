@@ -1,10 +1,11 @@
+use oxc_syntax::{identifier::is_white_space, line_terminator::is_line_terminator};
 use quickjs_frontend::Span;
 
 use super::super::{
     ArrowFunctionExpression, AstKind, Class, CompilationContext, CompilationUnitKind, Executable,
     ExecutableId, ExecutableKind, Expression, Function, FunctionType, LeafCompilationError,
-    MethodDefinitionKind, NodeId, ParsedUnit, Program, PropertyKind, UnsupportedLeafFeature,
-    unsupported,
+    MethodDefinition, MethodDefinitionKind, NodeId, ParsedUnit, Program, PropertyKind,
+    UnsupportedLeafFeature, unsupported,
 };
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -258,7 +259,7 @@ impl<'arena> CompilationContext<'_, 'arena, '_> {
                 function.span,
             );
         }
-        let form = class_method_form(self.unit, node_id).unwrap_or_else(|| {
+        let form = class_method_form(self.unit, node_id)?.unwrap_or_else(|| {
             object_method_or_accessor_span(self.unit, node_id)
                 .map_or(OrdinaryFunctionForm::Function, |property_span| {
                     OrdinaryFunctionForm::ObjectMethod { property_span }
@@ -513,28 +514,101 @@ pub(in crate::lowering) fn object_method_or_accessor_span(
     .then_some(property.span)
 }
 
-fn class_method_form(unit: &ParsedUnit<'_, '_>, node_id: NodeId) -> Option<OrdinaryFunctionForm> {
+fn class_method_form(
+    unit: &ParsedUnit<'_, '_>,
+    node_id: NodeId,
+) -> Result<Option<OrdinaryFunctionForm>, LeafCompilationError> {
     let AstKind::MethodDefinition(method) = unit.semantic().nodes().parent_kind(node_id) else {
-        return None;
+        return Ok(None);
     };
     if method.value.node_id.get() != node_id {
-        return None;
+        return Ok(None);
     }
     let AstKind::ClassBody(body) = unit.semantic().nodes().parent_kind(method.node_id.get()) else {
-        return None;
+        return Ok(None);
     };
     let AstKind::Class(class) = unit.semantic().nodes().parent_kind(body.node_id.get()) else {
-        return None;
+        return Ok(None);
     };
-    match method.kind {
-        MethodDefinitionKind::Constructor => Some(OrdinaryFunctionForm::ClassConstructor {
+    let form = match method.kind {
+        MethodDefinitionKind::Constructor => OrdinaryFunctionForm::ClassConstructor {
             class_span: class.span,
             derived: class.super_class.is_some(),
-        }),
+        },
         MethodDefinitionKind::Method | MethodDefinitionKind::Get | MethodDefinitionKind::Set => {
-            Some(OrdinaryFunctionForm::ClassMethod {
-                property_span: method.span,
-            })
+            OrdinaryFunctionForm::ClassMethod {
+                property_span: class_method_definition_span(unit, method)?,
+            }
         }
+    };
+    Ok(Some(form))
+}
+
+fn class_method_definition_span(
+    unit: &ParsedUnit<'_, '_>,
+    method: &MethodDefinition<'_>,
+) -> Result<Span, LeafCompilationError> {
+    if !method.r#static {
+        return Ok(method.span);
+    }
+
+    let invalid_source = || LeafCompilationError::SemanticInvariant {
+        invariant: "a static class element retains its nested MethodDefinition source",
+        span: Some(method.span),
+    };
+    let source = unit.program().source_text;
+    let start = method.span.start as usize;
+    let end = method.span.end as usize;
+    let element_source = source.get(start..end).ok_or_else(invalid_source)?;
+    let after_static = element_source
+        .strip_prefix("static")
+        .ok_or_else(invalid_source)?;
+    let trivia_bytes = leading_ecmascript_trivia_bytes(after_static).ok_or_else(invalid_source)?;
+    let relative_start = "static"
+        .len()
+        .checked_add(trivia_bytes)
+        .ok_or_else(invalid_source)?;
+    if relative_start >= element_source.len() {
+        return Err(invalid_source());
+    }
+    let relative_start =
+        u32::try_from(relative_start).map_err(|_| LeafCompilationError::CapacityExceeded {
+            domain: "class method source span",
+        })?;
+    let nested_start = method
+        .span
+        .start
+        .checked_add(relative_start)
+        .ok_or_else(invalid_source)?;
+    Ok(Span::new(nested_start, method.span.end))
+}
+
+fn leading_ecmascript_trivia_bytes(source: &str) -> Option<usize> {
+    let mut offset = 0_usize;
+    loop {
+        let remaining = source.get(offset..)?;
+        if let Some(comment) = remaining.strip_prefix("//") {
+            let comment_bytes = comment
+                .char_indices()
+                .find_map(|(index, character)| is_line_terminator(character).then_some(index))
+                .unwrap_or(comment.len());
+            offset = offset.checked_add(2)?.checked_add(comment_bytes)?;
+            continue;
+        }
+        if let Some(comment) = remaining.strip_prefix("/*") {
+            let comment_bytes = comment.find("*/")?;
+            offset = offset
+                .checked_add(2)?
+                .checked_add(comment_bytes)?
+                .checked_add(2)?;
+            continue;
+        }
+        let Some(character) = remaining.chars().next() else {
+            return Some(offset);
+        };
+        if !is_white_space(character) && !is_line_terminator(character) {
+            return Some(offset);
+        }
+        offset = offset.checked_add(character.len_utf8())?;
     }
 }

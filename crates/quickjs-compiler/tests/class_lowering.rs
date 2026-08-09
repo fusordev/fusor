@@ -698,6 +698,44 @@ fn computed_public_class_methods_use_the_typed_computed_definition_path() {
 }
 
 #[test]
+fn static_class_methods_retain_only_the_nested_method_definition_source() {
+    let tree = compile(
+        "function make(key){class Box{static /* before */f /* a */ ( /* b */ ) /* c */ { /* d */ }static /* before */get /* a */ g /* b */ ( /* c */ ) /* d */ { /* e */ }static /* before */set /* a */ h /* b */ ( /* c */ value /* d */ ) /* e */ { /* f */ }static /* before */async /* a */ i /* b */ ( /* c */ ) /* d */ { /* e */ }static /* before */async /* a */ * /* b */ j /* c */ ( /* d */ ) /* e */ { /* f */ }static /* before */* /* a */ k /* b */ ( /* c */ ) /* d */ { /* e */ }static /* before */#p /* a */ ( /* b */ ) /* c */ { /* d */ }static /* before */[ /* a */ key /* b */ ] /* c */ ( /* d */ ) /* e */ { /* f */ }static // before\nline(){}static \u{feff}wide(){}}return Box;}",
+        "make",
+    );
+    let sources = tree
+        .verified_bytecode()
+        .functions()
+        .filter(|function| {
+            matches!(
+                function.metadata().executable_kind(),
+                CompilerExecutableKind::OrdinaryMethod
+                    | CompilerExecutableKind::GeneratorMethod
+                    | CompilerExecutableKind::AsyncMethod
+                    | CompilerExecutableKind::AsyncGeneratorMethod
+            )
+        })
+        .map(|function| function.metadata().source().function_source())
+        .collect::<Vec<_>>();
+
+    assert_eq!(
+        sources,
+        [
+            "f /* a */ ( /* b */ ) /* c */ { /* d */ }",
+            "get /* a */ g /* b */ ( /* c */ ) /* d */ { /* e */ }",
+            "set /* a */ h /* b */ ( /* c */ value /* d */ ) /* e */ { /* f */ }",
+            "async /* a */ i /* b */ ( /* c */ ) /* d */ { /* e */ }",
+            "async /* a */ * /* b */ j /* c */ ( /* d */ ) /* e */ { /* f */ }",
+            "* /* a */ k /* b */ ( /* c */ ) /* d */ { /* e */ }",
+            "#p /* a */ ( /* b */ ) /* c */ { /* d */ }",
+            "[ /* a */ key /* b */ ] /* c */ ( /* d */ ) /* e */ { /* f */ }",
+            "line(){}",
+            "wide(){}",
+        ]
+    );
+}
+
+#[test]
 fn async_generator_class_methods_are_owned_by_their_definition() {
     let tree = compile(
         "function make(){class Box{async *values(){yield 1;}}return Box;}",
