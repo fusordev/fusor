@@ -98,13 +98,12 @@ fn rendered(body: &str) -> String {
 fn call_state(
     runtime: &mut Runtime,
     realm: &quickjs_runtime::Realm,
-    body: &str,
+    run: &Function,
     state: &Object,
 ) -> String {
     let mut context = runtime.context(realm).expect("context");
-    let run = dynamic_function(&mut context, body);
     context
-        .call(&run, &[state.as_value()], ExecutionLimits::default())
+        .call(run, &[state.as_value()], ExecutionLimits::default())
         .expect("state call")
         .as_string()
         .expect("live state result")
@@ -170,39 +169,40 @@ fn finalization_registry_register_and_unregister_follow_specification_order() {
 fn collection_clears_weak_refs_and_runs_finalizers_only_after_a_host_turn() {
     let mut runtime = Runtime::try_new(RuntimeLimits::default()).expect("runtime");
     let realm = runtime.create_realm().expect("realm");
-    let state = {
+    let (state, observe_before_cleanup, observe_after_cleanup) = {
         let mut context = runtime.context(&realm).expect("setup context");
         let setup = dynamic_function(
             &mut context,
-            "var log=[];var registry=new FinalizationRegistry(function(held){log.push(held.tag)});\
+            "var log=[];var selected=function(held){log.push('captured:'+held.tag)};\
+             var registry=new FinalizationRegistry(selected);\
+             selected=function(held){log.push('replacement:'+held.tag)};\
              var target={};var reference=new WeakRef(target);registry.register(target,{tag:'held'});\
              return {log:log,registry:registry,reference:reference};",
         );
-        context
+        let state = context
             .call(&setup, &[], ExecutionLimits::default())
             .expect("setup")
             .into_object()
-            .expect("state")
+            .expect("state");
+        let observe_before_cleanup = dynamic_function(
+            &mut context,
+            "var state=arguments[0];return [String(state.reference.deref()),state.log.join(',')].join('|');",
+        );
+        let observe_after_cleanup = dynamic_function(
+            &mut context,
+            "var state=arguments[0];return state.log.join(',');",
+        );
+        (state, observe_before_cleanup, observe_after_cleanup)
     };
 
     runtime.collect_cycles().expect("target collection");
     assert_eq!(
-        call_state(
-            &mut runtime,
-            &realm,
-            "var state=arguments[0];return [String(state.reference.deref()),state.log.join(',')].join('|');",
-            &state,
-        ),
+        call_state(&mut runtime, &realm, &observe_before_cleanup, &state,),
         "undefined|"
     );
     assert_eq!(
-        call_state(
-            &mut runtime,
-            &realm,
-            "var state=arguments[0];return state.log.join(',');",
-            &state,
-        ),
-        "held"
+        call_state(&mut runtime, &realm, &observe_after_cleanup, &state,),
+        "captured:held"
     );
 }
 
@@ -210,7 +210,7 @@ fn collection_clears_weak_refs_and_runs_finalizers_only_after_a_host_turn() {
 fn finalization_cleanup_preserves_cell_order_and_observes_pre_job_unregister() {
     let mut runtime = Runtime::try_new(RuntimeLimits::default()).expect("runtime");
     let realm = runtime.create_realm().expect("realm");
-    let state = {
+    let (state, unregister, observe) = {
         let mut context = runtime.context(&realm).expect("setup context");
         let setup = dynamic_function(
             &mut context,
@@ -220,30 +220,26 @@ fn finalization_cleanup_preserves_cell_order_and_observes_pre_job_unregister() {
              registry.register(cancelled,'cancelled',token);\
              return {log:log,registry:registry,token:token};",
         );
-        context
+        let state = context
             .call(&setup, &[], ExecutionLimits::default())
             .expect("setup")
             .into_object()
-            .expect("state")
+            .expect("state");
+        let unregister = dynamic_function(
+            &mut context,
+            "var state=arguments[0];return [state.registry.unregister(state.token),state.log.join(',')].join('|');",
+        );
+        let observe = dynamic_function(&mut context, "return arguments[0].log.join(',');");
+        (state, unregister, observe)
     };
 
     runtime.collect_cycles().expect("target collection");
     assert_eq!(
-        call_state(
-            &mut runtime,
-            &realm,
-            "var state=arguments[0];return [state.registry.unregister(state.token),state.log.join(',')].join('|');",
-            &state,
-        ),
+        call_state(&mut runtime, &realm, &unregister, &state,),
         "true|"
     );
     assert_eq!(
-        call_state(
-            &mut runtime,
-            &realm,
-            "return arguments[0].log.join(',');",
-            &state,
-        ),
+        call_state(&mut runtime, &realm, &observe, &state),
         "first,second"
     );
 }

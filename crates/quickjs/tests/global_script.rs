@@ -164,6 +164,25 @@ fn annex_b_is_html_dda_host_object_uses_only_the_three_special_semantics() {
 }
 
 #[test]
+fn default_private_element_add_accepts_non_extensible_ordinary_objects() {
+    let mut runtime = Runtime::try_new(RuntimeLimits::default()).expect("runtime");
+    let realm = runtime.create_realm().expect("realm");
+    let mut context = runtime.context(&realm).expect("context");
+
+    let value = evaluate_script(
+        &mut context,
+        "class Base{constructor(value){return value;}}\
+         class Box extends Base{#value=42;read(){return this.#value;}static has(value){return #value in value;}}\
+         var target=Object.preventExtensions({});var box=new Box(target);\
+         box===target&&Box.has(target)&&Box.prototype.read.call(box)===42&&Reflect.ownKeys(target).length===0;",
+        "default-private-element-add.js",
+        ScriptLimits::default(),
+    )
+    .expect("default private-element addition");
+    assert_eq!(value.as_boolean().expect("live Boolean"), Some(true));
+}
+
+#[test]
 fn annex_b_labelled_function_is_instantiated_in_the_variable_environment() {
     let mut runtime = Runtime::try_new(RuntimeLimits::default()).expect("runtime");
     let realm = runtime.create_realm().expect("realm");

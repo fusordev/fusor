@@ -4633,7 +4633,7 @@ impl Context<'_> {
         }
 
         let mut execution_budget = ExecutionBudget::new(limits);
-        drain_host_jobs(self.runtime, compiler, &mut execution_budget)?;
+        drain_ready_atomics_jobs_before_host_turn(self.runtime, compiler, &mut execution_budget)?;
         let mut function_id = function_id;
         let mut receiver = StoredValue::Undefined;
         let mut owned_arguments: Option<Vec<StoredValue>> = None;

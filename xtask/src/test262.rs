@@ -1846,6 +1846,13 @@ throw new TypeError();",
         let baseline = Baseline::load(&root).expect("filter policy");
         assert!(baseline.config_fingerprint != 0);
         assert!(baseline.policy.skipped_features.contains("Intl.Locale"));
+        assert!(
+            baseline
+                .policy
+                .skipped_features
+                .contains("nonextensible-applies-to-private"),
+            "the separate private-extensibility proposal must not redefine the B.3.8 default"
+        );
         assert!(baseline.policy.excludes("annexB/language/basic.js"));
         assert!(
             !baseline

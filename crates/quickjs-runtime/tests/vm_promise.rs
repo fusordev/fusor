@@ -646,6 +646,29 @@ fn promise_resolution_reads_then_synchronously_but_calls_it_in_a_job() {
 }
 
 #[test]
+fn default_job_callbacks_capture_the_exact_callable_and_use_ordinary_call() {
+    let actual = turn_result(
+        "let box={log:''};\n\
+         let thenable;\n\
+         let selected=function(resolve){'use strict';box.log=box.log+'captured:'+(this===thenable)+'|';resolve(4);};\n\
+         thenable={get then(){box.log=box.log+'get|';return selected;}};\n\
+         Promise.resolve(thenable).then(function(value){'use strict';box.log=box.log+'value'+value+':'+(this===undefined)+'|';});\n\
+         selected=function(resolve){box.log=box.log+'replacement|';resolve(5);};\n\
+         let pair=Proxy.revocable(function(value){box.log=box.log+'proxy|';return value;},{});\n\
+         Promise.resolve(1).then(pair.proxy).catch(function(error){box.log=box.log+'revoked:'+error.name+'|';});\n\
+         pair.revoke();\n\
+         box.log=box.log+'sync|';\n\
+         return box;",
+        "return arguments[0].log;",
+    )
+    .expect("default JobCallback semantics");
+    assert_eq!(
+        actual,
+        "get|sync|captured:true|value4:true|revoked:TypeError|"
+    );
+}
+
+#[test]
 fn resolving_with_self_rejects_and_resolving_twice_is_ignored() {
     let actual = turn_result(
         "let box={self:'',once:''};\n\
