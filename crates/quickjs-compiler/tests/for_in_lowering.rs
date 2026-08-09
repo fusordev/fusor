@@ -345,7 +345,7 @@ fn protocol_instructions_retain_exact_spans_and_stack_anchors() {
         "iterator is removed at shared cleanup"
     );
 
-    for jump_source in ["continue;", "break;"] {
+    for (jump_source, expected_depth) in [("continue;", Some(1)), ("break;", None)] {
         let jump = instructions
             .iter()
             .find(|instruction| {
@@ -355,7 +355,7 @@ fn protocol_instructions_retain_exact_spans_and_stack_anchors() {
                 ) && source_slice_at(&compiled, source, instruction.decoded().pc()) == jump_source
             })
             .expect("source-owned loop jump");
-        assert_eq!(jump.entry_stack_depth(), Some(1), "{jump_source}");
+        assert_eq!(jump.entry_stack_depth(), expected_depth, "{jump_source}");
     }
 }
 

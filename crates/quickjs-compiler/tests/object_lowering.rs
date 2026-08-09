@@ -945,7 +945,7 @@ fn computed_methods_getters_and_setters_use_typed_computed_definitions() {
 }
 
 #[test]
-fn static_anonymous_function_data_properties_emit_canonical_inferred_names() {
+fn static_anonymous_function_data_properties_exclude_the_proto_setter_from_name_inference() {
     let tree = compile_tree(
         r#"function make(){return {
             identifier:function(){},
@@ -958,24 +958,22 @@ fn static_anonymous_function_data_properties_emit_canonical_inferred_names() {
     );
     let root = tree.root();
 
-    assert_eq!(
-        inferred_names(root),
-        ["identifier", "quoted", "1", "1", "__proto__"]
-    );
+    assert_eq!(inferred_names(root), ["identifier", "quoted", "1", "1"]);
     assert_eq!(
         root.constants()
             .iter()
             .filter(|constant| constant.function().is_some())
             .count(),
         5,
-        "each static data property evaluates its anonymous function with NamedEvaluation"
+        "each static property still evaluates its anonymous function"
     );
     assert_eq!(
         tree_instructions(root)
             .iter()
             .filter(|(opcode, _)| *opcode == FinalOpcode::SetProto)
             .count(),
-        0
+        1,
+        "the non-computed __proto__ form is a prototype setter and does not use NamedEvaluation"
     );
 }
 

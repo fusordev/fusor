@@ -1218,10 +1218,18 @@ impl<'arena> CompilationContext<'_, 'arena, '_> {
                                 flow,
                             )?;
                         }
+                        ExpressionWork::IdentifierValueStore(identifier) => {
+                            ExpressionPlanner::new(self).plan_identifier_value_store(
+                                identifier,
+                                layout,
+                                tree_layout,
+                                constants,
+                                flow,
+                            )?;
+                        }
                         ExpressionWork::VisitOptionalChain { .. }
                         | ExpressionWork::IdentifierCallReference(_)
                         | ExpressionWork::IdentifierDelete { .. }
-                        | ExpressionWork::IdentifierValueStore(_)
                         | ExpressionWork::CallAfterCallee { .. }
                         | ExpressionWork::SuperPropertyBase { .. }
                         | ExpressionWork::InitializeInstanceFields => {

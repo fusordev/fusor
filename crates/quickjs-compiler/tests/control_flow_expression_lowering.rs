@@ -456,7 +456,7 @@ fn nested_control_flow_has_verified_equal_depth_joins_and_relocated_sources() {
             (
                 BytecodePc::new(8),
                 FinalOpcode::IfFalse8,
-                Operands::Label8(3),
+                Operands::Label8(12),
             ),
             (BytecodePc::new(10), FinalOpcode::Drop, Operands::None),
             (BytecodePc::new(11), FinalOpcode::GetArg2, Operands::NoneArg),
