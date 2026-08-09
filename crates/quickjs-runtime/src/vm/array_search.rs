@@ -298,7 +298,7 @@ pub(super) fn advance_array_search(
                 ));
             }
             ArraySearchStage::AwaitPresence => {
-                if !take_completion(&mut completion)?.is_truthy() {
+                if !runtime.to_boolean(&take_completion(&mut completion)?)? {
                     state.stage = ArraySearchStage::NextElement;
                     continue;
                 }

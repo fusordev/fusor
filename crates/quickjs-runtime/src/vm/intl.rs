@@ -2027,7 +2027,7 @@ pub(super) fn advance_intl_locale_constructor(
                     continue;
                 }
                 if matches!(option, IntlLocaleOption::Numeric) {
-                    state.locale_options.numeric = Some(value.is_truthy());
+                    state.locale_options.numeric = Some(runtime.to_boolean(&value)?);
                     state.option_index = state.option_index.saturating_add(1);
                     state.stage = IntlLocaleConstructorStage::ReadOption;
                     continue;
@@ -2612,7 +2612,7 @@ pub(super) fn advance_intl_collator_constructor(
                     store_intl_collator_boolean_option(
                         &mut state.options,
                         option,
-                        value.is_truthy(),
+                        runtime.to_boolean(&value)?,
                     );
                     advance_intl_collator_option(&mut state);
                     continue;
@@ -3451,13 +3451,13 @@ pub(super) fn advance_intl_number_format_constructor(
                         execution_budget,
                     );
                 }
-                store_intl_number_format_option(&mut state, option, value)?;
+                store_intl_number_format_option(runtime, &mut state, option, value)?;
                 advance_intl_number_format_option(&mut state);
             }
             IntlNumberFormatConstructorStage::AwaitOptionPrimitive => {
                 let primitive = take_intl_number_format_constructor_completion(&mut completion)?;
                 let option = IntlNumberFormatOption::ALL[state.option_index];
-                store_intl_number_format_option(&mut state, option, primitive)?;
+                store_intl_number_format_option(runtime, &mut state, option, primitive)?;
                 advance_intl_number_format_option(&mut state);
             }
             IntlNumberFormatConstructorStage::ConvertRawDigit => {
@@ -3557,7 +3557,7 @@ pub(super) fn advance_intl_number_format_constructor(
                         .ok_or(EngineFault::RuntimeInvariant {
                             message: "Intl.NumberFormat legacy chain lost its initialized object",
                         })?;
-                if !completion.is_truthy() {
+                if !runtime.to_boolean(&completion)? {
                     return Ok(NativeDispatch::Immediate(StoredValue::Object(
                         number_format,
                     )));
@@ -3624,6 +3624,7 @@ fn validate_required_number_format_option(
     reason = "the closed ECMA-402 NumberFormat option vocabulary is audited in one match"
 )]
 fn store_intl_number_format_option(
+    runtime: &Runtime,
     state: &mut IntlNumberFormatConstructorContinuation,
     option: IntlNumberFormatOption,
     value: StoredValue,
@@ -3652,7 +3653,7 @@ fn store_intl_number_format_option(
     }
 
     if option == IntlNumberFormatOption::UseGrouping {
-        state.options.use_grouping = Some(if value.is_truthy() {
+        state.options.use_grouping = Some(if runtime.to_boolean(&value)? {
             match value {
                 StoredValue::Boolean(true) => NumberFormatUseGrouping::Always,
                 StoredValue::Boolean(false) => unreachable!("falsy Boolean handled below"),
@@ -4347,7 +4348,7 @@ pub(super) fn advance_intl_number_format_unwrap(
 ) -> Result<NativeDispatch, NativeFailure> {
     match state.stage {
         IntlNumberFormatUnwrapStage::AwaitInstance => {
-            if !completion.is_truthy() {
+            if !runtime.to_boolean(completion)? {
                 return intl_number_format_brand_error(state.realm, state.origin);
             }
             let symbol = runtime.intl_number_format_fallback_symbol();
@@ -7297,7 +7298,7 @@ pub(super) fn advance_intl_list_format_value(
             )
         }
         IntlListFormatValueStage::Done => {
-            if completion.is_truthy() {
+            if runtime.to_boolean(&completion)? {
                 return finish_intl_list_format_operation(runtime, &state);
             }
             state.stage = IntlListFormatValueStage::Value;
@@ -10446,7 +10447,7 @@ pub(super) fn advance_intl_date_time_format_constructor(
                     );
                 }
                 if option == IntlDateTimeFormatOption::Hour12 {
-                    state.options.hour12 = Some(value.is_truthy());
+                    state.options.hour12 = Some(runtime.to_boolean(&value)?);
                     advance_intl_date_time_format_option(&mut state);
                     continue;
                 }
@@ -10529,7 +10530,7 @@ pub(super) fn advance_intl_date_time_format_constructor(
                         .ok_or(EngineFault::RuntimeInvariant {
                             message: "Intl.DateTimeFormat legacy chain lost its initialized object",
                         })?;
-                if !completion.is_truthy() {
+                if !runtime.to_boolean(&completion)? {
                     return Ok(NativeDispatch::Immediate(StoredValue::Object(
                         date_time_format,
                     )));
@@ -11282,7 +11283,7 @@ pub(super) fn advance_intl_date_time_format_unwrap(
 ) -> Result<NativeDispatch, NativeFailure> {
     match state.stage {
         IntlDateTimeFormatUnwrapStage::AwaitInstance => {
-            if !completion.is_truthy() {
+            if !runtime.to_boolean(completion)? {
                 return intl_date_time_format_brand_error(state.realm, state.origin);
             }
             let symbol = runtime.intl_number_format_fallback_symbol();

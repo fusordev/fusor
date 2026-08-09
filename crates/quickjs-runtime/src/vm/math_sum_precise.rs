@@ -367,7 +367,7 @@ pub(super) fn advance_math_sum_precise(
             )
         }
         MathSumPreciseStage::Done => {
-            if completion.is_truthy() {
+            if runtime.to_boolean(&completion)? {
                 execution_budget.charge_instructions(
                     u64::try_from(ACCUMULATOR_LIMBS).expect("limb count fits u64"),
                 )?;

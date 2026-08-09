@@ -277,7 +277,7 @@ pub(super) fn advance_group_by(
             )
         }
         GroupByStage::AwaitDone => {
-            if completion.is_truthy() {
+            if runtime.to_boolean(&completion)? {
                 return finish_group_by(runtime, state, execution_budget);
             }
             state.stage = GroupByStage::AwaitIteratorValue;

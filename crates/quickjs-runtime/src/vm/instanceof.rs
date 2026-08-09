@@ -115,7 +115,7 @@ pub(super) fn advance_instance_of(
             instance_of_method_decision(runtime, state, completion, return_to, execution_budget)
         }
         InstanceOfStage::MethodCall => Ok(NativeDispatch::Immediate(StoredValue::Boolean(
-            completion.is_truthy(),
+            runtime.to_boolean(completion)?,
         ))),
         InstanceOfStage::PrototypeRead => {
             finish_ordinary_has_instance(runtime, state, completion, return_to, execution_budget)

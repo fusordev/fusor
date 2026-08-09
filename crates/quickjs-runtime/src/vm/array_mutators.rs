@@ -537,7 +537,7 @@ pub(super) fn advance_array_mutator(
             }
             ArrayMutatorStage::AwaitFirstPresence => {
                 let step = current_step(&state)?;
-                if !take_completion(&mut completion)?.is_truthy() {
+                if !runtime.to_boolean(&take_completion(&mut completion)?)? {
                     state.first_absent = true;
                     state.stage = if matches!(step, ElementStep::Swap { .. }) {
                         ArrayMutatorStage::AwaitSecondRead
@@ -618,7 +618,7 @@ pub(super) fn advance_array_mutator(
                 ));
             }
             ArrayMutatorStage::AwaitSecondPresence => {
-                if !take_completion(&mut completion)?.is_truthy() {
+                if !runtime.to_boolean(&take_completion(&mut completion)?)? {
                     state.second_absent = true;
                     state.stage = ArrayMutatorStage::AwaitFirstWrite;
                     continue;
@@ -1808,7 +1808,7 @@ pub(super) fn advance_array_splice(
                 ));
             }
             ArraySpliceStage::AwaitExtractPresence => {
-                if !take_completion(&mut completion)?.is_truthy() {
+                if !runtime.to_boolean(&take_completion(&mut completion)?)? {
                     state.stage = ArraySpliceStage::NextExtract;
                     continue;
                 }
@@ -1985,7 +1985,7 @@ pub(super) fn advance_array_splice(
                 }
             }
             ArraySpliceStage::AwaitShiftPresence => {
-                if !take_completion(&mut completion)?.is_truthy() {
+                if !runtime.to_boolean(&take_completion(&mut completion)?)? {
                     state.pending_absent = true;
                     state.stage = ArraySpliceStage::AwaitShiftWrite;
                     continue;

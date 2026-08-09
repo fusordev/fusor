@@ -418,7 +418,7 @@ pub(super) fn advance_descriptor_read(
                             message: "descriptor Get resumed after its final field",
                         },
                     )?;
-                    record_field(&mut state.fields, field, value, realm, origin)?;
+                    record_field(runtime, &mut state.fields, field, value, realm, origin)?;
                     state.next = state.next.saturating_add(1);
                     state.phase = DescriptorReadPhase::Next;
                     continue;
@@ -489,6 +489,7 @@ pub(super) fn advance_descriptor_read(
 
 /// Records one read field.
 fn record_field(
+    runtime: &Runtime,
     fields: &mut CollectedFields,
     field: DescriptorField,
     value: StoredValue,
@@ -496,10 +497,10 @@ fn record_field(
     origin: &JsStackFrame,
 ) -> Result<(), NativeFailure> {
     match field {
-        DescriptorField::Enumerable => fields.enumerable = Some(value.is_truthy()),
-        DescriptorField::Configurable => fields.configurable = Some(value.is_truthy()),
+        DescriptorField::Enumerable => fields.enumerable = Some(runtime.to_boolean(&value)?),
+        DescriptorField::Configurable => fields.configurable = Some(runtime.to_boolean(&value)?),
         DescriptorField::Value => fields.value = Some(value),
-        DescriptorField::Writable => fields.writable = Some(value.is_truthy()),
+        DescriptorField::Writable => fields.writable = Some(runtime.to_boolean(&value)?),
         DescriptorField::Get => {
             let _ = accessor_function(Some(&value), realm, origin, "getter")?;
             fields.get = Some(value);

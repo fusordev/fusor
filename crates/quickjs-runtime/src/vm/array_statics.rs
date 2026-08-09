@@ -344,7 +344,7 @@ pub(super) fn advance_array_static(
                 );
             }
             ArrayStaticStage::AwaitDone => {
-                if take_array_static_completion(&mut completion)?.is_truthy() {
+                if runtime.to_boolean(&take_array_static_completion(&mut completion)?)? {
                     state.iterator = None;
                     state.next = None;
                     state.result = None;

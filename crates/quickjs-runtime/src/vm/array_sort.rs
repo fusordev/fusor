@@ -379,7 +379,7 @@ pub(super) fn advance_array_sort(
                 ));
             }
             ArraySortStage::AwaitPresence => {
-                if !take_sort_completion(&mut completion)?.is_truthy() {
+                if !runtime.to_boolean(&take_sort_completion(&mut completion)?)? {
                     state.stage = ArraySortStage::NextRead;
                     continue;
                 }

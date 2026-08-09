@@ -4009,6 +4009,14 @@ pub(super) fn begin_abstract_equality(
             return Ok(NativeDispatch::Immediate(StoredValue::Boolean(!invert)));
         }
 
+        let left_is_nullish = matches!(left, StoredValue::Null | StoredValue::Undefined);
+        let right_is_nullish = matches!(right, StoredValue::Null | StoredValue::Undefined);
+        if (left_is_nullish && runtime.value_has_is_html_dda(&right)?)
+            || (right_is_nullish && runtime.value_has_is_html_dda(&left)?)
+        {
+            return Ok(NativeDispatch::Immediate(StoredValue::Boolean(!invert)));
+        }
+
         // A `BigInt` compares across the domains by mathematical value, so the
         // Boolean-to-Number rewrite below must not reach it: `0n == false` is
         // `true` through the BigInt comparison, not through a rounded Number.

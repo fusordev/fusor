@@ -459,7 +459,7 @@ pub(super) fn advance_with_get(
             continue_with_get_after(runtime, dispatch, state, return_to, execution_budget)
         }
         WithGetStage::GetBlocked => {
-            if completion.is_truthy() {
+            if runtime.to_boolean(&completion)? {
                 return Ok(with_not_found(state.operation));
             }
             begin_binding_operation(runtime, state, return_to, execution_budget)

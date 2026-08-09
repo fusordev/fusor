@@ -239,7 +239,7 @@ pub(super) fn advance_promise_combinator(
             )
         }
         PromiseCombinatorStage::AwaitDone => {
-            if completion.is_truthy() {
+            if runtime.to_boolean(&completion)? {
                 state.iterator_done = true;
                 return finish_combinator_iteration(runtime, state, return_to);
             }

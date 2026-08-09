@@ -1631,6 +1631,12 @@ impl OwnProperty {
 pub(crate) struct ObjectRecord {
     prototype: Option<HeapReference>,
     extensible: bool,
+    /// Annex B.3.6 host-only `[[IsHTMLDDA]]` internal slot.
+    ///
+    /// The flag lives beside the ordinary object record because both callable
+    /// and non-callable ECMAScript objects own one. JavaScript allocation never
+    /// sets it; only the trusted embedding boundary may do so.
+    is_html_dda: bool,
     shape: Arc<Vec<ShapeProperty>>,
     shape_interner: Option<Rc<RefCell<ShapeInterner>>>,
     slots: Vec<PropertySlot>,
@@ -1666,6 +1672,7 @@ impl ObjectRecord {
         Self {
             prototype,
             extensible: true,
+            is_html_dda: false,
             shape: Arc::new(Vec::new()),
             shape_interner: None,
             slots: Vec::new(),
@@ -1725,6 +1732,14 @@ impl ObjectRecord {
 
     pub(crate) const fn is_extensible(&self) -> bool {
         self.extensible
+    }
+
+    pub(crate) const fn is_html_dda(&self) -> bool {
+        self.is_html_dda
+    }
+
+    pub(crate) const fn mark_host_defined_is_html_dda(&mut self) {
+        self.is_html_dda = true;
     }
 
     /// Clears the extensible bit, matching `QuickJS`'s `JS_PreventExtensions`

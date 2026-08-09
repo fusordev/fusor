@@ -169,6 +169,41 @@ impl Context<'_> {
         self.runtime.usage()
     }
 
+    /// Adds Annex B.3.6's `[[IsHTMLDDA]]` internal slot to a host-designated
+    /// callable or non-callable object.
+    ///
+    /// ECMAScript code has no path to this operation. The designation is
+    /// irreversible and is intended only for a host compatibility object such
+    /// as `document.all`. Primitive values are left unchanged and return
+    /// `false`; a function or object returns `true`.
+    ///
+    /// # Errors
+    ///
+    /// Returns a handle error for an orphaned or foreign value, or an engine
+    /// fault if a rooted heap identity is internally stale.
+    pub fn mark_host_defined_is_html_dda(
+        &mut self,
+        value: &JsValue,
+    ) -> Result<bool, crate::ExecutionError> {
+        let owner = value.owner()?;
+        self.runtime.validate_owner(&owner, HandleKind::Value)?;
+        let reference = match value.stored()? {
+            StoredValue::Function(function) => HeapReference::Function(*function),
+            StoredValue::Object(object) => HeapReference::Object(*object),
+            StoredValue::Undefined
+            | StoredValue::Null
+            | StoredValue::Boolean(_)
+            | StoredValue::Number(_)
+            | StoredValue::BigInt(_)
+            | StoredValue::String(_)
+            | StoredValue::Symbol(_) => return Ok(false),
+        };
+        self.runtime
+            .object_record_mut(reference)?
+            .mark_host_defined_is_html_dda();
+        Ok(true)
+    }
+
     /// Exports a thread-safe host capability for a live
     /// `SharedArrayBuffer`. Other values return `None` without invoking
     /// JavaScript or observing user properties.

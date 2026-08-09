@@ -92,6 +92,78 @@ fn annex_b_catch_var_initializer_updates_only_the_catch_parameter() {
 }
 
 #[test]
+fn annex_b_is_html_dda_host_object_uses_only_the_three_special_semantics() {
+    let mut runtime = Runtime::try_new(RuntimeLimits::default()).expect("runtime");
+    let realm = runtime.create_realm().expect("realm");
+    let mut context = runtime.context(&realm).expect("context");
+
+    let host_object = evaluate_script(
+        &mut context,
+        "var hostDda=function(value){if(arguments.length===0||value==='')return null;return value;};hostDda;",
+        "annex-b-is-html-dda-host-object.js",
+        ScriptLimits::default(),
+    )
+    .expect("host object fixture");
+    assert!(
+        context
+            .mark_host_defined_is_html_dda(&host_object)
+            .expect("same-runtime live host object")
+    );
+
+    let observed = evaluate_script(
+        &mut context,
+        "[Boolean(hostDda),!hostDda,hostDda==null,null==hostDda,\
+         hostDda==undefined,undefined==hostDda,hostDda===undefined,\
+         Object.is(hostDda,hostDda),typeof hostDda,(hostDda??1)===hostDda,\
+         hostDda()===null,hostDda('')===null,hostDda(3)===3,\
+         Reflect.defineProperty(new Proxy({},{defineProperty(){return hostDda;}}),\
+         'x',{value:1})===false].join('|');",
+        "annex-b-is-html-dda-semantics.js",
+        ScriptLimits::default(),
+    )
+    .expect("B.3.6 semantics");
+    assert_eq!(
+        string(&observed),
+        "false|true|true|true|true|true|false|true|undefined|true|true|true|true|true"
+    );
+
+    let ordinary_object = evaluate_script(
+        &mut context,
+        "var hostDdaObject={};hostDdaObject;",
+        "annex-b-is-html-dda-non-callable.js",
+        ScriptLimits::default(),
+    )
+    .expect("non-callable host object fixture");
+    assert!(
+        context
+            .mark_host_defined_is_html_dda(&ordinary_object)
+            .expect("same-runtime live ordinary object")
+    );
+    let ordinary_observed = evaluate_script(
+        &mut context,
+        "[Boolean(hostDdaObject),hostDdaObject==null,typeof hostDdaObject,\
+         Object.is(hostDdaObject,hostDdaObject)].join('|');",
+        "annex-b-is-html-dda-non-callable-semantics.js",
+        ScriptLimits::default(),
+    )
+    .expect("non-callable B.3.6 semantics");
+    assert_eq!(string(&ordinary_observed), "false|true|undefined|true");
+
+    let primitive = evaluate_script(
+        &mut context,
+        "1;",
+        "annex-b-is-html-dda-primitive.js",
+        ScriptLimits::default(),
+    )
+    .expect("primitive fixture");
+    assert!(
+        !context
+            .mark_host_defined_is_html_dda(&primitive)
+            .expect("same-runtime primitive")
+    );
+}
+
+#[test]
 fn annex_b_labelled_function_is_instantiated_in_the_variable_environment() {
     let mut runtime = Runtime::try_new(RuntimeLimits::default()).expect("runtime");
     let realm = runtime.create_realm().expect("realm");

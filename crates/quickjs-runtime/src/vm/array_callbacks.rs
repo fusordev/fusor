@@ -514,7 +514,7 @@ pub(super) fn advance_array_callback(
                 ));
             }
             ArrayCallbackStage::AwaitPresence => {
-                if !take_completion(&mut completion)?.is_truthy() {
+                if !runtime.to_boolean(&take_completion(&mut completion)?)? {
                     // `map` still counts the hole so the result keeps its shape.
                     if matches!(state.method, ArrayCallback::Map) {
                         state.written = state.written.saturating_add(1);
@@ -558,7 +558,7 @@ pub(super) fn advance_array_callback(
             ArrayCallbackStage::AwaitCallback => {
                 let answer = take_completion(&mut completion)?;
                 let element = state.element.take();
-                let truthy = answer.is_truthy();
+                let truthy = runtime.to_boolean(&answer)?;
                 match state.method {
                     ArrayCallback::ForEach => {}
                     ArrayCallback::Map => {
@@ -1237,7 +1237,7 @@ pub(super) fn advance_array_reduction(
                 ));
             }
             ArrayReductionStage::AwaitSeedPresence => {
-                if !take_completion(&mut completion)?.is_truthy() {
+                if !runtime.to_boolean(&take_completion(&mut completion)?)? {
                     state.stage = ArrayReductionStage::SeedAccumulator;
                     continue;
                 }
@@ -1292,7 +1292,7 @@ pub(super) fn advance_array_reduction(
                 ));
             }
             ArrayReductionStage::AwaitElementPresence => {
-                if !take_completion(&mut completion)?.is_truthy() {
+                if !runtime.to_boolean(&take_completion(&mut completion)?)? {
                     state.stage = ArrayReductionStage::NextElement;
                     continue;
                 }

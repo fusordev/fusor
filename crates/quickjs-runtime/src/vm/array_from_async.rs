@@ -438,7 +438,7 @@ pub(super) fn advance_array_from_async(
                 );
             }
             ArrayFromAsyncStage::Done => {
-                if take_array_from_async_completion(&mut completion)?.is_truthy() {
+                if runtime.to_boolean(&take_array_from_async_completion(&mut completion)?)? {
                     state.iterator = None;
                     state.next = None;
                     state.result = None;

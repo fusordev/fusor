@@ -1284,7 +1284,7 @@ pub(super) fn advance_iterator_zip_creation(
             )
         }
         IteratorZipCreationStage::OuterDone => {
-            if completion.is_truthy() {
+            if runtime.to_boolean(&completion)? {
                 state.outer_iterator = None;
                 state.outer_next = None;
                 state.outer_result = None;
@@ -1662,7 +1662,7 @@ pub(super) fn advance_iterator_zip_creation(
             )
         }
         IteratorZipCreationStage::PaddingDone => {
-            if completion.is_truthy() {
+            if runtime.to_boolean(&completion)? {
                 state.padding_iterator = None;
                 state.padding_next = None;
                 state.padding_result = None;
@@ -2510,7 +2510,7 @@ pub(super) fn advance_iterator_zip_next(
             )
         }
         IteratorZipNextStage::Done => {
-            if completion.is_truthy() {
+            if runtime.to_boolean(&completion)? {
                 runtime.finish_iterator_zip_record(state.helper, state.index)?;
                 state.result = None;
                 match state.mode {
@@ -2596,7 +2596,7 @@ pub(super) fn advance_iterator_zip_next(
         }
         IteratorZipNextStage::StrictDone => {
             state.result = None;
-            if completion.is_truthy() {
+            if runtime.to_boolean(&completion)? {
                 runtime.finish_iterator_zip_record(state.helper, state.index)?;
                 state.index = state.index.saturating_add(1);
                 continue_iterator_zip_strict_check(runtime, state, return_to, execution_budget)
@@ -3454,7 +3454,7 @@ pub(super) fn advance_iterator_helper_next(
             )
         }
         IteratorHelperNextStage::ConcatDone => {
-            if completion.is_truthy() {
+            if runtime.to_boolean(&completion)? {
                 runtime.finish_iterator_concat_inner(state.helper)?;
                 state.inner_iterator = None;
                 state.inner_next_method = None;
@@ -3499,7 +3499,7 @@ pub(super) fn advance_iterator_helper_next(
             )
         }
         IteratorHelperNextStage::Done => {
-            if completion.is_truthy() {
+            if runtime.to_boolean(&completion)? {
                 complete_iterator_helper(runtime, state.helper)?;
                 return iterator_result(runtime, state.realm, StoredValue::Undefined, true);
             }
@@ -3630,7 +3630,7 @@ pub(super) fn advance_iterator_helper_next(
             )
         }
         IteratorHelperNextStage::InnerDone => {
-            if completion.is_truthy() {
+            if runtime.to_boolean(&completion)? {
                 runtime.finish_iterator_flat_map_inner(state.helper)?;
                 state.counter = state.counter.saturating_add(1);
                 state.inner_iterator = None;
@@ -3817,7 +3817,7 @@ fn advance_iterator_helper_callback(
             iterator_result(runtime, state.realm, completion, false)
         }
         crate::object::IteratorHelperKind::Filter => {
-            let selected = completion.is_truthy();
+            let selected = runtime.to_boolean(&completion)?;
             runtime.finish_iterator_helper_callback(state.helper, selected)?;
             let candidate = state
                 .candidate
@@ -4455,7 +4455,7 @@ pub(super) fn advance_iterator_consumer(
             )
         }
         IteratorConsumerStage::Done => {
-            if completion.is_truthy() {
+            if runtime.to_boolean(&completion)? {
                 return finish_iterator_consumer_exhausted(state);
             }
             state.stage = IteratorConsumerStage::Value;
@@ -4576,11 +4576,10 @@ fn finish_iterator_consumer_callback(
         state.counter = state.counter.saturating_add(1);
         return call_iterator_consumer_next(state, return_to, execution_budget);
     }
+    let truthy = runtime.to_boolean(&completion)?;
     let exits = match state.kind {
-        crate::runtime::IteratorConsumer::Every => !completion.is_truthy(),
-        crate::runtime::IteratorConsumer::Find | crate::runtime::IteratorConsumer::Some => {
-            completion.is_truthy()
-        }
+        crate::runtime::IteratorConsumer::Every => !truthy,
+        crate::runtime::IteratorConsumer::Find | crate::runtime::IteratorConsumer::Some => truthy,
         crate::runtime::IteratorConsumer::ForEach => false,
         crate::runtime::IteratorConsumer::Reduce => unreachable!(
             "Iterator.prototype.reduce returns before predicate-style consumer handling"
@@ -4866,7 +4865,7 @@ pub(super) fn advance_iterator_to_array(
             )
         }
         IteratorToArrayStage::Done => {
-            if completion.is_truthy() {
+            if runtime.to_boolean(&completion)? {
                 return Ok(NativeDispatch::Immediate(StoredValue::Object(
                     runtime.allocate_array(state.realm, state.items)?,
                 )));
@@ -6026,7 +6025,7 @@ pub(super) fn advance_for_of_next(
             )
         }
         ForOfNextStage::Done => {
-            if completion.is_truthy() {
+            if runtime.to_boolean(&completion)? {
                 return Ok(NativeDispatch::ForOfStep {
                     value: StoredValue::Undefined,
                     done: true,
@@ -6320,7 +6319,7 @@ pub(super) fn advance_iterator_append(
             )
         }
         IteratorAppendStage::AwaitDone => {
-            if completion.is_truthy() {
+            if runtime.to_boolean(&completion)? {
                 return Ok(NativeDispatch::Pair(
                     StoredValue::Object(state.array),
                     StoredValue::Number(JsNumber::from_u32(state.next_index)),

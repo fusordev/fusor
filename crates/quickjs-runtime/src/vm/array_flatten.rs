@@ -415,7 +415,7 @@ pub(super) fn advance_array_flatten(
                 ));
             }
             ArrayFlattenStage::AwaitElementPresence => {
-                if !take_flatten_completion(&mut completion)?.is_truthy() {
+                if !runtime.to_boolean(&take_flatten_completion(&mut completion)?)? {
                     state.stage = ArrayFlattenStage::NextElement;
                     continue;
                 }

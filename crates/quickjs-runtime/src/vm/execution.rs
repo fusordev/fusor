@@ -3619,14 +3619,17 @@ pub(super) fn execute_one(
         }
         FinalOpcode::IfFalse | FinalOpcode::IfFalse8 => {
             let condition = pop(frame)?;
-            frame.instruction =
-                branch_successor(verified_instruction, !condition.is_truthy(), frame)?;
+            frame.instruction = branch_successor(
+                verified_instruction,
+                !runtime.to_boolean(&condition)?,
+                frame,
+            )?;
             return Ok(Step::Continue);
         }
         FinalOpcode::IfTrue | FinalOpcode::IfTrue8 => {
             let condition = pop(frame)?;
             frame.instruction =
-                branch_successor(verified_instruction, condition.is_truthy(), frame)?;
+                branch_successor(verified_instruction, runtime.to_boolean(&condition)?, frame)?;
             return Ok(Step::Continue);
         }
         FinalOpcode::Goto | FinalOpcode::Goto8 | FinalOpcode::Goto16 => {
@@ -3796,19 +3799,23 @@ pub(super) fn execute_one(
         }
         FinalOpcode::Lnot => {
             let value = pop(frame)?;
-            push(frame, StoredValue::Boolean(!value.is_truthy()));
+            push(frame, StoredValue::Boolean(!runtime.to_boolean(&value)?));
         }
         FinalOpcode::Typeof => {
             let value = pop(frame)?;
-            let name = match value {
-                StoredValue::Undefined => "undefined",
-                StoredValue::Null | StoredValue::Object(_) => "object",
-                StoredValue::Boolean(_) => "boolean",
-                StoredValue::Number(_) => "number",
-                StoredValue::BigInt(_) => "bigint",
-                StoredValue::String(_) => "string",
-                StoredValue::Symbol(_) => "symbol",
-                StoredValue::Function(_) => "function",
+            let name = if runtime.value_has_is_html_dda(&value)? {
+                "undefined"
+            } else {
+                match value {
+                    StoredValue::Undefined => "undefined",
+                    StoredValue::Null | StoredValue::Object(_) => "object",
+                    StoredValue::Boolean(_) => "boolean",
+                    StoredValue::Number(_) => "number",
+                    StoredValue::BigInt(_) => "bigint",
+                    StoredValue::String(_) => "string",
+                    StoredValue::Symbol(_) => "symbol",
+                    StoredValue::Function(_) => "function",
+                }
             };
             push(frame, StoredValue::String(JsString::from_utf8(name)?));
         }
