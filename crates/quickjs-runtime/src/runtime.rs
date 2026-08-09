@@ -4726,6 +4726,7 @@ impl NativeFunctionKind {
                 | Self::ErrorConstructor(_)
                 | Self::BooleanConstructor
                 | Self::NumberConstructor
+                | Self::BigIntConstructor
                 | Self::StringConstructor
                 | Self::ArrayConstructor
                 | Self::ArrayBufferConstructor
@@ -4752,6 +4753,7 @@ impl NativeFunctionKind {
                 | Self::TemporalPlainYearMonthConstructor
                 | Self::TemporalZonedDateTimeConstructor
                 | Self::RegExpConstructor
+                | Self::SymbolConstructor
                 | Self::IteratorConstructor
                 | Self::GeneratorFunctionConstructor
                 | Self::AsyncFunctionConstructor

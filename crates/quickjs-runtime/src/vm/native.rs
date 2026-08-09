@@ -4710,6 +4710,16 @@ pub(super) fn dispatch_native_call_with_frames(
             execution_budget,
         ),
         NativeFunctionKind::SymbolConstructor => {
+            if inputs.new_target.is_some() {
+                return Err(NativeFailure::Abrupt(PendingException {
+                    realm: native.realm,
+                    payload: PendingExceptionPayload::EngineError {
+                        kind: ExceptionKind::TypeError,
+                        message: JsString::from_utf8("Symbol is not a constructor")?,
+                    },
+                    origin: origin.unwrap_or_else(native_function_host_origin),
+                }));
+            }
             let mut arguments = inputs.arguments;
             let Some(argument) = arguments.take_first() else {
                 return Ok(NativeDispatch::Immediate(StoredValue::Symbol(

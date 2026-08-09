@@ -142,6 +142,17 @@ fn an_object_subclass_allocates_from_the_derived_new_target() {
 }
 
 #[test]
+fn symbol_and_bigint_are_valid_heritage_but_reject_construction_before_coercion() {
+    run_with(
+        "function run(){let global=(function(){return this;})();let reflect=global.Reflect;let SymbolConstructor=global.Symbol;let BigIntConstructor=global.BigInt;function isConstructor(value){try{reflect.construct(function(){},[],value);return true;}catch(error){return false;}}class SymbolSubclass extends SymbolConstructor{}class BigIntSubclass extends BigIntConstructor{}let effects=0;let poison={valueOf(){effects++;throw 'valueOf';},toString(){effects++;throw 'toString';}};let symbol=false;let bigint=false;let symbolSubclass=false;let bigintSubclass=false;try{reflect.construct(SymbolConstructor,[poison]);}catch(error){symbol=error.name==='TypeError';}try{reflect.construct(BigIntConstructor,[poison]);}catch(error){bigint=error.name==='TypeError';}try{new SymbolSubclass(poison);}catch(error){symbolSubclass=error.name==='TypeError';}try{new BigIntSubclass(poison);}catch(error){bigintSubclass=error.name==='TypeError';}return isConstructor(SymbolConstructor)&&isConstructor(BigIntConstructor)&&symbol&&bigint&&symbolSubclass&&bigintSubclass&&effects===0;}",
+        |result| {
+            let value = result.expect("primitive constructor rejection");
+            assert_eq!(value.as_boolean().expect("live Boolean"), Some(true));
+        },
+    );
+}
+
+#[test]
 fn class_constructors_reject_native_call_and_apply_paths_before_running_the_body() {
     run_with(
         "function run(){let entries=0;class Base{constructor(){entries++;}}class Derived extends Base{constructor(){entries+=10;super();}}let rejected=0;try{Base.call({});}catch(error){if(error.name==='TypeError')rejected++;}try{Base.apply({},[]);}catch(error){if(error.name==='TypeError')rejected++;}try{Derived.call({});}catch(error){if(error.name==='TypeError')rejected++;}try{Derived.apply({},[]);}catch(error){if(error.name==='TypeError')rejected++;}return rejected===4&&entries===0;}",
