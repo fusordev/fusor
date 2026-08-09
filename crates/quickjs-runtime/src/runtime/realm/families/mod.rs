@@ -10,6 +10,7 @@ mod date;
 mod error;
 mod generator;
 mod globals;
+mod intl;
 mod iterator;
 mod json;
 mod kernel;
@@ -194,6 +195,19 @@ pub(super) const fn is_declarative_object(id: IntrinsicObjectId) -> bool {
             | IntrinsicObjectId::WeakSetPrototype
             | IntrinsicObjectId::WeakRefPrototype
             | IntrinsicObjectId::FinalizationRegistryPrototype
+            | IntrinsicObjectId::Intl
+            | IntrinsicObjectId::IntlCollatorPrototype
+            | IntrinsicObjectId::IntlNumberFormatPrototype
+            | IntrinsicObjectId::IntlDateTimeFormatPrototype
+            | IntrinsicObjectId::IntlPluralRulesPrototype
+            | IntrinsicObjectId::IntlRelativeTimeFormatPrototype
+            | IntrinsicObjectId::IntlListFormatPrototype
+            | IntrinsicObjectId::IntlDisplayNamesPrototype
+            | IntrinsicObjectId::IntlDurationFormatPrototype
+            | IntrinsicObjectId::IntlSegmenterPrototype
+            | IntrinsicObjectId::IntlSegmentsPrototype
+            | IntrinsicObjectId::IntlSegmentIteratorPrototype
+            | IntrinsicObjectId::IntlLocalePrototype
             | IntrinsicObjectId::Reflect
             | IntrinsicObjectId::Json
             | IntrinsicObjectId::Math
@@ -334,6 +348,43 @@ pub(super) const fn is_declarative_function(id: IntrinsicFunctionId) -> bool {
             | NativeFunctionKind::JsonParse
             | NativeFunctionKind::JsonRawJson
             | NativeFunctionKind::JsonStringify
+            | NativeFunctionKind::IntlGetCanonicalLocales
+            | NativeFunctionKind::IntlSupportedValuesOf
+            | NativeFunctionKind::IntlCollatorConstructor
+            | NativeFunctionKind::IntlCollatorSupportedLocalesOf
+            | NativeFunctionKind::IntlCollatorPrototype(_)
+            | NativeFunctionKind::IntlCollatorCompare
+            | NativeFunctionKind::IntlNumberFormatConstructor
+            | NativeFunctionKind::IntlNumberFormatSupportedLocalesOf
+            | NativeFunctionKind::IntlNumberFormatPrototype(_)
+            | NativeFunctionKind::IntlNumberFormatFormat
+            | NativeFunctionKind::IntlDateTimeFormatConstructor
+            | NativeFunctionKind::IntlDateTimeFormatSupportedLocalesOf
+            | NativeFunctionKind::IntlDateTimeFormatPrototype(_)
+            | NativeFunctionKind::IntlDateTimeFormatFormat
+            | NativeFunctionKind::IntlPluralRulesConstructor
+            | NativeFunctionKind::IntlPluralRulesSupportedLocalesOf
+            | NativeFunctionKind::IntlPluralRulesPrototype(_)
+            | NativeFunctionKind::IntlRelativeTimeFormatConstructor
+            | NativeFunctionKind::IntlRelativeTimeFormatSupportedLocalesOf
+            | NativeFunctionKind::IntlRelativeTimeFormatPrototype(_)
+            | NativeFunctionKind::IntlListFormatConstructor
+            | NativeFunctionKind::IntlListFormatSupportedLocalesOf
+            | NativeFunctionKind::IntlListFormatPrototype(_)
+            | NativeFunctionKind::IntlDisplayNamesConstructor
+            | NativeFunctionKind::IntlDisplayNamesSupportedLocalesOf
+            | NativeFunctionKind::IntlDisplayNamesPrototype(_)
+            | NativeFunctionKind::IntlDurationFormatConstructor
+            | NativeFunctionKind::IntlDurationFormatSupportedLocalesOf
+            | NativeFunctionKind::IntlDurationFormatPrototype(_)
+            | NativeFunctionKind::IntlSegmenterConstructor
+            | NativeFunctionKind::IntlSegmenterSupportedLocalesOf
+            | NativeFunctionKind::IntlSegmenterPrototype(_)
+            | NativeFunctionKind::IntlSegmentsContaining
+            | NativeFunctionKind::IntlSegmentsIterator
+            | NativeFunctionKind::IntlSegmentIteratorNext
+            | NativeFunctionKind::IntlLocaleConstructor
+            | NativeFunctionKind::IntlLocalePrototype(_)
             | NativeFunctionKind::Math(_)
             | NativeFunctionKind::Atomics(_)
             | NativeFunctionKind::TemporalNow(_)
@@ -514,6 +565,7 @@ fn is_global_namespace_property(property: IntrinsicPropertySpec) -> bool {
             IntrinsicDescriptorSpec::Data {
                 value: IntrinsicValueSpec::Object(
                     IntrinsicObjectId::Reflect
+                        | IntrinsicObjectId::Intl
                         | IntrinsicObjectId::Json
                         | IntrinsicObjectId::Math
                         | IntrinsicObjectId::Atomics
@@ -1043,6 +1095,7 @@ fn visit_object_specs(visit: ObjectSink<'_>) {
     set::visit_objects(visit);
     weak_collections::visit_objects(visit);
     weak_references::visit_objects(visit);
+    intl::visit_objects(visit);
     reflect::visit_objects(visit);
     json::visit_objects(visit);
     math::visit_objects(visit);
@@ -1073,6 +1126,7 @@ fn visit_function_specs(visit: FunctionSink<'_>) {
     set::visit_functions(visit);
     weak_collections::visit_functions(visit);
     weak_references::visit_functions(visit);
+    intl::visit_functions(visit);
     reflect::visit_functions(visit);
     json::visit_functions(visit);
     math::visit_functions(visit);
@@ -1106,6 +1160,7 @@ fn visit_property_specs(visit: PropertySink<'_>) {
     weak_collections::visit_properties(visit);
     weak_references::visit_properties(visit);
     globals::visit_properties(visit);
+    intl::visit_properties(visit);
     reflect::visit_properties(visit);
     json::visit_properties(visit);
     math::visit_properties(visit);

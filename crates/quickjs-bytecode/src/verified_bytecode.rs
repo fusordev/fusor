@@ -7825,6 +7825,13 @@ fn classify_iteration_declarative_local_puts(
             limits.max_policy_transfers,
         )?;
         let definition = &variables[argument_count + local];
+        // Mutable lexical writes are already proven safe by the binding-state
+        // pass once their scope is active. An iterator-backed destructuring
+        // assignment may use a different cursor than the declaration's
+        // iterator, so it must not be mistaken for a second declarative put.
+        if definition.policy.writes == CompilerWritePolicy::Mutable {
+            continue;
+        }
         if definition.policy.temporal_dead_zone && summary.multiple_cursor_sites {
             return Err(policy_error(
                 id,

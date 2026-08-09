@@ -54,13 +54,14 @@ use icu_normalizer::{ComposingNormalizerBorrowed, DecomposingNormalizerBorrowed}
 use writeable::Writeable as _;
 
 /// One already-coerced argument.
-#[derive(Clone, Debug)]
+#[derive(Debug)]
 enum ConvertedArgument {
     Text(JsString),
     /// An absent or `undefined` optional argument.
     Absent,
     Integer(f64),
     Number(JsNumber),
+    Value(StoredValue),
 }
 
 impl ConvertedArgument {
@@ -68,7 +69,7 @@ impl ConvertedArgument {
     fn text(&self) -> Result<&JsString, NativeFailure> {
         match self {
             Self::Text(value) => Ok(value),
-            Self::Absent | Self::Integer(_) | Self::Number(_) => {
+            Self::Absent | Self::Integer(_) | Self::Number(_) | Self::Value(_) => {
                 Err(EngineFault::RuntimeInvariant {
                     message: "a String method read a non-string argument as text",
                 }
@@ -81,10 +82,24 @@ impl ConvertedArgument {
     fn integer(&self) -> Result<f64, NativeFailure> {
         match self {
             Self::Integer(value) => Ok(*value),
-            Self::Text(_) | Self::Absent | Self::Number(_) => Err(EngineFault::RuntimeInvariant {
-                message: "a String method read a non-integer argument as an integer",
+            Self::Text(_) | Self::Absent | Self::Number(_) | Self::Value(_) => {
+                Err(EngineFault::RuntimeInvariant {
+                    message: "a String method read a non-integer argument as an integer",
+                }
+                .into())
             }
-            .into()),
+        }
+    }
+
+    fn value(&self) -> Result<&StoredValue, NativeFailure> {
+        match self {
+            Self::Value(value) => Ok(value),
+            Self::Text(_) | Self::Absent | Self::Integer(_) | Self::Number(_) => {
+                Err(EngineFault::RuntimeInvariant {
+                    message: "an Intl String method lost an unconverted argument",
+                }
+                .into())
+            }
         }
     }
 }
@@ -130,6 +145,11 @@ impl StringMethodContinuation {
         trace_stored_value_root(&self.receiver, mark);
         for value in &self.pending {
             trace_stored_value_root(value, mark);
+        }
+        for value in &self.converted {
+            if let ConvertedArgument::Value(value) = value {
+                trace_stored_value_root(value, mark);
+            }
         }
     }
 }
@@ -263,7 +283,14 @@ pub(super) fn advance_string_method(
                 }
 
                 let Some(value) = state.pending.get(state.next_argument) else {
-                    return finish_string_method(&state, execution_budget);
+                    return match state.method {
+                        StringMethod::LocaleCompare
+                        | StringMethod::ToLocaleLowerCase
+                        | StringMethod::ToLocaleUpperCase => {
+                            finish_intl_string_method(runtime, state, return_to, execution_budget)
+                        }
+                        _ => finish_string_method(&state, execution_budget),
+                    };
                 };
                 let shape = argument_shape_at(state.method, state.next_argument);
                 let value = value.duplicate();
@@ -287,6 +314,10 @@ pub(super) fn advance_string_method(
                     continue;
                 }
 
+                if shape == StringArgument::Value {
+                    completion = Some(value);
+                    continue;
+                }
                 let hint = match shape {
                     StringArgument::String | StringArgument::OptionalString => {
                         OperatorPrimitiveHint::String
@@ -294,6 +325,7 @@ pub(super) fn advance_string_method(
                     StringArgument::Integer
                     | StringArgument::OptionalInteger
                     | StringArgument::Number => OperatorPrimitiveHint::Number,
+                    StringArgument::Value => unreachable!("raw Intl arguments returned above"),
                 };
                 // An already-primitive argument converts without suspending.
                 if !matches!(value, StoredValue::Function(_) | StoredValue::Object(_)) {
@@ -346,6 +378,81 @@ fn convert_argument(
         StringArgument::Number => Ok(ConvertedArgument::Number(operator_to_number(
             value, realm, origin,
         )?)),
+        StringArgument::Value => Ok(ConvertedArgument::Value(value)),
+    }
+}
+
+fn finish_intl_string_method(
+    runtime: &mut Runtime,
+    state: StringMethodContinuation,
+    return_to: Option<CallReturn>,
+    execution_budget: &mut ExecutionBudget,
+) -> Result<NativeDispatch, NativeFailure> {
+    let subject = state.subject.ok_or(EngineFault::RuntimeInvariant {
+        message: "an Intl String method lost its converted receiver",
+    })?;
+    match state.method {
+        StringMethod::LocaleCompare => {
+            let that = state
+                .converted
+                .first()
+                .ok_or(EngineFault::RuntimeInvariant {
+                    message: "String.prototype.localeCompare lost its comparison string",
+                })?
+                .text()?
+                .clone();
+            let locales = state
+                .converted
+                .get(1)
+                .ok_or(EngineFault::RuntimeInvariant {
+                    message: "String.prototype.localeCompare lost its locales argument",
+                })?
+                .value()?
+                .duplicate();
+            let options = state
+                .converted
+                .get(2)
+                .ok_or(EngineFault::RuntimeInvariant {
+                    message: "String.prototype.localeCompare lost its options argument",
+                })?
+                .value()?
+                .duplicate();
+            begin_intl_string_locale_compare(
+                runtime,
+                subject,
+                that,
+                locales,
+                options,
+                state.realm,
+                return_to,
+                state.origin,
+                execution_budget,
+            )
+        }
+        StringMethod::ToLocaleLowerCase | StringMethod::ToLocaleUpperCase => {
+            let locales = state
+                .converted
+                .first()
+                .ok_or(EngineFault::RuntimeInvariant {
+                    message: "a locale-sensitive String case method lost its locales argument",
+                })?
+                .value()?
+                .duplicate();
+            begin_intl_string_case_mapping(
+                runtime,
+                subject,
+                locales,
+                state.method == StringMethod::ToLocaleUpperCase,
+                state.realm,
+                return_to,
+                state.origin,
+                execution_budget,
+            )
+        }
+        _ => Err(EngineFault::RuntimeInvariant {
+            message: "a non-Intl String method entered Intl completion",
+        }
+        .into()),
     }
 }
 
@@ -633,17 +740,29 @@ fn finish_string_method(
         }
         StringMethod::IsWellFormed => StoredValue::Boolean(is_well_formed(subject)),
         StringMethod::ToWellFormed => StoredValue::String(to_well_formed(subject)?),
-        StringMethod::ToLowerCase | StringMethod::ToLocaleLowerCase => {
+        StringMethod::ToLowerCase => {
             execution_budget.charge_instructions(u64::from(subject.len()).saturating_add(1))?;
-            let result = transform_unicode_segments(subject, UnicodeTransform::Lowercase)?;
+            let result = transform_unicode_segments(
+                subject,
+                UnicodeTransform::Lowercase(&LanguageIdentifier::UNKNOWN),
+            )?;
             execution_budget.charge_instructions(u64::from(result.len()))?;
             StoredValue::String(result)
         }
-        StringMethod::ToUpperCase | StringMethod::ToLocaleUpperCase => {
+        StringMethod::ToUpperCase => {
             execution_budget.charge_instructions(u64::from(subject.len()).saturating_add(1))?;
-            let result = transform_unicode_segments(subject, UnicodeTransform::Uppercase)?;
+            let result = transform_unicode_segments(
+                subject,
+                UnicodeTransform::Uppercase(&LanguageIdentifier::UNKNOWN),
+            )?;
             execution_budget.charge_instructions(u64::from(result.len()))?;
             StoredValue::String(result)
+        }
+        StringMethod::ToLocaleLowerCase | StringMethod::ToLocaleUpperCase => {
+            return Err(EngineFault::RuntimeInvariant {
+                message: "a locale-sensitive String case method bypassed CanonicalizeLocaleList",
+            }
+            .into());
         }
         StringMethod::Normalize => {
             let form = match argument(0)? {
@@ -661,7 +780,9 @@ fn finish_string_method(
                     };
                     form
                 }
-                ConvertedArgument::Integer(_) | ConvertedArgument::Number(_) => {
+                ConvertedArgument::Integer(_)
+                | ConvertedArgument::Number(_)
+                | ConvertedArgument::Value(_) => {
                     return Err(EngineFault::RuntimeInvariant {
                         message: "String.prototype.normalize lost its form String",
                     }
@@ -674,32 +795,36 @@ fn finish_string_method(
             StoredValue::String(result)
         }
         StringMethod::LocaleCompare => {
-            let that = argument(0)?.text()?;
-            execution_budget.charge_instructions(
-                u64::from(subject.len())
-                    .saturating_add(u64::from(that.len()))
-                    .saturating_add(1),
-            )?;
-            let left = transform_unicode_segments(
-                subject,
-                UnicodeTransform::Normalize(NormalizationForm::Nfc),
-            )?;
-            let right = transform_unicode_segments(
-                that,
-                UnicodeTransform::Normalize(NormalizationForm::Nfc),
-            )?;
-            execution_budget.charge_instructions(
-                u64::from(left.len()).saturating_add(u64::from(right.len())),
-            )?;
-            let ordering = match left.cmp(&right) {
-                std::cmp::Ordering::Less => -1,
-                std::cmp::Ordering::Equal => 0,
-                std::cmp::Ordering::Greater => 1,
-            };
-            StoredValue::Number(JsNumber::from_i32(ordering))
+            return Err(EngineFault::RuntimeInvariant {
+                message: "String.prototype.localeCompare bypassed Intl.Collator resolution",
+            }
+            .into());
         }
     };
     Ok(NativeDispatch::Immediate(value))
+}
+
+pub(super) fn finish_locale_case_mapping(
+    subject: &JsString,
+    language: &str,
+    uppercase: bool,
+    execution_budget: &mut ExecutionBudget,
+) -> Result<NativeDispatch, NativeFailure> {
+    let language =
+        language
+            .parse::<LanguageIdentifier>()
+            .map_err(|_| EngineFault::RuntimeInvariant {
+                message: "a canonical locale produced an invalid case-mapping language",
+            })?;
+    execution_budget.charge_instructions(u64::from(subject.len()).saturating_add(1))?;
+    let transform = if uppercase {
+        UnicodeTransform::Uppercase(&language)
+    } else {
+        UnicodeTransform::Lowercase(&language)
+    };
+    let result = transform_unicode_segments(subject, transform)?;
+    execution_budget.charge_instructions(u64::from(result.len()))?;
+    Ok(NativeDispatch::Immediate(StoredValue::String(result)))
 }
 
 /// One of the four normalization forms admitted by ECMA-262.
@@ -714,9 +839,9 @@ enum NormalizationForm {
 /// One Unicode transform applied independently to scalar runs separated by a
 /// lone surrogate.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum UnicodeTransform {
-    Lowercase,
-    Uppercase,
+enum UnicodeTransform<'a> {
+    Lowercase(&'a LanguageIdentifier),
+    Uppercase(&'a LanguageIdentifier),
     Normalize(NormalizationForm),
 }
 
@@ -751,7 +876,7 @@ fn js_string_is_ascii(value: &JsString, expected: &[u8]) -> bool {
 /// ignorable, and break both normalization sequences and case context.
 fn transform_unicode_segments(
     subject: &JsString,
-    transform: UnicodeTransform,
+    transform: UnicodeTransform<'_>,
 ) -> Result<JsString, JsStringError> {
     let mut output = Vec::new();
     let mut segment = String::new();
@@ -778,7 +903,7 @@ fn transform_unicode_segments(
 /// Writes one valid scalar segment through the selected ICU4X operation.
 fn flush_unicode_segment(
     segment: &str,
-    transform: UnicodeTransform,
+    transform: UnicodeTransform<'_>,
     output: &mut Vec<u16>,
 ) -> Result<(), JsStringError> {
     if segment.is_empty() {
@@ -786,11 +911,11 @@ fn flush_unicode_segment(
     }
     let mut sink = FallibleUtf16Sink::new(output);
     let result = match transform {
-        UnicodeTransform::Lowercase => CaseMapperBorrowed::new()
-            .lowercase(segment, &LanguageIdentifier::UNKNOWN)
+        UnicodeTransform::Lowercase(language) => CaseMapperBorrowed::new()
+            .lowercase(segment, language)
             .write_to(&mut sink),
-        UnicodeTransform::Uppercase => CaseMapperBorrowed::new()
-            .uppercase(segment, &LanguageIdentifier::UNKNOWN)
+        UnicodeTransform::Uppercase(language) => CaseMapperBorrowed::new()
+            .uppercase(segment, language)
             .write_to(&mut sink),
         UnicodeTransform::Normalize(NormalizationForm::Nfc) => {
             ComposingNormalizerBorrowed::new_nfc().normalize_to(segment, &mut sink)

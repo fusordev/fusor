@@ -815,12 +815,12 @@ impl<'arena> CompilationContext<'_, 'arena, '_> {
         Ok(())
     }
 
-    /// Re-arms the for-of loop scope's non-captured TDZ cells at the back
-    /// edge. Each iteration writes the head bindings (identifier or
-    /// destructuring) as fresh initializations; captured cells rotate through
-    /// `close_loc`, and the non-captured cells return to the uninitialized
-    /// state exactly like the captured rotation, so every iteration's write
-    /// is a valid initialization.
+    /// Re-arms the for-of loop scope's TDZ cells at the back edge. Each
+    /// iteration writes the head bindings (identifier or
+    /// destructuring) as fresh initializations. Captured cells first detach
+    /// through `close_loc`; re-arming every TDZ local here then makes the new
+    /// direct binding uninitialized before the next head write, while the
+    /// detached cell retains the preceding iteration's value.
     pub(in crate::lowering) fn plan_for_of_rotation(
         &self,
         executable: ExecutableId,
@@ -851,7 +851,7 @@ impl<'arena> CompilationContext<'_, 'arena, '_> {
                     span: Some(declaration_span),
                 });
             }
-            if storage.is_frame_captured() || !storage.policy().has_temporal_dead_zone() {
+            if !storage.policy().has_temporal_dead_zone() {
                 continue;
             }
             let FrameSlot::Local(slot) =

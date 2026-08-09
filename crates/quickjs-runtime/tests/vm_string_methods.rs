@@ -644,13 +644,17 @@ fn unicode_case_conversion_handles_context_expansion_and_surrogates() {
         // Full uppercasing can expand one code point into several.
         ("'Straße'.toUpperCase()", "STRASSE"),
         ("'\\u0130'.toLowerCase()", "i̇"),
-        // Locale-named methods use the deterministic root locale in this
-        // no-Intl profile and ignore their reserved arguments.
-        ("'I'.toLocaleLowerCase('tr')", "i"),
-        ("'i'.toLocaleUpperCase('tr')", "I"),
+        // Locale-named methods canonicalize the full locale list and apply
+        // the selected locale's special casing.
+        ("'I'.toLocaleLowerCase('tr')", "ı"),
+        ("'i'.toLocaleUpperCase('tr')", "İ"),
         (
             "(function(){let used=false;const locale={toString(){used=true;return 'tr';}};'I'.toLocaleLowerCase(locale);return used;})()",
             "false",
+        ),
+        (
+            "(function(){let used=false;const locale={toString(){used=true;return 'tr';}};'I'.toLocaleLowerCase([locale]);return used;})()",
+            "true",
         ),
         // Unicode transforms must preserve an ECMAScript lone surrogate.
         (
@@ -690,9 +694,8 @@ fn normalization_supports_all_forms_and_exact_conversion_order() {
     );
 }
 
-/// The deterministic no-Intl comparator orders NFC representatives, making
-/// every canonically equivalent pair compare equal without folding
-/// compatibility equivalents together.
+/// `localeCompare` delegates to the same resolved collation engine as
+/// `Intl.Collator` while retaining receiver-then-argument coercion order.
 #[test]
 fn locale_compare_honours_canonical_equivalence_and_total_order() {
     assert_all(&[

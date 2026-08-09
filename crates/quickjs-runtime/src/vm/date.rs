@@ -910,23 +910,31 @@ pub(super) fn dispatch_date_prototype(
         );
     }
     let (object, value) = require_date_value(runtime, receiver, realm, &origin)?;
+    if matches!(
+        method,
+        DatePrototypeMethod::ToLocaleString
+            | DatePrototypeMethod::ToLocaleDateString
+            | DatePrototypeMethod::ToLocaleTimeString
+    ) {
+        return begin_intl_date_to_locale_string(
+            runtime,
+            method,
+            arguments,
+            value,
+            realm,
+            return_to,
+            origin,
+            execution_budget,
+        );
+    }
     match method {
         DatePrototypeMethod::ValueOf | DatePrototypeMethod::GetTime => {
             Ok(NativeDispatch::Immediate(StoredValue::Number(value)))
         }
         DatePrototypeMethod::ToString
         | DatePrototypeMethod::ToDateString
-        | DatePrototypeMethod::ToTimeString
-        | DatePrototypeMethod::ToLocaleString
-        | DatePrototypeMethod::ToLocaleDateString
-        | DatePrototypeMethod::ToLocaleTimeString => {
-            let render_method = match method {
-                DatePrototypeMethod::ToLocaleString => DatePrototypeMethod::ToString,
-                DatePrototypeMethod::ToLocaleDateString => DatePrototypeMethod::ToDateString,
-                DatePrototypeMethod::ToLocaleTimeString => DatePrototypeMethod::ToTimeString,
-                method => method,
-            };
-            let rendered = local_date_string(render_method, value.as_f64());
+        | DatePrototypeMethod::ToTimeString => {
+            let rendered = local_date_string(method, value.as_f64());
             Ok(NativeDispatch::Immediate(StoredValue::String(
                 JsString::from_utf8(&rendered)?,
             )))
@@ -1036,6 +1044,11 @@ pub(super) fn dispatch_date_prototype(
         ),
         DatePrototypeMethod::ToJson | DatePrototypeMethod::SymbolToPrimitive => {
             unreachable!("generic Date method dispatched through branded path")
+        }
+        DatePrototypeMethod::ToLocaleString
+        | DatePrototypeMethod::ToLocaleDateString
+        | DatePrototypeMethod::ToLocaleTimeString => {
+            unreachable!("locale Date methods dispatched through Intl.DateTimeFormat")
         }
     }
 }

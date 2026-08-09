@@ -2094,6 +2094,7 @@ fn realm_installs_the_exact_function_intrinsic_graph() {
         finalization_registry: _,
         regexp: _,
         date: _,
+        intl: _,
         temporal: _,
         array_buffer: _,
         shared_array_buffer: _,
@@ -3838,6 +3839,66 @@ fn realm_function_intrinsics_remain_roots_during_collection() {
             .expect("realm state")
             .intrinsics,
         expected_intrinsics
+    );
+}
+
+#[test]
+fn realm_segmenter_hidden_intrinsics_remain_roots_during_collection() {
+    let mut runtime = Runtime::try_new(RuntimeLimits::default()).expect("runtime");
+    let realm = runtime.create_realm().expect("realm");
+    let realm_id = realm.0.id;
+    let segmenter_prototype = runtime
+        .realm_intl_segmenter_prototype(realm_id)
+        .expect("Intl.Segmenter.prototype");
+    let segments_prototype = runtime
+        .realm_intl_segments_prototype(realm_id)
+        .expect("Intl Segments prototype");
+    let segment_iterator_prototype = runtime
+        .realm_intl_segment_iterator_prototype(realm_id)
+        .expect("Intl Segment Iterator prototype");
+
+    let report = runtime.collect_cycles().expect("collection");
+
+    assert_eq!(report.objects(), 0);
+    assert_eq!(runtime.usage().heap_objects(), realm_object_slots());
+    assert_eq!(
+        runtime
+            .realm_intl_segmenter_prototype(realm_id)
+            .expect("rooted Intl.Segmenter.prototype"),
+        segmenter_prototype
+    );
+    assert_eq!(
+        runtime
+            .realm_intl_segments_prototype(realm_id)
+            .expect("rooted Intl Segments prototype"),
+        segments_prototype
+    );
+    assert_eq!(
+        runtime
+            .realm_intl_segment_iterator_prototype(realm_id)
+            .expect("rooted Intl Segment Iterator prototype"),
+        segment_iterator_prototype
+    );
+}
+
+#[test]
+fn realm_duration_format_hidden_intrinsic_remains_a_root_during_collection() {
+    let mut runtime = Runtime::try_new(RuntimeLimits::default()).expect("runtime");
+    let realm = runtime.create_realm().expect("realm");
+    let realm_id = realm.0.id;
+    let duration_format_prototype = runtime
+        .realm_intl_duration_format_prototype(realm_id)
+        .expect("Intl.DurationFormat.prototype");
+
+    let report = runtime.collect_cycles().expect("collection");
+
+    assert_eq!(report.objects(), 0);
+    assert_eq!(runtime.usage().heap_objects(), realm_object_slots());
+    assert_eq!(
+        runtime
+            .realm_intl_duration_format_prototype(realm_id)
+            .expect("rooted Intl.DurationFormat.prototype"),
+        duration_format_prototype
     );
 }
 

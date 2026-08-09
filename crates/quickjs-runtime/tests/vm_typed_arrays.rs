@@ -622,6 +622,22 @@ fn typed_array_join_captures_length_before_separator_conversion() {
 }
 
 #[test]
+fn typed_array_to_locale_string_shares_array_function_and_forwards_arguments() {
+    assert_eq!(
+        rendered(
+            "var proto=Object.getPrototypeOf(Uint8Array.prototype),\
+             descriptor=Object.getOwnPropertyDescriptor(proto,'toLocaleString'),\
+             expected=(0).toLocaleString('th-u-nu-thai',{minimumFractionDigits:3});\
+             return [proto.toLocaleString===Array.prototype.toLocaleString,\
+               descriptor.writable,descriptor.enumerable,descriptor.configurable,\
+               proto.toLocaleString.length,proto.toLocaleString.name,\
+               new Uint8Array([0]).toLocaleString('th-u-nu-thai',{minimumFractionDigits:3})===expected].join('|');"
+        ),
+        "true|true|false|true|0|toLocaleString|true"
+    );
+}
+
+#[test]
 fn typed_array_to_reversed_creates_an_independent_same_type_copy() {
     assert_eq!(
         rendered(

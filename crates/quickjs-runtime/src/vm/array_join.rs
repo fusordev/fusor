@@ -341,7 +341,7 @@ pub(super) fn advance_array_join(
                         state.accumulated = state.accumulated.concat(&text)?;
                         state.stage = ArrayJoinStage::NextElement;
                     }
-                    value => {
+                    value @ (StoredValue::Function(_) | StoredValue::Object(_)) => {
                         let realm = state.realm;
                         state.stage = ArrayJoinStage::AwaitElementString;
                         return begin_operator_primitive_conversion(
@@ -354,6 +354,11 @@ pub(super) fn advance_array_join(
                             native_function_host_origin(),
                             execution_budget,
                         );
+                    }
+                    value => {
+                        let text = operator_primitive_to_string(value, state.realm, &state.origin)?;
+                        state.accumulated = state.accumulated.concat(&text)?;
+                        state.stage = ArrayJoinStage::NextElement;
                     }
                 }
             }

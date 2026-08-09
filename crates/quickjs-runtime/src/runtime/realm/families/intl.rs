@@ -1,0 +1,792 @@
+//! `%Intl%` namespace declarations.
+
+use super::{
+    FunctionSink, ObjectSink, PropertySink, accessor, data, method, object, object_prototype,
+    ordinary,
+};
+use crate::runtime::realm::{
+    CONSTRUCTOR_PROTOTYPE_PROPERTY, IDENTITY_PROPERTY, METHOD_PROPERTY, NativeFunctionKind,
+    PredefinedAtom, PropertyLayout,
+    schema::{
+        IntrinsicFunctionId, IntrinsicIdentity, IntrinsicKeySpec, IntrinsicNameSpec,
+        IntrinsicObjectId, IntrinsicObjectKind, IntrinsicStringSpec, IntrinsicValueSpec,
+        PrototypeSpec, RealmNameId,
+    },
+};
+use crate::runtime::{
+    IntlCollatorPrototypeMethod, IntlDateTimeFormatPrototypeMethod,
+    IntlDisplayNamesPrototypeMethod, IntlDurationFormatPrototypeMethod,
+    IntlListFormatPrototypeMethod, IntlLocalePrototypeMethod, IntlNumberFormatPrototypeMethod,
+    IntlPluralRulesPrototypeMethod, IntlRelativeTimeFormatPrototypeMethod,
+    IntlSegmenterPrototypeMethod,
+};
+
+pub(super) fn visit_objects(visit: ObjectSink<'_>) {
+    for id in [
+        IntrinsicObjectId::Intl,
+        IntrinsicObjectId::IntlCollatorPrototype,
+        IntrinsicObjectId::IntlNumberFormatPrototype,
+        IntrinsicObjectId::IntlDateTimeFormatPrototype,
+        IntrinsicObjectId::IntlPluralRulesPrototype,
+        IntrinsicObjectId::IntlRelativeTimeFormatPrototype,
+        IntrinsicObjectId::IntlListFormatPrototype,
+        IntrinsicObjectId::IntlDisplayNamesPrototype,
+        IntrinsicObjectId::IntlDurationFormatPrototype,
+        IntrinsicObjectId::IntlSegmenterPrototype,
+        IntrinsicObjectId::IntlSegmentsPrototype,
+        IntrinsicObjectId::IntlLocalePrototype,
+    ] {
+        visit(object(
+            id,
+            object_prototype(),
+            IntrinsicObjectKind::Ordinary,
+        ));
+    }
+    visit(object(
+        IntrinsicObjectId::IntlSegmentIteratorPrototype,
+        PrototypeSpec::Intrinsic(IntrinsicIdentity::Object(
+            IntrinsicObjectId::IteratorPrototype,
+        )),
+        IntrinsicObjectKind::Ordinary,
+    ));
+}
+
+#[allow(
+    clippy::too_many_lines,
+    reason = "the declarative Intl function graph stays together for identity and arity audits"
+)]
+pub(super) fn visit_functions(visit: FunctionSink<'_>) {
+    visit(ordinary(
+        NativeFunctionKind::IntlGetCanonicalLocales,
+        IntrinsicNameSpec::RealmName(RealmNameId::IntlGetCanonicalLocales),
+        1,
+    ));
+    visit(ordinary(
+        NativeFunctionKind::IntlSupportedValuesOf,
+        IntrinsicNameSpec::RealmName(RealmNameId::IntlSupportedValuesOf),
+        1,
+    ));
+    visit(ordinary(
+        NativeFunctionKind::IntlCollatorConstructor,
+        IntrinsicNameSpec::RealmName(RealmNameId::Collator),
+        0,
+    ));
+    visit(ordinary(
+        NativeFunctionKind::IntlCollatorSupportedLocalesOf,
+        IntrinsicNameSpec::RealmName(RealmNameId::IntlCollatorSupportedLocalesOf),
+        1,
+    ));
+    for method in IntlCollatorPrototypeMethod::ALL {
+        let name = if method.is_accessor() {
+            IntrinsicNameSpec::Literal("get compare")
+        } else {
+            IntrinsicNameSpec::RealmName(RealmNameId::IntlCollatorPrototype(method))
+        };
+        visit(ordinary(
+            NativeFunctionKind::IntlCollatorPrototype(method),
+            name,
+            0,
+        ));
+    }
+    visit(ordinary(
+        NativeFunctionKind::IntlCollatorCompare,
+        IntrinsicNameSpec::Literal(""),
+        2,
+    ));
+    visit(ordinary(
+        NativeFunctionKind::IntlNumberFormatConstructor,
+        IntrinsicNameSpec::RealmName(RealmNameId::IntlNumberFormat),
+        0,
+    ));
+    visit(ordinary(
+        NativeFunctionKind::IntlNumberFormatSupportedLocalesOf,
+        IntrinsicNameSpec::RealmName(RealmNameId::IntlNumberFormatSupportedLocalesOf),
+        1,
+    ));
+    for method in IntlNumberFormatPrototypeMethod::ALL {
+        let name = if method.is_accessor() {
+            IntrinsicNameSpec::Literal("get format")
+        } else {
+            IntrinsicNameSpec::RealmName(RealmNameId::IntlNumberFormatPrototype(method))
+        };
+        visit(ordinary(
+            NativeFunctionKind::IntlNumberFormatPrototype(method),
+            name,
+            method.length(),
+        ));
+    }
+    visit(ordinary(
+        NativeFunctionKind::IntlNumberFormatFormat,
+        IntrinsicNameSpec::Literal(""),
+        1,
+    ));
+    visit(ordinary(
+        NativeFunctionKind::IntlDateTimeFormatConstructor,
+        IntrinsicNameSpec::RealmName(RealmNameId::IntlDateTimeFormat),
+        0,
+    ));
+    visit(ordinary(
+        NativeFunctionKind::IntlDateTimeFormatSupportedLocalesOf,
+        IntrinsicNameSpec::RealmName(RealmNameId::IntlDateTimeFormatSupportedLocalesOf),
+        1,
+    ));
+    for method in IntlDateTimeFormatPrototypeMethod::ALL {
+        let name = if method.is_accessor() {
+            IntrinsicNameSpec::Literal("get format")
+        } else {
+            IntrinsicNameSpec::RealmName(RealmNameId::IntlDateTimeFormatPrototype(method))
+        };
+        visit(ordinary(
+            NativeFunctionKind::IntlDateTimeFormatPrototype(method),
+            name,
+            method.length(),
+        ));
+    }
+    visit(ordinary(
+        NativeFunctionKind::IntlDateTimeFormatFormat,
+        IntrinsicNameSpec::Literal(""),
+        1,
+    ));
+    visit(ordinary(
+        NativeFunctionKind::IntlPluralRulesConstructor,
+        IntrinsicNameSpec::RealmName(RealmNameId::IntlPluralRules),
+        0,
+    ));
+    visit(ordinary(
+        NativeFunctionKind::IntlPluralRulesSupportedLocalesOf,
+        IntrinsicNameSpec::RealmName(RealmNameId::IntlPluralRulesSupportedLocalesOf),
+        1,
+    ));
+    for method in IntlPluralRulesPrototypeMethod::ALL {
+        visit(ordinary(
+            NativeFunctionKind::IntlPluralRulesPrototype(method),
+            IntrinsicNameSpec::RealmName(RealmNameId::IntlPluralRulesPrototype(method)),
+            method.length(),
+        ));
+    }
+    visit(ordinary(
+        NativeFunctionKind::IntlRelativeTimeFormatConstructor,
+        IntrinsicNameSpec::RealmName(RealmNameId::IntlRelativeTimeFormat),
+        0,
+    ));
+    visit(ordinary(
+        NativeFunctionKind::IntlRelativeTimeFormatSupportedLocalesOf,
+        IntrinsicNameSpec::RealmName(RealmNameId::IntlRelativeTimeFormatSupportedLocalesOf),
+        1,
+    ));
+    for method in IntlRelativeTimeFormatPrototypeMethod::ALL {
+        visit(ordinary(
+            NativeFunctionKind::IntlRelativeTimeFormatPrototype(method),
+            IntrinsicNameSpec::RealmName(RealmNameId::IntlRelativeTimeFormatPrototype(method)),
+            method.length(),
+        ));
+    }
+    visit(ordinary(
+        NativeFunctionKind::IntlListFormatConstructor,
+        IntrinsicNameSpec::RealmName(RealmNameId::IntlListFormat),
+        0,
+    ));
+    visit(ordinary(
+        NativeFunctionKind::IntlListFormatSupportedLocalesOf,
+        IntrinsicNameSpec::RealmName(RealmNameId::IntlListFormatSupportedLocalesOf),
+        1,
+    ));
+    for method in IntlListFormatPrototypeMethod::ALL {
+        visit(ordinary(
+            NativeFunctionKind::IntlListFormatPrototype(method),
+            IntrinsicNameSpec::RealmName(RealmNameId::IntlListFormatPrototype(method)),
+            method.length(),
+        ));
+    }
+    visit(ordinary(
+        NativeFunctionKind::IntlDisplayNamesConstructor,
+        IntrinsicNameSpec::RealmName(RealmNameId::IntlDisplayNames),
+        2,
+    ));
+    visit(ordinary(
+        NativeFunctionKind::IntlDisplayNamesSupportedLocalesOf,
+        IntrinsicNameSpec::RealmName(RealmNameId::IntlDisplayNamesSupportedLocalesOf),
+        1,
+    ));
+    for method in IntlDisplayNamesPrototypeMethod::ALL {
+        visit(ordinary(
+            NativeFunctionKind::IntlDisplayNamesPrototype(method),
+            IntrinsicNameSpec::RealmName(RealmNameId::IntlDisplayNamesPrototype(method)),
+            method.length(),
+        ));
+    }
+    visit(ordinary(
+        NativeFunctionKind::IntlDurationFormatConstructor,
+        IntrinsicNameSpec::RealmName(RealmNameId::IntlDurationFormat),
+        0,
+    ));
+    visit(ordinary(
+        NativeFunctionKind::IntlDurationFormatSupportedLocalesOf,
+        IntrinsicNameSpec::RealmName(RealmNameId::IntlDurationFormatSupportedLocalesOf),
+        1,
+    ));
+    for method in IntlDurationFormatPrototypeMethod::ALL {
+        visit(ordinary(
+            NativeFunctionKind::IntlDurationFormatPrototype(method),
+            IntrinsicNameSpec::RealmName(RealmNameId::IntlDurationFormatPrototype(method)),
+            method.length(),
+        ));
+    }
+    visit(ordinary(
+        NativeFunctionKind::IntlSegmenterConstructor,
+        IntrinsicNameSpec::RealmName(RealmNameId::IntlSegmenter),
+        0,
+    ));
+    visit(ordinary(
+        NativeFunctionKind::IntlSegmenterSupportedLocalesOf,
+        IntrinsicNameSpec::RealmName(RealmNameId::IntlSegmenterSupportedLocalesOf),
+        1,
+    ));
+    for method in IntlSegmenterPrototypeMethod::ALL {
+        visit(ordinary(
+            NativeFunctionKind::IntlSegmenterPrototype(method),
+            IntrinsicNameSpec::RealmName(RealmNameId::IntlSegmenterPrototype(method)),
+            method.length(),
+        ));
+    }
+    visit(ordinary(
+        NativeFunctionKind::IntlSegmentsContaining,
+        IntrinsicNameSpec::RealmName(RealmNameId::IntlSegmentsContaining),
+        1,
+    ));
+    visit(ordinary(
+        NativeFunctionKind::IntlSegmentsIterator,
+        IntrinsicNameSpec::Literal("[Symbol.iterator]"),
+        0,
+    ));
+    visit(ordinary(
+        NativeFunctionKind::IntlSegmentIteratorNext,
+        IntrinsicNameSpec::Predefined(PredefinedAtom::Next),
+        0,
+    ));
+    visit(ordinary(
+        NativeFunctionKind::IntlLocaleConstructor,
+        IntrinsicNameSpec::RealmName(RealmNameId::Locale),
+        1,
+    ));
+    for method in IntlLocalePrototypeMethod::ALL {
+        let name = if matches!(method, IntlLocalePrototypeMethod::ToString) {
+            IntrinsicNameSpec::Predefined(PredefinedAtom::ToString)
+        } else if method.is_accessor() {
+            IntrinsicNameSpec::Literal(method.function_name())
+        } else {
+            IntrinsicNameSpec::RealmName(RealmNameId::IntlLocalePrototype(method))
+        };
+        visit(ordinary(
+            NativeFunctionKind::IntlLocalePrototype(method),
+            name,
+            0,
+        ));
+    }
+}
+
+#[allow(
+    clippy::too_many_lines,
+    reason = "the declarative Intl graph stays together for descriptor and identity audits"
+)]
+pub(super) fn visit_properties(visit: PropertySink<'_>) {
+    let intl = IntrinsicIdentity::Object(IntrinsicObjectId::Intl);
+    let collator_constructor = IntrinsicIdentity::Function(IntrinsicFunctionId(
+        NativeFunctionKind::IntlCollatorConstructor,
+    ));
+    let collator_prototype = IntrinsicIdentity::Object(IntrinsicObjectId::IntlCollatorPrototype);
+    let number_format_constructor = IntrinsicIdentity::Function(IntrinsicFunctionId(
+        NativeFunctionKind::IntlNumberFormatConstructor,
+    ));
+    let number_format_prototype =
+        IntrinsicIdentity::Object(IntrinsicObjectId::IntlNumberFormatPrototype);
+    let date_time_format_constructor = IntrinsicIdentity::Function(IntrinsicFunctionId(
+        NativeFunctionKind::IntlDateTimeFormatConstructor,
+    ));
+    let date_time_format_prototype =
+        IntrinsicIdentity::Object(IntrinsicObjectId::IntlDateTimeFormatPrototype);
+    let plural_rules_constructor = IntrinsicIdentity::Function(IntrinsicFunctionId(
+        NativeFunctionKind::IntlPluralRulesConstructor,
+    ));
+    let plural_rules_prototype =
+        IntrinsicIdentity::Object(IntrinsicObjectId::IntlPluralRulesPrototype);
+    let relative_time_format_constructor = IntrinsicIdentity::Function(IntrinsicFunctionId(
+        NativeFunctionKind::IntlRelativeTimeFormatConstructor,
+    ));
+    let relative_time_format_prototype =
+        IntrinsicIdentity::Object(IntrinsicObjectId::IntlRelativeTimeFormatPrototype);
+    let list_format_constructor = IntrinsicIdentity::Function(IntrinsicFunctionId(
+        NativeFunctionKind::IntlListFormatConstructor,
+    ));
+    let list_format_prototype =
+        IntrinsicIdentity::Object(IntrinsicObjectId::IntlListFormatPrototype);
+    let display_names_constructor = IntrinsicIdentity::Function(IntrinsicFunctionId(
+        NativeFunctionKind::IntlDisplayNamesConstructor,
+    ));
+    let display_names_prototype =
+        IntrinsicIdentity::Object(IntrinsicObjectId::IntlDisplayNamesPrototype);
+    let duration_format_constructor = IntrinsicIdentity::Function(IntrinsicFunctionId(
+        NativeFunctionKind::IntlDurationFormatConstructor,
+    ));
+    let duration_format_prototype =
+        IntrinsicIdentity::Object(IntrinsicObjectId::IntlDurationFormatPrototype);
+    let segmenter_constructor = IntrinsicIdentity::Function(IntrinsicFunctionId(
+        NativeFunctionKind::IntlSegmenterConstructor,
+    ));
+    let segmenter_prototype = IntrinsicIdentity::Object(IntrinsicObjectId::IntlSegmenterPrototype);
+    let segments_prototype = IntrinsicIdentity::Object(IntrinsicObjectId::IntlSegmentsPrototype);
+    let segment_iterator_prototype =
+        IntrinsicIdentity::Object(IntrinsicObjectId::IntlSegmentIteratorPrototype);
+    let locale_constructor = IntrinsicIdentity::Function(IntrinsicFunctionId(
+        NativeFunctionKind::IntlLocaleConstructor,
+    ));
+    let locale_prototype = IntrinsicIdentity::Object(IntrinsicObjectId::IntlLocalePrototype);
+    visit(method(
+        intl,
+        IntrinsicKeySpec::InternedString(RealmNameId::Collator),
+        NativeFunctionKind::IntlCollatorConstructor,
+    ));
+    visit(method(
+        intl,
+        IntrinsicKeySpec::InternedString(RealmNameId::IntlGetCanonicalLocales),
+        NativeFunctionKind::IntlGetCanonicalLocales,
+    ));
+    visit(method(
+        intl,
+        IntrinsicKeySpec::InternedString(RealmNameId::IntlNumberFormat),
+        NativeFunctionKind::IntlNumberFormatConstructor,
+    ));
+    visit(method(
+        intl,
+        IntrinsicKeySpec::InternedString(RealmNameId::IntlDateTimeFormat),
+        NativeFunctionKind::IntlDateTimeFormatConstructor,
+    ));
+    visit(method(
+        intl,
+        IntrinsicKeySpec::InternedString(RealmNameId::IntlPluralRules),
+        NativeFunctionKind::IntlPluralRulesConstructor,
+    ));
+    visit(method(
+        intl,
+        IntrinsicKeySpec::InternedString(RealmNameId::IntlRelativeTimeFormat),
+        NativeFunctionKind::IntlRelativeTimeFormatConstructor,
+    ));
+    visit(method(
+        intl,
+        IntrinsicKeySpec::InternedString(RealmNameId::IntlListFormat),
+        NativeFunctionKind::IntlListFormatConstructor,
+    ));
+    visit(method(
+        intl,
+        IntrinsicKeySpec::InternedString(RealmNameId::IntlDisplayNames),
+        NativeFunctionKind::IntlDisplayNamesConstructor,
+    ));
+    visit(method(
+        intl,
+        IntrinsicKeySpec::InternedString(RealmNameId::IntlDurationFormat),
+        NativeFunctionKind::IntlDurationFormatConstructor,
+    ));
+    visit(method(
+        intl,
+        IntrinsicKeySpec::InternedString(RealmNameId::IntlSegmenter),
+        NativeFunctionKind::IntlSegmenterConstructor,
+    ));
+    visit(method(
+        intl,
+        IntrinsicKeySpec::InternedString(RealmNameId::IntlSupportedValuesOf),
+        NativeFunctionKind::IntlSupportedValuesOf,
+    ));
+    visit(method(
+        intl,
+        IntrinsicKeySpec::InternedString(RealmNameId::Locale),
+        NativeFunctionKind::IntlLocaleConstructor,
+    ));
+    visit(data(
+        intl,
+        IntrinsicKeySpec::WellKnownSymbol(PredefinedAtom::SymbolToStringTag),
+        IDENTITY_PROPERTY,
+        IntrinsicValueSpec::String(IntrinsicStringSpec::RealmName(RealmNameId::Intl)),
+    ));
+    visit(data(
+        IntrinsicIdentity::Object(IntrinsicObjectId::GlobalObject),
+        IntrinsicKeySpec::InternedString(RealmNameId::Intl),
+        METHOD_PROPERTY,
+        IntrinsicValueSpec::Object(IntrinsicObjectId::Intl),
+    ));
+
+    visit(data(
+        collator_constructor,
+        IntrinsicKeySpec::PredefinedString(PredefinedAtom::Prototype),
+        CONSTRUCTOR_PROTOTYPE_PROPERTY,
+        IntrinsicValueSpec::Object(IntrinsicObjectId::IntlCollatorPrototype),
+    ));
+    visit(method(
+        collator_constructor,
+        IntrinsicKeySpec::InternedString(RealmNameId::IntlCollatorSupportedLocalesOf),
+        NativeFunctionKind::IntlCollatorSupportedLocalesOf,
+    ));
+    visit(method(
+        collator_prototype,
+        IntrinsicKeySpec::PredefinedString(PredefinedAtom::Constructor),
+        NativeFunctionKind::IntlCollatorConstructor,
+    ));
+    for method_id in IntlCollatorPrototypeMethod::ALL {
+        let key = IntrinsicKeySpec::InternedString(RealmNameId::IntlCollatorPrototype(method_id));
+        if method_id.is_accessor() {
+            visit(accessor(
+                collator_prototype,
+                key,
+                PropertyLayout::accessor(false, true),
+                Some(IntrinsicFunctionId(
+                    NativeFunctionKind::IntlCollatorPrototype(method_id),
+                )),
+                None,
+            ));
+        } else {
+            visit(method(
+                collator_prototype,
+                key,
+                NativeFunctionKind::IntlCollatorPrototype(method_id),
+            ));
+        }
+    }
+    visit(data(
+        collator_prototype,
+        IntrinsicKeySpec::WellKnownSymbol(PredefinedAtom::SymbolToStringTag),
+        PropertyLayout::data(false, false, true),
+        IntrinsicValueSpec::String(IntrinsicStringSpec::Literal("Intl.Collator")),
+    ));
+
+    visit(data(
+        number_format_constructor,
+        IntrinsicKeySpec::PredefinedString(PredefinedAtom::Prototype),
+        CONSTRUCTOR_PROTOTYPE_PROPERTY,
+        IntrinsicValueSpec::Object(IntrinsicObjectId::IntlNumberFormatPrototype),
+    ));
+    visit(method(
+        number_format_constructor,
+        IntrinsicKeySpec::InternedString(RealmNameId::IntlNumberFormatSupportedLocalesOf),
+        NativeFunctionKind::IntlNumberFormatSupportedLocalesOf,
+    ));
+    visit(method(
+        number_format_prototype,
+        IntrinsicKeySpec::PredefinedString(PredefinedAtom::Constructor),
+        NativeFunctionKind::IntlNumberFormatConstructor,
+    ));
+    for method_id in IntlNumberFormatPrototypeMethod::ALL {
+        let key =
+            IntrinsicKeySpec::InternedString(RealmNameId::IntlNumberFormatPrototype(method_id));
+        if method_id.is_accessor() {
+            visit(accessor(
+                number_format_prototype,
+                key,
+                PropertyLayout::accessor(false, true),
+                Some(IntrinsicFunctionId(
+                    NativeFunctionKind::IntlNumberFormatPrototype(method_id),
+                )),
+                None,
+            ));
+        } else {
+            visit(method(
+                number_format_prototype,
+                key,
+                NativeFunctionKind::IntlNumberFormatPrototype(method_id),
+            ));
+        }
+    }
+    visit(data(
+        number_format_prototype,
+        IntrinsicKeySpec::WellKnownSymbol(PredefinedAtom::SymbolToStringTag),
+        PropertyLayout::data(false, false, true),
+        IntrinsicValueSpec::String(IntrinsicStringSpec::Literal("Intl.NumberFormat")),
+    ));
+
+    visit(data(
+        date_time_format_constructor,
+        IntrinsicKeySpec::PredefinedString(PredefinedAtom::Prototype),
+        CONSTRUCTOR_PROTOTYPE_PROPERTY,
+        IntrinsicValueSpec::Object(IntrinsicObjectId::IntlDateTimeFormatPrototype),
+    ));
+    visit(method(
+        date_time_format_constructor,
+        IntrinsicKeySpec::InternedString(RealmNameId::IntlDateTimeFormatSupportedLocalesOf),
+        NativeFunctionKind::IntlDateTimeFormatSupportedLocalesOf,
+    ));
+    visit(method(
+        date_time_format_prototype,
+        IntrinsicKeySpec::PredefinedString(PredefinedAtom::Constructor),
+        NativeFunctionKind::IntlDateTimeFormatConstructor,
+    ));
+    for method_id in IntlDateTimeFormatPrototypeMethod::ALL {
+        let key =
+            IntrinsicKeySpec::InternedString(RealmNameId::IntlDateTimeFormatPrototype(method_id));
+        if method_id.is_accessor() {
+            visit(accessor(
+                date_time_format_prototype,
+                key,
+                PropertyLayout::accessor(false, true),
+                Some(IntrinsicFunctionId(
+                    NativeFunctionKind::IntlDateTimeFormatPrototype(method_id),
+                )),
+                None,
+            ));
+        } else {
+            visit(method(
+                date_time_format_prototype,
+                key,
+                NativeFunctionKind::IntlDateTimeFormatPrototype(method_id),
+            ));
+        }
+    }
+    visit(data(
+        date_time_format_prototype,
+        IntrinsicKeySpec::WellKnownSymbol(PredefinedAtom::SymbolToStringTag),
+        PropertyLayout::data(false, false, true),
+        IntrinsicValueSpec::String(IntrinsicStringSpec::Literal("Intl.DateTimeFormat")),
+    ));
+
+    visit(data(
+        plural_rules_constructor,
+        IntrinsicKeySpec::PredefinedString(PredefinedAtom::Prototype),
+        CONSTRUCTOR_PROTOTYPE_PROPERTY,
+        IntrinsicValueSpec::Object(IntrinsicObjectId::IntlPluralRulesPrototype),
+    ));
+    visit(method(
+        plural_rules_constructor,
+        IntrinsicKeySpec::InternedString(RealmNameId::IntlPluralRulesSupportedLocalesOf),
+        NativeFunctionKind::IntlPluralRulesSupportedLocalesOf,
+    ));
+    visit(method(
+        plural_rules_prototype,
+        IntrinsicKeySpec::PredefinedString(PredefinedAtom::Constructor),
+        NativeFunctionKind::IntlPluralRulesConstructor,
+    ));
+    for method_id in IntlPluralRulesPrototypeMethod::ALL {
+        visit(method(
+            plural_rules_prototype,
+            IntrinsicKeySpec::InternedString(RealmNameId::IntlPluralRulesPrototype(method_id)),
+            NativeFunctionKind::IntlPluralRulesPrototype(method_id),
+        ));
+    }
+    visit(data(
+        plural_rules_prototype,
+        IntrinsicKeySpec::WellKnownSymbol(PredefinedAtom::SymbolToStringTag),
+        PropertyLayout::data(false, false, true),
+        IntrinsicValueSpec::String(IntrinsicStringSpec::Literal("Intl.PluralRules")),
+    ));
+
+    visit(data(
+        relative_time_format_constructor,
+        IntrinsicKeySpec::PredefinedString(PredefinedAtom::Prototype),
+        CONSTRUCTOR_PROTOTYPE_PROPERTY,
+        IntrinsicValueSpec::Object(IntrinsicObjectId::IntlRelativeTimeFormatPrototype),
+    ));
+    visit(method(
+        relative_time_format_constructor,
+        IntrinsicKeySpec::InternedString(RealmNameId::IntlRelativeTimeFormatSupportedLocalesOf),
+        NativeFunctionKind::IntlRelativeTimeFormatSupportedLocalesOf,
+    ));
+    visit(method(
+        relative_time_format_prototype,
+        IntrinsicKeySpec::PredefinedString(PredefinedAtom::Constructor),
+        NativeFunctionKind::IntlRelativeTimeFormatConstructor,
+    ));
+    for method_id in IntlRelativeTimeFormatPrototypeMethod::ALL {
+        visit(method(
+            relative_time_format_prototype,
+            IntrinsicKeySpec::InternedString(RealmNameId::IntlRelativeTimeFormatPrototype(
+                method_id,
+            )),
+            NativeFunctionKind::IntlRelativeTimeFormatPrototype(method_id),
+        ));
+    }
+    visit(data(
+        relative_time_format_prototype,
+        IntrinsicKeySpec::WellKnownSymbol(PredefinedAtom::SymbolToStringTag),
+        PropertyLayout::data(false, false, true),
+        IntrinsicValueSpec::String(IntrinsicStringSpec::Literal("Intl.RelativeTimeFormat")),
+    ));
+
+    visit(data(
+        list_format_constructor,
+        IntrinsicKeySpec::PredefinedString(PredefinedAtom::Prototype),
+        CONSTRUCTOR_PROTOTYPE_PROPERTY,
+        IntrinsicValueSpec::Object(IntrinsicObjectId::IntlListFormatPrototype),
+    ));
+    visit(method(
+        list_format_constructor,
+        IntrinsicKeySpec::InternedString(RealmNameId::IntlListFormatSupportedLocalesOf),
+        NativeFunctionKind::IntlListFormatSupportedLocalesOf,
+    ));
+    visit(method(
+        list_format_prototype,
+        IntrinsicKeySpec::PredefinedString(PredefinedAtom::Constructor),
+        NativeFunctionKind::IntlListFormatConstructor,
+    ));
+    for method_id in IntlListFormatPrototypeMethod::ALL {
+        visit(method(
+            list_format_prototype,
+            IntrinsicKeySpec::InternedString(RealmNameId::IntlListFormatPrototype(method_id)),
+            NativeFunctionKind::IntlListFormatPrototype(method_id),
+        ));
+    }
+    visit(data(
+        list_format_prototype,
+        IntrinsicKeySpec::WellKnownSymbol(PredefinedAtom::SymbolToStringTag),
+        PropertyLayout::data(false, false, true),
+        IntrinsicValueSpec::String(IntrinsicStringSpec::Literal("Intl.ListFormat")),
+    ));
+
+    visit(data(
+        display_names_constructor,
+        IntrinsicKeySpec::PredefinedString(PredefinedAtom::Prototype),
+        CONSTRUCTOR_PROTOTYPE_PROPERTY,
+        IntrinsicValueSpec::Object(IntrinsicObjectId::IntlDisplayNamesPrototype),
+    ));
+    visit(method(
+        display_names_constructor,
+        IntrinsicKeySpec::InternedString(RealmNameId::IntlDisplayNamesSupportedLocalesOf),
+        NativeFunctionKind::IntlDisplayNamesSupportedLocalesOf,
+    ));
+    visit(method(
+        display_names_prototype,
+        IntrinsicKeySpec::PredefinedString(PredefinedAtom::Constructor),
+        NativeFunctionKind::IntlDisplayNamesConstructor,
+    ));
+    for method_id in IntlDisplayNamesPrototypeMethod::ALL {
+        visit(method(
+            display_names_prototype,
+            IntrinsicKeySpec::InternedString(RealmNameId::IntlDisplayNamesPrototype(method_id)),
+            NativeFunctionKind::IntlDisplayNamesPrototype(method_id),
+        ));
+    }
+    visit(data(
+        display_names_prototype,
+        IntrinsicKeySpec::WellKnownSymbol(PredefinedAtom::SymbolToStringTag),
+        PropertyLayout::data(false, false, true),
+        IntrinsicValueSpec::String(IntrinsicStringSpec::Literal("Intl.DisplayNames")),
+    ));
+
+    visit(data(
+        duration_format_constructor,
+        IntrinsicKeySpec::PredefinedString(PredefinedAtom::Prototype),
+        CONSTRUCTOR_PROTOTYPE_PROPERTY,
+        IntrinsicValueSpec::Object(IntrinsicObjectId::IntlDurationFormatPrototype),
+    ));
+    visit(method(
+        duration_format_constructor,
+        IntrinsicKeySpec::InternedString(RealmNameId::IntlDurationFormatSupportedLocalesOf),
+        NativeFunctionKind::IntlDurationFormatSupportedLocalesOf,
+    ));
+    visit(method(
+        duration_format_prototype,
+        IntrinsicKeySpec::PredefinedString(PredefinedAtom::Constructor),
+        NativeFunctionKind::IntlDurationFormatConstructor,
+    ));
+    for method_id in IntlDurationFormatPrototypeMethod::ALL {
+        visit(method(
+            duration_format_prototype,
+            IntrinsicKeySpec::InternedString(RealmNameId::IntlDurationFormatPrototype(method_id)),
+            NativeFunctionKind::IntlDurationFormatPrototype(method_id),
+        ));
+    }
+    visit(data(
+        duration_format_prototype,
+        IntrinsicKeySpec::WellKnownSymbol(PredefinedAtom::SymbolToStringTag),
+        PropertyLayout::data(false, false, true),
+        IntrinsicValueSpec::String(IntrinsicStringSpec::Literal("Intl.DurationFormat")),
+    ));
+
+    visit(data(
+        segmenter_constructor,
+        IntrinsicKeySpec::PredefinedString(PredefinedAtom::Prototype),
+        CONSTRUCTOR_PROTOTYPE_PROPERTY,
+        IntrinsicValueSpec::Object(IntrinsicObjectId::IntlSegmenterPrototype),
+    ));
+    visit(method(
+        segmenter_constructor,
+        IntrinsicKeySpec::InternedString(RealmNameId::IntlSegmenterSupportedLocalesOf),
+        NativeFunctionKind::IntlSegmenterSupportedLocalesOf,
+    ));
+    visit(method(
+        segmenter_prototype,
+        IntrinsicKeySpec::PredefinedString(PredefinedAtom::Constructor),
+        NativeFunctionKind::IntlSegmenterConstructor,
+    ));
+    for method_id in IntlSegmenterPrototypeMethod::ALL {
+        visit(method(
+            segmenter_prototype,
+            IntrinsicKeySpec::InternedString(RealmNameId::IntlSegmenterPrototype(method_id)),
+            NativeFunctionKind::IntlSegmenterPrototype(method_id),
+        ));
+    }
+    visit(data(
+        segmenter_prototype,
+        IntrinsicKeySpec::WellKnownSymbol(PredefinedAtom::SymbolToStringTag),
+        PropertyLayout::data(false, false, true),
+        IntrinsicValueSpec::String(IntrinsicStringSpec::Literal("Intl.Segmenter")),
+    ));
+    visit(method(
+        segments_prototype,
+        IntrinsicKeySpec::InternedString(RealmNameId::IntlSegmentsContaining),
+        NativeFunctionKind::IntlSegmentsContaining,
+    ));
+    visit(method(
+        segments_prototype,
+        IntrinsicKeySpec::WellKnownSymbol(PredefinedAtom::SymbolIterator),
+        NativeFunctionKind::IntlSegmentsIterator,
+    ));
+    visit(method(
+        segment_iterator_prototype,
+        IntrinsicKeySpec::PredefinedString(PredefinedAtom::Next),
+        NativeFunctionKind::IntlSegmentIteratorNext,
+    ));
+    visit(data(
+        segment_iterator_prototype,
+        IntrinsicKeySpec::WellKnownSymbol(PredefinedAtom::SymbolToStringTag),
+        PropertyLayout::data(false, false, true),
+        IntrinsicValueSpec::String(IntrinsicStringSpec::Literal("Segmenter String Iterator")),
+    ));
+
+    visit(data(
+        locale_constructor,
+        IntrinsicKeySpec::PredefinedString(PredefinedAtom::Prototype),
+        CONSTRUCTOR_PROTOTYPE_PROPERTY,
+        IntrinsicValueSpec::Object(IntrinsicObjectId::IntlLocalePrototype),
+    ));
+    visit(method(
+        locale_prototype,
+        IntrinsicKeySpec::PredefinedString(PredefinedAtom::Constructor),
+        NativeFunctionKind::IntlLocaleConstructor,
+    ));
+    for method_id in IntlLocalePrototypeMethod::ALL {
+        let key = if matches!(method_id, IntlLocalePrototypeMethod::ToString) {
+            IntrinsicKeySpec::PredefinedString(PredefinedAtom::ToString)
+        } else {
+            IntrinsicKeySpec::InternedString(RealmNameId::IntlLocalePrototype(method_id))
+        };
+        if method_id.is_accessor() {
+            visit(accessor(
+                locale_prototype,
+                key,
+                PropertyLayout::accessor(false, true),
+                Some(IntrinsicFunctionId(
+                    NativeFunctionKind::IntlLocalePrototype(method_id),
+                )),
+                None,
+            ));
+        } else {
+            visit(method(
+                locale_prototype,
+                key,
+                NativeFunctionKind::IntlLocalePrototype(method_id),
+            ));
+        }
+    }
+    visit(data(
+        locale_prototype,
+        IntrinsicKeySpec::WellKnownSymbol(PredefinedAtom::SymbolToStringTag),
+        PropertyLayout::data(false, false, true),
+        IntrinsicValueSpec::String(IntrinsicStringSpec::Literal("Intl.Locale")),
+    ));
+}

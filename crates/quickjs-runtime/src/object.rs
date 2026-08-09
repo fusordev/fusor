@@ -23,6 +23,10 @@
  * THE SOFTWARE.
  */
 
+use quickjs_intl::{
+    CollatorState, DateTimeFormatState, DisplayNamesState, DurationFormatState, ListFormatState,
+    NumberFormatState, PluralRulesState, RelativeTimeFormatState, SegmentBoundary, SegmenterState,
+};
 use std::{
     cell::RefCell,
     collections::hash_map::DefaultHasher,
@@ -2977,6 +2981,30 @@ pub(crate) enum HeapObjectKind {
     RegExp(RegExpState),
     /// An ECMAScript Date object with a `[[DateValue]]` Number.
     Date(DateState),
+    /// An ECMA-402 `Intl.Locale` object with its canonical `[[Locale]]` string.
+    IntlLocale(JsString),
+    /// An ECMA-402 `Intl.Collator` object and its cached bound comparator.
+    IntlCollator(IntlCollatorObjectState),
+    /// An ECMA-402 `Intl.NumberFormat` object and its cached bound formatter.
+    IntlNumberFormat(IntlNumberFormatObjectState),
+    /// An ECMA-402 `Intl.DateTimeFormat` object and its cached bound formatter.
+    IntlDateTimeFormat(IntlDateTimeFormatObjectState),
+    /// An ECMA-402 `Intl.PluralRules` object.
+    IntlPluralRules(PluralRulesState),
+    /// An ECMA-402 `Intl.RelativeTimeFormat` object.
+    IntlRelativeTimeFormat(RelativeTimeFormatState),
+    /// An ECMA-402 `Intl.ListFormat` object.
+    IntlListFormat(ListFormatState),
+    /// An ECMA-402 `Intl.DisplayNames` object.
+    IntlDisplayNames(DisplayNamesState),
+    /// An ECMA-402 `Intl.DurationFormat` object.
+    IntlDurationFormat(DurationFormatState),
+    /// An ECMA-402 `Intl.Segmenter` object.
+    IntlSegmenter(SegmenterState),
+    /// An ECMA-402 Segments object returned by `Intl.Segmenter.prototype.segment`.
+    IntlSegments(IntlSegmentsObjectState),
+    /// An ECMA-402 Segment Iterator object.
+    IntlSegmentIterator(IntlSegmentIteratorObjectState),
     /// An ECMAScript `ArrayBuffer` object with its byte-data block slots.
     ArrayBuffer(ArrayBufferState),
     /// An ECMAScript `DataView` object with its view and buffer slots.
@@ -3017,6 +3045,32 @@ pub(crate) enum HeapObjectKind {
     WeakRef(WeakRefState),
     /// An ECMAScript `FinalizationRegistry` with strongly held cleanup state.
     FinalizationRegistry(FinalizationRegistryState),
+}
+
+pub(crate) struct IntlCollatorObjectState {
+    pub(crate) resolved: CollatorState,
+    pub(crate) bound_compare: Option<FunctionId>,
+}
+
+pub(crate) struct IntlNumberFormatObjectState {
+    pub(crate) resolved: NumberFormatState,
+    pub(crate) bound_format: Option<FunctionId>,
+}
+
+pub(crate) struct IntlDateTimeFormatObjectState {
+    pub(crate) resolved: DateTimeFormatState,
+    pub(crate) bound_format: Option<FunctionId>,
+}
+
+pub(crate) struct IntlSegmentsObjectState {
+    pub(crate) segmenter: ObjectId,
+    pub(crate) input: JsString,
+    pub(crate) boundaries: Vec<SegmentBoundary>,
+}
+
+pub(crate) struct IntlSegmentIteratorObjectState {
+    pub(crate) segments: ObjectId,
+    pub(crate) next_segment: usize,
 }
 
 /// Specification-level Proxy slots shared by callable and non-callable proxy
@@ -3141,6 +3195,18 @@ impl HeapObjectKind {
             | Self::RegExpStringIterator(_)
             | Self::RegExp(_)
             | Self::Date(_)
+            | Self::IntlLocale(_)
+            | Self::IntlCollator(_)
+            | Self::IntlNumberFormat(_)
+            | Self::IntlDateTimeFormat(_)
+            | Self::IntlPluralRules(_)
+            | Self::IntlRelativeTimeFormat(_)
+            | Self::IntlListFormat(_)
+            | Self::IntlDisplayNames(_)
+            | Self::IntlDurationFormat(_)
+            | Self::IntlSegmenter(_)
+            | Self::IntlSegments(_)
+            | Self::IntlSegmentIterator(_)
             | Self::ArrayBuffer(_)
             | Self::DataView(_)
             | Self::TypedArray(_)
@@ -3181,6 +3247,18 @@ impl HeapObjectKind {
             | Self::RegExpStringIterator(_)
             | Self::RegExp(_)
             | Self::Date(_)
+            | Self::IntlLocale(_)
+            | Self::IntlCollator(_)
+            | Self::IntlNumberFormat(_)
+            | Self::IntlDateTimeFormat(_)
+            | Self::IntlPluralRules(_)
+            | Self::IntlRelativeTimeFormat(_)
+            | Self::IntlListFormat(_)
+            | Self::IntlDisplayNames(_)
+            | Self::IntlDurationFormat(_)
+            | Self::IntlSegmenter(_)
+            | Self::IntlSegments(_)
+            | Self::IntlSegmentIterator(_)
             | Self::ArrayBuffer(_)
             | Self::DataView(_)
             | Self::TypedArray(_)
@@ -3220,6 +3298,18 @@ impl HeapObjectKind {
             | Self::RegExpStringIterator(_)
             | Self::RegExp(_)
             | Self::Date(_)
+            | Self::IntlLocale(_)
+            | Self::IntlCollator(_)
+            | Self::IntlNumberFormat(_)
+            | Self::IntlDateTimeFormat(_)
+            | Self::IntlPluralRules(_)
+            | Self::IntlRelativeTimeFormat(_)
+            | Self::IntlListFormat(_)
+            | Self::IntlDisplayNames(_)
+            | Self::IntlDurationFormat(_)
+            | Self::IntlSegmenter(_)
+            | Self::IntlSegments(_)
+            | Self::IntlSegmentIterator(_)
             | Self::ArrayBuffer(_)
             | Self::DataView(_)
             | Self::TypedArray(_)
@@ -3259,6 +3349,18 @@ impl HeapObjectKind {
             | Self::RegExpStringIterator(_)
             | Self::RegExp(_)
             | Self::Date(_)
+            | Self::IntlLocale(_)
+            | Self::IntlCollator(_)
+            | Self::IntlNumberFormat(_)
+            | Self::IntlDateTimeFormat(_)
+            | Self::IntlPluralRules(_)
+            | Self::IntlRelativeTimeFormat(_)
+            | Self::IntlListFormat(_)
+            | Self::IntlDisplayNames(_)
+            | Self::IntlDurationFormat(_)
+            | Self::IntlSegmenter(_)
+            | Self::IntlSegments(_)
+            | Self::IntlSegmentIterator(_)
             | Self::ArrayBuffer(_)
             | Self::DataView(_)
             | Self::TypedArray(_)
@@ -3298,6 +3400,18 @@ impl HeapObjectKind {
             | Self::RegExpStringIterator(_)
             | Self::RegExp(_)
             | Self::Date(_)
+            | Self::IntlLocale(_)
+            | Self::IntlCollator(_)
+            | Self::IntlNumberFormat(_)
+            | Self::IntlDateTimeFormat(_)
+            | Self::IntlPluralRules(_)
+            | Self::IntlRelativeTimeFormat(_)
+            | Self::IntlListFormat(_)
+            | Self::IntlDisplayNames(_)
+            | Self::IntlDurationFormat(_)
+            | Self::IntlSegmenter(_)
+            | Self::IntlSegments(_)
+            | Self::IntlSegmentIterator(_)
             | Self::ArrayBuffer(_)
             | Self::DataView(_)
             | Self::TypedArray(_)
@@ -3337,6 +3451,18 @@ impl HeapObjectKind {
             | Self::RegExpStringIterator(_)
             | Self::RegExp(_)
             | Self::Date(_)
+            | Self::IntlLocale(_)
+            | Self::IntlCollator(_)
+            | Self::IntlNumberFormat(_)
+            | Self::IntlDateTimeFormat(_)
+            | Self::IntlPluralRules(_)
+            | Self::IntlRelativeTimeFormat(_)
+            | Self::IntlListFormat(_)
+            | Self::IntlDisplayNames(_)
+            | Self::IntlDurationFormat(_)
+            | Self::IntlSegmenter(_)
+            | Self::IntlSegments(_)
+            | Self::IntlSegmentIterator(_)
             | Self::ArrayBuffer(_)
             | Self::DataView(_)
             | Self::TypedArray(_)
@@ -3376,6 +3502,18 @@ impl HeapObjectKind {
             | Self::RegExpStringIterator(_)
             | Self::RegExp(_)
             | Self::Date(_)
+            | Self::IntlLocale(_)
+            | Self::IntlCollator(_)
+            | Self::IntlNumberFormat(_)
+            | Self::IntlDateTimeFormat(_)
+            | Self::IntlPluralRules(_)
+            | Self::IntlRelativeTimeFormat(_)
+            | Self::IntlListFormat(_)
+            | Self::IntlDisplayNames(_)
+            | Self::IntlDurationFormat(_)
+            | Self::IntlSegmenter(_)
+            | Self::IntlSegments(_)
+            | Self::IntlSegmentIterator(_)
             | Self::ArrayBuffer(_)
             | Self::DataView(_)
             | Self::TypedArray(_)
@@ -3429,6 +3567,18 @@ impl HeapObjectKind {
             | Self::RegExpStringIterator(_)
             | Self::RegExp(_)
             | Self::Date(_)
+            | Self::IntlLocale(_)
+            | Self::IntlCollator(_)
+            | Self::IntlNumberFormat(_)
+            | Self::IntlDateTimeFormat(_)
+            | Self::IntlPluralRules(_)
+            | Self::IntlRelativeTimeFormat(_)
+            | Self::IntlListFormat(_)
+            | Self::IntlDisplayNames(_)
+            | Self::IntlDurationFormat(_)
+            | Self::IntlSegmenter(_)
+            | Self::IntlSegments(_)
+            | Self::IntlSegmentIterator(_)
             | Self::ArrayBuffer(_)
             | Self::DataView(_)
             | Self::TypedArray(_)
@@ -3468,6 +3618,18 @@ impl HeapObjectKind {
             | Self::RegExpStringIterator(_)
             | Self::RegExp(_)
             | Self::Date(_)
+            | Self::IntlLocale(_)
+            | Self::IntlCollator(_)
+            | Self::IntlNumberFormat(_)
+            | Self::IntlDateTimeFormat(_)
+            | Self::IntlPluralRules(_)
+            | Self::IntlRelativeTimeFormat(_)
+            | Self::IntlListFormat(_)
+            | Self::IntlDisplayNames(_)
+            | Self::IntlDurationFormat(_)
+            | Self::IntlSegmenter(_)
+            | Self::IntlSegments(_)
+            | Self::IntlSegmentIterator(_)
             | Self::ArrayBuffer(_)
             | Self::DataView(_)
             | Self::TypedArray(_)
@@ -3791,6 +3953,147 @@ impl HeapObject {
     }
 
     #[must_use]
+    pub(crate) const fn intl_locale(record: ObjectRecord, locale: JsString) -> Self {
+        Self {
+            kind: HeapObjectKind::IntlLocale(locale),
+            record,
+            public_roots: 0,
+        }
+    }
+
+    #[must_use]
+    pub(crate) const fn intl_collator(record: ObjectRecord, resolved: CollatorState) -> Self {
+        Self {
+            kind: HeapObjectKind::IntlCollator(IntlCollatorObjectState {
+                resolved,
+                bound_compare: None,
+            }),
+            record,
+            public_roots: 0,
+        }
+    }
+
+    #[must_use]
+    pub(crate) const fn intl_number_format(
+        record: ObjectRecord,
+        resolved: NumberFormatState,
+    ) -> Self {
+        Self {
+            kind: HeapObjectKind::IntlNumberFormat(IntlNumberFormatObjectState {
+                resolved,
+                bound_format: None,
+            }),
+            record,
+            public_roots: 0,
+        }
+    }
+
+    #[must_use]
+    pub(crate) const fn intl_date_time_format(
+        record: ObjectRecord,
+        resolved: DateTimeFormatState,
+    ) -> Self {
+        Self {
+            kind: HeapObjectKind::IntlDateTimeFormat(IntlDateTimeFormatObjectState {
+                resolved,
+                bound_format: None,
+            }),
+            record,
+            public_roots: 0,
+        }
+    }
+
+    #[must_use]
+    pub(crate) const fn intl_plural_rules(
+        record: ObjectRecord,
+        resolved: PluralRulesState,
+    ) -> Self {
+        Self {
+            kind: HeapObjectKind::IntlPluralRules(resolved),
+            record,
+            public_roots: 0,
+        }
+    }
+
+    #[must_use]
+    pub(crate) const fn intl_relative_time_format(
+        record: ObjectRecord,
+        resolved: RelativeTimeFormatState,
+    ) -> Self {
+        Self {
+            kind: HeapObjectKind::IntlRelativeTimeFormat(resolved),
+            record,
+            public_roots: 0,
+        }
+    }
+
+    #[must_use]
+    pub(crate) const fn intl_list_format(record: ObjectRecord, resolved: ListFormatState) -> Self {
+        Self {
+            kind: HeapObjectKind::IntlListFormat(resolved),
+            record,
+            public_roots: 0,
+        }
+    }
+
+    #[must_use]
+    pub(crate) const fn intl_display_names(
+        record: ObjectRecord,
+        resolved: DisplayNamesState,
+    ) -> Self {
+        Self {
+            kind: HeapObjectKind::IntlDisplayNames(resolved),
+            record,
+            public_roots: 0,
+        }
+    }
+
+    #[must_use]
+    pub(crate) const fn intl_duration_format(
+        record: ObjectRecord,
+        resolved: DurationFormatState,
+    ) -> Self {
+        Self {
+            kind: HeapObjectKind::IntlDurationFormat(resolved),
+            record,
+            public_roots: 0,
+        }
+    }
+
+    #[must_use]
+    pub(crate) const fn intl_segmenter(record: ObjectRecord, resolved: SegmenterState) -> Self {
+        Self {
+            kind: HeapObjectKind::IntlSegmenter(resolved),
+            record,
+            public_roots: 0,
+        }
+    }
+
+    #[must_use]
+    pub(crate) const fn intl_segments(
+        record: ObjectRecord,
+        state: IntlSegmentsObjectState,
+    ) -> Self {
+        Self {
+            kind: HeapObjectKind::IntlSegments(state),
+            record,
+            public_roots: 0,
+        }
+    }
+
+    #[must_use]
+    pub(crate) const fn intl_segment_iterator(
+        record: ObjectRecord,
+        state: IntlSegmentIteratorObjectState,
+    ) -> Self {
+        Self {
+            kind: HeapObjectKind::IntlSegmentIterator(state),
+            record,
+            public_roots: 0,
+        }
+    }
+
+    #[must_use]
     pub(crate) fn array_buffer(record: ObjectRecord, state: ArrayBufferState) -> Self {
         Self {
             kind: HeapObjectKind::ArrayBuffer(state),
@@ -4040,6 +4343,128 @@ impl HeapObject {
         }
     }
 
+    pub(crate) const fn intl_locale_value(&self) -> Option<&JsString> {
+        match &self.kind {
+            HeapObjectKind::IntlLocale(locale) => Some(locale),
+            _ => None,
+        }
+    }
+
+    pub(crate) const fn intl_collator_state(&self) -> Option<&IntlCollatorObjectState> {
+        match &self.kind {
+            HeapObjectKind::IntlCollator(state) => Some(state),
+            _ => None,
+        }
+    }
+
+    pub(crate) const fn intl_collator_state_mut(&mut self) -> Option<&mut IntlCollatorObjectState> {
+        match &mut self.kind {
+            HeapObjectKind::IntlCollator(state) => Some(state),
+            _ => None,
+        }
+    }
+
+    pub(crate) const fn intl_number_format_state(&self) -> Option<&IntlNumberFormatObjectState> {
+        match &self.kind {
+            HeapObjectKind::IntlNumberFormat(state) => Some(state),
+            _ => None,
+        }
+    }
+
+    pub(crate) const fn intl_number_format_state_mut(
+        &mut self,
+    ) -> Option<&mut IntlNumberFormatObjectState> {
+        match &mut self.kind {
+            HeapObjectKind::IntlNumberFormat(state) => Some(state),
+            _ => None,
+        }
+    }
+
+    pub(crate) const fn intl_date_time_format_state(
+        &self,
+    ) -> Option<&IntlDateTimeFormatObjectState> {
+        match &self.kind {
+            HeapObjectKind::IntlDateTimeFormat(state) => Some(state),
+            _ => None,
+        }
+    }
+
+    pub(crate) const fn intl_date_time_format_state_mut(
+        &mut self,
+    ) -> Option<&mut IntlDateTimeFormatObjectState> {
+        match &mut self.kind {
+            HeapObjectKind::IntlDateTimeFormat(state) => Some(state),
+            _ => None,
+        }
+    }
+
+    pub(crate) const fn intl_plural_rules_state(&self) -> Option<&PluralRulesState> {
+        match &self.kind {
+            HeapObjectKind::IntlPluralRules(state) => Some(state),
+            _ => None,
+        }
+    }
+
+    pub(crate) const fn intl_relative_time_format_state(&self) -> Option<&RelativeTimeFormatState> {
+        match &self.kind {
+            HeapObjectKind::IntlRelativeTimeFormat(state) => Some(state),
+            _ => None,
+        }
+    }
+
+    pub(crate) const fn intl_list_format_state(&self) -> Option<&ListFormatState> {
+        match &self.kind {
+            HeapObjectKind::IntlListFormat(state) => Some(state),
+            _ => None,
+        }
+    }
+
+    pub(crate) const fn intl_display_names_state(&self) -> Option<&DisplayNamesState> {
+        match &self.kind {
+            HeapObjectKind::IntlDisplayNames(state) => Some(state),
+            _ => None,
+        }
+    }
+
+    pub(crate) const fn intl_duration_format_state(&self) -> Option<&DurationFormatState> {
+        match &self.kind {
+            HeapObjectKind::IntlDurationFormat(state) => Some(state),
+            _ => None,
+        }
+    }
+
+    pub(crate) const fn intl_segmenter_state(&self) -> Option<&SegmenterState> {
+        match &self.kind {
+            HeapObjectKind::IntlSegmenter(state) => Some(state),
+            _ => None,
+        }
+    }
+
+    pub(crate) const fn intl_segments_state(&self) -> Option<&IntlSegmentsObjectState> {
+        match &self.kind {
+            HeapObjectKind::IntlSegments(state) => Some(state),
+            _ => None,
+        }
+    }
+
+    pub(crate) const fn intl_segment_iterator_state(
+        &self,
+    ) -> Option<&IntlSegmentIteratorObjectState> {
+        match &self.kind {
+            HeapObjectKind::IntlSegmentIterator(state) => Some(state),
+            _ => None,
+        }
+    }
+
+    pub(crate) const fn intl_segment_iterator_state_mut(
+        &mut self,
+    ) -> Option<&mut IntlSegmentIteratorObjectState> {
+        match &mut self.kind {
+            HeapObjectKind::IntlSegmentIterator(state) => Some(state),
+            _ => None,
+        }
+    }
+
     pub(crate) const fn array_buffer_state(&self) -> Option<&ArrayBufferState> {
         match &self.kind {
             HeapObjectKind::ArrayBuffer(state) => Some(state),
@@ -4149,6 +4574,18 @@ impl HeapObject {
             | HeapObjectKind::RegExpStringIterator(_)
             | HeapObjectKind::RegExp(_)
             | HeapObjectKind::Date(_)
+            | HeapObjectKind::IntlLocale(_)
+            | HeapObjectKind::IntlCollator(_)
+            | HeapObjectKind::IntlNumberFormat(_)
+            | HeapObjectKind::IntlDateTimeFormat(_)
+            | HeapObjectKind::IntlPluralRules(_)
+            | HeapObjectKind::IntlRelativeTimeFormat(_)
+            | HeapObjectKind::IntlListFormat(_)
+            | HeapObjectKind::IntlDisplayNames(_)
+            | HeapObjectKind::IntlDurationFormat(_)
+            | HeapObjectKind::IntlSegmenter(_)
+            | HeapObjectKind::IntlSegments(_)
+            | HeapObjectKind::IntlSegmentIterator(_)
             | HeapObjectKind::ArrayBuffer(_)
             | HeapObjectKind::DataView(_)
             | HeapObjectKind::TypedArray(_)
@@ -4188,6 +4625,18 @@ impl HeapObject {
             | HeapObjectKind::RegExpStringIterator(_)
             | HeapObjectKind::RegExp(_)
             | HeapObjectKind::Date(_)
+            | HeapObjectKind::IntlLocale(_)
+            | HeapObjectKind::IntlCollator(_)
+            | HeapObjectKind::IntlNumberFormat(_)
+            | HeapObjectKind::IntlDateTimeFormat(_)
+            | HeapObjectKind::IntlPluralRules(_)
+            | HeapObjectKind::IntlRelativeTimeFormat(_)
+            | HeapObjectKind::IntlListFormat(_)
+            | HeapObjectKind::IntlDisplayNames(_)
+            | HeapObjectKind::IntlDurationFormat(_)
+            | HeapObjectKind::IntlSegmenter(_)
+            | HeapObjectKind::IntlSegments(_)
+            | HeapObjectKind::IntlSegmentIterator(_)
             | HeapObjectKind::ArrayBuffer(_)
             | HeapObjectKind::DataView(_)
             | HeapObjectKind::TypedArray(_)
@@ -4229,6 +4678,18 @@ impl HeapObject {
             | HeapObjectKind::RegExpStringIterator(_)
             | HeapObjectKind::RegExp(_)
             | HeapObjectKind::Date(_)
+            | HeapObjectKind::IntlLocale(_)
+            | HeapObjectKind::IntlCollator(_)
+            | HeapObjectKind::IntlNumberFormat(_)
+            | HeapObjectKind::IntlDateTimeFormat(_)
+            | HeapObjectKind::IntlPluralRules(_)
+            | HeapObjectKind::IntlRelativeTimeFormat(_)
+            | HeapObjectKind::IntlListFormat(_)
+            | HeapObjectKind::IntlDisplayNames(_)
+            | HeapObjectKind::IntlDurationFormat(_)
+            | HeapObjectKind::IntlSegmenter(_)
+            | HeapObjectKind::IntlSegments(_)
+            | HeapObjectKind::IntlSegmentIterator(_)
             | HeapObjectKind::ArrayBuffer(_)
             | HeapObjectKind::DataView(_)
             | HeapObjectKind::TypedArray(_)

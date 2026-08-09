@@ -55,7 +55,7 @@ macro_rules! define_predefined_atoms {
 
         impl PredefinedAtom {
             /// Number of predefined atoms in this `QuickJS` version.
-            pub const COUNT: usize = 243;
+            pub const COUNT: usize = 244;
 
             /// Every predefined atom in exact ordinal order.
             pub const ALL: [Self; Self::COUNT] = [$(Self::$variant,)+];
@@ -365,6 +365,7 @@ define_predefined_atoms! {
     241 => SymbolUnscopables, Symbol, "Symbol.unscopables";
     242 => SymbolAsyncIterator, Symbol, "Symbol.asyncIterator";
     243 => SymbolDispose, Symbol, "Symbol.dispose";
+    244 => IntlLegacyConstructedSymbol, Symbol, "IntlLegacyConstructedSymbol";
 }
 
 #[cfg(test)]
@@ -375,14 +376,14 @@ mod tests {
 
     #[test]
     fn count_boundaries_and_conversions_are_exact() {
-        assert_eq!(PredefinedAtom::COUNT, 243);
+        assert_eq!(PredefinedAtom::COUNT, 244);
         assert_eq!(PredefinedAtom::ALL.len(), PredefinedAtom::COUNT);
         assert_eq!(PredefinedAtom::ALL[0], PredefinedAtom::Null);
         assert_eq!(PredefinedAtom::ALL[228], PredefinedAtom::PrivateBrand);
         assert_eq!(PredefinedAtom::ALL[229], PredefinedAtom::SymbolToPrimitive);
         assert_eq!(
             PredefinedAtom::ALL[PredefinedAtom::COUNT - 1],
-            PredefinedAtom::SymbolDispose
+            PredefinedAtom::IntlLegacyConstructedSymbol
         );
 
         for (index, atom) in PredefinedAtom::ALL.into_iter().enumerate() {
@@ -426,6 +427,7 @@ mod tests {
         assert_eq!(PredefinedAtom::SymbolToPrimitive.ordinal(), 230);
         assert_eq!(PredefinedAtom::SymbolAsyncIterator.ordinal(), 242);
         assert_eq!(PredefinedAtom::SymbolDispose.ordinal(), 243);
+        assert_eq!(PredefinedAtom::IntlLegacyConstructedSymbol.ordinal(), 244);
     }
 
     #[test]
@@ -451,7 +453,7 @@ mod tests {
 
         assert_eq!(strings.len(), 228);
         assert_eq!(private_names.len(), 1);
-        assert_eq!(symbol_names.len(), 14);
+        assert_eq!(symbol_names.len(), 15);
         assert!(strings.contains(PredefinedAtom::PrivateBrand.text()));
         assert_eq!(
             PredefinedAtom::Brand.text(),
@@ -476,8 +478,8 @@ mod tests {
             .map(|spec| spec.text.encode_utf16().count())
             .sum::<usize>();
 
-        assert_eq!(utf8_bytes, 2_092);
-        assert_eq!(utf16_code_units, 2_092);
+        assert_eq!(utf8_bytes, 2_119);
+        assert_eq!(utf16_code_units, 2_119);
     }
 
     #[test]
@@ -513,6 +515,6 @@ mod tests {
             }
         }
 
-        assert_eq!(fingerprint, 0xd3d5_f893_cbab_f0f5);
+        assert_eq!(fingerprint, 0x1f42_72ee_e8a3_ca06);
     }
 }

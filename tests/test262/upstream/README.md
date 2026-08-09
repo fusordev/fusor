@@ -23,6 +23,7 @@ To inspect a bounded local selection without executing the full suite:
 ```sh
 cargo xtask test262 --suite /path/to/test262 --inventory-only
 cargo xtask test262 --suite /path/to/test262 --filter built-ins/Array --report target/test262.json
+cargo xtask test262 --suite /path/to/test262 --filter intl402 --admit-intl402 --inventory-only
 ```
 
 Run the complete configured suite with an optimized runner. Unfiltered,
@@ -33,4 +34,7 @@ property tests make that profile impractically slow:
 cargo run --release --quiet -p xtask -- test262 --suite /path/to/test262 --report target/test262.json
 ```
 
-ECMA-402 paths are inventoried as low-priority skips.
+ECMA-402 paths are inventoried as low-priority skips by default. The explicit
+`--admit-intl402` switch is accepted only with an `intl402[/...]` or
+`staging/intl402[/...]` filter, so focused Intl work cannot silently change the
+full-suite policy.

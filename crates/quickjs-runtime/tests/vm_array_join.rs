@@ -153,6 +153,14 @@ fn join_uses_a_comma_by_default_and_the_supplied_separator_otherwise() {
     assert_eq!(text("return [1,2].join(\"<>\");"), "1<>2");
 }
 
+#[test]
+fn joining_many_primitive_elements_does_not_grow_the_host_stack() {
+    assert_eq!(
+        text("return new Array(4096).fill(1).join('').length.toString();"),
+        "4096"
+    );
+}
+
 /// Oracle: `join sep undefined => [1,2]`. An explicit `undefined` separator is
 /// the default, not the string `"undefined"`.
 #[test]

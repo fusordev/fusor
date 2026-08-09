@@ -14,7 +14,8 @@ use crate::runtime::realm::{
 use crate::{
     object::TypedArrayElementType,
     runtime::{
-        ArrayStatic, PredefinedAtom, PropertyLayout, TypedArrayPrototypeMethod, Uint8ArrayMethod,
+        ArrayStatic, LocaleStringMethod, PredefinedAtom, PropertyLayout, TypedArrayPrototypeMethod,
+        Uint8ArrayMethod,
     },
 };
 
@@ -169,6 +170,11 @@ fn visit_typed_array_prototype_properties(visit: PropertySink<'_>, prototype: In
         prototype,
         IntrinsicKeySpec::WellKnownSymbol(PredefinedAtom::SymbolIterator),
         NativeFunctionKind::TypedArrayPrototype(TypedArrayPrototypeMethod::Values),
+    ));
+    visit(method(
+        prototype,
+        IntrinsicKeySpec::PredefinedString(PredefinedAtom::ToLocaleString),
+        NativeFunctionKind::LocaleString(LocaleStringMethod::Array),
     ));
 }
 

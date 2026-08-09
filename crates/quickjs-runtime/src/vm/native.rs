@@ -1272,6 +1272,214 @@ pub(super) fn resume_native_continuations(
                 return_to,
                 execution_budget,
             )?,
+            NativeContinuation::IntlLocaleList(state) => advance_intl_locale_list(
+                runtime,
+                *state,
+                Some(value.duplicate()),
+                return_to,
+                execution_budget,
+            )?,
+            NativeContinuation::IntlCollatorConstructor(state) => {
+                advance_intl_collator_constructor(
+                    runtime,
+                    *state,
+                    Some(value.duplicate()),
+                    return_to,
+                    execution_budget,
+                )?
+            }
+            NativeContinuation::IntlCollatorSupportedLocalesOf(state) => {
+                advance_intl_collator_supported_locales(
+                    runtime,
+                    *state,
+                    Some(value.duplicate()),
+                    return_to,
+                    execution_budget,
+                )?
+            }
+            NativeContinuation::IntlNumberFormatConstructor(state) => {
+                advance_intl_number_format_constructor(
+                    runtime,
+                    *state,
+                    Some(value.duplicate()),
+                    return_to,
+                    execution_budget,
+                )?
+            }
+            NativeContinuation::IntlNumberFormatUnwrap(state) => advance_intl_number_format_unwrap(
+                runtime,
+                *state,
+                &value,
+                return_to,
+                execution_budget,
+            )?,
+            NativeContinuation::IntlNumberFormatSupportedLocalesOf(state) => {
+                advance_intl_number_format_supported_locales(
+                    runtime,
+                    *state,
+                    Some(value.duplicate()),
+                    return_to,
+                    execution_budget,
+                )?
+            }
+            NativeContinuation::IntlDateTimeFormatConstructor(state) => {
+                advance_intl_date_time_format_constructor(
+                    runtime,
+                    *state,
+                    Some(value.duplicate()),
+                    return_to,
+                    execution_budget,
+                )?
+            }
+            NativeContinuation::IntlDateTimeFormatUnwrap(state) => {
+                advance_intl_date_time_format_unwrap(
+                    runtime,
+                    *state,
+                    &value,
+                    return_to,
+                    execution_budget,
+                )?
+            }
+            NativeContinuation::IntlDateTimeFormatSupportedLocalesOf(state) => {
+                advance_intl_date_time_format_supported_locales(
+                    runtime,
+                    *state,
+                    Some(value.duplicate()),
+                    return_to,
+                    execution_budget,
+                )?
+            }
+            NativeContinuation::IntlPluralRulesConstructor(state) => {
+                advance_intl_plural_rules_constructor(
+                    runtime,
+                    *state,
+                    Some(value.duplicate()),
+                    return_to,
+                    execution_budget,
+                )?
+            }
+            NativeContinuation::IntlPluralRulesSupportedLocalesOf(state) => {
+                advance_intl_plural_rules_supported_locales(
+                    runtime,
+                    *state,
+                    Some(value.duplicate()),
+                    return_to,
+                    execution_budget,
+                )?
+            }
+            NativeContinuation::IntlRelativeTimeFormatConstructor(state) => {
+                advance_intl_relative_time_format_constructor(
+                    runtime,
+                    *state,
+                    Some(value.duplicate()),
+                    return_to,
+                    execution_budget,
+                )?
+            }
+            NativeContinuation::IntlRelativeTimeFormatSupportedLocalesOf(state) => {
+                advance_intl_relative_time_format_supported_locales(
+                    runtime,
+                    *state,
+                    Some(value.duplicate()),
+                    return_to,
+                    execution_budget,
+                )?
+            }
+            NativeContinuation::IntlListFormatConstructor(state) => {
+                advance_intl_list_format_constructor(
+                    runtime,
+                    *state,
+                    Some(value.duplicate()),
+                    return_to,
+                    execution_budget,
+                )?
+            }
+            NativeContinuation::IntlListFormatSupportedLocalesOf(state) => {
+                advance_intl_list_format_supported_locales(
+                    runtime,
+                    *state,
+                    Some(value.duplicate()),
+                    return_to,
+                    execution_budget,
+                )?
+            }
+            NativeContinuation::IntlListFormatValue(state) => advance_intl_list_format_value(
+                runtime,
+                *state,
+                value.duplicate(),
+                return_to,
+                execution_budget,
+            )?,
+            NativeContinuation::IntlDisplayNamesConstructor(state) => {
+                advance_intl_display_names_constructor(
+                    runtime,
+                    *state,
+                    Some(value.duplicate()),
+                    return_to,
+                    execution_budget,
+                )?
+            }
+            NativeContinuation::IntlDisplayNamesSupportedLocalesOf(state) => {
+                advance_intl_display_names_supported_locales(
+                    runtime,
+                    *state,
+                    Some(value.duplicate()),
+                    return_to,
+                    execution_budget,
+                )?
+            }
+            NativeContinuation::IntlDurationFormatConstructor(state) => {
+                advance_intl_duration_format_constructor(
+                    runtime,
+                    *state,
+                    Some(value.duplicate()),
+                    return_to,
+                    execution_budget,
+                )?
+            }
+            NativeContinuation::IntlDurationFormatSupportedLocalesOf(state) => {
+                advance_intl_duration_format_supported_locales(
+                    runtime,
+                    *state,
+                    Some(value.duplicate()),
+                    return_to,
+                    execution_budget,
+                )?
+            }
+            NativeContinuation::IntlDurationFormatValue(state) => {
+                advance_intl_duration_format_value(
+                    runtime,
+                    *state,
+                    Some(value.duplicate()),
+                    return_to,
+                    execution_budget,
+                )?
+            }
+            NativeContinuation::IntlSegmenterConstructor(state) => {
+                advance_intl_segmenter_constructor(
+                    runtime,
+                    *state,
+                    Some(value.duplicate()),
+                    return_to,
+                    execution_budget,
+                )?
+            }
+            NativeContinuation::IntlSegmenterSupportedLocalesOf(state) => {
+                advance_intl_segmenter_supported_locales(
+                    runtime,
+                    *state,
+                    Some(value.duplicate()),
+                    return_to,
+                    execution_budget,
+                )?
+            }
+            NativeContinuation::IntlLocaleConstructor(state) => advance_intl_locale_constructor(
+                runtime,
+                *state,
+                Some(value.duplicate()),
+                return_to,
+                execution_budget,
+            )?,
             NativeContinuation::InstanceOf(state) => {
                 advance_instance_of(runtime, state, &value, return_to, execution_budget)?
             }
@@ -2759,6 +2967,353 @@ pub(super) fn dispatch_native_call_with_frames(
             origin.unwrap_or_else(native_function_host_origin),
             execution_budget,
         ),
+        NativeFunctionKind::IntlGetCanonicalLocales => begin_intl_get_canonical_locales(
+            runtime,
+            inputs.arguments.take_first_or_undefined(),
+            native.realm,
+            return_to,
+            origin.unwrap_or_else(native_function_host_origin),
+            execution_budget,
+        ),
+        NativeFunctionKind::IntlSupportedValuesOf => begin_intl_supported_values_of(
+            runtime,
+            inputs.arguments.take_first_or_undefined(),
+            native.realm,
+            return_to,
+            origin.unwrap_or_else(native_function_host_origin),
+            execution_budget,
+        ),
+        NativeFunctionKind::IntlCollatorConstructor => begin_intl_collator_constructor(
+            runtime,
+            function,
+            inputs,
+            native.realm,
+            return_to,
+            origin.unwrap_or_else(native_function_host_origin),
+            execution_budget,
+        ),
+        NativeFunctionKind::IntlCollatorSupportedLocalesOf => {
+            begin_intl_collator_supported_locales_of(
+                runtime,
+                inputs.arguments,
+                native.realm,
+                return_to,
+                origin.unwrap_or_else(native_function_host_origin),
+                execution_budget,
+            )
+        }
+        NativeFunctionKind::IntlCollatorPrototype(method) => begin_intl_collator_prototype(
+            runtime,
+            method,
+            &inputs.receiver,
+            native.realm,
+            origin.unwrap_or_else(native_function_host_origin),
+        ),
+        NativeFunctionKind::IntlCollatorCompare => begin_intl_collator_compare(
+            runtime,
+            &inputs.receiver,
+            inputs.arguments,
+            native.realm,
+            return_to,
+            origin.unwrap_or_else(native_function_host_origin),
+            execution_budget,
+        ),
+        NativeFunctionKind::IntlNumberFormatConstructor => begin_intl_number_format_constructor(
+            runtime,
+            function,
+            inputs,
+            native.realm,
+            return_to,
+            origin.unwrap_or_else(native_function_host_origin),
+            execution_budget,
+        ),
+        NativeFunctionKind::IntlNumberFormatSupportedLocalesOf => {
+            begin_intl_number_format_supported_locales_of(
+                runtime,
+                inputs.arguments,
+                native.realm,
+                return_to,
+                origin.unwrap_or_else(native_function_host_origin),
+                execution_budget,
+            )
+        }
+        NativeFunctionKind::IntlNumberFormatPrototype(method) => {
+            begin_intl_number_format_prototype(
+                runtime,
+                method,
+                &inputs.receiver,
+                inputs.arguments,
+                native.realm,
+                return_to,
+                origin.unwrap_or_else(native_function_host_origin),
+                execution_budget,
+            )
+        }
+        NativeFunctionKind::IntlNumberFormatFormat => begin_intl_number_format_format(
+            runtime,
+            &inputs.receiver,
+            inputs.arguments,
+            native.realm,
+            return_to,
+            origin.unwrap_or_else(native_function_host_origin),
+            execution_budget,
+        ),
+        NativeFunctionKind::IntlDateTimeFormatConstructor => {
+            begin_intl_date_time_format_constructor(
+                runtime,
+                function,
+                inputs,
+                native.realm,
+                return_to,
+                origin.unwrap_or_else(native_function_host_origin),
+                execution_budget,
+            )
+        }
+        NativeFunctionKind::IntlDateTimeFormatSupportedLocalesOf => {
+            begin_intl_date_time_format_supported_locales_of(
+                runtime,
+                inputs.arguments,
+                native.realm,
+                return_to,
+                origin.unwrap_or_else(native_function_host_origin),
+                execution_budget,
+            )
+        }
+        NativeFunctionKind::IntlDateTimeFormatPrototype(method) => {
+            begin_intl_date_time_format_prototype(
+                runtime,
+                method,
+                &inputs.receiver,
+                inputs.arguments,
+                native.realm,
+                return_to,
+                origin.unwrap_or_else(native_function_host_origin),
+                execution_budget,
+            )
+        }
+        NativeFunctionKind::IntlDateTimeFormatFormat => begin_intl_date_time_format_format(
+            runtime,
+            &inputs.receiver,
+            inputs.arguments,
+            native.realm,
+            return_to,
+            origin.unwrap_or_else(native_function_host_origin),
+            execution_budget,
+        ),
+        NativeFunctionKind::IntlPluralRulesConstructor => begin_intl_plural_rules_constructor(
+            runtime,
+            inputs,
+            native.realm,
+            return_to,
+            origin.unwrap_or_else(native_function_host_origin),
+            execution_budget,
+        ),
+        NativeFunctionKind::IntlPluralRulesSupportedLocalesOf => {
+            begin_intl_plural_rules_supported_locales_of(
+                runtime,
+                inputs.arguments,
+                native.realm,
+                return_to,
+                origin.unwrap_or_else(native_function_host_origin),
+                execution_budget,
+            )
+        }
+        NativeFunctionKind::IntlPluralRulesPrototype(method) => begin_intl_plural_rules_prototype(
+            runtime,
+            method,
+            &inputs.receiver,
+            inputs.arguments,
+            native.realm,
+            return_to,
+            origin.unwrap_or_else(native_function_host_origin),
+            execution_budget,
+        ),
+        NativeFunctionKind::IntlRelativeTimeFormatConstructor => {
+            begin_intl_relative_time_format_constructor(
+                runtime,
+                inputs,
+                native.realm,
+                return_to,
+                origin.unwrap_or_else(native_function_host_origin),
+                execution_budget,
+            )
+        }
+        NativeFunctionKind::IntlRelativeTimeFormatSupportedLocalesOf => {
+            begin_intl_relative_time_format_supported_locales_of(
+                runtime,
+                inputs.arguments,
+                native.realm,
+                return_to,
+                origin.unwrap_or_else(native_function_host_origin),
+                execution_budget,
+            )
+        }
+        NativeFunctionKind::IntlRelativeTimeFormatPrototype(method) => {
+            begin_intl_relative_time_format_prototype(
+                runtime,
+                method,
+                &inputs.receiver,
+                inputs.arguments,
+                native.realm,
+                return_to,
+                origin.unwrap_or_else(native_function_host_origin),
+                execution_budget,
+            )
+        }
+        NativeFunctionKind::IntlListFormatConstructor => begin_intl_list_format_constructor(
+            runtime,
+            inputs,
+            native.realm,
+            return_to,
+            origin.unwrap_or_else(native_function_host_origin),
+            execution_budget,
+        ),
+        NativeFunctionKind::IntlListFormatSupportedLocalesOf => {
+            begin_intl_list_format_supported_locales_of(
+                runtime,
+                inputs.arguments,
+                native.realm,
+                return_to,
+                origin.unwrap_or_else(native_function_host_origin),
+                execution_budget,
+            )
+        }
+        NativeFunctionKind::IntlListFormatPrototype(method) => begin_intl_list_format_prototype(
+            runtime,
+            method,
+            &inputs.receiver,
+            inputs.arguments,
+            native.realm,
+            return_to,
+            origin.unwrap_or_else(native_function_host_origin),
+            execution_budget,
+        ),
+        NativeFunctionKind::IntlDisplayNamesConstructor => begin_intl_display_names_constructor(
+            runtime,
+            inputs,
+            native.realm,
+            return_to,
+            origin.unwrap_or_else(native_function_host_origin),
+            execution_budget,
+        ),
+        NativeFunctionKind::IntlDisplayNamesSupportedLocalesOf => {
+            begin_intl_display_names_supported_locales_of(
+                runtime,
+                inputs.arguments,
+                native.realm,
+                return_to,
+                origin.unwrap_or_else(native_function_host_origin),
+                execution_budget,
+            )
+        }
+        NativeFunctionKind::IntlDisplayNamesPrototype(method) => {
+            begin_intl_display_names_prototype(
+                runtime,
+                method,
+                &inputs.receiver,
+                inputs.arguments,
+                native.realm,
+                return_to,
+                origin.unwrap_or_else(native_function_host_origin),
+                execution_budget,
+            )
+        }
+        NativeFunctionKind::IntlDurationFormatConstructor => {
+            begin_intl_duration_format_constructor(
+                runtime,
+                inputs,
+                native.realm,
+                return_to,
+                origin.unwrap_or_else(native_function_host_origin),
+                execution_budget,
+            )
+        }
+        NativeFunctionKind::IntlDurationFormatSupportedLocalesOf => {
+            begin_intl_duration_format_supported_locales_of(
+                runtime,
+                inputs.arguments,
+                native.realm,
+                return_to,
+                origin.unwrap_or_else(native_function_host_origin),
+                execution_budget,
+            )
+        }
+        NativeFunctionKind::IntlDurationFormatPrototype(method) => {
+            begin_intl_duration_format_prototype(
+                runtime,
+                method,
+                &inputs.receiver,
+                inputs.arguments,
+                native.realm,
+                return_to,
+                origin.unwrap_or_else(native_function_host_origin),
+                execution_budget,
+            )
+        }
+        NativeFunctionKind::IntlSegmenterConstructor => begin_intl_segmenter_constructor(
+            runtime,
+            inputs,
+            native.realm,
+            return_to,
+            origin.unwrap_or_else(native_function_host_origin),
+            execution_budget,
+        ),
+        NativeFunctionKind::IntlSegmenterSupportedLocalesOf => {
+            begin_intl_segmenter_supported_locales_of(
+                runtime,
+                inputs.arguments,
+                native.realm,
+                return_to,
+                origin.unwrap_or_else(native_function_host_origin),
+                execution_budget,
+            )
+        }
+        NativeFunctionKind::IntlSegmenterPrototype(method) => begin_intl_segmenter_prototype(
+            runtime,
+            method,
+            &inputs.receiver,
+            inputs.arguments,
+            native.realm,
+            return_to,
+            origin.unwrap_or_else(native_function_host_origin),
+            execution_budget,
+        ),
+        NativeFunctionKind::IntlSegmentsContaining => begin_intl_segments_containing(
+            runtime,
+            &inputs.receiver,
+            inputs.arguments,
+            native.realm,
+            return_to,
+            origin.unwrap_or_else(native_function_host_origin),
+            execution_budget,
+        ),
+        NativeFunctionKind::IntlSegmentsIterator => begin_intl_segments_iterator(
+            runtime,
+            &inputs.receiver,
+            native.realm,
+            origin.unwrap_or_else(native_function_host_origin),
+        ),
+        NativeFunctionKind::IntlSegmentIteratorNext => begin_intl_segment_iterator_next(
+            runtime,
+            &inputs.receiver,
+            native.realm,
+            origin.unwrap_or_else(native_function_host_origin),
+        ),
+        NativeFunctionKind::IntlLocaleConstructor => begin_intl_locale_constructor(
+            runtime,
+            inputs,
+            native.realm,
+            return_to,
+            origin.unwrap_or_else(native_function_host_origin),
+            execution_budget,
+        ),
+        NativeFunctionKind::IntlLocalePrototype(method) => begin_intl_locale_prototype(
+            runtime,
+            method,
+            &inputs.receiver,
+            native.realm,
+            origin.unwrap_or_else(native_function_host_origin),
+        ),
         NativeFunctionKind::Math(method) => begin_math_method(
             runtime,
             method,
@@ -3563,6 +4118,7 @@ pub(super) fn dispatch_native_call_with_frames(
             method,
             native.realm,
             inputs.receiver,
+            inputs.arguments,
             return_to,
             origin.unwrap_or_else(native_function_host_origin),
             execution_budget,

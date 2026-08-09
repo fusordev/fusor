@@ -136,7 +136,7 @@ fn plain_date_intrinsic_constructor_accessors_and_iso_formatting_are_spec_shaped
                d.monthsInYear,d.inLeapYear,d.era,d.eraYear,d.toString(),d.toJSON(),
                d.toLocaleString()].join('|');"
         ),
-        "3|PlainDate|true|[object Temporal.PlainDate]|false|get year|iso8601|2020|12|M12|24|4|359|52|2020|7|31|366|12|true|||2020-12-24|2020-12-24|2020-12-24"
+        "3|PlainDate|true|[object Temporal.PlainDate]|false|get year|iso8601|2020|12|M12|24|4|359|52|2020|7|31|366|12|true|||2020-12-24|2020-12-24|12/24/2020"
     );
 }
 
@@ -245,6 +245,28 @@ fn plain_month_day_converts_property_bags_and_preserves_observable_boundaries() 
         ExceptionKind::RangeError
     );
     assert_eq!(
+        rendered(
+            "var log=[];
+             var fields={
+               get year(){log.push('year')},
+               get era(){log.push('era');return {toString:function(){log.push('era toString');return 'ad'}}},
+               get eraYear(){log.push('eraYear');return {valueOf:function(){log.push('eraYear valueOf');return 2020}}}
+             };
+             var date=new Temporal.PlainMonthDay(5,2,'gregory').toPlainDate(fields);
+             return date.toString()+'|'+log.join(',');"
+        ),
+        "2020-05-02[u-ca=gregory]|year,era,era toString,eraYear,eraYear valueOf"
+    );
+    assert_eq!(
+        rendered(
+            "var log=[];
+             var eraYear={get valueOf(){log.push('get eraYear.valueOf');return function(){log.push('call eraYear.valueOf');return Infinity}}};
+             try{new Temporal.PlainMonthDay(5,2,'gregory').toPlainDate({era:'ad',eraYear:eraYear})}
+             catch(error){return error.name+'|'+log.join(',')}"
+        ),
+        "RangeError|get eraYear.valueOf,call eraYear.valueOf"
+    );
+    assert_eq!(
         thrown("return new Temporal.PlainMonthDay(5,2).with({day:-1}, null);"),
         ExceptionKind::RangeError
     );
@@ -282,12 +304,13 @@ fn plain_year_month_converts_property_bags_and_preserves_observable_boundaries()
                Object.prototype.toString.call(value),year.enumerable,year.get.name,
                value.calendarId,value.year,value.month,value.monthCode,value.daysInMonth,
                value.daysInYear,value.monthsInYear,value.inLeapYear,value.era,value.eraYear,
-               value.toString({calendarName:'always'}),value.toJSON(),value.toLocaleString(),
+               value.toString({calendarName:'always'}),value.toJSON(),
+               value.toLocaleString('en-u-ca-iso8601'),
                from.toString(),changed.toString(),date.toString(),added.toString(),
                subtracted.toString(),until.toString(),since.toString(),
                Temporal.PlainYearMonth.compare(value,from),value.equals(from),log.join(',')].join('|');"
         ),
-        "2|PlainYearMonth|true|[object Temporal.PlainYearMonth]|false|get year|iso8601|2020|12|M12|31|366|12|true|||2020-12-01[u-ca=iso8601]|2020-12|2020-12|2021-12|2020-02|2020-12-29|2021-02|2019-12|P1Y3M|-P1Y3M|-1|false|calendar,month,month number,monthCode,monthCode string,year,year number,from overflow,from overflow string,with calendar,with timeZone,with month,with month number,with monthCode,with year,with overflow,with overflow string,day,add months"
+        "2|PlainYearMonth|true|[object Temporal.PlainYearMonth]|false|get year|iso8601|2020|12|M12|31|366|12|true|||2020-12-01[u-ca=iso8601]|2020-12|12/2020|2021-12|2020-02|2020-12-29|2021-02|2019-12|P1Y3M|-P1Y3M|-1|false|calendar,month,month number,monthCode,monthCode string,year,year number,from overflow,from overflow string,with calendar,with timeZone,with month,with month number,with monthCode,with year,with overflow,with overflow string,day,add months"
     );
     assert_eq!(
         thrown("return new Temporal.PlainYearMonth(2020,12).with({calendar:'iso8601'});"),
@@ -537,7 +560,7 @@ fn zoned_date_time_property_bags_and_from_options_preserve_observable_order() {
 }
 
 #[test]
-fn zoned_date_time_json_and_non_intl_locale_rendering_are_ixdtf() {
+fn zoned_date_time_json_is_ixdtf_and_locale_rendering_uses_date_time_format() {
     assert_eq!(
         rendered(
             "var value=new Temporal.ZonedDateTime(0n,'UTC','iso8601');
@@ -545,11 +568,23 @@ fn zoned_date_time_json_and_non_intl_locale_rendering_are_ixdtf() {
              return [value.toJSON(),value.toLocaleString(),json.value.length,json.value.name,
                json.enumerable,json.writable,json.configurable].join('|');"
         ),
-        "1970-01-01T00:00:00+00:00[UTC]|1970-01-01T00:00:00+00:00[UTC]|0|toJSON|false|true|true"
+        "1970-01-01T00:00:00+00:00[UTC]|1/1/1970, 12:00:00 AM UTC|0|toJSON|false|true|true"
     );
     assert_eq!(
         thrown("return new Temporal.ZonedDateTime(0n,'UTC').valueOf();"),
         ExceptionKind::TypeError
+    );
+}
+
+#[test]
+fn zoned_date_time_locale_strings_format_offset_time_zones() {
+    assert_eq!(
+        rendered(
+            "return [new Temporal.ZonedDateTime(0n,'+00:00').toLocaleString('en'),
+              new Temporal.ZonedDateTime(0n,'+01:00').toLocaleString('en'),
+              new Temporal.ZonedDateTime(0n,'-01:00').toLocaleString('en')].join('|');"
+        ),
+        "1/1/1970, 12:00:00 AM GMT|1/1/1970, 1:00:00 AM GMT+1|12/31/1969, 11:00:00 PM GMT-1"
     );
 }
 
@@ -1065,7 +1100,7 @@ fn plain_date_time_constructor_accessors_and_iso_formatting_are_spec_shaped() {
                d.daysInMonth,d.daysInYear,d.monthsInYear,d.inLeapYear,d.era,d.eraYear,
                d.toJSON(),d.toLocaleString()].join('|');"
         ),
-        "4|359|52|2020|7|31|366|12|true|||2020-12-24T12:34:56.007008009|2020-12-24T12:34:56.007008009"
+        "4|359|52|2020|7|31|366|12|true|||2020-12-24T12:34:56.007008009|12/24/2020, 12:34:56 PM"
     );
     assert_eq!(
         rendered("return new Temporal.PlainDateTime(2020,2,29).toString();"),
@@ -1132,7 +1167,7 @@ fn plain_time_constructor_conversion_and_accessors_are_spec_shaped() {
                Temporal.PlainTime.compare.name,Temporal.PlainTime.compare.length,
                from.toString(),parsed.toString(),Temporal.PlainTime.compare(time,parsed)].join('|');"
         ),
-        "0|PlainTime|true|[object Temporal.PlainTime]|false|get hour|12|34|56|7|8|9|12:34:56.007008009|12:34:56.007008009|12:34:56.007008009|from|1|compare|2|23:59:00.000999|01:02:03.004005006|1"
+        "0|PlainTime|true|[object Temporal.PlainTime]|false|get hour|12|34|56|7|8|9|12:34:56.007008009|12:34:56.007008009|12:34:56 PM|from|1|compare|2|23:59:00.000999|01:02:03.004005006|1"
     );
     assert_eq!(
         rendered(
@@ -1644,6 +1679,27 @@ fn plain_date_from_property_bags_observe_field_and_overflow_conversion_order() {
 }
 
 #[test]
+fn non_iso_calendar_property_bags_resolve_eras_and_leap_months() {
+    assert_eq!(
+        rendered(
+            "var date=Temporal.PlainDate.from({calendar:'gregory',era:'bce',eraYear:1,monthCode:'M06',day:15});
+             var dateTime=Temporal.PlainDateTime.from({calendar:'gregory',era:'bce',eraYear:1,monthCode:'M06',day:15,hour:12});
+             var monthDay=Temporal.PlainMonthDay.from({calendar:'chinese',year:2001,month:5,day:15});
+             var yearMonth=Temporal.PlainYearMonth.from({calendar:'hebrew',year:5784,monthCode:'M11'}).with({month:13});
+             var zoned=Temporal.ZonedDateTime.from({calendar:'gregory',era:'ce',eraYear:1970,monthCode:'M01',day:1,timeZone:'UTC'});
+             var ignored=Temporal.PlainDate.from({calendar:'chinese',era:'unknown',eraYear:1,year:2025,monthCode:'M01',day:1});
+             var rejected=false;
+             try { Temporal.PlainDate.from({calendar:'islamic',year:1500,month:1,day:1}); }
+             catch (error) { rejected=error instanceof RangeError; }
+             return [date.year,date.era,date.eraYear,dateTime.year,dateTime.era,dateTime.eraYear,
+               monthDay.monthCode,monthDay.day,yearMonth.month,yearMonth.monthCode,
+               zoned.year,zoned.era,zoned.eraYear,ignored.year,ignored.era===undefined,rejected].join('|');"
+        ),
+        "0|bce|1|0|bce|1|M04L|15|13|M12|1970|ce|1970|2025|true|true"
+    );
+}
+
+#[test]
 fn plain_date_compare_reuses_resumable_property_bag_conversion_for_both_operands() {
     assert_eq!(
         rendered(
@@ -2082,7 +2138,7 @@ fn duration_constructor_and_accessors_preserve_all_ten_fields() {
                d.milliseconds,d.microseconds,d.nanoseconds,d.sign,d.blank,
                d.toString(),d.toJSON(),d.toLocaleString(),z.sign,z.blank,z.toString()].join('|');"
         ),
-        "1|2|3|4|5|6|7|8|9|10|1|false|P1Y2M3W4DT5H6M7.00800901S|P1Y2M3W4DT5H6M7.00800901S|P1Y2M3W4DT5H6M7.00800901S|0|true|PT0S"
+        "1|2|3|4|5|6|7|8|9|10|1|false|P1Y2M3W4DT5H6M7.00800901S|P1Y2M3W4DT5H6M7.00800901S|1 yr, 2 mths, 3 wks, 4 days, 5 hr, 6 min, 7 sec, 8 ms, 9 μs, 10 ns|0|true|PT0S"
     );
 }
 
@@ -2122,7 +2178,7 @@ fn duration_to_string_observes_options_and_coercions_in_specified_order() {
 }
 
 #[test]
-fn duration_to_string_rejects_invalid_options_and_keeps_json_locale_defaults() {
+fn duration_to_string_rejects_invalid_options_and_keeps_json_separate_from_locale_output() {
     assert_eq!(
         thrown("return new Temporal.Duration().toString(1);"),
         ExceptionKind::TypeError
@@ -2153,7 +2209,7 @@ fn duration_to_string_rejects_invalid_options_and_keeps_json_locale_defaults() {
             "var duration=Temporal.Duration.from('PT1.23456789S');
              return [duration.toJSON(),duration.toLocaleString('fr',{smallestUnit:'second'})].join('|');"
         ),
-        "PT1.23456789S|PT1.23456789S"
+        "PT1.23456789S|1\u{202f}s, 234\u{202f}ms, 567\u{202f}μs et 890\u{202f}ns"
     );
 }
 
@@ -2549,9 +2605,12 @@ fn instant_to_string_formats_fractional_precision_rounding_and_time_zones() {
                instant.toString({roundingMode:'ceil',smallestUnit:'second'}),
                instant.toString({smallestUnit:'minute'}),
                instant.toString({timeZone:'UTC'}),instant.toString({timeZone:'+05:30'}),
-               instant.toString({timeZone:'America/New_York'})].join('|');"
+               instant.toString({timeZone:'America/New_York'}),
+               new Temporal.Instant(0n).toString({timeZone:'2021-08-19T17:30[America/Vancouver]'}),
+               new Temporal.Instant(0n).toString({timeZone:'2021-08-19T17:30Z[America/Vancouver]'}),
+               new Temporal.Instant(0n).toString({timeZone:'2021-08-19T17:30-07:00[America/Vancouver]'})].join('|');"
         ),
-        "2020-01-02T03:04:05.678901234Z|2020-01-02T03:04:05Z|2020-01-02T03:04:05.678Z|2020-01-02T03:04:06Z|2020-01-02T03:04Z|2020-01-02T03:04:05.678901234+00:00|2020-01-02T08:34:05.678901234+05:30|2020-01-01T22:04:05.678901234-05:00"
+        "2020-01-02T03:04:05.678901234Z|2020-01-02T03:04:05Z|2020-01-02T03:04:05.678Z|2020-01-02T03:04:06Z|2020-01-02T03:04Z|2020-01-02T03:04:05.678901234+00:00|2020-01-02T08:34:05.678901234+05:30|2020-01-01T22:04:05.678901234-05:00|1969-12-31T16:00:00-08:00|1969-12-31T16:00:00-08:00|1969-12-31T16:00:00-08:00"
     );
 }
 
@@ -2857,9 +2916,9 @@ fn instant_to_zoned_date_time_iso_uses_time_zone_slot_values() {
             "var instant=new Temporal.Instant(0n);
              return [instant.toZonedDateTimeISO('uTc').timeZoneId,
                instant.toZonedDateTimeISO('1976-11-18T15:23+01:00[+01:00]').timeZoneId,
-               instant.toLocaleString()].join('|');"
+               instant.toLocaleString('en',{timeZone:'UTC'})].join('|');"
         ),
-        "UTC|+01:00|1970-01-01T00:00:00Z"
+        "UTC|+01:00|1/1/1970, 12:00:00 AM"
     );
     assert_eq!(
         thrown("return new Temporal.Instant(0n).toZonedDateTimeISO();"),

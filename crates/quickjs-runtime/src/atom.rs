@@ -53,10 +53,10 @@ use crate::{
 pub const MAX_ATOM_ENTRIES: u32 = (1 << 30) - 1;
 
 /// Number of atoms installed when an atom table is created.
-pub const PREDEFINED_ATOM_COUNT: u32 = 243;
+pub const PREDEFINED_ATOM_COUNT: u32 = 244;
 
 /// UTF-16 code units held by the predefined atom descriptions.
-pub const PREDEFINED_DESCRIPTION_CODE_UNITS: u64 = 2_092;
+pub const PREDEFINED_DESCRIPTION_CODE_UNITS: u64 = 2_119;
 
 /// Content-interner slots held by predefined string atoms.
 pub const PREDEFINED_INTERNER_SLOTS: u32 = 228;
