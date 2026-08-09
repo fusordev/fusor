@@ -270,6 +270,78 @@ fn direct_eval_parameter_boundary_certifies_scope_zero_only_in_parameter_code() 
 }
 
 #[test]
+fn eval_reference_call_metadata_is_checked_and_retained() {
+    let flow = compiler_flow(
+        &[
+            (FinalOpcode::Push7, Operands::NoneInt),
+            (FinalOpcode::Push7, Operands::NoneInt),
+            (
+                FinalOpcode::Eval,
+                Operands::NPopU16 {
+                    argument_count: 0,
+                    scope_index: 1,
+                },
+            ),
+            (FinalOpcode::Swap, Operands::None),
+            (FinalOpcode::Drop, Operands::None),
+            (FinalOpcode::Return, Operands::None),
+        ],
+        0,
+        0,
+        &[],
+        0,
+        &[],
+    );
+    let verified = verify_compiler_function_graph(
+        graph(vec![
+            function(flow, &[], &[])
+                .with_eval_reference_call_instructions(Arc::from([2]))
+                .with_direct_eval(true),
+        ]),
+        FunctionGraphVerificationLimits::default(),
+    )
+    .expect("receiver-carrying eval metadata");
+
+    assert_eq!(verified.root().eval_reference_call_instructions(), [2]);
+}
+
+#[test]
+fn eval_reference_call_metadata_rejects_missing_receiver_and_wrong_opcode() {
+    let error = verify_compiler_function_graph(
+        graph(vec![
+            function(parameter_eval_flow(1), &[], &[])
+                .with_eval_reference_call_instructions(Arc::from([1]))
+                .with_direct_eval(true),
+        ]),
+        FunctionGraphVerificationLimits::default(),
+    )
+    .expect_err("a receiver-carrying eval needs one extra stack value");
+    assert_eq!(
+        error.kind(),
+        &FunctionGraphVerificationErrorKind::EvalReferenceCallReceiverMissing {
+            instruction: 1,
+            required: 2,
+            actual: Some(1),
+        }
+    );
+
+    let error = verify_compiler_function_graph(
+        graph(vec![
+            function(leaf_flow(), &[], &[]).with_eval_reference_call_instructions(Arc::from([0])),
+        ]),
+        FunctionGraphVerificationLimits::default(),
+    )
+    .expect_err("metadata cannot relabel an ordinary opcode as eval");
+    assert_eq!(
+        error.kind(),
+        &FunctionGraphVerificationErrorKind::EvalReferenceCallOpcodeMismatch {
+            instruction: 0,
+            opcode: FinalOpcode::ReturnUndef,
+        }
+    );
+}
+
+#[test]
 fn accepts_a_nonzero_root_identity_without_reordering_records() {
     let parent = function(
         compiler_flow(

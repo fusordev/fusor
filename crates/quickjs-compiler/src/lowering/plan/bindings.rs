@@ -26,6 +26,15 @@ pub(in crate::lowering) enum LoweredReference {
     },
 }
 
+/// Storage source for one active Object Environment Record binding object.
+/// Source `with` statements use ordinary frame bindings; direct eval imports
+/// caller objects through verified external closure slots.
+#[derive(Clone, Copy)]
+pub(in crate::lowering) enum WithObjectSource {
+    Frame(BindingId),
+    DirectEval(RealmGlobalId),
+}
+
 pub(in crate::lowering) fn compact_get_argument(slot: ArgumentSlot) -> (FinalOpcode, Operands) {
     match slot.0 {
         0 => (FinalOpcode::GetArg0, Operands::NoneArg),
@@ -211,6 +220,46 @@ impl ScopeEntryInitialization {
 }
 
 impl<'arena> ExpressionPlanner<'_, '_, 'arena, '_> {
+    pub(in crate::lowering) fn plan_with_object_read(
+        &self,
+        source: WithObjectSource,
+        layout: &FrameLayout,
+        tree_layout: &FunctionTreeLayout,
+        span: Span,
+    ) -> Result<PlannedInstruction, LeafCompilationError> {
+        match source {
+            WithObjectSource::Frame(binding) => {
+                let slot = layout
+                    .slot(binding)
+                    .ok_or(LeafCompilationError::SemanticInvariant {
+                        invariant: "visible with-object binding has a frame slot",
+                        span: Some(span),
+                    })?;
+                self.plan_read_slot(binding, slot, span)
+            }
+            WithObjectSource::DirectEval(global) => {
+                let slot = tree_layout.realm_globals.closure_slot(
+                    &self.planned.plan,
+                    layout.executable,
+                    global,
+                )?;
+                let descriptor = tree_layout.realm_globals.binding(global).ok_or(
+                    LeafCompilationError::SemanticInvariant {
+                        invariant: "direct-eval with object has an external-binding descriptor",
+                        span: Some(span),
+                    },
+                )?;
+                if descriptor.policy.kind() != quickjs_bytecode::CompilerBindingKind::WithObject {
+                    return Err(LeafCompilationError::SemanticInvariant {
+                        invariant: "direct-eval with object retains its binding kind",
+                        span: Some(span),
+                    });
+                }
+                Ok(plan_external_read(descriptor.binding, slot, false, span))
+            }
+        }
+    }
+
     pub(in crate::lowering) fn plan_identifier_read(
         &self,
         identifier: &IdentifierReference<'arena>,
@@ -240,21 +289,18 @@ impl<'arena> ExpressionPlanner<'_, '_, 'arena, '_> {
                 plan_external_read(binding, slot, unresolved_is_undefined, identifier.span)
             }
         };
-        let with_objects = self
-            .with_object_bindings_for_reference(identifier.reference_id.get(), identifier.span)?;
+        let with_objects = self.with_object_sources_for_reference(
+            identifier.reference_id.get(),
+            identifier.span,
+            tree_layout,
+        )?;
         if with_objects.is_empty() {
             return flow.emit(instruction);
         }
         let done = flow.new_label(identifier.span)?;
         let atom = constants.property_atom_index(identifier.span)?;
-        for binding in with_objects {
-            let slot = layout
-                .slot(binding)
-                .ok_or(LeafCompilationError::SemanticInvariant {
-                    invariant: "visible with-object binding has a frame slot",
-                    span: Some(identifier.span),
-                })?;
-            flow.emit(self.plan_read_slot(binding, slot, identifier.span)?)?;
+        for source in with_objects {
+            flow.emit(self.plan_with_object_read(source, layout, tree_layout, identifier.span)?)?;
             flow.with_branch(FinalOpcode::WithGetVar, atom, 1, &done, identifier.span)?;
         }
         flow.emit(instruction)?;
@@ -289,8 +335,11 @@ impl<'arena> ExpressionPlanner<'_, '_, 'arena, '_> {
                 plan_external_read(binding, slot, false, identifier.span)
             }
         };
-        let with_objects = self
-            .with_object_bindings_for_reference(identifier.reference_id.get(), identifier.span)?;
+        let with_objects = self.with_object_sources_for_reference(
+            identifier.reference_id.get(),
+            identifier.span,
+            tree_layout,
+        )?;
         if with_objects.is_empty() {
             return Err(LeafCompilationError::SemanticInvariant {
                 invariant: "with call-reference lowering has a visible object environment",
@@ -299,14 +348,8 @@ impl<'arena> ExpressionPlanner<'_, '_, 'arena, '_> {
         }
         let done = flow.new_label(identifier.span)?;
         let atom = constants.property_atom_index(identifier.span)?;
-        for binding in with_objects {
-            let slot = layout
-                .slot(binding)
-                .ok_or(LeafCompilationError::SemanticInvariant {
-                    invariant: "visible with-object binding has a frame slot",
-                    span: Some(identifier.span),
-                })?;
-            flow.emit(self.plan_read_slot(binding, slot, identifier.span)?)?;
+        for source in with_objects {
+            flow.emit(self.plan_with_object_read(source, layout, tree_layout, identifier.span)?)?;
             flow.with_branch(FinalOpcode::WithGetRef, atom, 1, &done, identifier.span)?;
         }
         flow.emit(PlannedInstruction::new(
@@ -333,8 +376,11 @@ impl<'arena> ExpressionPlanner<'_, '_, 'arena, '_> {
             tree_layout,
         )?;
         self.validate_lowered_mutation_reference(reference, false, identifier.span)?;
-        let with_objects = self
-            .with_object_bindings_for_reference(identifier.reference_id.get(), identifier.span)?;
+        let with_objects = self.with_object_sources_for_reference(
+            identifier.reference_id.get(),
+            identifier.span,
+            tree_layout,
+        )?;
         let emit_fallback = |flow: &mut PlannedControlFlow| match reference {
             LoweredReference::Frame { binding, slot, .. } => {
                 for instruction in self.plan_write_slot(binding, slot, false, identifier.span)? {
@@ -353,14 +399,8 @@ impl<'arena> ExpressionPlanner<'_, '_, 'arena, '_> {
         let with_reference = flow.new_label(identifier.span)?;
         let done = flow.new_label(identifier.span)?;
         let atom = constants.property_atom_index(identifier.span)?;
-        for binding in with_objects {
-            let slot = layout
-                .slot(binding)
-                .ok_or(LeafCompilationError::SemanticInvariant {
-                    invariant: "visible with-object binding has a frame slot",
-                    span: Some(identifier.span),
-                })?;
-            flow.emit(self.plan_read_slot(binding, slot, identifier.span)?)?;
+        for source in with_objects {
+            flow.emit(self.plan_with_object_read(source, layout, tree_layout, identifier.span)?)?;
             flow.with_branch(
                 FinalOpcode::WithMakeRef,
                 atom,
@@ -659,9 +699,10 @@ impl<'arena> ExpressionPlanner<'_, '_, 'arena, '_> {
     /// before selecting the object or static binding store.
     pub(in crate::lowering) fn plan_with_make_reference_selection(
         &self,
-        with_objects: &[BindingId],
+        with_objects: &[WithObjectSource],
         atom: quickjs_bytecode::AtomPoolIndex,
         layout: &FrameLayout,
+        tree_layout: &FunctionTreeLayout,
         span: Span,
         flow: &mut PlannedControlFlow,
     ) -> Result<(), LeafCompilationError> {
@@ -673,7 +714,7 @@ impl<'arena> ExpressionPlanner<'_, '_, 'arena, '_> {
         }
         let resolved = flow.new_label(span)?;
         let merged = flow.new_label(span)?;
-        for (index, &binding) in with_objects.iter().enumerate() {
+        for (index, &source) in with_objects.iter().enumerate() {
             if index != 0 {
                 flow.emit(PlannedInstruction::new(
                     FinalOpcode::Drop,
@@ -681,13 +722,7 @@ impl<'arena> ExpressionPlanner<'_, '_, 'arena, '_> {
                     span,
                 ))?;
             }
-            let slot = layout
-                .slot(binding)
-                .ok_or(LeafCompilationError::SemanticInvariant {
-                    invariant: "visible with-object binding has a frame slot",
-                    span: Some(span),
-                })?;
-            flow.emit(self.plan_read_slot(binding, slot, span)?)?;
+            flow.emit(self.plan_with_object_read(source, layout, tree_layout, span)?)?;
             flow.emit(PlannedInstruction::new(
                 FinalOpcode::Dup,
                 Operands::None,
@@ -729,6 +764,76 @@ impl<'arena> ExpressionPlanner<'_, '_, 'arena, '_> {
 }
 
 impl CompilationContext<'_, '_, '_> {
+    pub(in crate::lowering) fn with_object_sources_for_reference(
+        &self,
+        reference_id: Option<ReferenceId>,
+        span: Span,
+        tree_layout: &FunctionTreeLayout,
+    ) -> Result<Vec<WithObjectSource>, LeafCompilationError> {
+        let reference_id = reference_id.ok_or(LeafCompilationError::SemanticInvariant {
+            invariant: "identifier reference has Oxc reference identity",
+            span: Some(span),
+        })?;
+        let mut sources = self
+            .with_object_bindings_for_reference(Some(reference_id), span)?
+            .into_iter()
+            .map(WithObjectSource::Frame)
+            .collect::<Vec<_>>();
+        let native = self
+            .planned
+            .identities
+            .reference_by_id
+            .get(reference_id.index())
+            .copied()
+            .flatten()
+            .ok_or(LeafCompilationError::SemanticInvariant {
+                invariant: "Oxc reference has compiler identity",
+                span: Some(span),
+            })?;
+        let ambient = match native {
+            NativeReferenceId::Resolved(reference) => {
+                let binding = self
+                    .planned
+                    .plan
+                    .resolved_reference(reference)
+                    .ok_or(LeafCompilationError::SemanticInvariant {
+                        invariant: "resolved compiler reference exists",
+                        span: Some(span),
+                    })?
+                    .binding();
+                tree_layout.realm_globals.with_objects_for_binding(binding)
+            }
+            NativeReferenceId::Unresolved(reference) => tree_layout
+                .realm_globals
+                .with_objects_for_unresolved(reference),
+        };
+        sources.extend(ambient.iter().copied().map(WithObjectSource::DirectEval));
+        Ok(sources)
+    }
+
+    pub(in crate::lowering) fn with_object_sources_for_node_before_binding(
+        &self,
+        node: NodeId,
+        binding: BindingId,
+        span: Span,
+        tree_layout: &FunctionTreeLayout,
+    ) -> Result<Vec<WithObjectSource>, LeafCompilationError> {
+        let mut sources = self
+            .with_object_bindings_for_node_before_binding(node, binding, span)?
+            .into_iter()
+            .map(WithObjectSource::Frame)
+            .collect::<Vec<_>>();
+        sources.extend(
+            tree_layout
+                .realm_globals
+                .with_objects_for_binding(binding)
+                .iter()
+                .copied()
+                .map(WithObjectSource::DirectEval),
+        );
+        Ok(sources)
+    }
+
     pub(in crate::lowering) fn with_object_binding(
         &self,
         statement: NodeId,
@@ -1364,10 +1469,11 @@ impl<'arena> CompilationContext<'_, 'arena, '_> {
             if declaration_kind == VariableDeclarationKind::Var
                 && let Some(initializer) = declarator.init.as_ref()
             {
-                let with_objects = self.with_object_bindings_for_node_before_binding(
+                let with_objects = self.with_object_sources_for_node_before_binding(
                     initializer.node_id(),
                     binding,
                     identifier.span,
+                    tree_layout,
                 )?;
                 if !with_objects.is_empty() {
                     return self.plan_with_identifier_var_initializer(
@@ -1523,7 +1629,7 @@ impl<'arena> CompilationContext<'_, 'arena, '_> {
         initializer: &Expression<'arena>,
         binding: BindingId,
         storage: &crate::storage::BindingStorage,
-        with_objects: &[BindingId],
+        with_objects: &[WithObjectSource],
         layout: &FrameLayout,
         tree_layout: &FunctionTreeLayout,
         constants: &CompiledConstantPool,
@@ -1589,6 +1695,7 @@ impl<'arena> CompilationContext<'_, 'arena, '_> {
             with_objects,
             atom,
             layout,
+            tree_layout,
             identifier.span,
             flow,
         )?;

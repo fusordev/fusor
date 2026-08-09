@@ -31,11 +31,12 @@ fn verified_binding_policy(
         DeclarationKind::Parameter => VerifiedBindingKind::Parameter,
         DeclarationKind::Var => VerifiedBindingKind::Var,
         DeclarationKind::Let | DeclarationKind::Class => VerifiedBindingKind::Let,
-        DeclarationKind::Const | DeclarationKind::WithObject => VerifiedBindingKind::Const,
+        DeclarationKind::Const => VerifiedBindingKind::Const,
         DeclarationKind::ClassName => VerifiedBindingKind::ClassName,
         DeclarationKind::ClassFieldKey => VerifiedBindingKind::ClassFieldKey,
         DeclarationKind::ClassPrivateName => VerifiedBindingKind::ClassPrivateName,
         DeclarationKind::ClassStaticReceiver => VerifiedBindingKind::ClassStaticReceiver,
+        DeclarationKind::WithObject => VerifiedBindingKind::WithObject,
         DeclarationKind::Function => VerifiedBindingKind::Function,
         DeclarationKind::FunctionName => VerifiedBindingKind::FunctionName,
         DeclarationKind::Catch => VerifiedBindingKind::Catch,
@@ -901,6 +902,9 @@ fn build_unverified_graph_records(
             )
             .with_atom_pool(Arc::clone(&function.atoms))
             .with_parameter_initialization_end(function.parameter_initialization_end)
+            .with_eval_reference_call_instructions(Arc::clone(
+                &function.eval_reference_call_instructions,
+            ))
             .with_direct_eval(
                 function
                     .storage_plan

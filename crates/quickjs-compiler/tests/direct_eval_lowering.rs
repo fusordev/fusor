@@ -148,3 +148,40 @@ fn spread_bare_eval_uses_apply_eval_without_a_receiver_slot() {
         Some(&FinalOpcode::Undefined)
     );
 }
+
+#[test]
+fn eval_resolved_through_with_retains_its_reference_receiver() {
+    let compiled = compile(
+        "function invoke(object, eval) { with (object) return eval('value'); }",
+        "invoke",
+    );
+    let instructions = compiled.root().control_flow().instructions();
+    let eval = instructions
+        .iter()
+        .position(|instruction| instruction.decoded().instruction().opcode() == FinalOpcode::Eval)
+        .expect("eval instruction");
+
+    assert_eq!(
+        instructions[eval].decoded().instruction().operands(),
+        Operands::NPopU16 {
+            argument_count: 1,
+            scope_index: 3,
+        }
+    );
+    assert_eq!(
+        instructions[eval + 1].decoded().instruction().opcode(),
+        FinalOpcode::Swap
+    );
+    assert_eq!(
+        instructions[eval + 2].decoded().instruction().opcode(),
+        FinalOpcode::Drop
+    );
+    assert_eq!(
+        compiled
+            .verified_bytecode()
+            .root()
+            .function()
+            .eval_reference_call_instructions(),
+        [u32::try_from(eval).expect("instruction index")]
+    );
+}

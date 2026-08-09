@@ -59,6 +59,13 @@ pub enum CompilerBindingKind {
     /// static field initializers that lexically observe `this` or resolve a
     /// `super` property.
     ClassStaticReceiver,
+    /// The compiler-created immutable cell holding an active Object
+    /// Environment Record's binding object for a sloppy `with` statement.
+    ///
+    /// This is not an ECMAScript declarative binding. Its distinct metadata
+    /// kind lets direct eval reconstruct the intervening dynamic environment
+    /// without exposing the compiler's hidden cell name to source code.
+    WithObject,
     /// A function declaration.
     Function,
     /// A named function-expression self binding.
@@ -162,6 +169,7 @@ impl CompilerBindingPolicy {
                 | CompilerBindingKind::ClassFieldKey
                 | CompilerBindingKind::ClassPrivateName
                 | CompilerBindingKind::ClassStaticReceiver
+                | CompilerBindingKind::WithObject
                 | CompilerBindingKind::Catch
         ) || matches!(
             self.initialization,
@@ -193,7 +201,8 @@ impl CompilerBindingPolicy {
             | CompilerBindingKind::ClassName
             | CompilerBindingKind::ClassFieldKey
             | CompilerBindingKind::ClassPrivateName
-            | CompilerBindingKind::ClassStaticReceiver => {
+            | CompilerBindingKind::ClassStaticReceiver
+            | CompilerBindingKind::WithObject => {
                 matches!(
                     self.initialization,
                     CompilerInitializationPolicy::AtDeclaration
@@ -4252,6 +4261,7 @@ const fn realm_global_policy_supported(policy: CompilerBindingPolicy) -> bool {
         | CompilerBindingKind::ClassFieldKey
         | CompilerBindingKind::ClassPrivateName
         | CompilerBindingKind::ClassStaticReceiver
+        | CompilerBindingKind::WithObject
         | CompilerBindingKind::Catch => false,
     }
 }

@@ -292,6 +292,9 @@ pub enum DirectEvalBindingKind {
     FunctionName,
     /// A global function declaration.
     GlobalFunctionDeclaration,
+    /// A compiler-hidden binding object for an active sloppy `with`
+    /// environment. This is an environment marker, not a source-visible name.
+    WithObject,
 }
 
 /// The storage location of a binding visible to direct `eval`.

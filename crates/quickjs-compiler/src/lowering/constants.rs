@@ -4,7 +4,7 @@ use quickjs_bytecode::{
     AtomPoolIndex, Binary64Constant, CompilerAtom, CompilerBigInt, CompilerConstantValue,
     CompilerString, CompilerTemplateElement, CompilerTemplateObject, FinalOpcode, Operands,
 };
-use quickjs_frontend::Span;
+use quickjs_frontend::{CompilationGoal, DirectEvalBindingKind, Span};
 
 use crate::storage::ExecutableId;
 
@@ -246,6 +246,16 @@ impl<'arena> CompilationContext<'_, 'arena, '_> {
         atom_candidates: &mut [Vec<CompiledAtomCandidate>],
     ) -> Result<(), LeafCompilationError> {
         let nodes = self.unit.semantic().nodes();
+        let has_direct_eval_with = matches!(
+            self.unit.goal(),
+            CompilationGoal::DirectEval(context)
+                if context.scope_snapshot().frames().iter().any(|frame| {
+                    frame
+                        .bindings()
+                        .iter()
+                        .any(|binding| binding.kind() == DirectEvalBindingKind::WithObject)
+                })
+        );
         let mut owners = vec![None; nodes.len()];
         for (node_id, node) in nodes.iter_enumerated() {
             let owner = match node.kind() {
@@ -281,7 +291,13 @@ impl<'arena> CompilationContext<'_, 'arena, '_> {
                 let owner = self
                     .instance_field_initializer_owner(node_id)?
                     .unwrap_or(owner);
-                self.record_node_literal_candidate(node_id, owner, candidates, atom_candidates)?;
+                self.record_node_literal_candidate(
+                    node_id,
+                    owner,
+                    has_direct_eval_with,
+                    candidates,
+                    atom_candidates,
+                )?;
             }
         }
         Ok(())
@@ -333,6 +349,7 @@ impl<'arena> CompilationContext<'_, 'arena, '_> {
         &self,
         node_id: NodeId,
         owner: ExecutableId,
+        has_direct_eval_with: bool,
         candidates: &mut [Vec<CompiledConstantCandidate>],
         atom_candidates: &mut [Vec<CompiledAtomCandidate>],
     ) -> Result<(), LeafCompilationError> {
@@ -393,12 +410,13 @@ impl<'arena> CompilationContext<'_, 'arena, '_> {
                 record_string_candidate(owner, value, literal.span, candidates, atom_candidates)?;
             }
             AstKind::IdentifierReference(identifier)
-                if !self
-                    .with_object_bindings_for_reference(
-                        identifier.reference_id.get(),
-                        identifier.span,
-                    )?
-                    .is_empty() =>
+                if has_direct_eval_with
+                    || !self
+                        .with_object_bindings_for_reference(
+                            identifier.reference_id.get(),
+                            identifier.span,
+                        )?
+                        .is_empty() =>
             {
                 record_property_candidate(
                     owner,
@@ -419,13 +437,14 @@ impl<'arena> CompilationContext<'_, 'arena, '_> {
                 };
                 let binding =
                     self.binding_for_identifier(identifier.symbol_id.get(), identifier.span)?;
-                if !self
-                    .with_object_bindings_for_node_before_binding(
-                        initializer.node_id(),
-                        binding,
-                        identifier.span,
-                    )?
-                    .is_empty()
+                if has_direct_eval_with
+                    || !self
+                        .with_object_bindings_for_node_before_binding(
+                            initializer.node_id(),
+                            binding,
+                            identifier.span,
+                        )?
+                        .is_empty()
                 {
                     record_property_candidate(
                         owner,

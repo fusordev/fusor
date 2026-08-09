@@ -4086,6 +4086,9 @@ enum CallInputSource {
         argument_count: usize,
         kind: CallKind,
     },
+    EvalReferenceFrame {
+        argument_count: usize,
+    },
     Prepared(CallInputs),
 }
 
@@ -4093,13 +4096,16 @@ impl CallInputSource {
     const fn is_construction(&self) -> bool {
         match self {
             Self::Frame { kind, .. } => matches!(kind, CallKind::Constructor),
+            Self::EvalReferenceFrame { .. } => false,
             Self::Prepared(inputs) => inputs.new_target.is_some(),
         }
     }
 
     fn argument_count(&self) -> usize {
         match self {
-            Self::Frame { argument_count, .. } => *argument_count,
+            Self::Frame { argument_count, .. } | Self::EvalReferenceFrame { argument_count } => {
+                *argument_count
+            }
             Self::Prepared(inputs) => inputs.arguments.remaining().len(),
         }
     }
@@ -4171,7 +4177,7 @@ enum Step {
     Continue,
     DirectEval {
         function: FunctionId,
-        argument_count: usize,
+        inputs: CallInputSource,
         scope_index: u16,
         return_to: CallReturn,
         source_pc: BytecodePc,
@@ -4936,7 +4942,7 @@ fn execute_frame_loop(
             Step::Continue => {}
             Step::DirectEval {
                 function,
-                argument_count,
+                inputs,
                 scope_index,
                 return_to,
                 source_pc,
@@ -4947,10 +4953,7 @@ fn execute_frame_loop(
                         instruction: 0,
                     })?,
                     function,
-                    CallInputSource::Frame {
-                        argument_count,
-                        kind: CallKind::Direct,
-                    },
+                    inputs,
                 )?;
                 let mut arguments = inputs.arguments;
                 let argument = arguments.take_first_or_undefined();

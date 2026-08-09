@@ -1207,6 +1207,8 @@ impl CompilationContext<'_, '_, '_> {
         );
         let finished = flow.finish()?;
         let parameter_initialization_end = finished.parameter_initialization_end();
+        let eval_reference_call_instructions: Arc<[u32]> =
+            finished.eval_reference_call_instructions().into();
         let (source_instructions, control_flow) = finished.verify_with_layouts(
             domains,
             header,
@@ -1245,6 +1247,7 @@ impl CompilationContext<'_, '_, '_> {
             realm_globals: realm_globals.into(),
             source_instructions: source_instructions.into(),
             control_flow: Arc::new(control_flow),
+            eval_reference_call_instructions,
             parameter_initialization_end,
             metadata,
         })

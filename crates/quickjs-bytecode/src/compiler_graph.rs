@@ -18,7 +18,7 @@ use std::{
 
 use crate::{
     AtomPoolIndex, BytecodePc, CompilerAtom, CompilerConstantKind, CompilerString, FinalOpcode,
-    VerifiedControlFlow,
+    InstructionIndex, VerifiedControlFlow,
 };
 
 /// Provisional maximum number of compiler function templates in one graph.
@@ -512,13 +512,14 @@ pub struct UnverifiedCompilerFunction {
     constants: Arc<[CompilerConstant]>,
     closure_sources: Arc<[CompilerClosureSource]>,
     parameter_initialization_end: Option<u32>,
+    eval_reference_call_instructions: Arc<[u32]>,
     has_direct_eval: bool,
 }
 
 impl UnverifiedCompilerFunction {
     /// Creates one unverified compiler function-template record.
     #[must_use]
-    pub const fn new(
+    pub fn new(
         control_flow: Arc<VerifiedControlFlow>,
         constants: Arc<[CompilerConstant]>,
         closure_sources: Arc<[CompilerClosureSource]>,
@@ -529,6 +530,7 @@ impl UnverifiedCompilerFunction {
             constants,
             closure_sources,
             parameter_initialization_end: None,
+            eval_reference_call_instructions: Arc::from([]),
             has_direct_eval: false,
         }
     }
@@ -556,6 +558,14 @@ impl UnverifiedCompilerFunction {
     #[must_use]
     pub const fn with_parameter_initialization_end(mut self, boundary: Option<u32>) -> Self {
         self.parameter_initialization_end = boundary;
+        self
+    }
+
+    /// Attaches the ordered `eval`/`apply_eval` instruction indices whose
+    /// callee Reference carries an ordinary-call receiver.
+    #[must_use]
+    pub fn with_eval_reference_call_instructions(mut self, instructions: Arc<[u32]>) -> Self {
+        self.eval_reference_call_instructions = instructions;
         self
     }
 
@@ -593,6 +603,12 @@ impl UnverifiedCompilerFunction {
     #[must_use]
     pub const fn parameter_initialization_end(&self) -> Option<u32> {
         self.parameter_initialization_end
+    }
+
+    /// Returns the proposed receiver-carrying eval instruction indices.
+    #[must_use]
+    pub fn eval_reference_call_instructions(&self) -> &[u32] {
+        &self.eval_reference_call_instructions
     }
 }
 
@@ -958,6 +974,7 @@ pub struct VerifiedCompilerFunction {
     constants: Arc<[CompilerConstant]>,
     closure_sources: Arc<[CompilerClosureSource]>,
     parameter_initialization_end: Option<u32>,
+    eval_reference_call_instructions: Arc<[u32]>,
     has_direct_eval: bool,
 }
 
@@ -998,6 +1015,22 @@ impl VerifiedCompilerFunction {
     #[must_use]
     pub const fn parameter_initialization_end(&self) -> Option<u32> {
         self.parameter_initialization_end
+    }
+
+    /// Returns the verified ordered instruction indices at which an eval
+    /// call retains the receiver supplied by its source Reference.
+    #[must_use]
+    pub fn eval_reference_call_instructions(&self) -> &[u32] {
+        &self.eval_reference_call_instructions
+    }
+
+    /// Returns whether one instruction is a verified receiver-carrying eval
+    /// callsite.
+    #[must_use]
+    pub fn is_eval_reference_call(&self, instruction: InstructionIndex) -> bool {
+        self.eval_reference_call_instructions
+            .binary_search(&instruction.get())
+            .is_ok()
     }
 }
 
@@ -1169,6 +1202,38 @@ pub enum FunctionGraphVerificationErrorKind {
         scope_index: u16,
         /// Proposed boundary, or no boundary for a parameter-phase callsite.
         boundary: Option<u32>,
+    },
+    /// Receiver-carrying eval callsite indices are not strictly increasing.
+    EvalReferenceCallInstructionOrder {
+        /// Previous instruction index.
+        previous: u32,
+        /// Repeated or decreasing instruction index.
+        instruction: u32,
+    },
+    /// Receiver-carrying eval metadata names no verified instruction.
+    EvalReferenceCallInstructionOutOfBounds {
+        /// Rejected instruction index.
+        instruction: u32,
+        /// Verified instruction count.
+        instructions: u32,
+    },
+    /// Receiver-carrying eval metadata names an opcode outside the eval
+    /// family.
+    EvalReferenceCallOpcodeMismatch {
+        /// Rejected instruction index.
+        instruction: u32,
+        /// Opcode found at that index.
+        opcode: FinalOpcode,
+    },
+    /// A reachable receiver-carrying eval callsite does not have an additional
+    /// receiver value on its verified operand stack.
+    EvalReferenceCallReceiverMissing {
+        /// Rejected instruction index.
+        instruction: u32,
+        /// Minimum entry stack depth required by the callsite.
+        required: u32,
+        /// Verified entry stack depth, or `None` for unreachable code.
+        actual: Option<u32>,
     },
     /// A nonempty body atom domain has no supplied atom table.
     MissingAtomPool {
@@ -1389,6 +1454,35 @@ impl fmt::Display for FunctionGraphVerificationErrorKind {
                 formatter,
                 "direct-eval scope index {scope_index} at instruction {instruction} disagrees with parameter boundary {boundary:?}"
             ),
+            Self::EvalReferenceCallInstructionOrder {
+                previous,
+                instruction,
+            } => write!(
+                formatter,
+                "eval reference-call instruction {instruction} does not follow {previous}"
+            ),
+            Self::EvalReferenceCallInstructionOutOfBounds {
+                instruction,
+                instructions,
+            } => write!(
+                formatter,
+                "eval reference-call instruction {instruction} is outside instruction count {instructions}"
+            ),
+            Self::EvalReferenceCallOpcodeMismatch {
+                instruction,
+                opcode,
+            } => write!(
+                formatter,
+                "eval reference-call instruction {instruction} names non-eval opcode {opcode}"
+            ),
+            Self::EvalReferenceCallReceiverMissing {
+                instruction,
+                required,
+                actual,
+            } => write!(
+                formatter,
+                "eval reference-call instruction {instruction} requires entry stack depth {required}, found {actual:?}"
+            ),
             Self::MissingAtomPool { declared } => write!(
                 formatter,
                 "body declares {declared} atoms, but the compiler graph has no atom pool"
@@ -1576,6 +1670,9 @@ pub fn verify_compiler_function_graph(
             constants: Arc::clone(&function.constants),
             closure_sources: Arc::clone(&function.closure_sources),
             parameter_initialization_end: function.parameter_initialization_end,
+            eval_reference_call_instructions: Arc::clone(
+                &function.eval_reference_call_instructions,
+            ),
             has_direct_eval: function.has_direct_eval,
         }
     }));
@@ -1701,6 +1798,7 @@ fn validate_direct_eval_record(
         ));
     }
     let instruction_count = usize_to_u32(flow.instructions().len());
+    validate_eval_reference_calls(id, function, instruction_count)?;
     if let Some(boundary) = function.parameter_initialization_end
         && (!function.has_direct_eval
             || boundary > instruction_count
@@ -1734,6 +1832,68 @@ fn validate_direct_eval_record(
                     instruction: instruction_index,
                     scope_index,
                     boundary: function.parameter_initialization_end,
+                },
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn validate_eval_reference_calls(
+    id: FunctionTemplateId,
+    function: &UnverifiedCompilerFunction,
+    instruction_count: u32,
+) -> Result<(), FunctionGraphVerificationError> {
+    let flow = &function.control_flow;
+    let mut previous = None;
+    for &instruction_index in function.eval_reference_call_instructions.iter() {
+        if let Some(previous) = previous
+            && instruction_index <= previous
+        {
+            return Err(FunctionGraphVerificationError::at_function(
+                id,
+                FunctionGraphVerificationErrorKind::EvalReferenceCallInstructionOrder {
+                    previous,
+                    instruction: instruction_index,
+                },
+            ));
+        }
+        previous = Some(instruction_index);
+        let Some(verified) = flow.instructions().get(instruction_index as usize) else {
+            return Err(FunctionGraphVerificationError::at_function(
+                id,
+                FunctionGraphVerificationErrorKind::EvalReferenceCallInstructionOutOfBounds {
+                    instruction: instruction_index,
+                    instructions: instruction_count,
+                },
+            ));
+        };
+        let instruction = verified.decoded().instruction();
+        let required = match (instruction.opcode(), instruction.operands()) {
+            (FinalOpcode::Eval, crate::Operands::NPopU16 { argument_count, .. }) => {
+                u32::from(argument_count).saturating_add(2)
+            }
+            (FinalOpcode::ApplyEval, crate::Operands::U16(_)) => 3,
+            (opcode, _) => {
+                return Err(FunctionGraphVerificationError::at_function(
+                    id,
+                    FunctionGraphVerificationErrorKind::EvalReferenceCallOpcodeMismatch {
+                        instruction: instruction_index,
+                        opcode,
+                    },
+                ));
+            }
+        };
+        if verified
+            .entry_stack_depth()
+            .is_some_and(|actual| actual < required)
+        {
+            return Err(FunctionGraphVerificationError::at_function(
+                id,
+                FunctionGraphVerificationErrorKind::EvalReferenceCallReceiverMissing {
+                    instruction: instruction_index,
+                    required,
+                    actual: verified.entry_stack_depth(),
                 },
             ));
         }

@@ -29,6 +29,7 @@ pub(in crate::lowering) struct PlannedControlFlow {
     assembler: BytecodeAssembler,
     max_instructions: u32,
     instruction_spans: Vec<Span>,
+    eval_reference_call_instructions: Vec<u32>,
     parameter_initialization_end: Option<u32>,
     label_spans: Vec<Span>,
     stack_anchors: Vec<StackAnchor>,
@@ -41,6 +42,7 @@ pub(in crate::lowering) struct PlannedControlFlow {
 pub(in crate::lowering) struct FinishedControlFlow {
     bytecode: Vec<u8>,
     source_instructions: Vec<SourceInstruction>,
+    eval_reference_call_instructions: Vec<u32>,
     parameter_initialization_end: Option<u32>,
     stack_anchors: Vec<ResolvedStackAnchor>,
 }
@@ -56,6 +58,7 @@ impl PlannedControlFlow {
             assembler: BytecodeAssembler::with_limits(assembler_limits),
             max_instructions: limits.max_instructions_per_function(),
             instruction_spans: Vec::new(),
+            eval_reference_call_instructions: Vec::new(),
             parameter_initialization_end: None,
             label_spans: Vec::new(),
             stack_anchors: Vec::new(),
@@ -88,12 +91,33 @@ impl PlannedControlFlow {
         &mut self,
         instruction: PlannedInstruction,
     ) -> Result<(), LeafCompilationError> {
+        if instruction.eval_reference_call
+            && !matches!(
+                (instruction.opcode, instruction.operands),
+                (FinalOpcode::Eval, Operands::NPopU16 { .. })
+                    | (FinalOpcode::ApplyEval, Operands::U16(_))
+            )
+        {
+            return Err(LeafCompilationError::SemanticInvariant {
+                invariant: "eval reference-call metadata names an eval-family instruction",
+                span: Some(instruction.span),
+            });
+        }
         self.assembler
             .push(instruction.opcode, instruction.operands)
             .map_err(|source| LeafCompilationError::BytecodeAssembly {
                 span: Some(instruction.span),
                 source,
             })?;
+        if instruction.eval_reference_call {
+            self.eval_reference_call_instructions.push(
+                u32::try_from(self.instruction_spans.len()).map_err(|_| {
+                    LeafCompilationError::CapacityExceeded {
+                        domain: "eval reference-call instruction indices",
+                    }
+                })?,
+            );
+        }
         self.instruction_spans.push(instruction.span);
         self.last_instruction_can_fall_through = Some(!matches!(
             instruction.opcode,
@@ -340,6 +364,7 @@ impl PlannedControlFlow {
             assembler,
             max_instructions: _,
             instruction_spans: spans,
+            eval_reference_call_instructions,
             parameter_initialization_end,
             label_spans,
             stack_anchors,
@@ -402,6 +427,7 @@ impl PlannedControlFlow {
         Ok(FinishedControlFlow {
             bytecode,
             source_instructions,
+            eval_reference_call_instructions,
             parameter_initialization_end,
             stack_anchors: resolved_stack_anchors,
         })
@@ -411,6 +437,10 @@ impl PlannedControlFlow {
 impl FinishedControlFlow {
     pub(in crate::lowering) const fn parameter_initialization_end(&self) -> Option<u32> {
         self.parameter_initialization_end
+    }
+
+    pub(in crate::lowering) fn eval_reference_call_instructions(&self) -> &[u32] {
+        &self.eval_reference_call_instructions
     }
 
     #[cfg(test)]
@@ -451,6 +481,7 @@ impl FinishedControlFlow {
         let Self {
             bytecode,
             source_instructions,
+            eval_reference_call_instructions: _,
             parameter_initialization_end: _,
             stack_anchors,
         } = self;
@@ -537,6 +568,7 @@ pub(in crate::lowering) struct PlannedInstruction {
     opcode: FinalOpcode,
     operands: Operands,
     span: Span,
+    eval_reference_call: bool,
 }
 
 impl PlannedInstruction {
@@ -549,7 +581,13 @@ impl PlannedInstruction {
             opcode,
             operands,
             span,
+            eval_reference_call: false,
         }
+    }
+
+    pub(in crate::lowering) const fn with_eval_reference_call(mut self) -> Self {
+        self.eval_reference_call = true;
+        self
     }
 }
 

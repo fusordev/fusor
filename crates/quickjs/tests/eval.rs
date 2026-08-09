@@ -55,6 +55,118 @@ fn closed_direct_eval_returns_the_script_completion() {
 }
 
 #[test]
+fn direct_eval_inside_with_observes_the_object_environment() {
+    evaluate(
+        "let object={name:'str2'};with(object){eval(\"'str2'===name\");}",
+        |value| assert_eq!(value.as_boolean(), Ok(Some(true))),
+    );
+}
+
+#[test]
+fn direct_eval_inside_nested_with_uses_the_innermost_object_environment() {
+    evaluate(
+        "let outer={name:'outer',eval};let inner={name:'inner'};with(outer){with(inner){eval('name');}}",
+        |value| assert_eq!(string(value), "inner"),
+    );
+}
+
+#[test]
+fn noncanonical_eval_from_with_receives_the_object_as_this() {
+    evaluate(
+        "let object;object={eval:function(source){'use strict';return this===object&&source==='payload';}};with(object){eval('payload');}",
+        |value| assert_eq!(value.as_boolean(), Ok(Some(true))),
+    );
+}
+
+#[test]
+fn canonical_eval_stored_on_with_object_remains_direct_eval() {
+    evaluate(
+        "let object={answer:42,eval};with(object){eval('answer');}",
+        |value| assert!(number(value).strict_equals(JsNumber::from_i32(42))),
+    );
+}
+
+#[test]
+fn unscopable_eval_property_falls_back_to_the_realm_intrinsic() {
+    evaluate(
+        "let object={answer:42,eval:function(){return 0;}};object[Symbol.unscopables]={eval:true};with(object){eval('answer');}",
+        |value| assert!(number(value).strict_equals(JsNumber::from_i32(42))),
+    );
+}
+
+#[test]
+fn lexical_eval_binding_inside_with_has_no_object_receiver() {
+    evaluate(
+        "let object={eval:function(){return false;}};let replacement=function(){'use strict';return this===undefined;};let result;with(object){{let eval=replacement;result=eval();}}result;",
+        |value| assert_eq!(value.as_boolean(), Ok(Some(true))),
+    );
+}
+
+#[test]
+fn direct_eval_inside_with_writes_and_deletes_object_properties() {
+    evaluate(
+        "let object={answer:1,removed:2};with(object){eval('answer=42;delete removed;');}object.answer+'|'+('removed' in object);",
+        |value| assert_eq!(string(value), "42|false"),
+    );
+}
+
+#[test]
+fn direct_eval_inside_with_preserves_method_call_references() {
+    evaluate(
+        "let object={method:function(){'use strict';return this;}};with(object){eval('method()===object');}",
+        |value| assert_eq!(value.as_boolean(), Ok(Some(true))),
+    );
+}
+
+#[test]
+fn escaped_eval_closure_retains_the_with_object_environment() {
+    evaluate(
+        "let object={answer:1};let read;with(object){read=eval('()=>answer');}object.answer=42;read();",
+        |value| assert!(number(value).strict_equals(JsNumber::from_i32(42))),
+    );
+}
+
+#[test]
+fn eval_lexical_declaration_shadows_the_with_object_property() {
+    evaluate(
+        "let object={answer:1};let result;with(object){result=eval('let answer=42;answer;');}result+'|'+object.answer;",
+        |value| assert_eq!(string(value), "42|1"),
+    );
+}
+
+#[test]
+fn sloppy_eval_var_initializer_resolves_through_with_before_variable_environment() {
+    evaluate(
+        "function run(){let object={answer:1};with(object){eval('var answer=42;');}return object.answer+'|'+String(answer);}run();",
+        |value| assert_eq!(string(value), "42|undefined"),
+    );
+}
+
+#[test]
+fn nested_direct_eval_retains_the_ambient_with_environment() {
+    evaluate(
+        "let object={answer:42};with(object){eval(\"eval('answer');\");}",
+        |value| assert!(number(value).strict_equals(JsNumber::from_i32(42))),
+    );
+}
+
+#[test]
+fn direct_eval_observes_a_captured_outer_with_environment() {
+    evaluate(
+        "function make(object){with(object){return function(){return eval('answer');};}}make({answer:42})();",
+        |value| assert!(number(value).strict_equals(JsNumber::from_i32(42))),
+    );
+}
+
+#[test]
+fn eval_variable_environment_precedes_a_captured_outer_with_environment() {
+    evaluate(
+        "function make(object){with(object){return function(){var answer=1;eval('var answer=42;');return object.answer+'|'+answer;};}}make({answer:1})();",
+        |value| assert_eq!(string(value), "1|42"),
+    );
+}
+
+#[test]
 fn direct_eval_reads_arguments_and_writes_live_lexicals() {
     evaluate(
         "function local(argument){let value=1;eval('value=argument+1');return value;}local(41);",

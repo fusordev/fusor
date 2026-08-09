@@ -1696,6 +1696,7 @@ const fn direct_eval_local_scope(kind: CompilerBindingKind) -> DirectEvalCallerB
         CompilerBindingKind::Let
         | CompilerBindingKind::Const
         | CompilerBindingKind::ClassName
+        | CompilerBindingKind::WithObject
         | CompilerBindingKind::Catch => DirectEvalCallerBindingScope::Lexical,
         CompilerBindingKind::Parameter
         | CompilerBindingKind::Var

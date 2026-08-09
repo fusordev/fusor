@@ -1,10 +1,10 @@
 use super::super::{
     Argument, AssignmentExpression, AssignmentOperator, AstKind, CallExpression, ChainExpression,
     CompilationGoal, CompiledConstantPool, ComputedMemberExpression, ExecutableId, ExecutableKind,
-    Expression, FinalOpcode, FrameLayout, GetSpan, IdentifierReference, LeafCompilationError,
-    NewExpression, Operands, PlannedInstruction, PrivateFieldExpression, Span,
-    StaticMemberExpression, TaggedTemplateExpression, UnsupportedLeafFeature, binding_has_scope,
-    plan_push_integer, unsupported,
+    Expression, FinalOpcode, FrameLayout, FunctionTreeLayout, GetSpan, IdentifierReference,
+    LeafCompilationError, NewExpression, Operands, PlannedInstruction, PrivateFieldExpression,
+    Span, StaticMemberExpression, TaggedTemplateExpression, UnsupportedLeafFeature,
+    binding_has_scope, plan_push_integer, unsupported,
 };
 use super::expressions::{ExpressionPlanner, ExpressionWork};
 
@@ -31,6 +31,7 @@ impl<'arena> ExpressionPlanner<'_, '_, 'arena, '_> {
     fn with_identifier_callee<'expression>(
         &self,
         mut callee: &'expression Expression<'arena>,
+        tree_layout: &FunctionTreeLayout,
     ) -> Result<Option<&'expression IdentifierReference<'arena>>, LeafCompilationError> {
         while let Expression::ParenthesizedExpression(parenthesized) = callee {
             callee = &parenthesized.expression;
@@ -39,7 +40,11 @@ impl<'arena> ExpressionPlanner<'_, '_, 'arena, '_> {
             return Ok(None);
         };
         Ok((!self
-            .with_object_bindings_for_reference(identifier.reference_id.get(), identifier.span)?
+            .with_object_sources_for_reference(
+                identifier.reference_id.get(),
+                identifier.span,
+                tree_layout,
+            )?
             .is_empty())
         .then_some(identifier))
     }
@@ -130,6 +135,7 @@ impl<'arena> ExpressionPlanner<'_, '_, 'arena, '_> {
         &self,
         tagged: &'expression TaggedTemplateExpression<'arena>,
         layout: &FrameLayout,
+        tree_layout: &FunctionTreeLayout,
         constants: &CompiledConstantPool,
         work: &mut Vec<ExpressionWork<'expression, 'arena>>,
     ) -> Result<(), LeafCompilationError> {
@@ -152,7 +158,7 @@ impl<'arena> ExpressionPlanner<'_, '_, 'arena, '_> {
                 domain: "tagged template arguments",
             })?;
         let member = Self::member_callee(&tagged.tag)?;
-        let with_identifier = self.with_identifier_callee(&tagged.tag)?;
+        let with_identifier = self.with_identifier_callee(&tagged.tag, tree_layout)?;
         work.push(ExpressionWork::Emit(
             if member.is_some() || with_identifier.is_some() {
                 PlannedInstruction::new(
@@ -253,6 +259,7 @@ impl<'arena> ExpressionPlanner<'_, '_, 'arena, '_> {
         &self,
         call: &'expression CallExpression<'arena>,
         layout: &FrameLayout,
+        tree_layout: &FunctionTreeLayout,
         constants: &CompiledConstantPool,
         work: &mut Vec<ExpressionWork<'expression, 'arena>>,
     ) -> Result<(), LeafCompilationError> {
@@ -347,13 +354,7 @@ impl<'arena> ExpressionPlanner<'_, '_, 'arena, '_> {
         let direct_eval_scope = (!call.optional && call.callee.is_specific_id("eval"))
             .then(|| self.adjusted_eval_scope_index(call, layout))
             .transpose()?;
-        let with_identifier = self.with_identifier_callee(&call.callee)?;
-        if direct_eval_scope.is_some() && with_identifier.is_some() {
-            return Err(LeafCompilationError::SemanticInvariant {
-                invariant: "direct eval inside with fails storage preflight",
-                span: Some(call.callee.span()),
-            });
-        }
+        let with_identifier = self.with_identifier_callee(&call.callee, tree_layout)?;
         if let Some(spread) = call.arguments.iter().position(Argument::is_spread) {
             let member = if direct_eval_scope.is_some() {
                 None
@@ -375,14 +376,33 @@ impl<'arena> ExpressionPlanner<'_, '_, 'arena, '_> {
             // `array_from`, the dynamic index, each remaining argument, the
             // index drop, the ordinary receiver insert when needed, and
             // finally `apply` or identity-checked `apply_eval`.
-            work.push(ExpressionWork::Emit(PlannedInstruction::new(
+            let eval_reference_call = direct_eval_scope.is_some() && with_identifier.is_some();
+            if eval_reference_call {
+                work.push(ExpressionWork::Emit(PlannedInstruction::new(
+                    FinalOpcode::Drop,
+                    Operands::None,
+                    call.span,
+                )));
+                work.push(ExpressionWork::Emit(PlannedInstruction::new(
+                    FinalOpcode::Swap,
+                    Operands::None,
+                    call.span,
+                )));
+            }
+            let call_instruction = PlannedInstruction::new(
                 direct_eval_scope.map_or(FinalOpcode::Apply, |_| FinalOpcode::ApplyEval),
                 Operands::U16(direct_eval_scope.unwrap_or(0)),
                 call.span,
-            )));
+            );
+            work.push(ExpressionWork::Emit(if eval_reference_call {
+                call_instruction.with_eval_reference_call()
+            } else {
+                call_instruction
+            }));
             if direct_eval_scope.is_some() {
-                // `apply_eval` consumes exactly `func array`; its fallback
-                // ordinary call supplies an undefined receiver itself.
+                // `apply_eval` normally consumes `func array`. A verified
+                // reference call carries `receiver func array`; the matching
+                // cleanup above discards the retained receiver after return.
             } else if member.is_some() || with_identifier.is_some() {
                 // `obj func array` -> `func obj array`
                 work.push(ExpressionWork::Emit(PlannedInstruction::new(
@@ -499,26 +519,43 @@ impl<'arena> ExpressionPlanner<'_, '_, 'arena, '_> {
             }
         })?;
         let member = Self::member_callee(&call.callee)?;
-        work.push(ExpressionWork::Emit(
-            if let Some(scope_index) = direct_eval_scope {
-                PlannedInstruction::new(
-                    FinalOpcode::Eval,
-                    Operands::NPopU16 {
-                        argument_count,
-                        scope_index,
-                    },
-                    call.span,
-                )
-            } else if member.is_some() || with_identifier.is_some() {
-                PlannedInstruction::new(
-                    FinalOpcode::CallMethod,
-                    Operands::NPop { argument_count },
-                    call.span,
-                )
+        let eval_reference_call = direct_eval_scope.is_some() && with_identifier.is_some();
+        if eval_reference_call {
+            work.push(ExpressionWork::Emit(PlannedInstruction::new(
+                FinalOpcode::Drop,
+                Operands::None,
+                call.span,
+            )));
+            work.push(ExpressionWork::Emit(PlannedInstruction::new(
+                FinalOpcode::Swap,
+                Operands::None,
+                call.span,
+            )));
+        }
+        let call_instruction = if let Some(scope_index) = direct_eval_scope {
+            let instruction = PlannedInstruction::new(
+                FinalOpcode::Eval,
+                Operands::NPopU16 {
+                    argument_count,
+                    scope_index,
+                },
+                call.span,
+            );
+            if eval_reference_call {
+                instruction.with_eval_reference_call()
             } else {
-                plan_direct_call(argument_count, call.span)
-            },
-        ));
+                instruction
+            }
+        } else if member.is_some() || with_identifier.is_some() {
+            PlannedInstruction::new(
+                FinalOpcode::CallMethod,
+                Operands::NPop { argument_count },
+                call.span,
+            )
+        } else {
+            plan_direct_call(argument_count, call.span)
+        };
+        work.push(ExpressionWork::Emit(call_instruction));
         for argument in call.arguments.iter().rev() {
             let expression =
                 argument

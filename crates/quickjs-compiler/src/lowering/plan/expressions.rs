@@ -18,6 +18,7 @@ use super::super::{
     plan_put_slot, unsupported,
 };
 use super::abrupt::{AbruptMarker, AbruptMarkerKind};
+use super::bindings::WithObjectSource;
 use super::calls::MemberCallee;
 use oxc_ast::ast::{SpreadElement, StaticBlock};
 use std::collections::HashSet;
@@ -499,11 +500,21 @@ impl<'compiler, 'unit, 'arena, 'scope> ExpressionPlanner<'compiler, 'unit, 'aren
                             )?;
                         }
                         Expression::CallExpression(call) => {
-                            self.plan_call_expression(call, layout, constants, &mut work)?;
+                            self.plan_call_expression(
+                                call,
+                                layout,
+                                tree_layout,
+                                constants,
+                                &mut work,
+                            )?;
                         }
                         Expression::TaggedTemplateExpression(tagged) => {
                             self.plan_tagged_template_expression(
-                                tagged, layout, constants, &mut work,
+                                tagged,
+                                layout,
+                                tree_layout,
+                                constants,
+                                &mut work,
                             )?;
                         }
                         Expression::NewExpression(constructor) => {
@@ -4368,8 +4379,11 @@ impl<'compiler, 'unit, 'arena, 'scope> ExpressionPlanner<'compiler, 'unit, 'aren
         } else {
             None
         };
-        let with_objects = self
-            .with_object_bindings_for_reference(identifier.reference_id.get(), identifier.span)?;
+        let with_objects = self.with_object_sources_for_reference(
+            identifier.reference_id.get(),
+            identifier.span,
+            tree_layout,
+        )?;
         if !with_objects.is_empty() {
             return self.plan_with_identifier_assignment(
                 assignment,
@@ -4378,6 +4392,7 @@ impl<'compiler, 'unit, 'arena, 'scope> ExpressionPlanner<'compiler, 'unit, 'aren
                 with_objects,
                 inferred_name,
                 layout,
+                tree_layout,
                 constants,
                 flow,
                 work,
@@ -4507,9 +4522,10 @@ impl<'compiler, 'unit, 'arena, 'scope> ExpressionPlanner<'compiler, 'unit, 'aren
         assignment: &'expression AssignmentExpression<'arena>,
         identifier: &'expression IdentifierReference<'arena>,
         reference: LoweredReference,
-        with_objects: Vec<BindingId>,
+        with_objects: Vec<WithObjectSource>,
         inferred_name: Option<PlannedInstruction>,
         layout: &FrameLayout,
+        tree_layout: &FunctionTreeLayout,
         constants: &CompiledConstantPool,
         flow: &mut PlannedControlFlow,
         work: &mut Vec<ExpressionWork<'expression, 'arena>>,
@@ -4522,6 +4538,7 @@ impl<'compiler, 'unit, 'arena, 'scope> ExpressionPlanner<'compiler, 'unit, 'aren
                 &with_objects,
                 inferred_name,
                 layout,
+                tree_layout,
                 constants,
                 flow,
                 work,
@@ -4535,14 +4552,8 @@ impl<'compiler, 'unit, 'arena, 'scope> ExpressionPlanner<'compiler, 'unit, 'aren
         } else {
             FinalOpcode::WithGetRef
         };
-        for binding in with_objects {
-            let slot = layout
-                .slot(binding)
-                .ok_or(LeafCompilationError::SemanticInvariant {
-                    invariant: "visible with-object binding has a frame slot",
-                    span: Some(identifier.span),
-                })?;
-            flow.emit(self.plan_read_slot(binding, slot, identifier.span)?)?;
+        for source in with_objects {
+            flow.emit(self.plan_with_object_read(source, layout, tree_layout, identifier.span)?)?;
             flow.with_branch(branch_opcode, atom, 1, &with_reference, identifier.span)?;
         }
 
@@ -4592,15 +4603,23 @@ impl<'compiler, 'unit, 'arena, 'scope> ExpressionPlanner<'compiler, 'unit, 'aren
         assignment: &'expression AssignmentExpression<'arena>,
         identifier: &'expression IdentifierReference<'arena>,
         reference: LoweredReference,
-        with_objects: &[BindingId],
+        with_objects: &[WithObjectSource],
         inferred_name: Option<PlannedInstruction>,
         layout: &FrameLayout,
+        tree_layout: &FunctionTreeLayout,
         constants: &CompiledConstantPool,
         flow: &mut PlannedControlFlow,
         work: &mut Vec<ExpressionWork<'expression, 'arena>>,
     ) -> Result<(), LeafCompilationError> {
         let atom = constants.property_atom_index(identifier.span)?;
-        self.plan_with_make_reference_selection(with_objects, atom, layout, identifier.span, flow)?;
+        self.plan_with_make_reference_selection(
+            with_objects,
+            atom,
+            layout,
+            tree_layout,
+            identifier.span,
+            flow,
+        )?;
         let fallback = flow.new_label(identifier.span)?;
         let done = flow.new_label(assignment.span)?;
 
@@ -5752,8 +5771,11 @@ impl<'compiler, 'unit, 'arena, 'scope> ExpressionPlanner<'compiler, 'unit, 'aren
             tree_layout,
         )?;
         self.validate_lowered_mutation_reference(reference, true, identifier.span)?;
-        let with_objects = self
-            .with_object_bindings_for_reference(identifier.reference_id.get(), identifier.span)?;
+        let with_objects = self.with_object_sources_for_reference(
+            identifier.reference_id.get(),
+            identifier.span,
+            tree_layout,
+        )?;
         if !with_objects.is_empty() {
             return self.plan_with_identifier_update(
                 update,
@@ -5761,6 +5783,7 @@ impl<'compiler, 'unit, 'arena, 'scope> ExpressionPlanner<'compiler, 'unit, 'aren
                 reference,
                 with_objects,
                 layout,
+                tree_layout,
                 constants,
                 flow,
                 work,
@@ -5829,8 +5852,9 @@ impl<'compiler, 'unit, 'arena, 'scope> ExpressionPlanner<'compiler, 'unit, 'aren
         update: &'expression UpdateExpression<'arena>,
         identifier: &'expression IdentifierReference<'arena>,
         reference: LoweredReference,
-        with_objects: Vec<BindingId>,
+        with_objects: Vec<WithObjectSource>,
         layout: &FrameLayout,
+        tree_layout: &FunctionTreeLayout,
         constants: &CompiledConstantPool,
         flow: &mut PlannedControlFlow,
         work: &mut Vec<ExpressionWork<'expression, 'arena>>,
@@ -5838,14 +5862,8 @@ impl<'compiler, 'unit, 'arena, 'scope> ExpressionPlanner<'compiler, 'unit, 'aren
         let with_reference = flow.new_label(identifier.span)?;
         let done = flow.new_label(update.span)?;
         let atom = constants.property_atom_index(identifier.span)?;
-        for binding in with_objects {
-            let slot = layout
-                .slot(binding)
-                .ok_or(LeafCompilationError::SemanticInvariant {
-                    invariant: "visible with-object binding has a frame slot",
-                    span: Some(identifier.span),
-                })?;
-            flow.emit(self.plan_read_slot(binding, slot, identifier.span)?)?;
+        for source in with_objects {
+            flow.emit(self.plan_with_object_read(source, layout, tree_layout, identifier.span)?)?;
             flow.with_branch(
                 FinalOpcode::WithGetRef,
                 atom,
@@ -6105,21 +6123,18 @@ impl<'compiler, 'unit, 'arena, 'scope> ExpressionPlanner<'compiler, 'unit, 'aren
             tree_layout,
             constants,
         )?;
-        let with_objects = self
-            .with_object_bindings_for_reference(identifier.reference_id.get(), identifier.span)?;
+        let with_objects = self.with_object_sources_for_reference(
+            identifier.reference_id.get(),
+            identifier.span,
+            tree_layout,
+        )?;
         if with_objects.is_empty() {
             return flow.emit(fallback);
         }
         let done = flow.new_label(delete_span)?;
         let atom = constants.property_atom_index(identifier.span)?;
-        for binding in with_objects {
-            let slot = layout
-                .slot(binding)
-                .ok_or(LeafCompilationError::SemanticInvariant {
-                    invariant: "visible with-object binding has a frame slot",
-                    span: Some(identifier.span),
-                })?;
-            flow.emit(self.plan_read_slot(binding, slot, identifier.span)?)?;
+        for source in with_objects {
+            flow.emit(self.plan_with_object_read(source, layout, tree_layout, identifier.span)?)?;
             flow.with_branch(FinalOpcode::WithDeleteVar, atom, 1, &done, delete_span)?;
         }
         flow.emit(fallback)?;

@@ -770,9 +770,6 @@ pub enum UnsupportedFeature {
     /// A write or delete whose reference may resolve through a `with`
     /// object-environment record.
     WithReferenceMutation,
-    /// A call or tagged-template reference whose receiver may be supplied by
-    /// a `with` object-environment record.
-    WithReferenceCall,
     /// Annex B's paired block-lexical and var-like function binding.
     AnnexBBlockFunction,
     /// An anonymous `export default class` needs the module execution layer's
@@ -1157,12 +1154,6 @@ impl<'unit, 'arena, 'scope> Planner<'unit, 'arena, 'scope> {
             &implicit_arguments_references,
         )?;
         resolved_drafts.extend(arguments_references);
-        self.validate_with_reference_uses(
-            &resolved_drafts,
-            &unresolved_drafts,
-            &scope_by_binding,
-            &with_object_binding_by_scope,
-        )?;
         resolved_drafts.sort_by_key(|reference| {
             (
                 reference.executable.index(),
@@ -1471,69 +1462,6 @@ impl<'unit, 'arena, 'scope> Planner<'unit, 'arena, 'scope> {
             }
         }
         visible
-    }
-
-    fn validate_with_reference_uses(
-        &self,
-        resolved: &[ResolvedDraft],
-        unresolved: &[UnresolvedDraft],
-        scope_by_binding: &[Option<ScopeId>],
-        with_object_binding_by_scope: &HashMap<ScopeId, BindingId>,
-    ) -> Result<(), CompilerError> {
-        let nodes = self.unit.semantic().nodes();
-        for (reference_id, binding, span) in resolved
-            .iter()
-            .map(|draft| (draft.reference_id, Some(draft.binding), draft.span))
-            .chain(
-                unresolved
-                    .iter()
-                    .map(|draft| (draft.reference_id, None, draft.span)),
-            )
-        {
-            let stop_scope = binding
-                .and_then(|binding| scope_by_binding.get(binding.index()))
-                .copied()
-                .flatten();
-            if self
-                .visible_with_object_bindings(
-                    reference_id,
-                    stop_scope,
-                    with_object_binding_by_scope,
-                )
-                .is_empty()
-            {
-                continue;
-            }
-            if self.with_reference_is_direct_eval_call(nodes, reference_id) {
-                return unsupported(UnsupportedFeature::WithReferenceCall, span);
-            }
-        }
-        Ok(())
-    }
-
-    fn with_reference_is_direct_eval_call(
-        &self,
-        nodes: &AstNodes<'_>,
-        reference_id: ReferenceId,
-    ) -> bool {
-        let reference = self.unit.semantic().scoping().get_reference(reference_id);
-        let AstKind::IdentifierReference(identifier) = nodes.kind(reference.node_id()) else {
-            return false;
-        };
-        if identifier.name.as_str() != "eval" {
-            return false;
-        }
-        let mut node_id = reference.node_id();
-        loop {
-            let parent = nodes.parent_id(node_id);
-            match nodes.kind(parent) {
-                AstKind::ParenthesizedExpression(_) => node_id = parent,
-                AstKind::CallExpression(call) => {
-                    return !call.optional && call.callee.span() == nodes.kind(node_id).span();
-                }
-                _ => return false,
-            }
-        }
     }
 
     fn with_object_capture_requests(

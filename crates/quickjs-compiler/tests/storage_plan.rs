@@ -1339,11 +1339,19 @@ fn with_object_environment_is_a_hidden_scoped_capture() {
 }
 
 #[test]
-fn direct_eval_inside_with_fails_closed_at_the_identifier() {
-    let source = "with (object) eval('value');";
-    let (actual, span) = unsupported(source, ParseMode::Script);
-    assert_eq!(actual, UnsupportedFeature::WithReferenceCall);
-    assert_eq!(&source[span.start as usize..span.end as usize], "eval");
+fn direct_eval_inside_with_retains_the_hidden_object_environment() {
+    let plan = script("function invoke(object) { with (object) return eval('value'); }");
+    let invoke = plan.executables()[1].id();
+    let binding = plan
+        .bindings_for(invoke)
+        .expect("invoke bindings")
+        .iter()
+        .find(|binding| binding.policy().kind() == DeclarationKind::WithObject)
+        .expect("hidden with-object binding");
+
+    assert_eq!(binding.placement(), StoragePlacement::Local);
+    assert!(!binding.is_frame_captured());
+    assert!(plan.executables()[1].has_direct_eval());
 }
 
 #[test]

@@ -52,12 +52,21 @@ struct DirectEvalCallerBinding {
     policy: CompilerBindingPolicy,
 }
 
+#[derive(Clone, Copy)]
+struct DirectEvalWithObject {
+    global: RealmGlobalId,
+    index: u32,
+    scope: DirectEvalBindingScope,
+}
+
 pub(in crate::lowering) struct RealmGlobalLayout {
     bindings: Box<[RealmGlobalBinding]>,
     by_binding: Box<[Option<RealmGlobalId>]>,
     by_unresolved: Box<[Option<RealmGlobalId>]>,
     import_ranges: Box<[Range<usize>]>,
     imports: Box<[RealmGlobalId]>,
+    with_by_binding: Box<[Box<[RealmGlobalId]>]>,
+    with_by_unresolved: Box<[Box<[RealmGlobalId]>]>,
     direct_environment_size: u32,
 }
 
@@ -71,6 +80,9 @@ struct RealmGlobalLayoutBuilder<'plan> {
     direct_by_name: HashMap<Arc<str>, DirectEvalCallerBinding>,
     direct_variable_by_name: HashMap<Arc<str>, DirectEvalCallerBinding>,
     direct_lexical_names: HashSet<Arc<str>>,
+    direct_with_objects: Vec<DirectEvalWithObject>,
+    with_by_binding: Vec<Vec<RealmGlobalId>>,
+    with_by_unresolved: Vec<Vec<RealmGlobalId>>,
     direct_environment_size: u32,
     direct_new_variable_count: u32,
     direct_variable_environment: Option<DirectEvalVariableEnvironment>,
@@ -142,6 +154,12 @@ fn direct_eval_binding_policy(
             },
             false,
         ),
+        DirectEvalBindingKind::WithObject => CompilerBindingPolicy::new(
+            CompilerBindingKind::WithObject,
+            CompilerInitializationPolicy::AtDeclaration,
+            CompilerWritePolicy::Immutable,
+            true,
+        ),
         _ => {
             return Err(LeafCompilationError::SemanticInvariant {
                 invariant: "direct-eval caller binding kind is supported",
@@ -155,54 +173,93 @@ fn direct_eval_binding_policy(
 impl<'plan> RealmGlobalLayoutBuilder<'plan> {
     fn new(input: RealmGlobalLayoutInput<'plan, '_>) -> Result<Self, LeafCompilationError> {
         let plan = input.plan;
-        let mut direct_by_name = HashMap::new();
-        let mut direct_variable_by_name = HashMap::new();
-        let mut direct_lexical_names = HashSet::new();
-        let mut direct_environment_size = 0_u32;
         let direct_variable_environment = input
             .direct_eval
             .map(DirectEvalContext::variable_environment);
-        if let Some(context) = input.direct_eval {
-            for frame in context.scope_snapshot().frames() {
-                for binding in frame.bindings() {
-                    let index = direct_environment_size;
-                    direct_environment_size = direct_environment_size.checked_add(1).ok_or(
-                        LeafCompilationError::CapacityExceeded {
-                            domain: "direct-eval caller bindings",
-                        },
-                    )?;
-                    let caller = DirectEvalCallerBinding {
-                        index,
-                        policy: direct_eval_binding_policy(*binding)?,
-                    };
-                    direct_by_name
-                        .entry(Arc::from(binding.name()))
-                        .or_insert(caller);
-                    if binding.scope() == DirectEvalBindingScope::Variable {
-                        direct_variable_by_name
-                            .entry(Arc::from(binding.name()))
-                            .or_insert(caller);
-                    }
-                    if binding.scope() == DirectEvalBindingScope::Lexical {
-                        direct_lexical_names.insert(Arc::from(binding.name()));
-                    }
-                }
-            }
-        }
-        Ok(Self {
+        let mut builder = Self {
             plan,
             bindings: Vec::new(),
             by_name: HashMap::new(),
             by_binding: vec![None; plan.bindings().len()],
             by_unresolved: vec![None; plan.unresolved_globals().len()],
             needs: (0..plan.executables().len()).map(|_| Vec::new()).collect(),
-            direct_by_name,
-            direct_variable_by_name,
-            direct_lexical_names,
-            direct_environment_size,
+            direct_by_name: HashMap::new(),
+            direct_variable_by_name: HashMap::new(),
+            direct_lexical_names: HashSet::new(),
+            direct_with_objects: Vec::new(),
+            with_by_binding: vec![Vec::new(); plan.bindings().len()],
+            with_by_unresolved: vec![Vec::new(); plan.unresolved_globals().len()],
+            direct_environment_size: 0,
             direct_new_variable_count: 0,
             direct_variable_environment,
-        })
+        };
+        if let Some(context) = input.direct_eval {
+            for frame in context.scope_snapshot().frames() {
+                for binding in frame.bindings() {
+                    let index = builder.direct_environment_size;
+                    builder.direct_environment_size = builder
+                        .direct_environment_size
+                        .checked_add(1)
+                        .ok_or(LeafCompilationError::CapacityExceeded {
+                            domain: "direct-eval caller bindings",
+                        })?;
+                    let policy = direct_eval_binding_policy(*binding)?;
+                    if binding.kind() == DirectEvalBindingKind::WithObject {
+                        let first_span = plan
+                            .executables()
+                            .first()
+                            .map_or(Span::new(0, 0), crate::storage::Executable::span);
+                        let global = builder.push_binding(RealmGlobalBinding {
+                            name: Arc::from(binding.name()),
+                            first_span,
+                            policy,
+                            binding: CompilerClosureBinding::Captured(policy),
+                            root_source: RealmGlobalRootSource::DirectEvalBinding { index },
+                            declaration: None,
+                        })?;
+                        builder.direct_with_objects.push(DirectEvalWithObject {
+                            global,
+                            index,
+                            scope: binding.scope(),
+                        });
+                        continue;
+                    }
+                    let caller = DirectEvalCallerBinding { index, policy };
+                    builder
+                        .direct_by_name
+                        .entry(Arc::from(binding.name()))
+                        .or_insert(caller);
+                    if binding.scope() == DirectEvalBindingScope::Variable {
+                        builder
+                            .direct_variable_by_name
+                            .entry(Arc::from(binding.name()))
+                            .or_insert(caller);
+                    }
+                    if binding.scope() == DirectEvalBindingScope::Lexical {
+                        builder
+                            .direct_lexical_names
+                            .insert(Arc::from(binding.name()));
+                    }
+                }
+            }
+        }
+        Ok(builder)
+    }
+
+    fn direct_with_objects_before(&self, fallback: Option<u32>) -> Vec<RealmGlobalId> {
+        self.direct_with_objects
+            .iter()
+            .filter(|object| fallback.is_none_or(|index| object.index < index))
+            .map(|object| object.global)
+            .collect()
+    }
+
+    fn direct_with_objects_before_variable_environment(&self) -> Vec<RealmGlobalId> {
+        self.direct_with_objects
+            .iter()
+            .filter(|object| object.scope == DirectEvalBindingScope::Lexical)
+            .map(|object| object.global)
+            .collect()
     }
 
     fn collect_declarations(&mut self) -> Result<(), LeafCompilationError> {
@@ -304,6 +361,69 @@ impl<'plan> RealmGlobalLayoutBuilder<'plan> {
                 span: None,
             },
         )?;
+        self.validate_realm_declaration(binding, first_span)?;
+
+        let name: Arc<str> = Arc::from(binding.name());
+        if binding.placement() == StoragePlacement::GlobalObject
+            && self.direct_lexical_names.contains(&name)
+        {
+            return Err(LeafCompilationError::EvalDeclarationConflict {
+                name,
+                span: first_span,
+            });
+        }
+        if self.by_name.contains_key(&name) {
+            return Err(LeafCompilationError::SemanticInvariant {
+                invariant: "one declared constructor-realm binding per name",
+                span: Some(first_span),
+            });
+        }
+        let (policy, closure_binding, root_source) =
+            self.declaration_target(binding, &name, first_span)?;
+        let id = self.push_binding(RealmGlobalBinding {
+            name: Arc::clone(&name),
+            first_span,
+            policy,
+            binding: closure_binding,
+            root_source,
+            declaration: Some(binding.id()),
+        })?;
+        self.by_name.insert(name, id);
+        let mapping = self.by_binding.get_mut(binding.id().index()).ok_or(
+            LeafCompilationError::SemanticInvariant {
+                invariant: "binding identity indexes its realm-global mapping",
+                span: Some(first_span),
+            },
+        )?;
+        if mapping.replace(id).is_some() {
+            return Err(LeafCompilationError::SemanticInvariant {
+                invariant: "one realm-global mapping per declared binding",
+                span: Some(first_span),
+            });
+        }
+        let with_objects = if binding.placement() == StoragePlacement::GlobalObject {
+            self.direct_with_objects_before_variable_environment()
+        } else {
+            Vec::new()
+        };
+        let with_mapping = self.with_by_binding.get_mut(binding.id().index()).ok_or(
+            LeafCompilationError::SemanticInvariant {
+                invariant: "declared binding indexes its ambient with-object mapping",
+                span: Some(first_span),
+            },
+        )?;
+        with_mapping.clone_from(&with_objects);
+        for object in with_objects {
+            self.push_need(binding.executable(), object)?;
+        }
+        self.push_need(binding.executable(), id)
+    }
+
+    fn validate_realm_declaration(
+        &self,
+        binding: &crate::storage::BindingStorage,
+        first_span: Span,
+    ) -> Result<(), LeafCompilationError> {
         let supported_policy = matches!(
             (binding.policy().kind(), binding.policy().initialization()),
             (
@@ -356,55 +476,17 @@ impl<'plan> RealmGlobalLayoutBuilder<'plan> {
                 span: Some(first_span),
             });
         }
-
-        let name: Arc<str> = Arc::from(binding.name());
-        if binding.placement() == StoragePlacement::GlobalObject
-            && self.direct_lexical_names.contains(&name)
-        {
-            return Err(LeafCompilationError::EvalDeclarationConflict {
-                name,
-                span: first_span,
-            });
-        }
-        if self.by_name.contains_key(&name) {
-            return Err(LeafCompilationError::SemanticInvariant {
-                invariant: "one declared constructor-realm binding per name",
-                span: Some(first_span),
-            });
-        }
-        let (policy, closure_binding, root_source) =
-            self.declaration_target(binding, &name, first_span)?;
-        let id = self.push_binding(RealmGlobalBinding {
-            name: Arc::clone(&name),
-            first_span,
-            policy,
-            binding: closure_binding,
-            root_source,
-            declaration: Some(binding.id()),
-        })?;
-        self.by_name.insert(name, id);
-        let mapping = self.by_binding.get_mut(binding.id().index()).ok_or(
-            LeafCompilationError::SemanticInvariant {
-                invariant: "binding identity indexes its realm-global mapping",
-                span: Some(first_span),
-            },
-        )?;
-        if mapping.replace(id).is_some() {
-            return Err(LeafCompilationError::SemanticInvariant {
-                invariant: "one realm-global mapping per declared binding",
-                span: Some(first_span),
-            });
-        }
-        self.push_need(binding.executable(), id)
+        Ok(())
     }
 
     fn collect_unresolved(&mut self) -> Result<(), LeafCompilationError> {
         for reference in self.plan.unresolved_globals() {
             let name: Arc<str> = Arc::from(reference.name());
+            let caller = self.direct_by_name.get(&name).copied();
+            let with_objects = self.direct_with_objects_before(caller.map(|binding| binding.index));
             let id = if let Some(&id) = self.by_name.get(&name) {
                 id
             } else {
-                let caller = self.direct_by_name.get(&name).copied();
                 let policy =
                     caller.map_or_else(constructor_realm_lookup_policy, |binding| binding.policy);
                 let (binding, root_source) = caller.map_or(
@@ -444,6 +526,17 @@ impl<'plan> RealmGlobalLayoutBuilder<'plan> {
                     span: Some(reference.span()),
                 });
             }
+            let with_mapping = self
+                .with_by_unresolved
+                .get_mut(reference.id().index())
+                .ok_or(LeafCompilationError::SemanticInvariant {
+                    invariant: "unresolved reference indexes its ambient with-object mapping",
+                    span: Some(reference.span()),
+                })?;
+            with_mapping.clone_from(&with_objects);
+            for object in with_objects {
+                self.push_need(reference.executable(), object)?;
+            }
             self.push_need(reference.executable(), id)?;
         }
         Ok(())
@@ -451,6 +544,35 @@ impl<'plan> RealmGlobalLayoutBuilder<'plan> {
 
     fn collect_resolved_needs(&mut self) -> Result<(), LeafCompilationError> {
         for reference in self.plan.resolved_references() {
+            let binding = self.plan.binding(reference.binding()).ok_or(
+                LeafCompilationError::SemanticInvariant {
+                    invariant: "resolved reference binding exists",
+                    span: Some(reference.span()),
+                },
+            )?;
+            let with_objects = if binding.placement() == StoragePlacement::GlobalObject {
+                self.direct_with_objects_before_variable_environment()
+            } else {
+                Vec::new()
+            };
+            let with_mapping = self
+                .with_by_binding
+                .get_mut(reference.binding().index())
+                .ok_or(LeafCompilationError::SemanticInvariant {
+                    invariant: "resolved binding indexes its ambient with-object mapping",
+                    span: Some(reference.span()),
+                })?;
+            if with_mapping.is_empty() {
+                with_mapping.clone_from(&with_objects);
+            } else if *with_mapping != with_objects {
+                return Err(LeafCompilationError::SemanticInvariant {
+                    invariant: "one ambient with-object chain per resolved binding",
+                    span: Some(reference.span()),
+                });
+            }
+            for object in with_objects {
+                self.push_need(reference.executable(), object)?;
+            }
             let Some(global) = self
                 .by_binding
                 .get(reference.binding().index())
@@ -526,6 +648,18 @@ impl<'plan> RealmGlobalLayoutBuilder<'plan> {
             by_unresolved: self.by_unresolved.into_boxed_slice(),
             import_ranges: import_ranges.into_boxed_slice(),
             imports: imports.into_boxed_slice(),
+            with_by_binding: self
+                .with_by_binding
+                .into_iter()
+                .map(Vec::into_boxed_slice)
+                .collect::<Vec<_>>()
+                .into_boxed_slice(),
+            with_by_unresolved: self
+                .with_by_unresolved
+                .into_iter()
+                .map(Vec::into_boxed_slice)
+                .collect::<Vec<_>>()
+                .into_boxed_slice(),
             direct_environment_size,
         })
     }
@@ -543,6 +677,9 @@ impl RealmGlobalLayout {
                 by_unresolved: vec![None; plan.unresolved_globals().len()].into_boxed_slice(),
                 import_ranges: vec![0..0; plan.executables().len()].into_boxed_slice(),
                 imports: Box::default(),
+                with_by_binding: vec![Box::default(); plan.bindings().len()].into_boxed_slice(),
+                with_by_unresolved: vec![Box::default(); plan.unresolved_globals().len()]
+                    .into_boxed_slice(),
                 direct_environment_size: 0,
             });
         }
@@ -567,6 +704,21 @@ impl RealmGlobalLayout {
 
     pub(in crate::lowering) fn for_binding(&self, id: BindingId) -> Option<RealmGlobalId> {
         self.by_binding.get(id.index()).copied().flatten()
+    }
+
+    pub(in crate::lowering) fn with_objects_for_binding(&self, id: BindingId) -> &[RealmGlobalId] {
+        self.with_by_binding
+            .get(id.index())
+            .map_or(&[], Box::as_ref)
+    }
+
+    pub(in crate::lowering) fn with_objects_for_unresolved(
+        &self,
+        id: UnresolvedGlobalId,
+    ) -> &[RealmGlobalId] {
+        self.with_by_unresolved
+            .get(id.index())
+            .map_or(&[], Box::as_ref)
     }
 
     pub(in crate::lowering) fn imports_for(

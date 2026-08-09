@@ -772,7 +772,7 @@ pub(super) fn execute_one(
     frame: &mut Frame,
     execution_budget: &mut ExecutionBudget,
 ) -> Result<Step, ExecutionError> {
-    let (verified_instruction, source_pc, parameter_initialization_end) = {
+    let (verified_instruction, source_pc, parameter_initialization_end, eval_reference_call) = {
         let code = code(runtime, frame.code)?;
         let function = code.authority.function(frame.template).ok_or(
             EngineFault::InvalidClosureEnvironment {
@@ -792,6 +792,9 @@ pub(super) fn execute_one(
             instruction,
             instruction.decoded().pc(),
             function.function().parameter_initialization_end(),
+            function
+                .function()
+                .is_eval_reference_call(frame.instruction),
         )
     };
 
@@ -1523,7 +1526,7 @@ pub(super) fn execute_one(
                 return unsupported_dispatch(opcode);
             };
             let argument_count = usize::from(argument_count);
-            let required = argument_count.saturating_add(1);
+            let required = argument_count.saturating_add(if eval_reference_call { 2 } else { 1 });
             if frame.stack.len() < required {
                 return Err(EngineFault::StackDepthMismatch {
                     function: frame.template,
@@ -1533,7 +1536,7 @@ pub(super) fn execute_one(
                 }
                 .into());
             }
-            let callee_index = frame.stack.len() - required;
+            let callee_index = frame.stack.len() - argument_count - 1;
             let StoredValue::Function(function) = stack_value_at(frame, callee_index)? else {
                 return Ok(Step::Abrupt(not_callable_exception(
                     runtime, frame, source_pc,
@@ -1547,20 +1550,25 @@ pub(super) fn execute_one(
                     },
                 )?);
             let realm = code(runtime, frame.code)?.realm;
+            let inputs = if eval_reference_call {
+                CallInputSource::EvalReferenceFrame { argument_count }
+            } else {
+                CallInputSource::Frame {
+                    argument_count,
+                    kind: CallKind::Direct,
+                }
+            };
             if !is_canonical_realm_eval(runtime, *function, realm)? {
                 return Ok(Step::Call {
                     function: *function,
-                    inputs: CallInputSource::Frame {
-                        argument_count,
-                        kind: CallKind::Direct,
-                    },
+                    inputs,
                     return_to,
                     source_pc,
                 });
             }
             return Ok(Step::DirectEval {
                 function: *function,
-                argument_count,
+                inputs,
                 scope_index,
                 return_to,
                 source_pc,
@@ -3062,12 +3070,39 @@ pub(super) fn execute_one(
             let value = match duplicate_environment(runtime, frame, index, false) {
                 Ok(value) => value,
                 Err(BindingAccessError::Missing) => {
-                    return Ok(Step::Abrupt(binding_not_defined_exception(
-                        runtime,
-                        frame,
-                        BindingName::Closure(index),
-                        source_pc,
-                    )?));
+                    // Sloppy eval-created bindings are deletable. A missing
+                    // captured cell is observable as `undefined` only by the
+                    // immediately verified `typeof` operation; ordinary reads
+                    // still throw a ReferenceError.
+                    let typeof_fallthrough = if let Some(next) =
+                        verified_instruction.successors().fallthrough()
+                    {
+                        let code = code(runtime, frame.code)?;
+                        let function = code.authority.function(frame.template).ok_or(
+                            EngineFault::InvalidClosureEnvironment {
+                                function: frame.template,
+                            },
+                        )?;
+                        function
+                            .function()
+                            .control_flow()
+                            .instruction(next)
+                            .is_some_and(|instruction| {
+                                instruction.decoded().instruction().opcode() == FinalOpcode::Typeof
+                            })
+                    } else {
+                        false
+                    };
+                    if typeof_fallthrough {
+                        StoredValue::Undefined
+                    } else {
+                        return Ok(Step::Abrupt(binding_not_defined_exception(
+                            runtime,
+                            frame,
+                            BindingName::Closure(index),
+                            source_pc,
+                        )?));
+                    }
                 }
                 Err(error) => return Err(error.into()),
             };

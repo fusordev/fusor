@@ -287,6 +287,7 @@ pub struct CompiledFunction {
     pub(super) realm_globals: Arc<[CompiledRealmGlobal]>,
     pub(super) source_instructions: Arc<[SourceInstruction]>,
     pub(super) control_flow: Arc<VerifiedControlFlow>,
+    pub(super) eval_reference_call_instructions: Arc<[u32]>,
     pub(super) parameter_initialization_end: Option<u32>,
     pub(super) metadata: UnverifiedFunctionMetadata,
 }
@@ -354,6 +355,13 @@ impl CompiledFunction {
     #[must_use]
     pub fn control_flow(&self) -> &VerifiedControlFlow {
         &self.control_flow
+    }
+
+    /// Returns the `eval` instruction indices whose callee was obtained as a
+    /// reference carrying an ordinary-call receiver.
+    #[must_use]
+    pub fn eval_reference_call_instructions(&self) -> &[u32] {
+        &self.eval_reference_call_instructions
     }
 
     /// Returns the first body instruction after parameter-expression evaluation.

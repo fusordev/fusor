@@ -1176,6 +1176,7 @@ fn frontend_direct_eval_policy(
             policy.writes() == CompilerWritePolicy::Immutable,
         ),
         CompilerBindingKind::Catch => (FrontendDirectEvalBindingKind::Catch, true, false),
+        CompilerBindingKind::WithObject => (FrontendDirectEvalBindingKind::WithObject, true, true),
         CompilerBindingKind::ClassFieldKey
         | CompilerBindingKind::ClassPrivateName
         | CompilerBindingKind::ClassStaticReceiver
