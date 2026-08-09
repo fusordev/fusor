@@ -1305,6 +1305,14 @@ impl Runtime {
                                             &mut work,
                                         );
                                     }
+                                    for value in helper.chunk_buffer() {
+                                        mark_stored_value(
+                                            value,
+                                            &mut marked_functions,
+                                            &mut marked_objects,
+                                            &mut work,
+                                        );
+                                    }
                                 }
                             }
                             if let Some(view) = object.data_view_state() {

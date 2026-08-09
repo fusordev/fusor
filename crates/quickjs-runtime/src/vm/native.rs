@@ -4474,6 +4474,18 @@ pub(super) fn dispatch_native_call_with_frames(
                 execution_budget,
             )
         }
+        NativeFunctionKind::IteratorPrototypeChunks => {
+            let chunk_size = inputs.arguments.take_first_or_undefined();
+            begin_iterator_chunks(
+                runtime,
+                inputs.receiver,
+                &chunk_size,
+                native.realm,
+                return_to,
+                origin.unwrap_or_else(native_function_host_origin),
+                execution_budget,
+            )
+        }
         NativeFunctionKind::IteratorPrototypeDispose => begin_iterator_dispose(
             runtime,
             inputs.receiver,
@@ -4544,6 +4556,20 @@ pub(super) fn dispatch_native_call_with_frames(
             origin.unwrap_or_else(native_function_host_origin),
             execution_budget,
         ),
+        NativeFunctionKind::IteratorPrototypeWindows => {
+            let window_size = inputs.arguments.take_first_or_undefined();
+            let undersized = inputs.arguments.take_first_or_undefined();
+            begin_iterator_windows(
+                runtime,
+                inputs.receiver,
+                &window_size,
+                undersized,
+                native.realm,
+                return_to,
+                origin.unwrap_or_else(native_function_host_origin),
+                execution_budget,
+            )
+        }
         NativeFunctionKind::IteratorPrototypeConstructorGetter => Ok(NativeDispatch::Immediate(
             StoredValue::Function(runtime.realm_iterator_constructor(native.realm)?),
         )),

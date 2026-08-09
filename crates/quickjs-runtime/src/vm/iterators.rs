@@ -519,6 +519,8 @@ pub(super) struct IteratorHelperCreationContinuation {
     kind: crate::object::IteratorHelperKind,
     callback: Option<FunctionId>,
     remaining: f64,
+    size: u32,
+    allow_partial: bool,
     realm: RealmId,
     origin: JsStackFrame,
 }
@@ -3223,6 +3225,237 @@ pub(super) fn begin_iterator_dispose(
     read_iterator_dispose_return(runtime, state, return_to, execution_budget)
 }
 
+pub(super) fn begin_iterator_chunks(
+    runtime: &mut Runtime,
+    receiver: StoredValue,
+    chunk_size: &StoredValue,
+    realm: RealmId,
+    return_to: Option<CallReturn>,
+    origin: JsStackFrame,
+    execution_budget: &mut ExecutionBudget,
+) -> Result<NativeDispatch, NativeFailure> {
+    begin_iterator_chunking(
+        runtime,
+        receiver,
+        chunk_size,
+        crate::object::IteratorHelperKind::Chunks,
+        false,
+        realm,
+        return_to,
+        origin,
+        execution_budget,
+    )
+}
+
+#[allow(
+    clippy::too_many_arguments,
+    reason = "the proposal operation keeps both arguments and the native resume boundary explicit"
+)]
+pub(super) fn begin_iterator_windows(
+    runtime: &mut Runtime,
+    receiver: StoredValue,
+    window_size: &StoredValue,
+    undersized: StoredValue,
+    realm: RealmId,
+    return_to: Option<CallReturn>,
+    origin: JsStackFrame,
+    execution_budget: &mut ExecutionBudget,
+) -> Result<NativeDispatch, NativeFailure> {
+    if receiver.heap_reference().is_none() {
+        return Err(iterator_exception(
+            realm,
+            origin,
+            ExceptionKind::TypeError,
+            "Iterator.prototype.windows receiver must be an object",
+        )?);
+    }
+    let size = match iterator_chunking_size(window_size) {
+        Ok(size) => size,
+        Err(kind) => {
+            return close_iterator_chunking_validation(
+                runtime,
+                receiver,
+                realm,
+                origin,
+                kind,
+                "Iterator.prototype.windows windowSize must be an integral Number from 1 through 2^32 - 1",
+                return_to,
+                execution_budget,
+            );
+        }
+    };
+    let allow_partial = match undersized {
+        StoredValue::Undefined => false,
+        StoredValue::String(value) => {
+            if value == JsString::from_utf8("only-full")? {
+                false
+            } else if value == JsString::from_utf8("allow-partial")? {
+                true
+            } else {
+                return close_iterator_chunking_validation(
+                    runtime,
+                    receiver,
+                    realm,
+                    origin,
+                    ExceptionKind::TypeError,
+                    "Iterator.prototype.windows undersized must be 'only-full' or 'allow-partial'",
+                    return_to,
+                    execution_budget,
+                );
+            }
+        }
+        StoredValue::Null
+        | StoredValue::Boolean(_)
+        | StoredValue::Number(_)
+        | StoredValue::BigInt(_)
+        | StoredValue::Symbol(_)
+        | StoredValue::Function(_)
+        | StoredValue::Object(_) => {
+            return close_iterator_chunking_validation(
+                runtime,
+                receiver,
+                realm,
+                origin,
+                ExceptionKind::TypeError,
+                "Iterator.prototype.windows undersized must be 'only-full' or 'allow-partial'",
+                return_to,
+                execution_budget,
+            );
+        }
+    };
+    begin_iterator_chunking_creation(
+        runtime,
+        receiver,
+        crate::object::IteratorHelperKind::Windows,
+        size,
+        allow_partial,
+        realm,
+        return_to,
+        origin,
+        execution_budget,
+    )
+}
+
+#[allow(
+    clippy::too_many_arguments,
+    reason = "the proposal operation carries the direct iterator record and native resume boundary explicitly"
+)]
+fn begin_iterator_chunking(
+    runtime: &mut Runtime,
+    receiver: StoredValue,
+    size: &StoredValue,
+    kind: crate::object::IteratorHelperKind,
+    allow_partial: bool,
+    realm: RealmId,
+    return_to: Option<CallReturn>,
+    origin: JsStackFrame,
+    execution_budget: &mut ExecutionBudget,
+) -> Result<NativeDispatch, NativeFailure> {
+    if receiver.heap_reference().is_none() {
+        return Err(iterator_exception(
+            realm,
+            origin,
+            ExceptionKind::TypeError,
+            "Iterator.prototype.chunks receiver must be an object",
+        )?);
+    }
+    let size = match iterator_chunking_size(size) {
+        Ok(size) => size,
+        Err(error_kind) => {
+            return close_iterator_chunking_validation(
+                runtime,
+                receiver,
+                realm,
+                origin,
+                error_kind,
+                "Iterator.prototype.chunks chunkSize must be an integral Number from 1 through 2^32 - 1",
+                return_to,
+                execution_budget,
+            );
+        }
+    };
+    begin_iterator_chunking_creation(
+        runtime,
+        receiver,
+        kind,
+        size,
+        allow_partial,
+        realm,
+        return_to,
+        origin,
+        execution_budget,
+    )
+}
+
+fn iterator_chunking_size(value: &StoredValue) -> Result<u32, ExceptionKind> {
+    let StoredValue::Number(number) = value else {
+        return Err(ExceptionKind::TypeError);
+    };
+    let raw = number.as_f64();
+    if !raw.is_finite() || raw.fract() != 0.0 {
+        return Err(ExceptionKind::TypeError);
+    }
+    let Some(size) = array_length_from_number(*number) else {
+        return Err(ExceptionKind::RangeError);
+    };
+    if size == 0 {
+        return Err(ExceptionKind::RangeError);
+    }
+    Ok(size)
+}
+
+#[allow(
+    clippy::too_many_arguments,
+    reason = "the validated direct iterator record and native resume boundary remain explicit"
+)]
+fn begin_iterator_chunking_creation(
+    runtime: &mut Runtime,
+    iterator: StoredValue,
+    kind: crate::object::IteratorHelperKind,
+    size: u32,
+    allow_partial: bool,
+    realm: RealmId,
+    return_to: Option<CallReturn>,
+    origin: JsStackFrame,
+    execution_budget: &mut ExecutionBudget,
+) -> Result<NativeDispatch, NativeFailure> {
+    begin_iterator_helper_creation(
+        runtime,
+        IteratorHelperCreationContinuation {
+            iterator,
+            kind,
+            callback: None,
+            remaining: 0.0,
+            size,
+            allow_partial,
+            realm,
+            origin,
+        },
+        return_to,
+        execution_budget,
+    )
+}
+
+#[allow(
+    clippy::too_many_arguments,
+    reason = "IteratorClose must retain the original validation completion and native resume boundary"
+)]
+fn close_iterator_chunking_validation(
+    runtime: &mut Runtime,
+    iterator: StoredValue,
+    realm: RealmId,
+    origin: JsStackFrame,
+    kind: ExceptionKind,
+    message: &str,
+    return_to: Option<CallReturn>,
+    execution_budget: &mut ExecutionBudget,
+) -> Result<NativeDispatch, NativeFailure> {
+    let NativeFailure::Abrupt(pending) = iterator_exception(realm, origin, kind, message)? else {
+        unreachable!("iterator_exception always returns an abrupt completion")
+    };
+    begin_exceptional_iterator_close(runtime, iterator, pending, return_to, execution_budget)
+}
+
 pub(super) fn begin_iterator_map(
     runtime: &mut Runtime,
     receiver: StoredValue,
@@ -3335,6 +3568,8 @@ fn begin_iterator_callback_helper(
         kind,
         callback: Some(*callback),
         remaining: 0.0,
+        size: 0,
+        allow_partial: false,
         realm,
         origin,
     };
@@ -3451,6 +3686,8 @@ pub(super) fn advance_iterator_limit(
             kind: state.kind,
             callback: None,
             remaining,
+            size: 0,
+            allow_partial: false,
             realm: state.realm,
             origin: state.origin,
         },
@@ -3554,6 +3791,16 @@ pub(super) fn advance_iterator_helper_creation(
                 state.remaining,
             )?
         }
+        crate::object::IteratorHelperKind::Chunks | crate::object::IteratorHelperKind::Windows => {
+            runtime.allocate_iterator_chunking_helper(
+                state.realm,
+                state.iterator,
+                next_method,
+                state.kind,
+                state.size,
+                state.allow_partial,
+            )?
+        }
         crate::object::IteratorHelperKind::Concat | crate::object::IteratorHelperKind::Zip => {
             return Err(EngineFault::RuntimeInvariant {
                 message: "static Iterator helper used the ordinary helper constructor",
@@ -3607,6 +3854,14 @@ pub(super) fn begin_iterator_helper_next(
         }
         crate::object::IteratorHelperLifecycle::SuspendedStart
         | crate::object::IteratorHelperLifecycle::SuspendedYield => {}
+    }
+    if matches!(
+        snapshot.kind,
+        crate::object::IteratorHelperKind::Chunks | crate::object::IteratorHelperKind::Windows
+    ) && snapshot.chunk_source_done
+    {
+        complete_iterator_helper(runtime, helper)?;
+        return iterator_result(runtime, realm, StoredValue::Undefined, true);
     }
     if matches!(snapshot.kind, crate::object::IteratorHelperKind::Zip) {
         return begin_iterator_zip_next(
@@ -3854,6 +4109,23 @@ pub(super) fn advance_iterator_helper_next(
         }
         IteratorHelperNextStage::Done => {
             if runtime.to_boolean(&completion)? {
+                if matches!(
+                    state.kind,
+                    crate::object::IteratorHelperKind::Chunks
+                        | crate::object::IteratorHelperKind::Windows
+                ) {
+                    let values = runtime.finish_iterator_chunking_source(state.helper)?;
+                    let Some(values) = values else {
+                        return iterator_result(runtime, state.realm, StoredValue::Undefined, true);
+                    };
+                    let array = runtime.allocate_array(state.realm, values)?;
+                    return iterator_result(
+                        runtime,
+                        state.realm,
+                        StoredValue::Object(array),
+                        false,
+                    );
+                }
                 complete_iterator_helper(runtime, state.helper)?;
                 return iterator_result(runtime, state.realm, StoredValue::Undefined, true);
             }
@@ -3870,6 +4142,18 @@ pub(super) fn advance_iterator_helper_next(
             )
         }
         IteratorHelperNextStage::Value => {
+            if matches!(
+                state.kind,
+                crate::object::IteratorHelperKind::Chunks
+                    | crate::object::IteratorHelperKind::Windows
+            ) {
+                let values = runtime.push_iterator_chunking_value(state.helper, completion)?;
+                let Some(values) = values else {
+                    return continue_iterator_chunking(state, return_to, execution_budget);
+                };
+                let array = runtime.allocate_array(state.realm, values)?;
+                return iterator_result(runtime, state.realm, StoredValue::Object(array), false);
+            }
             if matches!(
                 state.kind,
                 crate::object::IteratorHelperKind::Take | crate::object::IteratorHelperKind::Drop
@@ -4158,6 +4442,31 @@ fn continue_iterator_drop(
     )
 }
 
+fn continue_iterator_chunking(
+    mut state: IteratorHelperNextContinuation,
+    return_to: Option<CallReturn>,
+    execution_budget: &mut ExecutionBudget,
+) -> Result<NativeDispatch, NativeFailure> {
+    state.result = None;
+    state.stage = IteratorHelperNextStage::NextResult;
+    execution_budget.charge_instructions(1)?;
+    let StoredValue::Function(next_method) = state.next_method else {
+        return Err(EngineFault::RuntimeInvariant {
+            message: "running Iterator chunking helper lost its callable next method",
+        }
+        .into());
+    };
+    let receiver = state.iterator.duplicate();
+    let origin = state.origin.clone();
+    iterator_method_call(
+        next_method,
+        receiver,
+        NativeContinuation::IteratorHelperNext(state),
+        return_to,
+        origin,
+    )
+}
+
 fn advance_iterator_helper_callback(
     runtime: &mut Runtime,
     mut state: IteratorHelperNextContinuation,
@@ -4232,6 +4541,12 @@ fn advance_iterator_helper_callback(
         crate::object::IteratorHelperKind::Take | crate::object::IteratorHelperKind::Drop => {
             Err(EngineFault::RuntimeInvariant {
                 message: "limit Iterator Helper resumed from a callback",
+            }
+            .into())
+        }
+        crate::object::IteratorHelperKind::Chunks | crate::object::IteratorHelperKind::Windows => {
+            Err(EngineFault::RuntimeInvariant {
+                message: "chunking Iterator Helper resumed from a callback",
             }
             .into())
         }
@@ -4548,6 +4863,14 @@ pub(super) fn begin_iterator_helper_return(
         }
         crate::object::IteratorHelperLifecycle::SuspendedStart
         | crate::object::IteratorHelperLifecycle::SuspendedYield => {}
+    }
+    if matches!(
+        snapshot.kind,
+        crate::object::IteratorHelperKind::Chunks | crate::object::IteratorHelperKind::Windows
+    ) && snapshot.chunk_source_done
+    {
+        complete_iterator_helper(runtime, helper)?;
+        return iterator_result(runtime, realm, StoredValue::Undefined, true);
     }
     if matches!(snapshot.kind, crate::object::IteratorHelperKind::Zip) {
         let iterators = runtime.iterator_zip_open_iterators(helper)?;

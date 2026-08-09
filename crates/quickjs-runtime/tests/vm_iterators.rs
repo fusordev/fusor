@@ -859,6 +859,66 @@ fn iterator_includes_validates_before_next_and_does_not_close_step_failures() {
 }
 
 #[test]
+fn iterator_chunks_and_windows_use_retained_helper_buffers() {
+    let mut runtime = Runtime::try_new(RuntimeLimits::default()).expect("runtime");
+    let realm = runtime.create_realm().expect("realm");
+    let mut context = runtime.context(&realm).expect("context");
+    let function = dynamic_function(
+        &mut context,
+        "function source(){return [0,1,2,3,4].values();}\
+         let chunks=Array.from(source().chunks(2));\
+         let windows=Array.from(source().windows(3));\
+         let partial=Array.from([0,1].values().windows(3,'allow-partial'));\
+         return [chunks.length,chunks[0].join(','),chunks[1].join(','),\
+           chunks[2].join(','),chunks[0]!==chunks[1],windows.length,\
+           windows[0].join(','),windows[1].join(','),windows[2].join(','),\
+           windows[0]!==windows[1],partial.length,partial[0].join(','),\
+           Iterator.prototype.chunks.name,Iterator.prototype.chunks.length,\
+           Iterator.prototype.windows.name,Iterator.prototype.windows.length].join('|');",
+    );
+
+    let result = context
+        .call(&function, &[], ExecutionLimits::default())
+        .expect("Iterator chunking helper buffers");
+    assert_eq!(
+        string_value(&result),
+        "3|0,1|2,3|4|true|3|0,1,2|1,2,3|2,3,4|true|1|0,1|chunks|1|windows|1"
+    );
+}
+
+#[test]
+fn iterator_chunking_validation_and_exhaustion_close_in_spec_order() {
+    let mut runtime = Runtime::try_new(RuntimeLimits::default()).expect("runtime");
+    let realm = runtime.create_realm().expect("realm");
+    let mut context = runtime.context(&realm).expect("context");
+    let function = dynamic_function(
+        &mut context,
+        "let log='',chunksType=false,windowsType=false;\
+         function invalid(){return {get next(){log+='n';throw {};},\
+           return(){log+='r';return {};}};}\
+         try{Iterator.prototype.chunks.call(invalid(),'2');}\
+         catch(error){chunksType=error instanceof TypeError;}\
+         try{Iterator.prototype.windows.call(invalid(),1,'bad');}\
+         catch(error){windowsType=error instanceof TypeError;}\
+         let step=0,exhaustedReturns=0;\
+         let exhausted=Iterator.prototype.chunks.call({next(){step++;return step===1\
+           ?{done:false,value:1}:{done:true};},return(){exhaustedReturns++;throw {}; }},2);\
+         let partial=exhausted.next();let exhaustedReturn=true;\
+         try{exhausted.return();}catch(error){exhaustedReturn=false;}\
+         let closes=0,open=Iterator.prototype.windows.call({\
+           next(){return {done:false,value:1};},return(){closes++;return {};}},2);\
+         open.return();open.return();\
+         return [log,chunksType,windowsType,partial.value.join(','),exhaustedReturn,\
+           exhaustedReturns,closes].join('|');",
+    );
+
+    let result = context
+        .call(&function, &[], ExecutionLimits::default())
+        .expect("Iterator chunking validation and close order");
+    assert_eq!(string_value(&result), "rr|true|true|1|true|0|1");
+}
+
+#[test]
 fn iterator_reduce_distinguishes_missing_and_explicit_initial_values() {
     let mut runtime = Runtime::try_new(RuntimeLimits::default()).expect("runtime");
     let realm = runtime.create_realm().expect("realm");

@@ -94,6 +94,11 @@ pub(super) fn visit_functions(visit: FunctionSink<'_>) {
             1,
         ),
         (
+            NativeFunctionKind::IteratorPrototypeChunks,
+            IntrinsicNameSpec::RealmName(RealmNameId::IteratorChunks),
+            1,
+        ),
+        (
             NativeFunctionKind::IteratorPrototypeDrop,
             IntrinsicNameSpec::RealmName(RealmNameId::IteratorDrop),
             1,
@@ -152,6 +157,11 @@ pub(super) fn visit_functions(visit: FunctionSink<'_>) {
             NativeFunctionKind::IteratorPrototypeToArray,
             IntrinsicNameSpec::RealmName(RealmNameId::IteratorToArray),
             0,
+        ),
+        (
+            NativeFunctionKind::IteratorPrototypeWindows,
+            IntrinsicNameSpec::RealmName(RealmNameId::IteratorWindows),
+            1,
         ),
         (
             NativeFunctionKind::IteratorPrototypeDispose,
@@ -327,6 +337,11 @@ pub(super) fn visit_properties(visit: PropertySink<'_>) {
     ));
     visit(method(
         prototype,
+        IntrinsicKeySpec::InternedString(RealmNameId::IteratorChunks),
+        NativeFunctionKind::IteratorPrototypeChunks,
+    ));
+    visit(method(
+        prototype,
         IntrinsicKeySpec::InternedString(RealmNameId::IteratorDrop),
         NativeFunctionKind::IteratorPrototypeDrop,
     ));
@@ -384,6 +399,11 @@ pub(super) fn visit_properties(visit: PropertySink<'_>) {
         prototype,
         IntrinsicKeySpec::InternedString(RealmNameId::IteratorToArray),
         NativeFunctionKind::IteratorPrototypeToArray,
+    ));
+    visit(method(
+        prototype,
+        IntrinsicKeySpec::InternedString(RealmNameId::IteratorWindows),
+        NativeFunctionKind::IteratorPrototypeWindows,
     ));
     let helper = IntrinsicIdentity::Object(IntrinsicObjectId::IteratorHelperPrototype);
     visit(method(

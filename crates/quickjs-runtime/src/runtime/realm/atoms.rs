@@ -252,6 +252,7 @@ fn visit_realm_name_order(
     }
     visit(RealmNameId::ArrayIsArray)?;
     visit(RealmNameId::ArrayFromAsync)?;
+    visit(RealmNameId::IteratorChunks)?;
     visit(RealmNameId::IteratorDrop)?;
     visit(RealmNameId::IteratorIncludes)?;
     for consumer in IteratorConsumer::ALL {
@@ -262,6 +263,7 @@ fn visit_realm_name_order(
     visit(RealmNameId::IteratorMap)?;
     visit(RealmNameId::IteratorTake)?;
     visit(RealmNameId::IteratorToArray)?;
+    visit(RealmNameId::IteratorWindows)?;
     visit(RealmNameId::IteratorZip)?;
     visit(RealmNameId::IteratorZipKeyed)?;
     visit(RealmNameId::ArrayBufferIsView)?;
@@ -664,6 +666,7 @@ fn realm_name_description(id: RealmNameId) -> &'static str {
         RealmNameId::ArraySplice => "splice",
         RealmNameId::ArrayIsArray => "isArray",
         RealmNameId::ArrayFromAsync => "fromAsync",
+        RealmNameId::IteratorChunks => "chunks",
         RealmNameId::IteratorDrop => "drop",
         RealmNameId::IteratorIncludes => "includes",
         RealmNameId::IteratorConsumer(consumer) => consumer.name(),
@@ -672,6 +675,7 @@ fn realm_name_description(id: RealmNameId) -> &'static str {
         RealmNameId::IteratorMap => "map",
         RealmNameId::IteratorTake => "take",
         RealmNameId::IteratorToArray => "toArray",
+        RealmNameId::IteratorWindows => "windows",
         RealmNameId::IteratorZip => "zip",
         RealmNameId::IteratorZipKeyed => "zipKeyed",
         RealmNameId::ArrayBufferIsView => "isView",

@@ -223,6 +223,50 @@ fn map_and_map_iterator_trace_keys_values_and_release_entry_charges() {
 }
 
 #[test]
+fn iterator_chunking_helper_traces_values_retained_only_in_its_buffer() {
+    let mut runtime = Runtime::try_new(RuntimeLimits::default()).expect("runtime");
+    let realm = runtime.create_realm().expect("realm");
+    let realm_id = realm.0.id;
+    let object_prototype = runtime
+        .realm_object_prototype(realm_id)
+        .expect("Object.prototype");
+    let baseline = runtime.usage();
+    let value = runtime
+        .allocate_ordinary_object(object_prototype)
+        .expect("buffered value");
+    let helper = runtime
+        .allocate_iterator_chunking_helper(
+            realm_id,
+            StoredValue::Undefined,
+            StoredValue::Undefined,
+            crate::object::IteratorHelperKind::Chunks,
+            2,
+            false,
+        )
+        .expect("chunks helper");
+    assert!(
+        runtime
+            .push_iterator_chunking_value(helper, StoredValue::Object(value))
+            .expect("buffer first chunk value")
+            .is_none()
+    );
+
+    runtime
+        .collect_cycles_with_roots(|mark| {
+            mark(CollectionRoot::Heap(HeapReference::Object(helper)));
+        })
+        .expect("rooted chunking helper collection");
+    assert!(runtime.objects.get(value).is_some());
+    assert_eq!(runtime.usage().heap_objects(), baseline.heap_objects() + 2);
+
+    let report = runtime
+        .collect_cycles()
+        .expect("unrooted helper collection");
+    assert_eq!(report.objects(), 2);
+    assert_eq!(runtime.usage(), baseline);
+}
+
+#[test]
 fn deleted_map_entries_release_key_and_value_edges_but_retain_slot_charge() {
     let mut runtime = Runtime::try_new(RuntimeLimits::default()).expect("runtime");
     let realm = runtime.create_realm().expect("realm");

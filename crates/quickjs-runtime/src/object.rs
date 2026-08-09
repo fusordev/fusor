@@ -392,12 +392,14 @@ pub(crate) enum IteratorHelperLifecycle {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum IteratorHelperKind {
+    Chunks,
     Concat,
     Drop,
     FlatMap,
     Map,
     Filter,
     Take,
+    Windows,
     Zip,
 }
 
@@ -499,6 +501,10 @@ pub(crate) struct IteratorHelperState {
     zip_padding: Vec<StoredValue>,
     zip_mode: IteratorZipMode,
     zip_keys: Option<Vec<PropertyKey>>,
+    chunk_size: u32,
+    chunk_allow_partial: bool,
+    chunk_buffer: Vec<StoredValue>,
+    chunk_source_done: bool,
 }
 
 impl IteratorHelperState {
@@ -518,6 +524,10 @@ impl IteratorHelperState {
             zip_padding: Vec::new(),
             zip_mode: IteratorZipMode::Shortest,
             zip_keys: None,
+            chunk_size: 0,
+            chunk_allow_partial: false,
+            chunk_buffer: Vec::new(),
+            chunk_source_done: false,
         }
     }
 
@@ -537,6 +547,10 @@ impl IteratorHelperState {
             zip_padding: Vec::new(),
             zip_mode: IteratorZipMode::Shortest,
             zip_keys: None,
+            chunk_size: 0,
+            chunk_allow_partial: false,
+            chunk_buffer: Vec::new(),
+            chunk_source_done: false,
         }
     }
 
@@ -556,6 +570,10 @@ impl IteratorHelperState {
             zip_padding: Vec::new(),
             zip_mode: IteratorZipMode::Shortest,
             zip_keys: None,
+            chunk_size: 0,
+            chunk_allow_partial: false,
+            chunk_buffer: Vec::new(),
+            chunk_source_done: false,
         }
     }
 
@@ -580,6 +598,37 @@ impl IteratorHelperState {
             zip_padding: padding,
             zip_mode: mode,
             zip_keys: keys,
+            chunk_size: 0,
+            chunk_allow_partial: false,
+            chunk_buffer: Vec::new(),
+            chunk_source_done: false,
+        }
+    }
+
+    #[must_use]
+    pub(crate) const fn new_chunking(
+        kind: IteratorHelperKind,
+        size: u32,
+        allow_partial: bool,
+    ) -> Self {
+        Self {
+            kind,
+            callback: None,
+            counter: 0,
+            remaining: 0.0,
+            lifecycle: IteratorHelperLifecycle::SuspendedStart,
+            inner_iterator: None,
+            inner_next_method: None,
+            concat_iterables: Vec::new(),
+            concat_index: 0,
+            zip_records: Vec::new(),
+            zip_padding: Vec::new(),
+            zip_mode: IteratorZipMode::Shortest,
+            zip_keys: None,
+            chunk_size: size,
+            chunk_allow_partial: allow_partial,
+            chunk_buffer: Vec::new(),
+            chunk_source_done: false,
         }
     }
 
@@ -653,6 +702,16 @@ impl IteratorHelperState {
         self.zip_keys.as_deref()
     }
 
+    #[must_use]
+    pub(crate) fn chunk_buffer(&self) -> &[StoredValue] {
+        &self.chunk_buffer
+    }
+
+    #[must_use]
+    pub(crate) const fn chunk_source_done(&self) -> bool {
+        self.chunk_source_done
+    }
+
     pub(crate) fn set_lifecycle(&mut self, lifecycle: IteratorHelperLifecycle) {
         self.lifecycle = lifecycle;
         if matches!(lifecycle, IteratorHelperLifecycle::Completed) {
@@ -662,7 +721,49 @@ impl IteratorHelperState {
             self.zip_records.clear();
             self.zip_padding.clear();
             self.zip_keys = None;
+            self.chunk_buffer.clear();
         }
+    }
+
+    pub(crate) fn push_chunking_value(
+        &mut self,
+        value: StoredValue,
+    ) -> Result<Option<Vec<StoredValue>>, TryReserveError> {
+        if matches!(self.kind, IteratorHelperKind::Windows)
+            && self.chunk_buffer.len() == usize::try_from(self.chunk_size).unwrap_or(usize::MAX)
+        {
+            self.chunk_buffer.remove(0);
+        }
+        self.chunk_buffer.try_reserve(1)?;
+        self.chunk_buffer.push(value);
+        let size = usize::try_from(self.chunk_size).unwrap_or(usize::MAX);
+        if self.chunk_buffer.len() != size {
+            return Ok(None);
+        }
+        self.lifecycle = IteratorHelperLifecycle::SuspendedYield;
+        if matches!(self.kind, IteratorHelperKind::Chunks) {
+            return Ok(Some(std::mem::take(&mut self.chunk_buffer)));
+        }
+        let mut window = Vec::new();
+        window.try_reserve_exact(self.chunk_buffer.len())?;
+        window.extend(self.chunk_buffer.iter().map(StoredValue::duplicate));
+        Ok(Some(window))
+    }
+
+    pub(crate) fn finish_chunking_source(&mut self) -> Option<Vec<StoredValue>> {
+        let should_yield = !self.chunk_buffer.is_empty()
+            && (matches!(self.kind, IteratorHelperKind::Chunks)
+                || (matches!(self.kind, IteratorHelperKind::Windows)
+                    && self.chunk_allow_partial
+                    && self.chunk_buffer.len()
+                        < usize::try_from(self.chunk_size).unwrap_or(usize::MAX)));
+        if !should_yield {
+            self.set_lifecycle(IteratorHelperLifecycle::Completed);
+            return None;
+        }
+        self.chunk_source_done = true;
+        self.lifecycle = IteratorHelperLifecycle::SuspendedYield;
+        Some(std::mem::take(&mut self.chunk_buffer))
     }
 
     pub(crate) const fn finish_callback(&mut self, yielded: bool) {
@@ -760,6 +861,21 @@ impl IteratorRecord {
             iterator,
             next_method,
             helper: Some(IteratorHelperState::new_limit(kind, remaining)),
+        }
+    }
+
+    #[must_use]
+    pub(crate) const fn new_chunking_helper(
+        iterator: StoredValue,
+        next_method: StoredValue,
+        kind: IteratorHelperKind,
+        size: u32,
+        allow_partial: bool,
+    ) -> Self {
+        Self {
+            iterator,
+            next_method,
+            helper: Some(IteratorHelperState::new_chunking(kind, size, allow_partial)),
         }
     }
 

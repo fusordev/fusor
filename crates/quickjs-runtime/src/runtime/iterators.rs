@@ -88,6 +88,7 @@ pub(crate) struct IteratorHelperSnapshot {
     pub(crate) zip_mode: IteratorZipMode,
     pub(crate) zip_record_count: usize,
     pub(crate) zip_keys: Option<Vec<PropertyKey>>,
+    pub(crate) chunk_source_done: bool,
 }
 
 impl Runtime {
@@ -214,6 +215,22 @@ impl Runtime {
         ))
     }
 
+    pub(crate) fn allocate_iterator_chunking_helper(
+        &mut self,
+        realm: RealmId,
+        iterator: StoredValue,
+        next_method: StoredValue,
+        kind: IteratorHelperKind,
+        size: u32,
+        allow_partial: bool,
+    ) -> Result<ObjectId, crate::ExecutionError> {
+        let prototype = self.realm_iterator_helper_prototype(realm)?;
+        self.allocate_iterator_object(HeapObject::iterator_wrapper(
+            ObjectRecord::empty(Some(HeapReference::Object(prototype))),
+            IteratorRecord::new_chunking_helper(iterator, next_method, kind, size, allow_partial),
+        ))
+    }
+
     pub(crate) fn allocate_iterator_concat_helper(
         &mut self,
         realm: RealmId,
@@ -290,6 +307,7 @@ impl Runtime {
             zip_mode: helper_state.zip_mode(),
             zip_record_count: helper_state.zip_records().len(),
             zip_keys: helper_state.zip_keys().map(<[PropertyKey]>::to_vec),
+            chunk_source_done: helper_state.chunk_source_done(),
         }))
     }
 
@@ -491,6 +509,48 @@ impl Runtime {
             })?;
         helper_state.finish_limit_yield();
         Ok(())
+    }
+
+    pub(crate) fn push_iterator_chunking_value(
+        &mut self,
+        helper: ObjectId,
+        value: StoredValue,
+    ) -> Result<Option<Vec<StoredValue>>, crate::ExecutionError> {
+        let helper_state = self
+            .objects
+            .get_mut(helper)
+            .ok_or_else(|| stale_heap_reference(HeapReference::Object(helper)))?
+            .iterator_wrapper_state_mut()
+            .and_then(IteratorRecord::helper_mut)
+            .ok_or(crate::EngineFault::RuntimeInvariant {
+                message: "Iterator chunking state disappeared",
+            })?;
+        let output = helper_state.push_chunking_value(value).map_err(|_| {
+            crate::ExecutionError::AllocationFailed {
+                resource: RuntimeResource::FrameValues,
+                additional: 1,
+            }
+        })?;
+        self.collection_pending = true;
+        Ok(output)
+    }
+
+    pub(crate) fn finish_iterator_chunking_source(
+        &mut self,
+        helper: ObjectId,
+    ) -> Result<Option<Vec<StoredValue>>, crate::EngineFault> {
+        let helper_state = self
+            .objects
+            .get_mut(helper)
+            .ok_or_else(|| stale_heap_reference(HeapReference::Object(helper)))?
+            .iterator_wrapper_state_mut()
+            .and_then(IteratorRecord::helper_mut)
+            .ok_or(crate::EngineFault::RuntimeInvariant {
+                message: "Iterator chunking state disappeared",
+            })?;
+        let output = helper_state.finish_chunking_source();
+        self.collection_pending = true;
+        Ok(output)
     }
 
     pub(crate) fn install_iterator_helper_inner(

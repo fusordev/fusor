@@ -296,6 +296,7 @@ pub(super) const fn is_declarative_function(id: IntrinsicFunctionId) -> bool {
             | NativeFunctionKind::IteratorZip
             | NativeFunctionKind::IteratorZipKeyed
             | NativeFunctionKind::IteratorFrom
+            | NativeFunctionKind::IteratorPrototypeChunks
             | NativeFunctionKind::IteratorPrototypeDispose
             | NativeFunctionKind::IteratorPrototypeDrop
             | NativeFunctionKind::IteratorPrototypeIncludes
@@ -305,6 +306,7 @@ pub(super) const fn is_declarative_function(id: IntrinsicFunctionId) -> bool {
             | NativeFunctionKind::IteratorPrototypeMap
             | NativeFunctionKind::IteratorPrototypeTake
             | NativeFunctionKind::IteratorPrototypeToArray
+            | NativeFunctionKind::IteratorPrototypeWindows
             | NativeFunctionKind::IteratorPrototypeConstructorGetter
             | NativeFunctionKind::IteratorPrototypeConstructorSetter
             | NativeFunctionKind::IteratorPrototypeToStringTagGetter
@@ -974,6 +976,7 @@ const fn is_iterator_function(id: IntrinsicFunctionId) -> bool {
             | NativeFunctionKind::IteratorZip
             | NativeFunctionKind::IteratorZipKeyed
             | NativeFunctionKind::IteratorFrom
+            | NativeFunctionKind::IteratorPrototypeChunks
             | NativeFunctionKind::IteratorPrototypeDispose
             | NativeFunctionKind::IteratorPrototypeDrop
             | NativeFunctionKind::IteratorPrototypeIncludes
@@ -983,6 +986,7 @@ const fn is_iterator_function(id: IntrinsicFunctionId) -> bool {
             | NativeFunctionKind::IteratorPrototypeMap
             | NativeFunctionKind::IteratorPrototypeTake
             | NativeFunctionKind::IteratorPrototypeToArray
+            | NativeFunctionKind::IteratorPrototypeWindows
             | NativeFunctionKind::IteratorPrototypeConstructorGetter
             | NativeFunctionKind::IteratorPrototypeConstructorSetter
             | NativeFunctionKind::IteratorPrototypeToStringTagGetter
