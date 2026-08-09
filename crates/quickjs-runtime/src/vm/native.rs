@@ -2192,6 +2192,31 @@ fn resolve_native_dispatch_inner(
 
         let supplied_argument_count = call.arguments.remaining().len();
         let construction = call.new_target;
+        if construction.is_none() && bytecode_function_is_class_constructor(runtime, call.function)?
+        {
+            let pending = PendingException {
+                // ECMAScript function [[Call]] creates this TypeError in the
+                // class constructor's callee context.
+                realm: runtime.function_realm(call.function)?,
+                payload: PendingExceptionPayload::EngineError {
+                    kind: ExceptionKind::TypeError,
+                    message: class_constructor_call_message(runtime, call.function)?,
+                },
+                origin: call.origin,
+            };
+            dispatch = resume_iterator_abrupt_continuations(
+                runtime,
+                call.continuations,
+                pending,
+                call.return_to,
+                active_root_frames,
+                active_frames,
+                active_frame_values,
+                compiler,
+                execution_budget,
+            )?;
+            continue;
+        }
         let plan = plan_frame(
             runtime,
             call.function,

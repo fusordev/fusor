@@ -6051,7 +6051,9 @@ fn execute_frame_loop(
                 }
                 if !construction && bytecode_function_is_class_constructor(runtime, function)? {
                     let pending = PendingException {
-                        realm: operation_realm,
+                        // ECMAScript function [[Call]] creates this TypeError in
+                        // the class constructor's callee context.
+                        realm: runtime.function_realm(function)?,
                         payload: PendingExceptionPayload::EngineError {
                             kind: ExceptionKind::TypeError,
                             message: class_constructor_call_message(runtime, function)?,

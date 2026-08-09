@@ -142,6 +142,17 @@ fn an_object_subclass_allocates_from_the_derived_new_target() {
 }
 
 #[test]
+fn class_constructors_reject_native_call_and_apply_paths_before_running_the_body() {
+    run_with(
+        "function run(){let entries=0;class Base{constructor(){entries++;}}class Derived extends Base{constructor(){entries+=10;super();}}let rejected=0;try{Base.call({});}catch(error){if(error.name==='TypeError')rejected++;}try{Base.apply({},[]);}catch(error){if(error.name==='TypeError')rejected++;}try{Derived.call({});}catch(error){if(error.name==='TypeError')rejected++;}try{Derived.apply({},[]);}catch(error){if(error.name==='TypeError')rejected++;}return rejected===4&&entries===0;}",
+        |result| {
+            let value = result.expect("class call/apply rejection");
+            assert_eq!(value.as_boolean().expect("live Boolean"), Some(true));
+        },
+    );
+}
+
+#[test]
 fn initializer_free_public_instance_fields_define_on_each_receiver_at_constructor_entry() {
     run_with(
         "function run(){class Empty{empty;}class Base{base;constructor(){this.baseBeforeBody=this.base===void 0;}}class Explicit extends Base{own;constructor(){super();this.ownBeforeBody=this.own===void 0;}}class Default extends Base{forward;}let empty=new Empty;let base=new Base;let explicit=new Explicit;let forwarded=new Default;let fields=empty.empty===void 0&&base.base===void 0&&base.baseBeforeBody&&explicit.base===void 0&&explicit.own===void 0&&explicit.baseBeforeBody&&explicit.ownBeforeBody&&forwarded.base===void 0&&forwarded.forward===void 0;let descriptors=empty.hasOwnProperty('empty')&&empty.propertyIsEnumerable('empty')&&delete empty.empty&&!empty.hasOwnProperty('empty')&&base.hasOwnProperty('base')&&base.propertyIsEnumerable('base')&&delete base.base&&!base.hasOwnProperty('base')&&explicit.hasOwnProperty('own')&&explicit.propertyIsEnumerable('own')&&delete explicit.own&&!explicit.hasOwnProperty('own')&&forwarded.hasOwnProperty('forward')&&forwarded.propertyIsEnumerable('forward');return fields&&descriptors;}",

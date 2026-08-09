@@ -6218,6 +6218,86 @@ fn foreign_nonconstructor_type_errors_use_the_constructing_frame_realm() {
     }
 }
 
+#[test]
+fn foreign_class_constructor_call_errors_use_the_class_realm() {
+    let invoke_authority = compile_test_function(
+        "function invoke(candidate,viaNative){\
+             try{if(viaNative){candidate.call(null);}else{candidate();}}\
+             catch(error){return error;}\
+         }",
+        "invoke",
+    );
+    let maker_authority = compile_test_function(
+        "function make(){return class Foreign{constructor(){throw 1;}};}",
+        "make",
+    );
+    let mut runtime = Runtime::try_new(RuntimeLimits::default()).expect("runtime");
+    let target_realm = runtime.create_realm().expect("target realm");
+    let caller_realm = runtime.create_realm().expect("caller realm");
+    let target_realm_id = runtime
+        .context(&target_realm)
+        .expect("target context")
+        .realm;
+    let caller_realm_id = runtime
+        .context(&caller_realm)
+        .expect("caller context")
+        .realm;
+    let maker = runtime
+        .context(&target_realm)
+        .expect("target context")
+        .instantiate(maker_authority)
+        .expect("class maker");
+    let candidate = runtime
+        .context(&target_realm)
+        .expect("target context")
+        .call(&maker, &[], ExecutionLimits::default())
+        .expect("foreign class")
+        .into_function()
+        .expect("class constructor");
+    let invoke = runtime
+        .context(&caller_realm)
+        .expect("caller context")
+        .instantiate(invoke_authority)
+        .expect("class invoker");
+    let caller_type_error = runtime
+        .realm_error_prototype(caller_realm_id, ExceptionKind::TypeError)
+        .expect("caller TypeError.prototype");
+    let target_type_error = runtime
+        .realm_error_prototype(target_realm_id, ExceptionKind::TypeError)
+        .expect("target TypeError.prototype");
+
+    for (kind, via_native) in [("direct", false), ("Function.prototype.call", true)] {
+        let via_native = runtime
+            .public_value(StoredValue::Boolean(via_native))
+            .expect("call mode root");
+        let error = runtime
+            .context(&caller_realm)
+            .expect("caller context")
+            .call(
+                &invoke,
+                &[candidate.as_value(), via_native],
+                ExecutionLimits::default(),
+            )
+            .expect("caught class constructor TypeError");
+        let error = error.object_id().expect("materialized TypeError object");
+        let prototype = runtime
+            .object_record(HeapReference::Object(error))
+            .expect("TypeError object")
+            .prototype();
+
+        assert_eq!(
+            prototype,
+            Some(HeapReference::Object(target_type_error)),
+            "{kind} class-call error must belong to the class constructor realm"
+        );
+        assert_ne!(
+            prototype,
+            Some(HeapReference::Object(caller_type_error)),
+            "{kind} caller realm must not own the class-call error"
+        );
+    }
+}
+
 fn runtime_with_apply_invoker() -> (Runtime, crate::Realm, Function, Function) {
     let invoke_authority = compile_test_function(
         "function invoke(apply,target,receiver,list){\
