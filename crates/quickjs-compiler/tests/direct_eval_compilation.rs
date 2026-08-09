@@ -3,7 +3,8 @@ use quickjs_bytecode::{
     VerificationLimits,
 };
 use quickjs_compiler::{
-    CompilationContext, CompiledFunctionTree, CompiledRealmGlobalSource, LeafCompilationError,
+    CompilationContext, CompiledFunctionTree, CompiledRealmGlobalSource, DeclarationKind,
+    LeafCompilationError,
 };
 use quickjs_frontend::{
     CompilationGoal, DirectEvalBinding, DirectEvalBindingKind, DirectEvalBindingLocation,
@@ -122,6 +123,56 @@ fn closed_sloppy_direct_eval_certifies_eval_local_lexicals() {
             .is_strict()
     );
     assert!(root.metadata().closures().is_empty());
+}
+
+#[test]
+fn direct_eval_keeps_named_class_binding_in_tdz_through_computed_names() {
+    let tree = compile("class EvalDeclaration { [EvalDeclaration]() {} }", false)
+        .expect("named class direct-eval authority");
+    let root = tree.root();
+    let binding = root
+        .storage_plan()
+        .bindings_for(root.executable())
+        .expect("direct-eval root bindings")
+        .iter()
+        .find(|binding| binding.policy().kind() == DeclarationKind::ClassName)
+        .expect("synthetic class-name binding");
+    let slot = root
+        .locals()
+        .iter()
+        .find(|local| local.binding() == binding.id())
+        .expect("class-name local")
+        .slot()
+        .index();
+    let initialization = match slot {
+        0 => (FinalOpcode::PutLoc0, Operands::NoneLoc),
+        1 => (FinalOpcode::PutLoc1, Operands::NoneLoc),
+        2 => (FinalOpcode::PutLoc2, Operands::NoneLoc),
+        3 => (FinalOpcode::PutLoc3, Operands::NoneLoc),
+        slot => (
+            FinalOpcode::PutLoc8,
+            Operands::Loc8(u8::try_from(slot).expect("small direct-eval local layout")),
+        ),
+    };
+    let instructions = root
+        .control_flow()
+        .instructions()
+        .iter()
+        .map(|instruction| {
+            let instruction = instruction.decoded().instruction();
+            (instruction.opcode(), instruction.operands())
+        })
+        .collect::<Vec<_>>();
+    let computed_name_read = instructions
+        .iter()
+        .position(|instruction| *instruction == (FinalOpcode::GetLocCheck, Operands::Loc(slot)))
+        .expect("computed name reads the uninitialized inner binding");
+    let class_name_initialization = instructions
+        .iter()
+        .position(|instruction| *instruction == initialization)
+        .expect("class constructor initializes the inner binding");
+
+    assert!(computed_name_read < class_name_initialization);
 }
 
 #[test]

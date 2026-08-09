@@ -1296,9 +1296,6 @@ impl<'compiler, 'unit, 'arena, 'scope> ExpressionPlanner<'compiler, 'unit, 'aren
                 flow.emit(PlannedInstruction::new(opcode, Operands::None, class.span))?;
             }
         }
-        if class.id.is_some() {
-            self.plan_base_class_name_initialization(class, layout, flow)?;
-        }
         self.plan_base_class_private_name_initializations(class, layout, constants, flow)?;
         self.plan_base_class_static_receiver_initialization(class, layout, flow)?;
 
@@ -1326,6 +1323,9 @@ impl<'compiler, 'unit, 'arena, 'scope> ExpressionPlanner<'compiler, 'unit, 'aren
                     });
                 }
             }
+        }
+        if class.id.is_some() {
+            self.plan_base_class_name_initialization(class, layout, flow)?;
         }
         for element in &class.body.body {
             match element {

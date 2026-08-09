@@ -378,6 +378,89 @@ fn global_lexical_access_preserves_tdz_and_immutable_assignment_errors() {
 }
 
 #[test]
+fn named_class_inner_bindings_are_immutable_tdz_scoped_and_distinct() {
+    let mut runtime = Runtime::try_new(RuntimeLimits::default()).expect("runtime");
+    let realm = runtime.create_realm().expect("realm");
+    let mut context = runtime.context(&realm).expect("context");
+
+    let value = evaluate_script(
+        &mut context,
+        r#"
+        let bits = 0;
+        class Declaration { tryBreak() { Declaration = 4; } }
+        let immutable = true;
+        for (let Class of [Declaration, class Expression { tryBreak() { Expression = 4; } }]) {
+          try { new Class().tryBreak(); immutable = false; }
+          catch (error) { if (error.name !== "TypeError") immutable = false; }
+        }
+        if (immutable) bits += 1;
+        {
+          class BlockDeclaration { tryBreak() { BlockDeclaration = 4; } }
+          let blockImmutable = true;
+          for (let Class of [BlockDeclaration, class BlockExpression { tryBreak() { BlockExpression = 4; } }]) {
+            try { new Class().tryBreak(); blockImmutable = false; }
+            catch (error) { if (error.name !== "TypeError") blockImmutable = false; }
+          }
+          if (blockImmutable) bits += 2;
+        }
+        let declarationTdz = false;
+        try { eval("class EvalDeclaration { [EvalDeclaration]() {} }"); }
+        catch (error) { declarationTdz = error.name === "ReferenceError"; }
+        if (declarationTdz) bits += 4;
+        let expressionTdz = false;
+        try { eval("(class EvalExpression { [EvalExpression]() {} })"); }
+        catch (error) { expressionTdz = error.name === "ReferenceError"; }
+        if (expressionTdz) bits += 8;
+        {
+          class Outer {
+            test() {
+              class Inner { test() { return Outer === Inner; } }
+              return new Inner().test();
+            }
+          }
+          let declarationDistinct = !new Outer().test();
+          let expressionDistinct = !new class ExpressionOuter {
+            test() {
+              return new class ExpressionInner {
+                test() { return ExpressionOuter === ExpressionInner; }
+              }().test();
+            }
+          }().test();
+          if (declarationDistinct && expressionDistinct) bits += 16;
+        }
+        {
+          class ShadowDeclaration { test(ShadowDeclaration) { return ShadowDeclaration; } }
+          let declarationShadow = new ShadowDeclaration().test(4) === 4;
+          let expressionShadow = new class ShadowExpression {
+            test(ShadowExpression) { return ShadowExpression; }
+          }().test(4) === 4;
+          if (declarationShadow && expressionShadow) bits += 32;
+        }
+        class ExistingName { static method() { throw new Error("outer"); } }
+        let innerShadowsOuter = new class ExistingName {
+          static method() { return 4; }
+          test() { return ExistingName.method(); }
+        }().test() === 4;
+        if (innerShadowsOuter) bits += 64;
+        let original;
+        class MutableOuter { same() { return MutableOuter === original; } }
+        original = MutableOuter;
+        MutableOuter = 13;
+        if (MutableOuter === 13 && new original().same()) bits += 128;
+        bits;
+        "#,
+        "class-inner-bindings.js",
+        ScriptLimits::default(),
+    )
+    .expect("class inner-binding Script");
+    let bits = number(&value);
+    assert!(
+        bits.strict_equals(JsNumber::from_i32(255)),
+        "bits: {bits:?}"
+    );
+}
+
+#[test]
 fn global_destructuring_initializes_realm_lexical_cells() {
     let mut runtime = Runtime::try_new(RuntimeLimits::default()).expect("runtime");
     let realm = runtime.create_realm().expect("realm");
