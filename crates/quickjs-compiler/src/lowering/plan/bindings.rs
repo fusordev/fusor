@@ -5,10 +5,10 @@ use super::super::{
     DestructuringBindingInitialization, ExecutableId, Expression, FinalOpcode, ForStatementLeft,
     FrameLayout, FrameSlot, FunctionTreeLayout, GetSpan, IdentifierReference, LeafCompilationError,
     LocalSlot, NativeReferenceId, NodeId, Operands, PlannedControlFlow, PlannedInstruction,
-    RealmGlobalId, ReferenceAccess, ReferenceId, ScopeId, Span, StaticMemberExpression,
-    StoragePlacement, SymbolId, UnresolvedGlobalId, UnsupportedLeafFeature, VariableDeclaration,
-    VariableDeclarationKind, VariableDeclarator, WritePolicy, anonymous_named_evaluation_span,
-    binary_opcode, unsupported,
+    PrivateFieldExpression, RealmGlobalId, ReferenceAccess, ReferenceId, ScopeId, Span,
+    StaticMemberExpression, StoragePlacement, SymbolId, UnresolvedGlobalId, UnsupportedLeafFeature,
+    VariableDeclaration, VariableDeclarationKind, VariableDeclarator, WritePolicy,
+    anonymous_named_evaluation_span, binary_opcode, unsupported,
 };
 use super::expressions::{ExpressionPlanner, ExpressionWork};
 
@@ -1111,6 +1111,15 @@ impl<'arena> CompilationContext<'_, 'arena, '_> {
                     abrupt_markers,
                     flow,
                 )?,
+            AssignmentTarget::PrivateFieldExpression(member) if !member.optional => self
+                .plan_for_in_private_member_assignment(
+                    member,
+                    layout,
+                    tree_layout,
+                    constants,
+                    abrupt_markers,
+                    flow,
+                )?,
             _ => {
                 return unsupported(UnsupportedLeafFeature::UnsupportedExpression, target.span());
             }
@@ -1237,6 +1246,45 @@ impl<'arena> CompilationContext<'_, 'arena, '_> {
         ))
     }
 
+    fn plan_for_in_private_member_assignment(
+        &self,
+        member: &PrivateFieldExpression<'arena>,
+        layout: &FrameLayout,
+        tree_layout: &FunctionTreeLayout,
+        constants: &CompiledConstantPool,
+        abrupt_markers: &[super::abrupt::AbruptMarker],
+        flow: &mut PlannedControlFlow,
+    ) -> Result<(), LeafCompilationError> {
+        let planner = ExpressionPlanner::new(self);
+        let (binding, slot) = planner.private_name_binding_for_access(
+            member.node_id.get(),
+            member.field.name.as_str(),
+            member.span,
+            layout,
+        )?;
+        self.plan_expression_with_abrupt_markers(
+            &member.object,
+            layout,
+            tree_layout,
+            constants,
+            abrupt_markers,
+            flow,
+        )?;
+        flow.emit(planner.plan_read_slot(binding, slot, member.field.span)?)?;
+        // The iteration value was produced before reference evaluation.
+        // `[value, receiver, privateName] -> [receiver, privateName, value]`.
+        flow.emit(PlannedInstruction::new(
+            FinalOpcode::Rot3l,
+            Operands::None,
+            member.span,
+        ))?;
+        flow.emit(PlannedInstruction::new(
+            FinalOpcode::PutPrivateField,
+            Operands::None,
+            member.span,
+        ))
+    }
+
     /// Stores the per-iteration for-of value into the loop head. Identifier
     /// and member heads share the for-in path; destructuring heads run the
     /// declaration or assignment pattern machinery directly on the value
@@ -1291,7 +1339,8 @@ impl<'arena> CompilationContext<'_, 'arena, '_> {
             ),
             AssignmentTarget::AssignmentTargetIdentifier(_)
             | AssignmentTarget::StaticMemberExpression(_)
-            | AssignmentTarget::ComputedMemberExpression(_) => self.plan_for_in_assignment(
+            | AssignmentTarget::ComputedMemberExpression(_)
+            | AssignmentTarget::PrivateFieldExpression(_) => self.plan_for_in_assignment(
                 left,
                 layout,
                 tree_layout,
@@ -1302,8 +1351,7 @@ impl<'arena> CompilationContext<'_, 'arena, '_> {
             AssignmentTarget::TSAsExpression(_)
             | AssignmentTarget::TSSatisfiesExpression(_)
             | AssignmentTarget::TSNonNullExpression(_)
-            | AssignmentTarget::TSTypeAssertion(_)
-            | AssignmentTarget::PrivateFieldExpression(_) => {
+            | AssignmentTarget::TSTypeAssertion(_) => {
                 unsupported(UnsupportedLeafFeature::UnsupportedExpression, target.span())
             }
         }

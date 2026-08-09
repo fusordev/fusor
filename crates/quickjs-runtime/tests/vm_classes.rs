@@ -395,6 +395,17 @@ fn private_destructuring_target_checks_this_before_invoking_the_source_getter() 
 }
 
 #[test]
+fn private_field_iteration_heads_write_and_enforce_the_receiver_brand() {
+    run_with(
+        "function run(){class Box{#value;write(){for(this.#value of [1,2]){}let ofValue=this.#value;for(this.#value in {key:0}){}return ofValue===2&&this.#value==='key';}writeOf(){for(this.#value of [1]){}}writeIn(){for(this.#value in {key:0}){}}}let box=new Box;let values=box.write();let ofError=false;try{Box.prototype.writeOf.call({});}catch(error){ofError=error.name==='TypeError';}let inError=false;try{Box.prototype.writeIn.call({});}catch(error){inError=error.name==='TypeError';}return values&&ofError&&inError;}",
+        |result| {
+            let value = result.expect("private field iteration-head execution");
+            assert_eq!(value.as_boolean().expect("live Boolean"), Some(true));
+        },
+    );
+}
+
+#[test]
 fn super_assignment_targets_write_through_the_actual_receiver() {
     run_with(
         "function run(){class Base{set value(next){this._value=next;this.writes.push(next);}set rest(next){this._rest=next;}}class Derived extends Base{check(){this.writes=[];[super.value,super['value'],...super.rest]=[1,2,3,4];let array=this._value===2&&this._rest.join(',')==='3,4'&&this.writes.join(',')==='1,2';this.writes=[];({first:super.value,second:super['value'],...super.rest}={first:5,second:6,extra:7});let object=this._value===6&&this._rest.extra===7&&this.writes.join(',')==='5,6';for(super.value in {first:0,second:0}){}let forIn=this._value==='second';for(super['value'] of [8,9]){}let forOf=this._value===9;return array&&object&&forIn&&forOf;}}return new Derived().check();}",

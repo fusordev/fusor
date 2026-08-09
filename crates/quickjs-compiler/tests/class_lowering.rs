@@ -436,6 +436,31 @@ fn super_destructuring_and_iteration_targets_keep_complete_references() {
 }
 
 #[test]
+fn private_field_iteration_heads_lower_as_brand_checked_writes() {
+    let tree = compile(
+        "function make(){class Box{#value;write(values,object){for(this.#value of values){}for(this.#value in object){}return this.#value;}}return Box;}",
+        "make",
+    );
+    let opcodes = tree
+        .functions()
+        .iter()
+        .flat_map(|function| function.control_flow().instructions())
+        .map(|instruction| instruction.decoded().instruction().opcode())
+        .collect::<Vec<_>>();
+
+    assert!(opcodes.contains(&FinalOpcode::ForOfStart));
+    assert!(opcodes.contains(&FinalOpcode::ForInStart));
+    assert!(
+        opcodes
+            .iter()
+            .filter(|&&opcode| opcode == FinalOpcode::PutPrivateField)
+            .count()
+            >= 2
+    );
+    assert!(opcodes.contains(&FinalOpcode::Rot3l));
+}
+
+#[test]
 fn a_named_base_class_expression_uses_the_same_typed_definition_path() {
     let tree = compile(
         "function make(){let Result=class Box{static self(){return Box;}};return Result;}",
