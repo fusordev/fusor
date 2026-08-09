@@ -9,6 +9,7 @@ use super::*;
 mod common;
 mod duration;
 mod instant;
+mod now;
 mod plain_date;
 mod plain_date_time;
 mod plain_month_day;
@@ -21,6 +22,6 @@ mod zoned_date_time;
     reason = "private VM sibling modules share one interpreter implementation namespace"
 )]
 pub(super) use {
-    common::*, duration::*, instant::*, plain_date::*, plain_date_time::*, plain_month_day::*,
-    plain_time::*, plain_year_month::*, zoned_date_time::*,
+    common::*, duration::*, instant::*, now::*, plain_date::*, plain_date_time::*,
+    plain_month_day::*, plain_time::*, plain_year_month::*, zoned_date_time::*,
 };

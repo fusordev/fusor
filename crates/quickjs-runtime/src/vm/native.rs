@@ -2818,6 +2818,10 @@ pub(super) fn dispatch_native_call_with_frames(
             origin.unwrap_or_else(native_function_host_origin),
             execution_budget,
         ),
+        NativeFunctionKind::TemporalNow(method) => {
+            let origin = origin.unwrap_or_else(native_function_host_origin);
+            dispatch_temporal_now(runtime, method, native.realm, inputs.arguments, &origin)
+        }
         NativeFunctionKind::TemporalDurationConstructor => begin_temporal_duration_constructor(
             runtime,
             native.realm,

@@ -1132,7 +1132,7 @@ fn plain_time_constructor_conversion_and_accessors_are_spec_shaped() {
                Temporal.PlainTime.compare.name,Temporal.PlainTime.compare.length,
                from.toString(),parsed.toString(),Temporal.PlainTime.compare(time,parsed)].join('|');"
         ),
-        "1|PlainTime|true|[object Temporal.PlainTime]|false|get hour|12|34|56|7|8|9|12:34:56.007008009|12:34:56.007008009|12:34:56.007008009|from|1|compare|2|23:59:00.000999|01:02:03.004005006|1"
+        "0|PlainTime|true|[object Temporal.PlainTime]|false|get hour|12|34|56|7|8|9|12:34:56.007008009|12:34:56.007008009|12:34:56.007008009|from|1|compare|2|23:59:00.000999|01:02:03.004005006|1"
     );
     assert_eq!(
         rendered(
@@ -1163,8 +1163,18 @@ fn plain_time_constructor_conversion_and_accessors_are_spec_shaped() {
         "00:00:00"
     );
     assert_eq!(
-        thrown("return new Temporal.PlainTime(undefined);"),
-        ExceptionKind::RangeError
+        rendered("return new Temporal.PlainTime(undefined).toString();"),
+        "00:00:00"
+    );
+    assert_eq!(
+        rendered(
+            "var log=[];
+             try{new Temporal.PlainTime(1,
+               {valueOf:function(){log.push('minute');return Infinity;}},
+               {valueOf:function(){log.push('second');return 1;}})}catch(error){log.push(error.name);}
+             return log.join(',');"
+        ),
+        "minute,RangeError"
     );
     assert_eq!(
         thrown("return Temporal.PlainTime.from({});"),
@@ -2977,5 +2987,81 @@ fn plain_date_arguments_accept_plain_date_time_and_zoned_date_time_slots() {
              return log.join(',');"
         ),
         "month,RangeError"
+    );
+}
+
+#[test]
+fn plain_date_time_with_plain_time_and_constructor_validation_match_temporal() {
+    assert_eq!(
+        rendered(
+            "var value=new Temporal.PlainDateTime(2000,5,2,12,34,56,987,654,321);
+             var method=Object.getOwnPropertyDescriptor(Temporal.PlainDateTime.prototype,'withPlainTime');
+             var bag=value.withPlainTime({hour:2,minute:30});
+             var string=value.withPlainTime('12:34:56.987654321');
+             var defaulted=value.withPlainTime();
+             var branded=value.withPlainTime(new Temporal.ZonedDateTime(3600000000000n,'UTC'));
+             return [bag.toString(),string.toString(),defaulted.toString(),branded.toString(),
+               method.value.length,method.value.name,method.enumerable,
+               method.writable,method.configurable].join('|');"
+        ),
+        "2000-05-02T02:30:00|2000-05-02T12:34:56.987654321|2000-05-02T00:00:00|2000-05-02T01:00:00|0|withPlainTime|false|true|true"
+    );
+    assert_eq!(
+        thrown(
+            "return new Temporal.PlainDateTime(2000,5,2,12,34,56,987,654,321,'1997-12-04[u-ca=iso8601]');"
+        ),
+        ExceptionKind::RangeError
+    );
+    assert_eq!(
+        thrown("return new Temporal.PlainDateTime(2000,5,2,Infinity);"),
+        ExceptionKind::RangeError
+    );
+    assert_eq!(
+        rendered(
+            "var log=[];
+             try{new Temporal.PlainDateTime(0,
+               {valueOf:function(){log.push('month');return Infinity;}},
+               {valueOf:function(){log.push('day');return 1;}})}catch(error){log.push(error.name);}
+             return log.join(',');"
+        ),
+        "month,RangeError"
+    );
+}
+
+#[test]
+fn temporal_now_namespace_and_current_values_are_spec_shaped() {
+    assert_eq!(
+        rendered(
+            "var before=Date.now();
+             var first=Temporal.Now.instant();
+             var second=Temporal.Now.instant();
+             var after=Date.now();
+             var zone=Temporal.Now.timeZoneId();
+             var zoned=Temporal.Now.zonedDateTimeISO('UTC');
+             var dateTime=Temporal.Now.plainDateTimeISO('UTC');
+             var date=Temporal.Now.plainDateISO('UTC');
+             var time=Temporal.Now.plainTimeISO('UTC');
+             var nowDesc=Object.getOwnPropertyDescriptor(Temporal,'Now');
+             return [String(Temporal),Object.prototype.toString.call(Temporal.Now),
+               Object.getPrototypeOf(Temporal.Now)===Object.prototype,Temporal.Now.prototype,
+               typeof zone,first instanceof Temporal.Instant,first!==second,
+               Number(first.epochNanoseconds/1000000n)>=before,
+               Number(first.epochNanoseconds/1000000n)<=after,
+               zoned.timeZoneId,zoned.calendarId,dateTime.calendarId,date.calendarId,
+               time instanceof Temporal.PlainTime,
+               Temporal.Now.instant.length,Temporal.Now.plainDateISO.length,
+               Temporal.Now.plainDateTimeISO.length,Temporal.Now.plainTimeISO.length,
+               Temporal.Now.timeZoneId.length,Temporal.Now.zonedDateTimeISO.length,
+               nowDesc.enumerable,nowDesc.writable,nowDesc.configurable].join('|');"
+        ),
+        "[object Temporal]|[object Temporal.Now]|true||string|true|true|true|true|UTC|iso8601|iso8601|iso8601|true|0|0|0|0|0|0|false|true|true"
+    );
+    assert_eq!(
+        thrown("return Temporal.Now.plainTimeISO(1);"),
+        ExceptionKind::TypeError
+    );
+    assert_eq!(
+        thrown("return Temporal.Now.zonedDateTimeISO('');"),
+        ExceptionKind::RangeError
     );
 }

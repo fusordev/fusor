@@ -138,12 +138,12 @@ impl RealmIntrinsicSchema {
             FamilyCardinality {
                 family: "Realm intrinsic objects",
                 actual: self.objects.len(),
-                expected: 70,
+                expected: 71,
             },
             FamilyCardinality {
                 family: "Realm native functions",
                 actual: self.specs.len(),
-                expected: 727,
+                expected: 734,
             },
         ];
         validate_intrinsic_schema(IntrinsicSchema {
@@ -174,6 +174,7 @@ pub(super) const fn is_declarative_object(id: IntrinsicObjectId) -> bool {
             | IntrinsicObjectId::TypedArrayInstancePrototype(_)
             | IntrinsicObjectId::DatePrototype
             | IntrinsicObjectId::Temporal
+            | IntrinsicObjectId::TemporalNow
             | IntrinsicObjectId::TemporalDurationPrototype
             | IntrinsicObjectId::TemporalInstantPrototype
             | IntrinsicObjectId::TemporalPlainDatePrototype
@@ -340,6 +341,7 @@ pub(super) const fn is_declarative_function(id: IntrinsicFunctionId) -> bool {
             | NativeFunctionKind::JsonStringify
             | NativeFunctionKind::Math(_)
             | NativeFunctionKind::Atomics(_)
+            | NativeFunctionKind::TemporalNow(_)
             | NativeFunctionKind::TemporalDurationConstructor
             | NativeFunctionKind::TemporalDurationStatic(_)
             | NativeFunctionKind::TemporalDurationPrototype(_)
@@ -1208,7 +1210,7 @@ mod tests {
     #[test]
     fn complete_function_schema_has_characterized_cardinality_and_unique_ids() {
         let schema = RealmIntrinsicSchema::try_new().expect("function schema");
-        assert_eq!(schema.specs().len(), 727);
+        assert_eq!(schema.specs().len(), 734);
         assert_eq!(schema.constructor_prototypes.len(), 54);
         for (index, spec) in schema.specs().iter().enumerate() {
             assert!(

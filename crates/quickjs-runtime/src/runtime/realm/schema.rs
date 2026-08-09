@@ -16,7 +16,7 @@ use crate::runtime::{
     ArrayBufferPrototypeMethod, AtomicsMethod, DataViewPrototypeMethod, DatePrototypeMethod,
     DateStaticMethod, SharedArrayBufferPrototypeMethod, TemporalDurationPrototypeMethod,
     TemporalDurationStaticMethod, TemporalInstantPrototypeMethod, TemporalInstantStaticMethod,
-    TemporalPlainDatePrototypeMethod, TemporalPlainDateStaticMethod,
+    TemporalNowMethod, TemporalPlainDatePrototypeMethod, TemporalPlainDateStaticMethod,
     TemporalPlainDateTimePrototypeMethod, TemporalPlainDateTimeStaticMethod,
     TemporalPlainMonthDayPrototypeMethod, TemporalPlainMonthDayStaticMethod,
     TemporalPlainTimePrototypeMethod, TemporalPlainTimeStaticMethod,
@@ -46,6 +46,7 @@ pub(in crate::runtime) enum IntrinsicObjectId {
     TypedArrayInstancePrototype(TypedArrayElementType),
     DatePrototype,
     Temporal,
+    TemporalNow,
     TemporalDurationPrototype,
     TemporalInstantPrototype,
     TemporalPlainDatePrototype,
@@ -85,7 +86,7 @@ pub(in crate::runtime) enum IntrinsicObjectId {
 }
 
 impl IntrinsicObjectId {
-    pub(in crate::runtime) const ALL: [Self; 70] = [
+    pub(in crate::runtime) const ALL: [Self; 71] = [
         Self::ObjectPrototype,
         Self::GlobalObject,
         Self::ErrorPrototype(ErrorIntrinsicKind::Error),
@@ -120,6 +121,7 @@ impl IntrinsicObjectId {
         Self::TypedArrayInstancePrototype(TypedArrayElementType::Float64),
         Self::DatePrototype,
         Self::Temporal,
+        Self::TemporalNow,
         Self::TemporalDurationPrototype,
         Self::TemporalInstantPrototype,
         Self::TemporalPlainDatePrototype,
@@ -215,6 +217,8 @@ pub(in crate::runtime) enum RealmNameId {
     DateStatic(DateStaticMethod),
     DatePrototype(DatePrototypeMethod),
     Temporal,
+    TemporalNow,
+    TemporalNowMethod(TemporalNowMethod),
     Duration,
     Instant,
     PlainDate,

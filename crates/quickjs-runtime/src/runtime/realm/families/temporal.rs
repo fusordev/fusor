@@ -15,17 +15,19 @@ use crate::runtime::realm::{
 };
 use crate::runtime::{
     TemporalDurationPrototypeMethod, TemporalDurationStaticMethod, TemporalInstantPrototypeMethod,
-    TemporalInstantStaticMethod, TemporalPlainDatePrototypeMethod, TemporalPlainDateStaticMethod,
-    TemporalPlainDateTimePrototypeMethod, TemporalPlainDateTimeStaticMethod,
-    TemporalPlainMonthDayPrototypeMethod, TemporalPlainMonthDayStaticMethod,
-    TemporalPlainTimePrototypeMethod, TemporalPlainTimeStaticMethod,
-    TemporalPlainYearMonthPrototypeMethod, TemporalPlainYearMonthStaticMethod,
-    TemporalZonedDateTimePrototypeMethod, TemporalZonedDateTimeStaticMethod,
+    TemporalInstantStaticMethod, TemporalNowMethod, TemporalPlainDatePrototypeMethod,
+    TemporalPlainDateStaticMethod, TemporalPlainDateTimePrototypeMethod,
+    TemporalPlainDateTimeStaticMethod, TemporalPlainMonthDayPrototypeMethod,
+    TemporalPlainMonthDayStaticMethod, TemporalPlainTimePrototypeMethod,
+    TemporalPlainTimeStaticMethod, TemporalPlainYearMonthPrototypeMethod,
+    TemporalPlainYearMonthStaticMethod, TemporalZonedDateTimePrototypeMethod,
+    TemporalZonedDateTimeStaticMethod,
 };
 
 pub(super) fn visit_objects(visit: ObjectSink<'_>) {
     for id in [
         IntrinsicObjectId::Temporal,
+        IntrinsicObjectId::TemporalNow,
         IntrinsicObjectId::TemporalDurationPrototype,
         IntrinsicObjectId::TemporalInstantPrototype,
         IntrinsicObjectId::TemporalPlainDatePrototype,
@@ -48,6 +50,13 @@ pub(super) fn visit_objects(visit: ObjectSink<'_>) {
     reason = "the Temporal family keeps its complete native-function topology in one auditable declaration"
 )]
 pub(super) fn visit_functions(visit: FunctionSink<'_>) {
+    for method in TemporalNowMethod::ALL {
+        visit(ordinary(
+            NativeFunctionKind::TemporalNow(method),
+            IntrinsicNameSpec::RealmName(RealmNameId::TemporalNowMethod(method)),
+            0,
+        ));
+    }
     visit(ordinary(
         NativeFunctionKind::TemporalDurationConstructor,
         IntrinsicNameSpec::Literal("Duration"),
@@ -238,7 +247,7 @@ pub(super) fn visit_functions(visit: FunctionSink<'_>) {
     visit(ordinary(
         NativeFunctionKind::TemporalPlainTimeConstructor,
         IntrinsicNameSpec::RealmName(RealmNameId::PlainTime),
-        1,
+        0,
     ));
     for method in TemporalPlainTimeStaticMethod::ALL {
         let name = match method {
@@ -421,6 +430,7 @@ pub(super) fn visit_functions(visit: FunctionSink<'_>) {
 )]
 pub(super) fn visit_properties(visit: PropertySink<'_>) {
     let namespace = IntrinsicIdentity::Object(IntrinsicObjectId::Temporal);
+    let now = IntrinsicIdentity::Object(IntrinsicObjectId::TemporalNow);
     let duration_prototype =
         IntrinsicIdentity::Object(IntrinsicObjectId::TemporalDurationPrototype);
     let duration_constructor = IntrinsicIdentity::Function(IntrinsicFunctionId(
@@ -466,6 +476,31 @@ pub(super) fn visit_properties(visit: PropertySink<'_>) {
         IntrinsicKeySpec::InternedString(RealmNameId::Temporal),
         METHOD_PROPERTY,
         IntrinsicValueSpec::Object(IntrinsicObjectId::Temporal),
+    ));
+    visit(data(
+        namespace,
+        IntrinsicKeySpec::InternedString(RealmNameId::TemporalNow),
+        METHOD_PROPERTY,
+        IntrinsicValueSpec::Object(IntrinsicObjectId::TemporalNow),
+    ));
+    for method_id in TemporalNowMethod::ALL {
+        visit(method(
+            now,
+            IntrinsicKeySpec::InternedString(RealmNameId::TemporalNowMethod(method_id)),
+            NativeFunctionKind::TemporalNow(method_id),
+        ));
+    }
+    visit(data(
+        namespace,
+        IntrinsicKeySpec::WellKnownSymbol(PredefinedAtom::SymbolToStringTag),
+        PropertyLayout::data(false, false, true),
+        IntrinsicValueSpec::String(IntrinsicStringSpec::Literal("Temporal")),
+    ));
+    visit(data(
+        now,
+        IntrinsicKeySpec::WellKnownSymbol(PredefinedAtom::SymbolToStringTag),
+        PropertyLayout::data(false, false, true),
+        IntrinsicValueSpec::String(IntrinsicStringSpec::Literal("Temporal.Now")),
     ));
     visit(method(
         namespace,

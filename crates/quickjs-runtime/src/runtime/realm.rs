@@ -695,6 +695,7 @@ impl RealmBuildTransaction<'_> {
             },
             temporal: TemporalIntrinsics {
                 namespace: object(IntrinsicObjectId::Temporal),
+                now: object(IntrinsicObjectId::TemporalNow),
                 duration_prototype: object(IntrinsicObjectId::TemporalDurationPrototype),
                 duration_constructor: function(NativeFunctionKind::TemporalDurationConstructor),
                 instant_prototype: object(IntrinsicObjectId::TemporalInstantPrototype),

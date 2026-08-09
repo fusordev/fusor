@@ -487,7 +487,7 @@ pub(in crate::vm) fn temporal_plain_date_integer(
 }
 
 /// `ToPositiveIntegerWithTruncation` for month and day fields: zero and
-/// negative values are a RangeError, while values beyond the kernel's `u8`
+/// negative values are a `RangeError`, while values beyond the kernel's `u8`
 /// domain saturate and leave constrain-or-reject resolution to the calendar.
 fn temporal_plain_date_positive_u8(
     value: i64,

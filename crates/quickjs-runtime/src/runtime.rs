@@ -299,6 +299,7 @@ struct DateIntrinsics {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 struct TemporalIntrinsics {
     namespace: ObjectId,
+    now: ObjectId,
     duration_prototype: ObjectId,
     duration_constructor: FunctionId,
     instant_prototype: ObjectId,
@@ -1246,6 +1247,7 @@ pub(crate) enum NativeFunctionKind {
     DateConstructor,
     DateStatic(DateStaticMethod),
     DatePrototype(DatePrototypeMethod),
+    TemporalNow(TemporalNowMethod),
     TemporalDurationConstructor,
     TemporalDurationStatic(TemporalDurationStaticMethod),
     TemporalDurationPrototype(TemporalDurationPrototypeMethod),
@@ -2292,6 +2294,38 @@ impl ArrayBufferPrototypeMethod {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum TemporalNowMethod {
+    Instant,
+    PlainDateIso,
+    PlainDateTimeIso,
+    PlainTimeIso,
+    TimeZoneId,
+    ZonedDateTimeIso,
+}
+
+impl TemporalNowMethod {
+    pub(crate) const ALL: [Self; 6] = [
+        Self::Instant,
+        Self::PlainDateIso,
+        Self::PlainDateTimeIso,
+        Self::PlainTimeIso,
+        Self::TimeZoneId,
+        Self::ZonedDateTimeIso,
+    ];
+
+    pub(crate) const fn name(self) -> &'static str {
+        match self {
+            Self::Instant => "instant",
+            Self::PlainDateIso => "plainDateISO",
+            Self::PlainDateTimeIso => "plainDateTimeISO",
+            Self::PlainTimeIso => "plainTimeISO",
+            Self::TimeZoneId => "timeZoneId",
+            Self::ZonedDateTimeIso => "zonedDateTimeISO",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum TemporalInstantStaticMethod {
     From,
     Compare,
@@ -2498,6 +2532,7 @@ pub(crate) enum TemporalPlainDateTimePrototypeMethod {
     ToZonedDateTime,
     ToPlainDate,
     ToPlainTime,
+    WithPlainTime,
     WithCalendar,
     ToString,
     ToJson,
@@ -3470,7 +3505,7 @@ impl TemporalPlainDatePrototypeMethod {
 }
 
 impl TemporalPlainDateTimePrototypeMethod {
-    pub(crate) const ALL: [Self; 37] = [
+    pub(crate) const ALL: [Self; 38] = [
         Self::CalendarId,
         Self::Year,
         Self::Month,
@@ -3503,6 +3538,7 @@ impl TemporalPlainDateTimePrototypeMethod {
         Self::ToZonedDateTime,
         Self::ToPlainDate,
         Self::ToPlainTime,
+        Self::WithPlainTime,
         Self::WithCalendar,
         Self::ToString,
         Self::ToJson,
@@ -3544,6 +3580,7 @@ impl TemporalPlainDateTimePrototypeMethod {
             Self::ToZonedDateTime => "toZonedDateTime",
             Self::ToPlainDate => "toPlainDate",
             Self::ToPlainTime => "toPlainTime",
+            Self::WithPlainTime => "withPlainTime",
             Self::WithCalendar => "withCalendar",
             Self::ToString => "toString",
             Self::ToJson => "toJSON",
@@ -3586,6 +3623,7 @@ impl TemporalPlainDateTimePrototypeMethod {
             Self::ToZonedDateTime => "toZonedDateTime",
             Self::ToPlainDate => "toPlainDate",
             Self::ToPlainTime => "toPlainTime",
+            Self::WithPlainTime => "withPlainTime",
             Self::WithCalendar => "withCalendar",
             Self::ToString => "toString",
             Self::ToJson => "toJSON",
