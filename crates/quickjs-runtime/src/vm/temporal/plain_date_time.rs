@@ -1729,9 +1729,19 @@ pub(in crate::vm) fn dispatch_temporal_plain_date_time_prototype(
             origin.clone(),
             execution_budget,
         ),
-        TemporalPlainDateTimePrototypeMethod::ToJson
-        | TemporalPlainDateTimePrototypeMethod::ToLocaleString => {
+        TemporalPlainDateTimePrototypeMethod::ToJson => {
             render_temporal_plain_date_time(&date_time, realm, origin)
+        }
+        TemporalPlainDateTimePrototypeMethod::ToLocaleString => {
+            begin_intl_temporal_to_locale_string(
+                runtime,
+                IntlDateTimeFormatLocaleValue::PlainDateTime(date_time),
+                arguments,
+                realm,
+                return_to,
+                origin.clone(),
+                execution_budget,
+            )
         }
         TemporalPlainDateTimePrototypeMethod::ValueOf => temporal_type_error(
             realm,

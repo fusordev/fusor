@@ -1554,6 +1554,18 @@ enum IntlDateTimeFormatDefaults {
     Date,
     Time,
     All,
+    ZonedDateTime,
+}
+
+pub(super) enum IntlDateTimeFormatLocaleValue {
+    Date(temporal_rs::Instant),
+    Instant(temporal_rs::Instant),
+    PlainDate(temporal_rs::PlainDate),
+    PlainDateTime(temporal_rs::PlainDateTime),
+    PlainMonthDay(temporal_rs::PlainMonthDay),
+    PlainTime(temporal_rs::PlainTime),
+    PlainYearMonth(temporal_rs::PlainYearMonth),
+    ZonedDateTime(temporal_rs::ZonedDateTime),
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -1640,7 +1652,8 @@ impl IntlDateTimeFormatOption {
 
 pub(super) struct IntlDateTimeFormatConstructorContinuation {
     new_target: FunctionId,
-    format_value: Option<temporal_rs::Instant>,
+    format_value: Option<IntlDateTimeFormatLocaleValue>,
+    to_locale_string_time_zone: Option<String>,
     required: IntlDateTimeFormatRequired,
     defaults: IntlDateTimeFormatDefaults,
     legacy_receiver: Option<StoredValue>,
@@ -10154,6 +10167,7 @@ pub(super) fn begin_intl_date_time_format_constructor(
     let state = IntlDateTimeFormatConstructorContinuation {
         new_target,
         format_value: None,
+        to_locale_string_time_zone: None,
         required: IntlDateTimeFormatRequired::Any,
         defaults: IntlDateTimeFormatDefaults::Date,
         legacy_receiver,
@@ -10233,7 +10247,87 @@ pub(super) fn begin_intl_date_to_locale_string(
     let new_target = runtime.realm_intl_date_time_format_constructor(realm)?;
     let state = IntlDateTimeFormatConstructorContinuation {
         new_target,
-        format_value: Some(instant),
+        format_value: Some(IntlDateTimeFormatLocaleValue::Date(instant)),
+        to_locale_string_time_zone: None,
+        required,
+        defaults,
+        legacy_receiver: None,
+        legacy_date_time_format: None,
+        options_argument,
+        options_object: None,
+        requested_locales: Vec::new(),
+        options: DateTimeFormatRequestOptions::default(),
+        resolved: None,
+        option_index: 0,
+        realm,
+        stage: IntlDateTimeFormatConstructorStage::ReadOption,
+        origin: origin.clone(),
+    };
+    begin_intl_locale_list(
+        runtime,
+        locales,
+        IntlLocaleListTarget::DateTimeFormatConstructor(Box::new(state)),
+        realm,
+        return_to,
+        origin,
+        execution_budget,
+    )
+}
+
+#[allow(
+    clippy::too_many_arguments,
+    reason = "native dispatch keeps the Temporal value, arguments, realm, return target, origin, and budget explicit"
+)]
+pub(super) fn begin_intl_temporal_to_locale_string(
+    runtime: &mut Runtime,
+    value: IntlDateTimeFormatLocaleValue,
+    mut arguments: CallArguments,
+    realm: RealmId,
+    return_to: Option<CallReturn>,
+    origin: JsStackFrame,
+    execution_budget: &mut ExecutionBudget,
+) -> Result<NativeDispatch, NativeFailure> {
+    let (required, defaults, to_locale_string_time_zone) = match &value {
+        IntlDateTimeFormatLocaleValue::Date(_) => {
+            return Err(EngineFault::RuntimeInvariant {
+                message: "the Date locale-string service reached the Temporal entry point",
+            }
+            .into());
+        }
+        IntlDateTimeFormatLocaleValue::Instant(_)
+        | IntlDateTimeFormatLocaleValue::PlainDateTime(_) => (
+            IntlDateTimeFormatRequired::Any,
+            IntlDateTimeFormatDefaults::All,
+            None,
+        ),
+        IntlDateTimeFormatLocaleValue::PlainDate(_)
+        | IntlDateTimeFormatLocaleValue::PlainMonthDay(_)
+        | IntlDateTimeFormatLocaleValue::PlainYearMonth(_) => (
+            IntlDateTimeFormatRequired::Date,
+            IntlDateTimeFormatDefaults::Date,
+            None,
+        ),
+        IntlDateTimeFormatLocaleValue::PlainTime(_) => (
+            IntlDateTimeFormatRequired::Time,
+            IntlDateTimeFormatDefaults::Time,
+            None,
+        ),
+        IntlDateTimeFormatLocaleValue::ZonedDateTime(date_time) => (
+            IntlDateTimeFormatRequired::Any,
+            IntlDateTimeFormatDefaults::ZonedDateTime,
+            Some(date_time.time_zone().identifier().map_err(|_| {
+                EngineFault::RuntimeInvariant {
+                    message: "a Temporal.ZonedDateTime slot lacked a valid time-zone identifier",
+                }
+            })?),
+        ),
+    };
+    let locales = arguments.take_first_or_undefined();
+    let options_argument = arguments.take_first_or_undefined();
+    let state = IntlDateTimeFormatConstructorContinuation {
+        new_target: runtime.realm_intl_date_time_format_constructor(realm)?,
+        format_value: Some(value),
+        to_locale_string_time_zone,
         required,
         defaults,
         legacy_receiver: None,
@@ -10340,6 +10434,16 @@ pub(super) fn advance_intl_date_time_format_constructor(
                 if matches!(value, StoredValue::Undefined) {
                     advance_intl_date_time_format_option(&mut state);
                     continue;
+                }
+                if option == IntlDateTimeFormatOption::TimeZone
+                    && state.to_locale_string_time_zone.is_some()
+                {
+                    return intl_locale_list_error(
+                        state.realm,
+                        state.origin,
+                        ExceptionKind::TypeError,
+                        "Temporal.ZonedDateTime locale options must not specify timeZone",
+                    );
                 }
                 if option == IntlDateTimeFormatOption::Hour12 {
                     state.options.hour12 = Some(value.is_truthy());
@@ -10658,12 +10762,16 @@ fn finish_intl_date_time_format_options(
 ) -> Result<NativeDispatch, NativeFailure> {
     apply_intl_date_time_format_defaults(&mut state)?;
     if state.options.time_zone.is_none() {
-        let time_zone = temporal_rs::Temporal::local_now()
-            .time_zone()
-            .and_then(|time_zone| time_zone.identifier())
-            .map_err(|_| EngineFault::RuntimeInvariant {
-                message: "the host did not provide a valid system time-zone identifier",
-            })?;
+        let time_zone = if let Some(time_zone) = &state.to_locale_string_time_zone {
+            time_zone.clone()
+        } else {
+            temporal_rs::Temporal::local_now()
+                .time_zone()
+                .and_then(|time_zone| time_zone.identifier())
+                .map_err(|_| EngineFault::RuntimeInvariant {
+                    message: "the host did not provide a valid system time-zone identifier",
+                })?
+        };
         state.options.time_zone = Some(time_zone);
     }
     execution_budget
@@ -10688,28 +10796,25 @@ fn finish_intl_date_time_format_options(
                 origin: state.origin.clone(),
             })
         })?;
-    if let Some(instant) = state.format_value.take() {
-        let input = project_epoch_date_time_input(
-            &resolved.time_zone,
-            instant,
-            DateTimeFormatInputKind::Epoch,
-            IntlDateTimeInputIdentity::Number,
-        )?;
-        let formatted = format_datetime(&resolved, &input.value).map_err(|error| match error {
-            DateTimeFormatError::InvalidDateTime => NativeFailure::Abrupt(PendingException {
-                realm: state.realm,
-                payload: PendingExceptionPayload::EngineError {
-                    kind: ExceptionKind::RangeError,
-                    message: JsString::from_utf8("Intl.DateTimeFormat value is outside its range")
-                        .expect("static Intl error is valid UTF-8"),
-                },
-                origin: state.origin.clone(),
-            }),
-            _ => EngineFault::RuntimeInvariant {
-                message: "resolved Date locale-string slots failed formatting",
-            }
-            .into(),
-        })?;
+    if let Some(value) = state.format_value.take() {
+        let input = resolve_intl_date_time_format_locale_value(&resolved, value)?;
+        if input.calendar.as_deref().is_some_and(|calendar| {
+            let iso_is_compatible = !matches!(
+                input.identity,
+                IntlDateTimeInputIdentity::PlainYearMonth
+                    | IntlDateTimeInputIdentity::PlainMonthDay
+            );
+            calendar != resolved.calendar.as_str() && !(iso_is_compatible && calendar == "iso8601")
+        }) {
+            return intl_locale_list_error(
+                state.realm,
+                state.origin,
+                ExceptionKind::RangeError,
+                "Temporal calendar does not match the resolved Intl.DateTimeFormat calendar",
+            );
+        }
+        let formatted = format_datetime(&resolved, &input.value)
+            .map_err(|error| intl_date_time_format_failure(state.realm, &state.origin, error))?;
         return Ok(NativeDispatch::Immediate(StoredValue::String(
             JsString::from_utf8(&formatted)?,
         )));
@@ -10755,6 +10860,9 @@ fn apply_intl_date_time_format_defaults(
             "Intl.DateTimeFormat style is incompatible with the locale-string service",
         );
     }
+    if state.options.date_style.is_some() || state.options.time_style.is_some() {
+        return Ok(());
+    }
 
     let has_date = state.options.weekday.is_some()
         || state.options.year.is_some()
@@ -10775,7 +10883,9 @@ fn apply_intl_date_time_format_defaults(
     }
     if matches!(
         state.defaults,
-        IntlDateTimeFormatDefaults::Date | IntlDateTimeFormatDefaults::All
+        IntlDateTimeFormatDefaults::Date
+            | IntlDateTimeFormatDefaults::All
+            | IntlDateTimeFormatDefaults::ZonedDateTime
     ) {
         state.options.year = Some(DateTimeComponentStyle::Numeric);
         state.options.month = Some(DateTimeComponentStyle::Numeric);
@@ -10783,11 +10893,18 @@ fn apply_intl_date_time_format_defaults(
     }
     if matches!(
         state.defaults,
-        IntlDateTimeFormatDefaults::Time | IntlDateTimeFormatDefaults::All
+        IntlDateTimeFormatDefaults::Time
+            | IntlDateTimeFormatDefaults::All
+            | IntlDateTimeFormatDefaults::ZonedDateTime
     ) {
         state.options.hour = Some(DateTimeComponentStyle::Numeric);
         state.options.minute = Some(DateTimeComponentStyle::Numeric);
         state.options.second = Some(DateTimeComponentStyle::Numeric);
+    }
+    if state.defaults == IntlDateTimeFormatDefaults::ZonedDateTime
+        && state.options.time_zone_name.is_none()
+    {
+        state.options.time_zone_name = Some(DateTimeTimeZoneName::Short);
     }
     Ok(())
 }
@@ -11558,6 +11675,84 @@ fn finish_intl_date_time_format_value_resolved(
     finish_intl_date_time_format_operation(runtime, state, &value)
 }
 
+#[allow(
+    clippy::too_many_lines,
+    reason = "the closed Temporal locale-string input matrix keeps each branded slot projection auditable"
+)]
+fn resolve_intl_date_time_format_locale_value(
+    resolved: &DateTimeFormatState,
+    value: IntlDateTimeFormatLocaleValue,
+) -> Result<ResolvedDateTimeInput, NativeFailure> {
+    match value {
+        IntlDateTimeFormatLocaleValue::Date(instant) => project_epoch_date_time_input(
+            &resolved.time_zone,
+            instant,
+            DateTimeFormatInputKind::Epoch,
+            IntlDateTimeInputIdentity::Number,
+        ),
+        IntlDateTimeFormatLocaleValue::Instant(instant) => project_epoch_date_time_input(
+            &resolved.time_zone,
+            instant,
+            DateTimeFormatInputKind::Instant,
+            IntlDateTimeInputIdentity::Instant,
+        ),
+        IntlDateTimeFormatLocaleValue::PlainDateTime(date_time) => {
+            let calendar = date_time.calendar().identifier().to_owned();
+            Ok(resolve_plain_date_time_input(
+                &date_time,
+                DateTimeFormatInputKind::PlainDateTime,
+                IntlDateTimeInputIdentity::PlainDateTime,
+                Some(calendar),
+            ))
+        }
+        IntlDateTimeFormatLocaleValue::PlainDate(date) => {
+            let calendar = date.calendar().identifier().to_owned();
+            let instant = temporal_rs::Instant::from(date.epoch_ns_for_utc());
+            Ok(resolve_anchored_plain_date_time_input(
+                instant,
+                DateTimeFormatInputKind::PlainDate,
+                IntlDateTimeInputIdentity::PlainDate,
+                Some(calendar),
+            )?)
+        }
+        IntlDateTimeFormatLocaleValue::PlainYearMonth(year_month) => {
+            let calendar = year_month.calendar_id().to_owned();
+            let instant = temporal_rs::Instant::from(year_month.epoch_ns_for_utc());
+            Ok(resolve_anchored_plain_date_time_input(
+                instant,
+                DateTimeFormatInputKind::PlainYearMonth,
+                IntlDateTimeInputIdentity::PlainYearMonth,
+                Some(calendar),
+            )?)
+        }
+        IntlDateTimeFormatLocaleValue::PlainMonthDay(month_day) => {
+            let calendar = month_day.calendar_id().to_owned();
+            let instant = temporal_rs::Instant::from(month_day.epoch_ns_for_utc());
+            Ok(resolve_anchored_plain_date_time_input(
+                instant,
+                DateTimeFormatInputKind::PlainMonthDay,
+                IntlDateTimeInputIdentity::PlainMonthDay,
+                Some(calendar),
+            )?)
+        }
+        IntlDateTimeFormatLocaleValue::PlainTime(time) => {
+            Ok(resolve_plain_time_date_time_input(&time))
+        }
+        IntlDateTimeFormatLocaleValue::ZonedDateTime(date_time) => {
+            let calendar = date_time.calendar().identifier().to_owned();
+            let instant = temporal_rs::Instant::from(*date_time.epoch_nanoseconds());
+            let mut input = project_epoch_date_time_input(
+                &resolved.time_zone,
+                instant,
+                DateTimeFormatInputKind::Instant,
+                IntlDateTimeInputIdentity::Instant,
+            )?;
+            input.calendar = Some(calendar);
+            Ok(input)
+        }
+    }
+}
+
 fn resolve_temporal_date_time_input(
     runtime: &Runtime,
     object: ObjectId,
@@ -11626,30 +11821,34 @@ fn resolve_temporal_date_time_input(
         )?));
     }
     if let Some(time) = runtime.temporal_plain_time(object)? {
-        let nanosecond = u32::from(time.millisecond()) * 1_000_000
-            + u32::from(time.microsecond()) * 1_000
-            + u32::from(time.nanosecond());
-        return Ok(Some(ResolvedDateTimeInput {
-            value: DateTimeFormatInput {
-                kind: DateTimeFormatInputKind::PlainTime,
-                year: 1970,
-                month: 1,
-                day: 1,
-                hour: time.hour(),
-                minute: time.minute(),
-                second: time.second(),
-                nanosecond,
-                offset_seconds: 0,
-                epoch_seconds: i64::from(time.hour()) * 3_600
-                    + i64::from(time.minute()) * 60
-                    + i64::from(time.second()),
-            },
-            identity: IntlDateTimeInputIdentity::PlainTime,
-            calendar: None,
-            valid: true,
-        }));
+        return Ok(Some(resolve_plain_time_date_time_input(&time)));
     }
     Ok(None)
+}
+
+fn resolve_plain_time_date_time_input(time: &temporal_rs::PlainTime) -> ResolvedDateTimeInput {
+    let nanosecond = u32::from(time.millisecond()) * 1_000_000
+        + u32::from(time.microsecond()) * 1_000
+        + u32::from(time.nanosecond());
+    ResolvedDateTimeInput {
+        value: DateTimeFormatInput {
+            kind: DateTimeFormatInputKind::PlainTime,
+            year: 1970,
+            month: 1,
+            day: 1,
+            hour: time.hour(),
+            minute: time.minute(),
+            second: time.second(),
+            nanosecond,
+            offset_seconds: 0,
+            epoch_seconds: i64::from(time.hour()) * 3_600
+                + i64::from(time.minute()) * 60
+                + i64::from(time.second()),
+        },
+        identity: IntlDateTimeInputIdentity::PlainTime,
+        calendar: None,
+        valid: true,
+    }
 }
 
 fn invalid_resolved_date_time_input(identity: IntlDateTimeInputIdentity) -> ResolvedDateTimeInput {
@@ -11919,9 +12118,17 @@ fn intl_date_time_format_value_failure(
     state: &IntlDateTimeFormatValueContinuation,
     error: DateTimeFormatError,
 ) -> NativeFailure {
+    intl_date_time_format_failure(state.realm, &state.origin, error)
+}
+
+fn intl_date_time_format_failure(
+    realm: RealmId,
+    origin: &JsStackFrame,
+    error: DateTimeFormatError,
+) -> NativeFailure {
     match error {
         DateTimeFormatError::NoFields => NativeFailure::Abrupt(PendingException {
-            realm: state.realm,
+            realm,
             payload: PendingExceptionPayload::EngineError {
                 kind: ExceptionKind::TypeError,
                 message: JsString::from_utf8(
@@ -11929,16 +12136,16 @@ fn intl_date_time_format_value_failure(
                 )
                 .expect("static Intl error is valid UTF-8"),
             },
-            origin: state.origin.clone(),
+            origin: origin.clone(),
         }),
         DateTimeFormatError::InvalidDateTime => NativeFailure::Abrupt(PendingException {
-            realm: state.realm,
+            realm,
             payload: PendingExceptionPayload::EngineError {
                 kind: ExceptionKind::RangeError,
                 message: JsString::from_utf8("Intl.DateTimeFormat value is outside its range")
                     .expect("static Intl error is valid UTF-8"),
             },
-            origin: state.origin.clone(),
+            origin: origin.clone(),
         }),
         DateTimeFormatError::InvalidLocale
         | DateTimeFormatError::InvalidOption

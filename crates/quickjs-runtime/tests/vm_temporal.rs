@@ -136,7 +136,7 @@ fn plain_date_intrinsic_constructor_accessors_and_iso_formatting_are_spec_shaped
                d.monthsInYear,d.inLeapYear,d.era,d.eraYear,d.toString(),d.toJSON(),
                d.toLocaleString()].join('|');"
         ),
-        "3|PlainDate|true|[object Temporal.PlainDate]|false|get year|iso8601|2020|12|M12|24|4|359|52|2020|7|31|366|12|true|||2020-12-24|2020-12-24|2020-12-24"
+        "3|PlainDate|true|[object Temporal.PlainDate]|false|get year|iso8601|2020|12|M12|24|4|359|52|2020|7|31|366|12|true|||2020-12-24|2020-12-24|12/24/2020"
     );
 }
 
@@ -282,12 +282,13 @@ fn plain_year_month_converts_property_bags_and_preserves_observable_boundaries()
                Object.prototype.toString.call(value),year.enumerable,year.get.name,
                value.calendarId,value.year,value.month,value.monthCode,value.daysInMonth,
                value.daysInYear,value.monthsInYear,value.inLeapYear,value.era,value.eraYear,
-               value.toString({calendarName:'always'}),value.toJSON(),value.toLocaleString(),
+               value.toString({calendarName:'always'}),value.toJSON(),
+               value.toLocaleString('en-u-ca-iso8601'),
                from.toString(),changed.toString(),date.toString(),added.toString(),
                subtracted.toString(),until.toString(),since.toString(),
                Temporal.PlainYearMonth.compare(value,from),value.equals(from),log.join(',')].join('|');"
         ),
-        "2|PlainYearMonth|true|[object Temporal.PlainYearMonth]|false|get year|iso8601|2020|12|M12|31|366|12|true|||2020-12-01[u-ca=iso8601]|2020-12|2020-12|2021-12|2020-02|2020-12-29|2021-02|2019-12|P1Y3M|-P1Y3M|-1|false|calendar,month,month number,monthCode,monthCode string,year,year number,from overflow,from overflow string,with calendar,with timeZone,with month,with month number,with monthCode,with year,with overflow,with overflow string,day,add months"
+        "2|PlainYearMonth|true|[object Temporal.PlainYearMonth]|false|get year|iso8601|2020|12|M12|31|366|12|true|||2020-12-01[u-ca=iso8601]|2020-12|12/2020|2021-12|2020-02|2020-12-29|2021-02|2019-12|P1Y3M|-P1Y3M|-1|false|calendar,month,month number,monthCode,monthCode string,year,year number,from overflow,from overflow string,with calendar,with timeZone,with month,with month number,with monthCode,with year,with overflow,with overflow string,day,add months"
     );
     assert_eq!(
         thrown("return new Temporal.PlainYearMonth(2020,12).with({calendar:'iso8601'});"),
@@ -537,7 +538,7 @@ fn zoned_date_time_property_bags_and_from_options_preserve_observable_order() {
 }
 
 #[test]
-fn zoned_date_time_json_and_non_intl_locale_rendering_are_ixdtf() {
+fn zoned_date_time_json_is_ixdtf_and_locale_rendering_uses_date_time_format() {
     assert_eq!(
         rendered(
             "var value=new Temporal.ZonedDateTime(0n,'UTC','iso8601');
@@ -545,11 +546,23 @@ fn zoned_date_time_json_and_non_intl_locale_rendering_are_ixdtf() {
              return [value.toJSON(),value.toLocaleString(),json.value.length,json.value.name,
                json.enumerable,json.writable,json.configurable].join('|');"
         ),
-        "1970-01-01T00:00:00+00:00[UTC]|1970-01-01T00:00:00+00:00[UTC]|0|toJSON|false|true|true"
+        "1970-01-01T00:00:00+00:00[UTC]|1/1/1970, 12:00:00 AM UTC|0|toJSON|false|true|true"
     );
     assert_eq!(
         thrown("return new Temporal.ZonedDateTime(0n,'UTC').valueOf();"),
         ExceptionKind::TypeError
+    );
+}
+
+#[test]
+fn zoned_date_time_locale_strings_format_offset_time_zones() {
+    assert_eq!(
+        rendered(
+            "return [new Temporal.ZonedDateTime(0n,'+00:00').toLocaleString('en'),
+              new Temporal.ZonedDateTime(0n,'+01:00').toLocaleString('en'),
+              new Temporal.ZonedDateTime(0n,'-01:00').toLocaleString('en')].join('|');"
+        ),
+        "1/1/1970, 12:00:00 AM GMT|1/1/1970, 1:00:00 AM GMT+1|12/31/1969, 11:00:00 PM GMT-1"
     );
 }
 
@@ -1065,7 +1078,7 @@ fn plain_date_time_constructor_accessors_and_iso_formatting_are_spec_shaped() {
                d.daysInMonth,d.daysInYear,d.monthsInYear,d.inLeapYear,d.era,d.eraYear,
                d.toJSON(),d.toLocaleString()].join('|');"
         ),
-        "4|359|52|2020|7|31|366|12|true|||2020-12-24T12:34:56.007008009|2020-12-24T12:34:56.007008009"
+        "4|359|52|2020|7|31|366|12|true|||2020-12-24T12:34:56.007008009|12/24/2020, 12:34:56 PM"
     );
     assert_eq!(
         rendered("return new Temporal.PlainDateTime(2020,2,29).toString();"),
@@ -1132,7 +1145,7 @@ fn plain_time_constructor_conversion_and_accessors_are_spec_shaped() {
                Temporal.PlainTime.compare.name,Temporal.PlainTime.compare.length,
                from.toString(),parsed.toString(),Temporal.PlainTime.compare(time,parsed)].join('|');"
         ),
-        "0|PlainTime|true|[object Temporal.PlainTime]|false|get hour|12|34|56|7|8|9|12:34:56.007008009|12:34:56.007008009|12:34:56.007008009|from|1|compare|2|23:59:00.000999|01:02:03.004005006|1"
+        "0|PlainTime|true|[object Temporal.PlainTime]|false|get hour|12|34|56|7|8|9|12:34:56.007008009|12:34:56.007008009|12:34:56 PM|from|1|compare|2|23:59:00.000999|01:02:03.004005006|1"
     );
     assert_eq!(
         rendered(
@@ -2857,9 +2870,9 @@ fn instant_to_zoned_date_time_iso_uses_time_zone_slot_values() {
             "var instant=new Temporal.Instant(0n);
              return [instant.toZonedDateTimeISO('uTc').timeZoneId,
                instant.toZonedDateTimeISO('1976-11-18T15:23+01:00[+01:00]').timeZoneId,
-               instant.toLocaleString()].join('|');"
+               instant.toLocaleString('en',{timeZone:'UTC'})].join('|');"
         ),
-        "UTC|+01:00|1970-01-01T00:00:00Z"
+        "UTC|+01:00|1/1/1970, 12:00:00 AM"
     );
     assert_eq!(
         thrown("return new Temporal.Instant(0n).toZonedDateTimeISO();"),

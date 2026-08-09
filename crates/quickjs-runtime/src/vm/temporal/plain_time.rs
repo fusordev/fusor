@@ -1223,6 +1223,7 @@ pub(in crate::vm) fn temporal_plain_time_from_bag(
 #[allow(
     clippy::needless_pass_by_value,
     clippy::too_many_arguments,
+    clippy::too_many_lines,
     reason = "one exhaustive dispatcher preserves receiver validation and method-specific argument order"
 )]
 pub(in crate::vm) fn dispatch_temporal_plain_time_prototype(
@@ -1312,8 +1313,7 @@ pub(in crate::vm) fn dispatch_temporal_plain_time_prototype(
             origin.clone(),
             execution_budget,
         ),
-        TemporalPlainTimePrototypeMethod::ToJson
-        | TemporalPlainTimePrototypeMethod::ToLocaleString => {
+        TemporalPlainTimePrototypeMethod::ToJson => {
             let text = match time.to_ixdtf_string(ToStringRoundingOptions::default()) {
                 Ok(text) => text,
                 Err(error) => {
@@ -1326,6 +1326,15 @@ pub(in crate::vm) fn dispatch_temporal_plain_time_prototype(
                 JsString::from_utf8(&text)?,
             )))
         }
+        TemporalPlainTimePrototypeMethod::ToLocaleString => begin_intl_temporal_to_locale_string(
+            runtime,
+            IntlDateTimeFormatLocaleValue::PlainTime(time),
+            arguments,
+            realm,
+            return_to,
+            origin.clone(),
+            execution_budget,
+        ),
         TemporalPlainTimePrototypeMethod::ValueOf => temporal_type_error(
             realm,
             origin,

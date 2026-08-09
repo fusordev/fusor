@@ -2158,12 +2158,20 @@ pub(in crate::vm) fn dispatch_temporal_plain_date_prototype(
             origin.clone(),
             execution_budget,
         ),
-        TemporalPlainDatePrototypeMethod::ToJson
-        | TemporalPlainDatePrototypeMethod::ToLocaleString => {
+        TemporalPlainDatePrototypeMethod::ToJson => {
             Ok(NativeDispatch::Immediate(StoredValue::String(
                 JsString::from_utf8(&date.to_ixdtf_string(DisplayCalendar::Auto))?,
             )))
         }
+        TemporalPlainDatePrototypeMethod::ToLocaleString => begin_intl_temporal_to_locale_string(
+            runtime,
+            IntlDateTimeFormatLocaleValue::PlainDate(date),
+            arguments,
+            realm,
+            return_to,
+            origin.clone(),
+            execution_budget,
+        ),
         TemporalPlainDatePrototypeMethod::ValueOf => temporal_type_error(
             realm,
             origin,

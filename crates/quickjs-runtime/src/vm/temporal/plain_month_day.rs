@@ -536,11 +536,21 @@ pub(in crate::vm) fn dispatch_temporal_plain_month_day_prototype(
             origin.clone(),
             execution_budget,
         ),
-        TemporalPlainMonthDayPrototypeMethod::ToJson
-        | TemporalPlainMonthDayPrototypeMethod::ToLocaleString => {
+        TemporalPlainMonthDayPrototypeMethod::ToJson => {
             Ok(NativeDispatch::Immediate(StoredValue::String(
                 JsString::from_utf8(&month_day.to_ixdtf_string(DisplayCalendar::Auto))?,
             )))
+        }
+        TemporalPlainMonthDayPrototypeMethod::ToLocaleString => {
+            begin_intl_temporal_to_locale_string(
+                runtime,
+                IntlDateTimeFormatLocaleValue::PlainMonthDay(month_day),
+                arguments,
+                realm,
+                return_to,
+                origin.clone(),
+                execution_budget,
+            )
         }
         TemporalPlainMonthDayPrototypeMethod::ToPlainDate => {
             begin_temporal_plain_month_day_to_plain_date(

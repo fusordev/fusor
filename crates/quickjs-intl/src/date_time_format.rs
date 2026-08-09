@@ -628,6 +628,13 @@ fn format_combined_style_to_parts(
 }
 
 fn normalize_date_time_parts(state: &DateTimeFormatState, parts: &mut [DateTimeFormatPart]) {
+    if parse_offset_time_zone(&state.time_zone).is_some_and(|(offset, _)| offset == 0) {
+        for part in &mut *parts {
+            if part.kind == "timeZoneName" && matches!(part.value.as_str(), "GMT+0" | "GMT-0") {
+                "GMT".clone_into(&mut part.value);
+            }
+        }
+    }
     if matches!(state.calendar.as_str(), "chinese" | "dangi") {
         for part in &mut *parts {
             if part.kind == "month"

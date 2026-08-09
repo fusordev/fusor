@@ -1966,9 +1966,19 @@ pub(in crate::vm) fn dispatch_temporal_zoned_date_time_prototype(
             origin.clone(),
             execution_budget,
         ),
-        TemporalZonedDateTimePrototypeMethod::ToJson
-        | TemporalZonedDateTimePrototypeMethod::ToLocaleString => {
+        TemporalZonedDateTimePrototypeMethod::ToJson => {
             render_temporal_zoned_date_time(&date_time, realm, origin)
+        }
+        TemporalZonedDateTimePrototypeMethod::ToLocaleString => {
+            begin_intl_temporal_to_locale_string(
+                runtime,
+                IntlDateTimeFormatLocaleValue::ZonedDateTime(date_time),
+                arguments,
+                realm,
+                return_to,
+                origin.clone(),
+                execution_budget,
+            )
         }
         TemporalZonedDateTimePrototypeMethod::ValueOf => temporal_type_error(
             realm,

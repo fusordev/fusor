@@ -541,6 +541,7 @@ pub(in crate::vm) fn begin_temporal_plain_year_month_static(
 #[allow(
     clippy::needless_pass_by_value,
     clippy::too_many_arguments,
+    clippy::too_many_lines,
     reason = "one dispatcher preserves receiver validation before all PlainYearMonth operations"
 )]
 pub(in crate::vm) fn dispatch_temporal_plain_year_month_prototype(
@@ -569,11 +570,21 @@ pub(in crate::vm) fn dispatch_temporal_plain_year_month_prototype(
                 execution_budget,
             )
         }
-        TemporalPlainYearMonthPrototypeMethod::ToJson
-        | TemporalPlainYearMonthPrototypeMethod::ToLocaleString => {
+        TemporalPlainYearMonthPrototypeMethod::ToJson => {
             Ok(NativeDispatch::Immediate(StoredValue::String(
                 JsString::from_utf8(&year_month.to_ixdtf_string(DisplayCalendar::Auto))?,
             )))
+        }
+        TemporalPlainYearMonthPrototypeMethod::ToLocaleString => {
+            begin_intl_temporal_to_locale_string(
+                runtime,
+                IntlDateTimeFormatLocaleValue::PlainYearMonth(year_month),
+                arguments,
+                realm,
+                return_to,
+                origin.clone(),
+                execution_budget,
+            )
         }
         TemporalPlainYearMonthPrototypeMethod::ValueOf => temporal_type_error(
             realm,
