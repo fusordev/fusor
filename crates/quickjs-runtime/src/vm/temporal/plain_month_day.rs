@@ -43,6 +43,9 @@ const TEMPORAL_PLAIN_MONTH_DAY_WITH_FIELDS: [&str; 8] = [
     "year",
 ];
 
+const TEMPORAL_PLAIN_MONTH_DAY_TO_PLAIN_DATE_FIELDS: [&str; 1] = ["year"];
+const TEMPORAL_PLAIN_MONTH_DAY_TO_PLAIN_DATE_ERA_FIELDS: [&str; 3] = ["year", "era", "eraYear"];
+
 #[derive(Clone, Copy)]
 enum TemporalPlainMonthDayBagStage {
     ReadField,
@@ -120,18 +123,23 @@ pub(in crate::vm) struct TemporalPlainMonthDayToStringContinuation {
 
 #[derive(Clone, Copy)]
 enum TemporalPlainMonthDayToPlainDateStage {
-    ReadYear,
-    AwaitYear,
-    AwaitYearConversion,
+    ReadField,
+    AwaitField,
+    AwaitConversion,
 }
 
 /// Resumable `Temporal.PlainMonthDay.prototype.toPlainDate` field access.
 ///
-/// The spec reads and converts only `year`; retaining the property bag makes
-/// a getter or user-defined numeric conversion safe to suspend and resume.
+/// `PrepareCalendarFields` reads `year` followed by the calendar's extra era
+/// fields. Retaining the property bag and converted values makes every getter
+/// and user-defined primitive conversion safe to suspend and resume.
 pub(in crate::vm) struct TemporalPlainMonthDayToPlainDateContinuation {
     month_day: PlainMonthDay,
     fields: StoredValue,
+    year: Option<i64>,
+    era: Option<TinyAsciiStr<19>>,
+    era_year: Option<i64>,
+    next: usize,
     stage: TemporalPlainMonthDayToPlainDateStage,
     realm: RealmId,
     origin: JsStackFrame,
@@ -1390,7 +1398,11 @@ fn begin_temporal_plain_month_day_to_plain_date(
         TemporalPlainMonthDayToPlainDateContinuation {
             month_day,
             fields,
-            stage: TemporalPlainMonthDayToPlainDateStage::ReadYear,
+            year: None,
+            era: None,
+            era_year: None,
+            next: 0,
+            stage: TemporalPlainMonthDayToPlainDateStage::ReadField,
             realm,
             origin,
         },
@@ -1402,7 +1414,8 @@ fn begin_temporal_plain_month_day_to_plain_date(
 
 #[allow(
     clippy::too_many_arguments,
-    reason = "the explicit state machine preserves the year Get and ToNumber order"
+    clippy::too_many_lines,
+    reason = "the explicit state machine preserves calendar-field Get and conversion order"
 )]
 pub(in crate::vm) fn advance_temporal_plain_month_day_to_plain_date(
     runtime: &mut Runtime,
@@ -1414,11 +1427,24 @@ pub(in crate::vm) fn advance_temporal_plain_month_day_to_plain_date(
     let mut completion = completion;
     loop {
         match state.stage {
-            TemporalPlainMonthDayToPlainDateStage::ReadYear => {
+            TemporalPlainMonthDayToPlainDateStage::ReadField => {
+                let field_names =
+                    temporal_plain_month_day_to_plain_date_field_names(state.month_day.calendar());
+                if state.next == field_names.len() {
+                    return finish_temporal_plain_month_day_to_plain_date(
+                        runtime,
+                        &state.month_day,
+                        state.year,
+                        state.era,
+                        state.era_year,
+                        state.realm,
+                        &state.origin,
+                    );
+                }
                 charge_heap_property_lookup(runtime, &state.fields, execution_budget)?;
-                let name = JsString::from_utf8("year")?;
+                let name = JsString::from_utf8(field_names[state.next])?;
                 let key = runtime.property_key_from_string(&name)?;
-                state.stage = TemporalPlainMonthDayToPlainDateStage::AwaitYear;
+                state.stage = TemporalPlainMonthDayToPlainDateStage::AwaitField;
                 let dispatch = begin_value_get(
                     runtime,
                     &state.fields,
@@ -1433,7 +1459,7 @@ pub(in crate::vm) fn advance_temporal_plain_month_day_to_plain_date(
                     dispatch,
                     state,
                     temporal_plain_month_day_to_plain_date_continuation,
-                    "Temporal.PlainMonthDay.toPlainDate year Get produced a structured result",
+                    "Temporal.PlainMonthDay.toPlainDate field Get produced a structured result",
                 )? {
                     GetContinuationDispatch::Ready {
                         state: resumed,
@@ -1445,26 +1471,34 @@ pub(in crate::vm) fn advance_temporal_plain_month_day_to_plain_date(
                     GetContinuationDispatch::Suspended(dispatch) => return Ok(dispatch),
                 }
             }
-            TemporalPlainMonthDayToPlainDateStage::AwaitYear => {
+            TemporalPlainMonthDayToPlainDateStage::AwaitField => {
                 let value = completion.take().ok_or(EngineFault::RuntimeInvariant {
-                    message: "Temporal.PlainMonthDay.toPlainDate year Get resumed without a value",
+                    message: "Temporal.PlainMonthDay.toPlainDate field Get resumed without a value",
                 })?;
                 if matches!(value, StoredValue::Undefined) {
-                    return finish_temporal_plain_month_day_to_plain_date(
-                        runtime,
-                        &state.month_day,
-                        None,
-                        state.realm,
-                        &state.origin,
-                    );
+                    state.next = state.next.saturating_add(1);
+                    state.stage = TemporalPlainMonthDayToPlainDateStage::ReadField;
+                    continue;
                 }
-                state.stage = TemporalPlainMonthDayToPlainDateStage::AwaitYearConversion;
+                let field_names =
+                    temporal_plain_month_day_to_plain_date_field_names(state.month_day.calendar());
+                let hint = match field_names[state.next] {
+                    "era" => OperatorPrimitiveHint::String,
+                    "eraYear" | "year" => OperatorPrimitiveHint::Number,
+                    _ => {
+                        return Err(EngineFault::RuntimeInvariant {
+                            message: "unknown Temporal.PlainMonthDay.toPlainDate field",
+                        }
+                        .into());
+                    }
+                };
+                state.stage = TemporalPlainMonthDayToPlainDateStage::AwaitConversion;
                 let realm = state.realm;
                 let origin = state.origin.clone();
                 return begin_operator_primitive_conversion(
                     runtime,
                     value,
-                    OperatorPrimitiveHint::Number,
+                    hint,
                     OperatorPrimitiveTarget::TemporalPlainMonthDayToPlainDate(Box::new(state)),
                     realm,
                     return_to,
@@ -1472,30 +1506,62 @@ pub(in crate::vm) fn advance_temporal_plain_month_day_to_plain_date(
                     execution_budget,
                 );
             }
-            TemporalPlainMonthDayToPlainDateStage::AwaitYearConversion => {
+            TemporalPlainMonthDayToPlainDateStage::AwaitConversion => {
                 let value = completion.take().ok_or(EngineFault::RuntimeInvariant {
-                    message:
-                        "Temporal.PlainMonthDay.toPlainDate year conversion resumed without a value",
+                    message: "Temporal.PlainMonthDay.toPlainDate field conversion resumed without a value",
                 })?;
-                let year = operator_to_number(value, state.realm, &state.origin)?;
-                let year = temporal_plain_date_integer(year, "year", state.realm, &state.origin)?;
-                let Ok(year) = i32::try_from(year) else {
-                    return Err(NativeFailure::Abrupt(temporal_pending_exception(
-                        state.realm,
-                        &state.origin,
-                        ExceptionKind::RangeError,
-                        "Temporal.PlainMonthDay.toPlainDate year is outside the supported range",
-                    )?));
-                };
-                return finish_temporal_plain_month_day_to_plain_date(
-                    runtime,
-                    &state.month_day,
-                    Some(year),
-                    state.realm,
-                    &state.origin,
-                );
+                let field_names =
+                    temporal_plain_month_day_to_plain_date_field_names(state.month_day.calendar());
+                let field = field_names[state.next];
+                match field {
+                    "era" => {
+                        let StoredValue::String(value) = value else {
+                            return temporal_type_error(
+                                state.realm,
+                                &state.origin,
+                                "Temporal.PlainMonthDay.toPlainDate era must be a string",
+                            );
+                        };
+                        state.era =
+                            Some(temporal_calendar_era(&value, state.realm, &state.origin)?);
+                    }
+                    "eraYear" => {
+                        state.era_year = Some(temporal_plain_date_integer(
+                            operator_to_number(value, state.realm, &state.origin)?,
+                            field,
+                            state.realm,
+                            &state.origin,
+                        )?);
+                    }
+                    "year" => {
+                        state.year = Some(temporal_plain_date_integer(
+                            operator_to_number(value, state.realm, &state.origin)?,
+                            field,
+                            state.realm,
+                            &state.origin,
+                        )?);
+                    }
+                    _ => {
+                        return Err(EngineFault::RuntimeInvariant {
+                            message: "unknown Temporal.PlainMonthDay.toPlainDate field",
+                        }
+                        .into());
+                    }
+                }
+                state.next = state.next.saturating_add(1);
+                state.stage = TemporalPlainMonthDayToPlainDateStage::ReadField;
             }
         }
+    }
+}
+
+fn temporal_plain_month_day_to_plain_date_field_names(
+    calendar: &Calendar,
+) -> &'static [&'static str] {
+    if temporal_calendar_supports_eras(calendar) {
+        &TEMPORAL_PLAIN_MONTH_DAY_TO_PLAIN_DATE_ERA_FIELDS
+    } else {
+        &TEMPORAL_PLAIN_MONTH_DAY_TO_PLAIN_DATE_FIELDS
     }
 }
 
@@ -1508,12 +1574,23 @@ fn temporal_plain_month_day_to_plain_date_continuation(
 fn finish_temporal_plain_month_day_to_plain_date(
     runtime: &mut Runtime,
     month_day: &PlainMonthDay,
-    year: Option<i32>,
+    year: Option<i64>,
+    era: Option<TinyAsciiStr<19>>,
+    era_year: Option<i64>,
     realm: RealmId,
     origin: &JsStackFrame,
 ) -> Result<NativeDispatch, NativeFailure> {
-    let fields = year.map(|year| CalendarFields::new().with_year(year));
-    let date = match month_day.to_plain_date(fields) {
+    let year = year
+        .map(|year| temporal_plain_date_time_i32(year, realm, origin))
+        .transpose()?;
+    let era_year = era_year
+        .map(|era_year| temporal_plain_date_time_i32(era_year, realm, origin))
+        .transpose()?;
+    let fields = CalendarFields::new()
+        .with_optional_year(year)
+        .with_era(era)
+        .with_era_year(era_year);
+    let date = match month_day.to_plain_date(Some(fields)) {
         Ok(date) => date,
         Err(error) => {
             return Err(NativeFailure::Abrupt(temporal_exception_from_error(

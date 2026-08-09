@@ -245,6 +245,28 @@ fn plain_month_day_converts_property_bags_and_preserves_observable_boundaries() 
         ExceptionKind::RangeError
     );
     assert_eq!(
+        rendered(
+            "var log=[];
+             var fields={
+               get year(){log.push('year')},
+               get era(){log.push('era');return {toString:function(){log.push('era toString');return 'ad'}}},
+               get eraYear(){log.push('eraYear');return {valueOf:function(){log.push('eraYear valueOf');return 2020}}}
+             };
+             var date=new Temporal.PlainMonthDay(5,2,'gregory').toPlainDate(fields);
+             return date.toString()+'|'+log.join(',');"
+        ),
+        "2020-05-02[u-ca=gregory]|year,era,era toString,eraYear,eraYear valueOf"
+    );
+    assert_eq!(
+        rendered(
+            "var log=[];
+             var eraYear={get valueOf(){log.push('get eraYear.valueOf');return function(){log.push('call eraYear.valueOf');return Infinity}}};
+             try{new Temporal.PlainMonthDay(5,2,'gregory').toPlainDate({era:'ad',eraYear:eraYear})}
+             catch(error){return error.name+'|'+log.join(',')}"
+        ),
+        "RangeError|get eraYear.valueOf,call eraYear.valueOf"
+    );
+    assert_eq!(
         thrown("return new Temporal.PlainMonthDay(5,2).with({day:-1}, null);"),
         ExceptionKind::RangeError
     );
@@ -2583,9 +2605,12 @@ fn instant_to_string_formats_fractional_precision_rounding_and_time_zones() {
                instant.toString({roundingMode:'ceil',smallestUnit:'second'}),
                instant.toString({smallestUnit:'minute'}),
                instant.toString({timeZone:'UTC'}),instant.toString({timeZone:'+05:30'}),
-               instant.toString({timeZone:'America/New_York'})].join('|');"
+               instant.toString({timeZone:'America/New_York'}),
+               new Temporal.Instant(0n).toString({timeZone:'2021-08-19T17:30[America/Vancouver]'}),
+               new Temporal.Instant(0n).toString({timeZone:'2021-08-19T17:30Z[America/Vancouver]'}),
+               new Temporal.Instant(0n).toString({timeZone:'2021-08-19T17:30-07:00[America/Vancouver]'})].join('|');"
         ),
-        "2020-01-02T03:04:05.678901234Z|2020-01-02T03:04:05Z|2020-01-02T03:04:05.678Z|2020-01-02T03:04:06Z|2020-01-02T03:04Z|2020-01-02T03:04:05.678901234+00:00|2020-01-02T08:34:05.678901234+05:30|2020-01-01T22:04:05.678901234-05:00"
+        "2020-01-02T03:04:05.678901234Z|2020-01-02T03:04:05Z|2020-01-02T03:04:05.678Z|2020-01-02T03:04:06Z|2020-01-02T03:04Z|2020-01-02T03:04:05.678901234+00:00|2020-01-02T08:34:05.678901234+05:30|2020-01-01T22:04:05.678901234-05:00|1969-12-31T16:00:00-08:00|1969-12-31T16:00:00-08:00|1969-12-31T16:00:00-08:00"
     );
 }
 
