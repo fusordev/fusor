@@ -1657,6 +1657,27 @@ fn plain_date_from_property_bags_observe_field_and_overflow_conversion_order() {
 }
 
 #[test]
+fn non_iso_calendar_property_bags_resolve_eras_and_leap_months() {
+    assert_eq!(
+        rendered(
+            "var date=Temporal.PlainDate.from({calendar:'gregory',era:'bce',eraYear:1,monthCode:'M06',day:15});
+             var dateTime=Temporal.PlainDateTime.from({calendar:'gregory',era:'bce',eraYear:1,monthCode:'M06',day:15,hour:12});
+             var monthDay=Temporal.PlainMonthDay.from({calendar:'chinese',year:2001,month:5,day:15});
+             var yearMonth=Temporal.PlainYearMonth.from({calendar:'hebrew',year:5784,monthCode:'M11'}).with({month:13});
+             var zoned=Temporal.ZonedDateTime.from({calendar:'gregory',era:'ce',eraYear:1970,monthCode:'M01',day:1,timeZone:'UTC'});
+             var ignored=Temporal.PlainDate.from({calendar:'chinese',era:'unknown',eraYear:1,year:2025,monthCode:'M01',day:1});
+             var rejected=false;
+             try { Temporal.PlainDate.from({calendar:'islamic',year:1500,month:1,day:1}); }
+             catch (error) { rejected=error instanceof RangeError; }
+             return [date.year,date.era,date.eraYear,dateTime.year,dateTime.era,dateTime.eraYear,
+               monthDay.monthCode,monthDay.day,yearMonth.month,yearMonth.monthCode,
+               zoned.year,zoned.era,zoned.eraYear,ignored.year,ignored.era===undefined,rejected].join('|');"
+        ),
+        "0|bce|1|0|bce|1|M04L|15|13|M12|1970|ce|1970|2025|true|true"
+    );
+}
+
+#[test]
 fn plain_date_compare_reuses_resumable_property_bag_conversion_for_both_operands() {
     assert_eq!(
         rendered(

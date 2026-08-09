@@ -6,7 +6,7 @@ use super::super::conversions::operator_primitive_to_string;
 use super::*;
 use core::str::FromStr;
 use temporal_rs::{
-    Calendar, MonthCode, PlainDate, PlainDateTime, PlainTime, TimeZone,
+    Calendar, MonthCode, PlainDate, PlainDateTime, PlainTime, TimeZone, TinyAsciiStr,
     fields::{CalendarFields, DateTimeFields},
     options::{
         DifferenceSettings, Disambiguation, DisplayCalendar, Overflow, RoundingIncrement,
@@ -25,9 +25,11 @@ pub(in crate::vm) struct TemporalPlainDateTimeConstructorContinuation {
     new_target: FunctionId,
 }
 
-const TEMPORAL_PLAIN_DATE_TIME_BAG_FIELDS: [&str; 11] = [
+const TEMPORAL_PLAIN_DATE_TIME_BAG_FIELDS: [&str; 13] = [
     "calendar",
     "day",
+    "era",
+    "eraYear",
     "hour",
     "microsecond",
     "millisecond",
@@ -39,10 +41,12 @@ const TEMPORAL_PLAIN_DATE_TIME_BAG_FIELDS: [&str; 11] = [
     "year",
 ];
 
-const TEMPORAL_PLAIN_DATE_TIME_WITH_FIELDS: [&str; 12] = [
+const TEMPORAL_PLAIN_DATE_TIME_WITH_FIELDS: [&str; 14] = [
     "calendar",
     "timeZone",
     "day",
+    "era",
+    "eraYear",
     "hour",
     "microsecond",
     "millisecond",
@@ -71,6 +75,8 @@ pub(in crate::vm) struct TemporalPlainDateTimeBagContinuation {
     pub(super) base: StoredValue,
     pub(super) calendar: Option<Calendar>,
     pub(super) day: Option<JsNumber>,
+    pub(super) era: Option<TinyAsciiStr<19>>,
+    pub(super) era_year: Option<JsNumber>,
     pub(super) hour: Option<JsNumber>,
     pub(super) microsecond: Option<JsNumber>,
     pub(super) millisecond: Option<JsNumber>,
@@ -189,6 +195,8 @@ fn temporal_plain_date_time_property_bag_fields(
 
 pub(in crate::vm) struct TemporalPlainDateTimeWithFields {
     year: Option<i64>,
+    era: Option<TinyAsciiStr<19>>,
+    era_year: Option<i64>,
     month: Option<i64>,
     month_code: Option<JsString>,
     day: Option<i64>,
@@ -625,6 +633,8 @@ fn begin_temporal_plain_date_time_like(
                 base: value,
                 calendar: None,
                 day: None,
+                era: None,
+                era_year: None,
                 hour: None,
                 microsecond: None,
                 millisecond: None,
@@ -679,6 +689,8 @@ fn begin_temporal_plain_date_time_with(
             base: fields,
             calendar: None,
             day: None,
+            era: None,
+            era_year: None,
             hour: None,
             microsecond: None,
             millisecond: None,
@@ -940,16 +952,8 @@ pub(in crate::vm) fn advance_temporal_plain_date_time_property_bag(
                             "Temporal.PlainDateTime calendar must be a string",
                         );
                     };
-                    let calendar = match Calendar::from_str(&value.to_utf8_lossy()?) {
-                        Ok(calendar) => calendar,
-                        Err(error) => {
-                            return Err(NativeFailure::Abrupt(temporal_exception_from_error(
-                                state.realm,
-                                &state.origin,
-                                error,
-                            )?));
-                        }
-                    };
+                    let calendar =
+                        temporal_calendar_from_string(&value, state.realm, &state.origin)?;
                     state.calendar = Some(calendar);
                     state.next = state.next.saturating_add(1);
                     state.stage = TemporalPlainDateTimeBagStage::ReadField;
@@ -957,9 +961,9 @@ pub(in crate::vm) fn advance_temporal_plain_date_time_property_bag(
                 }
                 state.stage = TemporalPlainDateTimeBagStage::AwaitConversion;
                 let hint = match field {
-                    "monthCode" => OperatorPrimitiveHint::String,
-                    "day" | "hour" | "microsecond" | "millisecond" | "minute" | "month"
-                    | "nanosecond" | "second" | "year" => OperatorPrimitiveHint::Number,
+                    "era" | "monthCode" => OperatorPrimitiveHint::String,
+                    "day" | "eraYear" | "hour" | "microsecond" | "millisecond" | "minute"
+                    | "month" | "nanosecond" | "second" | "year" => OperatorPrimitiveHint::Number,
                     _ => {
                         return Err(EngineFault::RuntimeInvariant {
                             message: "unknown Temporal.PlainDateTime property bag field",
@@ -985,6 +989,21 @@ pub(in crate::vm) fn advance_temporal_plain_date_time_property_bag(
                     message: "Temporal.PlainDateTime property bag conversion resumed without a value",
                 })?;
                 match temporal_plain_date_time_property_bag_fields(&state.target)[state.next] {
+                    "era" => {
+                        let StoredValue::String(value) = value else {
+                            return temporal_type_error(
+                                state.realm,
+                                &state.origin,
+                                "Temporal.PlainDateTime era must be a string",
+                            );
+                        };
+                        state.era =
+                            Some(temporal_calendar_era(&value, state.realm, &state.origin)?);
+                    }
+                    "eraYear" => {
+                        state.era_year =
+                            Some(operator_to_number(value, state.realm, &state.origin)?);
+                    }
                     "monthCode" => {
                         let StoredValue::String(value) = value else {
                             return temporal_type_error(
@@ -1073,9 +1092,10 @@ fn temporal_plain_date_time_bag_continuation(
 fn temporal_plain_date_time_partial_from_bag(
     state: &TemporalPlainDateTimeBagContinuation,
 ) -> Result<PartialDateTime, NativeFailure> {
-    let year = temporal_plain_date_time_required_field(state.year, state.realm, &state.origin)?;
     let day = temporal_plain_date_time_required_field(state.day, state.realm, &state.origin)?;
-    let year = temporal_plain_date_time_i32(year, state.realm, &state.origin)?;
+    let year = temporal_plain_date_time_optional_i32(state.year, state.realm, &state.origin)?;
+    let era_year =
+        temporal_plain_date_time_optional_i32(state.era_year, state.realm, &state.origin)?;
     let day = temporal_plain_date_time_u8(day, state.realm, &state.origin)?;
     let month = temporal_plain_date_time_optional_u8(state.month, state.realm, &state.origin)?;
     let hour = temporal_plain_date_time_optional_u8(state.hour, state.realm, &state.origin)?;
@@ -1089,8 +1109,16 @@ fn temporal_plain_date_time_partial_from_bag(
         temporal_plain_date_time_optional_u16(state.nanosecond, state.realm, &state.origin)?;
     let month_code =
         temporal_plain_date_time_parsed_month_code_from_bag(state.month_code.as_ref())?;
+    let calendar = state.calendar.clone().unwrap_or_default();
+    let (era, era_year) = if temporal_calendar_supports_eras(&calendar) {
+        (state.era, era_year)
+    } else {
+        (None, None)
+    };
     let calendar_fields = CalendarFields::new()
-        .with_year(year)
+        .with_era(era)
+        .with_era_year(era_year)
+        .with_optional_year(year)
         .with_optional_month(month)
         .with_optional_month_code(month_code)
         .with_day(day);
@@ -1105,7 +1133,7 @@ fn temporal_plain_date_time_partial_from_bag(
         fields: DateTimeFields::new()
             .with_partial_date(calendar_fields)
             .with_partial_time(time),
-        calendar: state.calendar.clone().unwrap_or_default(),
+        calendar,
     })
 }
 
@@ -1186,8 +1214,20 @@ fn temporal_plain_date_time_with_fields_from_bag(
             )?));
         }
     }
+    let supports_eras = match &state.target {
+        TemporalPlainDateTimeLikeTarget::With { receiver, .. } => {
+            temporal_calendar_supports_eras(receiver.calendar())
+        }
+        _ => true,
+    };
     Ok(TemporalPlainDateTimeWithFields {
         year: temporal_plain_date_time_optional_integer(state.year, state.realm, &state.origin)?,
+        era: if supports_eras { state.era } else { None },
+        era_year: if supports_eras {
+            temporal_plain_date_time_optional_integer(state.era_year, state.realm, &state.origin)?
+        } else {
+            None
+        },
         month,
         month_code: temporal_plain_date_time_raw_month_code_from_bag(state.month_code.as_ref())?,
         day,
@@ -1217,6 +1257,10 @@ pub(in crate::vm) fn temporal_plain_date_time_with_fields(
 ) -> Result<DateTimeFields, NativeFailure> {
     let year = fields
         .year
+        .map(|value| temporal_plain_date_time_i32(value, realm, origin))
+        .transpose()?;
+    let era_year = fields
+        .era_year
         .map(|value| temporal_plain_date_time_i32(value, realm, origin))
         .transpose()?;
     let month = fields
@@ -1254,6 +1298,8 @@ pub(in crate::vm) fn temporal_plain_date_time_with_fields(
     let month_code =
         temporal_plain_date_time_optional_month_code(fields.month_code.as_ref(), realm, origin)?;
     let date = CalendarFields::new()
+        .with_era(fields.era)
+        .with_era_year(era_year)
         .with_optional_year(year)
         .with_optional_month(month)
         .with_optional_month_code(month_code)
@@ -1295,6 +1341,19 @@ pub(in crate::vm) fn temporal_plain_date_time_optional_u8(
         .map(|value| {
             temporal_plain_date_time_integer(value, realm, origin)
                 .and_then(|value| temporal_plain_date_time_u8(value, realm, origin))
+        })
+        .transpose()
+}
+
+pub(in crate::vm) fn temporal_plain_date_time_optional_i32(
+    value: Option<JsNumber>,
+    realm: RealmId,
+    origin: &JsStackFrame,
+) -> Result<Option<i32>, NativeFailure> {
+    value
+        .map(|value| {
+            temporal_plain_date_time_integer(value, realm, origin)
+                .and_then(|value| temporal_plain_date_time_i32(value, realm, origin))
         })
         .transpose()
 }

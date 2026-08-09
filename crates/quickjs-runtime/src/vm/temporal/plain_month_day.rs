@@ -6,7 +6,7 @@ use super::super::conversions::operator_primitive_to_string;
 use super::*;
 use core::str::FromStr;
 use temporal_rs::{
-    Calendar, MonthCode, PlainMonthDay,
+    Calendar, MonthCode, PlainMonthDay, TinyAsciiStr,
     fields::CalendarFields,
     options::{DisplayCalendar, Overflow},
     partial::PartialDate,
@@ -22,11 +22,26 @@ pub(in crate::vm) struct TemporalPlainMonthDayConstructorContinuation {
     new_target: FunctionId,
 }
 
-const TEMPORAL_PLAIN_MONTH_DAY_BAG_FIELDS: [&str; 5] =
-    ["calendar", "day", "month", "monthCode", "year"];
+const TEMPORAL_PLAIN_MONTH_DAY_BAG_FIELDS: [&str; 7] = [
+    "calendar",
+    "day",
+    "era",
+    "eraYear",
+    "month",
+    "monthCode",
+    "year",
+];
 
-const TEMPORAL_PLAIN_MONTH_DAY_WITH_FIELDS: [&str; 6] =
-    ["calendar", "timeZone", "day", "month", "monthCode", "year"];
+const TEMPORAL_PLAIN_MONTH_DAY_WITH_FIELDS: [&str; 8] = [
+    "calendar",
+    "timeZone",
+    "day",
+    "era",
+    "eraYear",
+    "month",
+    "monthCode",
+    "year",
+];
 
 #[derive(Clone, Copy)]
 enum TemporalPlainMonthDayBagStage {
@@ -56,6 +71,8 @@ impl TemporalPlainMonthDayLikeTarget {
 pub(in crate::vm) struct TemporalPlainMonthDayFields {
     calendar: Option<Calendar>,
     day: Option<JsNumber>,
+    era: Option<TinyAsciiStr<19>>,
+    era_year: Option<JsNumber>,
     month: Option<JsNumber>,
     month_code: Option<MonthCode>,
     year: Option<JsNumber>,
@@ -69,6 +86,8 @@ pub(in crate::vm) struct TemporalPlainMonthDayBagContinuation {
     base: StoredValue,
     calendar: Option<Calendar>,
     day: Option<JsNumber>,
+    era: Option<TinyAsciiStr<19>>,
+    era_year: Option<JsNumber>,
     month: Option<JsNumber>,
     month_code: Option<MonthCode>,
     year: Option<JsNumber>,
@@ -127,6 +146,8 @@ enum TemporalPlainMonthDayWithStage {
 
 pub(in crate::vm) struct TemporalPlainMonthDayWithFields {
     day: Option<i64>,
+    era: Option<TinyAsciiStr<19>>,
+    era_year: Option<i64>,
     month: Option<i64>,
     month_code: Option<MonthCode>,
     year: Option<i64>,
@@ -633,6 +654,8 @@ fn begin_temporal_plain_month_day_like(
                 base: value,
                 calendar: None,
                 day: None,
+                era: None,
+                era_year: None,
                 month: None,
                 month_code: None,
                 year: None,
@@ -729,6 +752,8 @@ pub(in crate::vm) fn advance_temporal_plain_month_day_property_bag(
                     let TemporalPlainMonthDayBagContinuation {
                         calendar,
                         day,
+                        era,
+                        era_year,
                         month,
                         month_code,
                         year,
@@ -740,6 +765,8 @@ pub(in crate::vm) fn advance_temporal_plain_month_day_property_bag(
                     let fields = TemporalPlainMonthDayFields {
                         calendar,
                         day,
+                        era,
+                        era_year,
                         month,
                         month_code,
                         year,
@@ -832,24 +859,19 @@ pub(in crate::vm) fn advance_temporal_plain_month_day_property_bag(
                             "Temporal.PlainMonthDay calendar must be a string",
                         );
                     };
-                    state.calendar = Some(match Calendar::from_str(&value.to_utf8_lossy()?) {
-                        Ok(calendar) => calendar,
-                        Err(error) => {
-                            return Err(NativeFailure::Abrupt(temporal_exception_from_error(
-                                state.realm,
-                                &state.origin,
-                                error,
-                            )?));
-                        }
-                    });
+                    state.calendar = Some(temporal_calendar_from_string(
+                        &value,
+                        state.realm,
+                        &state.origin,
+                    )?);
                     state.next = state.next.saturating_add(1);
                     state.stage = TemporalPlainMonthDayBagStage::ReadField;
                     continue;
                 }
                 state.stage = TemporalPlainMonthDayBagStage::AwaitConversion;
                 let hint = match field {
-                    "monthCode" => OperatorPrimitiveHint::String,
-                    "day" | "month" | "year" => OperatorPrimitiveHint::Number,
+                    "era" | "monthCode" => OperatorPrimitiveHint::String,
+                    "day" | "eraYear" | "month" | "year" => OperatorPrimitiveHint::Number,
                     _ => {
                         return Err(EngineFault::RuntimeInvariant {
                             message: "unknown Temporal.PlainMonthDay property bag field",
@@ -875,6 +897,21 @@ pub(in crate::vm) fn advance_temporal_plain_month_day_property_bag(
                     message: "Temporal.PlainMonthDay property bag conversion resumed without a value",
                 })?;
                 match TEMPORAL_PLAIN_MONTH_DAY_BAG_FIELDS[state.next] {
+                    "era" => {
+                        let StoredValue::String(value) = value else {
+                            return temporal_type_error(
+                                state.realm,
+                                &state.origin,
+                                "Temporal.PlainMonthDay era must be a string",
+                            );
+                        };
+                        state.era =
+                            Some(temporal_calendar_era(&value, state.realm, &state.origin)?);
+                    }
+                    "eraYear" => {
+                        state.era_year =
+                            Some(operator_to_number(value, state.realm, &state.origin)?);
+                    }
                     "monthCode" => {
                         let StoredValue::String(value) = value else {
                             return temporal_type_error(
@@ -935,29 +972,27 @@ pub(in crate::vm) fn temporal_plain_month_day_from_fields(
         .month
         .map(|value| temporal_plain_date_integer(value, "month", realm, origin))
         .transpose()?;
-    let year = fields
-        .year
-        .map(|value| temporal_plain_date_integer(value, "year", realm, origin))
-        .transpose()?
-        .unwrap_or(1972);
-    let Ok(year) = i32::try_from(year) else {
-        return Err(NativeFailure::Abrupt(temporal_pending_exception(
-            realm,
-            origin,
-            ExceptionKind::RangeError,
-            "Temporal.PlainMonthDay property bag fields are outside the supported range",
-        )?));
-    };
-    let day = temporal_plain_month_day_field_u8(day, "day", 31, overflow, realm, origin)?;
+    let year = fields.year;
+    let year = temporal_plain_date_time_optional_i32(year, realm, origin)?;
+    let era_year = temporal_plain_date_time_optional_i32(fields.era_year, realm, origin)?;
+    let day = temporal_plain_month_day_field_u8(day, "day", overflow, realm, origin)?;
     let month = match month {
         Some(month) => Some(temporal_plain_month_day_field_u8(
-            month, "month", 12, overflow, realm, origin,
+            month, "month", overflow, realm, origin,
         )?),
         None => None,
     };
+    let calendar = fields.calendar.clone().unwrap_or_default();
+    let (era, era_year) = if temporal_calendar_supports_eras(&calendar) {
+        (fields.era, era_year)
+    } else {
+        (None, None)
+    };
     let partial = PartialDate::new()
-        .with_calendar(fields.calendar.clone().unwrap_or_default())
-        .with_year(Some(year))
+        .with_calendar(calendar)
+        .with_era(era)
+        .with_era_year(era_year)
+        .with_year(year)
         .with_month(month)
         .with_month_code(fields.month_code)
         .with_day(Some(day));
@@ -972,7 +1007,6 @@ pub(in crate::vm) fn temporal_plain_month_day_from_fields(
 fn temporal_plain_month_day_field_u8(
     value: i64,
     field: &str,
-    maximum: u8,
     overflow: Overflow,
     realm: RealmId,
     origin: &JsStackFrame,
@@ -986,7 +1020,7 @@ fn temporal_plain_month_day_field_u8(
         )?));
     }
     let value = match overflow {
-        Overflow::Constrain => value.min(i64::from(maximum)),
+        Overflow::Constrain => value.min(i64::from(u8::MAX)),
         Overflow::Reject => value,
     };
     let Ok(value) = u8::try_from(value) else {
@@ -1022,13 +1056,20 @@ pub(in crate::vm) fn temporal_plain_month_day_with_fields(
     };
     let month = fields
         .month
-        .map(|value| temporal_plain_month_day_field_u8(value, "month", 12, overflow, realm, origin))
+        .map(|value| temporal_plain_month_day_field_u8(value, "month", overflow, realm, origin))
         .transpose()?;
     let day = fields
         .day
-        .map(|value| temporal_plain_month_day_field_u8(value, "day", 31, overflow, realm, origin))
+        .map(|value| temporal_plain_month_day_field_u8(value, "day", overflow, realm, origin))
         .transpose()?;
     Ok(CalendarFields::new()
+        .with_era(fields.era)
+        .with_era_year(
+            fields
+                .era_year
+                .map(|era_year| temporal_plain_date_time_i32(era_year, realm, origin))
+                .transpose()?,
+        )
         .with_optional_year(year)
         .with_optional_month(month)
         .with_optional_month_code(fields.month_code)
@@ -1077,6 +1118,8 @@ fn begin_temporal_plain_month_day_with(
             base: fields,
             fields: TemporalPlainMonthDayWithFields {
                 day: None,
+                era: None,
+                era_year: None,
                 month: None,
                 month_code: None,
                 year: None,
@@ -1110,6 +1153,10 @@ pub(in crate::vm) fn advance_temporal_plain_month_day_with(
         match state.stage {
             TemporalPlainMonthDayWithStage::ReadField => {
                 if state.next == TEMPORAL_PLAIN_MONTH_DAY_WITH_FIELDS.len() {
+                    if !temporal_calendar_supports_eras(state.receiver.calendar()) {
+                        state.fields.era = None;
+                        state.fields.era_year = None;
+                    }
                     return begin_temporal_plain_date_from_options(
                         runtime,
                         TemporalPlainDateOverflowTarget::MonthDayWith {
@@ -1177,8 +1224,8 @@ pub(in crate::vm) fn advance_temporal_plain_month_day_with(
                 }
                 state.stage = TemporalPlainMonthDayWithStage::AwaitConversion;
                 let hint = match field {
-                    "monthCode" => OperatorPrimitiveHint::String,
-                    "day" | "month" | "year" => OperatorPrimitiveHint::Number,
+                    "era" | "monthCode" => OperatorPrimitiveHint::String,
+                    "day" | "eraYear" | "month" | "year" => OperatorPrimitiveHint::Number,
                     _ => {
                         return Err(EngineFault::RuntimeInvariant {
                             message: "unknown Temporal.PlainMonthDay.with field",
@@ -1204,6 +1251,25 @@ pub(in crate::vm) fn advance_temporal_plain_month_day_with(
                     message: "Temporal.PlainMonthDay.with field conversion resumed without a value",
                 })?;
                 match TEMPORAL_PLAIN_MONTH_DAY_WITH_FIELDS[state.next] {
+                    "era" => {
+                        let StoredValue::String(value) = value else {
+                            return temporal_type_error(
+                                state.realm,
+                                &state.origin,
+                                "Temporal.PlainMonthDay.with era must be a string",
+                            );
+                        };
+                        state.fields.era =
+                            Some(temporal_calendar_era(&value, state.realm, &state.origin)?);
+                    }
+                    "eraYear" => {
+                        state.fields.era_year = Some(temporal_plain_date_integer(
+                            operator_to_number(value, state.realm, &state.origin)?,
+                            "eraYear",
+                            state.realm,
+                            &state.origin,
+                        )?);
+                    }
                     "year" => {
                         state.fields.year = Some(temporal_plain_date_integer(
                             operator_to_number(value, state.realm, &state.origin)?,
