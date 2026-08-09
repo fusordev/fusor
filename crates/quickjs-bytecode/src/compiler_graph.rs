@@ -511,6 +511,7 @@ pub struct UnverifiedCompilerFunction {
     atoms: Option<Arc<[CompilerAtom]>>,
     constants: Arc<[CompilerConstant]>,
     closure_sources: Arc<[CompilerClosureSource]>,
+    parameter_initialization_end: Option<u32>,
     has_direct_eval: bool,
 }
 
@@ -527,6 +528,7 @@ impl UnverifiedCompilerFunction {
             atoms: None,
             constants,
             closure_sources,
+            parameter_initialization_end: None,
             has_direct_eval: false,
         }
     }
@@ -546,6 +548,14 @@ impl UnverifiedCompilerFunction {
     #[must_use]
     pub const fn with_direct_eval(mut self, has_direct_eval: bool) -> Self {
         self.has_direct_eval = has_direct_eval;
+        self
+    }
+
+    /// Attaches the first body instruction following parameter-expression
+    /// evaluation, when the function contains direct eval.
+    #[must_use]
+    pub const fn with_parameter_initialization_end(mut self, boundary: Option<u32>) -> Self {
+        self.parameter_initialization_end = boundary;
         self
     }
 
@@ -577,6 +587,12 @@ impl UnverifiedCompilerFunction {
     #[must_use]
     pub const fn has_direct_eval(&self) -> bool {
         self.has_direct_eval
+    }
+
+    /// Returns the proposed parameter/body instruction boundary.
+    #[must_use]
+    pub const fn parameter_initialization_end(&self) -> Option<u32> {
+        self.parameter_initialization_end
     }
 }
 
@@ -941,6 +957,7 @@ pub struct VerifiedCompilerFunction {
     atoms: Arc<[CompilerAtom]>,
     constants: Arc<[CompilerConstant]>,
     closure_sources: Arc<[CompilerClosureSource]>,
+    parameter_initialization_end: Option<u32>,
     has_direct_eval: bool,
 }
 
@@ -973,6 +990,14 @@ impl VerifiedCompilerFunction {
     #[must_use]
     pub const fn has_direct_eval(&self) -> bool {
         self.has_direct_eval
+    }
+
+    /// Returns the verified first body instruction following parameter
+    /// initialization, when parameter expressions require a distinct body
+    /// variable environment.
+    #[must_use]
+    pub const fn parameter_initialization_end(&self) -> Option<u32> {
+        self.parameter_initialization_end
     }
 }
 
@@ -1125,6 +1150,25 @@ pub enum FunctionGraphVerificationErrorKind {
         declared: bool,
         /// Whether the verified body contains `eval` or `apply_eval`.
         encoded: bool,
+    },
+    /// The parameter/body boundary is incompatible with the verified body.
+    DirectEvalParameterBoundaryInvalid {
+        /// Proposed first body instruction.
+        boundary: u32,
+        /// Verified instruction count.
+        instructions: u32,
+        /// Whether the header declares a simple parameter list.
+        simple_parameter_list: bool,
+    },
+    /// An eval callsite's adjusted scope does not agree with the verified
+    /// parameter/body boundary.
+    DirectEvalParameterPhaseMismatch {
+        /// Instruction containing `eval` or `apply_eval`.
+        instruction: u32,
+        /// Encoded adjusted scope index.
+        scope_index: u16,
+        /// Proposed boundary, or no boundary for a parameter-phase callsite.
+        boundary: Option<u32>,
     },
     /// A nonempty body atom domain has no supplied atom table.
     MissingAtomPool {
@@ -1329,6 +1373,22 @@ impl fmt::Display for FunctionGraphVerificationErrorKind {
                 formatter,
                 "direct-eval marker {declared} disagrees with encoded callsite presence {encoded}"
             ),
+            Self::DirectEvalParameterBoundaryInvalid {
+                boundary,
+                instructions,
+                simple_parameter_list,
+            } => write!(
+                formatter,
+                "direct-eval parameter boundary {boundary} is incompatible with instruction count {instructions} and simple-parameter marker {simple_parameter_list}"
+            ),
+            Self::DirectEvalParameterPhaseMismatch {
+                instruction,
+                scope_index,
+                boundary,
+            } => write!(
+                formatter,
+                "direct-eval scope index {scope_index} at instruction {instruction} disagrees with parameter boundary {boundary:?}"
+            ),
             Self::MissingAtomPool { declared } => write!(
                 formatter,
                 "body declares {declared} atoms, but the compiler graph has no atom pool"
@@ -1515,6 +1575,7 @@ pub fn verify_compiler_function_graph(
                 .map_or_else(|| Arc::from([]), Arc::clone),
             constants: Arc::clone(&function.constants),
             closure_sources: Arc::clone(&function.closure_sources),
+            parameter_initialization_end: function.parameter_initialization_end,
             has_direct_eval: function.has_direct_eval,
         }
     }));
@@ -1534,21 +1595,7 @@ fn validate_function_records(
     for (index, function) in functions.iter().enumerate() {
         let id = function_id(index)?;
         let flow = &function.control_flow;
-        let encoded_direct_eval = flow.instructions().iter().any(|instruction| {
-            matches!(
-                instruction.decoded().instruction().opcode(),
-                FinalOpcode::Eval | FinalOpcode::ApplyEval
-            )
-        });
-        if function.has_direct_eval != encoded_direct_eval {
-            return Err(FunctionGraphVerificationError::at_function(
-                id,
-                FunctionGraphVerificationErrorKind::DirectEvalMarkerMismatch {
-                    declared: function.has_direct_eval,
-                    encoded: encoded_direct_eval,
-                },
-            ));
-        }
+        validate_direct_eval_record(id, function)?;
         if flow.compiler_capture_layout().is_none() {
             return Err(FunctionGraphVerificationError::at_function(
                 id,
@@ -1628,6 +1675,67 @@ fn validate_function_records(
         }
         for (constant_index, target) in function_constant_targets(&function.constants) {
             constant_target_index(id, constant_index, target, functions.len())?;
+        }
+    }
+    Ok(())
+}
+
+fn validate_direct_eval_record(
+    id: FunctionTemplateId,
+    function: &UnverifiedCompilerFunction,
+) -> Result<(), FunctionGraphVerificationError> {
+    let flow = &function.control_flow;
+    let encoded_direct_eval = flow.instructions().iter().any(|instruction| {
+        matches!(
+            instruction.decoded().instruction().opcode(),
+            FinalOpcode::Eval | FinalOpcode::ApplyEval
+        )
+    });
+    if function.has_direct_eval != encoded_direct_eval {
+        return Err(FunctionGraphVerificationError::at_function(
+            id,
+            FunctionGraphVerificationErrorKind::DirectEvalMarkerMismatch {
+                declared: function.has_direct_eval,
+                encoded: encoded_direct_eval,
+            },
+        ));
+    }
+    let instruction_count = usize_to_u32(flow.instructions().len());
+    if let Some(boundary) = function.parameter_initialization_end
+        && (!function.has_direct_eval
+            || boundary > instruction_count
+            || flow.function_header().flags().has_simple_parameter_list())
+    {
+        return Err(FunctionGraphVerificationError::at_function(
+            id,
+            FunctionGraphVerificationErrorKind::DirectEvalParameterBoundaryInvalid {
+                boundary,
+                instructions: instruction_count,
+                simple_parameter_list: flow.function_header().flags().has_simple_parameter_list(),
+            },
+        ));
+    }
+    for (instruction_index, verified) in flow.instructions().iter().enumerate() {
+        let instruction = verified.decoded().instruction();
+        let ((FinalOpcode::Eval, crate::Operands::NPopU16 { scope_index, .. })
+        | (FinalOpcode::ApplyEval, crate::Operands::U16(scope_index))) =
+            (instruction.opcode(), instruction.operands())
+        else {
+            continue;
+        };
+        let instruction_index = usize_to_u32(instruction_index);
+        let parameter_phase = function
+            .parameter_initialization_end
+            .is_some_and(|boundary| instruction_index < boundary);
+        if (scope_index == 0) != parameter_phase {
+            return Err(FunctionGraphVerificationError::at_function(
+                id,
+                FunctionGraphVerificationErrorKind::DirectEvalParameterPhaseMismatch {
+                    instruction: instruction_index,
+                    scope_index,
+                    boundary: function.parameter_initialization_end,
+                },
+            ));
         }
     }
     Ok(())

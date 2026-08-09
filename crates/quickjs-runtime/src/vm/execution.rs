@@ -364,7 +364,15 @@ pub(super) fn create_frame(
         })?;
     let bytecode = function.bytecode()?;
     let environment = copy_environment(&bytecode.environment, RuntimeResource::FrameValues)?;
+    let environment_eval_shadows = copy_eval_binding_shadows(&bytecode.environment_eval_shadows)?;
+    if environment_eval_shadows.len() != environment.len() {
+        return Err(EngineFault::InvalidClosureEnvironment {
+            function: plan.template,
+        }
+        .into());
+    }
     let inherited_eval_environment = bytecode.eval_environment.as_ref().map(Rc::clone);
+    let inherited_eval_environment_marker = inherited_eval_environment.as_ref().map(Rc::clone);
     let lexical_receiver = bytecode
         .lexical_receiver
         .as_ref()
@@ -501,24 +509,50 @@ pub(super) fn create_frame(
                 function: plan.template,
             })?;
     let executable_kind = verified.metadata().executable_kind();
-    let eval_declaration_environment = if verified.function().has_direct_eval()
+    let owns_eval_variable_environment = verified.function().has_direct_eval()
+        && !plan.strict
         && !matches!(
             executable_kind,
             CompilerExecutableKind::GlobalScript
                 | CompilerExecutableKind::IndirectEvalScript
                 | CompilerExecutableKind::DirectEvalScript
                 | CompilerExecutableKind::DynamicFunctionScript
-        ) {
-        Some(EvalVariableEnvironment::shared(
-            inherited_eval_environment.as_ref().map(Rc::clone),
-        ))
+        );
+    let (
+        eval_environment,
+        eval_declaration_environment,
+        body_eval_environment,
+        parameter_eval_boundary,
+    ) = if owns_eval_variable_environment {
+        if verified.function().parameter_initialization_end().is_some() {
+            let parameter_initializer = EvalVariableEnvironment::shared(
+                inherited_eval_environment,
+                EvalVariableEnvironmentKind::ParameterInitializer,
+            );
+            let parameter_boundary = EvalVariableEnvironment::shared(
+                Some(Rc::clone(&parameter_initializer)),
+                EvalVariableEnvironmentKind::ParameterBoundary,
+            );
+            let body = EvalVariableEnvironment::shared(
+                Some(Rc::clone(&parameter_boundary)),
+                EvalVariableEnvironmentKind::FunctionBody,
+            );
+            (
+                Some(Rc::clone(&parameter_initializer)),
+                Some(parameter_initializer),
+                Some(body),
+                Some(parameter_boundary),
+            )
+        } else {
+            let function = EvalVariableEnvironment::shared(
+                inherited_eval_environment,
+                EvalVariableEnvironmentKind::Function,
+            );
+            (Some(Rc::clone(&function)), Some(function), None, None)
+        }
     } else {
-        None
+        (inherited_eval_environment, None, None, None)
     };
-    let eval_environment = eval_declaration_environment
-        .as_ref()
-        .map(Rc::clone)
-        .or(inherited_eval_environment);
     let variable_count = plan.argument_count.checked_add(plan.local_count).ok_or(
         EngineFault::InvalidClosureEnvironment {
             function: plan.template,
@@ -678,6 +712,9 @@ pub(super) fn create_frame(
         },
         eval_environment,
         eval_declaration_environment,
+        body_eval_environment,
+        inherited_eval_environment: inherited_eval_environment_marker,
+        parameter_eval_boundary,
         receiver,
         new_target,
         instruction: plan.instruction,
@@ -705,6 +742,7 @@ pub(super) fn create_frame(
         own_cells,
         own_cell_bindings,
         environment,
+        environment_eval_shadows,
         stack,
     })
 }
@@ -718,7 +756,7 @@ pub(super) fn execute_one(
     frame: &mut Frame,
     execution_budget: &mut ExecutionBudget,
 ) -> Result<Step, ExecutionError> {
-    let (verified_instruction, source_pc) = {
+    let (verified_instruction, source_pc, parameter_initialization_end) = {
         let code = code(runtime, frame.code)?;
         let function = code.authority.function(frame.template).ok_or(
             EngineFault::InvalidClosureEnvironment {
@@ -734,8 +772,19 @@ pub(super) fn execute_one(
                 function: frame.template,
                 instruction: frame.instruction.get(),
             })?;
-        (instruction, instruction.decoded().pc())
+        (
+            instruction,
+            instruction.decoded().pc(),
+            function.function().parameter_initialization_end(),
+        )
     };
+
+    if parameter_initialization_end.is_some_and(|boundary| frame.instruction.get() >= boundary)
+        && let Some(body) = frame.body_eval_environment.take()
+    {
+        frame.eval_environment = Some(Rc::clone(&body));
+        frame.eval_declaration_environment = Some(body);
+    }
 
     let expected_depth =
         verified_instruction
@@ -2702,46 +2751,63 @@ pub(super) fn execute_one(
         }
         FinalOpcode::GetVarUndef | FinalOpcode::GetVar => {
             let index = closure_index(opcode, operands)?;
-            let global = global_reference_operand(runtime, frame, index)?;
-            match read_realm_global(runtime, &global)? {
-                RealmGlobalReadOutcome::Value(value) => push(frame, value),
-                RealmGlobalReadOutcome::Getter { function, receiver } => {
-                    let return_to =
-                        CallReturn::push(verified_instruction.successors().fallthrough().ok_or(
-                            EngineFault::InvalidSuccessor {
-                                function: frame.template,
-                                pc: source_pc,
-                            },
-                        )?);
-                    return Ok(Step::Call {
-                        function,
-                        inputs: CallInputSource::Prepared(CallInputs {
-                            receiver,
-                            arguments: CallArguments::empty(),
-                            new_target: None,
-                        }),
-                        return_to,
-                        source_pc,
-                    });
-                }
-                RealmGlobalReadOutcome::Missing if opcode == FinalOpcode::GetVarUndef => {
-                    push(frame, StoredValue::Undefined);
-                }
-                RealmGlobalReadOutcome::Missing => {
-                    return Ok(Step::Abrupt(global_not_defined_exception(
-                        runtime,
-                        frame,
-                        &global.name,
-                        source_pc,
-                    )?));
-                }
-                RealmGlobalReadOutcome::Uninitialized => {
-                    return Ok(Step::Abrupt(tdz_exception(
-                        runtime,
-                        frame,
-                        BindingName::Closure(index),
-                        source_pc,
-                    )?));
+            let deletable_eval_variable = code(runtime, frame.code)?
+                .authority
+                .function(frame.template)
+                .and_then(|function| function.metadata().closures().get(index as usize))
+                .is_some_and(
+                    quickjs_bytecode::ClosureVariableDefinition::is_deletable_eval_variable,
+                );
+            if deletable_eval_variable {
+                let value = match duplicate_environment(runtime, frame, index, false) {
+                    Ok(value) => value,
+                    Err(BindingAccessError::Missing) => StoredValue::Undefined,
+                    Err(error) => return Err(error.into()),
+                };
+                push(frame, value);
+            } else {
+                let global = global_reference_operand(runtime, frame, index)?;
+                match read_realm_global(runtime, &global)? {
+                    RealmGlobalReadOutcome::Value(value) => push(frame, value),
+                    RealmGlobalReadOutcome::Getter { function, receiver } => {
+                        let return_to = CallReturn::push(
+                            verified_instruction.successors().fallthrough().ok_or(
+                                EngineFault::InvalidSuccessor {
+                                    function: frame.template,
+                                    pc: source_pc,
+                                },
+                            )?,
+                        );
+                        return Ok(Step::Call {
+                            function,
+                            inputs: CallInputSource::Prepared(CallInputs {
+                                receiver,
+                                arguments: CallArguments::empty(),
+                                new_target: None,
+                            }),
+                            return_to,
+                            source_pc,
+                        });
+                    }
+                    RealmGlobalReadOutcome::Missing if opcode == FinalOpcode::GetVarUndef => {
+                        push(frame, StoredValue::Undefined);
+                    }
+                    RealmGlobalReadOutcome::Missing => {
+                        return Ok(Step::Abrupt(global_not_defined_exception(
+                            runtime,
+                            frame,
+                            &global.name,
+                            source_pc,
+                        )?));
+                    }
+                    RealmGlobalReadOutcome::Uninitialized => {
+                        return Ok(Step::Abrupt(tdz_exception(
+                            runtime,
+                            frame,
+                            BindingName::Closure(index),
+                            source_pc,
+                        )?));
+                    }
                 }
             }
         }
@@ -2825,7 +2891,7 @@ pub(super) fn execute_one(
         | FinalOpcode::GetLoc2
         | FinalOpcode::GetLoc3 => {
             let index = local_index(opcode, operands)?;
-            let value = duplicate_binding(runtime, frame_local(frame, index)?, false, frame)?;
+            let value = duplicate_local(runtime, frame, index, false)?;
             push(frame, value);
         }
         FinalOpcode::PutLoc
@@ -2854,7 +2920,18 @@ pub(super) fn execute_one(
         | FinalOpcode::GetVarRef2
         | FinalOpcode::GetVarRef3 => {
             let index = closure_index(opcode, operands)?;
-            let value = duplicate_environment(runtime, frame, index, false)?;
+            let value = match duplicate_environment(runtime, frame, index, false) {
+                Ok(value) => value,
+                Err(BindingAccessError::Missing) => {
+                    return Ok(Step::Abrupt(binding_not_defined_exception(
+                        runtime,
+                        frame,
+                        BindingName::Closure(index),
+                        source_pc,
+                    )?));
+                }
+                Err(error) => return Err(error.into()),
+            };
             push(frame, value);
         }
         FinalOpcode::PutVarRef
@@ -2909,7 +2986,7 @@ pub(super) fn execute_one(
         }
         FinalOpcode::GetLocCheck => {
             let index = local_index(opcode, operands)?;
-            let value = match duplicate_binding(runtime, frame_local(frame, index)?, true, frame) {
+            let value = match duplicate_local(runtime, frame, index, true) {
                 Ok(value) => value,
                 Err(BindingAccessError::Uninitialized) => {
                     return Ok(Step::Abrupt(tdz_exception(
@@ -2919,13 +2996,13 @@ pub(super) fn execute_one(
                         source_pc,
                     )?));
                 }
-                Err(BindingAccessError::Fault(fault)) => return Err(fault.into()),
+                Err(error) => return Err(error.into()),
             };
             push(frame, value);
         }
         FinalOpcode::PutLocCheck => {
             let index = local_index(opcode, operands)?;
-            if binding_is_uninitialized(runtime, frame_local(frame, index)?)? {
+            if local_is_uninitialized(runtime, frame, index)? {
                 return Ok(Step::Abrupt(tdz_exception(
                     runtime,
                     frame,
@@ -2938,7 +3015,7 @@ pub(super) fn execute_one(
         }
         FinalOpcode::SetLocCheck => {
             let index = local_index(opcode, operands)?;
-            if binding_is_uninitialized(runtime, frame_local(frame, index)?)? {
+            if local_is_uninitialized(runtime, frame, index)? {
                 return Ok(Step::Abrupt(tdz_exception(
                     runtime,
                     frame,
@@ -2955,6 +3032,14 @@ pub(super) fn execute_one(
                 Ok(value) => value,
                 Err(BindingAccessError::Uninitialized) => {
                     return Ok(Step::Abrupt(tdz_exception(
+                        runtime,
+                        frame,
+                        BindingName::Closure(index),
+                        source_pc,
+                    )?));
+                }
+                Err(BindingAccessError::Missing) => {
+                    return Ok(Step::Abrupt(binding_not_defined_exception(
                         runtime,
                         frame,
                         BindingName::Closure(index),

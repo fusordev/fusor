@@ -542,6 +542,7 @@ pub(crate) struct BytecodeFunction {
     pub(crate) code: InstalledCodeId,
     pub(crate) template: FunctionTemplateId,
     pub(crate) environment: Vec<EnvironmentBinding>,
+    pub(crate) environment_eval_shadows: Vec<Option<EvalBindingShadow>>,
     /// Nearest per-activation function variable environment that may receive
     /// bindings from sloppy direct eval.
     pub(crate) eval_environment: Option<SharedEvalVariableEnvironment>,
@@ -4439,11 +4440,27 @@ pub(crate) struct BindingCell {
 pub(crate) struct EvalVariableBinding {
     pub(crate) name: JsString,
     pub(crate) cell: BindingCellId,
+    pub(crate) deleted: bool,
+}
+
+#[derive(Clone)]
+pub(crate) struct EvalBindingShadow {
+    pub(crate) head: SharedEvalVariableEnvironment,
+    pub(crate) boundary: Option<SharedEvalVariableEnvironment>,
 }
 
 pub(crate) type SharedEvalVariableEnvironment = Rc<RefCell<EvalVariableEnvironment>>;
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum EvalVariableEnvironmentKind {
+    Function,
+    ParameterInitializer,
+    ParameterBoundary,
+    FunctionBody,
+}
+
 pub(crate) struct EvalVariableEnvironment {
+    pub(crate) kind: EvalVariableEnvironmentKind,
     pub(crate) parent: Option<SharedEvalVariableEnvironment>,
     pub(crate) bindings: Vec<EvalVariableBinding>,
 }
@@ -4451,8 +4468,10 @@ pub(crate) struct EvalVariableEnvironment {
 impl EvalVariableEnvironment {
     pub(crate) fn shared(
         parent: Option<SharedEvalVariableEnvironment>,
+        kind: EvalVariableEnvironmentKind,
     ) -> SharedEvalVariableEnvironment {
         Rc::new(RefCell::new(Self {
+            kind,
             parent,
             bindings: Vec::new(),
         }))

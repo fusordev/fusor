@@ -1,3 +1,4 @@
+use super::super::layouts::RealmGlobalRootSource;
 use super::super::{
     ArrayExpression, ArrayExpressionElement, ArrowFunctionExpression, AssignmentExpression,
     AssignmentOperator, AssignmentTarget, AstKind, AtomPoolIndex, BinaryOperator, BindingId,
@@ -5422,12 +5423,31 @@ impl<'compiler, 'unit, 'arena, 'scope> ExpressionPlanner<'compiler, 'unit, 'aren
                     tree_layout,
                 )?;
                 if let LoweredReference::RealmGlobal {
+                    global,
                     slot,
-                    binding: CompilerClosureBinding::RealmGlobal(_),
+                    binding,
                     access,
-                    ..
                 } = reference
                 {
+                    let unresolved_is_undefined =
+                        matches!(binding, CompilerClosureBinding::RealmGlobal(_))
+                            || tree_layout.realm_globals.binding(global).is_some_and(
+                                |descriptor| {
+                                    matches!(
+                                        descriptor.root_source,
+                                        RealmGlobalRootSource::DirectEvalVariable { .. }
+                                    )
+                                },
+                            );
+                    if !unresolved_is_undefined {
+                        return self.plan_ordinary_unary_expression(
+                            unary,
+                            layout,
+                            tree_layout,
+                            constants,
+                            work,
+                        );
+                    }
                     if !access.reads() || access.writes() {
                         return unsupported(
                             UnsupportedLeafFeature::UnsupportedReference,
@@ -5448,6 +5468,17 @@ impl<'compiler, 'unit, 'arena, 'scope> ExpressionPlanner<'compiler, 'unit, 'aren
                 }
             }
         }
+        self.plan_ordinary_unary_expression(unary, layout, tree_layout, constants, work)
+    }
+
+    fn plan_ordinary_unary_expression<'expression>(
+        &self,
+        unary: &'expression UnaryExpression<'arena>,
+        layout: &FrameLayout,
+        tree_layout: &FunctionTreeLayout,
+        constants: &CompiledConstantPool,
+        work: &mut Vec<ExpressionWork<'expression, 'arena>>,
+    ) -> Result<(), LeafCompilationError> {
         match unary.operator {
             UnaryOperator::UnaryPlus
             | UnaryOperator::UnaryNegation
@@ -5540,48 +5571,13 @@ impl<'compiler, 'unit, 'arena, 'scope> ExpressionPlanner<'compiler, 'unit, 'aren
                 Ok(())
             }
             Expression::Identifier(identifier) => {
-                let reference = self.lowered_reference(
-                    identifier.reference_id.get(),
-                    identifier.span,
+                let opcode = self.plan_identifier_delete(
+                    identifier,
+                    unary.span,
                     layout,
                     tree_layout,
+                    constants,
                 )?;
-                let opcode = match reference {
-                    LoweredReference::Frame { .. }
-                    | LoweredReference::RealmGlobal {
-                        binding: CompilerClosureBinding::Captured(_),
-                        ..
-                    } => {
-                        PlannedInstruction::new(FinalOpcode::PushFalse, Operands::None, unary.span)
-                    }
-                    LoweredReference::RealmGlobal { global, .. } => {
-                        let binding = tree_layout.realm_globals.binding(global).ok_or(
-                            LeafCompilationError::SemanticInvariant {
-                                invariant: "deleted realm-global binding exists",
-                                span: Some(identifier.span),
-                            },
-                        )?;
-                        if matches!(
-                            binding.policy.kind(),
-                            quickjs_bytecode::CompilerBindingKind::Let
-                                | quickjs_bytecode::CompilerBindingKind::Const
-                        ) {
-                            PlannedInstruction::new(
-                                FinalOpcode::PushFalse,
-                                Operands::None,
-                                unary.span,
-                            )
-                        } else {
-                            PlannedInstruction::new(
-                                FinalOpcode::DeleteVar,
-                                Operands::Atom(constants.metadata_atom_index(
-                                    CompiledMetadataAtomKey::RealmGlobal(global),
-                                )?),
-                                unary.span,
-                            )
-                        }
-                    }
-                };
                 work.push(ExpressionWork::Emit(opcode));
                 Ok(())
             }
@@ -5603,6 +5599,63 @@ impl<'compiler, 'unit, 'arena, 'scope> ExpressionPlanner<'compiler, 'unit, 'aren
                 Ok(())
             }
         }
+    }
+
+    fn plan_identifier_delete(
+        &self,
+        identifier: &IdentifierReference<'arena>,
+        delete_span: Span,
+        layout: &FrameLayout,
+        tree_layout: &FunctionTreeLayout,
+        constants: &CompiledConstantPool,
+    ) -> Result<PlannedInstruction, LeafCompilationError> {
+        let reference = self.lowered_reference(
+            identifier.reference_id.get(),
+            identifier.span,
+            layout,
+            tree_layout,
+        )?;
+        let LoweredReference::RealmGlobal {
+            global, binding, ..
+        } = reference
+        else {
+            return Ok(PlannedInstruction::new(
+                FinalOpcode::PushFalse,
+                Operands::None,
+                delete_span,
+            ));
+        };
+        let descriptor = tree_layout.realm_globals.binding(global).ok_or(
+            LeafCompilationError::SemanticInvariant {
+                invariant: "deleted realm-global binding exists",
+                span: Some(identifier.span),
+            },
+        )?;
+        let deletable = match binding {
+            CompilerClosureBinding::Captured(_) => matches!(
+                descriptor.root_source,
+                RealmGlobalRootSource::DirectEvalVariable { .. }
+            ),
+            CompilerClosureBinding::RealmGlobal(_) => !matches!(
+                descriptor.policy.kind(),
+                quickjs_bytecode::CompilerBindingKind::Let
+                    | quickjs_bytecode::CompilerBindingKind::Const
+            ),
+        };
+        if !deletable {
+            return Ok(PlannedInstruction::new(
+                FinalOpcode::PushFalse,
+                Operands::None,
+                delete_span,
+            ));
+        }
+        Ok(PlannedInstruction::new(
+            FinalOpcode::DeleteVar,
+            Operands::Atom(
+                constants.metadata_atom_index(CompiledMetadataAtomKey::RealmGlobal(global))?,
+            ),
+            delete_span,
+        ))
     }
 
     fn plan_conditional_expression<'expression>(

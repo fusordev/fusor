@@ -176,6 +176,7 @@ pub struct CompiledRealmGlobal {
     pub(super) source: CompiledRealmGlobalSource,
     pub(super) binding: CompilerClosureBinding,
     pub(super) policy: CompilerBindingPolicy,
+    pub(super) deletable_eval_variable: bool,
     pub(super) function_initializer: Option<u32>,
 }
 
@@ -286,6 +287,7 @@ pub struct CompiledFunction {
     pub(super) realm_globals: Arc<[CompiledRealmGlobal]>,
     pub(super) source_instructions: Arc<[SourceInstruction]>,
     pub(super) control_flow: Arc<VerifiedControlFlow>,
+    pub(super) parameter_initialization_end: Option<u32>,
     pub(super) metadata: UnverifiedFunctionMetadata,
 }
 
@@ -352,6 +354,12 @@ impl CompiledFunction {
     #[must_use]
     pub fn control_flow(&self) -> &VerifiedControlFlow {
         &self.control_flow
+    }
+
+    /// Returns the first body instruction after parameter-expression evaluation.
+    #[must_use]
+    pub const fn parameter_initialization_end(&self) -> Option<u32> {
+        self.parameter_initialization_end
     }
 }
 

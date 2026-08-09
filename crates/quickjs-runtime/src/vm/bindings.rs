@@ -292,7 +292,7 @@ pub(super) fn materialize_direct_eval_environment(
             if record
                 .bindings
                 .iter()
-                .any(|binding| binding.name == pending.name)
+                .any(|binding| !binding.deleted && binding.name == pending.name)
             {
                 return Err(EngineFault::RuntimeInvariant {
                     message: "new direct-eval variable already exists in the function environment",
@@ -414,6 +414,7 @@ pub(super) fn materialize_direct_eval_environment(
             record.bindings.push(EvalVariableBinding {
                 name: entry.name.clone(),
                 cell: *cell,
+                deleted: false,
             });
             bindings[entry.external_index] = Some(EnvironmentBinding::Captured(*cell));
         }
@@ -446,6 +447,7 @@ fn direct_eval_variable_cell(
         .borrow()
         .bindings
         .get(index as usize)
+        .filter(|binding| !binding.deleted)
         .map(|binding| binding.cell)
         .ok_or(EngineFault::InvalidClosureEnvironment {
             function: frame.template,
@@ -786,6 +788,75 @@ pub(super) fn set_function_home_object(
     Ok(())
 }
 
+fn captured_binding_eval_shadow(
+    frame: &Frame,
+    source: CompilerClosureSource,
+    shadowable: bool,
+) -> Result<Option<EvalBindingShadow>, EngineFault> {
+    if !shadowable {
+        return Ok(None);
+    }
+    match source {
+        CompilerClosureSource::ParentVariableReference(_) => {
+            let Some(boundary) = frame.parameter_eval_boundary.as_ref() else {
+                return Ok(None);
+            };
+            if frame.body_eval_environment.is_some() {
+                return Ok(None);
+            }
+            let head =
+                frame
+                    .eval_environment
+                    .as_ref()
+                    .ok_or(EngineFault::InvalidClosureEnvironment {
+                        function: frame.template,
+                    })?;
+            Ok(Some(EvalBindingShadow {
+                head: Rc::clone(head),
+                boundary: Some(Rc::clone(boundary)),
+            }))
+        }
+        CompilerClosureSource::ParentClosure(index) => {
+            let inherited = frame
+                .environment_eval_shadows
+                .get(index as usize)
+                .ok_or(EngineFault::MissingPoolEntry {
+                    pool: "closure eval shadow",
+                    index,
+                })?
+                .clone();
+            let owns_environment = match (
+                frame.eval_environment.as_ref(),
+                frame.inherited_eval_environment.as_ref(),
+            ) {
+                (Some(head), Some(inherited)) => !Rc::ptr_eq(head, inherited),
+                (Some(_), None) => frame.eval_declaration_environment.is_some(),
+                (None, _) => false,
+            };
+            if !owns_environment {
+                return Ok(inherited);
+            }
+            let head =
+                frame
+                    .eval_environment
+                    .as_ref()
+                    .ok_or(EngineFault::InvalidClosureEnvironment {
+                        function: frame.template,
+                    })?;
+            Ok(Some(EvalBindingShadow {
+                head: Rc::clone(head),
+                boundary: inherited
+                    .as_ref()
+                    .and_then(|shadow| shadow.boundary.as_ref().map(Rc::clone))
+                    .or_else(|| frame.inherited_eval_environment.as_ref().map(Rc::clone)),
+            }))
+        }
+        CompilerClosureSource::ConstructorRealmGlobal(_)
+        | CompilerClosureSource::DirectEvalBinding { .. }
+        | CompilerClosureSource::DirectEvalVariable { .. } => Ok(None),
+    }
+}
+
 #[allow(
     clippy::too_many_lines,
     reason = "closure validation, capture materialization, and publication are one transaction"
@@ -824,6 +895,7 @@ pub(super) fn create_closure(
         function_kind,
         executable_kind,
         lexical_derived_this,
+        closure_eval_shadowable,
     ) = {
         let code = code(runtime, frame.code)?;
         let function = code
@@ -860,6 +932,20 @@ pub(super) fn create_closure(
             },
         )?;
         let header = function.function().control_flow().function_header();
+        let mut closure_eval_shadowable = Vec::new();
+        closure_eval_shadowable
+            .try_reserve_exact(function.metadata().closures().len())
+            .map_err(|_| ExecutionError::AllocationFailed {
+                resource: RuntimeResource::FrameValues,
+                additional: function.metadata().closures().len(),
+            })?;
+        closure_eval_shadowable.extend(
+            function
+                .metadata()
+                .closures()
+                .iter()
+                .map(|definition| eval_can_shadow_binding(definition.policy().kind())),
+        );
         (
             copied,
             function.metadata().closures().len(),
@@ -870,6 +956,7 @@ pub(super) fn create_closure(
             header.kind(),
             function.metadata().executable_kind(),
             function.lexical_derived_this(),
+            closure_eval_shadowable,
         )
     };
     let lexical = executable_kind == CompilerExecutableKind::OrdinaryArrow;
@@ -930,6 +1017,13 @@ pub(super) fn create_closure(
             resource: RuntimeResource::BindingCells,
             additional: sources.len(),
         })?;
+    let mut capture_eval_shadows = Vec::new();
+    capture_eval_shadows
+        .try_reserve_exact(sources.len())
+        .map_err(|_| ExecutionError::AllocationFailed {
+            resource: RuntimeResource::FrameValues,
+            additional: sources.len(),
+        })?;
     let mut pending_by_own = Vec::new();
     pending_by_own
         .try_reserve_exact(frame.own_cells.len())
@@ -946,7 +1040,12 @@ pub(super) fn create_closure(
             additional: sources.len(),
         })?;
 
-    for source in sources {
+    for (source, eval_shadowable) in sources.into_iter().zip(closure_eval_shadowable) {
+        capture_eval_shadows.push(captured_binding_eval_shadow(
+            frame,
+            source,
+            eval_shadowable,
+        )?);
         match source {
             CompilerClosureSource::ParentVariableReference(index) => {
                 let own_index = index as usize;
@@ -1241,6 +1340,7 @@ pub(super) fn create_closure(
             code: frame.code,
             template: child,
             environment,
+            environment_eval_shadows: capture_eval_shadows,
             eval_environment: frame.eval_environment.as_ref().map(Rc::clone),
             lexical_receiver: lexical.then(|| frame.receiver.duplicate()),
             lexical_new_target: if lexical { frame.new_target } else { None },
@@ -1358,6 +1458,7 @@ pub(super) fn close_local(
 
 pub(super) enum BindingAccessError {
     Uninitialized,
+    Missing,
     Fault(EngineFault),
 }
 
@@ -1366,6 +1467,10 @@ impl From<BindingAccessError> for ExecutionError {
         match error {
             BindingAccessError::Uninitialized => EngineFault::UnexpectedUninitialized {
                 function: FunctionTemplateId::new(u32::MAX),
+            }
+            .into(),
+            BindingAccessError::Missing => EngineFault::RuntimeInvariant {
+                message: "a missing dynamic binding escaped opcode-level exception handling",
             }
             .into(),
             BindingAccessError::Fault(fault) => fault.into(),
@@ -1406,6 +1511,25 @@ pub(super) fn duplicate_binding(
     }
 }
 
+pub(super) fn duplicate_local(
+    runtime: &Runtime,
+    frame: &Frame,
+    index: u32,
+    checked: bool,
+) -> Result<StoredValue, BindingAccessError> {
+    if let Some(cell) =
+        local_eval_shadow_cell(runtime, frame, index).map_err(BindingAccessError::Fault)?
+    {
+        return duplicate_binding(runtime, &FrameBinding::Captured(cell), checked, frame);
+    }
+    duplicate_binding(
+        runtime,
+        frame_local(frame, index).map_err(BindingAccessError::Fault)?,
+        checked,
+        frame,
+    )
+}
+
 pub(super) fn binding_is_uninitialized(
     runtime: &Runtime,
     binding: &FrameBinding,
@@ -1427,6 +1551,17 @@ pub(super) fn binding_is_uninitialized(
     })
 }
 
+pub(super) fn local_is_uninitialized(
+    runtime: &Runtime,
+    frame: &Frame,
+    index: u32,
+) -> Result<bool, EngineFault> {
+    if let Some(cell) = local_eval_shadow_cell(runtime, frame, index)? {
+        return binding_is_uninitialized(runtime, &FrameBinding::Captured(cell));
+    }
+    binding_is_uninitialized(runtime, frame_local(frame, index)?)
+}
+
 pub(super) fn write_argument(
     runtime: &mut Runtime,
     frame: &mut Frame,
@@ -1442,7 +1577,169 @@ pub(super) fn write_local(
     index: u32,
     value: SlotValue,
 ) -> Result<(), ExecutionError> {
+    if let Some(cell) = local_eval_shadow_cell(runtime, frame, index)? {
+        let mut binding = FrameBinding::Captured(cell);
+        return write_binding(runtime, &mut binding, value);
+    }
     write_binding(runtime, frame_local_mut(frame, index)?, value)
+}
+
+fn local_eval_shadow_cell(
+    runtime: &Runtime,
+    frame: &Frame,
+    index: u32,
+) -> Result<Option<BindingCellId>, EngineFault> {
+    let Some(boundary) = frame.parameter_eval_boundary.as_ref() else {
+        return Ok(None);
+    };
+    if frame.body_eval_environment.is_some() {
+        return Ok(None);
+    }
+    if boundary.borrow().kind != EvalVariableEnvironmentKind::ParameterBoundary {
+        return Err(EngineFault::InvalidClosureEnvironment {
+            function: frame.template,
+        });
+    }
+    let function = code(runtime, frame.code)?
+        .authority
+        .function(frame.template)
+        .ok_or(EngineFault::InvalidClosureEnvironment {
+            function: frame.template,
+        })?;
+    let argument_count = function
+        .function()
+        .control_flow()
+        .domains()
+        .argument_count();
+    let definition = function
+        .metadata()
+        .variables()
+        .get(argument_count.saturating_add(index) as usize)
+        .ok_or(EngineFault::MissingPoolEntry {
+            pool: "local metadata",
+            index,
+        })?;
+    if !eval_can_shadow_binding(definition.policy().kind()) {
+        return Ok(None);
+    }
+    let name = installed_binding_name(runtime, frame, definition.name())?;
+    lookup_eval_variable_range(
+        frame.eval_environment.as_ref().map(Rc::clone),
+        Some(boundary),
+        &name,
+        frame.template,
+    )
+}
+
+const fn eval_can_shadow_binding(kind: CompilerBindingKind) -> bool {
+    matches!(
+        kind,
+        CompilerBindingKind::Parameter
+            | CompilerBindingKind::Var
+            | CompilerBindingKind::Let
+            | CompilerBindingKind::Const
+            | CompilerBindingKind::ClassName
+            | CompilerBindingKind::Function
+            | CompilerBindingKind::FunctionName
+            | CompilerBindingKind::Catch
+            | CompilerBindingKind::GlobalReference
+    )
+}
+
+fn installed_binding_name(
+    runtime: &Runtime,
+    frame: &Frame,
+    name: Option<quickjs_bytecode::AtomPoolIndex>,
+) -> Result<JsString, EngineFault> {
+    let name = name.ok_or(EngineFault::InvalidClosureEnvironment {
+        function: frame.template,
+    })?;
+    installed_template(runtime, frame.code, frame.template)?
+        .atoms
+        .get(name.get() as usize)
+        .ok_or(EngineFault::MissingPoolEntry {
+            pool: "binding metadata atom",
+            index: name.get(),
+        })?
+        .description()
+        .cloned()
+        .ok_or(EngineFault::InvalidClosureEnvironment {
+            function: frame.template,
+        })
+}
+
+fn lookup_eval_variable_range(
+    mut current: Option<SharedEvalVariableEnvironment>,
+    boundary: Option<&SharedEvalVariableEnvironment>,
+    name: &JsString,
+    function: FunctionTemplateId,
+) -> Result<Option<BindingCellId>, EngineFault> {
+    while let Some(environment) = current {
+        if boundary.is_some_and(|boundary| Rc::ptr_eq(&environment, boundary)) {
+            return Ok(None);
+        }
+        let record = environment.borrow();
+        if let Some(cell) = record
+            .bindings
+            .iter()
+            .find(|binding| !binding.deleted && binding.name.code_units().eq(name.code_units()))
+            .map(|binding| binding.cell)
+        {
+            return Ok(Some(cell));
+        }
+        current = record.parent.as_ref().map(Rc::clone);
+    }
+    if boundary.is_some() {
+        Err(EngineFault::InvalidClosureEnvironment { function })
+    } else {
+        Ok(None)
+    }
+}
+
+fn closure_eval_shadow_cell(
+    runtime: &Runtime,
+    frame: &Frame,
+    index: u32,
+) -> Result<Option<BindingCellId>, EngineFault> {
+    let function = code(runtime, frame.code)?
+        .authority
+        .function(frame.template)
+        .ok_or(EngineFault::InvalidClosureEnvironment {
+            function: frame.template,
+        })?;
+    let definition = function.metadata().closures().get(index as usize).ok_or(
+        EngineFault::MissingPoolEntry {
+            pool: "closure metadata",
+            index,
+        },
+    )?;
+    if !eval_can_shadow_binding(definition.policy().kind()) {
+        return Ok(None);
+    }
+    let name = installed_binding_name(runtime, frame, definition.name())?;
+    if let Some(cell) = lookup_eval_variable_range(
+        frame.eval_environment.as_ref().map(Rc::clone),
+        frame.inherited_eval_environment.as_ref(),
+        &name,
+        frame.template,
+    )? {
+        return Ok(Some(cell));
+    }
+    let shadow = frame.environment_eval_shadows.get(index as usize).ok_or(
+        EngineFault::MissingPoolEntry {
+            pool: "closure eval shadow",
+            index,
+        },
+    )?;
+    let Some(shadow) = shadow else {
+        return Ok(None);
+    };
+    lookup_eval_variable_range(
+        Some(Rc::clone(&shadow.head)),
+        shadow.boundary.as_ref(),
+        &name,
+        frame.template,
+    )
 }
 
 fn write_binding(
@@ -1474,6 +1771,32 @@ pub(super) fn duplicate_environment(
     index: u32,
     checked: bool,
 ) -> Result<StoredValue, BindingAccessError> {
+    if let Some(cell) =
+        closure_eval_shadow_cell(runtime, frame, index).map_err(BindingAccessError::Fault)?
+    {
+        return duplicate_binding(runtime, &FrameBinding::Captured(cell), checked, frame);
+    }
+    let function = code(runtime, frame.code)
+        .map_err(BindingAccessError::Fault)?
+        .authority
+        .function(frame.template)
+        .ok_or(BindingAccessError::Fault(
+            EngineFault::InvalidClosureEnvironment {
+                function: frame.template,
+            },
+        ))?;
+    let definition =
+        function
+            .metadata()
+            .closures()
+            .get(index as usize)
+            .ok_or(BindingAccessError::Fault(EngineFault::MissingPoolEntry {
+                pool: "closure metadata",
+                index,
+            }))?;
+    if definition.is_deletable_eval_variable() {
+        return Err(BindingAccessError::Missing);
+    }
     let binding = *frame.environment.get(index as usize).ok_or({
         BindingAccessError::Fault(EngineFault::MissingPoolEntry {
             pool: "closure environment",
@@ -1514,6 +1837,9 @@ pub(super) fn environment_is_uninitialized(
     frame: &Frame,
     index: u32,
 ) -> Result<bool, EngineFault> {
+    if let Some(cell) = closure_eval_shadow_cell(runtime, frame, index)? {
+        return binding_is_uninitialized(runtime, &FrameBinding::Captured(cell));
+    }
     let binding = *frame
         .environment
         .get(index as usize)
@@ -1546,6 +1872,10 @@ pub(super) fn write_environment(
     index: u32,
     value: SlotValue,
 ) -> Result<(), ExecutionError> {
+    if let Some(cell) = closure_eval_shadow_cell(runtime, frame, index)? {
+        let mut binding = FrameBinding::Captured(cell);
+        return write_binding(runtime, &mut binding, value);
+    }
     let binding = *frame
         .environment
         .get(index as usize)

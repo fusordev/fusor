@@ -237,7 +237,8 @@ impl<'plan> RealmGlobalLayoutBuilder<'plan> {
             None
         } else if let Some(environment) = self.direct_variable_environment {
             match environment {
-                DirectEvalVariableEnvironment::Function => {
+                DirectEvalVariableEnvironment::Function
+                | DirectEvalVariableEnvironment::FunctionParameterInitializer => {
                     self.direct_variable_by_name.get(name).copied()
                 }
                 DirectEvalVariableEnvironment::Global => None,
@@ -261,8 +262,13 @@ impl<'plan> RealmGlobalLayoutBuilder<'plan> {
             ));
         }
         let policy = verified_storage_policy(binding)?;
-        if self.direct_variable_environment == Some(DirectEvalVariableEnvironment::Function)
-            && binding.placement() == StoragePlacement::GlobalObject
+        if matches!(
+            self.direct_variable_environment,
+            Some(
+                DirectEvalVariableEnvironment::Function
+                    | DirectEvalVariableEnvironment::FunctionParameterInitializer
+            )
+        ) && binding.placement() == StoragePlacement::GlobalObject
         {
             let index = self
                 .direct_environment_size

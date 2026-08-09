@@ -29,6 +29,7 @@ pub(in crate::lowering) struct PlannedControlFlow {
     assembler: BytecodeAssembler,
     max_instructions: u32,
     instruction_spans: Vec<Span>,
+    parameter_initialization_end: Option<u32>,
     label_spans: Vec<Span>,
     stack_anchors: Vec<StackAnchor>,
     last_instruction_can_fall_through: Option<bool>,
@@ -40,6 +41,7 @@ pub(in crate::lowering) struct PlannedControlFlow {
 pub(in crate::lowering) struct FinishedControlFlow {
     bytecode: Vec<u8>,
     source_instructions: Vec<SourceInstruction>,
+    parameter_initialization_end: Option<u32>,
     stack_anchors: Vec<ResolvedStackAnchor>,
 }
 
@@ -54,12 +56,32 @@ impl PlannedControlFlow {
             assembler: BytecodeAssembler::with_limits(assembler_limits),
             max_instructions: limits.max_instructions_per_function(),
             instruction_spans: Vec::new(),
+            parameter_initialization_end: None,
             label_spans: Vec::new(),
             stack_anchors: Vec::new(),
             last_instruction_can_fall_through: None,
             label_bound_after_last_instruction: false,
             statement_stack_base: 0,
         }
+    }
+
+    pub(in crate::lowering) fn mark_parameter_initialization_end(
+        &mut self,
+        span: Span,
+    ) -> Result<(), LeafCompilationError> {
+        if self.parameter_initialization_end.is_some() {
+            return Err(LeafCompilationError::SemanticInvariant {
+                invariant: "parameter initialization has one instruction boundary",
+                span: Some(span),
+            });
+        }
+        self.parameter_initialization_end =
+            Some(u32::try_from(self.instruction_spans.len()).map_err(|_| {
+                LeafCompilationError::CapacityExceeded {
+                    domain: "parameter initialization instruction boundary",
+                }
+            })?);
+        Ok(())
     }
 
     pub(in crate::lowering) fn emit(
@@ -298,6 +320,7 @@ impl PlannedControlFlow {
             assembler,
             max_instructions: _,
             instruction_spans: spans,
+            parameter_initialization_end,
             label_spans,
             stack_anchors,
             last_instruction_can_fall_through: _,
@@ -359,12 +382,17 @@ impl PlannedControlFlow {
         Ok(FinishedControlFlow {
             bytecode,
             source_instructions,
+            parameter_initialization_end,
             stack_anchors: resolved_stack_anchors,
         })
     }
 }
 
 impl FinishedControlFlow {
+    pub(in crate::lowering) const fn parameter_initialization_end(&self) -> Option<u32> {
+        self.parameter_initialization_end
+    }
+
     #[cfg(test)]
     fn verify(
         self,
@@ -403,6 +431,7 @@ impl FinishedControlFlow {
         let Self {
             bytecode,
             source_instructions,
+            parameter_initialization_end: _,
             stack_anchors,
         } = self;
         let control_flow = match verify_compiler_control_flow(

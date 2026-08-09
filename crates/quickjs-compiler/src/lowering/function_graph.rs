@@ -439,7 +439,8 @@ impl CompilationContext<'_, '_, '_> {
             verified_storage_policy(binding)?,
             has_scope,
             variable_reference,
-        );
+        )
+        .with_arguments_object(binding.is_arguments_object());
         if let Some(initializer) = tree_layout.function_declaration(binding.id()) {
             definition =
                 definition.with_function_initializer(constants.function_index(initializer)?);
@@ -549,14 +550,18 @@ impl CompilationContext<'_, '_, '_> {
                     CompilerGraphClosureSource::ParentClosure(u32::from(index))
                 }
             };
-            definitions.push(VerifiedClosureVariableDefinition::new(
-                Some(
-                    constants
-                        .metadata_atom_index(CompiledMetadataAtomKey::Binding(closure.binding))?,
-                ),
-                verified_storage_policy(binding)?,
-                source,
-            ));
+            definitions.push(
+                VerifiedClosureVariableDefinition::new(
+                    Some(
+                        constants.metadata_atom_index(CompiledMetadataAtomKey::Binding(
+                            closure.binding,
+                        ))?,
+                    ),
+                    verified_storage_policy(binding)?,
+                    source,
+                )
+                .with_arguments_object(binding.is_arguments_object()),
+            );
         }
         for global in realm_globals {
             let name = global.atom;
@@ -572,6 +577,7 @@ impl CompilationContext<'_, '_, '_> {
             if let Some(initializer) = global.function_initializer {
                 definition = definition.with_function_initializer(initializer);
             }
+            definition = definition.with_deletable_eval_variable(global.deletable_eval_variable);
             definitions.push(definition);
         }
         Ok(definitions)
@@ -779,6 +785,10 @@ impl CompilationContext<'_, '_, '_> {
                 source,
                 binding: binding.binding,
                 policy: binding.policy,
+                deletable_eval_variable: matches!(
+                    binding.root_source,
+                    RealmGlobalRootSource::DirectEvalVariable { .. }
+                ),
                 function_initializer,
             });
         }
@@ -889,6 +899,7 @@ fn build_unverified_graph_records(
                 closure_sources.into(),
             )
             .with_atom_pool(Arc::clone(&function.atoms))
+            .with_parameter_initialization_end(function.parameter_initialization_end)
             .with_direct_eval(
                 function
                     .storage_plan

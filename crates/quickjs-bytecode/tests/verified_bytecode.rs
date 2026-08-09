@@ -3091,8 +3091,23 @@ fn typed_stack_input_with_captures(
     let has_direct_eval = instructions
         .iter()
         .any(|(opcode, _)| matches!(opcode, FinalOpcode::Eval | FinalOpcode::ApplyEval));
+    let parameter_initialization_end = instructions
+        .iter()
+        .enumerate()
+        .filter_map(|(index, (opcode, operands))| match (opcode, operands) {
+            (FinalOpcode::Eval, Operands::NPopU16 { scope_index: 0, .. })
+            | (FinalOpcode::ApplyEval, Operands::U16(0)) => u32::try_from(index + 1).ok(),
+            _ => None,
+        })
+        .max();
     let locals = u32::try_from(variables.len()).expect("fixture local count");
-    let flow = flow(
+    let header = UnverifiedFunctionHeader::ordinary_source_function_with_variable_references(
+        false,
+        0,
+        u32::try_from(captures.len()).expect("fixture capture count"),
+    )
+    .with_simple_parameter_list(parameter_initialization_end.is_none());
+    let flow = flow_with_header(
         instructions,
         u32::try_from(atoms.len()).expect("fixture atom count"),
         0,
@@ -3100,6 +3115,7 @@ fn typed_stack_input_with_captures(
         captures,
         0,
         &[],
+        header,
     );
     let text: Arc<str> = Arc::from("typed stack fixture");
     let span = SourceByteSpan::new(0, u32::try_from(text.len()).expect("fixture source length"));
@@ -3121,6 +3137,7 @@ fn typed_stack_input_with_captures(
             Arc::from([
                 UnverifiedCompilerFunction::new(flow, Arc::from([]), Arc::from([]))
                     .with_atom_pool(Arc::from(atoms))
+                    .with_parameter_initialization_end(parameter_initialization_end)
                     .with_direct_eval(has_direct_eval),
             ]),
         ),
@@ -6819,6 +6836,27 @@ fn direct_eval_source_input(
     closure_source: CompilerClosureSource,
     name: Option<AtomPoolIndex>,
 ) -> UnverifiedCompilerBytecodeGraph {
+    direct_eval_source_input_with_marker(
+        executable_kind,
+        instructions,
+        policy,
+        closure_source,
+        name,
+        matches!(
+            closure_source,
+            CompilerClosureSource::DirectEvalVariable { .. }
+        ),
+    )
+}
+
+fn direct_eval_source_input_with_marker(
+    executable_kind: CompilerExecutableKind,
+    instructions: &[(FinalOpcode, Operands)],
+    policy: CompilerBindingPolicy,
+    closure_source: CompilerClosureSource,
+    name: Option<AtomPoolIndex>,
+    deletable_eval_variable: bool,
+) -> UnverifiedCompilerBytecodeGraph {
     let flow = flow_with_header(
         instructions,
         1,
@@ -6856,7 +6894,10 @@ fn direct_eval_source_input(
         Arc::from([UnverifiedFunctionMetadata::new(
             None,
             Arc::from([]),
-            Arc::from([ClosureVariableDefinition::new(name, policy, closure_source)]),
+            Arc::from(
+                [ClosureVariableDefinition::new(name, policy, closure_source)
+                    .with_deletable_eval_variable(deletable_eval_variable)],
+            ),
             source(text, full_span, None, &mappings),
         )
         .with_executable_kind(executable_kind)]),
@@ -6881,6 +6922,38 @@ fn direct_eval_new_variables_require_named_mutable_var_or_function_bindings() {
     )
     .expect("a named mutable var may be created in the caller variable environment");
     assert_eq!(verified.root().function().closure_sources(), [source]);
+
+    for (staged_source, marker) in [
+        (source, false),
+        (
+            CompilerClosureSource::DirectEvalBinding {
+                index: 1,
+                environment_size: 2,
+            },
+            true,
+        ),
+    ] {
+        let error = verify_compiler_bytecode_graph(
+            direct_eval_source_input_with_marker(
+                CompilerExecutableKind::DirectEvalScript,
+                &[(FinalOpcode::ReturnUndef, Operands::None)],
+                var_policy(),
+                staged_source,
+                Some(AtomPoolIndex::new(0)),
+                marker,
+            ),
+            BytecodeGraphVerificationLimits::default(),
+        )
+        .expect_err("deletable eval-variable metadata must match its staged source");
+        assert_eq!(
+            error.kind(),
+            &BytecodeVerificationErrorKind::BindingPolicyViolation {
+                slot: BindingSlot::Closure(0),
+                pc: None,
+                reason: BindingPolicyViolationReason::InvalidDeclarationPolicy,
+            }
+        );
+    }
 
     let error = verify_compiler_bytecode_graph(
         direct_eval_source_input(

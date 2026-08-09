@@ -74,6 +74,7 @@ pub(crate) const fn is_supported_realm_global_binding_goal(
                     context.variable_environment(),
                     quickjs_frontend::DirectEvalVariableEnvironment::Global
                         | quickjs_frontend::DirectEvalVariableEnvironment::Function
+                        | quickjs_frontend::DirectEvalVariableEnvironment::FunctionParameterInitializer
                 )
         )
 }

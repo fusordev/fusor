@@ -828,6 +828,48 @@ fn top_level_arrow_arguments_remains_an_unresolved_global() {
 }
 
 #[test]
+fn parameter_initializers_resolve_past_body_only_bindings() {
+    let outer_plan = script("let outer=10;const f=(p=()=>outer)=>{let outer=20;};");
+    let parameter_closure = outer_plan.executables()[2].id();
+    let outer = outer_plan
+        .bindings_for(outer_plan.executables()[0].id())
+        .unwrap()
+        .iter()
+        .find(|binding| binding.name() == "outer")
+        .expect("outer lexical binding");
+    assert_eq!(
+        outer_plan
+            .resolved_references_for(parameter_closure)
+            .unwrap()[0]
+            .binding(),
+        outer.id()
+    );
+
+    for (source, name) in [
+        (
+            "const f=(p=eval('var arguments=1'),q=()=>arguments)=>{let arguments=20;};",
+            "arguments",
+        ),
+        (
+            "const f=(p=eval('var value=1'),q=()=>value)=>{var value=20;};",
+            "value",
+        ),
+    ] {
+        let plan = script(source);
+        let parameter_closure = plan.executables()[2].id();
+        assert!(
+            plan.resolved_references_for(parameter_closure)
+                .unwrap()
+                .is_empty(),
+            "{source}"
+        );
+        let unresolved = plan.unresolved_globals_for(parameter_closure).unwrap();
+        assert_eq!(unresolved.len(), 1, "{source}");
+        assert_eq!(unresolved[0].name(), name, "{source}");
+    }
+}
+
+#[test]
 fn sloppy_arguments_is_synthesized_and_captured_by_an_arrow() {
     let plan = script("function outer() { arguments; return () => arguments; }");
     let outer = plan.executables()[1].id();

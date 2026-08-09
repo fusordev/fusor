@@ -268,6 +268,7 @@ pub struct VariableDefinition {
     scope_next: ScopeLink,
     policy: CompilerBindingPolicy,
     has_scope: bool,
+    arguments_object: bool,
     variable_reference: Option<u32>,
     function_initializer: Option<u32>,
 }
@@ -287,9 +288,17 @@ impl VariableDefinition {
             scope_next,
             policy,
             has_scope,
+            arguments_object: false,
             variable_reference,
             function_initializer: None,
         }
+    }
+
+    /// Marks the compiler-synthesized function `arguments` object binding.
+    #[must_use]
+    pub const fn with_arguments_object(mut self, arguments_object: bool) -> Self {
+        self.arguments_object = arguments_object;
+        self
     }
 
     /// Attaches the function-template constant that initializes this binding.
@@ -321,6 +330,12 @@ impl VariableDefinition {
     #[must_use]
     pub const fn has_scope(&self) -> bool {
         self.has_scope
+    }
+
+    /// Returns whether this is the compiler-synthesized `arguments` object.
+    #[must_use]
+    pub const fn is_arguments_object(&self) -> bool {
+        self.arguments_object
     }
 
     /// Returns the dense own variable-reference index when captured.
@@ -377,6 +392,8 @@ pub struct ClosureVariableDefinition {
     name: Option<AtomPoolIndex>,
     binding: CompilerClosureBinding,
     source: CompilerClosureSource,
+    arguments_object: bool,
+    deletable_eval_variable: bool,
     function_initializer: Option<u32>,
 }
 
@@ -392,6 +409,8 @@ impl ClosureVariableDefinition {
             name,
             binding: CompilerClosureBinding::Captured(policy),
             source,
+            arguments_object: false,
+            deletable_eval_variable: false,
             function_initializer: None,
         }
     }
@@ -408,8 +427,26 @@ impl ClosureVariableDefinition {
             name,
             binding: CompilerClosureBinding::RealmGlobal(policy),
             source,
+            arguments_object: false,
+            deletable_eval_variable: false,
             function_initializer: None,
         }
+    }
+
+    /// Marks a captured compiler-synthesized `arguments` object binding.
+    #[must_use]
+    pub const fn with_arguments_object(mut self, arguments_object: bool) -> Self {
+        self.arguments_object = arguments_object;
+        self
+    }
+
+    /// Marks a captured binding created by sloppy direct eval. Such bindings
+    /// remain dynamically name-resolved because `DeleteBinding` may remove
+    /// them from the caller's variable environment.
+    #[must_use]
+    pub const fn with_deletable_eval_variable(mut self, deletable: bool) -> Self {
+        self.deletable_eval_variable = deletable;
+        self
     }
 
     /// Attaches the function-template constant that initializes a
@@ -442,6 +479,19 @@ impl ClosureVariableDefinition {
     #[must_use]
     pub const fn source(&self) -> CompilerClosureSource {
         self.source
+    }
+
+    /// Returns whether this capture originates at a synthesized `arguments`
+    /// object binding.
+    #[must_use]
+    pub const fn is_arguments_object(&self) -> bool {
+        self.arguments_object
+    }
+
+    /// Returns whether sloppy direct eval created this deletable binding.
+    #[must_use]
+    pub const fn is_deletable_eval_variable(&self) -> bool {
+        self.deletable_eval_variable
     }
 
     /// Returns the function-template constant used for a constructor-realm
@@ -1352,6 +1402,14 @@ pub enum BytecodeVerificationErrorKind {
         /// Supplied definitions.
         entries: u64,
     },
+    /// The synthesized `arguments` binding marker does not match its metadata
+    /// or bytecode initializer.
+    ArgumentsObjectMetadataMismatch {
+        /// Marked variable definition, when one was supplied.
+        definition: Option<u32>,
+        /// `special_object` initializer site, when one was encoded.
+        pc: Option<BytecodePc>,
+    },
     /// Closure definition count differs from the staged closure domain.
     ClosureDefinitionCountMismatch {
         /// Required closure count.
@@ -1846,6 +1904,10 @@ impl fmt::Display for BytecodeVerificationErrorKind {
             Self::VariableDefinitionCountMismatch { declared, entries } => write!(
                 formatter,
                 "variable definition count {entries} does not equal frame count {declared}"
+            ),
+            Self::ArgumentsObjectMetadataMismatch { definition, pc } => write!(
+                formatter,
+                "arguments-object metadata definition {definition:?} disagrees with initializer site {pc:?}"
             ),
             Self::ClosureDefinitionCountMismatch { declared, entries } => write!(
                 formatter,
@@ -2497,11 +2559,16 @@ fn verify_function_metadata(
         &metadata.closures,
         &internal_stack,
     )?;
+    let function_initializer_prefix = function
+        .parameter_initialization_end()
+        .map_or(realm_global_initializer_prefix, |boundary| {
+            realm_global_initializer_prefix.max(boundary as usize)
+        });
     let initializer_sites = verify_function_initializers(
         id,
         function,
         &metadata.variables,
-        realm_global_initializer_prefix,
+        function_initializer_prefix,
         &internal_stack,
     )?;
     classify_iteration_declarative_local_puts(
@@ -3029,6 +3096,7 @@ fn verify_variables(
                 },
             )
         })?;
+    let mut arguments_object_definition = None;
     for (index, definition) in variables.iter().enumerate() {
         let definition_index = usize_to_u32(index);
         let slot = if index < arguments {
@@ -3042,6 +3110,28 @@ fn verify_variables(
             MetadataAtomField::VariableName(definition_index),
             function,
         )?;
+        if definition.arguments_object {
+            let valid = index >= arguments
+                && arguments_object_definition.is_none()
+                && atom_contents(definition.name, function.atoms())
+                    .is_some_and(|name| name.code_units().eq("arguments".encode_utf16()))
+                && definition.policy.kind() == CompilerBindingKind::Var
+                && definition.policy.initialization()
+                    == CompilerInitializationPolicy::UndefinedAtInstantiation
+                && definition.policy.writes() == CompilerWritePolicy::Mutable
+                && !definition.policy.has_temporal_dead_zone()
+                && !definition.has_scope;
+            if !valid {
+                return Err(BytecodeVerificationError::function(
+                    id,
+                    BytecodeVerificationErrorKind::ArgumentsObjectMetadataMismatch {
+                        definition: Some(definition_index),
+                        pc: None,
+                    },
+                ));
+            }
+            arguments_object_definition = Some(definition_index);
+        }
         if !definition.policy.is_valid_for_function(strict) {
             return Err(policy_error(
                 id,
@@ -3938,9 +4028,26 @@ fn verify_closures(
             function,
         )?;
         let policy = closure.policy();
+        let arguments_object_valid = !closure.arguments_object
+            || (atom_contents(closure.name, function.atoms())
+                .is_some_and(|name| name.code_units().eq("arguments".encode_utf16()))
+                && policy.kind() == CompilerBindingKind::Var
+                && policy.initialization()
+                    == CompilerInitializationPolicy::UndefinedAtInstantiation
+                && policy.writes() == CompilerWritePolicy::Mutable
+                && !policy.has_temporal_dead_zone());
+        let deletable_eval_variable_valid = match staged_source {
+            CompilerClosureSource::DirectEvalVariable { .. } => closure.deletable_eval_variable,
+            CompilerClosureSource::ParentClosure(_) => true,
+            CompilerClosureSource::ParentVariableReference(_)
+            | CompilerClosureSource::ConstructorRealmGlobal(_)
+            | CompilerClosureSource::DirectEvalBinding { .. } => !closure.deletable_eval_variable,
+        };
         let binding_valid = match closure.binding {
             CompilerClosureBinding::Captured(_) => {
                 policy.is_valid()
+                    && arguments_object_valid
+                    && deletable_eval_variable_valid
                     && policy.kind() != CompilerBindingKind::GlobalReference
                     && closure.function_initializer.is_none()
                     && matches!(
@@ -3959,7 +4066,9 @@ fn verify_closures(
                     ) && closure.name.is_some()))
             }
             CompilerClosureBinding::RealmGlobal(_) => {
-                realm_global_policy_supported(policy)
+                !closure.arguments_object
+                    && !closure.deletable_eval_variable
+                    && realm_global_policy_supported(policy)
                     && (!matches!(
                         policy.kind(),
                         CompilerBindingKind::Let | CompilerBindingKind::Const
@@ -4418,17 +4527,24 @@ fn verify_closure_metadata(
                     CompilerClosureSource::ParentClosure(index) => usize::try_from(index)
                         .ok()
                         .and_then(|index| parent_metadata.closures.get(index))
-                        .map(|definition| (definition.name, definition.binding, parent.atoms())),
+                        .map(|definition| ParentClosureDefinition {
+                            name: definition.name,
+                            binding: definition.binding,
+                            arguments_object: definition.arguments_object,
+                            deletable_eval_variable: definition.deletable_eval_variable,
+                            atoms: parent.atoms(),
+                        }),
                     CompilerClosureSource::ConstructorRealmGlobal(_)
                     | CompilerClosureSource::DirectEvalBinding { .. }
                     | CompilerClosureSource::DirectEvalVariable { .. } => None,
                 };
-                let matches =
-                    expected.is_some_and(|(expected_name, expected_binding, expected_atoms)| {
-                        expected_binding == closure.binding
-                            && atom_contents(expected_name, expected_atoms)
-                                == atom_contents(closure.name, child.atoms())
-                    });
+                let matches = expected.is_some_and(|expected| {
+                    expected.binding == closure.binding
+                        && expected.arguments_object == closure.arguments_object
+                        && expected.deletable_eval_variable == closure.deletable_eval_variable
+                        && atom_contents(expected.name, expected.atoms)
+                            == atom_contents(closure.name, child.atoms())
+                });
                 if !matches {
                     return Err(BytecodeVerificationError::function(
                         *child_id,
@@ -6046,15 +6162,19 @@ fn has_only_effective_successor(
         && successors.next().is_none()
 }
 
+struct ParentClosureDefinition<'metadata> {
+    name: Option<AtomPoolIndex>,
+    binding: CompilerClosureBinding,
+    arguments_object: bool,
+    deletable_eval_variable: bool,
+    atoms: &'metadata [crate::CompilerAtom],
+}
+
 fn parent_definition_for_reference<'metadata>(
     parent: &'metadata VerifiedCompilerFunction,
     metadata: &'metadata VerifiedFunctionMetadata,
     reference: u32,
-) -> Option<(
-    Option<AtomPoolIndex>,
-    CompilerClosureBinding,
-    &'metadata [crate::CompilerAtom],
-)> {
+) -> Option<ParentClosureDefinition<'metadata>> {
     let binding = parent
         .control_flow()
         .compiler_capture_layout()?
@@ -6068,11 +6188,13 @@ fn parent_definition_for_reference<'metadata>(
         }
     };
     let definition = metadata.variables.get(index)?;
-    (definition.variable_reference == Some(reference)).then_some((
-        definition.name,
-        CompilerClosureBinding::Captured(definition.policy),
-        parent.atoms(),
-    ))
+    (definition.variable_reference == Some(reference)).then_some(ParentClosureDefinition {
+        name: definition.name,
+        binding: CompilerClosureBinding::Captured(definition.policy),
+        arguments_object: definition.arguments_object,
+        deletable_eval_variable: false,
+        atoms: parent.atoms(),
+    })
 }
 
 fn atom_contents(
@@ -6094,6 +6216,7 @@ fn verify_supported_opcodes(
 ) -> Result<(), BytecodeVerificationError> {
     let executable_kind = metadata.executable_kind;
     let mut arguments_object_count = 0_u8;
+    let mut arguments_object_initializer = None;
     let mut rest_parameter_count = 0_u8;
     let generator = matches!(
         executable_kind,
@@ -6140,6 +6263,7 @@ fn verify_supported_opcodes(
             (FinalOpcode::SpecialObject, Operands::U8(0 | 1))
         ) {
             arguments_object_count = arguments_object_count.saturating_add(1);
+            arguments_object_initializer = Some((instruction_index, decoded.pc()));
         } else if opcode == FinalOpcode::Rest {
             rest_parameter_count = rest_parameter_count.saturating_add(1);
         } else if opcode == FinalOpcode::InitialYield
@@ -6269,6 +6393,33 @@ fn verify_supported_opcodes(
                 },
             ));
         }
+    }
+    let arguments_object_definition = metadata
+        .variables
+        .iter()
+        .position(VariableDefinition::is_arguments_object)
+        .map(usize_to_u32);
+    let initialized_definition = arguments_object_initializer.and_then(|(index, _)| {
+        flow.instructions()
+            .get(index.checked_add(1)?)
+            .and_then(|put| {
+                let put = put.decoded().instruction();
+                initializer_put_definition(
+                    put.opcode(),
+                    put.operands(),
+                    flow.domains().argument_count() as usize,
+                )
+                .map(usize_to_u32)
+            })
+    });
+    if arguments_object_definition != initialized_definition {
+        return Err(BytecodeVerificationError::function(
+            id,
+            BytecodeVerificationErrorKind::ArgumentsObjectMetadataMismatch {
+                definition: arguments_object_definition,
+                pc: arguments_object_initializer.map(|(_, pc)| pc),
+            },
+        ));
     }
     if arguments_object_count == 0 && mapped_arguments_authority {
         return Err(BytecodeVerificationError::function(
@@ -9522,7 +9673,7 @@ fn verify_binding_opcodes(
             };
             let has_binding = closures.iter().any(|definition| {
                 definition.name == Some(atom)
-                    && matches!(
+                    && (matches!(
                         definition.binding,
                         CompilerClosureBinding::RealmGlobal(policy)
                             if matches!(
@@ -9531,7 +9682,7 @@ fn verify_binding_opcodes(
                                     | CompilerBindingKind::Var
                                     | CompilerBindingKind::Function
                             )
-                    )
+                    ) || definition.deletable_eval_variable)
             });
             if !has_binding {
                 return Err(BytecodeVerificationError::function(
@@ -9683,6 +9834,9 @@ fn verify_closure_opcode(
 ) -> Result<(), BytecodeVerificationError> {
     match definition.binding {
         CompilerClosureBinding::Captured(_) if is_realm_global_opcode(opcode) => {
+            if opcode == FinalOpcode::GetVarUndef && definition.deletable_eval_variable {
+                return Ok(());
+            }
             return Err(closure_opcode_mismatch(id, pc, closure, opcode));
         }
         CompilerClosureBinding::RealmGlobal(policy) => {

@@ -1285,6 +1285,7 @@ fn direct_eval_caller_bindings(
     let local_count = domains.local_count();
     let variables = template.metadata().variables();
     let closures = template.metadata().closures();
+    let has_parameter_environment = template.function().parameter_initialization_end().is_some();
     let dynamic_bindings = direct_eval_environment_binding_count(frame)?;
     let capacity = usize::try_from(argument_count)
         .ok()
@@ -1338,6 +1339,28 @@ fn direct_eval_caller_bindings(
     }
 
     if is_argument_scope {
+        if !has_parameter_environment {
+            return Err(EngineFault::InvalidClosureEnvironment { function }.into());
+        }
+        for local in 0..local_count {
+            let variable = variables
+                .get(argument_count.saturating_add(local) as usize)
+                .ok_or(EngineFault::InvalidClosureEnvironment { function })?;
+            if !variable.has_scope()
+                && (variable.policy().kind() == CompilerBindingKind::Parameter
+                    || variable.is_arguments_object())
+            {
+                push_direct_eval_caller_binding(
+                    &mut bindings,
+                    installed,
+                    variable.name(),
+                    variable.policy(),
+                    DirectEvalCallerBindingLocation::Local(local),
+                    DirectEvalCallerBindingScope::Lexical,
+                )?;
+            }
+        }
+        push_direct_eval_declaration_environment_bindings(&mut bindings, frame)?;
         for local in 0..local_count {
             let variable = variables
                 .get(argument_count.saturating_add(local) as usize)
@@ -1381,6 +1404,7 @@ fn direct_eval_caller_bindings(
                 .ok_or(EngineFault::InvalidClosureEnvironment { function })?;
             if !variable.has_scope()
                 && variable.policy().kind() != CompilerBindingKind::Parameter
+                && !variable.is_arguments_object()
                 && direct_eval_local_scope(variable.policy().kind())
                     == DirectEvalCallerBindingScope::Variable
             {
@@ -1394,32 +1418,56 @@ fn direct_eval_caller_bindings(
                 )?;
             }
         }
-        for argument in 0..argument_count {
-            let variable = variables
-                .get(argument as usize)
-                .ok_or(EngineFault::InvalidClosureEnvironment { function })?;
-            push_direct_eval_caller_binding(
-                &mut bindings,
-                installed,
-                variable.name(),
-                variable.policy(),
-                DirectEvalCallerBindingLocation::Argument(argument),
-                DirectEvalCallerBindingScope::Variable,
-            )?;
-        }
-        for local in 0..local_count {
-            let variable = variables
-                .get(argument_count.saturating_add(local) as usize)
-                .ok_or(EngineFault::InvalidClosureEnvironment { function })?;
-            if !variable.has_scope() && variable.policy().kind() == CompilerBindingKind::Parameter {
+        if has_parameter_environment {
+            for local in 0..local_count {
+                let variable = variables
+                    .get(argument_count.saturating_add(local) as usize)
+                    .ok_or(EngineFault::InvalidClosureEnvironment { function })?;
+                if !variable.has_scope()
+                    && (variable.policy().kind() == CompilerBindingKind::Parameter
+                        || variable.is_arguments_object())
+                {
+                    push_direct_eval_caller_binding(
+                        &mut bindings,
+                        installed,
+                        variable.name(),
+                        variable.policy(),
+                        DirectEvalCallerBindingLocation::Local(local),
+                        DirectEvalCallerBindingScope::Outer,
+                    )?;
+                }
+            }
+        } else {
+            for argument in 0..argument_count {
+                let variable = variables
+                    .get(argument as usize)
+                    .ok_or(EngineFault::InvalidClosureEnvironment { function })?;
                 push_direct_eval_caller_binding(
                     &mut bindings,
                     installed,
                     variable.name(),
                     variable.policy(),
-                    DirectEvalCallerBindingLocation::Local(local),
+                    DirectEvalCallerBindingLocation::Argument(argument),
                     DirectEvalCallerBindingScope::Variable,
                 )?;
+            }
+            for local in 0..local_count {
+                let variable = variables
+                    .get(argument_count.saturating_add(local) as usize)
+                    .ok_or(EngineFault::InvalidClosureEnvironment { function })?;
+                if !variable.has_scope()
+                    && (variable.policy().kind() == CompilerBindingKind::Parameter
+                        || variable.is_arguments_object())
+                {
+                    push_direct_eval_caller_binding(
+                        &mut bindings,
+                        installed,
+                        variable.name(),
+                        variable.policy(),
+                        DirectEvalCallerBindingLocation::Local(local),
+                        DirectEvalCallerBindingScope::Variable,
+                    )?;
+                }
             }
         }
         for local in 0..local_count {
@@ -1489,6 +1537,9 @@ fn push_direct_eval_declaration_environment_bindings(
         let record = environment.borrow();
         if Rc::ptr_eq(&environment, target) {
             for (index, binding) in record.bindings.iter().enumerate() {
+                if binding.deleted {
+                    continue;
+                }
                 push_direct_eval_environment_binding(
                     bindings,
                     binding,
@@ -1521,6 +1572,9 @@ fn push_direct_eval_outer_environment_bindings(
         let record = environment.borrow();
         if !target.is_some_and(|target| Rc::ptr_eq(&environment, target)) {
             for (index, binding) in record.bindings.iter().enumerate() {
+                if binding.deleted {
+                    continue;
+                }
                 push_direct_eval_environment_binding(
                     bindings,
                     binding,

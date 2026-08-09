@@ -84,6 +84,16 @@ impl<'arena> CompilationContext<'_, 'arena, '_> {
             self.emit_arguments_object_initializer(executable, planning.layout, flow)?;
             self.emit_parameter_pattern_initializers(executable, planning, flow)?;
             self.emit_parameter_body_binding_copies(executable, planning.layout, flow)?;
+            let executable_metadata = self
+                .planned
+                .plan
+                .executable(executable)
+                .ok_or(LeafCompilationError::InvalidExecutable { executable })?;
+            if executable_metadata.has_parameter_expressions()
+                && executable_metadata.has_direct_eval()
+            {
+                flow.mark_parameter_initialization_end(span)?;
+            }
             self.emit_realm_global_function_initializers(
                 executable,
                 planning.tree_layout,

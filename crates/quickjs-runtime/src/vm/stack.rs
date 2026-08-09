@@ -647,6 +647,20 @@ pub(super) fn copy_environment(
     Ok(copied)
 }
 
+pub(super) fn copy_eval_binding_shadows(
+    values: &[Option<EvalBindingShadow>],
+) -> Result<Vec<Option<EvalBindingShadow>>, ExecutionError> {
+    let mut copied = Vec::new();
+    copied
+        .try_reserve_exact(values.len())
+        .map_err(|_| ExecutionError::AllocationFailed {
+            resource: RuntimeResource::FrameValues,
+            additional: values.len(),
+        })?;
+    copied.extend(values.iter().cloned());
+    Ok(copied)
+}
+
 pub(super) fn copy_addresses(
     values: &[FrameBindingAddress],
 ) -> Result<Vec<FrameBindingAddress>, ExecutionError> {

@@ -1121,14 +1121,15 @@ impl<'unit, 'arena, 'scope> Planner<'unit, 'arena, 'scope> {
             &bindings,
         )?;
 
-        let mut resolved_drafts = self.resolved_drafts(
+        let (mut resolved_drafts, parameter_outer_references) = self.resolved_drafts(
             &symbol_bindings,
             &source_symbols,
             &class_name_bindings,
             &bindings,
             &implicit_arguments_references,
         )?;
-        let unresolved_drafts = self.unresolved_drafts()?;
+        let mut unresolved_drafts = self.unresolved_drafts()?;
+        unresolved_drafts.extend(parameter_outer_references);
         let (arguments_references, mut unresolved_drafts) = Self::resolve_arguments_references(
             unresolved_drafts,
             &bindings,
@@ -3445,7 +3446,7 @@ impl<'unit, 'arena, 'scope> Planner<'unit, 'arena, 'scope> {
         class_name_bindings: &HashMap<NodeId, BindingId>,
         bindings: &[BindingStorage],
         implicit_arguments_references: &HashMap<ReferenceId, ExecutableId>,
-    ) -> Result<Vec<ResolvedDraft>, CompilerError> {
+    ) -> Result<(Vec<ResolvedDraft>, Vec<UnresolvedDraft>), CompilerError> {
         let semantic = self.unit.semantic();
         let scoping = semantic.scoping();
         let arguments_bindings = bindings
@@ -3471,6 +3472,7 @@ impl<'unit, 'arena, 'scope> Planner<'unit, 'arena, 'scope> {
             }
         }
         let mut drafts = Vec::with_capacity(scoping.references_len());
+        let mut parameter_outer_references = Vec::new();
         for symbol_id in scoping.symbol_ids() {
             let source_binding = symbol_bindings
                 .get(symbol_id.index())
@@ -3512,6 +3514,26 @@ impl<'unit, 'arena, 'scope> Planner<'unit, 'arena, 'scope> {
                         class_name_bindings,
                     )
                     .unwrap_or(binding);
+                let binding_storage =
+                    bindings
+                        .get(binding.index())
+                        .ok_or(CompilerError::SemanticInvariant {
+                            invariant: "resolved reference binding exists",
+                            span: Some(span),
+                        })?;
+                if self.reference_precedes_body_environment(binding_storage, span) {
+                    parameter_outer_references.push(UnresolvedDraft {
+                        reference_id,
+                        executable,
+                        name: binding_storage.name.clone(),
+                        span,
+                        access: ReferenceAccess {
+                            read: reference.is_read(),
+                            write: reference.is_write(),
+                        },
+                    });
+                    continue;
+                }
                 drafts.push(ResolvedDraft {
                     reference_id,
                     executable,
@@ -3524,7 +3546,31 @@ impl<'unit, 'arena, 'scope> Planner<'unit, 'arena, 'scope> {
                 });
             }
         }
-        Ok(drafts)
+        Ok((drafts, parameter_outer_references))
+    }
+
+    fn reference_precedes_body_environment(&self, binding: &BindingStorage, span: Span) -> bool {
+        if !matches!(
+            binding.policy.kind,
+            DeclarationKind::Var
+                | DeclarationKind::Let
+                | DeclarationKind::Const
+                | DeclarationKind::Class
+                | DeclarationKind::Function
+        ) || !self.executable_drafts[binding.executable.index()]
+            .executable
+            .has_parameter_expressions()
+        {
+            return false;
+        }
+        self.parameter_list_span(binding.executable)
+            .is_some_and(|parameters| {
+                span_within(span, parameters)
+                    && binding
+                        .declaration_spans
+                        .iter()
+                        .all(|declaration| !span_within(*declaration, parameters))
+            })
     }
 
     fn class_name_binding_for_reference(
@@ -3629,6 +3675,10 @@ impl<'unit, 'arena, 'scope> Planner<'unit, 'arena, 'scope> {
         Ok(reference_owners)
     }
 
+    #[allow(
+        clippy::too_many_lines,
+        reason = "resolved and unresolved arguments references share one owner-selection pass"
+    )]
     fn collect_implicit_arguments_references(
         &self,
         bindings: &[BindingDraft],
@@ -3726,10 +3776,42 @@ impl<'unit, 'arena, 'scope> Planner<'unit, 'arena, 'scope> {
             &arguments_parameter_owners,
             &mut first_references,
         )?;
+        self.seed_direct_eval_arguments_object_requirements(
+            &arguments_parameter_owners,
+            &mut first_references,
+        )?;
         Ok(ImplicitArgumentsPlan {
             reference_owners: implicit_references,
             first_references,
         })
+    }
+
+    fn seed_direct_eval_arguments_object_requirements(
+        &self,
+        arguments_parameter_owners: &HashSet<ExecutableId>,
+        first_references: &mut HashMap<ExecutableId, Span>,
+    ) -> Result<(), CompilerError> {
+        for draft in &self.executable_drafts {
+            if !draft.executable.has_direct_eval() {
+                continue;
+            }
+            let span = draft.executable.span();
+            let Some(owner) = self.arguments_owner(draft.executable.id(), span)? else {
+                continue;
+            };
+            if arguments_parameter_owners.contains(&owner) {
+                continue;
+            }
+            first_references
+                .entry(owner)
+                .and_modify(|first| {
+                    if (span.start, span.end) < (first.start, first.end) {
+                        *first = span;
+                    }
+                })
+                .or_insert(span);
+        }
+        Ok(())
     }
 
     fn seed_body_arguments_object_requirements(
@@ -3743,6 +3825,12 @@ impl<'unit, 'arena, 'scope> Planner<'unit, 'arena, 'scope> {
                 && matches!(
                     binding.policy.kind,
                     DeclarationKind::Var | DeclarationKind::Function
+                )
+                && matches!(
+                    self.executable_drafts[binding.executable.index()]
+                        .executable
+                        .kind(),
+                    ExecutableKind::Function { .. }
                 )
                 && self.executable_drafts[binding.executable.index()]
                     .executable

@@ -72,18 +72,19 @@ use crate::{
         ArrayLengthWriteOutcome, ArrayMutator, ArrayReduction, ArraySearch, ArraySort, ArrayStatic,
         AtomicsMethod, BindingCell, BoundFunction, BytecodeFunction, CollectionRoot,
         DataViewElementType, DataViewPrototypeMethod, DatePrototypeMethod, DateStaticMethod,
-        EnvironmentBinding, EvalVariableBinding, EvalVariableEnvironment,
-        FinalizationRegistryMethod, FrameBindingAddress, FunctionImplementation,
-        GlobalNumericFunction, HeapFunction, InstalledCode, InstalledConstant, InstalledRoot,
-        InstalledTemplate, LocaleStringMethod, MapMethod, MathMethod, NativeFunction,
-        NativeFunctionKind, NumberFormat, NumberPredicate, PreparedIteratorResultPlan,
-        PromiseCapabilityCapture, PromiseCapabilityExecutor, PromiseCombinatorElementFunction,
-        PromiseCombinatorElementKind, PromiseCombinatorKind, PromiseCombinatorShared,
-        PromiseFinallyFunction, PromiseFinallyThunkKind, PromiseJob, PromiseResolvingFunction,
-        PromiseResolvingKind, PromiseStatic, RealmGlobalBindingState, ReflectMethod, RegExpFlag,
-        RegExpSymbolMethod, SetMethod, SetPrototypeOutcome, SharedEvalVariableEnvironment,
-        StringArgument, StringMethod, TemporalDurationPrototypeMethod,
-        TemporalDurationStaticMethod, TemporalInstantPrototypeMethod, TemporalInstantStaticMethod,
+        EnvironmentBinding, EvalBindingShadow, EvalVariableBinding, EvalVariableEnvironment,
+        EvalVariableEnvironmentKind, FinalizationRegistryMethod, FrameBindingAddress,
+        FunctionImplementation, GlobalNumericFunction, HeapFunction, InstalledCode,
+        InstalledConstant, InstalledRoot, InstalledTemplate, LocaleStringMethod, MapMethod,
+        MathMethod, NativeFunction, NativeFunctionKind, NumberFormat, NumberPredicate,
+        PreparedIteratorResultPlan, PromiseCapabilityCapture, PromiseCapabilityExecutor,
+        PromiseCombinatorElementFunction, PromiseCombinatorElementKind, PromiseCombinatorKind,
+        PromiseCombinatorShared, PromiseFinallyFunction, PromiseFinallyThunkKind, PromiseJob,
+        PromiseResolvingFunction, PromiseResolvingKind, PromiseStatic, RealmGlobalBindingState,
+        ReflectMethod, RegExpFlag, RegExpSymbolMethod, SetMethod, SetPrototypeOutcome,
+        SharedEvalVariableEnvironment, StringArgument, StringMethod,
+        TemporalDurationPrototypeMethod, TemporalDurationStaticMethod,
+        TemporalInstantPrototypeMethod, TemporalInstantStaticMethod,
         TemporalPlainDatePrototypeMethod, TemporalPlainDateStaticMethod,
         TemporalPlainDateTimePrototypeMethod, TemporalPlainDateTimeStaticMethod,
         TemporalPlainMonthDayPrototypeMethod, TemporalPlainMonthDayStaticMethod,
@@ -351,6 +352,9 @@ pub(crate) struct Frame {
     direct_eval_variable_environment: DirectEvalVariableEnvironment,
     eval_environment: Option<SharedEvalVariableEnvironment>,
     eval_declaration_environment: Option<SharedEvalVariableEnvironment>,
+    body_eval_environment: Option<SharedEvalVariableEnvironment>,
+    inherited_eval_environment: Option<SharedEvalVariableEnvironment>,
+    parameter_eval_boundary: Option<SharedEvalVariableEnvironment>,
     receiver: StoredValue,
     new_target: Option<FunctionId>,
     instruction: InstructionIndex,
@@ -374,6 +378,7 @@ pub(crate) struct Frame {
     own_cells: Vec<Option<BindingCellId>>,
     own_cell_bindings: Vec<FrameBindingAddress>,
     environment: Vec<EnvironmentBinding>,
+    environment_eval_shadows: Vec<Option<EvalBindingShadow>>,
     stack: Vec<OperandStackEntry>,
 }
 
@@ -3747,6 +3752,11 @@ pub(crate) fn trace_frame_roots(frame: &Frame, mark: &mut dyn FnMut(CollectionRo
         }
     }
     if let Some(environment) = &frame.eval_environment {
+        EvalVariableEnvironment::trace_cells(environment, |cell| {
+            mark(CollectionRoot::BindingCell(cell));
+        });
+    }
+    if let Some(environment) = &frame.body_eval_environment {
         EvalVariableEnvironment::trace_cells(environment, |cell| {
             mark(CollectionRoot::BindingCell(cell));
         });

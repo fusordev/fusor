@@ -1,9 +1,9 @@
 use quickjs_bytecode::{
-    CompilerClosureBinding, CompilerClosureSource, CompilerExecutableKind, VerificationLimits,
+    CompilerClosureBinding, CompilerClosureSource, CompilerExecutableKind, FinalOpcode,
+    VerificationLimits,
 };
 use quickjs_compiler::{
     CompilationContext, CompiledFunctionTree, CompiledRealmGlobalSource, LeafCompilationError,
-    UnsupportedLeafFeature,
 };
 use quickjs_frontend::{
     CompilationGoal, DirectEvalBinding, DirectEvalBindingKind, DirectEvalBindingLocation,
@@ -161,25 +161,52 @@ fn sloppy_direct_eval_certifies_a_new_function_declaration_binding() {
             .instructions()
             .iter()
             .any(|instruction| instruction.decoded().instruction().opcode()
-                == quickjs_bytecode::FinalOpcode::PutVarRef)
+                == FinalOpcode::PutVarRef)
     );
+    assert!(root.metadata().closures()[0].is_deletable_eval_variable());
 }
 
 #[test]
-fn sloppy_direct_eval_parameter_initializer_environment_remains_fail_closed() {
-    let error = compile_in_variable_environment(
+fn sloppy_direct_eval_certifies_deletable_variables_through_child_closures() {
+    let tree = compile(
+        "delete answer;let read=function(){answer;};var answer;",
+        false,
+    )
+    .expect("deletable direct-eval binding authority");
+    assert!(
+        tree.root()
+            .control_flow()
+            .instructions()
+            .iter()
+            .any(|instruction| {
+                instruction.decoded().instruction().opcode() == FinalOpcode::DeleteVar
+            })
+    );
+    for function in [
+        tree.verified_bytecode().root(),
+        tree.verified_bytecode()
+            .function(quickjs_bytecode::FunctionTemplateId::new(1))
+            .expect("child closure"),
+    ] {
+        assert!(function.metadata().closures()[0].is_deletable_eval_variable());
+    }
+}
+
+#[test]
+fn sloppy_direct_eval_certifies_a_parameter_initializer_variable() {
+    let tree = compile_in_variable_environment(
         "var answer = 42; answer;",
         false,
         DirectEvalVariableEnvironment::FunctionParameterInitializer,
     )
-    .expect_err("parameter-initializer variable environments remain a separate step");
-    assert!(matches!(
-        error,
-        LeafCompilationError::Unsupported {
-            feature: UnsupportedLeafFeature::DirectEvalVariableEnvironment,
-            ..
-        }
-    ));
+    .expect("parameter-initializer eval targets the caller callee environment");
+    assert_eq!(
+        tree.verified_bytecode().root().function().closure_sources(),
+        [CompilerClosureSource::DirectEvalVariable {
+            index: 0,
+            environment_size: 1,
+        }]
+    );
 }
 
 #[test]
@@ -316,7 +343,7 @@ fn sloppy_direct_eval_function_declaration_can_replace_an_existing_var_binding()
             .instructions()
             .iter()
             .any(|instruction| instruction.decoded().instruction().opcode()
-                == quickjs_bytecode::FinalOpcode::PutVarRef)
+                == FinalOpcode::PutVarRef)
     );
 }
 

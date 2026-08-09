@@ -175,10 +175,26 @@ fn escaped_caller_closure_direct_eval_observes_an_outer_eval_variable() {
 }
 
 #[test]
-fn eval_created_variables_are_nondeletable_and_visible_to_typeof() {
+fn eval_created_variable_bindings_are_deletable() {
     evaluate(
-        "function local(){eval('var answer=42;');return delete answer===false&&typeof answer==='number'&&answer===42;}local();",
+        "function local(){let deleted,missing,read;eval('var answer=42;deleted=delete answer;missing=typeof answer===\"undefined\";read=()=>answer;');try{read();return false;}catch(error){return deleted&&missing&&error.constructor===ReferenceError;}}local();",
         |value| assert_eq!(value.as_boolean(), Ok(Some(true))),
+    );
+}
+
+#[test]
+fn eval_created_function_bindings_are_deletable() {
+    evaluate(
+        "function local(){let initial,deleted,read;eval('initial=answer();deleted=delete answer;read=()=>answer;function answer(){return 42;}');try{read();return false;}catch(error){return initial===42&&deleted&&error.constructor===ReferenceError;}}local();",
+        |value| assert_eq!(value.as_boolean(), Ok(Some(true))),
+    );
+}
+
+#[test]
+fn eval_reuses_and_preserves_a_static_local_binding() {
+    evaluate(
+        "function local(){var answer=0;let deleted=eval('var answer=42;delete answer;');return deleted+'|'+answer;}local();",
+        |value| assert_eq!(string(value), "false|42"),
     );
 }
 
@@ -210,6 +226,118 @@ fn sloppy_direct_eval_function_declaration_replaces_an_existing_var_cell() {
 fn sloppy_direct_eval_targets_the_body_var_inside_non_simple_parameters() {
     evaluate(
         "function local(value=1){var value;eval('var value=42;');return value;}local();",
+        |value| assert!(number(value).strict_equals(JsNumber::from_i32(42))),
+    );
+}
+
+#[test]
+fn parameter_initializer_eval_rejects_the_ordinary_arguments_binding() {
+    evaluate(
+        "function local(value=eval('var arguments=42')){return false;}try{local();false;}catch(error){error.constructor===SyntaxError;}",
+        |value| assert_eq!(value.as_boolean(), Ok(Some(true))),
+    );
+}
+
+#[test]
+fn arrow_parameter_initializer_eval_can_create_arguments() {
+    evaluate(
+        "let local=(value=eval('var arguments=42'),read=()=>arguments)=>arguments+read();local();",
+        |value| assert!(number(value).strict_equals(JsNumber::from_i32(84))),
+    );
+}
+
+#[test]
+fn arrow_parameter_eval_binding_is_separate_from_a_body_function_declaration() {
+    evaluate(
+        "const old=globalThis.arguments;const f=(p=eval(\"var arguments='param'\"),q=()=>arguments)=>{function arguments(){}return typeof arguments+'|'+q()+'|'+(globalThis.arguments===old);};f();",
+        |value| assert_eq!(string(value), "function|param|true"),
+    );
+}
+
+#[test]
+fn arrow_parameter_eval_binding_is_separate_from_a_body_lexical_declaration() {
+    evaluate(
+        "const old=globalThis.arguments;const f=(p=eval(\"var arguments='param'\"),q=()=>arguments)=>{let arguments='local';return arguments+'|'+q()+'|'+(globalThis.arguments===old);};f();",
+        |value| assert_eq!(string(value), "local|param|true"),
+    );
+}
+
+#[test]
+fn arrow_parameter_eval_binding_is_separate_from_a_body_var_declaration() {
+    evaluate(
+        "const old=globalThis.arguments;const f=(p=eval(\"var arguments='param'\"),q=()=>arguments)=>{var arguments='local';return arguments+'|'+q()+'|'+(globalThis.arguments===old);};f();",
+        |value| assert_eq!(string(value), "local|param|true"),
+    );
+}
+
+#[test]
+fn arrow_parameter_initializer_eval_rejects_an_arguments_parameter() {
+    evaluate(
+        "let local=(arguments=eval('var arguments=42'))=>false;try{local();false;}catch(error){error.constructor===SyntaxError;}",
+        |value| assert_eq!(value.as_boolean(), Ok(Some(true))),
+    );
+}
+
+#[test]
+fn parameter_closure_cannot_observe_a_later_body_eval_variable() {
+    evaluate(
+        "function local(read=()=>typeof bodyOnly){eval('var bodyOnly=1');return read();}local();",
+        |value| assert_eq!(string(value), "undefined"),
+    );
+}
+
+#[test]
+fn body_eval_variable_shadows_a_non_simple_parameter() {
+    evaluate(
+        "function local(value=1){eval('var value=42');return value;}local();",
+        |value| assert!(number(value).strict_equals(JsNumber::from_i32(42))),
+    );
+}
+
+#[test]
+fn body_closure_observes_a_later_eval_shadow_of_a_parameter() {
+    evaluate(
+        "function local(value=1){let read=()=>value;eval('var value=42');return read();}local();",
+        |value| assert!(number(value).strict_equals(JsNumber::from_i32(42))),
+    );
+}
+
+#[test]
+fn nested_body_closure_retains_the_eval_shadow_boundary() {
+    evaluate(
+        "function outer(value=1){let middle=()=>()=>value;eval('var value=42');return middle()();}outer();",
+        |value| assert!(number(value).strict_equals(JsNumber::from_i32(42))),
+    );
+}
+
+#[test]
+fn inner_direct_eval_can_shadow_an_outer_parameter_capture() {
+    evaluate(
+        "function outer(value=1){return function inner(){eval('var value=42');return value;};}outer()();",
+        |value| assert!(number(value).strict_equals(JsNumber::from_i32(42))),
+    );
+}
+
+#[test]
+fn inner_direct_eval_can_shadow_an_outer_var_capture() {
+    evaluate(
+        "function outer(){var value=0;function inner(){eval('var value=42');return value;}return inner();}outer();",
+        |value| assert!(number(value).strict_equals(JsNumber::from_i32(42))),
+    );
+}
+
+#[test]
+fn an_outer_eval_variable_does_not_shadow_an_inner_parameter() {
+    evaluate(
+        "function outer(){eval('var value=42');return function inner(value=1){return value;};}outer()();",
+        |value| assert!(number(value).strict_equals(JsNumber::from_i32(1))),
+    );
+}
+
+#[test]
+fn body_eval_variable_shadows_the_non_simple_arguments_object() {
+    evaluate(
+        "function local(value=1){eval('var arguments=42');return arguments;}local();",
         |value| assert!(number(value).strict_equals(JsNumber::from_i32(42))),
     );
 }

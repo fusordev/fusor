@@ -72,15 +72,16 @@ fn eval_scope_head_selects_the_innermost_verified_lexical_chain() {
             FinalOpcode::Eval,
             Operands::NPopU16 {
                 argument_count: 1,
-                scope_index: 4,
+                scope_index: 5,
             },
         )]
     );
 
     let variables = compiled.verified_bytecode().root().metadata().variables();
+    assert!(variables[1].is_arguments_object());
+    assert_eq!(variables[4].scope_next(), ScopeLink::Local(2));
     assert_eq!(variables[3].scope_next(), ScopeLink::Local(1));
-    assert_eq!(variables[2].scope_next(), ScopeLink::Local(0));
-    assert_eq!(variables[1].scope_next(), ScopeLink::End);
+    assert_eq!(variables[2].scope_next(), ScopeLink::End);
 }
 
 #[test]
@@ -98,6 +99,26 @@ fn eval_in_parameter_expression_uses_argument_scope_sentinel() {
                 scope_index: 0,
             },
         )]
+    );
+    let eval_instruction = compiled
+        .root()
+        .control_flow()
+        .instructions()
+        .iter()
+        .position(|instruction| instruction.decoded().instruction().opcode() == FinalOpcode::Eval)
+        .expect("parameter eval instruction");
+    let boundary = compiled
+        .root()
+        .parameter_initialization_end()
+        .expect("parameter/body boundary");
+    assert!(u32::try_from(eval_instruction).expect("instruction index") < boundary);
+    assert_eq!(
+        compiled
+            .verified_bytecode()
+            .root()
+            .function()
+            .parameter_initialization_end(),
+        Some(boundary)
     );
 }
 

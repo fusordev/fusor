@@ -754,6 +754,28 @@ impl Context<'_> {
             None
         };
 
+        let mut root_eval_shadows = Vec::new();
+        if root_eval_shadows
+            .try_reserve_exact(root_environment.bindings.len())
+            .is_err()
+        {
+            if let Some(object) = prototype_object {
+                let removed = self.runtime.objects.remove(object);
+                debug_assert!(removed.is_some());
+            }
+            self.runtime
+                .rollback_root_environment(self.realm, &root_environment);
+            if publication.is_public() {
+                self.runtime.mailbox.cancel_reserved_root();
+            }
+            self.runtime.atoms.collect_dead();
+            return Err(InstallError::AllocationFailed {
+                resource: RuntimeResource::FrameValues,
+                additional: root_environment.bindings.len(),
+            });
+        }
+        root_eval_shadows.resize_with(root_environment.bindings.len(), || None);
+
         let root_template = authority.root_id();
         let Ok(code) = self.runtime.code.try_insert(InstalledCode {
             authority,
@@ -782,6 +804,7 @@ impl Context<'_> {
                 code,
                 template: root_template,
                 environment: root_bindings,
+                environment_eval_shadows: root_eval_shadows,
                 eval_environment: None,
                 lexical_receiver: None,
                 lexical_new_target: None,

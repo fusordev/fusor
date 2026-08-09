@@ -91,6 +91,38 @@ fn leaf_flow() -> Arc<VerifiedControlFlow> {
     )
 }
 
+fn parameter_eval_flow(scope_index: u16) -> Arc<VerifiedControlFlow> {
+    let instructions = [
+        (FinalOpcode::Push7, Operands::NoneInt),
+        (
+            FinalOpcode::Eval,
+            Operands::NPopU16 {
+                argument_count: 0,
+                scope_index,
+            },
+        ),
+        (FinalOpcode::Return, Operands::None),
+    ];
+    let header =
+        UnverifiedFunctionHeader::stripped_ordinary_source_function_with_variable_references(
+            false, 0, 0,
+        )
+        .with_simple_parameter_list(false);
+    Arc::new(
+        verify_compiler_control_flow(
+            UnverifiedCompilerFunctionBody::new(
+                encode(&instructions),
+                FunctionIndexDomains::new(0, 0, 0, 0, 0),
+                header,
+            )
+            .with_capture_layout(CompilerCaptureLayout::default())
+            .with_constant_layout(CompilerConstantLayout::default()),
+            VerificationLimits::default(),
+        )
+        .expect("parameter eval fixture control flow"),
+    )
+}
+
 fn function(
     control_flow: Arc<VerifiedControlFlow>,
     constants: &[u32],
@@ -185,6 +217,54 @@ fn direct_eval_marker_must_match_the_verified_callsite_family() {
         &FunctionGraphVerificationErrorKind::DirectEvalMarkerMismatch {
             declared: true,
             encoded: false,
+        }
+    );
+}
+
+#[test]
+fn direct_eval_parameter_boundary_certifies_scope_zero_only_in_parameter_code() {
+    let verified = verify_compiler_function_graph(
+        graph(vec![
+            function(parameter_eval_flow(0), &[], &[])
+                .with_parameter_initialization_end(Some(2))
+                .with_direct_eval(true),
+        ]),
+        FunctionGraphVerificationLimits::default(),
+    )
+    .expect("scope-zero eval precedes the parameter/body boundary");
+    assert_eq!(verified.root().parameter_initialization_end(), Some(2));
+
+    let error = verify_compiler_function_graph(
+        graph(vec![
+            function(parameter_eval_flow(0), &[], &[]).with_direct_eval(true),
+        ]),
+        FunctionGraphVerificationLimits::default(),
+    )
+    .expect_err("scope-zero eval requires an explicit parameter boundary");
+    assert_eq!(
+        error.kind(),
+        &FunctionGraphVerificationErrorKind::DirectEvalParameterPhaseMismatch {
+            instruction: 1,
+            scope_index: 0,
+            boundary: None,
+        }
+    );
+
+    let error = verify_compiler_function_graph(
+        graph(vec![
+            function(parameter_eval_flow(1), &[], &[])
+                .with_parameter_initialization_end(Some(2))
+                .with_direct_eval(true),
+        ]),
+        FunctionGraphVerificationLimits::default(),
+    )
+    .expect_err("body-scope eval cannot precede the boundary");
+    assert_eq!(
+        error.kind(),
+        &FunctionGraphVerificationErrorKind::DirectEvalParameterPhaseMismatch {
+            instruction: 1,
+            scope_index: 1,
+            boundary: Some(2),
         }
     );
 }

@@ -130,6 +130,18 @@ pub(super) fn global_not_defined_exception(
     })
 }
 
+pub(super) fn binding_not_defined_exception(
+    runtime: &Runtime,
+    frame: &Frame,
+    binding: BindingName,
+    pc: BytecodePc,
+) -> Result<PendingException, ExecutionError> {
+    let name = binding_name(runtime, frame, binding)?.ok_or(EngineFault::RuntimeInvariant {
+        message: "missing dynamic binding has no source name",
+    })?;
+    global_not_defined_exception(runtime, frame, &name, pc)
+}
+
 pub(super) fn not_callable_exception(
     runtime: &Runtime,
     frame: &Frame,

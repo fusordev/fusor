@@ -1100,6 +1100,10 @@ const fn executable_header(
 }
 
 impl CompilationContext<'_, '_, '_> {
+    #[allow(
+        clippy::too_many_lines,
+        reason = "validated layouts, final control flow, source mappings, and metadata are assembled atomically"
+    )]
     pub(in crate::lowering) fn compile_function(
         &self,
         executable: ExecutableId,
@@ -1167,6 +1171,7 @@ impl CompilationContext<'_, '_, '_> {
                 .into(),
         );
         let finished = flow.finish()?;
+        let parameter_initialization_end = finished.parameter_initialization_end();
         let (source_instructions, control_flow) = finished.verify_with_layouts(
             domains,
             header,
@@ -1205,6 +1210,7 @@ impl CompilationContext<'_, '_, '_> {
             realm_globals: realm_globals.into(),
             source_instructions: source_instructions.into(),
             control_flow: Arc::new(control_flow),
+            parameter_initialization_end,
             metadata,
         })
     }
