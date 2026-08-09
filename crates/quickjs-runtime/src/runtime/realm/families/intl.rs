@@ -14,8 +14,9 @@ use crate::runtime::realm::{
     },
 };
 use crate::runtime::{
-    IntlCollatorPrototypeMethod, IntlDateTimeFormatPrototypeMethod, IntlListFormatPrototypeMethod,
-    IntlLocalePrototypeMethod, IntlNumberFormatPrototypeMethod, IntlPluralRulesPrototypeMethod,
+    IntlCollatorPrototypeMethod, IntlDateTimeFormatPrototypeMethod,
+    IntlDisplayNamesPrototypeMethod, IntlListFormatPrototypeMethod, IntlLocalePrototypeMethod,
+    IntlNumberFormatPrototypeMethod, IntlPluralRulesPrototypeMethod,
     IntlRelativeTimeFormatPrototypeMethod,
 };
 
@@ -28,6 +29,7 @@ pub(super) fn visit_objects(visit: ObjectSink<'_>) {
         IntrinsicObjectId::IntlPluralRulesPrototype,
         IntrinsicObjectId::IntlRelativeTimeFormatPrototype,
         IntrinsicObjectId::IntlListFormatPrototype,
+        IntrinsicObjectId::IntlDisplayNamesPrototype,
         IntrinsicObjectId::IntlLocalePrototype,
     ] {
         visit(object(
@@ -186,6 +188,23 @@ pub(super) fn visit_functions(visit: FunctionSink<'_>) {
         ));
     }
     visit(ordinary(
+        NativeFunctionKind::IntlDisplayNamesConstructor,
+        IntrinsicNameSpec::RealmName(RealmNameId::IntlDisplayNames),
+        2,
+    ));
+    visit(ordinary(
+        NativeFunctionKind::IntlDisplayNamesSupportedLocalesOf,
+        IntrinsicNameSpec::RealmName(RealmNameId::IntlDisplayNamesSupportedLocalesOf),
+        1,
+    ));
+    for method in IntlDisplayNamesPrototypeMethod::ALL {
+        visit(ordinary(
+            NativeFunctionKind::IntlDisplayNamesPrototype(method),
+            IntrinsicNameSpec::RealmName(RealmNameId::IntlDisplayNamesPrototype(method)),
+            method.length(),
+        ));
+    }
+    visit(ordinary(
         NativeFunctionKind::IntlLocaleConstructor,
         IntrinsicNameSpec::RealmName(RealmNameId::Locale),
         1,
@@ -241,6 +260,11 @@ pub(super) fn visit_properties(visit: PropertySink<'_>) {
     ));
     let list_format_prototype =
         IntrinsicIdentity::Object(IntrinsicObjectId::IntlListFormatPrototype);
+    let display_names_constructor = IntrinsicIdentity::Function(IntrinsicFunctionId(
+        NativeFunctionKind::IntlDisplayNamesConstructor,
+    ));
+    let display_names_prototype =
+        IntrinsicIdentity::Object(IntrinsicObjectId::IntlDisplayNamesPrototype);
     let locale_constructor = IntrinsicIdentity::Function(IntrinsicFunctionId(
         NativeFunctionKind::IntlLocaleConstructor,
     ));
@@ -279,6 +303,11 @@ pub(super) fn visit_properties(visit: PropertySink<'_>) {
         intl,
         IntrinsicKeySpec::InternedString(RealmNameId::IntlListFormat),
         NativeFunctionKind::IntlListFormatConstructor,
+    ));
+    visit(method(
+        intl,
+        IntrinsicKeySpec::InternedString(RealmNameId::IntlDisplayNames),
+        NativeFunctionKind::IntlDisplayNamesConstructor,
     ));
     visit(method(
         intl,
@@ -524,6 +553,36 @@ pub(super) fn visit_properties(visit: PropertySink<'_>) {
         IntrinsicKeySpec::WellKnownSymbol(PredefinedAtom::SymbolToStringTag),
         PropertyLayout::data(false, false, true),
         IntrinsicValueSpec::String(IntrinsicStringSpec::Literal("Intl.ListFormat")),
+    ));
+
+    visit(data(
+        display_names_constructor,
+        IntrinsicKeySpec::PredefinedString(PredefinedAtom::Prototype),
+        CONSTRUCTOR_PROTOTYPE_PROPERTY,
+        IntrinsicValueSpec::Object(IntrinsicObjectId::IntlDisplayNamesPrototype),
+    ));
+    visit(method(
+        display_names_constructor,
+        IntrinsicKeySpec::InternedString(RealmNameId::IntlDisplayNamesSupportedLocalesOf),
+        NativeFunctionKind::IntlDisplayNamesSupportedLocalesOf,
+    ));
+    visit(method(
+        display_names_prototype,
+        IntrinsicKeySpec::PredefinedString(PredefinedAtom::Constructor),
+        NativeFunctionKind::IntlDisplayNamesConstructor,
+    ));
+    for method_id in IntlDisplayNamesPrototypeMethod::ALL {
+        visit(method(
+            display_names_prototype,
+            IntrinsicKeySpec::InternedString(RealmNameId::IntlDisplayNamesPrototype(method_id)),
+            NativeFunctionKind::IntlDisplayNamesPrototype(method_id),
+        ));
+    }
+    visit(data(
+        display_names_prototype,
+        IntrinsicKeySpec::WellKnownSymbol(PredefinedAtom::SymbolToStringTag),
+        PropertyLayout::data(false, false, true),
+        IntrinsicValueSpec::String(IntrinsicStringSpec::Literal("Intl.DisplayNames")),
     ));
 
     visit(data(

@@ -711,6 +711,10 @@ impl RealmBuildTransaction<'_> {
                 ),
                 list_format_prototype: object(IntrinsicObjectId::IntlListFormatPrototype),
                 list_format_constructor: function(NativeFunctionKind::IntlListFormatConstructor),
+                display_names_prototype: object(IntrinsicObjectId::IntlDisplayNamesPrototype),
+                display_names_constructor: function(
+                    NativeFunctionKind::IntlDisplayNamesConstructor,
+                ),
                 locale_prototype: object(IntrinsicObjectId::IntlLocalePrototype),
                 locale_constructor: function(NativeFunctionKind::IntlLocaleConstructor),
             },

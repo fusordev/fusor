@@ -11,18 +11,20 @@ use quickjs_intl::{
     CollatorRequestOptions, CollatorSensitivity, CollatorState, CollatorUsage,
     DateTimeComponentStyle, DateTimeFormatError, DateTimeFormatInput, DateTimeFormatInputKind,
     DateTimeFormatMatcher, DateTimeFormatRequestOptions, DateTimeFormatState, DateTimeHourCycle,
-    DateTimeStyle, DateTimeTimeZoneName, IntlMathematicalValue, ListFormatError,
-    ListFormatRequestOptions, ListFormatState, ListFormatStyle, ListFormatType, LocaleComponents,
-    LocaleOptionKind, LocaleOptions, LocaleWeekInfo, NumberFormatCompactDisplay,
-    NumberFormatCurrencyDisplay, NumberFormatCurrencySign, NumberFormatError, NumberFormatNotation,
-    NumberFormatRequestOptions, NumberFormatRoundingMode, NumberFormatRoundingPriority,
-    NumberFormatSignDisplay, NumberFormatState, NumberFormatStyle, NumberFormatTrailingZeroDisplay,
-    NumberFormatUnitDisplay, NumberFormatUseGrouping, PluralRuleType, PluralRulesRequestOptions,
-    PluralRulesState, RelativeTimeFormatError, RelativeTimeFormatNumeric,
-    RelativeTimeFormatRequestOptions, RelativeTimeFormatState, RelativeTimeFormatStyle,
-    RelativeTimeUnit, apply_locale_options, calendars_of_locale, canonicalize_locale,
-    canonicalize_locale_option, canonicalize_time_zone, collations_of_locale,
-    collator_supported_locales, compare_with_collator, date_time_format_supported_locales,
+    DateTimeStyle, DateTimeTimeZoneName, DisplayNamesError, DisplayNamesFallback,
+    DisplayNamesLanguageDisplay, DisplayNamesRequestOptions, DisplayNamesState, DisplayNamesStyle,
+    DisplayNamesType, IntlMathematicalValue, ListFormatError, ListFormatRequestOptions,
+    ListFormatState, ListFormatStyle, ListFormatType, LocaleComponents, LocaleOptionKind,
+    LocaleOptions, LocaleWeekInfo, NumberFormatCompactDisplay, NumberFormatCurrencyDisplay,
+    NumberFormatCurrencySign, NumberFormatError, NumberFormatNotation, NumberFormatRequestOptions,
+    NumberFormatRoundingMode, NumberFormatRoundingPriority, NumberFormatSignDisplay,
+    NumberFormatState, NumberFormatStyle, NumberFormatTrailingZeroDisplay, NumberFormatUnitDisplay,
+    NumberFormatUseGrouping, PluralRuleType, PluralRulesRequestOptions, PluralRulesState,
+    RelativeTimeFormatError, RelativeTimeFormatNumeric, RelativeTimeFormatRequestOptions,
+    RelativeTimeFormatState, RelativeTimeFormatStyle, RelativeTimeUnit, apply_locale_options,
+    calendars_of_locale, canonicalize_locale, canonicalize_locale_option, canonicalize_time_zone,
+    collations_of_locale, collator_supported_locales, compare_with_collator,
+    date_time_format_supported_locales, display_name, display_names_supported_locales,
     format_datetime, format_datetime_to_parts, format_list, format_list_to_parts, format_number,
     format_number_to_parts, format_relative_time, format_relative_time_to_parts,
     hour_cycles_of_locale, intl_mathematical_value_from_f64, is_well_formed_currency_code,
@@ -30,9 +32,9 @@ use quickjs_intl::{
     maximize_locale, minimize_locale, number_format_supported_locales, numbering_systems_of_locale,
     parse_intl_mathematical_value, plural_rules_supported_locales,
     relative_time_format_supported_locales, resolve_collator, resolve_date_time_format,
-    resolve_list_format, resolve_number_format, resolve_plural_rules, resolve_relative_time_format,
-    select_plural, select_plural_range, supported_values, text_direction_of_locale,
-    time_zones_of_locale, week_info_of_locale,
+    resolve_display_names, resolve_list_format, resolve_number_format, resolve_plural_rules,
+    resolve_relative_time_format, select_plural, select_plural_range, supported_values,
+    text_direction_of_locale, time_zones_of_locale, week_info_of_locale,
 };
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -175,6 +177,8 @@ enum IntlLocaleListTarget {
     RelativeTimeFormatSupportedLocalesOf(Box<IntlRelativeTimeFormatSupportedLocalesContinuation>),
     ListFormatConstructor(Box<IntlListFormatConstructorContinuation>),
     ListFormatSupportedLocalesOf(Box<IntlListFormatSupportedLocalesContinuation>),
+    DisplayNamesConstructor(Box<IntlDisplayNamesConstructorContinuation>),
+    DisplayNamesSupportedLocalesOf(Box<IntlDisplayNamesSupportedLocalesContinuation>),
 }
 
 impl IntlLocaleListTarget {
@@ -193,6 +197,8 @@ impl IntlLocaleListTarget {
             Self::RelativeTimeFormatSupportedLocalesOf(state) => state.retained_values(),
             Self::ListFormatConstructor(state) => state.retained_values(),
             Self::ListFormatSupportedLocalesOf(state) => state.retained_values(),
+            Self::DisplayNamesConstructor(state) => state.retained_values(),
+            Self::DisplayNamesSupportedLocalesOf(state) => state.retained_values(),
         }
     }
 
@@ -211,6 +217,8 @@ impl IntlLocaleListTarget {
             Self::RelativeTimeFormatSupportedLocalesOf(state) => state.trace_roots(mark),
             Self::ListFormatConstructor(state) => state.trace_roots(mark),
             Self::ListFormatSupportedLocalesOf(state) => state.trace_roots(mark),
+            Self::DisplayNamesConstructor(state) => state.trace_roots(mark),
+            Self::DisplayNamesSupportedLocalesOf(state) => state.trace_roots(mark),
         }
     }
 }
@@ -987,6 +995,129 @@ impl IntlListFormatSupportedLocalesContinuation {
         if let Some(options) = &self.options_object {
             trace_stored_value_root(options, mark);
         }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum IntlDisplayNamesConstructorStage {
+    AwaitPrototype,
+    ReadOption,
+    AwaitOption,
+    AwaitOptionPrimitive,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum IntlDisplayNamesOption {
+    LocaleMatcher,
+    Style,
+    Type,
+    Fallback,
+    LanguageDisplay,
+}
+
+impl IntlDisplayNamesOption {
+    const ALL: [Self; 5] = [
+        Self::LocaleMatcher,
+        Self::Style,
+        Self::Type,
+        Self::Fallback,
+        Self::LanguageDisplay,
+    ];
+
+    const fn name(self) -> &'static str {
+        match self {
+            Self::LocaleMatcher => "localeMatcher",
+            Self::Style => "style",
+            Self::Type => "type",
+            Self::Fallback => "fallback",
+            Self::LanguageDisplay => "languageDisplay",
+        }
+    }
+}
+
+pub(super) struct IntlDisplayNamesConstructorContinuation {
+    new_target: FunctionId,
+    locales_argument: Option<StoredValue>,
+    options_argument: StoredValue,
+    options_object: Option<StoredValue>,
+    prototype: Option<HeapReference>,
+    requested_locales: Vec<String>,
+    options: DisplayNamesRequestOptions,
+    option_index: usize,
+    realm: RealmId,
+    stage: IntlDisplayNamesConstructorStage,
+    origin: JsStackFrame,
+}
+
+impl IntlDisplayNamesConstructorContinuation {
+    pub(super) fn retained_values(&self) -> u64 {
+        2_u64
+            .saturating_add(u64::from(self.locales_argument.is_some()))
+            .saturating_add(u64::from(self.options_object.is_some()))
+            .saturating_add(u64::from(self.prototype.is_some()))
+    }
+
+    pub(super) fn trace_roots(&self, mark: &mut dyn FnMut(CollectionRoot)) {
+        mark(CollectionRoot::Heap(HeapReference::Function(
+            self.new_target,
+        )));
+        if let Some(locales) = &self.locales_argument {
+            trace_stored_value_root(locales, mark);
+        }
+        trace_stored_value_root(&self.options_argument, mark);
+        if let Some(options) = &self.options_object {
+            trace_stored_value_root(options, mark);
+        }
+        if let Some(prototype) = self.prototype {
+            mark(CollectionRoot::Heap(prototype));
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum IntlDisplayNamesSupportedLocalesStage {
+    ReadLocaleMatcher,
+    AwaitLocaleMatcher,
+    AwaitLocaleMatcherPrimitive,
+}
+
+pub(super) struct IntlDisplayNamesSupportedLocalesContinuation {
+    options_argument: StoredValue,
+    options_object: Option<StoredValue>,
+    requested_locales: Vec<String>,
+    realm: RealmId,
+    stage: IntlDisplayNamesSupportedLocalesStage,
+    origin: JsStackFrame,
+}
+
+impl IntlDisplayNamesSupportedLocalesContinuation {
+    pub(super) fn retained_values(&self) -> u64 {
+        1_u64.saturating_add(u64::from(self.options_object.is_some()))
+    }
+
+    pub(super) fn trace_roots(&self, mark: &mut dyn FnMut(CollectionRoot)) {
+        trace_stored_value_root(&self.options_argument, mark);
+        if let Some(options) = &self.options_object {
+            trace_stored_value_root(options, mark);
+        }
+    }
+}
+
+pub(super) struct IntlDisplayNamesOfContinuation {
+    display_names: ObjectId,
+    realm: RealmId,
+    origin: JsStackFrame,
+}
+
+impl IntlDisplayNamesOfContinuation {
+    pub(super) const fn retained_values() -> u64 {
+        1
+    }
+
+    pub(super) fn trace_roots(&self, mark: &mut dyn FnMut(CollectionRoot)) {
+        mark(CollectionRoot::Heap(HeapReference::Object(
+            self.display_names,
+        )));
     }
 }
 
@@ -7021,6 +7152,673 @@ fn intl_list_format_exception(
     })
 }
 
+pub(super) fn begin_intl_display_names_constructor(
+    runtime: &mut Runtime,
+    mut inputs: CallInputs,
+    realm: RealmId,
+    return_to: Option<CallReturn>,
+    origin: JsStackFrame,
+    execution_budget: &mut ExecutionBudget,
+) -> Result<NativeDispatch, NativeFailure> {
+    let Some(new_target) = inputs.new_target else {
+        return intl_locale_list_error(
+            realm,
+            origin,
+            ExceptionKind::TypeError,
+            "Intl.DisplayNames requires 'new'",
+        );
+    };
+    let locales_argument = inputs.arguments.take_first_or_undefined();
+    let options_argument = inputs.arguments.take_first_or_undefined();
+    let state = IntlDisplayNamesConstructorContinuation {
+        new_target,
+        locales_argument: Some(locales_argument),
+        options_argument,
+        options_object: None,
+        prototype: None,
+        requested_locales: Vec::new(),
+        options: DisplayNamesRequestOptions::default(),
+        option_index: 0,
+        realm,
+        stage: IntlDisplayNamesConstructorStage::AwaitPrototype,
+        origin,
+    };
+    let base = StoredValue::Function(new_target);
+    charge_heap_property_lookup(runtime, &base, execution_budget)?;
+    let key = runtime.predefined_property_key(PredefinedAtom::Prototype);
+    let dispatch = begin_value_get(
+        runtime,
+        &base,
+        key,
+        None,
+        realm,
+        return_to,
+        state.origin.clone(),
+        execution_budget,
+    )?;
+    continue_intl_display_names_constructor_after(
+        dispatch,
+        state,
+        runtime,
+        return_to,
+        execution_budget,
+    )
+}
+
+fn begin_intl_display_names_options(
+    runtime: &mut Runtime,
+    mut state: IntlDisplayNamesConstructorContinuation,
+    return_to: Option<CallReturn>,
+    execution_budget: &mut ExecutionBudget,
+) -> Result<NativeDispatch, NativeFailure> {
+    if matches!(state.options_argument, StoredValue::Undefined) {
+        return finish_intl_display_names_options(runtime, state);
+    }
+    if !matches!(
+        state.options_argument,
+        StoredValue::Function(_) | StoredValue::Object(_)
+    ) {
+        return intl_locale_list_error(
+            state.realm,
+            state.origin,
+            ExceptionKind::TypeError,
+            "Intl.DisplayNames options must be an object",
+        );
+    }
+    state.options_object = Some(state.options_argument.duplicate());
+    state.stage = IntlDisplayNamesConstructorStage::ReadOption;
+    advance_intl_display_names_constructor(runtime, state, None, return_to, execution_budget)
+}
+
+#[allow(
+    clippy::too_many_lines,
+    reason = "DisplayNames option Gets and resumable conversions stay in normative order"
+)]
+pub(super) fn advance_intl_display_names_constructor(
+    runtime: &mut Runtime,
+    mut state: IntlDisplayNamesConstructorContinuation,
+    completion: Option<StoredValue>,
+    return_to: Option<CallReturn>,
+    execution_budget: &mut ExecutionBudget,
+) -> Result<NativeDispatch, NativeFailure> {
+    let mut completion = completion;
+    loop {
+        match state.stage {
+            IntlDisplayNamesConstructorStage::AwaitPrototype => {
+                let requested = take_intl_display_names_constructor_completion(&mut completion)?;
+                state.prototype = Some(match requested {
+                    StoredValue::Function(function) => HeapReference::Function(function),
+                    StoredValue::Object(object) => HeapReference::Object(object),
+                    StoredValue::Undefined
+                    | StoredValue::Null
+                    | StoredValue::Boolean(_)
+                    | StoredValue::Number(_)
+                    | StoredValue::BigInt(_)
+                    | StoredValue::String(_)
+                    | StoredValue::Symbol(_) => {
+                        let target_realm = runtime.function_realm(state.new_target)?;
+                        HeapReference::Object(
+                            runtime.realm_intl_display_names_prototype(target_realm)?,
+                        )
+                    }
+                });
+                let locales =
+                    state
+                        .locales_argument
+                        .take()
+                        .ok_or(EngineFault::RuntimeInvariant {
+                            message: "Intl.DisplayNames constructor lost its locales argument",
+                        })?;
+                state.stage = IntlDisplayNamesConstructorStage::ReadOption;
+                let realm = state.realm;
+                let origin = state.origin.clone();
+                return begin_intl_locale_list(
+                    runtime,
+                    locales,
+                    IntlLocaleListTarget::DisplayNamesConstructor(Box::new(state)),
+                    realm,
+                    return_to,
+                    origin,
+                    execution_budget,
+                );
+            }
+            IntlDisplayNamesConstructorStage::ReadOption => {
+                let Some(option) = IntlDisplayNamesOption::ALL.get(state.option_index).copied()
+                else {
+                    return finish_intl_display_names_options(runtime, state);
+                };
+                let base = state
+                    .options_object
+                    .as_ref()
+                    .ok_or(EngineFault::RuntimeInvariant {
+                        message: "Intl.DisplayNames option iteration lost its options object",
+                    })?
+                    .duplicate();
+                charge_heap_property_lookup(runtime, &base, execution_budget)?;
+                let name = JsString::from_utf8(option.name())?;
+                let key = runtime.property_key_from_string(&name)?;
+                state.stage = IntlDisplayNamesConstructorStage::AwaitOption;
+                let dispatch = begin_value_get(
+                    runtime,
+                    &base,
+                    key,
+                    Some(&name),
+                    state.realm,
+                    return_to,
+                    state.origin.clone(),
+                    execution_budget,
+                )?;
+                return continue_intl_display_names_constructor_after(
+                    dispatch,
+                    state,
+                    runtime,
+                    return_to,
+                    execution_budget,
+                );
+            }
+            IntlDisplayNamesConstructorStage::AwaitOption => {
+                let value = take_intl_display_names_constructor_completion(&mut completion)?;
+                let option = IntlDisplayNamesOption::ALL[state.option_index];
+                if matches!(value, StoredValue::Undefined) {
+                    advance_intl_display_names_option(&mut state);
+                    continue;
+                }
+                if matches!(value, StoredValue::Function(_) | StoredValue::Object(_)) {
+                    state.stage = IntlDisplayNamesConstructorStage::AwaitOptionPrimitive;
+                    let realm = state.realm;
+                    let origin = state.origin.clone();
+                    return begin_operator_primitive_conversion(
+                        runtime,
+                        value,
+                        OperatorPrimitiveHint::String,
+                        OperatorPrimitiveTarget::IntlDisplayNamesConstructor(Box::new(state)),
+                        realm,
+                        return_to,
+                        origin,
+                        execution_budget,
+                    );
+                }
+                let text = operator_primitive_to_string(value, state.realm, &state.origin)?;
+                store_intl_display_names_option(&mut state, option, &text)?;
+                advance_intl_display_names_option(&mut state);
+            }
+            IntlDisplayNamesConstructorStage::AwaitOptionPrimitive => {
+                let value = take_intl_display_names_constructor_completion(&mut completion)?;
+                let option = IntlDisplayNamesOption::ALL[state.option_index];
+                let text = operator_primitive_to_string(value, state.realm, &state.origin)?;
+                store_intl_display_names_option(&mut state, option, &text)?;
+                advance_intl_display_names_option(&mut state);
+            }
+        }
+    }
+}
+
+fn advance_intl_display_names_option(state: &mut IntlDisplayNamesConstructorContinuation) {
+    state.option_index = state.option_index.saturating_add(1);
+    state.stage = IntlDisplayNamesConstructorStage::ReadOption;
+}
+
+fn store_intl_display_names_option(
+    state: &mut IntlDisplayNamesConstructorContinuation,
+    option: IntlDisplayNamesOption,
+    text: &JsString,
+) -> Result<(), NativeFailure> {
+    let value = text.to_utf8_lossy()?;
+    match option {
+        IntlDisplayNamesOption::LocaleMatcher => {
+            if !matches!(value.as_str(), "lookup" | "best fit") {
+                return invalid_intl_display_names_option(state, option);
+            }
+        }
+        IntlDisplayNamesOption::Style => {
+            state.options.style = Some(match value.as_str() {
+                "narrow" => DisplayNamesStyle::Narrow,
+                "short" => DisplayNamesStyle::Short,
+                "long" => DisplayNamesStyle::Long,
+                _ => return invalid_intl_display_names_option(state, option),
+            });
+        }
+        IntlDisplayNamesOption::Type => {
+            state.options.name_type = Some(match value.as_str() {
+                "language" => DisplayNamesType::Language,
+                "region" => DisplayNamesType::Region,
+                "script" => DisplayNamesType::Script,
+                "currency" => DisplayNamesType::Currency,
+                "calendar" => DisplayNamesType::Calendar,
+                "dateTimeField" => DisplayNamesType::DateTimeField,
+                _ => return invalid_intl_display_names_option(state, option),
+            });
+        }
+        IntlDisplayNamesOption::Fallback => {
+            state.options.fallback = Some(match value.as_str() {
+                "code" => DisplayNamesFallback::Code,
+                "none" => DisplayNamesFallback::None,
+                _ => return invalid_intl_display_names_option(state, option),
+            });
+        }
+        IntlDisplayNamesOption::LanguageDisplay => {
+            state.options.language_display = Some(match value.as_str() {
+                "dialect" => DisplayNamesLanguageDisplay::Dialect,
+                "standard" => DisplayNamesLanguageDisplay::Standard,
+                _ => return invalid_intl_display_names_option(state, option),
+            });
+        }
+    }
+    Ok(())
+}
+
+fn invalid_intl_display_names_option<T>(
+    state: &IntlDisplayNamesConstructorContinuation,
+    option: IntlDisplayNamesOption,
+) -> Result<T, NativeFailure> {
+    intl_locale_list_error(
+        state.realm,
+        state.origin.clone(),
+        ExceptionKind::RangeError,
+        &format!("invalid Intl.DisplayNames {} option", option.name()),
+    )
+}
+
+fn finish_intl_display_names_options(
+    runtime: &mut Runtime,
+    state: IntlDisplayNamesConstructorContinuation,
+) -> Result<NativeDispatch, NativeFailure> {
+    if state.options.name_type.is_none() {
+        return intl_locale_list_error(
+            state.realm,
+            state.origin,
+            ExceptionKind::TypeError,
+            "Intl.DisplayNames requires a type option",
+        );
+    }
+    let resolved = resolve_display_names(&state.requested_locales, state.options).map_err(
+        |error| match error {
+            DisplayNamesError::MissingType => NativeFailure::Abrupt(PendingException {
+                realm: state.realm,
+                payload: PendingExceptionPayload::EngineError {
+                    kind: ExceptionKind::TypeError,
+                    message: JsString::from_utf8("Intl.DisplayNames requires a type option")
+                        .expect("static Intl error is valid UTF-8"),
+                },
+                origin: state.origin.clone(),
+            }),
+            DisplayNamesError::InvalidLocale
+            | DisplayNamesError::InvalidCode
+            | DisplayNamesError::Data => EngineFault::RuntimeInvariant {
+                message: "canonical DisplayNames inputs failed locale resolution",
+            }
+            .into(),
+        },
+    )?;
+    let prototype = state.prototype.ok_or(EngineFault::RuntimeInvariant {
+        message: "Intl.DisplayNames allocation lost its prototype",
+    })?;
+    let object = runtime.allocate_intl_display_names(prototype, resolved)?;
+    Ok(NativeDispatch::Immediate(StoredValue::Object(object)))
+}
+
+fn continue_intl_display_names_constructor_after(
+    dispatch: NativeDispatch,
+    state: IntlDisplayNamesConstructorContinuation,
+    runtime: &mut Runtime,
+    return_to: Option<CallReturn>,
+    execution_budget: &mut ExecutionBudget,
+) -> Result<NativeDispatch, NativeFailure> {
+    continue_get_after(
+        dispatch,
+        state,
+        |state| NativeContinuation::IntlDisplayNamesConstructor(Box::new(state)),
+        |state, value| {
+            advance_intl_display_names_constructor(
+                runtime,
+                state,
+                Some(value),
+                return_to,
+                execution_budget,
+            )
+        },
+        "Intl.DisplayNames property Get produced a structured result",
+    )
+}
+
+fn take_intl_display_names_constructor_completion(
+    completion: &mut Option<StoredValue>,
+) -> Result<StoredValue, EngineFault> {
+    completion.take().ok_or(EngineFault::RuntimeInvariant {
+        message: "Intl.DisplayNames constructor resumed without a completion",
+    })
+}
+
+pub(super) fn begin_intl_display_names_supported_locales_of(
+    runtime: &mut Runtime,
+    mut arguments: CallArguments,
+    realm: RealmId,
+    return_to: Option<CallReturn>,
+    origin: JsStackFrame,
+    execution_budget: &mut ExecutionBudget,
+) -> Result<NativeDispatch, NativeFailure> {
+    let locales = arguments.take_first_or_undefined();
+    let options_argument = arguments.take_first_or_undefined();
+    let state = IntlDisplayNamesSupportedLocalesContinuation {
+        options_argument,
+        options_object: None,
+        requested_locales: Vec::new(),
+        realm,
+        stage: IntlDisplayNamesSupportedLocalesStage::ReadLocaleMatcher,
+        origin: origin.clone(),
+    };
+    begin_intl_locale_list(
+        runtime,
+        locales,
+        IntlLocaleListTarget::DisplayNamesSupportedLocalesOf(Box::new(state)),
+        realm,
+        return_to,
+        origin,
+        execution_budget,
+    )
+}
+
+fn begin_intl_display_names_supported_locales_options(
+    runtime: &mut Runtime,
+    mut state: IntlDisplayNamesSupportedLocalesContinuation,
+    return_to: Option<CallReturn>,
+    execution_budget: &mut ExecutionBudget,
+) -> Result<NativeDispatch, NativeFailure> {
+    if matches!(state.options_argument, StoredValue::Undefined) {
+        return finish_intl_display_names_supported_locales(runtime, &state);
+    }
+    let options_argument = state.options_argument.duplicate();
+    state.options_object = Some(
+        match to_object_value(runtime, state.realm, options_argument, state.origin.clone())? {
+            Ok(options) => options,
+            Err(exception) => return Err(NativeFailure::Abrupt(exception)),
+        },
+    );
+    advance_intl_display_names_supported_locales(runtime, state, None, return_to, execution_budget)
+}
+
+pub(super) fn advance_intl_display_names_supported_locales(
+    runtime: &mut Runtime,
+    mut state: IntlDisplayNamesSupportedLocalesContinuation,
+    completion: Option<StoredValue>,
+    return_to: Option<CallReturn>,
+    execution_budget: &mut ExecutionBudget,
+) -> Result<NativeDispatch, NativeFailure> {
+    let mut completion = completion;
+    match state.stage {
+        IntlDisplayNamesSupportedLocalesStage::ReadLocaleMatcher => {
+            let base = state
+                .options_object
+                .as_ref()
+                .ok_or(EngineFault::RuntimeInvariant {
+                    message: "Intl.DisplayNames.supportedLocalesOf lost its options object",
+                })?
+                .duplicate();
+            charge_heap_property_lookup(runtime, &base, execution_budget)?;
+            let name = JsString::from_utf8("localeMatcher")?;
+            let key = runtime.property_key_from_string(&name)?;
+            state.stage = IntlDisplayNamesSupportedLocalesStage::AwaitLocaleMatcher;
+            let dispatch = begin_value_get(
+                runtime,
+                &base,
+                key,
+                Some(&name),
+                state.realm,
+                return_to,
+                state.origin.clone(),
+                execution_budget,
+            )?;
+            continue_intl_display_names_supported_locales_after(
+                dispatch,
+                state,
+                runtime,
+                return_to,
+                execution_budget,
+            )
+        }
+        IntlDisplayNamesSupportedLocalesStage::AwaitLocaleMatcher => {
+            let value = take_intl_display_names_supported_locales_completion(&mut completion)?;
+            if matches!(value, StoredValue::Undefined) {
+                return finish_intl_display_names_supported_locales(runtime, &state);
+            }
+            if matches!(value, StoredValue::Function(_) | StoredValue::Object(_)) {
+                state.stage = IntlDisplayNamesSupportedLocalesStage::AwaitLocaleMatcherPrimitive;
+                let realm = state.realm;
+                let origin = state.origin.clone();
+                return begin_operator_primitive_conversion(
+                    runtime,
+                    value,
+                    OperatorPrimitiveHint::String,
+                    OperatorPrimitiveTarget::IntlDisplayNamesSupportedLocalesOf(Box::new(state)),
+                    realm,
+                    return_to,
+                    origin,
+                    execution_budget,
+                );
+            }
+            validate_intl_display_names_locale_matcher(&state, value)?;
+            finish_intl_display_names_supported_locales(runtime, &state)
+        }
+        IntlDisplayNamesSupportedLocalesStage::AwaitLocaleMatcherPrimitive => {
+            let value = take_intl_display_names_supported_locales_completion(&mut completion)?;
+            validate_intl_display_names_locale_matcher(&state, value)?;
+            finish_intl_display_names_supported_locales(runtime, &state)
+        }
+    }
+}
+
+fn validate_intl_display_names_locale_matcher(
+    state: &IntlDisplayNamesSupportedLocalesContinuation,
+    value: StoredValue,
+) -> Result<(), NativeFailure> {
+    let text = operator_primitive_to_string(value, state.realm, &state.origin)?;
+    if matches!(text.to_utf8_lossy()?.as_str(), "lookup" | "best fit") {
+        return Ok(());
+    }
+    intl_locale_list_error(
+        state.realm,
+        state.origin.clone(),
+        ExceptionKind::RangeError,
+        "invalid Intl.DisplayNames localeMatcher option",
+    )
+}
+
+fn finish_intl_display_names_supported_locales(
+    runtime: &mut Runtime,
+    state: &IntlDisplayNamesSupportedLocalesContinuation,
+) -> Result<NativeDispatch, NativeFailure> {
+    intl_locale_string_array(
+        runtime,
+        state.realm,
+        display_names_supported_locales(&state.requested_locales),
+    )
+}
+
+fn continue_intl_display_names_supported_locales_after(
+    dispatch: NativeDispatch,
+    state: IntlDisplayNamesSupportedLocalesContinuation,
+    runtime: &mut Runtime,
+    return_to: Option<CallReturn>,
+    execution_budget: &mut ExecutionBudget,
+) -> Result<NativeDispatch, NativeFailure> {
+    continue_get_after(
+        dispatch,
+        state,
+        |state| NativeContinuation::IntlDisplayNamesSupportedLocalesOf(Box::new(state)),
+        |state, value| {
+            advance_intl_display_names_supported_locales(
+                runtime,
+                state,
+                Some(value),
+                return_to,
+                execution_budget,
+            )
+        },
+        "Intl.DisplayNames.supportedLocalesOf Get produced a structured result",
+    )
+}
+
+fn take_intl_display_names_supported_locales_completion(
+    completion: &mut Option<StoredValue>,
+) -> Result<StoredValue, EngineFault> {
+    completion.take().ok_or(EngineFault::RuntimeInvariant {
+        message: "Intl.DisplayNames.supportedLocalesOf resumed without a completion",
+    })
+}
+
+#[allow(
+    clippy::too_many_arguments,
+    reason = "native dispatch keeps receiver, arguments, realm, return target, origin, and budget explicit"
+)]
+pub(super) fn begin_intl_display_names_prototype(
+    runtime: &mut Runtime,
+    method: IntlDisplayNamesPrototypeMethod,
+    receiver: &StoredValue,
+    mut arguments: CallArguments,
+    realm: RealmId,
+    return_to: Option<CallReturn>,
+    origin: JsStackFrame,
+    execution_budget: &mut ExecutionBudget,
+) -> Result<NativeDispatch, NativeFailure> {
+    let StoredValue::Object(display_names) = receiver else {
+        return intl_display_names_brand_error(realm, origin);
+    };
+    let Some(resolved) = runtime.intl_display_names_state(*display_names)?.cloned() else {
+        return intl_display_names_brand_error(realm, origin);
+    };
+    match method {
+        IntlDisplayNamesPrototypeMethod::ResolvedOptions => {
+            intl_display_names_resolved_options(runtime, realm, &resolved)
+        }
+        IntlDisplayNamesPrototypeMethod::Of => {
+            let code = arguments.take_first_or_undefined();
+            begin_intl_display_names_of(
+                runtime,
+                IntlDisplayNamesOfContinuation {
+                    display_names: *display_names,
+                    realm,
+                    origin,
+                },
+                code,
+                return_to,
+                execution_budget,
+            )
+        }
+    }
+}
+
+fn begin_intl_display_names_of(
+    runtime: &mut Runtime,
+    state: IntlDisplayNamesOfContinuation,
+    code: StoredValue,
+    return_to: Option<CallReturn>,
+    execution_budget: &mut ExecutionBudget,
+) -> Result<NativeDispatch, NativeFailure> {
+    if matches!(code, StoredValue::Function(_) | StoredValue::Object(_)) {
+        let realm = state.realm;
+        let origin = state.origin.clone();
+        return begin_operator_primitive_conversion(
+            runtime,
+            code,
+            OperatorPrimitiveHint::String,
+            OperatorPrimitiveTarget::IntlDisplayNamesOf(Box::new(state)),
+            realm,
+            return_to,
+            origin,
+            execution_budget,
+        );
+    }
+    finish_intl_display_names_of_primitive(runtime, &state, code)
+}
+
+pub(super) fn finish_intl_display_names_of_primitive(
+    runtime: &mut Runtime,
+    state: &IntlDisplayNamesOfContinuation,
+    code: StoredValue,
+) -> Result<NativeDispatch, NativeFailure> {
+    let code = operator_primitive_to_string(code, state.realm, &state.origin)?.to_utf8_lossy()?;
+    let resolved = runtime
+        .intl_display_names_state(state.display_names)?
+        .ok_or(EngineFault::RuntimeInvariant {
+            message: "Intl.DisplayNames.of lost its branded receiver",
+        })?;
+    match display_name(resolved, &code) {
+        Ok(Some(name)) => Ok(NativeDispatch::Immediate(StoredValue::String(
+            JsString::from_utf8(&name)?,
+        ))),
+        Ok(None) => Ok(NativeDispatch::Immediate(StoredValue::Undefined)),
+        Err(DisplayNamesError::InvalidCode) => intl_locale_list_error(
+            state.realm,
+            state.origin.clone(),
+            ExceptionKind::RangeError,
+            "invalid code for Intl.DisplayNames.of",
+        ),
+        Err(
+            DisplayNamesError::InvalidLocale
+            | DisplayNamesError::MissingType
+            | DisplayNamesError::Data,
+        ) => Err(EngineFault::RuntimeInvariant {
+            message: "resolved Intl.DisplayNames slots failed display-name lookup",
+        }
+        .into()),
+    }
+}
+
+fn intl_display_names_resolved_options(
+    runtime: &mut Runtime,
+    realm: RealmId,
+    state: &DisplayNamesState,
+) -> Result<NativeDispatch, NativeFailure> {
+    let object = runtime.allocate_ordinary_object(runtime.realm_object_prototype(realm)?)?;
+    let mut properties = vec![
+        (
+            "locale",
+            StoredValue::String(JsString::from_utf8(&state.locale)?),
+        ),
+        (
+            "style",
+            StoredValue::String(JsString::from_utf8(state.style.as_str())?),
+        ),
+        (
+            "type",
+            StoredValue::String(JsString::from_utf8(state.name_type.as_str())?),
+        ),
+        (
+            "fallback",
+            StoredValue::String(JsString::from_utf8(state.fallback.as_str())?),
+        ),
+    ];
+    if matches!(state.name_type, DisplayNamesType::Language) {
+        properties.push((
+            "languageDisplay",
+            StoredValue::String(JsString::from_utf8(state.language_display.as_str())?),
+        ));
+    }
+    for (name, value) in properties {
+        let name = JsString::from_utf8(name)?;
+        let key = runtime.property_key_from_string(&name)?;
+        runtime.append_data_property(
+            HeapReference::Object(object),
+            key,
+            PropertyLayout::data(true, true, true),
+            value,
+        )?;
+    }
+    Ok(NativeDispatch::Immediate(StoredValue::Object(object)))
+}
+
+fn intl_display_names_brand_error<T>(
+    realm: RealmId,
+    origin: JsStackFrame,
+) -> Result<T, NativeFailure> {
+    intl_locale_list_error(
+        realm,
+        origin,
+        ExceptionKind::TypeError,
+        "Intl.DisplayNames method called on incompatible receiver",
+    )
+}
+
 pub(super) fn begin_intl_date_time_format_constructor(
     runtime: &mut Runtime,
     function: FunctionId,
@@ -9466,6 +10264,19 @@ fn finish_intl_locale_list(
         IntlLocaleListTarget::ListFormatSupportedLocalesOf(mut state) => {
             state.requested_locales = intl_locale_strings(locales)?;
             begin_intl_list_format_supported_locales_options(
+                runtime,
+                *state,
+                return_to,
+                execution_budget,
+            )
+        }
+        IntlLocaleListTarget::DisplayNamesConstructor(mut state) => {
+            state.requested_locales = intl_locale_strings(locales)?;
+            begin_intl_display_names_options(runtime, *state, return_to, execution_budget)
+        }
+        IntlLocaleListTarget::DisplayNamesSupportedLocalesOf(mut state) => {
+            state.requested_locales = intl_locale_strings(locales)?;
+            begin_intl_display_names_supported_locales_options(
                 runtime,
                 *state,
                 return_to,

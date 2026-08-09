@@ -3262,6 +3262,27 @@ fn finish_operator_primitive_target(
                 execution_budget,
             )
         }
+        OperatorPrimitiveTarget::IntlDisplayNamesConstructor(state) => {
+            advance_intl_display_names_constructor(
+                runtime,
+                *state,
+                Some(value),
+                return_to,
+                execution_budget,
+            )
+        }
+        OperatorPrimitiveTarget::IntlDisplayNamesSupportedLocalesOf(state) => {
+            advance_intl_display_names_supported_locales(
+                runtime,
+                *state,
+                Some(value),
+                return_to,
+                execution_budget,
+            )
+        }
+        OperatorPrimitiveTarget::IntlDisplayNamesOf(state) => {
+            finish_intl_display_names_of_primitive(runtime, &state, value)
+        }
         OperatorPrimitiveTarget::IntlCollatorCompareFirst(state) => {
             finish_intl_collator_compare_first(runtime, *state, value, return_to, execution_budget)
         }

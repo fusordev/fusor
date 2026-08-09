@@ -314,6 +314,8 @@ struct IntlIntrinsics {
     relative_time_format_constructor: FunctionId,
     list_format_prototype: ObjectId,
     list_format_constructor: FunctionId,
+    display_names_prototype: ObjectId,
+    display_names_constructor: FunctionId,
     locale_prototype: ObjectId,
     locale_constructor: FunctionId,
 }
@@ -1291,6 +1293,12 @@ pub(crate) enum NativeFunctionKind {
     IntlListFormatSupportedLocalesOf,
     /// One `%Intl.ListFormat.prototype%` method.
     IntlListFormatPrototype(IntlListFormatPrototypeMethod),
+    /// The `%Intl.DisplayNames%` constructor.
+    IntlDisplayNamesConstructor,
+    /// `Intl.DisplayNames.supportedLocalesOf`.
+    IntlDisplayNamesSupportedLocalesOf,
+    /// One `%Intl.DisplayNames.prototype%` method.
+    IntlDisplayNamesPrototype(IntlDisplayNamesPrototypeMethod),
     /// The `%Intl.Locale%` constructor.
     IntlLocaleConstructor,
     /// One `%Intl.Locale.prototype%` accessor or method.
@@ -1705,6 +1713,30 @@ pub(crate) enum IntlListFormatPrototypeMethod {
     ResolvedOptions,
     Format,
     FormatToParts,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum IntlDisplayNamesPrototypeMethod {
+    ResolvedOptions,
+    Of,
+}
+
+impl IntlDisplayNamesPrototypeMethod {
+    pub(crate) const ALL: [Self; 2] = [Self::ResolvedOptions, Self::Of];
+
+    pub(crate) const fn name(self) -> &'static str {
+        match self {
+            Self::ResolvedOptions => "resolvedOptions",
+            Self::Of => "of",
+        }
+    }
+
+    pub(crate) const fn length(self) -> i32 {
+        match self {
+            Self::ResolvedOptions => 0,
+            Self::Of => 1,
+        }
+    }
 }
 
 impl IntlListFormatPrototypeMethod {
@@ -4472,6 +4504,7 @@ impl NativeFunctionKind {
                 | Self::IntlPluralRulesConstructor
                 | Self::IntlRelativeTimeFormatConstructor
                 | Self::IntlListFormatConstructor
+                | Self::IntlDisplayNamesConstructor
                 | Self::IntlLocaleConstructor
                 | Self::TemporalDurationConstructor
                 | Self::TemporalInstantConstructor

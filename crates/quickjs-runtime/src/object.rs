@@ -24,8 +24,8 @@
  */
 
 use quickjs_intl::{
-    CollatorState, DateTimeFormatState, ListFormatState, NumberFormatState, PluralRulesState,
-    RelativeTimeFormatState,
+    CollatorState, DateTimeFormatState, DisplayNamesState, ListFormatState, NumberFormatState,
+    PluralRulesState, RelativeTimeFormatState,
 };
 use std::{
     cell::RefCell,
@@ -2666,6 +2666,8 @@ pub(crate) enum HeapObjectKind {
     IntlRelativeTimeFormat(RelativeTimeFormatState),
     /// An ECMA-402 `Intl.ListFormat` object.
     IntlListFormat(ListFormatState),
+    /// An ECMA-402 `Intl.DisplayNames` object.
+    IntlDisplayNames(DisplayNamesState),
     /// An ECMAScript `ArrayBuffer` object with its byte-data block slots.
     ArrayBuffer(ArrayBufferState),
     /// An ECMAScript `DataView` object with its view and buffer slots.
@@ -2852,6 +2854,7 @@ impl HeapObjectKind {
             | Self::IntlPluralRules(_)
             | Self::IntlRelativeTimeFormat(_)
             | Self::IntlListFormat(_)
+            | Self::IntlDisplayNames(_)
             | Self::ArrayBuffer(_)
             | Self::DataView(_)
             | Self::TypedArray(_)
@@ -2899,6 +2902,7 @@ impl HeapObjectKind {
             | Self::IntlPluralRules(_)
             | Self::IntlRelativeTimeFormat(_)
             | Self::IntlListFormat(_)
+            | Self::IntlDisplayNames(_)
             | Self::ArrayBuffer(_)
             | Self::DataView(_)
             | Self::TypedArray(_)
@@ -2945,6 +2949,7 @@ impl HeapObjectKind {
             | Self::IntlPluralRules(_)
             | Self::IntlRelativeTimeFormat(_)
             | Self::IntlListFormat(_)
+            | Self::IntlDisplayNames(_)
             | Self::ArrayBuffer(_)
             | Self::DataView(_)
             | Self::TypedArray(_)
@@ -2991,6 +2996,7 @@ impl HeapObjectKind {
             | Self::IntlPluralRules(_)
             | Self::IntlRelativeTimeFormat(_)
             | Self::IntlListFormat(_)
+            | Self::IntlDisplayNames(_)
             | Self::ArrayBuffer(_)
             | Self::DataView(_)
             | Self::TypedArray(_)
@@ -3037,6 +3043,7 @@ impl HeapObjectKind {
             | Self::IntlPluralRules(_)
             | Self::IntlRelativeTimeFormat(_)
             | Self::IntlListFormat(_)
+            | Self::IntlDisplayNames(_)
             | Self::ArrayBuffer(_)
             | Self::DataView(_)
             | Self::TypedArray(_)
@@ -3083,6 +3090,7 @@ impl HeapObjectKind {
             | Self::IntlPluralRules(_)
             | Self::IntlRelativeTimeFormat(_)
             | Self::IntlListFormat(_)
+            | Self::IntlDisplayNames(_)
             | Self::ArrayBuffer(_)
             | Self::DataView(_)
             | Self::TypedArray(_)
@@ -3129,6 +3137,7 @@ impl HeapObjectKind {
             | Self::IntlPluralRules(_)
             | Self::IntlRelativeTimeFormat(_)
             | Self::IntlListFormat(_)
+            | Self::IntlDisplayNames(_)
             | Self::ArrayBuffer(_)
             | Self::DataView(_)
             | Self::TypedArray(_)
@@ -3189,6 +3198,7 @@ impl HeapObjectKind {
             | Self::IntlPluralRules(_)
             | Self::IntlRelativeTimeFormat(_)
             | Self::IntlListFormat(_)
+            | Self::IntlDisplayNames(_)
             | Self::ArrayBuffer(_)
             | Self::DataView(_)
             | Self::TypedArray(_)
@@ -3235,6 +3245,7 @@ impl HeapObjectKind {
             | Self::IntlPluralRules(_)
             | Self::IntlRelativeTimeFormat(_)
             | Self::IntlListFormat(_)
+            | Self::IntlDisplayNames(_)
             | Self::ArrayBuffer(_)
             | Self::DataView(_)
             | Self::TypedArray(_)
@@ -3642,6 +3653,18 @@ impl HeapObject {
     }
 
     #[must_use]
+    pub(crate) const fn intl_display_names(
+        record: ObjectRecord,
+        resolved: DisplayNamesState,
+    ) -> Self {
+        Self {
+            kind: HeapObjectKind::IntlDisplayNames(resolved),
+            record,
+            public_roots: 0,
+        }
+    }
+
+    #[must_use]
     pub(crate) fn array_buffer(record: ObjectRecord, state: ArrayBufferState) -> Self {
         Self {
             kind: HeapObjectKind::ArrayBuffer(state),
@@ -3967,6 +3990,13 @@ impl HeapObject {
         }
     }
 
+    pub(crate) const fn intl_display_names_state(&self) -> Option<&DisplayNamesState> {
+        match &self.kind {
+            HeapObjectKind::IntlDisplayNames(state) => Some(state),
+            _ => None,
+        }
+    }
+
     pub(crate) const fn array_buffer_state(&self) -> Option<&ArrayBufferState> {
         match &self.kind {
             HeapObjectKind::ArrayBuffer(state) => Some(state),
@@ -4083,6 +4113,7 @@ impl HeapObject {
             | HeapObjectKind::IntlPluralRules(_)
             | HeapObjectKind::IntlRelativeTimeFormat(_)
             | HeapObjectKind::IntlListFormat(_)
+            | HeapObjectKind::IntlDisplayNames(_)
             | HeapObjectKind::ArrayBuffer(_)
             | HeapObjectKind::DataView(_)
             | HeapObjectKind::TypedArray(_)
@@ -4129,6 +4160,7 @@ impl HeapObject {
             | HeapObjectKind::IntlPluralRules(_)
             | HeapObjectKind::IntlRelativeTimeFormat(_)
             | HeapObjectKind::IntlListFormat(_)
+            | HeapObjectKind::IntlDisplayNames(_)
             | HeapObjectKind::ArrayBuffer(_)
             | HeapObjectKind::DataView(_)
             | HeapObjectKind::TypedArray(_)
@@ -4177,6 +4209,7 @@ impl HeapObject {
             | HeapObjectKind::IntlPluralRules(_)
             | HeapObjectKind::IntlRelativeTimeFormat(_)
             | HeapObjectKind::IntlListFormat(_)
+            | HeapObjectKind::IntlDisplayNames(_)
             | HeapObjectKind::ArrayBuffer(_)
             | HeapObjectKind::DataView(_)
             | HeapObjectKind::TypedArray(_)

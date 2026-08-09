@@ -13,6 +13,7 @@ use icu::locale::{
 
 mod collator;
 mod date_time_format;
+mod display_names;
 mod list_format;
 mod locale;
 mod locale_info;
@@ -31,6 +32,12 @@ pub use date_time_format::{
     DateTimeHourCycle, DateTimeStyle, DateTimeTimeZoneName, canonicalize_time_zone,
     date_time_format_supported_locales, format_datetime, format_datetime_to_parts,
     resolve_date_time_format,
+};
+pub use display_names::{
+    DisplayNamesError, DisplayNamesFallback, DisplayNamesLanguageDisplay,
+    DisplayNamesRequestOptions, DisplayNamesState, DisplayNamesStyle, DisplayNamesType,
+    canonicalize_display_names_code, display_name, display_names_supported_locales,
+    resolve_display_names,
 };
 
 pub use list_format::{

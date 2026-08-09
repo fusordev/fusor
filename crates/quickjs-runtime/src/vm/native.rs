@@ -1381,6 +1381,24 @@ pub(super) fn resume_native_continuations(
                 return_to,
                 execution_budget,
             )?,
+            NativeContinuation::IntlDisplayNamesConstructor(state) => {
+                advance_intl_display_names_constructor(
+                    runtime,
+                    *state,
+                    Some(value.duplicate()),
+                    return_to,
+                    execution_budget,
+                )?
+            }
+            NativeContinuation::IntlDisplayNamesSupportedLocalesOf(state) => {
+                advance_intl_display_names_supported_locales(
+                    runtime,
+                    *state,
+                    Some(value.duplicate()),
+                    return_to,
+                    execution_budget,
+                )?
+            }
             NativeContinuation::IntlLocaleConstructor(state) => advance_intl_locale_constructor(
                 runtime,
                 *state,
@@ -3058,6 +3076,36 @@ pub(super) fn dispatch_native_call_with_frames(
             origin.unwrap_or_else(native_function_host_origin),
             execution_budget,
         ),
+        NativeFunctionKind::IntlDisplayNamesConstructor => begin_intl_display_names_constructor(
+            runtime,
+            inputs,
+            native.realm,
+            return_to,
+            origin.unwrap_or_else(native_function_host_origin),
+            execution_budget,
+        ),
+        NativeFunctionKind::IntlDisplayNamesSupportedLocalesOf => {
+            begin_intl_display_names_supported_locales_of(
+                runtime,
+                inputs.arguments,
+                native.realm,
+                return_to,
+                origin.unwrap_or_else(native_function_host_origin),
+                execution_budget,
+            )
+        }
+        NativeFunctionKind::IntlDisplayNamesPrototype(method) => {
+            begin_intl_display_names_prototype(
+                runtime,
+                method,
+                &inputs.receiver,
+                inputs.arguments,
+                native.realm,
+                return_to,
+                origin.unwrap_or_else(native_function_host_origin),
+                execution_budget,
+            )
+        }
         NativeFunctionKind::IntlLocaleConstructor => begin_intl_locale_constructor(
             runtime,
             inputs,

@@ -581,6 +581,58 @@ fn list_format_iterables_parts_and_iterator_close_are_spec_shaped() {
 }
 
 #[test]
+fn display_names_constructor_options_and_descriptors_are_spec_shaped() {
+    assert_eq!(
+        rendered(
+            "var log=[];
+             var options={
+               get localeMatcher(){log.push('localeMatcher');return {toString:function(){log.push('localeMatcher string');return 'lookup'}}},
+               get style(){log.push('style');return 'short'},
+               get type(){log.push('type');return 'language'},
+               get fallback(){log.push('fallback');return 'none'},
+               get languageDisplay(){log.push('languageDisplay');return 'standard'}
+             };
+             class CustomDisplayNames extends Intl.DisplayNames{}
+             var dn=new CustomDisplayNames('en-u-ca-gregory',options);var ro=dn.resolvedOptions();
+             var d=Object.getOwnPropertyDescriptor(Intl.DisplayNames.prototype,'of');
+             var supported=Intl.DisplayNames.supportedLocalesOf(['tlh','en-u-ca-gregory'],{localeMatcher:'lookup'});
+             var primitive,missing;
+             try{new Intl.DisplayNames([],true)}catch(error){primitive=error.name}
+             try{new Intl.DisplayNames([],{})}catch(error){missing=error.name}
+             return [Intl.DisplayNames.length,Intl.DisplayNames.name,
+               Object.getPrototypeOf(dn)===CustomDisplayNames.prototype,
+               Object.keys(ro).join(','),ro.locale,ro.style,ro.type,ro.fallback,ro.languageDisplay,
+               d.value.length,d.writable,d.enumerable,d.configurable,
+               supported.join(','),primitive,missing,log.join(',')].join('|');"
+        ),
+        "2|DisplayNames|true|locale,style,type,fallback,languageDisplay|en|short|language|none|standard|1|true|false|true|en-u-ca-gregory|TypeError|TypeError|localeMatcher,localeMatcher string,style,type,fallback,languageDisplay"
+    );
+}
+
+#[test]
+fn display_names_lookup_canonicalization_and_brand_order_are_spec_shaped() {
+    assert_eq!(
+        rendered(
+            "var language=new Intl.DisplayNames('en',{type:'language'});
+             var region=new Intl.DisplayNames('en',{type:'region'});
+             var script=new Intl.DisplayNames('en',{type:'script'});
+             var calendar=new Intl.DisplayNames('en',{type:'calendar'});
+             var field=new Intl.DisplayNames('en',{type:'dateTimeField'});
+             var none=new Intl.DisplayNames('en',{type:'calendar',fallback:'none'});
+             var log=[];var invalid,brand;
+             try{language.of('en-u-ca-gregory')}catch(error){invalid=error.name}
+             try{Intl.DisplayNames.prototype.of.call({},
+               {toString:function(){log.push('coerced');return 'en'}})}catch(error){brand=error.name}
+             return [language.of('de'),region.of('gb'),script.of('latn'),
+               calendar.of('GREGORY'),field.of('weekOfYear'),none.of('abc'),
+               invalid,brand,log.join(','),
+               Object.prototype.toString.call(language)].join('|');"
+        ),
+        "German|United Kingdom|Latin|Gregorian Calendar|weekOfYear||RangeError|TypeError||[object Intl.DisplayNames]"
+    );
+}
+
+#[test]
 fn date_time_format_constructor_reads_options_in_normative_order() {
     assert_eq!(
         rendered(

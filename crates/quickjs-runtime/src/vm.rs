@@ -72,10 +72,10 @@ use crate::{
         EnvironmentBinding, FinalizationRegistryMethod, FrameBindingAddress,
         FunctionImplementation, GlobalNumericFunction, HeapFunction, InstalledCode,
         InstalledConstant, InstalledRoot, InstalledTemplate, IntlCollatorPrototypeMethod,
-        IntlDateTimeFormatPrototypeMethod, IntlListFormatPrototypeMethod,
-        IntlLocalePrototypeMethod, IntlNumberFormatPrototypeMethod, IntlPluralRulesPrototypeMethod,
-        IntlRelativeTimeFormatPrototypeMethod, LocaleStringMethod, MapMethod, MathMethod,
-        NativeFunction, NativeFunctionKind, NumberFormat, NumberPredicate,
+        IntlDateTimeFormatPrototypeMethod, IntlDisplayNamesPrototypeMethod,
+        IntlListFormatPrototypeMethod, IntlLocalePrototypeMethod, IntlNumberFormatPrototypeMethod,
+        IntlPluralRulesPrototypeMethod, IntlRelativeTimeFormatPrototypeMethod, LocaleStringMethod,
+        MapMethod, MathMethod, NativeFunction, NativeFunctionKind, NumberFormat, NumberPredicate,
         PreparedIteratorResultPlan, PromiseCapabilityCapture, PromiseCapabilityExecutor,
         PromiseCombinatorElementFunction, PromiseCombinatorElementKind, PromiseCombinatorKind,
         PromiseCombinatorShared, PromiseFinallyFunction, PromiseFinallyThunkKind, PromiseJob,
@@ -889,6 +889,8 @@ enum NativeContinuation {
     IntlListFormatConstructor(Box<IntlListFormatConstructorContinuation>),
     IntlListFormatSupportedLocalesOf(Box<IntlListFormatSupportedLocalesContinuation>),
     IntlListFormatValue(Box<IntlListFormatValueContinuation>),
+    IntlDisplayNamesConstructor(Box<IntlDisplayNamesConstructorContinuation>),
+    IntlDisplayNamesSupportedLocalesOf(Box<IntlDisplayNamesSupportedLocalesContinuation>),
     IntlLocaleConstructor(Box<IntlLocaleConstructorContinuation>),
     DefineProperty(Box<DefinePropertyContinuation>),
     DefineProperties(Box<DefinePropertiesContinuation>),
@@ -1137,6 +1139,8 @@ impl NativeContinuation {
             Self::IntlListFormatConstructor(state) => state.retained_values(),
             Self::IntlListFormatSupportedLocalesOf(state) => state.retained_values(),
             Self::IntlListFormatValue(state) => state.retained_values(),
+            Self::IntlDisplayNamesConstructor(state) => state.retained_values(),
+            Self::IntlDisplayNamesSupportedLocalesOf(state) => state.retained_values(),
             Self::IntlLocaleConstructor(state) => state.retained_values(),
             Self::DefineProperty(state) => state.retained_values(),
             Self::DefineProperties(state) => state.retained_values(),
@@ -2543,6 +2547,12 @@ enum OperatorPrimitiveTarget {
     IntlListFormatConstructor(Box<IntlListFormatConstructorContinuation>),
     /// `Intl.ListFormat.supportedLocalesOf` matcher awaiting `ToString`.
     IntlListFormatSupportedLocalesOf(Box<IntlListFormatSupportedLocalesContinuation>),
+    /// One `%Intl.DisplayNames%` option awaiting primitive conversion.
+    IntlDisplayNamesConstructor(Box<IntlDisplayNamesConstructorContinuation>),
+    /// `Intl.DisplayNames.supportedLocalesOf` matcher awaiting `ToString`.
+    IntlDisplayNamesSupportedLocalesOf(Box<IntlDisplayNamesSupportedLocalesContinuation>),
+    /// An `Intl.DisplayNames.prototype.of` code awaiting `ToString`.
+    IntlDisplayNamesOf(Box<IntlDisplayNamesOfContinuation>),
     /// A `RelativeTimeFormat` numeric operand awaiting `ToPrimitive(number)`.
     IntlRelativeTimeFormatValue(Box<IntlRelativeTimeFormatValueContinuation>),
     /// A `RelativeTimeFormat` unit awaiting `ToPrimitive(string)`.
@@ -2904,6 +2914,9 @@ impl OperatorPrimitiveTarget {
             }
             Self::IntlListFormatConstructor(state) => state.retained_values(),
             Self::IntlListFormatSupportedLocalesOf(state) => state.retained_values(),
+            Self::IntlDisplayNamesConstructor(state) => state.retained_values(),
+            Self::IntlDisplayNamesSupportedLocalesOf(state) => state.retained_values(),
+            Self::IntlDisplayNamesOf(_) => IntlDisplayNamesOfContinuation::retained_values(),
             Self::IntlCollatorCompareFirst(state) | Self::IntlCollatorCompareSecond(state) => {
                 state.retained_values()
             }
@@ -3366,6 +3379,11 @@ fn trace_operator_primitive_target_roots(
         OperatorPrimitiveTarget::IntlListFormatSupportedLocalesOf(state) => {
             state.trace_roots(mark);
         }
+        OperatorPrimitiveTarget::IntlDisplayNamesConstructor(state) => state.trace_roots(mark),
+        OperatorPrimitiveTarget::IntlDisplayNamesSupportedLocalesOf(state) => {
+            state.trace_roots(mark);
+        }
+        OperatorPrimitiveTarget::IntlDisplayNamesOf(state) => state.trace_roots(mark),
         OperatorPrimitiveTarget::IntlCollatorCompareFirst(state)
         | OperatorPrimitiveTarget::IntlCollatorCompareSecond(state) => state.trace_roots(mark),
         OperatorPrimitiveTarget::ArrayFromAsyncLength { operation } => {
@@ -3491,6 +3509,8 @@ fn trace_native_continuation_roots(
         NativeContinuation::IntlListFormatConstructor(state) => state.trace_roots(mark),
         NativeContinuation::IntlListFormatSupportedLocalesOf(state) => state.trace_roots(mark),
         NativeContinuation::IntlListFormatValue(state) => state.trace_roots(mark),
+        NativeContinuation::IntlDisplayNamesConstructor(state) => state.trace_roots(mark),
+        NativeContinuation::IntlDisplayNamesSupportedLocalesOf(state) => state.trace_roots(mark),
         NativeContinuation::IntlLocaleConstructor(state) => state.trace_roots(mark),
         NativeContinuation::DefineProperty(state) => state.trace_roots(mark),
         NativeContinuation::FunctionBind(state) => {
