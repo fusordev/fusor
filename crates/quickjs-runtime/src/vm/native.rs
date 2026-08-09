@@ -4095,6 +4095,18 @@ pub(super) fn dispatch_native_call_with_frames(
         NativeFunctionKind::ArrayStatic(method) => begin_array_static(
             runtime,
             method,
+            false,
+            native.realm,
+            inputs.receiver,
+            inputs.arguments,
+            return_to,
+            origin.unwrap_or_else(native_function_host_origin),
+            execution_budget,
+        ),
+        NativeFunctionKind::TypedArrayStatic(method) => begin_array_static(
+            runtime,
+            method,
+            true,
             native.realm,
             inputs.receiver,
             inputs.arguments,

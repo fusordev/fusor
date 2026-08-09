@@ -691,8 +691,28 @@ pub(super) fn typed_array_define_own_property_action(
             TypedArrayPropertyKey::Index(_) => unreachable!("matched above"),
         }));
     };
-    if runtime.typed_array_read_index(object, index)?.is_none()
-        || definition.requested_configurable() == Some(false)
+    let Some(current_value) = runtime.typed_array_read_index(object, index)? else {
+        return Ok(Some(TypedArrayDefineAction::Rejected));
+    };
+    if runtime.is_typed_array_backing_buffer_immutable(object)? {
+        let current = OwnProperty::Data {
+            layout: PropertyLayout::data(false, true, false),
+            value: current_value,
+        };
+        return Ok(Some(
+            match validate_and_apply_existing(definition, &current) {
+                DefinitionDecision::Rejected => TypedArrayDefineAction::Rejected,
+                DefinitionDecision::Unchanged => TypedArrayDefineAction::Complete,
+                DefinitionDecision::Create(_) | DefinitionDecision::Replace(_) => {
+                    return Err(EngineFault::RuntimeInvariant {
+                        message: "immutable TypedArray descriptor validation requested mutation",
+                    }
+                    .into());
+                }
+            },
+        ));
+    }
+    if definition.requested_configurable() == Some(false)
         || definition.requested_enumerable() == Some(false)
         || definition.is_accessor_descriptor()
         || definition.requested_writable() == Some(false)
@@ -1758,6 +1778,17 @@ pub(super) fn dispatch_typed_array_prototype(
     let Some(state) = runtime.typed_array_state(*object)?.copied() else {
         return typed_array_type_error(realm, &origin, "not a TypedArray");
     };
+    if matches!(
+        method,
+        TypedArrayPrototypeMethod::Set
+            | TypedArrayPrototypeMethod::Fill
+            | TypedArrayPrototypeMethod::CopyWithin
+            | TypedArrayPrototypeMethod::Reverse
+            | TypedArrayPrototypeMethod::Sort
+    ) && typed_array_buffer_is_immutable(runtime, state)?
+    {
+        return typed_array_type_error(realm, &origin, "TypedArray backing buffer is immutable");
+    }
     let view = runtime.typed_array_view(*object)?;
     if matches!(
         method,
@@ -3460,8 +3491,12 @@ pub(super) fn advance_typed_array_prototype_slice(
                     "TypedArray species constructor returned a non-TypedArray",
                 );
             };
-            let (target_state, target_length) =
-                typed_array_require_in_bounds(runtime, result, state.realm, &state.origin)?;
+            let (target_state, target_length) = typed_array_require_writable_in_bounds(
+                runtime,
+                result,
+                state.realm,
+                &state.origin,
+            )?;
             if target_length < state.count {
                 return typed_array_type_error(
                     state.realm,
@@ -3748,8 +3783,12 @@ pub(super) fn advance_typed_array_prototype_map(
                     "TypedArray species constructor returned a non-TypedArray",
                 );
             };
-            let (target_state, target_length) =
-                typed_array_require_in_bounds(runtime, target, state.realm, &state.origin)?;
+            let (target_state, target_length) = typed_array_require_writable_in_bounds(
+                runtime,
+                target,
+                state.realm,
+                &state.origin,
+            )?;
             if target_length < state.source_length {
                 return typed_array_type_error(
                     state.realm,
@@ -4188,8 +4227,12 @@ pub(super) fn advance_typed_array_prototype_filter(
                     "TypedArray species constructor returned a non-TypedArray",
                 );
             };
-            let (target_state, target_length) =
-                typed_array_require_in_bounds(runtime, target, state.realm, &state.origin)?;
+            let (target_state, target_length) = typed_array_require_writable_in_bounds(
+                runtime,
+                target,
+                state.realm,
+                &state.origin,
+            )?;
             if target_length < state.kept.len() {
                 return typed_array_type_error(
                     state.realm,
@@ -4854,6 +4897,34 @@ fn typed_array_prototype_set_continuation(
     NativeContinuation::TypedArrayPrototypeSet(Box::new(state))
 }
 
+fn typed_array_buffer_is_immutable(
+    runtime: &Runtime,
+    state: TypedArrayState,
+) -> Result<bool, NativeFailure> {
+    runtime
+        .array_buffer_state(state.buffer())?
+        .map(crate::object::ArrayBufferState::is_immutable)
+        .ok_or_else(|| {
+            EngineFault::RuntimeInvariant {
+                message: "TypedArray backing buffer lost its internal slots",
+            }
+            .into()
+        })
+}
+
+fn typed_array_require_writable_in_bounds(
+    runtime: &Runtime,
+    object: ObjectId,
+    realm: RealmId,
+    origin: &JsStackFrame,
+) -> Result<(TypedArrayState, usize), NativeFailure> {
+    let (state, length) = typed_array_require_in_bounds(runtime, object, realm, origin)?;
+    if typed_array_buffer_is_immutable(runtime, state)? {
+        return typed_array_type_error(realm, origin, "TypedArray backing buffer is immutable");
+    }
+    Ok((state, length))
+}
+
 pub(super) fn typed_array_require_in_bounds(
     runtime: &Runtime,
     object: ObjectId,
@@ -5049,11 +5120,21 @@ pub(super) fn finish_typed_array_element_set(
                 )
             })?
     };
-    if stored == TypedArrayStoreOutcome::ContentTypeMismatch {
-        return Err(EngineFault::RuntimeInvariant {
-            message: "typed-array element content type changed during conversion",
+    match stored {
+        TypedArrayStoreOutcome::Stored | TypedArrayStoreOutcome::Missing => {}
+        TypedArrayStoreOutcome::Immutable => {
+            return typed_array_type_error(
+                state.realm,
+                &state.origin,
+                "TypedArray backing buffer is immutable",
+            );
         }
-        .into());
+        TypedArrayStoreOutcome::ContentTypeMismatch => {
+            return Err(EngineFault::RuntimeInvariant {
+                message: "typed-array element content type changed during conversion",
+            }
+            .into());
+        }
     }
     let completion = match state.completion {
         TypedArraySetCompletion::LanguageWrite => StoredValue::Undefined,

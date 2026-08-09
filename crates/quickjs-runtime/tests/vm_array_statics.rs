@@ -153,6 +153,36 @@ fn array_factory_identities_descriptors_and_default_results_are_exact() {
 }
 
 #[test]
+fn typed_array_factories_construct_typed_results_and_reject_immutable_destinations() {
+    assert_all(&[
+        (
+            "(function(){const from=Uint8Array.from([1,2],function(v,k){return v+k});\
+             const of=Uint8Array.of(3,4);return from.join(',')+'|'+of.join(',')+'|'+\
+             Uint8Array.from.length+'|'+Uint8Array.of.length})()",
+            "1,3|3,4|1|0",
+        ),
+        (
+            "(function(){let log=[];function C(length){log.push('ctor:'+length);\
+               return new Uint8Array((new ArrayBuffer(length)).transferToImmutable())}\
+             const items={[Symbol.iterator](){let index=0;return {next(){log.push('next');\
+               return index++<2?{value:index,done:false}:{done:true}}}}};\
+             let kind='';try{Uint8Array.from.call(C,items,function(value){\
+               log.push('map:'+value);return value})}catch(error){kind=error.name}\
+             return kind+'|'+log.join(',')})()",
+            "TypeError|next,next,next,ctor:2",
+        ),
+        (
+            "(function(){let log=[];function C(length){log.push('ctor:'+length);\
+               return new Uint8Array((new ArrayBuffer(length)).transferToImmutable())}\
+             const value={valueOf(){log.push('value');return 1}};let kind='';\
+             try{Uint8Array.of.call(C,value)}catch(error){kind=error.name}\
+             return kind+'|'+log.join(',')})()",
+            "TypeError|ctor:1",
+        ),
+    ]);
+}
+
+#[test]
 fn array_from_async_identity_and_async_rejection_boundary_are_exact() {
     assert_all(&[
         (

@@ -15,6 +15,7 @@ quickjs-bytecode = { path = "../quickjs-bytecode" }
 quickjs-intl = { path = "../quickjs-intl" }
 quickjs-regexp = { path = "../quickjs-regexp" }
 temporal_rs.workspace = true
+tokio.workspace = true
 writeable.workspace = true
 
 [dev-dependencies]

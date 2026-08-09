@@ -144,7 +144,7 @@ impl RealmIntrinsicSchema {
             FamilyCardinality {
                 family: "Realm native functions",
                 actual: self.specs.len(),
-                expected: 805,
+                expected: 811,
             },
         ];
         validate_intrinsic_schema(IntrinsicSchema {
@@ -274,6 +274,7 @@ pub(super) const fn is_declarative_function(id: IntrinsicFunctionId) -> bool {
             | NativeFunctionKind::DataViewPrototype(_)
             | NativeFunctionKind::TypedArrayBaseConstructor
             | NativeFunctionKind::TypedArrayConstructor(_)
+            | NativeFunctionKind::TypedArrayStatic(_)
             | NativeFunctionKind::TypedArraySpeciesGetter
             | NativeFunctionKind::TypedArrayPrototype(_)
             | NativeFunctionKind::ArrayPrototypeJoin
@@ -929,6 +930,7 @@ const fn is_array_function(id: IntrinsicFunctionId) -> bool {
             | NativeFunctionKind::DataViewPrototype(_)
             | NativeFunctionKind::TypedArrayBaseConstructor
             | NativeFunctionKind::TypedArrayConstructor(_)
+            | NativeFunctionKind::TypedArrayStatic(_)
             | NativeFunctionKind::TypedArraySpeciesGetter
             | NativeFunctionKind::TypedArrayPrototype(_)
             | NativeFunctionKind::ArrayPrototypeJoin
@@ -1263,7 +1265,7 @@ mod tests {
     #[test]
     fn complete_function_schema_has_characterized_cardinality_and_unique_ids() {
         let schema = RealmIntrinsicSchema::try_new().expect("function schema");
-        assert_eq!(schema.specs().len(), 805);
+        assert_eq!(schema.specs().len(), 811);
         assert_eq!(schema.constructor_prototypes.len(), 64);
         for (index, spec) in schema.specs().iter().enumerate() {
             assert!(

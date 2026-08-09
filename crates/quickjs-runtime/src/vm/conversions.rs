@@ -2067,6 +2067,9 @@ fn finish_operator_primitive_target(
         OperatorPrimitiveTarget::TypedArrayElementSet(state) => {
             finish_typed_array_element_set(runtime, *state, value, return_to, execution_budget)
         }
+        OperatorPrimitiveTarget::TypedArrayStaticElement(state) => {
+            finish_typed_array_static_element(runtime, *state, value, return_to, execution_budget)
+        }
         OperatorPrimitiveTarget::AtomicsIsLockFree => {
             finish_atomics_is_lock_free(value, realm, origin)
         }
@@ -2079,7 +2082,9 @@ fn finish_operator_primitive_target(
         OperatorPrimitiveTarget::AtomicsReplacement(state) => {
             finish_atomics_replacement(runtime, *state, value)
         }
-        OperatorPrimitiveTarget::AtomicsTimeout(state) => finish_atomics_timeout(&state, value),
+        OperatorPrimitiveTarget::AtomicsTimeout(state) => {
+            finish_atomics_timeout(runtime, state.as_ref(), value)
+        }
         OperatorPrimitiveTarget::ArrayBufferResize { object } => {
             finish_array_buffer_resize(runtime, object, value, realm, origin)
         }
@@ -2089,10 +2094,12 @@ fn finish_operator_primitive_target(
         OperatorPrimitiveTarget::ArrayBufferTransfer {
             object,
             preserve_resizability,
+            immutable,
         } => finish_array_buffer_transfer(
             runtime,
             object,
             preserve_resizability,
+            immutable,
             value,
             realm,
             origin,
@@ -4243,6 +4250,17 @@ fn finish_property_key_target(
                 );
             }
             if let Some((object, key)) = typed_array_indexed_key(runtime, &base, &property.key)? {
+                if runtime.is_typed_array_backing_buffer_immutable(object)? {
+                    if strict {
+                        return Err(NativeFailure::Abrupt(property_exception_at(
+                            realm,
+                            origin.clone(),
+                            Some(&property.name),
+                            PropertyFailure::ReadOnly,
+                        )?));
+                    }
+                    return Ok(NativeDispatch::Immediate(StoredValue::Undefined));
+                }
                 return begin_typed_array_element_set(
                     runtime,
                     object,

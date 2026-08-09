@@ -59,6 +59,7 @@ use crate::{
 
 mod array_buffers;
 mod async_functions;
+mod atomics_waiters;
 mod data_views;
 mod dates;
 mod intls;
@@ -78,7 +79,8 @@ pub(crate) use iterators::PreparedIteratorResultPlan;
 pub use limits::{RuntimeLimits, RuntimeUsage};
 pub(crate) use typed_arrays::{
     TypedArrayElementValue, TypedArrayOwnProperty, TypedArrayPropertyKey, TypedArrayStoreOutcome,
-    TypedArrayView,
+    TypedArrayView, typed_array_element_byte_index, typed_array_read_element,
+    typed_array_write_element,
 };
 
 struct RealmState {
@@ -1346,6 +1348,7 @@ pub(crate) enum NativeFunctionKind {
     /// `Object.getPrototypeOf(Int8Array)`, but never installed globally.
     TypedArrayBaseConstructor,
     TypedArrayConstructor(TypedArrayElementType),
+    TypedArrayStatic(ArrayStatic),
     TypedArraySpeciesGetter,
     TypedArrayPrototype(TypedArrayPrototypeMethod),
     DateConstructor,
@@ -1517,12 +1520,7 @@ pub(crate) enum NativeFunctionKind {
     PromisePrototypeFinally,
 }
 
-/// Synchronous operations exposed by the `%Atomics%` namespace.
-///
-/// `waitAsync` is deliberately absent from this enumeration until the runtime
-/// owns a spec-ordered waiter and Promise-job scheduler. `wait` and `notify`
-/// provide the single-agent synchronous semantics; multi-agent wakeups remain
-/// a host-agent capability rather than Tokio-scheduled JavaScript jobs.
+/// Operations exposed by the `%Atomics%` namespace.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum AtomicsMethod {
     Add,
@@ -1536,12 +1534,13 @@ pub(crate) enum AtomicsMethod {
     Store,
     Sub,
     Wait,
+    WaitAsync,
     Xor,
     Pause,
 }
 
 impl AtomicsMethod {
-    pub(crate) const ALL: [Self; 13] = [
+    pub(crate) const ALL: [Self; 14] = [
         Self::Add,
         Self::And,
         Self::CompareExchange,
@@ -1553,6 +1552,7 @@ impl AtomicsMethod {
         Self::Store,
         Self::Sub,
         Self::Wait,
+        Self::WaitAsync,
         Self::Xor,
         Self::Pause,
     ];
@@ -1570,6 +1570,7 @@ impl AtomicsMethod {
             Self::Store => "store",
             Self::Sub => "sub",
             Self::Wait => "wait",
+            Self::WaitAsync => "waitAsync",
             Self::Xor => "xor",
             Self::Pause => "pause",
         }
@@ -1577,7 +1578,7 @@ impl AtomicsMethod {
 
     pub(crate) const fn length(self) -> i32 {
         match self {
-            Self::CompareExchange | Self::Wait => 4,
+            Self::CompareExchange | Self::Wait | Self::WaitAsync => 4,
             Self::Add
             | Self::And
             | Self::Exchange
@@ -1603,17 +1604,32 @@ impl AtomicsMethod {
                 | Self::Store
                 | Self::Sub
                 | Self::Wait
+                | Self::WaitAsync
                 | Self::Xor
                 | Self::Notify
         )
     }
 
     pub(crate) const fn requires_waitable_element(self) -> bool {
-        matches!(self, Self::Notify | Self::Wait)
+        matches!(self, Self::Notify | Self::Wait | Self::WaitAsync)
     }
 
     pub(crate) const fn requires_shared_buffer(self) -> bool {
-        matches!(self, Self::Wait)
+        matches!(self, Self::Wait | Self::WaitAsync)
+    }
+
+    pub(crate) const fn requires_writable_buffer(self) -> bool {
+        matches!(
+            self,
+            Self::Add
+                | Self::And
+                | Self::CompareExchange
+                | Self::Exchange
+                | Self::Or
+                | Self::Store
+                | Self::Sub
+                | Self::Xor
+        )
     }
 }
 
@@ -2215,12 +2231,15 @@ impl DatePrototypeMethod {
 pub(crate) enum ArrayBufferPrototypeMethod {
     ByteLength,
     Detached,
+    Immutable,
     MaxByteLength,
     Resizable,
     Resize,
     Slice,
+    SliceToImmutable,
     Transfer,
     TransferToFixedLength,
+    TransferToImmutable,
 }
 
 /// Methods and accessors published on `%SharedArrayBuffer.prototype%`.
@@ -2696,42 +2715,59 @@ impl TypedArrayPrototypeMethod {
 }
 
 impl ArrayBufferPrototypeMethod {
-    pub(crate) const ALL: [Self; 8] = [
+    pub(crate) const ALL: [Self; 11] = [
         Self::ByteLength,
         Self::Detached,
+        Self::Immutable,
         Self::MaxByteLength,
         Self::Resizable,
         Self::Resize,
         Self::Slice,
+        Self::SliceToImmutable,
         Self::Transfer,
         Self::TransferToFixedLength,
+        Self::TransferToImmutable,
     ];
 
     pub(crate) const fn name(self) -> &'static str {
         match self {
             Self::ByteLength => "byteLength",
             Self::Detached => "detached",
+            Self::Immutable => "immutable",
             Self::MaxByteLength => "maxByteLength",
             Self::Resizable => "resizable",
             Self::Resize => "resize",
             Self::Slice => "slice",
+            Self::SliceToImmutable => "sliceToImmutable",
             Self::Transfer => "transfer",
             Self::TransferToFixedLength => "transferToFixedLength",
+            Self::TransferToImmutable => "transferToImmutable",
         }
     }
 
     pub(crate) const fn length(self) -> i32 {
         match self {
-            Self::Resize | Self::Transfer | Self::TransferToFixedLength => 1,
-            Self::Slice => 2,
-            Self::ByteLength | Self::Detached | Self::MaxByteLength | Self::Resizable => 0,
+            Self::Resize => 1,
+            Self::Slice | Self::SliceToImmutable => 2,
+            Self::ByteLength
+            | Self::Detached
+            | Self::Immutable
+            | Self::MaxByteLength
+            | Self::Resizable
+            | Self::Transfer
+            | Self::TransferToFixedLength
+            | Self::TransferToImmutable => 0,
         }
     }
 
     pub(crate) const fn is_accessor(self) -> bool {
         matches!(
             self,
-            Self::ByteLength | Self::Detached | Self::MaxByteLength | Self::Resizable
+            Self::ByteLength
+                | Self::Detached
+                | Self::Immutable
+                | Self::MaxByteLength
+                | Self::Resizable
         )
     }
 }
@@ -5224,6 +5260,14 @@ pub struct Runtime {
     pub(crate) interrupts: InterruptState,
     pub(crate) promise_rejections: PromiseRejectionState,
     pub(crate) promise_jobs: VecDeque<PromiseJob>,
+    pub(crate) atomics_waiters: HashMap<u64, atomics_waiters::AsyncAtomicsWaiter>,
+    pub(crate) atomics_ready: VecDeque<crate::shared_array_buffer::AtomicsWakeEvent>,
+    pub(crate) atomics_wake_sender:
+        tokio::sync::mpsc::UnboundedSender<crate::shared_array_buffer::AtomicsWakeEvent>,
+    pub(crate) atomics_wake_receiver:
+        tokio::sync::mpsc::UnboundedReceiver<crate::shared_array_buffer::AtomicsWakeEvent>,
+    pub(crate) atomics_agent_id: usize,
+    pub(crate) atomics_timer: Option<atomics_waiters::AtomicsTimerDriver>,
     pub(crate) finalization_jobs: VecDeque<ObjectId>,
     pub(crate) kept_alive: Vec<StoredValue>,
     pub(crate) generator_states: HashMap<ObjectId, crate::vm::GeneratorRecord>,

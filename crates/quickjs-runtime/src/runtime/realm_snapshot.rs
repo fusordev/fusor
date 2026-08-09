@@ -553,9 +553,9 @@ mod tests {
 
     use crate::runtime::{RealmIntrinsics, RuntimeLimits, RuntimeUsage};
 
-    const REALM_NODES: usize = 889;
-    const REALM_PROPERTIES: u64 = 2_688;
-    const REALM_SNAPSHOT_FINGERPRINT: u64 = 15_937_958_019_378_162_761;
+    const REALM_NODES: usize = 895;
+    const REALM_PROPERTIES: u64 = 2_706;
+    const REALM_SNAPSHOT_FINGERPRINT: u64 = 10_604_784_199_987_477_213;
 
     #[test]
     fn complete_realm_snapshot_pins_the_installed_intrinsic_graph() {
@@ -603,9 +603,9 @@ mod tests {
         assert_eq!(
             first_atoms,
             AtomUsage {
-                live_atoms: PREDEFINED_ATOM_COUNT + 393,
-                live_description_code_units: PREDEFINED_DESCRIPTION_CODE_UNITS + 3_543,
-                interner_slots: PREDEFINED_INTERNER_SLOTS + 393,
+                live_atoms: PREDEFINED_ATOM_COUNT + 398,
+                live_description_code_units: PREDEFINED_DESCRIPTION_CODE_UNITS + 3_610,
+                interner_slots: PREDEFINED_INTERNER_SLOTS + 398,
             }
         );
 
