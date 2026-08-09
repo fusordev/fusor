@@ -62,7 +62,7 @@ pub(in crate::lowering) enum StatementWork<'statement, 'arena> {
     ForInAssignment(&'statement ForStatementLeft<'arena>),
     ForOfHead(&'statement ForStatementLeft<'arena>),
     ForOfAssignment(&'statement ForStatementLeft<'arena>),
-    ForOfRotate(ScopeId),
+    IterationRotate(ScopeId),
     Declaration(&'statement VariableDeclaration<'arena>),
     CatchBinding {
         handler: &'statement CatchClause<'arena>,
@@ -311,8 +311,8 @@ impl<'arena> CompilationContext<'_, 'arena, '_> {
                 &state.abrupt_markers,
                 flow,
             )?,
-            StatementWork::ForOfRotate(scope) => {
-                self.plan_for_of_rotation(planning.executable, scope, planning.layout, flow)?;
+            StatementWork::IterationRotate(scope) => {
+                self.plan_iteration_rotation(planning.executable, scope, planning.layout, flow)?;
             }
             StatementWork::Expression(expression) => self.plan_expression_with_abrupt_markers(
                 expression,
@@ -1656,7 +1656,7 @@ impl<'arena> CompilationContext<'_, 'arena, '_> {
             loop_scope_depth,
         );
 
-        work.try_reserve(25)
+        work.try_reserve(26)
             .map_err(|_| LeafCompilationError::CapacityExceeded {
                 domain: "statement work stack",
             })?;
@@ -1711,6 +1711,7 @@ impl<'arena> CompilationContext<'_, 'arena, '_> {
             Operands::None,
             statement.span,
         )));
+        work.push(StatementWork::IterationRotate(scope));
         work.push(StatementWork::Bind(next));
         work.push(StatementWork::Emit(PlannedInstruction::new(
             FinalOpcode::ForInStart,
@@ -1807,7 +1808,7 @@ impl<'arena> CompilationContext<'_, 'arena, '_> {
             Operands::U8(0),
             statement.span,
         )));
-        work.push(StatementWork::ForOfRotate(scope));
+        work.push(StatementWork::IterationRotate(scope));
         work.push(StatementWork::Bind(next));
         work.push(StatementWork::Emit(PlannedInstruction::new(
             FinalOpcode::ForOfStart,

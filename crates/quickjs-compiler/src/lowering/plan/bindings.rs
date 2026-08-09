@@ -955,9 +955,15 @@ impl<'arena> CompilationContext<'_, 'arena, '_> {
             }
             return Ok(());
         };
-        let (identifier, initializer) = self.validate_for_in_declaration(declaration, layout)?;
+        let (pattern, initializer) = Self::validate_for_in_declaration(declaration)?;
         let Some(initializer) = initializer else {
             return Ok(());
+        };
+        let BindingPattern::BindingIdentifier(identifier) = pattern else {
+            return Err(LeafCompilationError::SemanticInvariant {
+                invariant: "Oxc permits a for-in declaration initializer only on an identifier",
+                span: Some(declaration.span),
+            });
         };
         let executable = self.planned.plan.executable(layout.executable).ok_or(
             LeafCompilationError::InvalidExecutable {
@@ -1065,14 +1071,28 @@ impl<'arena> CompilationContext<'_, 'arena, '_> {
         flow: &mut PlannedControlFlow,
     ) -> Result<(), LeafCompilationError> {
         if let ForStatementLeft::VariableDeclaration(declaration) = left {
-            let (identifier, _) = self.validate_for_in_declaration(declaration, layout)?;
-            return self.emit_for_in_declaration_write(
-                declaration.kind,
-                identifier,
-                layout,
-                tree_layout,
-                flow,
-            );
+            let (pattern, _) = Self::validate_for_in_declaration(declaration)?;
+            return match pattern {
+                BindingPattern::BindingIdentifier(identifier) => self
+                    .emit_for_in_declaration_write(
+                        declaration.kind,
+                        identifier,
+                        layout,
+                        tree_layout,
+                        flow,
+                    ),
+                BindingPattern::ArrayPattern(_)
+                | BindingPattern::ObjectPattern(_)
+                | BindingPattern::AssignmentPattern(_) => self.plan_destructuring_pattern_value(
+                    pattern,
+                    DestructuringBindingInitialization::IterationDeclaration(declaration.kind),
+                    layout,
+                    tree_layout,
+                    constants,
+                    abrupt_markers,
+                    flow,
+                ),
+            };
         }
 
         let target =
@@ -1118,6 +1138,15 @@ impl<'arena> CompilationContext<'_, 'arena, '_> {
                     abrupt_markers,
                     flow,
                 )?,
+            AssignmentTarget::ArrayAssignmentTarget(_)
+            | AssignmentTarget::ObjectAssignmentTarget(_) => self.plan_for_of_assignment_pattern(
+                target,
+                layout,
+                tree_layout,
+                constants,
+                abrupt_markers,
+                flow,
+            )?,
             _ => {
                 return unsupported(UnsupportedLeafFeature::UnsupportedExpression, target.span());
             }
@@ -1412,12 +1441,10 @@ impl<'arena> CompilationContext<'_, 'arena, '_> {
     }
 
     fn validate_for_in_declaration<'declaration>(
-        &self,
         declaration: &'declaration VariableDeclaration<'arena>,
-        layout: &FrameLayout,
     ) -> Result<
         (
-            &'declaration BindingIdentifier<'arena>,
+            &'declaration BindingPattern<'arena>,
             Option<&'declaration Expression<'arena>>,
         ),
         LeafCompilationError,
@@ -1437,33 +1464,7 @@ impl<'arena> CompilationContext<'_, 'arena, '_> {
             );
         }
         let declarator = &declaration.declarations[0];
-        let BindingPattern::BindingIdentifier(identifier) = &declarator.id else {
-            return unsupported(
-                UnsupportedLeafFeature::UnsupportedDeclaration,
-                declarator.id.span(),
-            );
-        };
-        let binding = self.binding_for_identifier(identifier.symbol_id.get(), identifier.span)?;
-        let storage =
-            self.planned
-                .plan
-                .binding(binding)
-                .ok_or(LeafCompilationError::SemanticInvariant {
-                    invariant: "for-in declared compiler binding exists",
-                    span: Some(identifier.span),
-                })?;
-        if storage.placement() == StoragePlacement::GlobalObject {
-            self.validate_realm_global_declaration(declaration.kind, storage, identifier.span)?;
-        } else {
-            let slot = layout
-                .slot(binding)
-                .ok_or(LeafCompilationError::Unsupported {
-                    feature: UnsupportedLeafFeature::UnsupportedBinding,
-                    span: identifier.span,
-                })?;
-            self.validate_declaration_storage(declaration.kind, binding, slot, identifier.span)?;
-        }
-        Ok((identifier, declarator.init.as_ref()))
+        Ok((&declarator.id, declarator.init.as_ref()))
     }
 
     fn emit_for_in_declaration_write(
@@ -1512,6 +1513,7 @@ impl<'arena> CompilationContext<'_, 'arena, '_> {
                 feature: UnsupportedLeafFeature::UnsupportedBinding,
                 span: identifier.span,
             })?;
+        self.validate_declaration_storage(declaration_kind, binding, slot, identifier.span)?;
         flow.emit(plan_put_slot(slot, identifier.span))
     }
 

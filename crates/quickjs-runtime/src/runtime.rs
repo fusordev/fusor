@@ -5776,6 +5776,7 @@ const fn is_supported_opcode(opcode: FinalOpcode) -> bool {
             | FinalOpcode::SetLocUninitialized
             | FinalOpcode::GetLocCheck
             | FinalOpcode::PutLocCheck
+            | FinalOpcode::PutLocCheckInit
             | FinalOpcode::SetLocCheck
             | FinalOpcode::GetVarRefCheck
             | FinalOpcode::PutVarRefCheck

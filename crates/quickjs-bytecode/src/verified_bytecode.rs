@@ -6682,6 +6682,7 @@ const fn supported_compiler_opcode(opcode: FinalOpcode) -> bool {
             | FinalOpcode::SetLocUninitialized
             | FinalOpcode::GetLocCheck
             | FinalOpcode::PutLocCheck
+            | FinalOpcode::PutLocCheckInit
             | FinalOpcode::SetLocCheck
             | FinalOpcode::GetVarRefCheck
             | FinalOpcode::PutVarRefCheck
@@ -9753,7 +9754,7 @@ fn verify_binding_opcodes(
     internal_stack: &InternalStackCertificate,
 ) -> Result<(), BytecodeVerificationError> {
     let argument_count = flow.domains().argument_count() as usize;
-    // The for-of loop rotation re-arms the head's non-captured TDZ cells at
+    // A for-in/of loop rotation re-arms the head's non-captured TDZ cells at
     // the loop back edge (the `rotate` label targets exactly that
     // instruction), so a second scope activation is admitted only at a
     // backward jump target; straight-line repeated initialization stays
@@ -9868,7 +9869,7 @@ fn verify_binding_opcodes(
             if matches!(opcode, FinalOpcode::SetLocUninitialized) {
                 let count = &mut scope_activations[local as usize];
                 *count = count.saturating_add(1);
-                // The for-of loop rotation is the single legitimate second
+                // The iteration rotation is the single legitimate second
                 // activation, and it must sit at the loop back-edge target.
                 if *count > 2 || (*count == 2 && !back_edge_targets[index]) {
                     return Err(policy_error(
@@ -9904,7 +9905,7 @@ fn verify_binding_opcodes(
         let requires_scope_activation = definition.policy.temporal_dead_zone
             || definition.policy.initialization
                 == CompilerInitializationPolicy::FunctionAtScopeEntry;
-        // A for-of loop rotation adds exactly one back-edge re-arm to the
+        // A for-in/of loop rotation adds exactly one back-edge re-arm to the
         // entry activation, so both one and two activations are admitted.
         if requires_scope_activation && !(activations == 1 || activations == 2) {
             return Err(policy_error(
@@ -9964,7 +9965,11 @@ fn verify_local_opcode(
         ));
     }
     let runtime_checked_immutable_write = definition.policy.writes != CompilerWritePolicy::Mutable
-        && ((tdz && matches!(opcode, FinalOpcode::PutLocCheck | FinalOpcode::SetLocCheck))
+        && ((tdz
+            && matches!(
+                opcode,
+                FinalOpcode::PutLocCheck | FinalOpcode::PutLocCheckInit | FinalOpcode::SetLocCheck
+            ))
             || (!tdz && definition.policy.kind == CompilerBindingKind::FunctionName));
     if is_local_write(opcode)
         && !matches!(opcode, FinalOpcode::SetLocUninitialized)
@@ -10498,6 +10503,17 @@ fn transfer_local_state(
                 BindingState::with_initialized_value(*state)
             };
         }
+        FinalOpcode::PutLocCheckInit => {
+            if !BindingState::only(*state, BindingState::UNINITIALIZED) {
+                return Err(policy_error(
+                    id,
+                    slot,
+                    Some(pc),
+                    BindingPolicyViolationReason::InvalidLexicalInitialization,
+                ));
+            }
+            *state = BindingState::with_initialized_value(*state);
+        }
         FinalOpcode::GetLocCheck | FinalOpcode::PutLocCheck | FinalOpcode::SetLocCheck => {
             if *state & BindingState::INACTIVE != 0 {
                 return Err(policy_error(
@@ -10621,7 +10637,10 @@ const fn implied_closure_index(opcode: FinalOpcode) -> Option<u32> {
 const fn is_checked_local(opcode: FinalOpcode) -> bool {
     matches!(
         opcode,
-        FinalOpcode::GetLocCheck | FinalOpcode::PutLocCheck | FinalOpcode::SetLocCheck
+        FinalOpcode::GetLocCheck
+            | FinalOpcode::PutLocCheck
+            | FinalOpcode::PutLocCheckInit
+            | FinalOpcode::SetLocCheck
     )
 }
 
@@ -10653,6 +10672,7 @@ const fn is_local_write(opcode: FinalOpcode) -> bool {
             | FinalOpcode::SetLoc2
             | FinalOpcode::SetLoc3
             | FinalOpcode::PutLocCheck
+            | FinalOpcode::PutLocCheckInit
             | FinalOpcode::SetLocCheck
             | FinalOpcode::SetLocUninitialized
     )

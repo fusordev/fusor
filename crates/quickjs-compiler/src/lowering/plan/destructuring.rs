@@ -5,10 +5,10 @@ use super::super::{
     AssignmentTargetProperty, AssignmentTargetRest, AtomPoolIndex, BindingIdentifier,
     BindingPattern, BindingRestElement, BranchKind, CompilationContext, CompiledConstantPool,
     CompiledMetadataAtomKey, ComputedMemberExpression, DeclarationKind, Expression,
-    ExpressionPlanner, ExpressionWork, FinalOpcode, FrameLayout, FunctionTreeLayout, GetSpan,
-    IdentifierReference, InitializationPolicy, LeafCompilationError, ObjectAssignmentTarget,
-    ObjectPattern, Operands, PlannedControlFlow, PlannedInstruction, Span, StoragePlacement,
-    UnsupportedLeafFeature, WritePolicy, anonymous_class_expression_span,
+    ExpressionPlanner, ExpressionWork, FinalOpcode, FrameLayout, FrameSlot, FunctionTreeLayout,
+    GetSpan, IdentifierReference, InitializationPolicy, LeafCompilationError,
+    ObjectAssignmentTarget, ObjectPattern, Operands, PlannedControlFlow, PlannedInstruction, Span,
+    StoragePlacement, UnsupportedLeafFeature, WritePolicy, anonymous_class_expression_span,
     anonymous_named_evaluation_span, anonymous_ordinary_function_span, plan_external_put,
     plan_push_integer, plan_put_slot, unsupported,
 };
@@ -17,6 +17,7 @@ use super::abrupt::{AbruptMarker, AbruptMarkerKind};
 #[derive(Clone, Copy)]
 pub(in crate::lowering) enum DestructuringBindingInitialization {
     Declaration(VariableDeclarationKind),
+    IterationDeclaration(VariableDeclarationKind),
     Parameter,
     Catch,
 }
@@ -704,10 +705,18 @@ impl<'arena> CompilationContext<'_, 'arena, '_> {
             storage.placement(),
             StoragePlacement::GlobalObject | StoragePlacement::GlobalLexical
         ) {
-            let DestructuringBindingInitialization::Declaration(declaration_kind) =
-                binding_initialization
-            else {
-                return unsupported(UnsupportedLeafFeature::UnsupportedBinding, identifier.span);
+            let declaration_kind = match binding_initialization {
+                DestructuringBindingInitialization::Declaration(declaration_kind)
+                | DestructuringBindingInitialization::IterationDeclaration(declaration_kind) => {
+                    declaration_kind
+                }
+                DestructuringBindingInitialization::Parameter
+                | DestructuringBindingInitialization::Catch => {
+                    return unsupported(
+                        UnsupportedLeafFeature::UnsupportedBinding,
+                        identifier.span,
+                    );
+                }
             };
             self.validate_realm_global_declaration(declaration_kind, storage, identifier.span)?;
             let global = tree_layout
@@ -754,6 +763,29 @@ impl<'arena> CompilationContext<'_, 'arena, '_> {
                     identifier.span,
                 )?;
                 flow.emit(plan_put_slot(frame_slot, identifier.span))
+            }
+            DestructuringBindingInitialization::IterationDeclaration(declaration_kind) => {
+                self.validate_declaration_storage(
+                    declaration_kind,
+                    binding,
+                    frame_slot,
+                    identifier.span,
+                )?;
+                if storage.policy().has_temporal_dead_zone() {
+                    let FrameSlot::Local(slot) = frame_slot else {
+                        return Err(LeafCompilationError::SemanticInvariant {
+                            invariant: "a destructured per-iteration lexical binding uses a local slot",
+                            span: Some(identifier.span),
+                        });
+                    };
+                    flow.emit(PlannedInstruction::new(
+                        FinalOpcode::PutLocCheckInit,
+                        Operands::Loc(slot.index()),
+                        identifier.span,
+                    ))
+                } else {
+                    flow.emit(plan_put_slot(frame_slot, identifier.span))
+                }
             }
             DestructuringBindingInitialization::Parameter => {
                 if storage.placement() != StoragePlacement::Local

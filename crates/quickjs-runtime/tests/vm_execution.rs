@@ -123,6 +123,42 @@ fn for_in_executes_ordered_own_keys_string_indices_and_getter_free_enumeration()
 }
 
 #[test]
+fn for_in_destructuring_supports_declarations_assignments_and_iteration_closures() {
+    let authority = compile(
+        "function run(){\
+            let declared='';\
+            for(const [first,second] in {ab:0})declared=first+second;\
+            let assigned;\
+            for([assigned] in {cd:0}){}\
+            let firstCapture,lastCapture,index=0;\
+            for(let [head] in {x:0,y:0}){\
+                if(index++===0)firstCapture=function(){return head;};\
+                else lastCapture=function(){return head;};\
+            }\
+            return declared+'|'+assigned+'|'+firstCapture()+lastCapture();\
+        }",
+        "run",
+    );
+    let mut runtime = runtime();
+    let realm = runtime.create_realm().expect("realm");
+    let mut context = runtime.context(&realm).expect("context");
+    let function = context.instantiate(authority).expect("function");
+
+    let result = context
+        .call(&function, &[], ExecutionLimits::default())
+        .expect("for-in destructuring execution");
+    assert_eq!(
+        result
+            .as_string()
+            .expect("live result")
+            .expect("string")
+            .to_utf8_lossy()
+            .expect("UTF-8"),
+        "ab|c|xy"
+    );
+}
+
+#[test]
 fn for_in_member_targets_captures_and_abrupt_control_use_verified_stack_shuffles() {
     let authority = compile(
         "function run(){\

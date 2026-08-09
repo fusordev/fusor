@@ -3278,6 +3278,19 @@ pub(super) fn execute_one(
                 return Ok(step);
             }
         }
+        FinalOpcode::PutLocCheckInit => {
+            let index = local_index(opcode, operands)?;
+            if !local_is_uninitialized(runtime, frame, index)? {
+                return Ok(Step::Abrupt(lexical_reinitialization_exception(
+                    runtime,
+                    frame,
+                    BindingName::Local(index),
+                    source_pc,
+                )?));
+            }
+            let value = pop(frame)?;
+            write_local(runtime, frame, index, SlotValue::Value(value))?;
+        }
         FinalOpcode::SetLocCheck => {
             let index = local_index(opcode, operands)?;
             if local_is_uninitialized(runtime, frame, index)? {

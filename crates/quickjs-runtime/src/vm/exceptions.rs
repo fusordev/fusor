@@ -54,6 +54,28 @@ pub(super) fn tdz_exception(
     })
 }
 
+pub(super) fn lexical_reinitialization_exception(
+    runtime: &Runtime,
+    frame: &Frame,
+    binding: BindingName,
+    pc: BytecodePc,
+) -> Result<PendingException, ExecutionError> {
+    let code = code(runtime, frame.code)?;
+    let message = if let Some(name) = binding_name(runtime, frame, binding)? {
+        name.concat(&JsString::from_utf8(" is already initialized")?)?
+    } else {
+        JsString::from_utf8("lexical variable is already initialized")?
+    };
+    Ok(PendingException {
+        realm: code.realm,
+        payload: PendingExceptionPayload::EngineError {
+            kind: ExceptionKind::ReferenceError,
+            message,
+        },
+        origin: instruction_location(runtime, frame, pc)?,
+    })
+}
+
 pub(super) fn immutable_binding_exception(
     runtime: &Runtime,
     frame: &Frame,

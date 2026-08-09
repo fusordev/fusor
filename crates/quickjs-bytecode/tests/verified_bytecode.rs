@@ -8469,6 +8469,54 @@ fn frame_state_distinguishes_proven_let_access_from_repeated_const_initializatio
 }
 
 #[test]
+fn checked_lexical_initialization_requires_an_uninitialized_tdz_cell() {
+    let definition = VariableDefinition::new(
+        Some(AtomPoolIndex::new(0)),
+        ScopeLink::End,
+        const_policy(),
+        true,
+        None,
+    );
+    let valid = [
+        (FinalOpcode::SetLocUninitialized, Operands::Loc(0)),
+        (FinalOpcode::Push1, Operands::NoneInt),
+        (FinalOpcode::PutLocCheckInit, Operands::Loc(0)),
+        (FinalOpcode::ReturnUndef, Operands::None),
+    ];
+    verify_compiler_bytecode_graph(
+        typed_stack_input(&valid, &[atom("value")], std::slice::from_ref(&definition)),
+        BytecodeGraphVerificationLimits::default(),
+    )
+    .expect("checked initialization consumes one uninitialized lexical cell");
+
+    let repeated = [
+        (FinalOpcode::SetLocUninitialized, Operands::Loc(0)),
+        (FinalOpcode::Push1, Operands::NoneInt),
+        (FinalOpcode::PutLocCheckInit, Operands::Loc(0)),
+        (FinalOpcode::Push2, Operands::NoneInt),
+        (FinalOpcode::PutLocCheckInit, Operands::Loc(0)),
+        (FinalOpcode::ReturnUndef, Operands::None),
+    ];
+    let error = verify_compiler_bytecode_graph(
+        typed_stack_input(
+            &repeated,
+            &[atom("value")],
+            std::slice::from_ref(&definition),
+        ),
+        BytecodeGraphVerificationLimits::default(),
+    )
+    .expect_err("checked initialization cannot overwrite an initialized lexical cell");
+    assert!(matches!(
+        error.kind(),
+        BytecodeVerificationErrorKind::BindingPolicyViolation {
+            slot: BindingSlot::Local(0),
+            reason: BindingPolicyViolationReason::InvalidLexicalInitialization,
+            ..
+        }
+    ));
+}
+
+#[test]
 fn checked_tdz_access_suppresses_definite_throw_and_narrows_mixed_normal_paths() {
     let variables = [
         VariableDefinition::new(
