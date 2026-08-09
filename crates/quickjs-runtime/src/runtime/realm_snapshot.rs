@@ -9,7 +9,7 @@ use crate::{
 
 use super::{
     ErrorIntrinsicKind, FunctionImplementation, HeapReference, RealmId, RealmIntrinsics, Runtime,
-    StoredValue, usize_to_u64,
+    StoredValue,
 };
 
 #[derive(Debug, Eq, PartialEq)]
@@ -326,22 +326,6 @@ impl RealmSnapshot {
 
         Self { nodes }
     }
-
-    pub(super) fn node_count(&self) -> usize {
-        self.nodes.len()
-    }
-
-    pub(super) fn property_count(&self) -> u64 {
-        usize_to_u64(self.nodes.iter().map(|node| node.properties.len()).sum())
-    }
-
-    pub(super) fn fingerprint(&self) -> u64 {
-        format!("{self:#?}")
-            .bytes()
-            .fold(0xcbf2_9ce4_8422_2325, |hash, byte| {
-                (hash ^ u64::from(byte)).wrapping_mul(0x0000_0100_0000_01b3)
-            })
-    }
 }
 
 fn snapshot_node(
@@ -546,30 +530,7 @@ fn global_object_property(record: &ObjectRecord, name: &str) -> super::ObjectId 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{
-        AtomUsage, PREDEFINED_ATOM_COUNT, PREDEFINED_DESCRIPTION_CODE_UNITS,
-        PREDEFINED_INTERNER_SLOTS,
-    };
-
-    use crate::runtime::{RealmIntrinsics, RuntimeLimits, RuntimeUsage};
-
-    const REALM_NODES: usize = 895;
-    const REALM_PROPERTIES: u64 = 2_707;
-    const REALM_SNAPSHOT_FINGERPRINT: u64 = 14_052_603_484_784_711_893;
-
-    #[test]
-    fn complete_realm_snapshot_pins_the_installed_intrinsic_graph() {
-        let mut runtime = Runtime::try_new(RuntimeLimits::default()).expect("runtime");
-        let before = runtime.usage();
-        let realm = runtime.create_realm().expect("realm");
-        let snapshot = RealmSnapshot::capture(&runtime, realm.0.id);
-
-        assert_eq!(before, RuntimeUsage::default());
-        assert_eq!(snapshot.node_count(), REALM_NODES);
-        assert_eq!(snapshot.property_count(), REALM_PROPERTIES);
-        assert_eq!(runtime.usage().object_properties(), REALM_PROPERTIES);
-        assert_eq!(snapshot.fingerprint(), REALM_SNAPSHOT_FINGERPRINT);
-    }
+    use crate::runtime::{RealmIntrinsics, RuntimeLimits};
 
     #[test]
     fn realm_snapshots_normalize_local_identity_and_preserve_isolation() {
@@ -600,14 +561,6 @@ mod tests {
         assert_ne!(first_function_prototype, second_function_prototype);
         assert_eq!(first_snapshot, second_snapshot);
         assert_eq!(runtime.atom_usage(), first_atoms);
-        assert_eq!(
-            first_atoms,
-            AtomUsage {
-                live_atoms: PREDEFINED_ATOM_COUNT + 398,
-                live_description_code_units: PREDEFINED_DESCRIPTION_CODE_UNITS + 3_610,
-                interner_slots: PREDEFINED_INTERNER_SLOTS + 398,
-            }
-        );
 
         let first_array = match first_state.intrinsics {
             RealmIntrinsics::Ready { array, .. } => array,

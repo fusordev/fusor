@@ -10,6 +10,7 @@ publish = false
 [dependencies]
 quickjs-bytecode = { path = "../quickjs-bytecode" }
 quickjs-compiler = { path = "../quickjs-compiler" }
+quickjs-diagnostics = { path = "../quickjs-diagnostics" }
 quickjs-frontend = { path = "../quickjs-frontend" }
 quickjs-runtime = { path = "../quickjs-runtime" }
 

@@ -39,6 +39,562 @@ pub(super) fn code(runtime: &Runtime, id: InstalledCodeId) -> Result<&InstalledC
     })
 }
 
+#[allow(
+    clippy::too_many_lines,
+    reason = "caller-cell admission, reservation, promotion, and rollback journaling form one auditable transaction"
+)]
+pub(super) fn materialize_direct_eval_environment(
+    runtime: &mut Runtime,
+    frame: &mut Frame,
+    authority: &quickjs_bytecode::VerifiedBytecode,
+    caller_bindings: &[DirectEvalCallerBinding],
+) -> Result<DirectEvalEnvironment, ExecutionError> {
+    let mut environment_size = None;
+    for source in authority.root().function().closure_sources() {
+        let size = match *source {
+            CompilerClosureSource::DirectEvalBinding {
+                environment_size, ..
+            }
+            | CompilerClosureSource::DirectEvalVariable {
+                environment_size, ..
+            } => environment_size as usize,
+            CompilerClosureSource::ParentVariableReference(_)
+            | CompilerClosureSource::ParentClosure(_)
+            | CompilerClosureSource::ConstructorRealmGlobal(_) => continue,
+        };
+        if size < caller_bindings.len()
+            || environment_size
+                .replace(size)
+                .is_some_and(|expected| expected != size)
+        {
+            return Err(EngineFault::RuntimeInvariant {
+                message: "direct-eval authority expects an inconsistent environment shape",
+            }
+            .into());
+        }
+    }
+    let environment_size = environment_size.unwrap_or(caller_bindings.len());
+    let mut bindings = Vec::new();
+    bindings
+        .try_reserve_exact(environment_size)
+        .map_err(|_| ExecutionError::AllocationFailed {
+            resource: RuntimeResource::BindingCells,
+            additional: environment_size,
+        })?;
+    bindings.resize(environment_size, None);
+    let mut selected = Vec::new();
+    selected
+        .try_reserve_exact(environment_size)
+        .map_err(|_| ExecutionError::AllocationFailed {
+            resource: RuntimeResource::BindingCells,
+            additional: environment_size,
+        })?;
+    selected.resize(environment_size, false);
+    let mut pending = Vec::new();
+    pending
+        .try_reserve_exact(caller_bindings.len())
+        .map_err(|_| ExecutionError::AllocationFailed {
+            resource: RuntimeResource::BindingCells,
+            additional: caller_bindings.len(),
+        })?;
+    let mut pending_variables = Vec::new();
+    pending_variables
+        .try_reserve_exact(environment_size.saturating_sub(caller_bindings.len()))
+        .map_err(|_| ExecutionError::AllocationFailed {
+            resource: RuntimeResource::BindingCells,
+            additional: environment_size.saturating_sub(caller_bindings.len()),
+        })?;
+
+    let root = authority.root();
+    for (closure, source) in root.function().closure_sources().iter().enumerate() {
+        let CompilerClosureSource::DirectEvalBinding { index, .. } = *source else {
+            if let CompilerClosureSource::DirectEvalVariable { index, .. } = *source {
+                let external_index = index as usize;
+                if external_index < caller_bindings.len() {
+                    return Err(EngineFault::RuntimeInvariant {
+                        message: "new direct-eval variable overlaps the caller snapshot",
+                    }
+                    .into());
+                }
+                let selected_entry =
+                    selected
+                        .get_mut(external_index)
+                        .ok_or(EngineFault::RuntimeInvariant {
+                            message: "new direct-eval variable indexes outside its environment",
+                        })?;
+                if std::mem::replace(selected_entry, true) {
+                    return Err(EngineFault::RuntimeInvariant {
+                        message: "direct-eval authority imports one environment entry twice",
+                    }
+                    .into());
+                }
+                let definition = root.metadata().closures().get(closure).ok_or(
+                    EngineFault::RuntimeInvariant {
+                        message: "new direct-eval variable lost its closure metadata",
+                    },
+                )?;
+                let atom = definition.name().ok_or(EngineFault::RuntimeInvariant {
+                    message: "new direct-eval variable has no name",
+                })?;
+                let atom = root.function().atoms().get(atom.get() as usize).ok_or(
+                    EngineFault::MissingPoolEntry {
+                        pool: "new direct-eval variable atom",
+                        index: atom.get(),
+                    },
+                )?;
+                let name = runtime_string(atom.string())?;
+                if pending_variables
+                    .iter()
+                    .any(|pending: &PendingDirectEvalVariable| pending.name == name)
+                {
+                    return Err(EngineFault::RuntimeInvariant {
+                        message: "direct-eval authority creates one variable more than once",
+                    }
+                    .into());
+                }
+                pending_variables.push(PendingDirectEvalVariable {
+                    external_index,
+                    name,
+                });
+            }
+            continue;
+        };
+        let external_index = index as usize;
+        if external_index >= caller_bindings.len() {
+            return Err(EngineFault::RuntimeInvariant {
+                message: "direct-eval caller binding indexes outside the caller snapshot",
+            }
+            .into());
+        }
+        let caller = caller_bindings
+            .get(external_index)
+            .ok_or(EngineFault::RuntimeInvariant {
+                message: "direct-eval authority indexes outside the caller environment",
+            })?;
+        let selected_entry =
+            selected
+                .get_mut(external_index)
+                .ok_or(EngineFault::RuntimeInvariant {
+                    message: "direct-eval caller selection is missing",
+                })?;
+        if std::mem::replace(selected_entry, true) {
+            return Err(EngineFault::RuntimeInvariant {
+                message: "direct-eval authority imports one caller binding more than once",
+            }
+            .into());
+        }
+        let location = caller.location();
+        match location {
+            DirectEvalCallerBindingLocation::Closure(index) => {
+                let binding = *frame.environment.get(index as usize).ok_or(
+                    EngineFault::MissingPoolEntry {
+                        pool: "direct-eval caller closure",
+                        index,
+                    },
+                )?;
+                let EnvironmentBinding::Captured(cell) = binding else {
+                    return Err(EngineFault::InvalidClosureEnvironment {
+                        function: frame.template,
+                    }
+                    .into());
+                };
+                if !runtime.cells.contains(cell) {
+                    return Err(EngineFault::StaleHeapEdge {
+                        edge: "direct-eval caller cell",
+                        index: cell.index(),
+                        generation: cell.generation(),
+                    }
+                    .into());
+                }
+                bindings[external_index] = Some(binding);
+            }
+            DirectEvalCallerBindingLocation::Argument(index)
+            | DirectEvalCallerBindingLocation::Local(index) => {
+                let address = match location {
+                    DirectEvalCallerBindingLocation::Argument(_) => {
+                        FrameBindingAddress::Argument(index)
+                    }
+                    DirectEvalCallerBindingLocation::Local(_) => FrameBindingAddress::Local(index),
+                    DirectEvalCallerBindingLocation::Closure(_)
+                    | DirectEvalCallerBindingLocation::EvalVariable { .. } => unreachable!(),
+                };
+                let frame_binding = match address {
+                    FrameBindingAddress::Argument(index) => frame_argument(frame, index)?,
+                    FrameBindingAddress::Local(index) => frame_local(frame, index)?,
+                };
+                match frame_binding {
+                    FrameBinding::Captured(cell) => {
+                        if !runtime.cells.contains(*cell) {
+                            return Err(EngineFault::StaleHeapEdge {
+                                edge: "direct-eval caller cell",
+                                index: cell.index(),
+                                generation: cell.generation(),
+                            }
+                            .into());
+                        }
+                        bindings[external_index] = Some(EnvironmentBinding::Captured(*cell));
+                    }
+                    FrameBinding::Direct(value) => {
+                        let own_index = frame
+                            .own_cell_bindings
+                            .iter()
+                            .position(|candidate| *candidate == address);
+                        if let Some(own) = own_index {
+                            let own_cell = frame.own_cells.get(own).ok_or(
+                                EngineFault::InvalidClosureEnvironment {
+                                    function: frame.template,
+                                },
+                            )?;
+                            if own_cell.is_some() {
+                                return Err(EngineFault::InvalidClosureEnvironment {
+                                    function: frame.template,
+                                }
+                                .into());
+                            }
+                        }
+                        pending.push(PendingDirectEvalCell {
+                            external_index,
+                            location,
+                            own_index,
+                            value: value.duplicate(),
+                        });
+                    }
+                }
+            }
+            DirectEvalCallerBindingLocation::EvalVariable { depth, index } => {
+                let cell = direct_eval_variable_cell(frame, depth, index)?;
+                if !runtime.cells.contains(cell) {
+                    return Err(EngineFault::StaleHeapEdge {
+                        edge: "direct-eval variable cell",
+                        index: cell.index(),
+                        generation: cell.generation(),
+                    }
+                    .into());
+                }
+                bindings[external_index] = Some(EnvironmentBinding::Captured(cell));
+            }
+        }
+    }
+
+    let variable_environment = if pending_variables.is_empty() {
+        None
+    } else {
+        let environment = frame
+            .eval_declaration_environment
+            .as_ref()
+            .map(Rc::clone)
+            .ok_or(EngineFault::RuntimeInvariant {
+                message: "new direct-eval variables require a function environment",
+            })?;
+        let mut record = environment.borrow_mut();
+        let original_len = record.bindings.len();
+        for pending in &pending_variables {
+            if record
+                .bindings
+                .iter()
+                .any(|binding| !binding.deleted && binding.name == pending.name)
+            {
+                return Err(EngineFault::RuntimeInvariant {
+                    message: "new direct-eval variable already exists in the function environment",
+                }
+                .into());
+            }
+        }
+        record
+            .bindings
+            .try_reserve_exact(pending_variables.len())
+            .map_err(|_| ExecutionError::AllocationFailed {
+                resource: RuntimeResource::BindingCells,
+                additional: pending_variables.len(),
+            })?;
+        drop(record);
+        Some((environment, original_len))
+    };
+
+    let inserted_count = pending.len().checked_add(pending_variables.len()).ok_or(
+        EngineFault::RuntimeInvariant {
+            message: "direct-eval binding cell count overflowed",
+        },
+    )?;
+    check_execution_limit(
+        RuntimeResource::BindingCells,
+        runtime.limits.max_binding_cells,
+        usize_to_u64(runtime.cells.len()).saturating_add(usize_to_u64(inserted_count)),
+    )?;
+    runtime
+        .cells
+        .try_reserve(inserted_count)
+        .map_err(|_| ExecutionError::AllocationFailed {
+            resource: RuntimeResource::BindingCells,
+            additional: inserted_count,
+        })?;
+    let mut new_cells = Vec::new();
+    new_cells
+        .try_reserve_exact(inserted_count)
+        .map_err(|_| ExecutionError::AllocationFailed {
+            resource: RuntimeResource::BindingCells,
+            additional: inserted_count,
+        })?;
+    let mut created_cells = Vec::new();
+    created_cells
+        .try_reserve_exact(pending.len())
+        .map_err(|_| ExecutionError::AllocationFailed {
+            resource: RuntimeResource::BindingCells,
+            additional: pending.len(),
+        })?;
+    let mut created_variable_cells = Vec::new();
+    created_variable_cells
+        .try_reserve_exact(pending_variables.len())
+        .map_err(|_| ExecutionError::AllocationFailed {
+            resource: RuntimeResource::BindingCells,
+            additional: pending_variables.len(),
+        })?;
+    for entry in &pending {
+        let Ok(cell) = runtime.cells.try_insert(BindingCell {
+            value: entry.value.duplicate(),
+        }) else {
+            for cell in new_cells {
+                let removed = runtime.cells.remove(cell);
+                debug_assert!(removed.is_some());
+            }
+            return Err(ExecutionError::AllocationFailed {
+                resource: RuntimeResource::BindingCells,
+                additional: 1,
+            });
+        };
+        new_cells.push(cell);
+    }
+    for _ in &pending_variables {
+        let Ok(cell) = runtime.cells.try_insert(BindingCell {
+            value: SlotValue::Value(StoredValue::Undefined),
+        }) else {
+            for cell in new_cells {
+                let removed = runtime.cells.remove(cell);
+                debug_assert!(removed.is_some());
+            }
+            return Err(ExecutionError::AllocationFailed {
+                resource: RuntimeResource::BindingCells,
+                additional: 1,
+            });
+        };
+        new_cells.push(cell);
+    }
+
+    for (entry, cell) in pending
+        .iter()
+        .zip(new_cells.iter().copied().take(pending.len()))
+    {
+        let frame_binding = match entry.location {
+            DirectEvalCallerBindingLocation::Argument(index) => {
+                &mut frame.arguments[index as usize]
+            }
+            DirectEvalCallerBindingLocation::Local(index) => &mut frame.locals[index as usize],
+            DirectEvalCallerBindingLocation::Closure(_) => {
+                unreachable!("only direct frame bindings are scheduled for promotion")
+            }
+            DirectEvalCallerBindingLocation::EvalVariable { .. } => {
+                unreachable!("existing eval-variable cells are never promoted")
+            }
+        };
+        *frame_binding = FrameBinding::Captured(cell);
+        if let Some(own_index) = entry.own_index {
+            frame.own_cells[own_index] = Some(cell);
+        }
+        bindings[entry.external_index] = Some(EnvironmentBinding::Captured(cell));
+        created_cells.push(CreatedDirectEvalCell {
+            location: entry.location,
+            own_index: entry.own_index,
+            cell,
+        });
+    }
+    created_variable_cells.extend(new_cells.iter().copied().skip(pending.len()));
+    if let Some((environment, _)) = &variable_environment {
+        let mut record = environment.borrow_mut();
+        for (entry, cell) in pending_variables.iter().zip(&created_variable_cells) {
+            record.bindings.push(EvalVariableBinding {
+                name: entry.name.clone(),
+                cell: *cell,
+                deleted: false,
+            });
+            bindings[entry.external_index] = Some(EnvironmentBinding::Captured(*cell));
+        }
+    }
+    runtime.collection_pending |= inserted_count != 0;
+    Ok(DirectEvalEnvironment {
+        bindings,
+        created_cells,
+        created_variable_environment: variable_environment,
+        created_variable_cells,
+    })
+}
+
+fn direct_eval_variable_cell(
+    frame: &Frame,
+    depth: u32,
+    index: u32,
+) -> Result<BindingCellId, EngineFault> {
+    let mut current = frame.eval_environment.as_ref().map(Rc::clone);
+    for _ in 0..depth {
+        let environment = current.ok_or(EngineFault::InvalidClosureEnvironment {
+            function: frame.template,
+        })?;
+        current = environment.borrow().parent.as_ref().map(Rc::clone);
+    }
+    let environment = current.ok_or(EngineFault::InvalidClosureEnvironment {
+        function: frame.template,
+    })?;
+    let cell = environment
+        .borrow()
+        .bindings
+        .get(index as usize)
+        .filter(|binding| !binding.deleted)
+        .map(|binding| binding.cell)
+        .ok_or(EngineFault::InvalidClosureEnvironment {
+            function: frame.template,
+        })?;
+    Ok(cell)
+}
+
+fn validate_direct_eval_rollback(
+    runtime: &Runtime,
+    frame: &Frame,
+    environment: &DirectEvalEnvironment,
+) -> Result<(), EngineFault> {
+    let mut distinct_cells = HashSet::new();
+    for &cell in &environment.created_variable_cells {
+        if !distinct_cells.insert(cell) || !runtime.cells.contains(cell) {
+            return Err(EngineFault::StaleHeapEdge {
+                edge: "direct-eval variable cell",
+                index: cell.index(),
+                generation: cell.generation(),
+            });
+        }
+    }
+    match &environment.created_variable_environment {
+        Some((variable_environment, original_len)) => {
+            let record = variable_environment.borrow();
+            let expected_len = original_len
+                .checked_add(environment.created_variable_cells.len())
+                .ok_or(EngineFault::RuntimeInvariant {
+                    message: "direct-eval variable rollback length overflowed",
+                })?;
+            if record.bindings.len() != expected_len
+                || !record.bindings[*original_len..]
+                    .iter()
+                    .zip(&environment.created_variable_cells)
+                    .all(|(binding, cell)| binding.cell == *cell)
+            {
+                return Err(EngineFault::RuntimeInvariant {
+                    message: "direct-eval variable environment changed before rollback",
+                });
+            }
+        }
+        None if !environment.created_variable_cells.is_empty() => {
+            return Err(EngineFault::RuntimeInvariant {
+                message: "direct-eval variable rollback lost its environment",
+            });
+        }
+        None => {}
+    }
+    for created in &environment.created_cells {
+        if !distinct_cells.insert(created.cell) || !runtime.cells.contains(created.cell) {
+            return Err(EngineFault::StaleHeapEdge {
+                edge: "direct-eval caller cell",
+                index: created.cell.index(),
+                generation: created.cell.generation(),
+            });
+        }
+        let binding = match created.location {
+            DirectEvalCallerBindingLocation::Argument(index) => frame_argument(frame, index),
+            DirectEvalCallerBindingLocation::Local(index) => frame_local(frame, index),
+            DirectEvalCallerBindingLocation::Closure(_) => {
+                return Err(EngineFault::RuntimeInvariant {
+                    message: "a direct-eval closure binding entered the promotion journal",
+                });
+            }
+            DirectEvalCallerBindingLocation::EvalVariable { .. } => {
+                return Err(EngineFault::RuntimeInvariant {
+                    message: "an existing eval-variable binding entered the promotion journal",
+                });
+            }
+        }?;
+        if !matches!(binding, FrameBinding::Captured(cell) if *cell == created.cell) {
+            return Err(EngineFault::InvalidClosureEnvironment {
+                function: frame.template,
+            });
+        }
+        if let Some(own_index) = created.own_index {
+            let own_cell =
+                frame
+                    .own_cells
+                    .get(own_index)
+                    .ok_or(EngineFault::InvalidClosureEnvironment {
+                        function: frame.template,
+                    })?;
+            if *own_cell != Some(created.cell) {
+                return Err(EngineFault::InvalidClosureEnvironment {
+                    function: frame.template,
+                });
+            }
+        }
+    }
+
+    Ok(())
+}
+
+pub(super) fn rollback_direct_eval_environment(
+    runtime: &mut Runtime,
+    frame: &mut Frame,
+    environment: DirectEvalEnvironment,
+) -> Result<(), EngineFault> {
+    validate_direct_eval_rollback(runtime, frame, &environment)?;
+
+    if let Some((variable_environment, original_len)) = &environment.created_variable_environment {
+        variable_environment
+            .borrow_mut()
+            .bindings
+            .truncate(*original_len);
+    }
+    for cell in environment.created_variable_cells.into_iter().rev() {
+        runtime
+            .cells
+            .remove(cell)
+            .ok_or(EngineFault::StaleHeapEdge {
+                edge: "direct-eval variable cell",
+                index: cell.index(),
+                generation: cell.generation(),
+            })?;
+    }
+
+    for created in environment.created_cells.into_iter().rev() {
+        let removed = runtime
+            .cells
+            .remove(created.cell)
+            .ok_or(EngineFault::StaleHeapEdge {
+                edge: "direct-eval caller cell",
+                index: created.cell.index(),
+                generation: created.cell.generation(),
+            })?;
+        let binding = match created.location {
+            DirectEvalCallerBindingLocation::Argument(index) => {
+                &mut frame.arguments[index as usize]
+            }
+            DirectEvalCallerBindingLocation::Local(index) => &mut frame.locals[index as usize],
+            DirectEvalCallerBindingLocation::Closure(_) => {
+                unreachable!("validated promotion journals contain only frame bindings")
+            }
+            DirectEvalCallerBindingLocation::EvalVariable { .. } => {
+                unreachable!("validated promotion journals exclude eval-variable bindings")
+            }
+        };
+        *binding = FrameBinding::Direct(removed.value);
+        if let Some(own_index) = created.own_index {
+            frame.own_cells[own_index] = None;
+        }
+    }
+    Ok(())
+}
+
 pub(super) fn installed_template(
     runtime: &Runtime,
     code_id: InstalledCodeId,
@@ -150,6 +706,7 @@ pub(super) fn define_class(
     name: JsString,
     constructor_parent: HeapReference,
     prototype_parent: Option<HeapReference>,
+    has_instance_elements: bool,
 ) -> Result<ObjectId, ExecutionError> {
     if !bytecode_function_is_class_constructor(runtime, constructor)? {
         return Err(EngineFault::RuntimeInvariant {
@@ -197,6 +754,12 @@ pub(super) fn define_class(
         .into());
     }
     set_function_home_object(runtime, constructor, HeapReference::Object(prototype))?;
+    runtime
+        .bytecode_function_mut(constructor)
+        .ok_or(EngineFault::RuntimeInvariant {
+            message: "class definition lost its bytecode constructor",
+        })?
+        .has_instance_elements = has_instance_elements;
     Ok(prototype)
 }
 
@@ -232,6 +795,75 @@ pub(super) fn set_function_home_object(
     Ok(())
 }
 
+fn captured_binding_eval_shadow(
+    frame: &Frame,
+    source: CompilerClosureSource,
+    shadowable: bool,
+) -> Result<Option<EvalBindingShadow>, EngineFault> {
+    if !shadowable {
+        return Ok(None);
+    }
+    match source {
+        CompilerClosureSource::ParentVariableReference(_) => {
+            let Some(boundary) = frame.parameter_eval_boundary.as_ref() else {
+                return Ok(None);
+            };
+            if frame.body_eval_environment.is_some() {
+                return Ok(None);
+            }
+            let head =
+                frame
+                    .eval_environment
+                    .as_ref()
+                    .ok_or(EngineFault::InvalidClosureEnvironment {
+                        function: frame.template,
+                    })?;
+            Ok(Some(EvalBindingShadow {
+                head: Rc::clone(head),
+                boundary: Some(Rc::clone(boundary)),
+            }))
+        }
+        CompilerClosureSource::ParentClosure(index) => {
+            let inherited = frame
+                .environment_eval_shadows
+                .get(index as usize)
+                .ok_or(EngineFault::MissingPoolEntry {
+                    pool: "closure eval shadow",
+                    index,
+                })?
+                .clone();
+            let owns_environment = match (
+                frame.eval_environment.as_ref(),
+                frame.inherited_eval_environment.as_ref(),
+            ) {
+                (Some(head), Some(inherited)) => !Rc::ptr_eq(head, inherited),
+                (Some(_), None) => frame.eval_declaration_environment.is_some(),
+                (None, _) => false,
+            };
+            if !owns_environment {
+                return Ok(inherited);
+            }
+            let head =
+                frame
+                    .eval_environment
+                    .as_ref()
+                    .ok_or(EngineFault::InvalidClosureEnvironment {
+                        function: frame.template,
+                    })?;
+            Ok(Some(EvalBindingShadow {
+                head: Rc::clone(head),
+                boundary: inherited
+                    .as_ref()
+                    .and_then(|shadow| shadow.boundary.as_ref().map(Rc::clone))
+                    .or_else(|| frame.inherited_eval_environment.as_ref().map(Rc::clone)),
+            }))
+        }
+        CompilerClosureSource::ConstructorRealmGlobal(_)
+        | CompilerClosureSource::DirectEvalBinding { .. }
+        | CompilerClosureSource::DirectEvalVariable { .. } => Ok(None),
+    }
+}
+
 #[allow(
     clippy::too_many_lines,
     reason = "closure validation, capture materialization, and publication are one transaction"
@@ -259,6 +891,7 @@ pub(super) fn create_closure(
         }
         .into());
     }
+    let parent_home_object = parent.home_object;
     let (
         sources,
         expected,
@@ -268,6 +901,8 @@ pub(super) fn create_closure(
         has_prototype,
         function_kind,
         executable_kind,
+        lexical_derived_this,
+        closure_eval_shadowable,
     ) = {
         let code = code(runtime, frame.code)?;
         let function = code
@@ -304,6 +939,20 @@ pub(super) fn create_closure(
             },
         )?;
         let header = function.function().control_flow().function_header();
+        let mut closure_eval_shadowable = Vec::new();
+        closure_eval_shadowable
+            .try_reserve_exact(function.metadata().closures().len())
+            .map_err(|_| ExecutionError::AllocationFailed {
+                resource: RuntimeResource::FrameValues,
+                additional: function.metadata().closures().len(),
+            })?;
+        closure_eval_shadowable.extend(
+            function
+                .metadata()
+                .closures()
+                .iter()
+                .map(|definition| eval_can_shadow_binding(definition.policy().kind())),
+        );
         (
             copied,
             function.metadata().closures().len(),
@@ -313,9 +962,35 @@ pub(super) fn create_closure(
             header.flags().has_prototype(),
             header.kind(),
             function.metadata().executable_kind(),
+            function.lexical_derived_this(),
+            closure_eval_shadowable,
         )
     };
     let lexical = executable_kind == CompilerExecutableKind::OrdinaryArrow;
+    let (lexical_derived_constructor, lexical_derived_this_cell) = if lexical_derived_this {
+        let constructor =
+            frame
+                .derived_constructor
+                .ok_or(EngineFault::InvalidClosureEnvironment {
+                    function: frame.template,
+                })?;
+        let cell = frame
+            .derived_this_cell
+            .ok_or(EngineFault::InvalidClosureEnvironment {
+                function: frame.template,
+            })?;
+        if !runtime.cells.contains(cell) {
+            return Err(EngineFault::StaleHeapEdge {
+                edge: "lexical derived-this binding",
+                index: cell.index(),
+                generation: cell.generation(),
+            }
+            .into());
+        }
+        (Some(constructor), Some(cell))
+    } else {
+        (None, None)
+    };
     let generator = function_kind == FunctionKind::Generator;
     let asynchronous = function_kind == FunctionKind::Async;
     let async_generator = function_kind == FunctionKind::AsyncGenerator;
@@ -349,6 +1024,13 @@ pub(super) fn create_closure(
             resource: RuntimeResource::BindingCells,
             additional: sources.len(),
         })?;
+    let mut capture_eval_shadows = Vec::new();
+    capture_eval_shadows
+        .try_reserve_exact(sources.len())
+        .map_err(|_| ExecutionError::AllocationFailed {
+            resource: RuntimeResource::FrameValues,
+            additional: sources.len(),
+        })?;
     let mut pending_by_own = Vec::new();
     pending_by_own
         .try_reserve_exact(frame.own_cells.len())
@@ -365,7 +1047,12 @@ pub(super) fn create_closure(
             additional: sources.len(),
         })?;
 
-    for source in sources {
+    for (source, eval_shadowable) in sources.into_iter().zip(closure_eval_shadowable) {
+        capture_eval_shadows.push(captured_binding_eval_shadow(
+            frame,
+            source,
+            eval_shadowable,
+        )?);
         match source {
             CompilerClosureSource::ParentVariableReference(index) => {
                 let own_index = index as usize;
@@ -455,7 +1142,9 @@ pub(super) fn create_closure(
                 }
                 capture_plans.push(ClosureCapturePlan::Existing(binding));
             }
-            CompilerClosureSource::ConstructorRealmGlobal(_) => {
+            CompilerClosureSource::ConstructorRealmGlobal(_)
+            | CompilerClosureSource::DirectEvalBinding { .. }
+            | CompilerClosureSource::DirectEvalVariable { .. } => {
                 return Err(EngineFault::InvalidClosureEnvironment { function: child }.into());
             }
         }
@@ -658,9 +1347,15 @@ pub(super) fn create_closure(
             code: frame.code,
             template: child,
             environment,
+            environment_eval_shadows: capture_eval_shadows,
+            eval_environment: frame.eval_environment.as_ref().map(Rc::clone),
             lexical_receiver: lexical.then(|| frame.receiver.duplicate()),
+            lexical_eval_in_function: lexical && frame.eval_in_function,
             lexical_new_target: if lexical { frame.new_target } else { None },
-            home_object: None,
+            lexical_derived_constructor,
+            lexical_derived_this: lexical_derived_this_cell,
+            has_instance_elements: false,
+            home_object: if lexical { parent_home_object } else { None },
         }),
         object: function_record,
         public_roots: 0,
@@ -772,6 +1467,7 @@ pub(super) fn close_local(
 
 pub(super) enum BindingAccessError {
     Uninitialized,
+    Missing,
     Fault(EngineFault),
 }
 
@@ -780,6 +1476,10 @@ impl From<BindingAccessError> for ExecutionError {
         match error {
             BindingAccessError::Uninitialized => EngineFault::UnexpectedUninitialized {
                 function: FunctionTemplateId::new(u32::MAX),
+            }
+            .into(),
+            BindingAccessError::Missing => EngineFault::RuntimeInvariant {
+                message: "a missing dynamic binding escaped opcode-level exception handling",
             }
             .into(),
             BindingAccessError::Fault(fault) => fault.into(),
@@ -820,6 +1520,25 @@ pub(super) fn duplicate_binding(
     }
 }
 
+pub(super) fn duplicate_local(
+    runtime: &Runtime,
+    frame: &Frame,
+    index: u32,
+    checked: bool,
+) -> Result<StoredValue, BindingAccessError> {
+    if let Some(cell) =
+        local_eval_shadow_cell(runtime, frame, index).map_err(BindingAccessError::Fault)?
+    {
+        return duplicate_binding(runtime, &FrameBinding::Captured(cell), checked, frame);
+    }
+    duplicate_binding(
+        runtime,
+        frame_local(frame, index).map_err(BindingAccessError::Fault)?,
+        checked,
+        frame,
+    )
+}
+
 pub(super) fn binding_is_uninitialized(
     runtime: &Runtime,
     binding: &FrameBinding,
@@ -841,6 +1560,17 @@ pub(super) fn binding_is_uninitialized(
     })
 }
 
+pub(super) fn local_is_uninitialized(
+    runtime: &Runtime,
+    frame: &Frame,
+    index: u32,
+) -> Result<bool, EngineFault> {
+    if let Some(cell) = local_eval_shadow_cell(runtime, frame, index)? {
+        return binding_is_uninitialized(runtime, &FrameBinding::Captured(cell));
+    }
+    binding_is_uninitialized(runtime, frame_local(frame, index)?)
+}
+
 pub(super) fn write_argument(
     runtime: &mut Runtime,
     frame: &mut Frame,
@@ -856,7 +1586,169 @@ pub(super) fn write_local(
     index: u32,
     value: SlotValue,
 ) -> Result<(), ExecutionError> {
+    if let Some(cell) = local_eval_shadow_cell(runtime, frame, index)? {
+        let mut binding = FrameBinding::Captured(cell);
+        return write_binding(runtime, &mut binding, value);
+    }
     write_binding(runtime, frame_local_mut(frame, index)?, value)
+}
+
+fn local_eval_shadow_cell(
+    runtime: &Runtime,
+    frame: &Frame,
+    index: u32,
+) -> Result<Option<BindingCellId>, EngineFault> {
+    let Some(boundary) = frame.parameter_eval_boundary.as_ref() else {
+        return Ok(None);
+    };
+    if frame.body_eval_environment.is_some() {
+        return Ok(None);
+    }
+    if boundary.borrow().kind != EvalVariableEnvironmentKind::ParameterBoundary {
+        return Err(EngineFault::InvalidClosureEnvironment {
+            function: frame.template,
+        });
+    }
+    let function = code(runtime, frame.code)?
+        .authority
+        .function(frame.template)
+        .ok_or(EngineFault::InvalidClosureEnvironment {
+            function: frame.template,
+        })?;
+    let argument_count = function
+        .function()
+        .control_flow()
+        .domains()
+        .argument_count();
+    let definition = function
+        .metadata()
+        .variables()
+        .get(argument_count.saturating_add(index) as usize)
+        .ok_or(EngineFault::MissingPoolEntry {
+            pool: "local metadata",
+            index,
+        })?;
+    if !eval_can_shadow_binding(definition.policy().kind()) {
+        return Ok(None);
+    }
+    let name = installed_binding_name(runtime, frame, definition.name())?;
+    lookup_eval_variable_range(
+        frame.eval_environment.as_ref().map(Rc::clone),
+        Some(boundary),
+        &name,
+        frame.template,
+    )
+}
+
+const fn eval_can_shadow_binding(kind: CompilerBindingKind) -> bool {
+    matches!(
+        kind,
+        CompilerBindingKind::Parameter
+            | CompilerBindingKind::Var
+            | CompilerBindingKind::Let
+            | CompilerBindingKind::Const
+            | CompilerBindingKind::ClassName
+            | CompilerBindingKind::Function
+            | CompilerBindingKind::FunctionName
+            | CompilerBindingKind::Catch
+            | CompilerBindingKind::GlobalReference
+    )
+}
+
+fn installed_binding_name(
+    runtime: &Runtime,
+    frame: &Frame,
+    name: Option<quickjs_bytecode::AtomPoolIndex>,
+) -> Result<JsString, EngineFault> {
+    let name = name.ok_or(EngineFault::InvalidClosureEnvironment {
+        function: frame.template,
+    })?;
+    installed_template(runtime, frame.code, frame.template)?
+        .atoms
+        .get(name.get() as usize)
+        .ok_or(EngineFault::MissingPoolEntry {
+            pool: "binding metadata atom",
+            index: name.get(),
+        })?
+        .description()
+        .cloned()
+        .ok_or(EngineFault::InvalidClosureEnvironment {
+            function: frame.template,
+        })
+}
+
+fn lookup_eval_variable_range(
+    mut current: Option<SharedEvalVariableEnvironment>,
+    boundary: Option<&SharedEvalVariableEnvironment>,
+    name: &JsString,
+    function: FunctionTemplateId,
+) -> Result<Option<BindingCellId>, EngineFault> {
+    while let Some(environment) = current {
+        if boundary.is_some_and(|boundary| Rc::ptr_eq(&environment, boundary)) {
+            return Ok(None);
+        }
+        let record = environment.borrow();
+        if let Some(cell) = record
+            .bindings
+            .iter()
+            .find(|binding| !binding.deleted && binding.name.code_units().eq(name.code_units()))
+            .map(|binding| binding.cell)
+        {
+            return Ok(Some(cell));
+        }
+        current = record.parent.as_ref().map(Rc::clone);
+    }
+    if boundary.is_some() {
+        Err(EngineFault::InvalidClosureEnvironment { function })
+    } else {
+        Ok(None)
+    }
+}
+
+fn closure_eval_shadow_cell(
+    runtime: &Runtime,
+    frame: &Frame,
+    index: u32,
+) -> Result<Option<BindingCellId>, EngineFault> {
+    let function = code(runtime, frame.code)?
+        .authority
+        .function(frame.template)
+        .ok_or(EngineFault::InvalidClosureEnvironment {
+            function: frame.template,
+        })?;
+    let definition = function.metadata().closures().get(index as usize).ok_or(
+        EngineFault::MissingPoolEntry {
+            pool: "closure metadata",
+            index,
+        },
+    )?;
+    if !eval_can_shadow_binding(definition.policy().kind()) {
+        return Ok(None);
+    }
+    let name = installed_binding_name(runtime, frame, definition.name())?;
+    if let Some(cell) = lookup_eval_variable_range(
+        frame.eval_environment.as_ref().map(Rc::clone),
+        frame.inherited_eval_environment.as_ref(),
+        &name,
+        frame.template,
+    )? {
+        return Ok(Some(cell));
+    }
+    let shadow = frame.environment_eval_shadows.get(index as usize).ok_or(
+        EngineFault::MissingPoolEntry {
+            pool: "closure eval shadow",
+            index,
+        },
+    )?;
+    let Some(shadow) = shadow else {
+        return Ok(None);
+    };
+    lookup_eval_variable_range(
+        Some(Rc::clone(&shadow.head)),
+        shadow.boundary.as_ref(),
+        &name,
+        frame.template,
+    )
 }
 
 fn write_binding(
@@ -888,6 +1780,32 @@ pub(super) fn duplicate_environment(
     index: u32,
     checked: bool,
 ) -> Result<StoredValue, BindingAccessError> {
+    if let Some(cell) =
+        closure_eval_shadow_cell(runtime, frame, index).map_err(BindingAccessError::Fault)?
+    {
+        return duplicate_binding(runtime, &FrameBinding::Captured(cell), checked, frame);
+    }
+    let function = code(runtime, frame.code)
+        .map_err(BindingAccessError::Fault)?
+        .authority
+        .function(frame.template)
+        .ok_or(BindingAccessError::Fault(
+            EngineFault::InvalidClosureEnvironment {
+                function: frame.template,
+            },
+        ))?;
+    let definition =
+        function
+            .metadata()
+            .closures()
+            .get(index as usize)
+            .ok_or(BindingAccessError::Fault(EngineFault::MissingPoolEntry {
+                pool: "closure metadata",
+                index,
+            }))?;
+    if definition.is_deletable_eval_variable() {
+        return Err(BindingAccessError::Missing);
+    }
     let binding = *frame.environment.get(index as usize).ok_or({
         BindingAccessError::Fault(EngineFault::MissingPoolEntry {
             pool: "closure environment",
@@ -928,6 +1846,9 @@ pub(super) fn environment_is_uninitialized(
     frame: &Frame,
     index: u32,
 ) -> Result<bool, EngineFault> {
+    if let Some(cell) = closure_eval_shadow_cell(runtime, frame, index)? {
+        return binding_is_uninitialized(runtime, &FrameBinding::Captured(cell));
+    }
     let binding = *frame
         .environment
         .get(index as usize)
@@ -960,6 +1881,10 @@ pub(super) fn write_environment(
     index: u32,
     value: SlotValue,
 ) -> Result<(), ExecutionError> {
+    if let Some(cell) = closure_eval_shadow_cell(runtime, frame, index)? {
+        let mut binding = FrameBinding::Captured(cell);
+        return write_binding(runtime, &mut binding, value);
+    }
     let binding = *frame
         .environment
         .get(index as usize)

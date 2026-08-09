@@ -53,6 +53,7 @@ impl CompilationContext<'_, '_, '_> {
         storage: &crate::storage::BindingStorage,
         span: Span,
     ) -> Result<(), LeafCompilationError> {
+        let supported_goal = crate::is_supported_realm_global_binding_goal(self.unit.goal());
         let valid = match storage.placement() {
             StoragePlacement::GlobalObject => {
                 declaration_kind == VariableDeclarationKind::Var
@@ -87,7 +88,10 @@ impl CompilationContext<'_, '_, '_> {
             | StoragePlacement::ModuleLocal
             | StoragePlacement::ModuleImport => false,
         };
-        if !crate::is_supported_script_root_goal(self.unit.goal()) || !valid {
+        if !supported_goal || !valid {
+            if crate::is_supported_direct_eval_goal(self.unit.goal()) {
+                return unsupported(UnsupportedLeafFeature::DirectEvalVariableEnvironment, span);
+            }
             return unsupported(UnsupportedLeafFeature::UnsupportedDeclaration, span);
         }
         Ok(())

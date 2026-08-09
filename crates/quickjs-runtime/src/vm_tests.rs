@@ -1274,7 +1274,7 @@ fn for_in_next_rejects_a_non_iterator_cursor_after_verified_admission() {
         .instantiate(authority)
         .expect("function");
     let function = function.id().expect("function id");
-    let plan = plan_frame(&runtime, function, 0, 0, 0, false).expect("frame plan");
+    let plan = plan_frame(&runtime, function, 0, 0, 0, FrameEntryKind::Call).expect("frame plan");
     let mut frame = create_frame(
         &mut runtime,
         plan,
@@ -1327,7 +1327,7 @@ fn for_in_next_fuel_exhaustion_preserves_the_unvisited_candidate_for_retry() {
         .instantiate(authority)
         .expect("function");
     let function = function.id().expect("function id");
-    let plan = plan_frame(&runtime, function, 0, 0, 0, false).expect("frame plan");
+    let plan = plan_frame(&runtime, function, 0, 0, 0, FrameEntryKind::Call).expect("frame plan");
     let mut frame = create_frame(
         &mut runtime,
         plan,
@@ -1441,7 +1441,7 @@ fn for_in_next_precharges_snapshot_release_before_prototype_transition() {
     assert!(state.candidate().is_none());
     let usage_before_prototype = runtime.usage().for_in_entries();
 
-    let plan = plan_frame(&runtime, function, 0, 0, 0, false).expect("frame plan");
+    let plan = plan_frame(&runtime, function, 0, 0, 0, FrameEntryKind::Call).expect("frame plan");
     let mut prototype_frame = create_frame(
         &mut runtime,
         plan,
@@ -1543,7 +1543,7 @@ fn for_in_next_precharges_snapshot_release_before_terminal_transition() {
     assert!(terminal_snapshot_len > 0);
     let usage_before_terminal = runtime.usage().for_in_entries();
 
-    let plan = plan_frame(&runtime, function, 0, 0, 0, false).expect("frame plan");
+    let plan = plan_frame(&runtime, function, 0, 0, 0, FrameEntryKind::Call).expect("frame plan");
     let mut terminal_frame = create_frame(
         &mut runtime,
         plan,
@@ -1650,7 +1650,7 @@ fn ordinary_test_frame() -> (Runtime, RealmId, Frame) {
         .expect("function")
         .id()
         .expect("function id");
-    let plan = plan_frame(&runtime, function, 0, 0, 0, false).expect("frame plan");
+    let plan = plan_frame(&runtime, function, 0, 0, 0, FrameEntryKind::Call).expect("frame plan");
     let frame = create_frame(
         &mut runtime,
         plan,
@@ -1687,7 +1687,7 @@ fn array_from_test_frame() -> (Runtime, RealmId, Frame) {
         .expect("function")
         .id()
         .expect("function id");
-    let plan = plan_frame(&runtime, function, 0, 0, 0, false).expect("frame plan");
+    let plan = plan_frame(&runtime, function, 0, 0, 0, FrameEntryKind::Call).expect("frame plan");
     let mut frame = create_frame(
         &mut runtime,
         plan,

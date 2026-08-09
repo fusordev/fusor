@@ -64,9 +64,10 @@ pub fn verify_control_flow(
 ///
 /// This uses the same target, opcode, domain, header, reachability, and
 /// join-depth checks as [`verify_control_flow`]. Compiler-generated input has
-/// no serialized stack-size field to compare, and every reachable terminal
-/// must leave the ordinary value stack empty. The returned value remains
-/// non-executable staged evidence.
+/// no serialized stack-size field to compare. Every reachable terminal must
+/// leave the ordinary value stack empty except a generator `return_async`,
+/// which may abandon the surrounding expression values retained across a
+/// `yield`. The returned value remains non-executable staged evidence.
 ///
 /// # Errors
 ///

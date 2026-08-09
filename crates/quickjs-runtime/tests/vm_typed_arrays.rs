@@ -127,6 +127,36 @@ fn typed_array_constructors_allocate_fixed_views_and_expose_the_shared_accessors
 }
 
 #[test]
+fn typed_array_integer_indexed_set_short_circuits_invalid_prototype_keys() {
+    assert_eq!(
+        rendered(
+            "var typedArray=new Int32Array(1);\
+             var valid=Object.create(typedArray),outOfBounds=Object.create(typedArray),nan=Object.create(typedArray);\
+             var validResult=Reflect.set(valid,'0',42,valid);\
+             var outOfBoundsResult=Reflect.set(outOfBounds,'1',42,outOfBounds);\
+             var nanResult=Reflect.set(nan,'NaN',42,nan);\
+             return [validResult,Object.hasOwn(valid,'0'),valid[0],typedArray[0],\
+               outOfBoundsResult,Object.hasOwn(outOfBounds,'1'),\
+               nanResult,Object.hasOwn(nan,'NaN')].join('|');"
+        ),
+        "true|true|42|0|true|false|true|false"
+    );
+}
+
+#[test]
+fn typed_array_integer_indexed_set_defines_a_valid_alternate_receiver() {
+    assert_eq!(
+        rendered(
+            "var target=new Int32Array([0]),receiver=new Int32Array([1]),short=new Int32Array(0);\
+             var updated=Reflect.set(target,'0',42,receiver);\
+             var rejected=Reflect.set(target,'0',43,short);\
+             return [updated,target[0],receiver[0],rejected,short.length].join('|');"
+        ),
+        "true|0|42|false|0"
+    );
+}
+
+#[test]
 fn typed_array_constructors_require_new_and_validate_the_length() {
     assert_eq!(thrown("return Int8Array(1);"), ExceptionKind::TypeError);
     assert_eq!(
@@ -891,5 +921,45 @@ fn typed_array_constructor_consumes_large_array_literals_without_growing_the_hos
             "return String(new Int32Array([{values}]).length);"
         )),
         "128"
+    );
+}
+
+#[test]
+fn uint8_array_base64_final_chunks_follow_the_selected_policy() {
+    assert_eq!(
+        rendered(
+            "function decode(input,handling){try{var options=handling===undefined?undefined:{lastChunkHandling:handling};return Array.from(Uint8Array.fromBase64(input,options)).join('.')}catch(error){return error.name}}\
+             var cases=[['ZXhhZg==',undefined],['ZXhhZg==','strict'],['ZXhhZg','loose'],['ZXhhZg','stop-before-partial'],['ZXhhZg','strict'],\
+               ['ZXhhZh==','loose'],['ZXhhZh==','strict'],['ZXhhZh','loose'],['ZXhhZh','stop-before-partial'],['ZXhhZh','strict'],\
+               ['ZXhhZg=','loose'],['ZXhhZg=','stop-before-partial'],['ZXhhZg===','stop-before-partial']];\
+             return cases.map(function(entry){return decode(entry[0],entry[1])}).join('|');"
+        ),
+        "101.120.97.102|101.120.97.102|101.120.97.102|101.120.97|SyntaxError|\
+         101.120.97.102|SyntaxError|101.120.97.102|101.120.97|SyntaxError|\
+         SyntaxError|101.120.97|SyntaxError"
+    );
+}
+
+#[test]
+fn uint8_array_base64_and_hex_methods_preserve_options_limits_and_partial_writes() {
+    assert_eq!(
+        rendered(
+            "var order=[],target=new Uint8Array(3);\
+             var result=target.setFromBase64('Zm9vYmFy',{\
+               get alphabet(){order.push('alphabet');return 'base64'},\
+               get lastChunkHandling(){order.push('lastChunkHandling');return 'loose'}});\
+             var partial=new Uint8Array(3),partialError='none';\
+             try{partial.setFromHex('6162xx')}catch(error){partialError=error.name}\
+             var url=Uint8Array.fromBase64('x-_y',{alphabet:'base64url'});\
+             var hex=Uint8Array.fromHex('00aBff'),invalidOrder=[],brandError='none';\
+             try{Uint8Array.prototype.toBase64.call(new Uint8ClampedArray(0),{\
+               get alphabet(){invalidOrder.push('alphabet');return 'base64'}})}\
+             catch(error){brandError=error.name}\
+             return [order.join(','),result.read,result.written,target.toHex(),\
+               partial.toHex(),partialError,url.toHex(),hex.toHex(),\
+               hex.toBase64(),hex.toBase64({alphabet:'base64url',omitPadding:true}),\
+               brandError,invalidOrder.length].join('|');"
+        ),
+        "alphabet,lastChunkHandling|4|3|666f6f|616200|SyntaxError|c7eff2|00abff|AKv/|AKv_|TypeError|0"
     );
 }

@@ -847,14 +847,40 @@ fn the_installed_methods_have_the_pinned_shape() {
 }
 
 #[test]
-fn annex_b_string_extensions_are_absent() {
-    assert_all(&[
-        ("typeof String.prototype.substr", "undefined"),
-        ("typeof String.prototype.anchor", "undefined"),
-        ("typeof String.prototype.fontcolor", "undefined"),
-        ("typeof String.prototype.trimRight", "undefined"),
-        ("typeof String.prototype.trimLeft", "undefined"),
-    ]);
+fn annex_b_substr_preserves_coercion_order_and_legacy_bounds() {
+    assert_eq!(
+        rendered(
+            "(function(){var log=[];
+             var receiver={toString:function(){log.push('this');return 'abcdef'}};
+             var start={valueOf:function(){log.push('start');return -3}};
+             var length={valueOf:function(){log.push('length');return 2}};
+             var selected=String.prototype.substr.call(receiver,start,length);
+             return [selected,log.join(','),'abc'.substr(1,undefined),
+               'abc'.substr(1,-1),'abc'.substr(-Infinity,2),
+               'abc'.substr(Infinity,2)].join('|')})()"
+        ),
+        "de|this,start,length|bc||ab|"
+    );
+}
+
+#[test]
+fn annex_b_trim_aliases_reuse_the_normative_function_objects() {
+    assert_eq!(
+        rendered(
+            "(function(){var left=Object.getOwnPropertyDescriptor(String.prototype,'trimLeft');
+             var right=Object.getOwnPropertyDescriptor(String.prototype,'trimRight');
+             return [String.prototype.trimLeft===String.prototype.trimStart,
+               String.prototype.trimRight===String.prototype.trimEnd,
+               String.prototype.trimLeft.name,String.prototype.trimRight.name,
+               String.prototype.trimLeft.length,String.prototype.trimRight.length,
+               left.writable,left.enumerable,left.configurable,
+               right.writable,right.enumerable,right.configurable,
+               '  x  '.trimLeft(),'  x  '.trimRight(),
+               typeof String.prototype.anchor,
+               typeof String.prototype.fontcolor].join('|')})()"
+        ),
+        "true|true|trimStart|trimEnd|0|0|true|false|true|true|false|true|x  |  x|undefined|undefined"
+    );
 }
 
 #[test]
@@ -862,8 +888,8 @@ fn supported_string_prototype_names_preserve_the_pinned_quickjs_order() {
     assert_eq!(
         rendered("Object.getOwnPropertyNames(String.prototype).join('|')"),
         "length|at|charCodeAt|charAt|concat|codePointAt|isWellFormed|toWellFormed|\
-         indexOf|lastIndexOf|includes|endsWith|startsWith|match|matchAll|search|split|substring|slice|repeat|\
-         replace|replaceAll|padEnd|padStart|trim|trimEnd|trimStart|toString|\
+         indexOf|lastIndexOf|includes|endsWith|startsWith|match|matchAll|search|split|substring|substr|slice|repeat|\
+         replace|replaceAll|padEnd|padStart|trim|trimEnd|trimRight|trimStart|trimLeft|toString|\
          valueOf|toLowerCase|toUpperCase|toLocaleLowerCase|toLocaleUpperCase|\
          constructor|normalize|localeCompare"
     );

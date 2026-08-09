@@ -113,6 +113,13 @@ pub(super) fn visit_properties(visit: PropertySink<'_>) {
             key,
             NativeFunctionKind::DatePrototype(method_id),
         ));
+        if method_id == DatePrototypeMethod::ToUtcString {
+            visit(method(
+                prototype,
+                IntrinsicKeySpec::InternedString(RealmNameId::DateToGmtString),
+                NativeFunctionKind::DatePrototype(method_id),
+            ));
+        }
     }
     visit(method(
         prototype,

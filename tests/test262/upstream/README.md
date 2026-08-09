@@ -6,7 +6,9 @@ requires an unmodified checkout with LF line endings and applies this
 repository's policy from `test262.conf`:
 
 - `[features]` entries marked `=skip` remain skipped;
-- `[exclude]` paths remain excluded, including Annex B and ECMA-402.
+- `[exclude]` paths remain excluded, including ECMA-402 and unfinished Annex B;
+- narrower `[include]` paths override a parent exclusion as compatibility
+  tranches become complete.
 
 The policy is intentionally independent of a particular upstream revision, so
 new upstream tests are classified by the same engine-support boundary. The

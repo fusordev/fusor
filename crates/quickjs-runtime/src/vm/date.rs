@@ -703,7 +703,8 @@ fn date_setter_argument_limit(method: DatePrototypeMethod) -> usize {
         DatePrototypeMethod::SetMilliseconds
         | DatePrototypeMethod::SetUtcMilliseconds
         | DatePrototypeMethod::SetDate
-        | DatePrototypeMethod::SetUtcDate => 1,
+        | DatePrototypeMethod::SetUtcDate
+        | DatePrototypeMethod::SetYear => 1,
         _ => unreachable!("non-component Date setter"),
     }
 }
@@ -736,7 +737,9 @@ fn apply_date_setter(
     );
     let recovers_invalid = matches!(
         method,
-        DatePrototypeMethod::SetFullYear | DatePrototypeMethod::SetUtcFullYear
+        DatePrototypeMethod::SetYear
+            | DatePrototypeMethod::SetFullYear
+            | DatePrototypeMethod::SetUtcFullYear
     );
     let original = original.as_f64();
     let original_invalid = original.is_nan();
@@ -792,6 +795,9 @@ fn apply_date_setter(
                 fields.date = value(1);
             }
         }
+        DatePrototypeMethod::SetYear => {
+            fields.year = annex_b_set_year_value(value(0));
+        }
         DatePrototypeMethod::SetFullYear | DatePrototypeMethod::SetUtcFullYear => {
             fields.year = value(0);
             if converted.len() >= 2 {
@@ -816,6 +822,18 @@ fn apply_date_setter(
         time_clip_local_date(date)
     };
     (result, true)
+}
+
+fn annex_b_set_year_value(year: f64) -> f64 {
+    if year.is_nan() {
+        return f64::NAN;
+    }
+    let year = year.trunc();
+    if (0.0..=99.0).contains(&year) {
+        year + 1900.0
+    } else {
+        year
+    }
 }
 
 fn date_setter_fields(value: f64, utc: bool) -> Option<DateSetterFields> {
@@ -977,7 +995,8 @@ pub(super) fn dispatch_date_prototype(
         | DatePrototypeMethod::GetUtcDay => Ok(NativeDispatch::Immediate(StoredValue::Number(
             utc_component(method, value.as_f64()),
         ))),
-        DatePrototypeMethod::GetFullYear
+        DatePrototypeMethod::GetYear
+        | DatePrototypeMethod::GetFullYear
         | DatePrototypeMethod::GetMonth
         | DatePrototypeMethod::GetDate
         | DatePrototypeMethod::GetHours
@@ -1010,6 +1029,7 @@ pub(super) fn dispatch_date_prototype(
         | DatePrototypeMethod::SetUtcDate
         | DatePrototypeMethod::SetMonth
         | DatePrototypeMethod::SetUtcMonth
+        | DatePrototypeMethod::SetYear
         | DatePrototypeMethod::SetFullYear
         | DatePrototypeMethod::SetUtcFullYear => begin_date_setter(
             runtime,
@@ -1265,6 +1285,7 @@ fn utc_component(method: DatePrototypeMethod, value: f64) -> JsNumber {
         | DatePrototypeMethod::ToLocaleTimeString
         | DatePrototypeMethod::GetTimezoneOffset
         | DatePrototypeMethod::GetTime
+        | DatePrototypeMethod::GetYear
         | DatePrototypeMethod::GetFullYear
         | DatePrototypeMethod::GetMonth
         | DatePrototypeMethod::GetDate
@@ -1286,6 +1307,7 @@ fn utc_component(method: DatePrototypeMethod, value: f64) -> JsNumber {
         | DatePrototypeMethod::SetUtcDate
         | DatePrototypeMethod::SetMonth
         | DatePrototypeMethod::SetUtcMonth
+        | DatePrototypeMethod::SetYear
         | DatePrototypeMethod::SetFullYear
         | DatePrototypeMethod::SetUtcFullYear
         | DatePrototypeMethod::ToTemporalInstant
@@ -1302,6 +1324,9 @@ fn local_component(method: DatePrototypeMethod, value: f64) -> JsNumber {
         return JsNumber::from_f64(f64::NAN);
     };
     match method {
+        DatePrototypeMethod::GetYear => {
+            JsNumber::from_i64(i64::from(fields.year()).saturating_sub(1900))
+        }
         DatePrototypeMethod::GetFullYear => JsNumber::from_i64(i64::from(fields.year())),
         DatePrototypeMethod::GetMonth => JsNumber::from_i64(i64::from(fields.month()) - 1),
         DatePrototypeMethod::GetDate => JsNumber::from_i64(i64::from(fields.day())),

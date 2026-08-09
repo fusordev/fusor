@@ -91,6 +91,38 @@ fn leaf_flow() -> Arc<VerifiedControlFlow> {
     )
 }
 
+fn parameter_eval_flow(scope_index: u16) -> Arc<VerifiedControlFlow> {
+    let instructions = [
+        (FinalOpcode::Push7, Operands::NoneInt),
+        (
+            FinalOpcode::Eval,
+            Operands::NPopU16 {
+                argument_count: 0,
+                scope_index,
+            },
+        ),
+        (FinalOpcode::Return, Operands::None),
+    ];
+    let header =
+        UnverifiedFunctionHeader::stripped_ordinary_source_function_with_variable_references(
+            false, 0, 0,
+        )
+        .with_simple_parameter_list(false);
+    Arc::new(
+        verify_compiler_control_flow(
+            UnverifiedCompilerFunctionBody::new(
+                encode(&instructions),
+                FunctionIndexDomains::new(0, 0, 0, 0, 0),
+                header,
+            )
+            .with_capture_layout(CompilerCaptureLayout::default())
+            .with_constant_layout(CompilerConstantLayout::default()),
+            VerificationLimits::default(),
+        )
+        .expect("parameter eval fixture control flow"),
+    )
+}
+
 fn function(
     control_flow: Arc<VerifiedControlFlow>,
     constants: &[u32],
@@ -138,6 +170,173 @@ fn rejects_empty_graphs_and_out_of_bounds_roots_structurally() {
         &FunctionGraphVerificationErrorKind::RootOutOfBounds {
             root: FunctionTemplateId::new(1),
             functions: 1,
+        }
+    );
+}
+
+#[test]
+fn direct_eval_marker_must_match_the_verified_callsite_family() {
+    let eval_flow = compiler_flow(
+        &[
+            (FinalOpcode::Push7, Operands::NoneInt),
+            (
+                FinalOpcode::Eval,
+                Operands::NPopU16 {
+                    argument_count: 0,
+                    scope_index: 1,
+                },
+            ),
+            (FinalOpcode::Return, Operands::None),
+        ],
+        0,
+        0,
+        &[],
+        0,
+        &[],
+    );
+    let error = verify_compiler_function_graph(
+        graph(vec![function(eval_flow, &[], &[])]),
+        FunctionGraphVerificationLimits::default(),
+    )
+    .expect_err("an encoded eval callsite requires the planner marker");
+    assert_eq!(
+        error.kind(),
+        &FunctionGraphVerificationErrorKind::DirectEvalMarkerMismatch {
+            declared: false,
+            encoded: true,
+        }
+    );
+
+    let error = verify_compiler_function_graph(
+        graph(vec![function(leaf_flow(), &[], &[]).with_direct_eval(true)]),
+        FunctionGraphVerificationLimits::default(),
+    )
+    .expect_err("a planner marker requires an encoded eval callsite");
+    assert_eq!(
+        error.kind(),
+        &FunctionGraphVerificationErrorKind::DirectEvalMarkerMismatch {
+            declared: true,
+            encoded: false,
+        }
+    );
+}
+
+#[test]
+fn direct_eval_parameter_boundary_certifies_scope_zero_only_in_parameter_code() {
+    let verified = verify_compiler_function_graph(
+        graph(vec![
+            function(parameter_eval_flow(0), &[], &[])
+                .with_parameter_initialization_end(Some(2))
+                .with_direct_eval(true),
+        ]),
+        FunctionGraphVerificationLimits::default(),
+    )
+    .expect("scope-zero eval precedes the parameter/body boundary");
+    assert_eq!(verified.root().parameter_initialization_end(), Some(2));
+
+    let error = verify_compiler_function_graph(
+        graph(vec![
+            function(parameter_eval_flow(0), &[], &[]).with_direct_eval(true),
+        ]),
+        FunctionGraphVerificationLimits::default(),
+    )
+    .expect_err("scope-zero eval requires an explicit parameter boundary");
+    assert_eq!(
+        error.kind(),
+        &FunctionGraphVerificationErrorKind::DirectEvalParameterPhaseMismatch {
+            instruction: 1,
+            scope_index: 0,
+            boundary: None,
+        }
+    );
+
+    let error = verify_compiler_function_graph(
+        graph(vec![
+            function(parameter_eval_flow(1), &[], &[])
+                .with_parameter_initialization_end(Some(2))
+                .with_direct_eval(true),
+        ]),
+        FunctionGraphVerificationLimits::default(),
+    )
+    .expect_err("body-scope eval cannot precede the boundary");
+    assert_eq!(
+        error.kind(),
+        &FunctionGraphVerificationErrorKind::DirectEvalParameterPhaseMismatch {
+            instruction: 1,
+            scope_index: 1,
+            boundary: Some(2),
+        }
+    );
+}
+
+#[test]
+fn eval_reference_call_metadata_is_checked_and_retained() {
+    let flow = compiler_flow(
+        &[
+            (FinalOpcode::Push7, Operands::NoneInt),
+            (FinalOpcode::Push7, Operands::NoneInt),
+            (
+                FinalOpcode::Eval,
+                Operands::NPopU16 {
+                    argument_count: 0,
+                    scope_index: 1,
+                },
+            ),
+            (FinalOpcode::Swap, Operands::None),
+            (FinalOpcode::Drop, Operands::None),
+            (FinalOpcode::Return, Operands::None),
+        ],
+        0,
+        0,
+        &[],
+        0,
+        &[],
+    );
+    let verified = verify_compiler_function_graph(
+        graph(vec![
+            function(flow, &[], &[])
+                .with_eval_reference_call_instructions(Arc::from([2]))
+                .with_direct_eval(true),
+        ]),
+        FunctionGraphVerificationLimits::default(),
+    )
+    .expect("receiver-carrying eval metadata");
+
+    assert_eq!(verified.root().eval_reference_call_instructions(), [2]);
+}
+
+#[test]
+fn eval_reference_call_metadata_rejects_missing_receiver_and_wrong_opcode() {
+    let error = verify_compiler_function_graph(
+        graph(vec![
+            function(parameter_eval_flow(1), &[], &[])
+                .with_eval_reference_call_instructions(Arc::from([1]))
+                .with_direct_eval(true),
+        ]),
+        FunctionGraphVerificationLimits::default(),
+    )
+    .expect_err("a receiver-carrying eval needs one extra stack value");
+    assert_eq!(
+        error.kind(),
+        &FunctionGraphVerificationErrorKind::EvalReferenceCallReceiverMissing {
+            instruction: 1,
+            required: 2,
+            actual: Some(1),
+        }
+    );
+
+    let error = verify_compiler_function_graph(
+        graph(vec![
+            function(leaf_flow(), &[], &[]).with_eval_reference_call_instructions(Arc::from([0])),
+        ]),
+        FunctionGraphVerificationLimits::default(),
+    )
+    .expect_err("metadata cannot relabel an ordinary opcode as eval");
+    assert_eq!(
+        error.kind(),
+        &FunctionGraphVerificationErrorKind::EvalReferenceCallOpcodeMismatch {
+            instruction: 0,
+            opcode: FinalOpcode::ReturnUndef,
         }
     );
 }
@@ -776,6 +975,104 @@ fn constructor_realm_global_sources_are_atom_bound_and_root_owned() {
     assert_eq!(
         error.kind(),
         &FunctionGraphVerificationErrorKind::ConstructorRealmGlobalSourceNotRoot { closure: 0 }
+    );
+    assert_eq!(error.function(), Some(FunctionTemplateId::new(1)));
+}
+
+#[test]
+fn direct_eval_sources_are_shape_bound_and_root_owned() {
+    let caller = |index, environment_size| CompilerClosureSource::DirectEvalBinding {
+        index,
+        environment_size,
+    };
+    let variable = |index, environment_size| CompilerClosureSource::DirectEvalVariable {
+        index,
+        environment_size,
+    };
+    let root_flow = compiler_flow(
+        &[(FinalOpcode::ReturnUndef, Operands::None)],
+        0,
+        0,
+        &[],
+        2,
+        &[],
+    );
+    let root = function(Arc::clone(&root_flow), &[], &[caller(0, 3), variable(2, 3)]);
+    let verified = verify_compiler_function_graph(
+        graph(vec![root]),
+        FunctionGraphVerificationLimits::default(),
+    )
+    .expect("a root can bind a sparse subset of one exact caller environment");
+    assert_eq!(
+        verified.root().closure_sources(),
+        [caller(0, 3), variable(2, 3)]
+    );
+
+    let out_of_bounds = function(Arc::clone(&root_flow), &[], &[variable(3, 3), caller(0, 3)]);
+    let error = verify_compiler_function_graph(
+        graph(vec![out_of_bounds]),
+        FunctionGraphVerificationLimits::default(),
+    )
+    .expect_err("a caller-binding index must fit the bound environment shape");
+    assert_eq!(
+        error.kind(),
+        &FunctionGraphVerificationErrorKind::DirectEvalBindingOutOfBounds {
+            closure: 0,
+            index: 3,
+            environment_size: 3,
+        }
+    );
+
+    let inconsistent = function(root_flow, &[], &[caller(0, 2), variable(1, 3)]);
+    let error = verify_compiler_function_graph(
+        graph(vec![inconsistent]),
+        FunctionGraphVerificationLimits::default(),
+    )
+    .expect_err("every caller-binding source must bind the same environment shape");
+    assert_eq!(
+        error.kind(),
+        &FunctionGraphVerificationErrorKind::DirectEvalEnvironmentSizeMismatch {
+            expected: 2,
+            closure: 1,
+            actual: 3,
+        }
+    );
+
+    let parent = function(
+        compiler_flow(
+            &[
+                (FinalOpcode::FClosure8, Operands::Const8(0)),
+                (FinalOpcode::Return, Operands::None),
+            ],
+            0,
+            0,
+            &[],
+            0,
+            &[CompilerConstantKind::Function],
+        ),
+        &[1],
+        &[],
+    );
+    let child = function(
+        compiler_flow(
+            &[(FinalOpcode::ReturnUndef, Operands::None)],
+            0,
+            0,
+            &[],
+            1,
+            &[],
+        ),
+        &[],
+        &[variable(0, 1)],
+    );
+    let error = verify_compiler_function_graph(
+        graph(vec![parent, child]),
+        FunctionGraphVerificationLimits::default(),
+    )
+    .expect_err("a descendant must forward the root caller binding");
+    assert_eq!(
+        error.kind(),
+        &FunctionGraphVerificationErrorKind::DirectEvalBindingSourceNotRoot { closure: 0 }
     );
     assert_eq!(error.function(), Some(FunctionTemplateId::new(1)));
 }

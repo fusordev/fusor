@@ -4,7 +4,7 @@ use quickjs_bytecode::{
     AtomPoolIndex, Binary64Constant, CompilerAtom, CompilerBigInt, CompilerConstantValue,
     CompilerString, CompilerTemplateElement, CompilerTemplateObject, FinalOpcode, Operands,
 };
-use quickjs_frontend::Span;
+use quickjs_frontend::{CompilationGoal, DirectEvalBindingKind, Span};
 
 use crate::storage::ExecutableId;
 
@@ -111,7 +111,7 @@ impl<'arena> CompilationContext<'_, 'arena, '_> {
                 });
             }
             if executable.id().index() == 0
-                && crate::is_supported_script_root_goal(self.unit.goal())
+                && crate::is_supported_script_compilation_goal(self.unit.goal())
             {
                 owner.push(CompiledMetadataAtomCandidate {
                     key: CompiledMetadataAtomKey::ScriptCompletion,
@@ -246,6 +246,16 @@ impl<'arena> CompilationContext<'_, 'arena, '_> {
         atom_candidates: &mut [Vec<CompiledAtomCandidate>],
     ) -> Result<(), LeafCompilationError> {
         let nodes = self.unit.semantic().nodes();
+        let has_direct_eval_with = matches!(
+            self.unit.goal(),
+            CompilationGoal::DirectEval(context)
+                if context.scope_snapshot().frames().iter().any(|frame| {
+                    frame
+                        .bindings()
+                        .iter()
+                        .any(|binding| binding.kind() == DirectEvalBindingKind::WithObject)
+                })
+        );
         let mut owners = vec![None; nodes.len()];
         for (node_id, node) in nodes.iter_enumerated() {
             let owner = match node.kind() {
@@ -281,7 +291,13 @@ impl<'arena> CompilationContext<'_, 'arena, '_> {
                 let owner = self
                     .instance_field_initializer_owner(node_id)?
                     .unwrap_or(owner);
-                self.record_node_literal_candidate(node_id, owner, candidates, atom_candidates)?;
+                self.record_node_literal_candidate(
+                    node_id,
+                    owner,
+                    has_direct_eval_with,
+                    candidates,
+                    atom_candidates,
+                )?;
             }
         }
         Ok(())
@@ -333,6 +349,7 @@ impl<'arena> CompilationContext<'_, 'arena, '_> {
         &self,
         node_id: NodeId,
         owner: ExecutableId,
+        has_direct_eval_with: bool,
         candidates: &mut [Vec<CompiledConstantCandidate>],
         atom_candidates: &mut [Vec<CompiledAtomCandidate>],
     ) -> Result<(), LeafCompilationError> {
@@ -380,7 +397,9 @@ impl<'arena> CompilationContext<'_, 'arena, '_> {
                     });
             }
             AstKind::StringLiteral(literal)
-                if !matches!(nodes.parent_kind(node_id), AstKind::Directive(_))
+                if (!matches!(nodes.parent_kind(node_id), AstKind::Directive(_))
+                    || (owner.index() == 0
+                        && crate::is_supported_script_compilation_goal(self.unit.goal())))
                     && !is_noncomputed_static_property_key_node(self.unit, node_id) =>
             {
                 let value = decode_compiler_string(
@@ -389,6 +408,51 @@ impl<'arena> CompilationContext<'_, 'arena, '_> {
                     literal.span,
                 )?;
                 record_string_candidate(owner, value, literal.span, candidates, atom_candidates)?;
+            }
+            AstKind::IdentifierReference(identifier)
+                if has_direct_eval_with
+                    || !self
+                        .with_object_bindings_for_reference(
+                            identifier.reference_id.get(),
+                            identifier.span,
+                        )?
+                        .is_empty() =>
+            {
+                record_property_candidate(
+                    owner,
+                    compiler_identifier_string(identifier.name.as_str(), identifier.span)?,
+                    identifier.span,
+                    atom_candidates,
+                )?;
+            }
+            AstKind::BindingIdentifier(identifier) => {
+                let AstKind::VariableDeclarator(declarator) = nodes.parent_kind(node_id) else {
+                    return Ok(());
+                };
+                if declarator.kind != super::VariableDeclarationKind::Var {
+                    return Ok(());
+                }
+                let Some(initializer) = declarator.init.as_ref() else {
+                    return Ok(());
+                };
+                let binding =
+                    self.binding_for_identifier(identifier.symbol_id.get(), identifier.span)?;
+                if has_direct_eval_with
+                    || !self
+                        .with_object_bindings_for_node_before_binding(
+                            initializer.node_id(),
+                            binding,
+                            identifier.span,
+                        )?
+                        .is_empty()
+                {
+                    record_property_candidate(
+                        owner,
+                        compiler_identifier_string(identifier.name.as_str(), identifier.span)?,
+                        identifier.span,
+                        atom_candidates,
+                    )?;
+                }
             }
             AstKind::PrivateIdentifier(identifier)
                 if matches!(
@@ -485,7 +549,7 @@ impl<'arena> CompilationContext<'_, 'arena, '_> {
                 }
             }
             AstKind::RegExpLiteral(literal) => {
-                Self::record_regexp_literal_candidate(owner, literal, candidates, atom_candidates)?;
+                self.record_regexp_literal_candidate(owner, literal, candidates, atom_candidates)?;
             }
             AstKind::ObjectProperty(property) => {
                 if !property.computed
@@ -913,33 +977,113 @@ impl<'arena> CompilationContext<'_, 'arena, '_> {
     }
 
     fn record_regexp_literal_candidate(
+        &self,
         owner: ExecutableId,
         literal: &RegExpLiteral<'_>,
         candidates: &mut [Vec<CompiledConstantCandidate>],
         atom_candidates: &mut [Vec<CompiledAtomCandidate>],
     ) -> Result<(), LeafCompilationError> {
-        let pattern = literal.regex.pattern.text.as_str();
         let flags = literal.regex.flags.to_string();
-        quickjs_regexp::CompiledRegExp::compile(
-            pattern,
-            &flags,
+        let (pattern_span, flags_span) = regexp_component_spans(literal, flags.len())?;
+        let pattern = self.exact_source_string(pattern_span)?;
+        let pattern_units = pattern.code_units().collect::<Vec<_>>();
+        let flag_units = flags.encode_utf16().collect::<Vec<_>>();
+        quickjs_regexp::CompiledRegExp::compile_utf16(
+            &pattern_units,
+            &flag_units,
             quickjs_regexp::CompileLimits::default(),
         )
         .map_err(|source| LeafCompilationError::RegExp {
             span: literal.span,
             source,
         })?;
-        let (pattern_span, flags_span) = regexp_component_spans(literal, flags.len())?;
-        for (value, span) in [(pattern, pattern_span), (flags.as_str(), flags_span)] {
-            record_string_candidate(
-                owner,
-                compiler_identifier_string(value, span)?,
-                span,
-                candidates,
-                atom_candidates,
-            )?;
-        }
+        record_string_candidate(owner, pattern, pattern_span, candidates, atom_candidates)?;
+        record_string_candidate(
+            owner,
+            compiler_identifier_string(&flags, flags_span)?,
+            flags_span,
+            candidates,
+            atom_candidates,
+        )?;
         Ok(())
+    }
+
+    fn exact_source_string(&self, span: Span) -> Result<CompilerString, LeafCompilationError> {
+        let start =
+            usize::try_from(span.start).map_err(|_| LeafCompilationError::CapacityExceeded {
+                domain: "source text byte offset",
+            })?;
+        let end =
+            usize::try_from(span.end).map_err(|_| LeafCompilationError::CapacityExceeded {
+                domain: "source text byte offset",
+            })?;
+        let source =
+            self.source_text
+                .get(start..end)
+                .ok_or(LeafCompilationError::SemanticInvariant {
+                    invariant: "literal source span addresses UTF-8 boundaries",
+                    span: Some(span),
+                })?;
+        let substitutions = self
+            .source_substitutions
+            .iter()
+            .filter(|substitution| {
+                let transformed = substitution.transformed();
+                transformed.start >= span.start && transformed.end <= span.end
+            })
+            .collect::<Vec<_>>();
+        if substitutions.is_empty() {
+            return compiler_identifier_string(source, span);
+        }
+
+        let additional_units = substitutions
+            .iter()
+            .try_fold(0_usize, |total, substitution| {
+                total.checked_add(substitution.original().len()).ok_or(
+                    LeafCompilationError::CapacityExceeded {
+                        domain: "restored source code units",
+                    },
+                )
+            })?;
+        let mut code_units = Vec::new();
+        code_units
+            .try_reserve(source.len().saturating_add(additional_units))
+            .map_err(|_| LeafCompilationError::CapacityExceeded {
+                domain: "restored source code units",
+            })?;
+        let mut copied = start;
+        for substitution in substitutions {
+            let transformed = substitution.transformed();
+            let substitution_start = usize::try_from(transformed.start).map_err(|_| {
+                LeafCompilationError::CapacityExceeded {
+                    domain: "source text byte offset",
+                }
+            })?;
+            let substitution_end = usize::try_from(transformed.end).map_err(|_| {
+                LeafCompilationError::CapacityExceeded {
+                    domain: "source text byte offset",
+                }
+            })?;
+            let unchanged = self.source_text.get(copied..substitution_start).ok_or(
+                LeafCompilationError::SemanticInvariant {
+                    invariant: "source substitution partitions a literal span",
+                    span: Some(transformed),
+                },
+            )?;
+            code_units.extend(unchanged.encode_utf16());
+            code_units.extend_from_slice(substitution.original());
+            copied = substitution_end;
+        }
+        let unchanged =
+            self.source_text
+                .get(copied..end)
+                .ok_or(LeafCompilationError::SemanticInvariant {
+                    invariant: "source substitutions terminate within a literal span",
+                    span: Some(span),
+                })?;
+        code_units.extend(unchanged.encode_utf16());
+        CompilerString::try_from_code_units(Arc::from(code_units))
+            .map_err(|source| LeafCompilationError::CompilerString { span, source })
     }
 
     fn record_array_property_candidates(

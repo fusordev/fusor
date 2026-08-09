@@ -14,8 +14,8 @@ pub use oxc_ast::ast::Program;
 use oxc_ast::{
     AstKind,
     ast::{
-        Argument, Directive, ImportPhase, ModuleExportName, Statement, VariableDeclarationKind,
-        WithClauseKeyword,
+        Argument, Directive, Expression, ImportPhase, ModuleExportName, Statement,
+        VariableDeclarationKind, WithClauseKeyword,
     },
     builder::AstBuilder,
 };
@@ -292,6 +292,9 @@ pub enum DirectEvalBindingKind {
     FunctionName,
     /// A global function declaration.
     GlobalFunctionDeclaration,
+    /// A compiler-hidden binding object for an active sloppy `with`
+    /// environment. This is an environment marker, not a source-visible name.
+    WithObject,
 }
 
 /// The storage location of a binding visible to direct `eval`.
@@ -315,6 +318,13 @@ pub enum DirectEvalBindingLocation {
     /// A closure slot inherited from the calling function.
     Closure {
         /// Zero-based closure slot.
+        index: u16,
+    },
+    /// A binding in a retained per-activation eval variable environment.
+    EvalVariable {
+        /// Zero-based environment depth from the current activation.
+        depth: u16,
+        /// Zero-based binding entry within that environment.
         index: u16,
     },
     /// A closure slot referencing a global variable.
@@ -344,6 +354,22 @@ pub enum DirectEvalBindingLocation {
     },
 }
 
+/// The caller-environment region that owns one direct-eval binding.
+///
+/// Eval declaration instantiation distinguishes lexical environments between
+/// the callsite and its variable environment from bindings owned by that
+/// variable environment and from still-outer bindings.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[non_exhaustive]
+pub enum DirectEvalBindingScope {
+    /// A lexical environment between the callsite and the variable environment.
+    Lexical,
+    /// The caller variable environment inherited by sloppy direct eval.
+    Variable,
+    /// An environment outside the caller variable environment.
+    Outer,
+}
+
 /// An ordinary binding visible in one direct-eval scope frame.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct DirectEvalBinding<'scope> {
@@ -352,14 +378,16 @@ pub struct DirectEvalBinding<'scope> {
     is_lexical: bool,
     is_const: bool,
     location: DirectEvalBindingLocation,
+    scope: DirectEvalBindingScope,
 }
 
 impl<'scope> DirectEvalBinding<'scope> {
-    /// Creates a lossless binding snapshot.
+    /// Creates a binding snapshot owned by an outer caller environment.
     ///
     /// `kind`, `is_lexical`, and `is_const` retain independent semantic
     /// metadata. `location` identifies storage without changing those
-    /// semantics.
+    /// semantics. Call [`Self::with_scope`] when the binding belongs to an
+    /// intervening lexical or inherited variable environment.
     #[must_use]
     pub const fn new(
         name: &'scope str,
@@ -374,7 +402,15 @@ impl<'scope> DirectEvalBinding<'scope> {
             is_lexical,
             is_const,
             location,
+            scope: DirectEvalBindingScope::Outer,
         }
+    }
+
+    /// Attaches the caller-environment region that owns this binding.
+    #[must_use]
+    pub const fn with_scope(mut self, scope: DirectEvalBindingScope) -> Self {
+        self.scope = scope;
+        self
     }
 
     /// Returns the JavaScript binding name.
@@ -405,6 +441,12 @@ impl<'scope> DirectEvalBinding<'scope> {
     #[must_use]
     pub const fn location(self) -> DirectEvalBindingLocation {
         self.location
+    }
+
+    /// Returns the caller-environment region that owns this binding.
+    #[must_use]
+    pub const fn scope(self) -> DirectEvalBindingScope {
+        self.scope
     }
 }
 
@@ -585,15 +627,31 @@ impl<'scope> DirectEvalScopeSnapshot<'scope> {
     }
 }
 
+/// The variable environment inherited by sloppy direct eval.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[non_exhaustive]
+pub enum DirectEvalVariableEnvironment {
+    /// The Realm global environment record.
+    Global,
+    /// A function or eval-owned declarative environment.
+    Function,
+    /// A function environment outside an active parameter-initializer scope.
+    FunctionParameterInitializer,
+}
+
 /// Caller context needed to parse and resolve direct `eval`.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct DirectEvalContext<'scope> {
     capabilities: DirectEvalCapabilities,
     scope_snapshot: DirectEvalScopeSnapshot<'scope>,
+    variable_environment: DirectEvalVariableEnvironment,
 }
 
 impl<'scope> DirectEvalContext<'scope> {
-    /// Creates a direct-eval context.
+    /// Creates a direct-eval context with a function-owned variable environment.
+    ///
+    /// Global and parameter-initializer callsites must select their exact
+    /// environment through [`Self::with_variable_environment`].
     #[must_use]
     pub const fn new(
         capabilities: DirectEvalCapabilities,
@@ -602,7 +660,18 @@ impl<'scope> DirectEvalContext<'scope> {
         Self {
             capabilities,
             scope_snapshot,
+            variable_environment: DirectEvalVariableEnvironment::Function,
         }
+    }
+
+    /// Attaches the variable environment inherited by sloppy eval code.
+    #[must_use]
+    pub const fn with_variable_environment(
+        mut self,
+        variable_environment: DirectEvalVariableEnvironment,
+    ) -> Self {
+        self.variable_environment = variable_environment;
+        self
     }
 
     /// Returns the syntax capabilities inherited from the caller.
@@ -615,6 +684,12 @@ impl<'scope> DirectEvalContext<'scope> {
     #[must_use]
     pub const fn scope_snapshot(self) -> DirectEvalScopeSnapshot<'scope> {
         self.scope_snapshot
+    }
+
+    /// Returns the variable environment inherited by sloppy eval code.
+    #[must_use]
+    pub const fn variable_environment(self) -> DirectEvalVariableEnvironment {
+        self.variable_environment
     }
 }
 
@@ -748,13 +823,10 @@ impl CompilationGoal<'_> {
 
     const fn supported_parse_mode(self) -> Result<ParseMode, UnsupportedCompilationGoal> {
         match self {
-            Self::GlobalScript(_) => Ok(ParseMode::Script),
+            Self::GlobalScript(_) | Self::DirectEval(_) => Ok(ParseMode::Script),
             Self::Module => Ok(ParseMode::Module),
             Self::IndirectEval(goal) if !goal.forces_strict() => Ok(ParseMode::Script),
             Self::IndirectEval(goal) => Err(UnsupportedCompilationGoal::IndirectEval(goal)),
-            Self::DirectEval(context) => Err(UnsupportedCompilationGoal::DirectEval(
-                context.capabilities(),
-            )),
             Self::DynamicFunction(kind) => Err(UnsupportedCompilationGoal::DynamicFunction(kind)),
         }
     }
@@ -2991,18 +3063,13 @@ fn parse_in_mode<'arena, 'scope>(
         CompilationGoal::GlobalScript(goal) => {
             (goal.forces_strict(), goal.allows_top_level_await())
         }
+        CompilationGoal::DirectEval(context) => (context.capabilities().is_strict(), false),
         CompilationGoal::Module
         | CompilationGoal::IndirectEval(_)
-        | CompilationGoal::DirectEval(_)
         | CompilationGoal::DynamicFunction(_) => (false, false),
     };
-    let mut parsed = if allow_top_level_await {
-        parse_async_global_script(allocator, source_text, mode)
-    } else {
-        Parser::new(allocator, source_text, mode.source_type())
-            .with_options(OxcParseOptions::default())
-            .parse()
-    };
+    let mut parsed =
+        parse_program_for_goal(allocator, source_text, goal, mode, allow_top_level_await);
 
     if parsed.panicked || !parsed.diagnostics.is_empty() {
         return Err(FrontendError::from_oxc(
@@ -3042,9 +3109,16 @@ fn parse_in_mode<'arena, 'scope>(
     let synthetic_strict_directive =
         force_strict && inject_forced_strict_directive(allocator, &mut parsed.program);
     let program: &'arena Program<'arena> = allocator.alloc(parsed.program);
-    let semantic = SemanticBuilder::new_compiler()
+    let mut semantic = SemanticBuilder::new_compiler()
         .with_build_nodes(true)
         .build(program);
+    if let CompilationGoal::DirectEval(context) = goal {
+        remove_admitted_direct_eval_diagnostics(
+            &mut semantic.diagnostics,
+            &semantic.semantic,
+            context.capabilities(),
+        );
+    }
     if allow_top_level_await
         && let Some(span) = async_script_await_identifier_span(&semantic.semantic)
     {
@@ -3085,6 +3159,120 @@ fn parse_in_mode<'arena, 'scope>(
         semantic,
         module_syntax,
         synthetic_strict_directive,
+    })
+}
+
+fn remove_admitted_direct_eval_diagnostics(
+    diagnostics: &mut Diagnostics,
+    semantic: &Semantic<'_>,
+    capabilities: DirectEvalCapabilities,
+) {
+    diagnostics.retain(|diagnostic| {
+        !is_admitted_direct_eval_super_diagnostic(diagnostic, semantic, capabilities)
+    });
+}
+
+fn parse_program_for_goal<'arena>(
+    allocator: &'arena Allocator,
+    source_text: &'arena str,
+    goal: CompilationGoal<'_>,
+    mode: ParseMode,
+    allow_top_level_await: bool,
+) -> ParserReturn<'arena> {
+    if allow_top_level_await {
+        parse_async_global_script(allocator, source_text, mode)
+    } else if let CompilationGoal::DirectEval(context) = goal {
+        parse_direct_eval_script(allocator, source_text, mode, context)
+    } else {
+        Parser::new(allocator, source_text, mode.source_type())
+            .with_options(OxcParseOptions::default())
+            .parse()
+    }
+}
+
+fn parse_direct_eval_script<'arena>(
+    allocator: &'arena Allocator,
+    source_text: &'arena str,
+    mode: ParseMode,
+    context: DirectEvalContext<'_>,
+) -> ParserReturn<'arena> {
+    let parsed = Parser::new(allocator, source_text, mode.source_type())
+        .with_options(OxcParseOptions::default())
+        .parse();
+    if !context.capabilities().allows_new_target()
+        || parsed.panicked
+        || parsed.diagnostics.is_empty()
+        || !parsed
+            .diagnostics
+            .iter()
+            .all(is_new_target_outside_function_diagnostic)
+    {
+        return parsed;
+    }
+
+    let mut contextual = Parser::new(
+        allocator,
+        source_text,
+        mode.source_type().with_commonjs(true),
+    )
+    .with_options(OxcParseOptions::default())
+    .parse();
+    contextual.program.source_type = mode.source_type();
+    contextual
+}
+
+fn is_new_target_outside_function_diagnostic(diagnostic: &OxcDiagnostic) -> bool {
+    diagnostic.to_string() == "Unexpected new.target expression"
+}
+
+fn is_admitted_direct_eval_super_diagnostic(
+    diagnostic: &OxcDiagnostic,
+    semantic: &Semantic<'_>,
+    capabilities: DirectEvalCapabilities,
+) -> bool {
+    let message = diagnostic.to_string();
+    let super_property = message
+        == "'super' can only be referenced in members of derived classes or object literal expressions.";
+    let super_call = message
+        == "Super calls are not permitted outside constructors or in nested functions inside constructors.";
+    if (!super_property || !capabilities.allows_super_property())
+        && (!super_call || !capabilities.allows_super_call())
+    {
+        return false;
+    }
+    let Some(label) = diagnostic.labels.first() else {
+        return false;
+    };
+    let source = label.inner();
+    let diagnostic_span = Span::new(
+        source.offset(),
+        source.offset().saturating_add(source.len()),
+    );
+    let nodes = semantic.nodes();
+    let Some((node_id, _)) = nodes.iter_enumerated().find(|(_, node)| {
+        let AstKind::Super(super_expression) = node.kind() else {
+            return false;
+        };
+        if super_property {
+            return super_expression.span == diagnostic_span;
+        }
+        matches!(
+            nodes.parent_kind(super_expression.node_id.get()),
+            AstKind::CallExpression(call)
+                if call.span == diagnostic_span
+                    && matches!(
+                        &call.callee,
+                        Expression::Super(callee) if callee.node_id.get() == super_expression.node_id.get()
+                    )
+        )
+    }) else {
+        return false;
+    };
+    !nodes.ancestor_ids(node_id).any(|ancestor| {
+        matches!(
+            nodes.kind(ancestor),
+            AstKind::Function(_) | AstKind::StaticBlock(_)
+        )
     })
 }
 

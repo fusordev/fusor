@@ -1,9 +1,10 @@
 use std::sync::Arc;
 
+use oxc_ast::AstKind;
 use quickjs_bytecode::{
     BytecodeGraphVerificationLimits, FunctionGraphVerificationLimits, VerificationLimits,
 };
-use quickjs_frontend::ParsedUnit;
+use quickjs_frontend::{ParsedUnit, Span};
 
 use crate::storage::{
     CompilerError, Executable, ExecutableId, PlannedStorage, StoragePlan, build_planned_storage,
@@ -16,6 +17,43 @@ use super::{
 
 #[derive(Debug)]
 pub(super) struct ContextIdentity;
+
+/// One lossless replacement applied before a UTF-16 runtime source is passed
+/// to Oxc's UTF-8 parser boundary.
+///
+/// `transformed` addresses the parser-facing UTF-8 source. `original` retains
+/// the exact ECMAScript UTF-16 code units that compiler-owned literal lowering
+/// must restore. The compiler currently admits substitutions only inside a
+/// `RegExp` literal body, where it can preserve both matcher and `.source`
+/// semantics without guessing about another token kind.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SourceTextSubstitution {
+    transformed: Span,
+    original: Arc<[u16]>,
+}
+
+impl SourceTextSubstitution {
+    /// Creates one parser-source substitution.
+    #[must_use]
+    pub const fn new(transformed: Span, original: Arc<[u16]>) -> Self {
+        Self {
+            transformed,
+            original,
+        }
+    }
+
+    /// Returns the parser-facing byte span replaced by this record.
+    #[must_use]
+    pub const fn transformed(&self) -> Span {
+        self.transformed
+    }
+
+    /// Returns the exact original UTF-16 code units.
+    #[must_use]
+    pub fn original(&self) -> &[u16] {
+        &self.original
+    }
+}
 
 /// An owned executable selection issued by one [`CompilationContext`].
 ///
@@ -49,6 +87,7 @@ pub struct CompilationContext<'unit, 'arena, 'scope> {
     pub(super) unit: &'unit ParsedUnit<'arena, 'scope>,
     pub(super) planned: PlannedStorage,
     pub(super) source_text: Arc<str>,
+    pub(super) source_substitutions: Arc<[SourceTextSubstitution]>,
     pub(super) source_name: Arc<str>,
     pub(super) identity: Arc<ContextIdentity>,
 }
@@ -74,6 +113,22 @@ impl<'unit, 'arena, 'scope> CompilationContext<'unit, 'arena, 'scope> {
         unit: &'unit ParsedUnit<'arena, 'scope>,
         source_name: Arc<str>,
     ) -> Result<Self, CompilerError> {
+        Self::new_with_source_name_and_substitutions(unit, source_name, Arc::from([]))
+    }
+
+    /// Builds compiler state with exact UTF-16 substitutions for a transformed
+    /// runtime source.
+    ///
+    /// # Errors
+    ///
+    /// Returns the storage planner's typed failure, rejects an empty source
+    /// identity, or rejects malformed/overlapping substitutions and any
+    /// substitution outside a `RegExp` literal body.
+    pub fn new_with_source_name_and_substitutions(
+        unit: &'unit ParsedUnit<'arena, 'scope>,
+        source_name: Arc<str>,
+        source_substitutions: Arc<[SourceTextSubstitution]>,
+    ) -> Result<Self, CompilerError> {
         if source_name.is_empty() {
             return Err(CompilerError::SemanticInvariant {
                 invariant: "nonempty compiler source display name",
@@ -82,10 +137,12 @@ impl<'unit, 'arena, 'scope> CompilationContext<'unit, 'arena, 'scope> {
         }
         let planned = build_planned_storage(unit)?;
         let source_text = Arc::from(unit.program().source_text);
+        validate_source_substitutions(unit, &source_text, &source_substitutions)?;
         Ok(Self {
             unit,
             planned,
             source_text,
+            source_substitutions,
             source_name,
             identity: Arc::new(ContextIdentity),
         })
@@ -279,6 +336,114 @@ impl<'unit, 'arena, 'scope> CompilationContext<'unit, 'arena, 'scope> {
         self.compile_subtree_with_all_limits(root, limits, graph_limits, bytecode_limits)
     }
 
+    /// Lowers one complete indirect-eval Script and every nested function
+    /// template as an indivisible verified authority.
+    ///
+    /// Program lexical declarations are eval-local. In sloppy eval, `var` and
+    /// function declarations target the Realm global environment; in strict
+    /// eval they are eval-local as well.
+    ///
+    /// # Errors
+    ///
+    /// Rejects non-indirect-eval goals, unsupported syntax, resource limits,
+    /// and staged or final verification failures.
+    pub fn compile_indirect_eval_script(
+        &self,
+        limits: VerificationLimits,
+    ) -> Result<CompiledFunctionTree, LeafCompilationError> {
+        self.compile_indirect_eval_script_with_all_limits(
+            limits,
+            FunctionGraphVerificationLimits::default(),
+            BytecodeGraphVerificationLimits::default(),
+        )
+    }
+
+    /// Lowers a complete indirect-eval Script with every staged and final
+    /// graph limit explicit.
+    ///
+    /// # Errors
+    ///
+    /// Returns the same failures as [`Self::compile_indirect_eval_script`].
+    pub fn compile_indirect_eval_script_with_all_limits(
+        &self,
+        limits: VerificationLimits,
+        graph_limits: FunctionGraphVerificationLimits,
+        bytecode_limits: BytecodeGraphVerificationLimits,
+    ) -> Result<CompiledFunctionTree, LeafCompilationError> {
+        if !crate::is_supported_indirect_eval_goal(self.unit.goal()) {
+            return unsupported(
+                UnsupportedLeafFeature::UnsupportedCompilationUnit,
+                self.unit.program().span,
+            );
+        }
+        let root = self
+            .planned
+            .plan
+            .executables()
+            .first()
+            .ok_or(LeafCompilationError::SemanticInvariant {
+                invariant: "indirect eval storage plan has a Program root",
+                span: Some(self.unit.program().span),
+            })?
+            .id();
+        self.compile_subtree_with_all_limits(root, limits, graph_limits, bytecode_limits)
+    }
+
+    /// Lowers a closed direct-eval Script and every nested function template
+    /// as an indivisible verified authority.
+    ///
+    /// Caller strictness and source strict directives are honored. Eval-local
+    /// lexical declarations and strict `var` declarations are supported;
+    /// caller/global name resolution and sloppy variable-environment mutation
+    /// remain fail closed until an external environment is supplied.
+    ///
+    /// # Errors
+    ///
+    /// Rejects non-direct-eval goals, caller/global references, sloppy `var`
+    /// declarations, unsupported syntax, resource limits, and verification
+    /// failures.
+    pub fn compile_direct_eval_script(
+        &self,
+        limits: VerificationLimits,
+    ) -> Result<CompiledFunctionTree, LeafCompilationError> {
+        self.compile_direct_eval_script_with_all_limits(
+            limits,
+            FunctionGraphVerificationLimits::default(),
+            BytecodeGraphVerificationLimits::default(),
+        )
+    }
+
+    /// Lowers a closed direct-eval Script with every staged and final graph
+    /// limit explicit.
+    ///
+    /// # Errors
+    ///
+    /// Returns the same failures as [`Self::compile_direct_eval_script`].
+    pub fn compile_direct_eval_script_with_all_limits(
+        &self,
+        limits: VerificationLimits,
+        graph_limits: FunctionGraphVerificationLimits,
+        bytecode_limits: BytecodeGraphVerificationLimits,
+    ) -> Result<CompiledFunctionTree, LeafCompilationError> {
+        if !crate::is_supported_direct_eval_goal(self.unit.goal()) {
+            return unsupported(
+                UnsupportedLeafFeature::UnsupportedCompilationUnit,
+                self.unit.program().span,
+            );
+        }
+        let root = self
+            .planned
+            .plan
+            .executables()
+            .first()
+            .ok_or(LeafCompilationError::SemanticInvariant {
+                invariant: "direct eval storage plan has a Program root",
+                span: Some(self.unit.program().span),
+            })?
+            .id();
+        self.compile_subtree_with_all_limits(root, limits, graph_limits, bytecode_limits)
+    }
+
     /// Lowers the complete exact wrapper Script for a supported synchronous
     /// dynamic-function constructor invocation.
     ///
@@ -336,4 +501,54 @@ impl<'unit, 'arena, 'scope> CompilationContext<'unit, 'arena, 'scope> {
             .id();
         self.compile_subtree_with_all_limits(root, limits, graph_limits, bytecode_limits)
     }
+}
+
+fn validate_source_substitutions(
+    unit: &ParsedUnit<'_, '_>,
+    source_text: &str,
+    substitutions: &[SourceTextSubstitution],
+) -> Result<(), CompilerError> {
+    let mut previous_end = 0_u32;
+    for substitution in substitutions {
+        let span = substitution.transformed();
+        let range = usize::try_from(span.start)
+            .ok()
+            .and_then(|start| usize::try_from(span.end).ok().map(|end| start..end));
+        if span.start >= span.end
+            || span.start < previous_end
+            || substitution.original().is_empty()
+            || range
+                .as_ref()
+                .and_then(|range| source_text.get(range.clone()))
+                .is_none()
+        {
+            return Err(CompilerError::SemanticInvariant {
+                invariant: "ordered nonempty source substitutions address UTF-8 boundaries",
+                span: Some(span),
+            });
+        }
+        let contained_by_regexp_pattern = unit.semantic().nodes().iter().any(|node| {
+            let AstKind::RegExpLiteral(literal) = node.kind() else {
+                return false;
+            };
+            let Ok(pattern_len) = u32::try_from(literal.regex.pattern.text.len()) else {
+                return false;
+            };
+            let Some(pattern_start) = literal.span.start.checked_add(1) else {
+                return false;
+            };
+            let Some(pattern_end) = pattern_start.checked_add(pattern_len) else {
+                return false;
+            };
+            span.start >= pattern_start && span.end <= pattern_end
+        });
+        if !contained_by_regexp_pattern {
+            return Err(CompilerError::SemanticInvariant {
+                invariant: "source substitutions occur only within RegExp literal bodies",
+                span: Some(span),
+            });
+        }
+        previous_end = span.end;
+    }
+    Ok(())
 }

@@ -392,19 +392,113 @@ pub(crate) enum IteratorHelperLifecycle {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum IteratorHelperKind {
+    Concat,
     Drop,
+    FlatMap,
     Map,
     Filter,
     Take,
+    Zip,
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum IteratorZipMode {
+    Shortest,
+    Longest,
+    Strict,
+}
+
+pub(crate) struct IteratorZipRecord {
+    iterator: StoredValue,
+    next_method: StoredValue,
+    done: bool,
+}
+
+impl IteratorZipRecord {
+    #[must_use]
+    pub(crate) const fn new(iterator: StoredValue, next_method: StoredValue) -> Self {
+        Self {
+            iterator,
+            next_method,
+            done: false,
+        }
+    }
+
+    #[must_use]
+    pub(crate) const fn iterator(&self) -> &StoredValue {
+        &self.iterator
+    }
+
+    #[must_use]
+    pub(crate) const fn next_method(&self) -> &StoredValue {
+        &self.next_method
+    }
+
+    #[must_use]
+    pub(crate) const fn is_done(&self) -> bool {
+        self.done
+    }
+
+    pub(crate) fn finish(&mut self) {
+        self.done = true;
+        self.iterator = StoredValue::Undefined;
+        self.next_method = StoredValue::Undefined;
+    }
+
+    #[must_use]
+    pub(crate) fn duplicate(&self) -> Self {
+        Self {
+            iterator: self.iterator.duplicate(),
+            next_method: self.next_method.duplicate(),
+            done: self.done,
+        }
+    }
+}
+
+pub(crate) struct IteratorConcatIterable {
+    iterable: StoredValue,
+    open_method: FunctionId,
+}
+
+impl IteratorConcatIterable {
+    #[must_use]
+    pub(crate) const fn new(iterable: StoredValue, open_method: FunctionId) -> Self {
+        Self {
+            iterable,
+            open_method,
+        }
+    }
+
+    #[must_use]
+    pub(crate) const fn iterable(&self) -> &StoredValue {
+        &self.iterable
+    }
+
+    #[must_use]
+    pub(crate) const fn open_method(&self) -> FunctionId {
+        self.open_method
+    }
+
+    #[must_use]
+    pub(crate) fn duplicate(&self) -> Self {
+        Self::new(self.iterable.duplicate(), self.open_method)
+    }
+}
+
 pub(crate) struct IteratorHelperState {
     kind: IteratorHelperKind,
     callback: Option<FunctionId>,
     counter: u64,
     remaining: f64,
     lifecycle: IteratorHelperLifecycle,
+    inner_iterator: Option<StoredValue>,
+    inner_next_method: Option<StoredValue>,
+    concat_iterables: Vec<IteratorConcatIterable>,
+    concat_index: usize,
+    zip_records: Vec<IteratorZipRecord>,
+    zip_padding: Vec<StoredValue>,
+    zip_mode: IteratorZipMode,
+    zip_keys: Option<Vec<PropertyKey>>,
 }
 
 impl IteratorHelperState {
@@ -416,6 +510,14 @@ impl IteratorHelperState {
             counter: 0,
             remaining: 0.0,
             lifecycle: IteratorHelperLifecycle::SuspendedStart,
+            inner_iterator: None,
+            inner_next_method: None,
+            concat_iterables: Vec::new(),
+            concat_index: 0,
+            zip_records: Vec::new(),
+            zip_padding: Vec::new(),
+            zip_mode: IteratorZipMode::Shortest,
+            zip_keys: None,
         }
     }
 
@@ -427,6 +529,57 @@ impl IteratorHelperState {
             counter: 0,
             remaining,
             lifecycle: IteratorHelperLifecycle::SuspendedStart,
+            inner_iterator: None,
+            inner_next_method: None,
+            concat_iterables: Vec::new(),
+            concat_index: 0,
+            zip_records: Vec::new(),
+            zip_padding: Vec::new(),
+            zip_mode: IteratorZipMode::Shortest,
+            zip_keys: None,
+        }
+    }
+
+    #[must_use]
+    pub(crate) fn new_concat(iterables: Vec<IteratorConcatIterable>) -> Self {
+        Self {
+            kind: IteratorHelperKind::Concat,
+            callback: None,
+            counter: 0,
+            remaining: 0.0,
+            lifecycle: IteratorHelperLifecycle::SuspendedStart,
+            inner_iterator: None,
+            inner_next_method: None,
+            concat_iterables: iterables,
+            concat_index: 0,
+            zip_records: Vec::new(),
+            zip_padding: Vec::new(),
+            zip_mode: IteratorZipMode::Shortest,
+            zip_keys: None,
+        }
+    }
+
+    #[must_use]
+    pub(crate) fn new_zip(
+        records: Vec<IteratorZipRecord>,
+        padding: Vec<StoredValue>,
+        mode: IteratorZipMode,
+        keys: Option<Vec<PropertyKey>>,
+    ) -> Self {
+        Self {
+            kind: IteratorHelperKind::Zip,
+            callback: None,
+            counter: 0,
+            remaining: 0.0,
+            lifecycle: IteratorHelperLifecycle::SuspendedStart,
+            inner_iterator: None,
+            inner_next_method: None,
+            concat_iterables: Vec::new(),
+            concat_index: 0,
+            zip_records: records,
+            zip_padding: padding,
+            zip_mode: mode,
+            zip_keys: keys,
         }
     }
 
@@ -455,8 +608,61 @@ impl IteratorHelperState {
         self.remaining
     }
 
-    pub(crate) const fn set_lifecycle(&mut self, lifecycle: IteratorHelperLifecycle) {
+    #[must_use]
+    pub(crate) const fn inner_iterator(&self) -> Option<&StoredValue> {
+        self.inner_iterator.as_ref()
+    }
+
+    #[must_use]
+    pub(crate) const fn inner_next_method(&self) -> Option<&StoredValue> {
+        self.inner_next_method.as_ref()
+    }
+
+    #[must_use]
+    pub(crate) fn concat_iterables(&self) -> &[IteratorConcatIterable] {
+        &self.concat_iterables
+    }
+
+    #[must_use]
+    pub(crate) fn current_concat_iterable(&self) -> Option<&IteratorConcatIterable> {
+        self.concat_iterables.get(self.concat_index)
+    }
+
+    #[must_use]
+    pub(crate) fn zip_records(&self) -> &[IteratorZipRecord] {
+        &self.zip_records
+    }
+
+    #[must_use]
+    pub(crate) fn zip_record(&self, index: usize) -> Option<&IteratorZipRecord> {
+        self.zip_records.get(index)
+    }
+
+    #[must_use]
+    pub(crate) fn zip_padding(&self) -> &[StoredValue] {
+        &self.zip_padding
+    }
+
+    #[must_use]
+    pub(crate) const fn zip_mode(&self) -> IteratorZipMode {
+        self.zip_mode
+    }
+
+    #[must_use]
+    pub(crate) fn zip_keys(&self) -> Option<&[PropertyKey]> {
+        self.zip_keys.as_deref()
+    }
+
+    pub(crate) fn set_lifecycle(&mut self, lifecycle: IteratorHelperLifecycle) {
         self.lifecycle = lifecycle;
+        if matches!(lifecycle, IteratorHelperLifecycle::Completed) {
+            self.inner_iterator = None;
+            self.inner_next_method = None;
+            self.concat_iterables.clear();
+            self.zip_records.clear();
+            self.zip_padding.clear();
+            self.zip_keys = None;
+        }
     }
 
     pub(crate) const fn finish_callback(&mut self, yielded: bool) {
@@ -474,6 +680,39 @@ impl IteratorHelperState {
     }
 
     pub(crate) const fn finish_limit_yield(&mut self) {
+        self.lifecycle = IteratorHelperLifecycle::SuspendedYield;
+    }
+
+    pub(crate) fn install_inner(&mut self, iterator: StoredValue, next_method: StoredValue) {
+        self.inner_iterator = Some(iterator);
+        self.inner_next_method = Some(next_method);
+    }
+
+    pub(crate) const fn finish_flat_map_yield(&mut self) {
+        self.lifecycle = IteratorHelperLifecycle::SuspendedYield;
+    }
+
+    pub(crate) fn finish_flat_map_inner(&mut self) {
+        self.inner_iterator = None;
+        self.inner_next_method = None;
+        self.counter = self.counter.saturating_add(1);
+    }
+
+    pub(crate) fn finish_concat_inner(&mut self) {
+        self.inner_iterator = None;
+        self.inner_next_method = None;
+        self.concat_index = self.concat_index.saturating_add(1);
+    }
+
+    pub(crate) fn finish_zip_record(&mut self, index: usize) -> bool {
+        let Some(record) = self.zip_records.get_mut(index) else {
+            return false;
+        };
+        record.finish();
+        true
+    }
+
+    pub(crate) const fn finish_zip_yield(&mut self) {
         self.lifecycle = IteratorHelperLifecycle::SuspendedYield;
     }
 }
@@ -525,11 +764,25 @@ impl IteratorRecord {
     }
 
     #[must_use]
-    pub(crate) fn duplicate(&self) -> Self {
+    pub(crate) fn new_concat_helper(iterables: Vec<IteratorConcatIterable>) -> Self {
         Self {
-            iterator: self.iterator.duplicate(),
-            next_method: self.next_method.duplicate(),
-            helper: self.helper,
+            iterator: StoredValue::Undefined,
+            next_method: StoredValue::Undefined,
+            helper: Some(IteratorHelperState::new_concat(iterables)),
+        }
+    }
+
+    #[must_use]
+    pub(crate) fn new_zip_helper(
+        records: Vec<IteratorZipRecord>,
+        padding: Vec<StoredValue>,
+        mode: IteratorZipMode,
+        keys: Option<Vec<PropertyKey>>,
+    ) -> Self {
+        Self {
+            iterator: StoredValue::Undefined,
+            next_method: StoredValue::Undefined,
+            helper: Some(IteratorHelperState::new_zip(records, padding, mode, keys)),
         }
     }
 

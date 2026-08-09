@@ -7,4 +7,4 @@ pub(super) use function_tree::{
     FunctionTreeLayout, FunctionTreeLayoutInput, FunctionTreeLayoutSeed,
     FunctionTreeLayoutSeedInput,
 };
-pub(super) use realm_globals::{RealmGlobalLayout, RealmGlobalLayoutInput};
+pub(super) use realm_globals::{RealmGlobalLayout, RealmGlobalLayoutInput, RealmGlobalRootSource};

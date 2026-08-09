@@ -1,9 +1,9 @@
 use std::sync::Arc;
 
 use quickjs_bytecode::{
-    AtomPoolIndex, BytecodePc, CompilerAtom, CompilerBindingPolicy, CompilerConstantKind,
-    CompilerConstantValue, FunctionTemplateId, UnverifiedFunctionMetadata, VerifiedBytecode,
-    VerifiedCompilerFunctionGraph, VerifiedControlFlow,
+    AtomPoolIndex, BytecodePc, CompilerAtom, CompilerBindingPolicy, CompilerClosureBinding,
+    CompilerConstantKind, CompilerConstantValue, FunctionTemplateId, UnverifiedFunctionMetadata,
+    VerifiedBytecode, VerifiedCompilerFunctionGraph, VerifiedControlFlow,
 };
 use quickjs_frontend::Span;
 
@@ -148,6 +148,20 @@ impl RealmGlobalId {
 pub enum CompiledRealmGlobalSource {
     /// The dynamic Script root resolves this name in its constructor realm.
     ConstructorRealm,
+    /// A direct-eval Script root imports one live caller binding.
+    DirectEvalBinding {
+        /// Zero-based entry in the caller-environment snapshot.
+        index: u32,
+        /// Exact caller-environment shape bound into the authority.
+        environment_size: u32,
+    },
+    /// A sloppy direct-eval declaration creates this caller function binding.
+    DirectEvalVariable {
+        /// Dense entry appended after the caller snapshot.
+        index: u32,
+        /// Exact combined caller and created-variable environment size.
+        environment_size: u32,
+    },
     /// A child forwards the same realm-owned handle from its parent.
     ParentClosure(u16),
 }
@@ -160,7 +174,9 @@ pub struct CompiledRealmGlobal {
     pub(super) atom: AtomPoolIndex,
     pub(super) slot: u16,
     pub(super) source: CompiledRealmGlobalSource,
+    pub(super) binding: CompilerClosureBinding,
     pub(super) policy: CompilerBindingPolicy,
+    pub(super) deletable_eval_variable: bool,
     pub(super) function_initializer: Option<u32>,
 }
 
@@ -193,6 +209,13 @@ impl CompiledRealmGlobal {
     #[must_use]
     pub const fn source(&self) -> CompiledRealmGlobalSource {
         self.source
+    }
+
+    /// Returns whether this slot is a captured caller cell or a Realm-global
+    /// handle.
+    #[must_use]
+    pub const fn binding(&self) -> CompilerClosureBinding {
+        self.binding
     }
 
     /// Returns whether this name is an unresolved lookup, property-backed
@@ -264,6 +287,8 @@ pub struct CompiledFunction {
     pub(super) realm_globals: Arc<[CompiledRealmGlobal]>,
     pub(super) source_instructions: Arc<[SourceInstruction]>,
     pub(super) control_flow: Arc<VerifiedControlFlow>,
+    pub(super) eval_reference_call_instructions: Arc<[u32]>,
+    pub(super) parameter_initialization_end: Option<u32>,
     pub(super) metadata: UnverifiedFunctionMetadata,
 }
 
@@ -330,6 +355,19 @@ impl CompiledFunction {
     #[must_use]
     pub fn control_flow(&self) -> &VerifiedControlFlow {
         &self.control_flow
+    }
+
+    /// Returns the `eval` instruction indices whose callee was obtained as a
+    /// reference carrying an ordinary-call receiver.
+    #[must_use]
+    pub fn eval_reference_call_instructions(&self) -> &[u32] {
+        &self.eval_reference_call_instructions
+    }
+
+    /// Returns the first body instruction after parameter-expression evaluation.
+    #[must_use]
+    pub const fn parameter_initialization_end(&self) -> Option<u32> {
+        self.parameter_initialization_end
     }
 }
 

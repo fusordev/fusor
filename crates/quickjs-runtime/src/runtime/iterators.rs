@@ -31,7 +31,10 @@ use super::{
     PropertyLayout, RealmId, RealmIntrinsics, RegExpStringIterator, Runtime, RuntimeResource,
     StoredValue, StringIterator, check_execution_limit, stale_heap_reference, usize_to_u64,
 };
-use crate::object::{IteratorHelperKind, IteratorHelperLifecycle, IteratorRecord, OwnProperty};
+use crate::object::{
+    IteratorConcatIterable, IteratorHelperKind, IteratorHelperLifecycle, IteratorRecord,
+    IteratorZipMode, IteratorZipRecord, OwnProperty,
+};
 
 pub(crate) struct PreparedIteratorResultPlan {
     result: ObjectRecord,
@@ -79,6 +82,12 @@ pub(crate) struct IteratorHelperSnapshot {
     pub(crate) counter: u64,
     pub(crate) remaining: f64,
     pub(crate) lifecycle: IteratorHelperLifecycle,
+    pub(crate) inner_iterator: Option<StoredValue>,
+    pub(crate) inner_next_method: Option<StoredValue>,
+    pub(crate) concat_iterable: Option<IteratorConcatIterable>,
+    pub(crate) zip_mode: IteratorZipMode,
+    pub(crate) zip_record_count: usize,
+    pub(crate) zip_keys: Option<Vec<PropertyKey>>,
 }
 
 impl Runtime {
@@ -205,6 +214,33 @@ impl Runtime {
         ))
     }
 
+    pub(crate) fn allocate_iterator_concat_helper(
+        &mut self,
+        realm: RealmId,
+        iterables: Vec<IteratorConcatIterable>,
+    ) -> Result<ObjectId, crate::ExecutionError> {
+        let prototype = self.realm_iterator_helper_prototype(realm)?;
+        self.allocate_iterator_object(HeapObject::iterator_wrapper(
+            ObjectRecord::empty(Some(HeapReference::Object(prototype))),
+            IteratorRecord::new_concat_helper(iterables),
+        ))
+    }
+
+    pub(crate) fn allocate_iterator_zip_helper(
+        &mut self,
+        realm: RealmId,
+        records: Vec<IteratorZipRecord>,
+        padding: Vec<StoredValue>,
+        mode: IteratorZipMode,
+        keys: Option<Vec<PropertyKey>>,
+    ) -> Result<ObjectId, crate::ExecutionError> {
+        let prototype = self.realm_iterator_helper_prototype(realm)?;
+        self.allocate_iterator_object(HeapObject::iterator_wrapper(
+            ObjectRecord::empty(Some(HeapReference::Object(prototype))),
+            IteratorRecord::new_zip_helper(records, padding, mode, keys),
+        ))
+    }
+
     pub(crate) fn iterator_wrapper_record(
         &self,
         wrapper: ObjectId,
@@ -216,7 +252,12 @@ impl Runtime {
         Ok(object
             .iterator_wrapper_state()
             .filter(|record| record.helper().is_none())
-            .map(IteratorRecord::duplicate))
+            .map(|record| {
+                IteratorRecord::new(
+                    record.iterator().duplicate(),
+                    record.next_method().duplicate(),
+                )
+            }))
     }
 
     pub(crate) fn iterator_helper_snapshot(
@@ -241,7 +282,146 @@ impl Runtime {
             counter: helper_state.counter(),
             remaining: helper_state.remaining(),
             lifecycle: helper_state.lifecycle(),
+            inner_iterator: helper_state.inner_iterator().map(StoredValue::duplicate),
+            inner_next_method: helper_state.inner_next_method().map(StoredValue::duplicate),
+            concat_iterable: helper_state
+                .current_concat_iterable()
+                .map(IteratorConcatIterable::duplicate),
+            zip_mode: helper_state.zip_mode(),
+            zip_record_count: helper_state.zip_records().len(),
+            zip_keys: helper_state.zip_keys().map(<[PropertyKey]>::to_vec),
         }))
+    }
+
+    pub(crate) fn iterator_zip_record(
+        &self,
+        helper: ObjectId,
+        index: usize,
+    ) -> Result<Option<IteratorZipRecord>, crate::EngineFault> {
+        let helper_state = self
+            .objects
+            .get(helper)
+            .ok_or_else(|| stale_heap_reference(HeapReference::Object(helper)))?
+            .iterator_wrapper_state()
+            .and_then(IteratorRecord::helper)
+            .ok_or(crate::EngineFault::RuntimeInvariant {
+                message: "Iterator.zip state disappeared",
+            })?;
+        Ok(helper_state
+            .zip_record(index)
+            .map(IteratorZipRecord::duplicate))
+    }
+
+    pub(crate) fn iterator_zip_padding(
+        &self,
+        helper: ObjectId,
+        index: usize,
+    ) -> Result<Option<StoredValue>, crate::EngineFault> {
+        let helper_state = self
+            .objects
+            .get(helper)
+            .ok_or_else(|| stale_heap_reference(HeapReference::Object(helper)))?
+            .iterator_wrapper_state()
+            .and_then(IteratorRecord::helper)
+            .ok_or(crate::EngineFault::RuntimeInvariant {
+                message: "Iterator.zip state disappeared",
+            })?;
+        Ok(helper_state
+            .zip_padding()
+            .get(index)
+            .map(StoredValue::duplicate))
+    }
+
+    pub(crate) fn finish_iterator_zip_record(
+        &mut self,
+        helper: ObjectId,
+        index: usize,
+    ) -> Result<(), crate::EngineFault> {
+        let helper_state = self
+            .objects
+            .get_mut(helper)
+            .ok_or_else(|| stale_heap_reference(HeapReference::Object(helper)))?
+            .iterator_wrapper_state_mut()
+            .and_then(IteratorRecord::helper_mut)
+            .ok_or(crate::EngineFault::RuntimeInvariant {
+                message: "Iterator.zip state disappeared",
+            })?;
+        if !helper_state.finish_zip_record(index) {
+            return Err(crate::EngineFault::RuntimeInvariant {
+                message: "Iterator.zip record index is missing",
+            });
+        }
+        Ok(())
+    }
+
+    pub(crate) fn finish_iterator_zip_yield(
+        &mut self,
+        helper: ObjectId,
+    ) -> Result<(), crate::EngineFault> {
+        let helper_state = self
+            .objects
+            .get_mut(helper)
+            .ok_or_else(|| stale_heap_reference(HeapReference::Object(helper)))?
+            .iterator_wrapper_state_mut()
+            .and_then(IteratorRecord::helper_mut)
+            .ok_or(crate::EngineFault::RuntimeInvariant {
+                message: "Iterator.zip state disappeared",
+            })?;
+        helper_state.finish_zip_yield();
+        Ok(())
+    }
+
+    pub(crate) fn iterator_zip_open_iterators(
+        &self,
+        helper: ObjectId,
+    ) -> Result<Vec<StoredValue>, crate::ExecutionError> {
+        let helper_state = self
+            .objects
+            .get(helper)
+            .ok_or_else(|| stale_heap_reference(HeapReference::Object(helper)))?
+            .iterator_wrapper_state()
+            .and_then(IteratorRecord::helper)
+            .ok_or(crate::EngineFault::RuntimeInvariant {
+                message: "Iterator.zip state disappeared",
+            })?;
+        let open_count = helper_state
+            .zip_records()
+            .iter()
+            .filter(|record| !record.is_done())
+            .count();
+        let mut iterators = Vec::new();
+        iterators.try_reserve_exact(open_count).map_err(|_| {
+            crate::ExecutionError::AllocationFailed {
+                resource: RuntimeResource::FrameValues,
+                additional: open_count,
+            }
+        })?;
+        iterators.extend(
+            helper_state
+                .zip_records()
+                .iter()
+                .filter(|record| !record.is_done())
+                .map(|record| record.iterator().duplicate()),
+        );
+        Ok(iterators)
+    }
+
+    pub(crate) fn current_iterator_concat_iterable(
+        &self,
+        helper: ObjectId,
+    ) -> Result<Option<IteratorConcatIterable>, crate::EngineFault> {
+        let helper_state = self
+            .objects
+            .get(helper)
+            .ok_or_else(|| stale_heap_reference(HeapReference::Object(helper)))?
+            .iterator_wrapper_state()
+            .and_then(IteratorRecord::helper)
+            .ok_or(crate::EngineFault::RuntimeInvariant {
+                message: "Iterator concat state disappeared",
+            })?;
+        Ok(helper_state
+            .current_concat_iterable()
+            .map(IteratorConcatIterable::duplicate))
     }
 
     pub(crate) fn set_iterator_helper_lifecycle(
@@ -310,6 +490,76 @@ impl Runtime {
                 message: "Iterator Helper state disappeared",
             })?;
         helper_state.finish_limit_yield();
+        Ok(())
+    }
+
+    pub(crate) fn install_iterator_helper_inner(
+        &mut self,
+        helper: ObjectId,
+        iterator: StoredValue,
+        next_method: StoredValue,
+    ) -> Result<(), crate::EngineFault> {
+        let helper_state = self
+            .objects
+            .get_mut(helper)
+            .ok_or_else(|| stale_heap_reference(HeapReference::Object(helper)))?
+            .iterator_wrapper_state_mut()
+            .and_then(IteratorRecord::helper_mut)
+            .ok_or(crate::EngineFault::RuntimeInvariant {
+                message: "Iterator Helper state disappeared",
+            })?;
+        helper_state.install_inner(iterator, next_method);
+        Ok(())
+    }
+
+    pub(crate) fn finish_iterator_flat_map_yield(
+        &mut self,
+        helper: ObjectId,
+    ) -> Result<(), crate::EngineFault> {
+        let helper_state = self
+            .objects
+            .get_mut(helper)
+            .ok_or_else(|| stale_heap_reference(HeapReference::Object(helper)))?
+            .iterator_wrapper_state_mut()
+            .and_then(IteratorRecord::helper_mut)
+            .ok_or(crate::EngineFault::RuntimeInvariant {
+                message: "Iterator Helper state disappeared",
+            })?;
+        helper_state.finish_flat_map_yield();
+        Ok(())
+    }
+
+    pub(crate) fn finish_iterator_flat_map_inner(
+        &mut self,
+        helper: ObjectId,
+    ) -> Result<(), crate::EngineFault> {
+        let helper_state = self
+            .objects
+            .get_mut(helper)
+            .ok_or_else(|| stale_heap_reference(HeapReference::Object(helper)))?
+            .iterator_wrapper_state_mut()
+            .and_then(IteratorRecord::helper_mut)
+            .ok_or(crate::EngineFault::RuntimeInvariant {
+                message: "Iterator Helper state disappeared",
+            })?;
+        helper_state.finish_flat_map_inner();
+        Ok(())
+    }
+
+    pub(crate) fn finish_iterator_concat_inner(
+        &mut self,
+        helper: ObjectId,
+    ) -> Result<(), crate::EngineFault> {
+        let helper_state = self
+            .objects
+            .get_mut(helper)
+            .ok_or_else(|| stale_heap_reference(HeapReference::Object(helper)))?
+            .iterator_wrapper_state_mut()
+            .and_then(IteratorRecord::helper_mut)
+            .ok_or(crate::EngineFault::RuntimeInvariant {
+                message: "Iterator concat state disappeared",
+            })?;
+        helper_state.finish_concat_inner();
         Ok(())
     }
 

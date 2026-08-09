@@ -1499,8 +1499,9 @@ impl Runtime {
     /// accessor slot; an existing data element is a duplicate private name.
     ///
     /// `getter` selects the supplied function's accessor half. `Ok(false)`
-    /// reports an existing private data slot, while `Ok(true)` publishes or
-    /// merges the accessor without walking prototypes or invoking Proxy traps.
+    /// reports an existing private data slot or an already-installed matching
+    /// accessor half, while `Ok(true)` publishes or completes a getter/setter
+    /// pair without walking prototypes or invoking Proxy traps.
     pub(crate) fn define_private_accessor_property(
         &mut self,
         reference: HeapReference,
@@ -1524,6 +1525,9 @@ impl Runtime {
             }
             Some(OwnProperty::Data { .. }) => return Ok(false),
             Some(OwnProperty::Accessor { getter, setter, .. }) => {
+                if (is_getter && getter.is_some()) || (!is_getter && setter.is_some()) {
+                    return Ok(false);
+                }
                 if is_getter {
                     (Some(function), setter)
                 } else {

@@ -20,6 +20,7 @@ mod atom;
 mod bigint;
 mod conversion;
 mod define_property;
+mod diagnostic;
 mod error;
 mod host;
 mod ids;
@@ -42,13 +43,16 @@ pub use atom::{
     PREDEFINED_INTERNER_SLOTS, PropertyKey,
 };
 pub use bigint::{BigIntError, JsBigInt};
+pub use diagnostic::RuntimeDiagnosticError;
 pub use error::{
     DynamicFunctionCompileFailure, DynamicFunctionScriptError, EngineFault, ErrorObjectKind,
-    ExceptionKind, ExecutionError, GlobalScriptError, HandleError, HandleKind, InstallError,
-    JsException, JsStackFrame, RuntimeError, RuntimeResource, ValueKind,
+    ExceptionKind, ExecutionError, GlobalDeclarationRejectionKind, GlobalScriptError, HandleError,
+    HandleKind, InstallError, JsException, JsStackFrame, RuntimeError, RuntimeResource, ValueKind,
 };
 pub use host::{
-    DynamicFunctionCompileRequest, DynamicFunctionCompiler, DynamicFunctionFamily,
+    DirectEvalCallerBinding, DirectEvalCallerBindingLocation, DirectEvalCallerBindingScope,
+    DirectEvalCompileRequest, DirectEvalVariableEnvironment, DynamicFunctionCompileRequest,
+    DynamicFunctionCompiler, DynamicFunctionFamily, IndirectEvalCompileRequest,
     OrdinaryDynamicFunctionCompiler, OrdinaryDynamicFunctionSource,
 };
 pub use interrupt::{INTERRUPT_POLL_INTERVAL, InterruptHandler};

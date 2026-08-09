@@ -274,6 +274,15 @@ impl From<AtomError> for RuntimeError {
     }
 }
 
+/// Structural reason a global declaration cannot be instantiated.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum GlobalDeclarationRejectionKind {
+    /// The requested declaration conflicts with an existing global binding.
+    BindingConflict,
+    /// The global object cannot accept the requested property definition.
+    ObjectDefinitionRejected,
+}
+
 /// Failure to turn verified bytecode into one runtime-local function.
 #[derive(Debug)]
 pub enum InstallError {
@@ -314,6 +323,8 @@ pub enum InstallError {
     GlobalDeclarationRejected {
         /// Exact declared binding name.
         name: JsString,
+        /// Structural reason declaration instantiation rejected the name.
+        kind: GlobalDeclarationRejectionKind,
         /// Dynamic Script root containing the rejected declaration.
         function: FunctionTemplateId,
         /// Declaration-instantiation bytecode position.
@@ -644,6 +655,12 @@ impl JsException {
     #[must_use]
     pub const fn source_span(&self) -> SourceByteSpan {
         self.origin.source_span
+    }
+
+    /// Returns the complete verified origin frame.
+    #[must_use]
+    pub const fn origin_frame(&self) -> &JsStackFrame {
+        &self.origin
     }
 
     /// Returns caller call sites from the immediate caller outward.

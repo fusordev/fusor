@@ -394,6 +394,97 @@ fn rooted_iterator_map_helper_keeps_its_hidden_state_live_through_collection() {
 }
 
 #[test]
+fn rooted_iterator_concat_helper_keeps_captured_records_live_through_collection() {
+    let mut runtime = Runtime::try_new(RuntimeLimits::default()).expect("runtime");
+    let realm = runtime.create_realm().expect("realm");
+    let helper = {
+        let mut context = runtime.context(&realm).expect("context");
+        let function = dynamic_function(
+            &mut context,
+            "return Iterator.concat({get [Symbol.iterator](){\
+               let state={value:42};return function(){return {\
+                 next(){return {done:false,value:state.value};}};};}});",
+        );
+        context
+            .call(&function, &[], ExecutionLimits::default())
+            .expect("Iterator concat helper")
+    };
+
+    runtime
+        .collect_cycles()
+        .expect("captured Iterator.concat records survive collection");
+
+    let mut context = runtime.context(&realm).expect("context");
+    let next = dynamic_function(&mut context, "return arguments[0].next().value;");
+    let result = context
+        .call(&next, &[helper], ExecutionLimits::default())
+        .expect("hidden Iterator.concat record remains live");
+    assert_number(&result, 42);
+}
+
+#[test]
+fn rooted_iterator_zip_helper_keeps_records_padding_and_keys_live_through_collection() {
+    let mut runtime = Runtime::try_new(RuntimeLimits::default()).expect("runtime");
+    let realm = runtime.create_realm().expect("realm");
+    let helper = {
+        let mut context = runtime.context(&realm).expect("context");
+        let function = dynamic_function(
+            &mut context,
+            "let state={value:42};return Iterator.zipKeyed({item:{[Symbol.iterator](){\
+               let used=false;return {next(){return used?{done:true}:\
+                 (used=true,{done:false,value:state.value});}};}}},\
+               {mode:'longest',padding:{item:99}});",
+        );
+        context
+            .call(&function, &[], ExecutionLimits::default())
+            .expect("Iterator.zipKeyed helper")
+    };
+
+    runtime
+        .collect_cycles()
+        .expect("captured Iterator.zipKeyed state survives collection");
+
+    let mut context = runtime.context(&realm).expect("context");
+    let next = dynamic_function(&mut context, "return arguments[0].next().value.item;");
+    let result = context
+        .call(&next, &[helper], ExecutionLimits::default())
+        .expect("hidden Iterator.zipKeyed state remains live");
+    assert_number(&result, 42);
+}
+
+#[test]
+fn rooted_iterator_flat_map_helper_keeps_its_active_inner_iterator_live() {
+    let mut runtime = Runtime::try_new(RuntimeLimits::default()).expect("runtime");
+    let realm = runtime.create_realm().expect("realm");
+    let helper = {
+        let mut context = runtime.context(&realm).expect("context");
+        let function = dynamic_function(
+            &mut context,
+            "let outerDone=false,state={value:40};\
+             let helper=Iterator.prototype.flatMap.call({next(){\
+               if(outerDone)return {done:true};outerDone=true;return {done:false,value:state};}},\
+               function(shared){let index=0;return {next(){index++;return index<3\
+                 ?{done:false,value:shared.value+index}:{done:true};}};});\
+             helper.next();return helper;",
+        );
+        context
+            .call(&function, &[], ExecutionLimits::default())
+            .expect("Iterator flatMap helper")
+    };
+
+    runtime
+        .collect_cycles()
+        .expect("active flatMap inner iterator survives collection");
+
+    let mut context = runtime.context(&realm).expect("context");
+    let next = dynamic_function(&mut context, "return arguments[0].next().value;");
+    let result = context
+        .call(&next, &[helper], ExecutionLimits::default())
+        .expect("hidden flatMap inner iterator remains live");
+    assert_number(&result, 42);
+}
+
+#[test]
 fn iterator_to_array_retains_next_and_observes_step_value_order() {
     let mut runtime = Runtime::try_new(RuntimeLimits::default()).expect("runtime");
     let realm = runtime.create_realm().expect("realm");
@@ -574,6 +665,316 @@ fn iterator_map_validation_and_step_abrupts_follow_spec_order() {
         .call(&function, &[], ExecutionLimits::default())
         .expect("Iterator.prototype.map validation and step abrupts");
     assert_eq!(string_value(&result), "returnreturn|true|true|0");
+}
+
+#[test]
+fn iterator_flat_map_is_lazy_and_reuses_each_inner_next_method() {
+    let mut runtime = Runtime::try_new(RuntimeLimits::default()).expect("runtime");
+    let realm = runtime.create_realm().expect("realm");
+    let mut context = runtime.context(&realm).expect("context");
+    let function = dynamic_function(
+        &mut context,
+        "let outerCalls=0,mapperLog='',iteratorCalls=0,nextGets=0;\
+         let outer={next(){outerCalls++;return outerCalls<3\
+           ?{done:false,value:outerCalls}:{done:true};}};\
+         let helper=Iterator.prototype.flatMap.call(outer,function(value,index){\
+           mapperLog+=value+':'+index+',';let innerCalls=0;return {\
+             [Symbol.iterator](){iteratorCalls++;return {get next(){nextGets++;return function(){\
+               innerCalls++;return innerCalls<3?{done:false,value:value*10+innerCalls}:{done:true};};}};}};});\
+         let before=[outerCalls,mapperLog,iteratorCalls,nextGets].join(',');\
+         let a=helper.next(),b=helper.next(),c=helper.next(),d=helper.next(),done=helper.next();\
+         return [before,a.value,b.value,c.value,d.value,done.value===undefined,done.done,\
+           outerCalls,mapperLog,iteratorCalls,nextGets,Iterator.prototype.flatMap.name,\
+           Iterator.prototype.flatMap.length].join('|');",
+    );
+
+    let result = context
+        .call(&function, &[], ExecutionLimits::default())
+        .expect("Iterator.prototype.flatMap lazy helper");
+    assert_eq!(
+        string_value(&result),
+        "0,,0,0|11|12|21|22|true|true|3|1:0,2:1,|2|2|flatMap|1"
+    );
+}
+
+#[test]
+fn iterator_flat_map_closes_inner_then_outer_and_preserves_abrupts() {
+    let mut runtime = Runtime::try_new(RuntimeLimits::default()).expect("runtime");
+    let realm = runtime.create_realm().expect("realm");
+    let mut context = runtime.context(&realm).expect("context");
+    let function = dynamic_function(
+        &mut context,
+        "let log='',innerError={},outerError={},preserved=false;\
+         let outer={next(){return {done:false,value:1};},return(){log+='O';throw outerError;}};\
+         let helper=Iterator.prototype.flatMap.call(outer,function(){let first=true;return {\
+           next(){if(first){first=false;return {done:false,value:1};}return {done:true};},\
+           return(){log+='I';throw innerError;}};});\
+         helper.next();try{helper.return();}catch(error){preserved=error===innerError;}\
+         let mapperError={},mapperPreserved=false,mapperCloses=0;\
+         let mapperHelper=Iterator.prototype.flatMap.call({\
+           next(){return {done:false,value:1};},return(){mapperCloses++;throw {};}} ,\
+           function(){throw mapperError;});\
+         try{mapperHelper.next();}catch(error){mapperPreserved=error===mapperError;}\
+         let stepError={},stepPreserved=false,innerCloses=0,outerCloses=0;\
+         let stepHelper=Iterator.prototype.flatMap.call({\
+           next(){return {done:false,value:1};},return(){outerCloses++;return {};}},\
+           function(){return {next(){throw stepError;},return(){innerCloses++;return {};}};});\
+         try{stepHelper.next();}catch(error){stepPreserved=error===stepError;}\
+         return [log,preserved,mapperPreserved,mapperCloses,stepPreserved,innerCloses,outerCloses].join('|');",
+    );
+
+    let result = context
+        .call(&function, &[], ExecutionLimits::default())
+        .expect("Iterator.prototype.flatMap close ordering");
+    assert_eq!(string_value(&result), "IO|true|true|1|true|0|1");
+}
+
+#[test]
+fn iterator_consumers_share_indexed_callback_and_exhaustion_semantics() {
+    let mut runtime = Runtime::try_new(RuntimeLimits::default()).expect("runtime");
+    let realm = runtime.create_realm().expect("realm");
+    let mut context = runtime.context(&realm).expect("context");
+    let function = dynamic_function(
+        &mut context,
+        "function source(){let index=0;return {next(){index++;return index<4\
+           ?{done:false,value:index}:{done:true};}};}\
+         let everyLog='',someLog='',findLog='',forEachLog='',thisValues=[];\
+         let every=Iterator.prototype.every.call(source(),function(value,index){'use strict';\
+           everyLog+=value+':'+index+',';thisValues.push(this);return value<4;});\
+         let some=Iterator.prototype.some.call(source(),function(value,index){'use strict';\
+           someLog+=value+':'+index+',';thisValues.push(this);return value===2;});\
+         let found=Iterator.prototype.find.call(source(),function(value,index){'use strict';\
+           findLog+=value+':'+index+',';thisValues.push(this);return value===2;});\
+         let each=Iterator.prototype.forEach.call(source(),function(value,index){'use strict';\
+           forEachLog+=value+':'+index+',';thisValues.push(this);return 99;});\
+         let empty={next(){return {done:true};}};\
+         return [every,everyLog,some,someLog,found,findLog,each===undefined,forEachLog,\
+           Iterator.prototype.every.call(empty,()=>false),\
+           Iterator.prototype.some.call(empty,()=>true),\
+           Iterator.prototype.find.call(empty,()=>true)===undefined,\
+           thisValues.every(value=>value===undefined)].join('|');",
+    );
+
+    let result = context
+        .call(&function, &[], ExecutionLimits::default())
+        .expect("Iterator consuming helpers");
+    assert_eq!(
+        string_value(&result),
+        "true|1:0,2:1,3:2,|true|1:0,2:1,|2|1:0,2:1,|true|1:0,2:1,3:2,|true|false|true|true"
+    );
+}
+
+#[test]
+fn iterator_consumers_close_only_for_validation_callbacks_and_early_exit() {
+    let mut runtime = Runtime::try_new(RuntimeLimits::default()).expect("runtime");
+    let realm = runtime.create_realm().expect("realm");
+    let mut context = runtime.context(&realm).expect("context");
+    let function = dynamic_function(
+        &mut context,
+        "let validationLog='',validationType=false;\
+         let validation={get next(){validationLog+='n';throw {};},\
+           return(){validationLog+='r';throw {};}};\
+         try{Iterator.prototype.every.call(validation,0);}catch(error){\
+           validationType=error instanceof TypeError;}\
+         let callbackError={},callbackCloses=0,callbackPreserved=false;\
+         try{Iterator.prototype.forEach.call({next(){return {done:false,value:1};},\
+           return(){callbackCloses++;throw {};}} ,function(){throw callbackError;});}\
+         catch(error){callbackPreserved=error===callbackError;}\
+         let closeError={},closeOverrides=false;\
+         try{Iterator.prototype.some.call({next(){return {done:false,value:1};},\
+           return(){throw closeError;}},()=>true);}catch(error){closeOverrides=error===closeError;}\
+         let stepError={},stepCloses=0,stepPreserved=false;\
+         try{Iterator.prototype.find.call({next(){return {get done(){throw stepError;}};},\
+           return(){stepCloses++;return {};}},()=>true);}\
+         catch(error){stepPreserved=error===stepError;}\
+         return [validationLog,validationType,callbackPreserved,callbackCloses,\
+           closeOverrides,stepPreserved,stepCloses].join('|');",
+    );
+
+    let result = context
+        .call(&function, &[], ExecutionLimits::default())
+        .expect("Iterator consumer close ordering");
+    assert_eq!(string_value(&result), "r|true|true|1|true|true|0");
+}
+
+#[test]
+fn iterator_reduce_distinguishes_missing_and_explicit_initial_values() {
+    let mut runtime = Runtime::try_new(RuntimeLimits::default()).expect("runtime");
+    let realm = runtime.create_realm().expect("realm");
+    let mut context = runtime.context(&realm).expect("context");
+    let function = dynamic_function(
+        &mut context,
+        "function source(){let value=0;return {next(){value++;return value<4\
+           ?{done:false,value}:{done:true};}};}\
+         let initialLog='',missingLog='',thisValues=[];\
+         let withInitial=Iterator.prototype.reduce.call(source(),function(memo,value,index){\
+           'use strict';initialLog+=memo+':'+value+':'+index+',';thisValues.push(this);\
+           return memo+value;},10);\
+         let withoutInitial=Iterator.prototype.reduce.call(source(),function(memo,value,index){\
+           'use strict';missingLog+=memo+':'+value+':'+index+',';thisValues.push(this);\
+           return memo+value;});\
+         let explicit=Iterator.prototype.reduce.call({\
+           next(){return this.done?{done:true}:(this.done=true,{done:false,value:7});}},\
+           function(memo,value,index){return [memo===undefined,value,index].join(':');},undefined);\
+         let token={},empty={next(){return {done:true};}};\
+         let retained=Iterator.prototype.reduce.call(empty,()=>0,token)===token;\
+         let emptyType=false;try{Iterator.prototype.reduce.call(empty,()=>0);}\
+         catch(error){emptyType=error instanceof TypeError;}\
+         return [withInitial,initialLog,withoutInitial,missingLog,explicit,retained,emptyType,\
+           thisValues.every(value=>value===undefined)].join('|');",
+    );
+
+    let result = context
+        .call(&function, &[], ExecutionLimits::default())
+        .expect("Iterator.prototype.reduce accumulator semantics");
+    assert_eq!(
+        string_value(&result),
+        "16|10:1:0,11:2:1,13:3:2,|6|1:2:1,3:3:2,|true:7:0|true|true|true"
+    );
+}
+
+#[test]
+fn iterator_reduce_closes_only_validation_and_reducer_failures() {
+    let mut runtime = Runtime::try_new(RuntimeLimits::default()).expect("runtime");
+    let realm = runtime.create_realm().expect("realm");
+    let mut context = runtime.context(&realm).expect("context");
+    let function = dynamic_function(
+        &mut context,
+        "let validationLog='',validationType=false;\
+         let validation={get next(){validationLog+='n';throw {};},\
+           return(){validationLog+='r';throw {};}};\
+         try{Iterator.prototype.reduce.call(validation,0);}catch(error){\
+           validationType=error instanceof TypeError;}\
+         let reducerError={},reducerCloses=0,reducerPreserved=false;\
+         try{Iterator.prototype.reduce.call({next(){return {done:false,value:1};},\
+           return(){reducerCloses++;throw {};}} ,function(){throw reducerError;},0);}\
+         catch(error){reducerPreserved=error===reducerError;}\
+         let stepError={},stepCloses=0,stepPreserved=false;\
+         try{Iterator.prototype.reduce.call({next(){return {get done(){throw stepError;}};},\
+           return(){stepCloses++;return {};}},()=>0,0);}\
+         catch(error){stepPreserved=error===stepError;}\
+         let emptyCloses=0,emptyType=false;\
+         try{Iterator.prototype.reduce.call({next(){return {done:true};},\
+           return(){emptyCloses++;return {};}},()=>0);}\
+         catch(error){emptyType=error instanceof TypeError;}\
+         return [validationLog,validationType,reducerPreserved,reducerCloses,\
+           stepPreserved,stepCloses,emptyType,emptyCloses].join('|');",
+    );
+
+    let result = context
+        .call(&function, &[], ExecutionLimits::default())
+        .expect("Iterator.prototype.reduce close ordering");
+    assert_eq!(string_value(&result), "r|true|true|1|true|0|true|0");
+}
+
+#[test]
+fn iterator_symbol_dispose_invokes_return_and_ignores_its_result() {
+    let mut runtime = Runtime::try_new(RuntimeLimits::default()).expect("runtime");
+    let realm = runtime.create_realm().expect("realm");
+    let mut context = runtime.context(&realm).expect("context");
+    let function = dynamic_function(
+        &mut context,
+        "let method=Iterator.prototype[Symbol.dispose],calls=0,receiver=false,args=-1;\
+         let iterator={return(){calls++;receiver=this===iterator;args=arguments.length;return 99;}};\
+         let result=method.call(iterator);\
+         let absent=method.call({})===undefined;\
+         let type=false;try{method.call({return:0});}catch(error){type=error instanceof TypeError;}\
+         let descriptor=Object.getOwnPropertyDescriptor(Iterator.prototype,Symbol.dispose);\
+         let symbolDescriptor=Object.getOwnPropertyDescriptor(Symbol,'dispose');\
+         return [typeof Symbol.dispose,typeof method,method.name,method.length,calls,receiver,args,\
+           result===undefined,absent,type,descriptor.writable,!descriptor.enumerable,\
+           descriptor.configurable,!symbolDescriptor.writable,!symbolDescriptor.enumerable,\
+           !symbolDescriptor.configurable].join('|');",
+    );
+
+    let result = context
+        .call(&function, &[], ExecutionLimits::default())
+        .expect("Iterator.prototype[Symbol.dispose]");
+    assert_eq!(
+        string_value(&result),
+        "symbol|function|[Symbol.dispose]|0|1|true|0|true|true|true|true|true|true|true|true|true"
+    );
+}
+
+#[test]
+fn iterator_concat_captures_methods_eagerly_and_opens_iterators_lazily() {
+    let mut runtime = Runtime::try_new(RuntimeLimits::default()).expect("runtime");
+    let realm = runtime.create_realm().expect("realm");
+    let mut context = runtime.context(&realm).expect("context");
+    let function = dynamic_function(
+        &mut context,
+        "let log='';\
+         function item(tag,values){return {get [Symbol.iterator](){log+='g'+tag;return function(){\
+           log+='o'+tag;let index=0;return {get next(){log+='n'+tag;return function(){\
+             return index<values.length?{done:false,value:values[index++]}:{done:true};};}};};}};}\
+         let helper=Iterator.concat(item('a',[1,2]),item('b',[3]));\
+         let before=log;let first=helper.next();let middle=log;\
+         let second=helper.next();let third=helper.next();let done=helper.next();\
+         return [before,first.value,first.done,middle,second.value,third.value,done.value===undefined,\
+           done.done,log,helper[Symbol.iterator]()===helper].join('|');",
+    );
+
+    let result = context
+        .call(&function, &[], ExecutionLimits::default())
+        .expect("Iterator.concat lazy sequencing");
+    assert_eq!(
+        string_value(&result),
+        "gagb|1|false|gagboana|2|3|true|true|gagboanaobnb|true"
+    );
+}
+
+#[test]
+fn iterator_concat_return_targets_only_the_active_iterator() {
+    let mut runtime = Runtime::try_new(RuntimeLimits::default()).expect("runtime");
+    let realm = runtime.create_realm().expect("realm");
+    let mut context = runtime.context(&realm).expect("context");
+    let function = dynamic_function(
+        &mut context,
+        "let unopened=0,opened=0,closed=0;\
+         let fresh=Iterator.concat({[Symbol.iterator](){unopened++;return {next(){return {done:false};},\
+           return(){closed++;return {};}};}});fresh.return();\
+         let helper=Iterator.concat({[Symbol.iterator](){opened++;return {\
+           next(){return {done:false,value:1};},return(){closed++;return {};}};}},\
+           {[Symbol.iterator](){unopened++;return {next(){return {done:true};}};}});\
+         helper.next();let returned=helper.return();let after=helper.next();\
+         let stepError={},stepClosed=0,preserved=false;\
+         let failing=Iterator.concat({[Symbol.iterator](){return {next(){throw stepError;},\
+           return(){stepClosed++;return {};}};}});\
+         try{failing.next();}catch(error){preserved=error===stepError;}\
+         return [opened,unopened,closed,returned.value===undefined,returned.done,\
+           after.value===undefined,after.done,preserved,stepClosed].join('|');",
+    );
+
+    let result = context
+        .call(&function, &[], ExecutionLimits::default())
+        .expect("Iterator.concat return forwarding");
+    assert_eq!(string_value(&result), "1|0|1|true|true|true|true|true|0");
+}
+
+#[test]
+fn iterator_zip_modes_and_keyed_results_share_reverse_close_semantics() {
+    let mut runtime = Runtime::try_new(RuntimeLimits::default()).expect("runtime");
+    let realm = runtime.create_realm().expect("realm");
+    let mut context = runtime.context(&realm).expect("context");
+    let function = dynamic_function(
+        &mut context,
+        "let close='';\
+         function input(tag,values){let index=0;return {next(){return index<values.length\
+           ?{done:false,value:values[index++]}:{done:true};},return(){close+=tag;return {};}};}\
+         let longest=Iterator.zipKeyed({x:input('x',[1]),y:input('y',[2,3])},\
+           {mode:'longest',padding:{x:9,y:8}});\
+         let first=longest.next().value,second=longest.next().value,done=longest.next();\
+         let strict=Iterator.zip([input('a',[4,5]),input('b',[6])],{mode:'strict'});\
+         strict.next();let mismatch=false;try{strict.next();}catch(error){mismatch=error instanceof TypeError;}\
+         let left=input('l',[1]),right=input('r',[2]);Iterator.zip([left,right]).return();\
+         return [Object.getPrototypeOf(first)===null,first.x,first.y,second.x,second.y,\
+           done.done,mismatch,close].join('|');",
+    );
+
+    let result = context
+        .call(&function, &[], ExecutionLimits::default())
+        .expect("Iterator.zip modes");
+    assert_eq!(string_value(&result), "true|1|2|9|3|true|true|arl");
 }
 
 #[test]

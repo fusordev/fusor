@@ -9,20 +9,41 @@
 use std::{error::Error, fmt, sync::Arc};
 
 use quickjs_bytecode::{
-    BytecodeGraphVerificationLimits, FunctionGraphVerificationLimits, VerificationLimits,
-    VerifiedBytecode,
+    BytecodeGraphVerificationLimits, CompilerBindingKind, CompilerBindingPolicy,
+    CompilerInitializationPolicy, CompilerWritePolicy, FunctionGraphVerificationLimits,
+    VerificationLimits, VerifiedBytecode,
 };
-use quickjs_compiler::{CompilationContext, CompilerError, LeafCompilationError};
+use quickjs_compiler::{
+    CompilationContext, CompilerError, LeafCompilationError, SourceTextSubstitution,
+};
+pub use quickjs_diagnostics::{
+    ByteSpan, ColumnEncoding, Diagnostic, DiagnosticCode, DiagnosticCodeError, DiagnosticLabel,
+    DiagnosticReport, DiagnosticSeverity, LineColumn, OriginalLocation, PrettyDiagnostic,
+    PrettyDiagnosticError, PrettyDiagnosticReport, ResolvedLocation, ResolvedSpan, SourceError,
+    SourceFile, SourceId, SourceMap, SourceMapError, SourceMapErrorKind, SourceMapMapping,
+    SourceMapPosition, SourceRegistry, SourceSnippet, SourceSpan, render_pretty,
+    render_pretty_report,
+};
 use quickjs_frontend::{
-    CompilationGoal, DiagnosticStage, DynamicFunctionError, DynamicFunctionKind,
-    DynamicFunctionSource, FrontendError, FrontendLimits, FrontendOptions, GlobalScriptGoal,
-    PreparedDynamicFunctionSource, SourceFragment, with_dynamic_function_source_and_prepared,
-    with_parsed_program,
+    CompilationGoal, DiagnosticStage, DirectEvalBinding as FrontendDirectEvalBinding,
+    DirectEvalBindingKind as FrontendDirectEvalBindingKind,
+    DirectEvalBindingLocation as FrontendDirectEvalBindingLocation,
+    DirectEvalBindingScope as FrontendDirectEvalBindingScope,
+    DirectEvalCapabilities as FrontendDirectEvalCapabilities, DirectEvalContext,
+    DirectEvalScopeFrame as FrontendDirectEvalScopeFrame,
+    DirectEvalScopeKind as FrontendDirectEvalScopeKind, DirectEvalScopeSnapshot,
+    DirectEvalVariableEnvironment as FrontendDirectEvalVariableEnvironment, DynamicFunctionError,
+    DynamicFunctionKind, DynamicFunctionSource, FrontendError, FrontendLimits, FrontendOptions,
+    GlobalScriptGoal, IndirectEvalGoal, PreparedDynamicFunctionSource, RegisteredFrontendError,
+    SourceFragment, Span, with_dynamic_function_source_and_prepared, with_parsed_program,
+    with_registered_program,
 };
 use quickjs_runtime::{
-    Context, DynamicFunctionCompileFailure, DynamicFunctionCompileRequest, DynamicFunctionCompiler,
-    DynamicFunctionFamily, DynamicFunctionScriptError, ExecutionError, ExecutionLimits, Function,
-    GlobalScriptError, JsString, JsValue,
+    Context, DirectEvalCallerBindingLocation, DirectEvalCallerBindingScope,
+    DirectEvalCompileRequest, DirectEvalVariableEnvironment, DynamicFunctionCompileFailure,
+    DynamicFunctionCompileRequest, DynamicFunctionCompiler, DynamicFunctionFamily,
+    DynamicFunctionScriptError, ExecutionError, ExecutionLimits, Function, GlobalScriptError,
+    IndirectEvalCompileRequest, InstallError, JsString, JsValue, RuntimeDiagnosticError,
 };
 
 /// Resource limits applied across Global Script parsing, compilation,
@@ -171,6 +192,402 @@ impl Error for ScriptEvaluationError {
     }
 }
 
+/// Exact stage that rejected a registered Global Script evaluation.
+#[derive(Debug)]
+#[non_exhaustive]
+pub enum RegisteredScriptFailure {
+    /// Registered source access, parsing, compatibility, or early errors.
+    Frontend(RegisteredFrontendError),
+    /// The parsed Script could not become complete verified bytecode.
+    Compiler(ScriptCompilerError),
+    /// Realm installation or verified Script execution failed.
+    Runtime(GlobalScriptError),
+}
+
+impl fmt::Display for RegisteredScriptFailure {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Frontend(error) => error.fmt(formatter),
+            Self::Compiler(error) => error.fmt(formatter),
+            Self::Runtime(error) => error.fmt(formatter),
+        }
+    }
+}
+
+impl Error for RegisteredScriptFailure {
+    fn source(&self) -> Option<&(dyn Error + 'static)> {
+        match self {
+            Self::Frontend(error) => Some(error),
+            Self::Compiler(error) => Some(error),
+            Self::Runtime(error) => Some(error),
+        }
+    }
+}
+
+/// Failure of a registered Global Script pipeline with stable source identity.
+#[derive(Debug)]
+pub struct RegisteredScriptEvaluationError {
+    source_id: SourceId,
+    failure: RegisteredScriptFailure,
+}
+
+impl RegisteredScriptEvaluationError {
+    fn new(source_id: SourceId, failure: RegisteredScriptFailure) -> Self {
+        Self { source_id, failure }
+    }
+
+    /// Returns the registered generated source that was evaluated.
+    #[must_use]
+    pub const fn source_id(&self) -> &SourceId {
+        &self.source_id
+    }
+
+    /// Returns the exact failing pipeline stage.
+    #[must_use]
+    pub const fn failure(&self) -> &RegisteredScriptFailure {
+        &self.failure
+    }
+
+    /// Converts the failure into stable, source-map-resolved diagnostics ready
+    /// for the shared Miette adapter.
+    ///
+    /// Frontend diagnostic batches use their first diagnostic as primary and
+    /// retain the rest as related diagnostics. Compiler failures receive exact
+    /// source labels when their typed error carries a span. Runtime exceptions
+    /// retain their verified origin and caller stack as independently sourced
+    /// related diagnostics.
+    ///
+    /// # Errors
+    ///
+    /// Returns a structured source, source-map, runtime-provenance, or internal
+    /// stable-code conversion failure.
+    pub fn diagnostic_report(
+        &self,
+        sources: &SourceRegistry,
+    ) -> Result<DiagnosticReport, ScriptDiagnosticError> {
+        match &self.failure {
+            RegisteredScriptFailure::Frontend(error) => frontend_diagnostic_report(error, sources),
+            RegisteredScriptFailure::Compiler(error) => {
+                compiler_diagnostic_report(error, sources, &self.source_id)
+            }
+            RegisteredScriptFailure::Runtime(error) => {
+                runtime_diagnostic_report(error, sources, &self.source_id)
+            }
+        }
+    }
+}
+
+impl fmt::Display for RegisteredScriptEvaluationError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.failure.fmt(formatter)
+    }
+}
+
+impl Error for RegisteredScriptEvaluationError {
+    fn source(&self) -> Option<&(dyn Error + 'static)> {
+        Some(&self.failure)
+    }
+}
+
+/// Failure while adapting a registered Script error to shared diagnostics.
+#[derive(Clone, Debug, Eq, PartialEq)]
+#[non_exhaustive]
+pub enum ScriptDiagnosticError {
+    /// A stable engine-owned code failed validation.
+    DiagnosticCode(DiagnosticCodeError),
+    /// The registered source or a typed source span was invalid.
+    Source(SourceError),
+    /// Incoming source-map resolution failed.
+    SourceMap(SourceMapError),
+    /// Runtime frame provenance could not be validated.
+    Runtime(RuntimeDiagnosticError),
+    /// A frontend rejection unexpectedly contained no diagnostic.
+    EmptyFrontendDiagnostics,
+}
+
+impl fmt::Display for ScriptDiagnosticError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::DiagnosticCode(error) => write!(formatter, "invalid diagnostic code: {error}"),
+            Self::Source(error) => write!(formatter, "invalid diagnostic source: {error}"),
+            Self::SourceMap(error) => write!(formatter, "source-map resolution failed: {error}"),
+            Self::Runtime(error) => write!(formatter, "runtime diagnostic failed: {error}"),
+            Self::EmptyFrontendDiagnostics => {
+                formatter.write_str("frontend rejection contained no diagnostics")
+            }
+        }
+    }
+}
+
+impl Error for ScriptDiagnosticError {
+    fn source(&self) -> Option<&(dyn Error + 'static)> {
+        match self {
+            Self::DiagnosticCode(error) => Some(error),
+            Self::Source(error) => Some(error),
+            Self::SourceMap(error) => Some(error),
+            Self::Runtime(error) => Some(error),
+            Self::EmptyFrontendDiagnostics => None,
+        }
+    }
+}
+
+impl From<DiagnosticCodeError> for ScriptDiagnosticError {
+    fn from(error: DiagnosticCodeError) -> Self {
+        Self::DiagnosticCode(error)
+    }
+}
+
+impl From<SourceError> for ScriptDiagnosticError {
+    fn from(error: SourceError) -> Self {
+        Self::Source(error)
+    }
+}
+
+impl From<SourceMapError> for ScriptDiagnosticError {
+    fn from(error: SourceMapError) -> Self {
+        Self::SourceMap(error)
+    }
+}
+
+impl From<RuntimeDiagnosticError> for ScriptDiagnosticError {
+    fn from(error: RuntimeDiagnosticError) -> Self {
+        Self::Runtime(error)
+    }
+}
+
+fn shared_diagnostic(
+    code: &'static str,
+    message: impl Into<String>,
+) -> Result<Diagnostic, ScriptDiagnosticError> {
+    Ok(Diagnostic::new(
+        DiagnosticCode::new(code)?,
+        DiagnosticSeverity::Error,
+        message,
+    ))
+}
+
+fn frontend_diagnostic_report(
+    error: &RegisteredFrontendError,
+    sources: &SourceRegistry,
+) -> Result<DiagnosticReport, ScriptDiagnosticError> {
+    let RegisteredFrontendError::Diagnostics(diagnostics) = error else {
+        return Ok(DiagnosticReport::new(shared_diagnostic(
+            "quickjs::frontend::source_integration",
+            error.to_string(),
+        )?));
+    };
+    let mut diagnostics = diagnostics.diagnostics().iter();
+    let primary = diagnostics
+        .next()
+        .ok_or(ScriptDiagnosticError::EmptyFrontendDiagnostics)?
+        .clone();
+    DiagnosticReport::new(primary)
+        .with_related_diagnostics(diagnostics.cloned())
+        .resolve_source_maps(sources)
+        .map_err(Into::into)
+}
+
+fn source_label(
+    sources: &SourceRegistry,
+    source_id: &SourceId,
+    span: Span,
+    message: &'static str,
+    primary: bool,
+) -> Result<DiagnosticLabel, ScriptDiagnosticError> {
+    let generated = sources.span(source_id, span.start as usize, span.end as usize)?;
+    let resolved = sources.resolve_span(&generated)?;
+    Ok(if primary {
+        DiagnosticLabel::primary(resolved.display_span().clone(), Some(message.to_owned()))
+    } else {
+        DiagnosticLabel::secondary(resolved.display_span().clone(), Some(message.to_owned()))
+    })
+}
+
+fn planning_diagnostic(
+    error: &CompilerError,
+    sources: &SourceRegistry,
+    source_id: &SourceId,
+) -> Result<Diagnostic, ScriptDiagnosticError> {
+    let (code, span, help) = match error {
+        CompilerError::Unsupported { span, .. } => (
+            "quickjs::compiler::planning::unsupported",
+            Some(*span),
+            Some("the syntax parsed successfully but its runtime semantics are not admitted yet"),
+        ),
+        CompilerError::SemanticInvariant { span, .. } => (
+            "quickjs::compiler::planning::semantic_invariant",
+            *span,
+            None,
+        ),
+        CompilerError::CapacityExceeded { .. } => {
+            ("quickjs::compiler::planning::capacity_exceeded", None, None)
+        }
+    };
+    let mut diagnostic = shared_diagnostic(code, error.to_string())?;
+    if let Some(help) = help {
+        diagnostic = diagnostic.with_help(help);
+    }
+    if let Some(span) = span {
+        diagnostic = diagnostic.with_label(source_label(
+            sources,
+            source_id,
+            span,
+            "compiler planning rejected this syntax",
+            true,
+        )?);
+    }
+    Ok(diagnostic)
+}
+
+fn lowering_code(error: &LeafCompilationError) -> &'static str {
+    match error {
+        LeafCompilationError::ForeignExecutable { .. } => {
+            "quickjs::compiler::lowering::foreign_executable"
+        }
+        LeafCompilationError::InvalidExecutable { .. } => {
+            "quickjs::compiler::lowering::invalid_executable"
+        }
+        LeafCompilationError::Unsupported { .. } => "quickjs::compiler::lowering::unsupported",
+        LeafCompilationError::SemanticInvariant { .. } => {
+            "quickjs::compiler::lowering::semantic_invariant"
+        }
+        LeafCompilationError::EvalDeclarationConflict { .. } => {
+            "quickjs::compiler::lowering::eval_declaration_conflict"
+        }
+        LeafCompilationError::CapacityExceeded { .. } => {
+            "quickjs::compiler::lowering::capacity_exceeded"
+        }
+        LeafCompilationError::CookedStringDecoding { .. } => {
+            "quickjs::compiler::lowering::cooked_string"
+        }
+        LeafCompilationError::CompilerString { .. } => {
+            "quickjs::compiler::lowering::compiler_string"
+        }
+        LeafCompilationError::CompilerBigInt { .. } => {
+            "quickjs::compiler::lowering::compiler_bigint"
+        }
+        LeafCompilationError::CompilerTemplateObject { .. } => {
+            "quickjs::compiler::lowering::template_object"
+        }
+        LeafCompilationError::RegExp { .. } => "quickjs::compiler::lowering::regexp",
+        LeafCompilationError::BytecodeEncoding { .. } => {
+            "quickjs::compiler::lowering::bytecode_encoding"
+        }
+        LeafCompilationError::BytecodeAssembly { .. } => {
+            "quickjs::compiler::lowering::bytecode_assembly"
+        }
+        LeafCompilationError::BytecodeStackInvariant { .. } => {
+            "quickjs::compiler::lowering::stack_invariant"
+        }
+        LeafCompilationError::BytecodeVerification { .. } => {
+            "quickjs::compiler::lowering::bytecode_verification"
+        }
+        LeafCompilationError::FunctionGraphVerification { .. } => {
+            "quickjs::compiler::lowering::function_graph_verification"
+        }
+        LeafCompilationError::BytecodeGraphVerification { .. } => {
+            "quickjs::compiler::lowering::bytecode_graph_verification"
+        }
+    }
+}
+
+fn lowering_spans(error: &LeafCompilationError) -> (Option<Span>, Option<Span>) {
+    match error {
+        LeafCompilationError::Unsupported { span, .. }
+        | LeafCompilationError::CookedStringDecoding { span, .. }
+        | LeafCompilationError::CompilerString { span, .. }
+        | LeafCompilationError::CompilerBigInt { span, .. }
+        | LeafCompilationError::CompilerTemplateObject { span, .. }
+        | LeafCompilationError::RegExp { span, .. }
+        | LeafCompilationError::BytecodeEncoding { span, .. }
+        | LeafCompilationError::BytecodeStackInvariant { span, .. }
+        | LeafCompilationError::EvalDeclarationConflict { span, .. } => (Some(*span), None),
+        LeafCompilationError::SemanticInvariant { span, .. }
+        | LeafCompilationError::BytecodeAssembly { span, .. }
+        | LeafCompilationError::FunctionGraphVerification { span, .. }
+        | LeafCompilationError::BytecodeGraphVerification { span, .. } => (*span, None),
+        LeafCompilationError::BytecodeVerification {
+            span, related_span, ..
+        } => (*span, *related_span),
+        LeafCompilationError::ForeignExecutable { .. }
+        | LeafCompilationError::InvalidExecutable { .. }
+        | LeafCompilationError::CapacityExceeded { .. } => (None, None),
+    }
+}
+
+fn lowering_diagnostic(
+    error: &LeafCompilationError,
+    sources: &SourceRegistry,
+    source_id: &SourceId,
+) -> Result<Diagnostic, ScriptDiagnosticError> {
+    let mut diagnostic = shared_diagnostic(lowering_code(error), error.to_string())?;
+    let (span, related_span) = lowering_spans(error);
+    if let Some(span) = span {
+        diagnostic = diagnostic.with_label(source_label(
+            sources,
+            source_id,
+            span,
+            "lowering failed here",
+            true,
+        )?);
+    }
+    if let Some(span) = related_span {
+        diagnostic = diagnostic.with_label(source_label(
+            sources,
+            source_id,
+            span,
+            "related control-flow location",
+            false,
+        )?);
+    }
+    Ok(diagnostic)
+}
+
+fn compiler_diagnostic_report(
+    error: &ScriptCompilerError,
+    sources: &SourceRegistry,
+    source_id: &SourceId,
+) -> Result<DiagnosticReport, ScriptDiagnosticError> {
+    let diagnostic = match error {
+        ScriptCompilerError::Planning(error) => planning_diagnostic(error, sources, source_id)?,
+        ScriptCompilerError::Lowering(error) => lowering_diagnostic(error, sources, source_id)?,
+    };
+    Ok(DiagnosticReport::new(diagnostic))
+}
+
+fn install_span(error: &InstallError) -> Option<quickjs_bytecode::SourceByteSpan> {
+    match error {
+        InstallError::UnsupportedOpcode { source_span, .. }
+        | InstallError::GlobalDeclarationRejected { source_span, .. } => Some(*source_span),
+        InstallError::LimitExceeded { .. }
+        | InstallError::AllocationFailed { .. }
+        | InstallError::String(_)
+        | InstallError::BigInt(_)
+        | InstallError::Atom(_)
+        | InstallError::AuthorityInvariant { .. } => None,
+    }
+}
+
+fn runtime_diagnostic_report(
+    error: &GlobalScriptError,
+    sources: &SourceRegistry,
+    source_id: &SourceId,
+) -> Result<DiagnosticReport, ScriptDiagnosticError> {
+    let GlobalScriptError::Install(install) = error else {
+        return error.to_diagnostic_report(sources).map_err(Into::into);
+    };
+    let mut diagnostic = install.to_diagnostic()?;
+    if let Some(span) = install_span(install) {
+        let generated = sources.span(source_id, span.start() as usize, span.end() as usize)?;
+        let resolved = sources.resolve_span(&generated)?;
+        diagnostic = diagnostic.with_label(DiagnosticLabel::primary(
+            resolved.display_span().clone(),
+            Some("installation failed here".to_owned()),
+        ));
+    }
+    Ok(DiagnosticReport::new(diagnostic))
+}
+
 /// Parses, compiles, final-verifies, installs, and executes one host-loaded
 /// ECMAScript Global Script.
 ///
@@ -218,6 +635,85 @@ pub fn evaluate_script(
             &dynamic_service,
         )
         .map_err(ScriptEvaluationError::Runtime)
+}
+
+/// Parses, compiles, final-verifies, installs, and executes one registered
+/// ECMAScript Global Script.
+///
+/// Source text and display identity come from `sources`; any incoming source
+/// map registered on `source_id` remains available to
+/// [`RegisteredScriptEvaluationError::diagnostic_report`]. Successfully
+/// instantiated global bindings stay in `context`'s realm for later Script
+/// evaluations.
+///
+/// # Errors
+///
+/// Returns a [`RegisteredScriptEvaluationError`] retaining the registered
+/// source identity and the exact failing frontend, compiler, installation, or
+/// execution stage.
+pub fn evaluate_registered_script(
+    context: &mut Context<'_>,
+    sources: &SourceRegistry,
+    source_id: &SourceId,
+    limits: ScriptLimits,
+) -> Result<JsValue, RegisteredScriptEvaluationError> {
+    let source_name = match sources.source(source_id) {
+        Ok(source) => Arc::<str>::from(source.display_name()),
+        Err(error) => {
+            let failure = RegisteredScriptFailure::Frontend(RegisteredFrontendError::Source(
+                quickjs_frontend::FrontendSourceError::Registry(error),
+            ));
+            return Err(RegisteredScriptEvaluationError::new(
+                source_id.clone(),
+                failure,
+            ));
+        }
+    };
+    let compiled = with_registered_program(
+        sources,
+        source_id,
+        FrontendOptions::for_goal(CompilationGoal::GlobalScript(GlobalScriptGoal::new()))
+            .with_limits(limits.frontend),
+        move |unit| {
+            let compiler = CompilationContext::new_with_source_name(unit, source_name)
+                .map_err(ScriptCompilerError::Planning)?;
+            compiler
+                .compile_global_script_with_all_limits(
+                    limits.bytecode,
+                    limits.function_graph,
+                    limits.final_graph,
+                )
+                .map_err(ScriptCompilerError::Lowering)
+        },
+    )
+    .map_err(|error| {
+        RegisteredScriptEvaluationError::new(
+            source_id.clone(),
+            RegisteredScriptFailure::Frontend(error),
+        )
+    })?
+    .map_err(|error| {
+        RegisteredScriptEvaluationError::new(
+            source_id.clone(),
+            RegisteredScriptFailure::Compiler(error),
+        )
+    })?;
+    let authority = Arc::new(compiled.verified_bytecode().clone());
+    let dynamic_service: Arc<dyn DynamicFunctionCompiler> = Arc::new(
+        OxcDynamicFunctionCompiler::new(limits.dynamic_function_limits()),
+    );
+    context
+        .execute_global_script_with_dynamic_function_compiler(
+            authority,
+            limits.execution,
+            &dynamic_service,
+        )
+        .map_err(|error| {
+            RegisteredScriptEvaluationError::new(
+                source_id.clone(),
+                RegisteredScriptFailure::Runtime(error),
+            )
+        })
 }
 
 /// Resource limits applied across every supported dynamic-function stage.
@@ -365,6 +861,8 @@ impl Error for OxcDynamicFunctionEngineError {
 enum RuntimeSourceFragment {
     Parameter(usize),
     Body,
+    IndirectEval,
+    DirectEval,
 }
 
 impl fmt::Display for RuntimeSourceFragment {
@@ -372,6 +870,8 @@ impl fmt::Display for RuntimeSourceFragment {
         match self {
             Self::Parameter(index) => write!(formatter, "parameter fragment {index}"),
             Self::Body => formatter.write_str("body fragment"),
+            Self::IndirectEval => formatter.write_str("indirect eval source"),
+            Self::DirectEval => formatter.write_str("direct eval source"),
         }
     }
 }
@@ -433,6 +933,299 @@ impl DynamicFunctionCompiler for OxcDynamicFunctionCompiler {
             .map(|compiled| compiled.authority)
             .map_err(map_service_compilation_error)
     }
+
+    fn compile_indirect_eval(
+        &self,
+        source: IndirectEvalCompileRequest,
+    ) -> Result<Arc<VerifiedBytecode>, DynamicFunctionCompileFailure> {
+        compile_indirect_eval_source(source.source(), self.limits)
+    }
+
+    fn compile_direct_eval(
+        &self,
+        source: DirectEvalCompileRequest,
+    ) -> Result<Arc<VerifiedBytecode>, DynamicFunctionCompileFailure> {
+        compile_direct_eval_source(&source, self.limits)
+    }
+}
+
+fn compile_indirect_eval_source(
+    source: &JsString,
+    limits: DynamicFunctionLimits,
+) -> Result<Arc<VerifiedBytecode>, DynamicFunctionCompileFailure> {
+    let source = js_eval_source_to_utf8(source, RuntimeSourceFragment::IndirectEval)?;
+    let compiled = with_parsed_program(
+        &source.text,
+        FrontendOptions::for_goal(CompilationGoal::IndirectEval(IndirectEvalGoal::new()))
+            .with_limits(limits.frontend),
+        |unit| {
+            let compiler = CompilationContext::new_with_source_name_and_substitutions(
+                unit,
+                Arc::from("<eval>"),
+                Arc::clone(&source.substitutions),
+            )
+            .map_err(DynamicFunctionCompilerError::Planning)?;
+            compiler
+                .compile_indirect_eval_script_with_all_limits(
+                    limits.bytecode,
+                    limits.function_graph,
+                    limits.final_graph,
+                )
+                .map_err(DynamicFunctionCompilerError::Lowering)
+        },
+    )
+    .map_err(map_eval_frontend_error)?
+    .map_err(|source| {
+        let stage = match &source {
+            DynamicFunctionCompilerError::Planning(_) => {
+                DynamicFunctionEngineStage::CompilerPlanning
+            }
+            DynamicFunctionCompilerError::Lowering(_) => {
+                DynamicFunctionEngineStage::CompilerLowering
+            }
+        };
+        engine_failure_with_source(stage, source.to_string(), source)
+    })?;
+    Ok(Arc::new(compiled.verified_bytecode().clone()))
+}
+
+fn compile_direct_eval_source(
+    request: &DirectEvalCompileRequest,
+    limits: DynamicFunctionLimits,
+) -> Result<Arc<VerifiedBytecode>, DynamicFunctionCompileFailure> {
+    let source = js_eval_source_to_utf8(request.source(), RuntimeSourceFragment::DirectEval)?;
+    let mut binding_names = Vec::new();
+    binding_names
+        .try_reserve_exact(request.bindings().len())
+        .map_err(|error| {
+            engine_failure_with_source(
+                DynamicFunctionEngineStage::SourceConversion,
+                format!(
+                    "could not reserve {} direct-eval binding names",
+                    request.bindings().len()
+                ),
+                error,
+            )
+        })?;
+    for binding in request.bindings() {
+        binding_names.push(js_string_to_utf8(
+            binding.name(),
+            RuntimeSourceFragment::DirectEval,
+        )?);
+    }
+    let mut bindings = Vec::new();
+    bindings
+        .try_reserve_exact(request.bindings().len())
+        .map_err(|error| {
+            engine_failure_with_source(
+                DynamicFunctionEngineStage::SourceConversion,
+                format!(
+                    "could not reserve {} direct-eval binding descriptors",
+                    request.bindings().len()
+                ),
+                error,
+            )
+        })?;
+    for (binding, name) in request.bindings().iter().zip(&binding_names) {
+        let (kind, is_lexical, is_const) = frontend_direct_eval_policy(binding.policy())?;
+        let location = frontend_direct_eval_location(binding.location())?;
+        bindings.push(
+            FrontendDirectEvalBinding::new(name, kind, is_lexical, is_const, location)
+                .with_scope(frontend_direct_eval_scope(binding.scope())),
+        );
+    }
+    let frames = [FrontendDirectEvalScopeFrame::new(
+        FrontendDirectEvalScopeKind::Pseudo,
+        &bindings,
+        &[],
+    )];
+    let capabilities = FrontendDirectEvalCapabilities::new()
+        .with_strict(request.is_strict())
+        .with_new_target(request.allows_new_target())
+        .with_super_property(request.allows_super_property())
+        .with_super_call(request.allows_super_call())
+        .with_arguments_allowed(request.allows_arguments());
+    let context = DirectEvalContext::new(capabilities, DirectEvalScopeSnapshot::new(&frames))
+        .with_variable_environment(frontend_direct_eval_variable_environment(
+            request.variable_environment(),
+        ));
+    let compiled = with_parsed_program(
+        &source.text,
+        FrontendOptions::for_goal(CompilationGoal::DirectEval(context))
+            .with_limits(limits.frontend),
+        |unit| {
+            let compiler = CompilationContext::new_with_source_name_and_substitutions(
+                unit,
+                Arc::from("<eval>"),
+                Arc::clone(&source.substitutions),
+            )
+            .map_err(DynamicFunctionCompilerError::Planning)?;
+            compiler
+                .compile_direct_eval_script_with_all_limits(
+                    limits.bytecode,
+                    limits.function_graph,
+                    limits.final_graph,
+                )
+                .map_err(DynamicFunctionCompilerError::Lowering)
+        },
+    )
+    .map_err(map_eval_frontend_error)?
+    .map_err(map_direct_eval_compiler_error)?;
+    Ok(Arc::new(compiled.verified_bytecode().clone()))
+}
+
+fn map_direct_eval_compiler_error(
+    source: DynamicFunctionCompilerError,
+) -> DynamicFunctionCompileFailure {
+    if let DynamicFunctionCompilerError::Lowering(LeafCompilationError::EvalDeclarationConflict {
+        name,
+        ..
+    }) = &source
+    {
+        let message = format!("Identifier '{name}' has already been declared");
+        return match JsString::from_utf8(&message) {
+            Ok(message) => DynamicFunctionCompileFailure::Syntax { message },
+            Err(error) => engine_failure_with_source(
+                DynamicFunctionEngineStage::SyntaxMessageConversion,
+                "could not retain the eval declaration-conflict diagnostic as a JavaScript string",
+                error,
+            ),
+        };
+    }
+    let stage = match &source {
+        DynamicFunctionCompilerError::Planning(_) => DynamicFunctionEngineStage::CompilerPlanning,
+        DynamicFunctionCompilerError::Lowering(_) => DynamicFunctionEngineStage::CompilerLowering,
+    };
+    engine_failure_with_source(stage, source.to_string(), source)
+}
+
+const fn frontend_direct_eval_scope(
+    scope: DirectEvalCallerBindingScope,
+) -> FrontendDirectEvalBindingScope {
+    match scope {
+        DirectEvalCallerBindingScope::Lexical => FrontendDirectEvalBindingScope::Lexical,
+        DirectEvalCallerBindingScope::Variable => FrontendDirectEvalBindingScope::Variable,
+        DirectEvalCallerBindingScope::Outer => FrontendDirectEvalBindingScope::Outer,
+    }
+}
+
+const fn frontend_direct_eval_variable_environment(
+    environment: DirectEvalVariableEnvironment,
+) -> FrontendDirectEvalVariableEnvironment {
+    match environment {
+        DirectEvalVariableEnvironment::Global => FrontendDirectEvalVariableEnvironment::Global,
+        DirectEvalVariableEnvironment::Function => FrontendDirectEvalVariableEnvironment::Function,
+        DirectEvalVariableEnvironment::FunctionParameterInitializer => {
+            FrontendDirectEvalVariableEnvironment::FunctionParameterInitializer
+        }
+    }
+}
+
+fn frontend_direct_eval_location(
+    location: DirectEvalCallerBindingLocation,
+) -> Result<FrontendDirectEvalBindingLocation, DynamicFunctionCompileFailure> {
+    let checked = |domain, index| {
+        u16::try_from(index).map_err(|_| {
+            engine_failure(
+                DynamicFunctionEngineStage::SourceConversion,
+                format!("direct-eval caller {domain} index is not representable"),
+            )
+        })
+    };
+    Ok(match location {
+        DirectEvalCallerBindingLocation::Argument(index) => {
+            FrontendDirectEvalBindingLocation::Argument {
+                index: checked("argument", index)?,
+            }
+        }
+        DirectEvalCallerBindingLocation::Local(index) => FrontendDirectEvalBindingLocation::Local {
+            index: checked("local", index)?,
+        },
+        DirectEvalCallerBindingLocation::Closure(index) => {
+            FrontendDirectEvalBindingLocation::Closure {
+                index: checked("closure", index)?,
+            }
+        }
+        DirectEvalCallerBindingLocation::EvalVariable { depth, index } => {
+            FrontendDirectEvalBindingLocation::EvalVariable {
+                depth: checked("eval-variable environment", depth)?,
+                index: checked("eval-variable binding", index)?,
+            }
+        }
+    })
+}
+
+fn frontend_direct_eval_policy(
+    policy: CompilerBindingPolicy,
+) -> Result<(FrontendDirectEvalBindingKind, bool, bool), DynamicFunctionCompileFailure> {
+    let binding = match policy.kind() {
+        CompilerBindingKind::Parameter | CompilerBindingKind::Var => {
+            (FrontendDirectEvalBindingKind::Normal, false, false)
+        }
+        CompilerBindingKind::Let => (FrontendDirectEvalBindingKind::Normal, true, false),
+        CompilerBindingKind::Const | CompilerBindingKind::ClassName => {
+            (FrontendDirectEvalBindingKind::Normal, true, true)
+        }
+        CompilerBindingKind::Function => (
+            if policy.initialization() == CompilerInitializationPolicy::FunctionAtScopeEntry {
+                FrontendDirectEvalBindingKind::NewFunctionDeclaration
+            } else {
+                FrontendDirectEvalBindingKind::FunctionDeclaration
+            },
+            policy.initialization() == CompilerInitializationPolicy::FunctionAtScopeEntry,
+            false,
+        ),
+        CompilerBindingKind::FunctionName => (
+            FrontendDirectEvalBindingKind::FunctionName,
+            false,
+            policy.writes() == CompilerWritePolicy::Immutable,
+        ),
+        CompilerBindingKind::Catch => (FrontendDirectEvalBindingKind::Catch, true, false),
+        CompilerBindingKind::WithObject => (FrontendDirectEvalBindingKind::WithObject, true, true),
+        CompilerBindingKind::ClassFieldKey
+        | CompilerBindingKind::ClassPrivateName
+        | CompilerBindingKind::ClassStaticReceiver
+        | CompilerBindingKind::GlobalReference => {
+            return Err(engine_failure(
+                DynamicFunctionEngineStage::SourceConversion,
+                "compiler-internal and Realm-global bindings must not enter a direct-eval caller snapshot",
+            ));
+        }
+    };
+    Ok(binding)
+}
+
+fn map_eval_frontend_error(source: FrontendError) -> DynamicFunctionCompileFailure {
+    if matches!(
+        source.stage(),
+        DiagnosticStage::Parser | DiagnosticStage::Profile | DiagnosticStage::Semantic
+    ) {
+        let Some(message) = source
+            .diagnostics()
+            .first()
+            .map(|diagnostic| diagnostic.message.as_str())
+        else {
+            return engine_failure_with_source(
+                DynamicFunctionEngineStage::Frontend(source.stage()),
+                "front end rejected eval source without a normalized diagnostic",
+                source,
+            );
+        };
+        return match JsString::from_utf8(message) {
+            Ok(message) => DynamicFunctionCompileFailure::Syntax { message },
+            Err(error) => engine_failure_with_source(
+                DynamicFunctionEngineStage::SyntaxMessageConversion,
+                "could not retain the normalized eval syntax diagnostic as a JavaScript string",
+                error,
+            ),
+        };
+    }
+    let stage = DynamicFunctionEngineStage::Frontend(source.stage());
+    let detail = source.diagnostics().first().map_or_else(
+        || source.to_string(),
+        |diagnostic| diagnostic.message.clone(),
+    );
+    engine_failure_with_source(stage, detail, source)
 }
 
 /// Compiler stage that rejected an already parsed dynamic-Function Script.
@@ -764,10 +1557,32 @@ fn map_service_compilation_error(
     }
 }
 
+struct Utf8RuntimeSource {
+    text: String,
+    substitutions: Arc<[SourceTextSubstitution]>,
+}
+
 fn js_string_to_utf8(
     source: &JsString,
     fragment: RuntimeSourceFragment,
 ) -> Result<String, DynamicFunctionCompileFailure> {
+    let encoded = encode_runtime_source(source, fragment, false)?;
+    debug_assert!(encoded.substitutions.is_empty());
+    Ok(encoded.text)
+}
+
+fn js_eval_source_to_utf8(
+    source: &JsString,
+    fragment: RuntimeSourceFragment,
+) -> Result<Utf8RuntimeSource, DynamicFunctionCompileFailure> {
+    encode_runtime_source(source, fragment, true)
+}
+
+fn encode_runtime_source(
+    source: &JsString,
+    fragment: RuntimeSourceFragment,
+    preserve_lone_surrogates: bool,
+) -> Result<Utf8RuntimeSource, DynamicFunctionCompileFailure> {
     let code_unit_count = usize::try_from(source.len()).map_err(|error| {
         engine_failure_with_source(
             DynamicFunctionEngineStage::SourceConversion,
@@ -790,23 +1605,60 @@ fn js_string_to_utf8(
         )
     })?;
 
+    let mut substitutions = Vec::new();
     let mut offset = 0_u32;
     let mut units = source.code_units().peekable();
     while let Some(unit) = units.next() {
-        let (scalar, width) = if (0xd800..=0xdbff).contains(&unit) {
-            let Some(&low) = units.peek() else {
-                return Err(lone_surrogate(fragment, offset, unit));
-            };
-            if !(0xdc00..=0xdfff).contains(&low) {
-                return Err(lone_surrogate(fragment, offset, unit));
-            }
+        let paired_low = (0xd800..=0xdbff)
+            .contains(&unit)
+            .then(|| {
+                units
+                    .peek()
+                    .copied()
+                    .filter(|low| (0xdc00..=0xdfff).contains(low))
+            })
+            .flatten();
+        let (scalar, width) = if let Some(low) = paired_low {
             let _ = units.next();
             (
                 0x1_0000 + ((u32::from(unit) - 0xd800) << 10) + (u32::from(low) - 0xdc00),
                 2,
             )
-        } else if (0xdc00..=0xdfff).contains(&unit) {
-            return Err(lone_surrogate(fragment, offset, unit));
+        } else if (0xd800..=0xdfff).contains(&unit) {
+            if !preserve_lone_surrogates {
+                return Err(lone_surrogate(fragment, offset, unit));
+            }
+            substitutions.try_reserve(1).map_err(|error| {
+                engine_failure_with_source(
+                    DynamicFunctionEngineStage::SourceConversion,
+                    format!("could not reserve a UTF-16 substitution for {fragment}"),
+                    error,
+                )
+            })?;
+            let start = u32::try_from(text.len()).map_err(|error| {
+                engine_failure_with_source(
+                    DynamicFunctionEngineStage::SourceConversion,
+                    format!("{fragment} parser byte offset does not fit u32"),
+                    error,
+                )
+            })?;
+            // A noncharacter is a lexically inert scalar placeholder. Exact
+            // source position, not scalar identity, selects the UTF-16 value
+            // restored by the compiler.
+            text.push('\u{fdd0}');
+            let end = u32::try_from(text.len()).map_err(|error| {
+                engine_failure_with_source(
+                    DynamicFunctionEngineStage::SourceConversion,
+                    format!("{fragment} parser byte offset does not fit u32"),
+                    error,
+                )
+            })?;
+            substitutions.push(SourceTextSubstitution::new(
+                Span::new(start, end),
+                Arc::from([unit]),
+            ));
+            offset = offset.saturating_add(1);
+            continue;
         } else {
             (u32::from(unit), 1)
         };
@@ -819,7 +1671,10 @@ fn js_string_to_utf8(
         text.push(character);
         offset += width;
     }
-    Ok(text)
+    Ok(Utf8RuntimeSource {
+        text,
+        substitutions: Arc::from(substitutions),
+    })
 }
 
 fn lone_surrogate(

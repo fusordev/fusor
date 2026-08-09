@@ -63,6 +63,28 @@ fn generator_yield_resume_and_return_use_the_verified_suspension_program() {
 }
 
 #[test]
+fn nested_yield_spreads_retain_the_enclosing_expression_stack_across_suspension() {
+    for source in [
+        "function* values(){yield [...yield];}",
+        "function* values(){yield {...yield};}",
+    ] {
+        let compiled = compile(source, "values");
+        assert!(
+            compiled
+                .control_flow()
+                .instructions()
+                .iter()
+                .any(|instruction| {
+                    instruction.decoded().instruction().opcode() == FinalOpcode::ReturnAsync
+                        && instruction
+                            .entry_stack_depth()
+                            .is_some_and(|depth| depth > 1)
+                })
+        );
+    }
+}
+
+#[test]
 fn empty_generator_has_an_explicit_undefined_async_return() {
     let compiled = compile("function* empty() {}", "empty");
     assert_eq!(

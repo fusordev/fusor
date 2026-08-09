@@ -11,7 +11,8 @@ use super::super::{
 };
 
 use oxc_ast::ast::{
-    BlockStatement, Expression, ForStatementLeft, Statement, SwitchStatement, VariableDeclaration,
+    BlockStatement, Directive, Expression, ForStatementLeft, Statement, SwitchStatement,
+    VariableDeclaration,
 };
 use oxc_semantic::{NodeId, ScopeId};
 use quickjs_bytecode::BranchKind;
@@ -32,6 +33,10 @@ pub(in crate::lowering) enum StatementWork<'statement, 'arena> {
     VisitBlock(&'statement BlockStatement<'arena>),
     VisitList {
         statements: &'statement [Statement<'arena>],
+        next: usize,
+    },
+    VisitDirectiveList {
+        directives: &'statement [Directive<'arena>],
         next: usize,
     },
     PushScope {
@@ -124,6 +129,36 @@ impl<'arena> CompilationContext<'_, 'arena, '_> {
                         next: next + 1,
                     });
                     state.work.push(StatementWork::Visit(statement));
+                }
+            }
+            StatementWork::VisitDirectiveList { directives, next } => {
+                if let Some(directive) = directives.get(next) {
+                    state.work.push(StatementWork::VisitDirectiveList {
+                        directives,
+                        next: next + 1,
+                    });
+                    let value = if directive.expression.value.is_empty() {
+                        PlannedInstruction::new(
+                            FinalOpcode::PushEmptyString,
+                            Operands::None,
+                            directive.expression.span,
+                        )
+                    } else {
+                        planning.constants.plan_string(directive.expression.span)?
+                    };
+                    let StatementCompletion::Script(slot) = state.completion else {
+                        return Err(LeafCompilationError::SemanticInvariant {
+                            invariant: "only Script roots evaluate directive completions",
+                            span: Some(directive.span),
+                        });
+                    };
+                    let (opcode, operands) = compact_put_local(slot);
+                    state.work.push(StatementWork::Emit(PlannedInstruction::new(
+                        opcode,
+                        operands,
+                        directive.expression.span,
+                    )));
+                    state.work.push(StatementWork::Emit(value));
                 }
             }
             StatementWork::PushScope {
@@ -498,6 +533,59 @@ impl<'arena> CompilationContext<'_, 'arena, '_> {
             Statement::TryStatement(statement) => {
                 Self::reset_script_completion(state.completion, statement.span, flow)?;
                 self.plan_try_statement(statement, layout, flow, state)?;
+            }
+            Statement::WithStatement(statement) => {
+                Self::reset_script_completion(state.completion, statement.span, flow)?;
+                let scope = self.created_scope(
+                    statement.scope_id.get(),
+                    statement.node_id.get(),
+                    statement.span,
+                )?;
+                let binding = self.with_object_binding(statement.node_id.get(), statement.span)?;
+                let storage = self.planned.plan.binding(binding).ok_or(
+                    LeafCompilationError::SemanticInvariant {
+                        invariant: "with-object compiler binding exists",
+                        span: Some(statement.span),
+                    },
+                )?;
+                if storage.executable() != layout.executable
+                    || storage.placement() != StoragePlacement::Local
+                    || storage.policy().kind() != DeclarationKind::WithObject
+                    || storage.policy().initialization() != InitializationPolicy::AtDeclaration
+                    || storage.policy().writes() != WritePolicy::Immutable
+                    || !storage.policy().has_temporal_dead_zone()
+                    || self.scope_for_binding(binding)? != scope
+                {
+                    return Err(LeafCompilationError::SemanticInvariant {
+                        invariant: "with-object binding is an immutable scoped lexical cell",
+                        span: Some(statement.span),
+                    });
+                }
+                let slot = layout
+                    .slot(binding)
+                    .ok_or(LeafCompilationError::SemanticInvariant {
+                        invariant: "with-object binding has a frame slot",
+                        span: Some(statement.span),
+                    })?;
+                state.work.push(StatementWork::PopScope(scope));
+                state.work.push(StatementWork::Visit(&statement.body));
+                state.work.push(StatementWork::Emit(plan_put_slot(
+                    slot,
+                    statement.object.span(),
+                )));
+                state.work.push(StatementWork::PushScope {
+                    scope,
+                    creator: statement.node_id.get(),
+                    span: statement.span,
+                });
+                state.work.push(StatementWork::Emit(PlannedInstruction::new(
+                    FinalOpcode::ToObject,
+                    Operands::None,
+                    statement.object.span(),
+                )));
+                state
+                    .work
+                    .push(StatementWork::Expression(&statement.object));
             }
             _ => {
                 return unsupported(UnsupportedLeafFeature::UnsupportedBody, statement.span());

@@ -6,8 +6,8 @@ use super::super::{
     Expression, ExpressionPlanner, FinalOpcode, FrameLayout, FrameSlot, Function,
     FunctionPlanningContext, FunctionTreeLayout, FunctionType, InitializationPolicy,
     LeafCompilationError, NodeId, Operands, PlannedControlFlow, PlannedInstruction,
-    ScopeEntryInitialization, Span, StoragePlacement, UnsupportedLeafFeature, VerifiedBindingKind,
-    WritePolicy, checked_function_index, compact_get_argument, plan_put_slot, unsupported,
+    ScopeEntryInitialization, Span, StoragePlacement, UnsupportedLeafFeature, WritePolicy,
+    checked_function_index, compact_get_argument, plan_put_slot, unsupported,
 };
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
@@ -84,6 +84,16 @@ impl<'arena> CompilationContext<'_, 'arena, '_> {
             self.emit_arguments_object_initializer(executable, planning.layout, flow)?;
             self.emit_parameter_pattern_initializers(executable, planning, flow)?;
             self.emit_parameter_body_binding_copies(executable, planning.layout, flow)?;
+            let executable_metadata = self
+                .planned
+                .plan
+                .executable(executable)
+                .ok_or(LeafCompilationError::InvalidExecutable { executable })?;
+            if executable_metadata.has_parameter_expressions()
+                && executable_metadata.has_direct_eval()
+            {
+                flow.mark_parameter_initialization_end(span)?;
+            }
             self.emit_realm_global_function_initializers(
                 executable,
                 planning.tree_layout,
@@ -642,7 +652,9 @@ impl<'arena> CompilationContext<'_, 'arena, '_> {
         constants: &CompiledConstantPool,
         flow: &mut PlannedControlFlow,
     ) -> Result<(), LeafCompilationError> {
-        if !crate::is_supported_script_root_goal(self.unit.goal()) || executable.index() != 0 {
+        if !crate::is_supported_realm_global_binding_goal(self.unit.goal())
+            || executable.index() != 0
+        {
             return Ok(());
         }
         let root = self
@@ -671,16 +683,18 @@ impl<'arena> CompilationContext<'_, 'arena, '_> {
                     span: Some(root.span()),
                 },
             )?;
-            if descriptor.policy.kind() != VerifiedBindingKind::Function {
+            let Some(binding) = descriptor.declaration else {
+                continue;
+            };
+            let declaration = self.planned.plan.binding(binding).ok_or(
+                LeafCompilationError::SemanticInvariant {
+                    invariant: "external function initializer has a declared binding",
+                    span: Some(descriptor.first_span),
+                },
+            )?;
+            if declaration.policy().kind() != DeclarationKind::Function {
                 continue;
             }
-            let binding =
-                descriptor
-                    .declaration
-                    .ok_or(LeafCompilationError::SemanticInvariant {
-                        invariant: "constructor-realm function initializer has a declared binding",
-                        span: Some(descriptor.first_span),
-                    })?;
             let child = tree_layout.function_declaration(binding).ok_or(
                 LeafCompilationError::SemanticInvariant {
                     invariant: "constructor-realm function initializer selects its last child",
@@ -703,8 +717,12 @@ impl<'arena> CompilationContext<'_, 'arena, '_> {
                 tree_layout
                     .realm_globals
                     .closure_slot(&self.planned.plan, executable, global)?;
+            let opcode = match descriptor.binding {
+                quickjs_bytecode::CompilerClosureBinding::Captured(_) => FinalOpcode::PutVarRef,
+                quickjs_bytecode::CompilerClosureBinding::RealmGlobal(_) => FinalOpcode::PutVar,
+            };
             flow.emit(PlannedInstruction::new(
-                FinalOpcode::PutVar,
+                opcode,
                 Operands::VarRef(slot),
                 descriptor.first_span,
             ))?;
@@ -891,6 +909,17 @@ impl<'arena> CompilationContext<'_, 'arena, '_> {
                     invariant: "function declaration binding has compiler storage",
                     span: Some(identifier.span),
                 })?;
+        if storage.placement() == StoragePlacement::GlobalObject
+            && !crate::is_supported_realm_global_binding_goal(self.unit.goal())
+        {
+            if crate::is_supported_direct_eval_goal(self.unit.goal()) {
+                return unsupported(
+                    UnsupportedLeafFeature::DirectEvalVariableEnvironment,
+                    identifier.span,
+                );
+            }
+            return unsupported(UnsupportedLeafFeature::GlobalEnvironment, identifier.span);
+        }
         if storage.executable() != parent
             || storage.policy().kind() != DeclarationKind::Function
             || !matches!(

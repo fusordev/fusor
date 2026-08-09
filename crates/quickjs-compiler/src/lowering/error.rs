@@ -49,6 +49,8 @@ pub enum UnsupportedLeafFeature {
     UnsupportedPattern,
     /// Program-level bindings require the constructor realm's global environment.
     GlobalEnvironment,
+    /// Sloppy direct eval requires its caller's variable environment.
+    DirectEvalVariableEnvironment,
     /// A reference access or binding write policy is not supported.
     UnsupportedReference,
     /// An identifier remained unresolved after Oxc semantics.
@@ -81,6 +83,13 @@ pub enum LeafCompilationError {
         invariant: &'static str,
         /// Related source span, when available.
         span: Option<Span>,
+    },
+    /// A sloppy eval declaration collided with an intervening caller lexical binding.
+    EvalDeclarationConflict {
+        /// Exact conflicting identifier name.
+        name: std::sync::Arc<str>,
+        /// Eval declaration source span.
+        span: Span,
     },
     /// A dense bytecode domain exceeded its encoded width.
     CapacityExceeded {
@@ -194,6 +203,10 @@ impl fmt::Display for LeafCompilationError {
                 }
                 Ok(())
             }
+            Self::EvalDeclarationConflict { name, span } => write!(
+                formatter,
+                "eval declaration `{name}` conflicts with a caller lexical binding at {span:?}"
+            ),
             Self::CapacityExceeded { domain } => {
                 write!(formatter, "compiler capacity exceeded for {domain}")
             }
@@ -289,6 +302,7 @@ impl Error for LeafCompilationError {
             | Self::InvalidExecutable { .. }
             | Self::Unsupported { .. }
             | Self::SemanticInvariant { .. }
+            | Self::EvalDeclarationConflict { .. }
             | Self::CapacityExceeded { .. }
             | Self::BytecodeStackInvariant { .. } => None,
         }

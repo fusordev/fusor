@@ -1,6 +1,6 @@
 use quickjs::{
-    DynamicFunctionCompilerError, DynamicFunctionConstructionError, DynamicFunctionLimits,
-    call_with_dynamic_function_support, construct_dynamic_function,
+    DynamicFunctionConstructionError, DynamicFunctionLimits, call_with_dynamic_function_support,
+    construct_dynamic_function,
 };
 use quickjs_frontend::{DynamicFunctionKind, DynamicFunctionSource, SourceFragment};
 use quickjs_runtime::{
@@ -845,56 +845,194 @@ fn named_anonymous_binding_is_initialized_to_the_constructed_function() {
 }
 
 #[test]
-fn direct_eval_remains_fail_closed_without_installing_code() {
+fn closed_direct_eval_executes_in_the_calling_function() {
     let mut runtime = Runtime::try_new(RuntimeLimits::default()).expect("runtime");
     let realm = runtime.create_realm().expect("realm");
-    let before = runtime.usage();
-    {
-        let mut context = runtime.context(&realm).expect("context");
-        let error = construct_dynamic_function(
-            &mut context,
-            source(&[], "return eval('1');"),
-            DynamicFunctionLimits::default(),
-        )
-        .expect_err("direct eval remains unsupported");
-        assert!(matches!(
-            &error,
-            DynamicFunctionConstructionError::Compiler {
-                source: DynamicFunctionCompilerError::Planning(_),
-                ..
-            }
-        ));
-        assert!(error.prepared_source().is_some());
-    }
-    assert_eq!(runtime.usage(), before);
+    let mut context = runtime.context(&realm).expect("context");
+    let function = construct_dynamic_function(
+        &mut context,
+        source(&[], "return eval('let answer = 40 + 2; answer;');"),
+        DynamicFunctionLimits::default(),
+    )
+    .expect("dynamic Function with direct eval")
+    .into_value()
+    .into_function()
+    .expect("function completion");
+    let result = call_with_dynamic_function_support(
+        &mut context,
+        &function,
+        &[],
+        DynamicFunctionLimits::default(),
+    )
+    .expect("closed direct eval")
+    .as_number()
+    .expect("number value")
+    .expect("finite number");
+    assert!(result.strict_equals(JsNumber::from_i32(42)));
 }
 
 #[test]
-fn direct_eval_inside_an_object_method_rejects_the_whole_dynamic_function() {
+fn closed_direct_eval_executes_inside_an_object_method() {
     let mut runtime = Runtime::try_new(RuntimeLimits::default()).expect("runtime");
     let realm = runtime.create_realm().expect("realm");
-    let before = runtime.usage();
-    {
-        let mut context = runtime.context(&realm).expect("context");
-        let error = construct_dynamic_function(
-            &mut context,
-            source(
-                &[],
-                "let object={method(){return eval('1');}};return object;",
-            ),
-            DynamicFunctionLimits::default(),
-        )
-        .expect_err("direct eval in a method remains unsupported");
-        assert!(matches!(
-            &error,
-            DynamicFunctionConstructionError::Compiler {
-                source: DynamicFunctionCompilerError::Planning(_),
-                ..
-            }
-        ));
-        assert!(error.prepared_source().is_some());
-    }
-    assert_eq!(runtime.usage(), before);
+    let mut context = runtime.context(&realm).expect("context");
+    let function = construct_dynamic_function(
+        &mut context,
+        source(
+            &[],
+            "let object={method(){return eval('let value=40;value+2;');}};return object.method();",
+        ),
+        DynamicFunctionLimits::default(),
+    )
+    .expect("dynamic Function with method direct eval")
+    .into_value()
+    .into_function()
+    .expect("function completion");
+    let result = call_with_dynamic_function_support(
+        &mut context,
+        &function,
+        &[],
+        DynamicFunctionLimits::default(),
+    )
+    .expect("method direct eval")
+    .as_number()
+    .expect("number value")
+    .expect("finite number");
+    assert!(result.strict_equals(JsNumber::from_i32(42)));
+}
+
+#[test]
+fn direct_eval_non_string_returns_without_requesting_a_compiler() {
+    let mut runtime = Runtime::try_new(RuntimeLimits::default()).expect("runtime");
+    let realm = runtime.create_realm().expect("realm");
+    let mut context = runtime.context(&realm).expect("context");
+    let function = construct_dynamic_function(
+        &mut context,
+        source(&[], "return eval(42);"),
+        DynamicFunctionLimits::default(),
+    )
+    .expect("dynamic Function")
+    .into_value()
+    .into_function()
+    .expect("function completion");
+
+    let result = context
+        .call(&function, &[], ExecutionLimits::default())
+        .expect("non-string direct eval")
+        .as_number()
+        .expect("number value")
+        .expect("finite number");
+    assert!(result.strict_equals(JsNumber::from_i32(42)));
+}
+
+#[test]
+fn direct_eval_inherits_strict_this_and_source_strict_var_locality() {
+    let mut runtime = Runtime::try_new(RuntimeLimits::default()).expect("runtime");
+    let realm = runtime.create_realm().expect("realm");
+    let mut context = runtime.context(&realm).expect("context");
+    let strict_this = construct_dynamic_function(
+        &mut context,
+        source(&[], "\"use strict\"; return eval('this');"),
+        DynamicFunctionLimits::default(),
+    )
+    .expect("strict dynamic Function")
+    .into_value()
+    .into_function()
+    .expect("function completion");
+    let result = call_with_dynamic_function_support(
+        &mut context,
+        &strict_this,
+        &[],
+        DynamicFunctionLimits::default(),
+    )
+    .expect("strict direct eval this");
+    assert_eq!(result.kind().expect("live result"), ValueKind::Undefined);
+
+    let strict_source = construct_dynamic_function(
+        &mut context,
+        source(
+            &[],
+            "return eval('\"use strict\"; var answer=40+2; answer;');",
+        ),
+        DynamicFunctionLimits::default(),
+    )
+    .expect("dynamic Function")
+    .into_value()
+    .into_function()
+    .expect("function completion");
+    let result = call_with_dynamic_function_support(
+        &mut context,
+        &strict_source,
+        &[],
+        DynamicFunctionLimits::default(),
+    )
+    .expect("source-strict direct eval")
+    .as_number()
+    .expect("number value")
+    .expect("finite number");
+    assert!(result.strict_equals(JsNumber::from_i32(42)));
+}
+
+#[test]
+fn shadowed_eval_falls_back_to_an_ordinary_call_after_identity_check() {
+    let mut runtime = Runtime::try_new(RuntimeLimits::default()).expect("runtime");
+    let realm = runtime.create_realm().expect("realm");
+    let mut context = runtime.context(&realm).expect("context");
+    let function = construct_dynamic_function(
+        &mut context,
+        source(
+            &[],
+            "let replacement=function(){return 42;};return (function(eval){return eval('ignored');})(replacement);",
+        ),
+        DynamicFunctionLimits::default(),
+    )
+    .expect("dynamic Function")
+    .into_value()
+    .into_function()
+    .expect("function completion");
+    let result = call_with_dynamic_function_support(
+        &mut context,
+        &function,
+        &[],
+        DynamicFunctionLimits::default(),
+    )
+    .expect("ordinary shadowed eval call")
+    .as_number()
+    .expect("number value")
+    .expect("finite number");
+    assert!(result.strict_equals(JsNumber::from_i32(42)));
+}
+
+#[test]
+fn direct_eval_syntax_error_is_catchable_at_the_callsite() {
+    let mut runtime = Runtime::try_new(RuntimeLimits::default()).expect("runtime");
+    let realm = runtime.create_realm().expect("realm");
+    let mut context = runtime.context(&realm).expect("context");
+    let function = construct_dynamic_function(
+        &mut context,
+        source(
+            &[],
+            "try{return eval('let =');}catch(error){return error.name;}",
+        ),
+        DynamicFunctionLimits::default(),
+    )
+    .expect("dynamic Function")
+    .into_value()
+    .into_function()
+    .expect("function completion");
+    let result = call_with_dynamic_function_support(
+        &mut context,
+        &function,
+        &[],
+        DynamicFunctionLimits::default(),
+    )
+    .expect("caught eval SyntaxError")
+    .as_string()
+    .expect("string value")
+    .expect("string result")
+    .to_utf8_lossy()
+    .expect("ASCII error name");
+    assert_eq!(result, "SyntaxError");
 }
 
 #[test]

@@ -135,7 +135,7 @@ impl<'arena> CompilationContext<'_, 'arena, '_> {
                 arrow.span,
             );
         }
-        if !crate::is_supported_script_root_goal(self.unit.goal())
+        if !crate::is_supported_script_compilation_goal(self.unit.goal())
             && let Some(reference) = self
                 .planned
                 .plan
@@ -230,7 +230,7 @@ impl<'arena> CompilationContext<'_, 'arena, '_> {
                 function.span,
             );
         }
-        if !crate::is_supported_script_root_goal(self.unit.goal())
+        if !crate::is_supported_script_compilation_goal(self.unit.goal())
             && let Some(reference) = self
                 .planned
                 .plan
@@ -374,6 +374,72 @@ impl<'arena> CompilationContext<'_, 'arena, '_> {
         {
             return Err(LeafCompilationError::SemanticInvariant {
                 invariant: "Global Script has one synchronous zero-argument Program root",
+                span: Some(program.span),
+            });
+        }
+        Ok((executable, program))
+    }
+
+    pub(in crate::lowering) fn selected_eval_script(
+        &self,
+        executable_id: ExecutableId,
+    ) -> Result<(&Executable, &Program<'arena>), LeafCompilationError> {
+        if !crate::is_supported_indirect_eval_goal(self.unit.goal())
+            && !crate::is_supported_direct_eval_goal(self.unit.goal())
+        {
+            return unsupported(
+                UnsupportedLeafFeature::UnsupportedCompilationUnit,
+                self.unit.program().span,
+            );
+        }
+        let executable = self.planned.plan.executable(executable_id).ok_or(
+            LeafCompilationError::InvalidExecutable {
+                executable: executable_id,
+            },
+        )?;
+        let node_id = self
+            .planned
+            .identities
+            .node_by_executable
+            .get(executable_id.index())
+            .copied()
+            .ok_or(LeafCompilationError::SemanticInvariant {
+                invariant: "eval executable has an Oxc node identity",
+                span: Some(executable.span()),
+            })?;
+        if self
+            .planned
+            .identities
+            .executable_by_node
+            .get(node_id.index())
+            .copied()
+            .flatten()
+            != Some(executable_id)
+        {
+            return Err(LeafCompilationError::SemanticInvariant {
+                invariant: "eval Oxc node and executable identities are bijective",
+                span: Some(executable.span()),
+            });
+        }
+        let AstKind::Program(program) = self.unit.semantic().nodes().kind(node_id) else {
+            return unsupported(
+                UnsupportedLeafFeature::UnsupportedCompilationUnit,
+                executable.span(),
+            );
+        };
+        if executable_id.index() != 0
+            || executable.parent().is_some()
+            || executable.parameter_count() != 0
+            || !matches!(
+                executable.kind(),
+                ExecutableKind::Script {
+                    asynchronous: false
+                }
+            )
+            || self.planned.plan.kind() != CompilationUnitKind::Script
+        {
+            return Err(LeafCompilationError::SemanticInvariant {
+                invariant: "eval has one synchronous zero-argument Program root",
                 span: Some(program.span),
             });
         }

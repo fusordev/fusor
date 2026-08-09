@@ -116,6 +116,7 @@ pub(super) fn finish_dynamic_function_constructor(
         Ok(installed) => installed,
         Err(crate::InstallError::GlobalDeclarationRejected {
             name,
+            kind: _,
             function,
             pc,
             source_span,
@@ -143,7 +144,7 @@ pub(super) fn finish_dynamic_function_constructor(
         active_frames,
         active_frame_values.saturating_add(dynamic_return_values),
         0,
-        false,
+        FrameEntryKind::Call,
     ) {
         Ok(plan) => plan,
         Err(error) => {
@@ -182,11 +183,339 @@ pub(super) fn finish_dynamic_function_constructor(
     frame.dynamic_return = Some(DynamicFunctionReturn {
         root: installed,
         realm: native.realm,
-        family,
+        kind: DynamicRootKind::Function(family),
         construction,
         origin: Some(origin),
     });
     Ok(NativeDispatch::Frame(frame))
+}
+
+#[allow(
+    clippy::too_many_arguments,
+    clippy::too_many_lines,
+    reason = "eval compilation, installation, frame admission, and rollback form one audited boundary"
+)]
+pub(super) fn finish_indirect_eval(
+    runtime: &mut Runtime,
+    realm: RealmId,
+    source: JsString,
+    return_to: Option<CallReturn>,
+    origin: JsStackFrame,
+    active_root_frames: &[Frame],
+    active_frames: usize,
+    active_frame_values: u64,
+    compiler: &Arc<dyn OrdinaryDynamicFunctionCompiler>,
+    execution_budget: &mut ExecutionBudget,
+) -> Result<NativeDispatch, NativeFailure> {
+    execution_budget.charge_indirect_eval_compilation(&source)?;
+    let authority = match compiler.compile_indirect_eval(IndirectEvalCompileRequest::new(source)) {
+        Ok(authority) => authority,
+        Err(DynamicFunctionCompileFailure::Syntax { message }) => {
+            return Err(NativeFailure::Abrupt(PendingException {
+                realm,
+                payload: PendingExceptionPayload::EngineError {
+                    kind: ExceptionKind::SyntaxError,
+                    message,
+                },
+                origin,
+            }));
+        }
+        Err(error @ DynamicFunctionCompileFailure::Engine { .. }) => {
+            return Err(NativeFailure::Execution(error.into()));
+        }
+    };
+
+    let exception_authority = Arc::clone(&authority);
+    let installation = {
+        let mut context = Context { runtime, realm };
+        context.install_indirect_eval_script_during_execution(authority)
+    };
+    let mut installed = match installation {
+        Ok(installed) => installed,
+        Err(crate::InstallError::GlobalDeclarationRejected {
+            name,
+            kind,
+            function,
+            pc,
+            source_span,
+        }) => {
+            let (message, declaration_origin) =
+                global_declaration_error(&exception_authority, &name, function, pc, source_span)
+                    .map_err(NativeFailure::Execution)?;
+            let snapshot = capture_error_stack(runtime, active_root_frames, &origin)
+                .map_err(NativeFailure::Execution)?;
+            let stack = render_error_stack(runtime, &snapshot).map_err(NativeFailure::Execution)?;
+            let exception_kind = match kind {
+                GlobalDeclarationRejectionKind::BindingConflict => ExceptionKind::SyntaxError,
+                GlobalDeclarationRejectionKind::ObjectDefinitionRejected => {
+                    ExceptionKind::TypeError
+                }
+            };
+            return Err(NativeFailure::Abrupt(PendingException {
+                realm,
+                payload: PendingExceptionPayload::FrozenEngineError {
+                    kind: exception_kind,
+                    message,
+                    stack,
+                },
+                origin: declaration_origin,
+            }));
+        }
+        Err(error) => return Err(NativeFailure::Execution(error.into())),
+    };
+    let plan = match plan_frame(
+        runtime,
+        installed.function,
+        active_frames,
+        active_frame_values,
+        0,
+        FrameEntryKind::Call,
+    ) {
+        Ok(plan) => plan,
+        Err(error) => {
+            retire_failed_dynamic_root(runtime, installed)?;
+            return Err(NativeFailure::Execution(error));
+        }
+    };
+    let global = match runtime.realm_global_object(realm) {
+        Ok(global) => global,
+        Err(fault) => {
+            retire_failed_dynamic_root(runtime, installed)?;
+            return Err(NativeFailure::Execution(fault.into()));
+        }
+    };
+    let mut frame = match create_frame(
+        runtime,
+        plan,
+        StoredValue::Object(global),
+        None,
+        FrameArguments::Owned(CallArguments::empty()),
+        return_to,
+        None,
+    ) {
+        Ok(frame) => frame,
+        Err(error) => {
+            retire_failed_dynamic_root(runtime, installed)?;
+            return Err(NativeFailure::Execution(error));
+        }
+    };
+    if let Err(error) = installed.commit_environment() {
+        retire_failed_dynamic_root(runtime, installed)?;
+        return Err(NativeFailure::Execution(error.into()));
+    }
+    frame.dynamic_return = Some(DynamicFunctionReturn {
+        root: installed,
+        realm,
+        kind: DynamicRootKind::IndirectEval,
+        construction: None,
+        origin: None,
+    });
+    Ok(NativeDispatch::Frame(frame))
+}
+
+#[allow(
+    clippy::too_many_arguments,
+    clippy::too_many_lines,
+    reason = "direct eval compilation and caller-frame admission form one audited boundary"
+)]
+pub(super) fn finish_direct_eval(
+    runtime: &mut Runtime,
+    caller: &mut Frame,
+    realm: RealmId,
+    request: DirectEvalCompileRequest,
+    receiver: StoredValue,
+    return_to: CallReturn,
+    origin: JsStackFrame,
+    active_frames: usize,
+    active_frame_values: u64,
+    compiler: &Arc<dyn OrdinaryDynamicFunctionCompiler>,
+    execution_budget: &mut ExecutionBudget,
+) -> Result<Frame, NativeFailure> {
+    execution_budget.charge_indirect_eval_compilation(request.source())?;
+    let caller_bindings = request.shared_bindings();
+    let variable_environment = request.variable_environment();
+    let allows_new_target = request.allows_new_target();
+    let allows_super_property = request.allows_super_property();
+    let allows_super_call = request.allows_super_call();
+    let inherited_new_target = allows_new_target.then_some(caller.new_target).flatten();
+    let inherited_home_object = if allows_super_property {
+        Some(
+            runtime
+                .bytecode_function(caller.function)
+                .and_then(|function| function.home_object)
+                .ok_or(EngineFault::InvalidClosureEnvironment {
+                    function: caller.template,
+                })?,
+        )
+    } else {
+        None
+    };
+    let inherited_derived_environment = if allows_super_call {
+        let constructor =
+            caller
+                .derived_constructor
+                .ok_or(EngineFault::InvalidClosureEnvironment {
+                    function: caller.template,
+                })?;
+        let this_cell = caller
+            .derived_this_cell
+            .filter(|cell| runtime.cells.contains(*cell))
+            .ok_or(EngineFault::InvalidClosureEnvironment {
+                function: caller.template,
+            })?;
+        Some((constructor, this_cell))
+    } else {
+        None
+    };
+    let authority = match compiler.compile_direct_eval(request) {
+        Ok(authority) => authority,
+        Err(DynamicFunctionCompileFailure::Syntax { message }) => {
+            return Err(NativeFailure::Abrupt(PendingException {
+                realm,
+                payload: PendingExceptionPayload::EngineError {
+                    kind: ExceptionKind::SyntaxError,
+                    message,
+                },
+                origin,
+            }));
+        }
+        Err(error @ DynamicFunctionCompileFailure::Engine { .. }) => {
+            return Err(NativeFailure::Execution(error.into()));
+        }
+    };
+    let root = authority.root();
+    let flags = root.function().control_flow().function_header().flags();
+    if root.metadata().executable_kind() != CompilerExecutableKind::DirectEvalScript
+        || flags.new_target_allowed() != allows_new_target
+        || flags.super_allowed() != allows_super_property
+        || flags.super_call_allowed() != allows_super_call
+    {
+        return Err(NativeFailure::Execution(
+            EngineFault::RuntimeInvariant {
+                message: "direct eval compiler authority disagrees with caller capabilities",
+            }
+            .into(),
+        ));
+    }
+    let exception_authority = Arc::clone(&authority);
+    let environment =
+        materialize_direct_eval_environment(runtime, caller, &authority, &caller_bindings)
+            .map_err(NativeFailure::Execution)?;
+
+    let installation = {
+        let mut context = Context { runtime, realm };
+        context.install_direct_eval_script_during_execution(authority, environment.bindings())
+    };
+    let mut installed = match installation {
+        Ok(installed) => installed,
+        Err(crate::InstallError::GlobalDeclarationRejected {
+            name,
+            kind,
+            function,
+            pc,
+            source_span,
+        }) => {
+            rollback_direct_eval_environment(runtime, caller, environment)
+                .map_err(|fault| NativeFailure::Execution(fault.into()))?;
+            let (message, declaration_origin) =
+                global_declaration_error(&exception_authority, &name, function, pc, source_span)
+                    .map_err(NativeFailure::Execution)?;
+            let exception_kind = match kind {
+                GlobalDeclarationRejectionKind::BindingConflict => ExceptionKind::SyntaxError,
+                GlobalDeclarationRejectionKind::ObjectDefinitionRejected => {
+                    ExceptionKind::TypeError
+                }
+            };
+            return Err(NativeFailure::Abrupt(PendingException {
+                realm,
+                payload: PendingExceptionPayload::EngineError {
+                    kind: exception_kind,
+                    message,
+                },
+                origin: declaration_origin,
+            }));
+        }
+        Err(error) => {
+            rollback_direct_eval_environment(runtime, caller, environment)
+                .map_err(|fault| NativeFailure::Execution(fault.into()))?;
+            return Err(NativeFailure::Execution(error.into()));
+        }
+    };
+    if let Some(home_object) = inherited_home_object {
+        runtime
+            .bytecode_function_mut(installed.function)
+            .ok_or(EngineFault::RuntimeInvariant {
+                message: "installed direct eval root is not a bytecode function",
+            })?
+            .home_object = Some(home_object);
+    }
+    let plan = match plan_frame(
+        runtime,
+        installed.function,
+        active_frames,
+        active_frame_values,
+        0,
+        if inherited_new_target.is_some() {
+            FrameEntryKind::ContextualNewTarget
+        } else {
+            FrameEntryKind::Call
+        },
+    ) {
+        Ok(plan) => plan,
+        Err(error) => {
+            let retirement = retire_failed_dynamic_root(runtime, installed);
+            let rollback = rollback_direct_eval_environment(runtime, caller, environment);
+            retirement?;
+            rollback.map_err(|fault| NativeFailure::Execution(fault.into()))?;
+            return Err(NativeFailure::Execution(error));
+        }
+    };
+    let mut frame = match create_frame(
+        runtime,
+        plan,
+        receiver,
+        inherited_new_target,
+        FrameArguments::Owned(CallArguments::empty()),
+        Some(return_to),
+        None,
+    ) {
+        Ok(frame) => frame,
+        Err(error) => {
+            let retirement = retire_failed_dynamic_root(runtime, installed);
+            let rollback = rollback_direct_eval_environment(runtime, caller, environment);
+            retirement?;
+            rollback.map_err(|fault| NativeFailure::Execution(fault.into()))?;
+            return Err(NativeFailure::Execution(error));
+        }
+    };
+    frame.direct_eval_variable_environment = if frame.strict {
+        DirectEvalVariableEnvironment::Function
+    } else {
+        variable_environment
+    };
+    frame.eval_environment = caller.eval_environment.as_ref().map(Rc::clone);
+    frame.eval_declaration_environment =
+        caller.eval_declaration_environment.as_ref().map(Rc::clone);
+    frame.eval_in_function = caller.eval_in_function;
+    if let Some((constructor, this_cell)) = inherited_derived_environment {
+        frame.derived_constructor = Some(constructor);
+        frame.derived_this_cell = Some(this_cell);
+    }
+    if let Err(error) = installed.commit_environment() {
+        let retirement = retire_failed_dynamic_root(runtime, installed);
+        let rollback = rollback_direct_eval_environment(runtime, caller, environment);
+        retirement?;
+        rollback.map_err(|fault| NativeFailure::Execution(fault.into()))?;
+        return Err(NativeFailure::Execution(error.into()));
+    }
+    frame.dynamic_return = Some(DynamicFunctionReturn {
+        root: installed,
+        realm,
+        kind: DynamicRootKind::IndirectEval,
+        construction: None,
+        origin: None,
+    });
+    Ok(frame)
 }
 
 #[allow(
@@ -802,10 +1131,17 @@ pub(super) fn finish_dynamic_function_return(
     dynamic: DynamicFunctionReturn,
     value: StoredValue,
 ) -> Result<DynamicFunctionCompletion, ExecutionError> {
-    let completion = if let Some(new_target) = dynamic.construction {
-        apply_dynamic_constructor_prototype(runtime, new_target, dynamic.family, value)
-    } else {
-        Ok(value)
+    let completion = match (dynamic.kind, dynamic.construction) {
+        (DynamicRootKind::Function(family), Some(new_target)) => {
+            apply_dynamic_constructor_prototype(runtime, new_target, family, value)
+        }
+        (DynamicRootKind::Function(_) | DynamicRootKind::IndirectEval, None) => Ok(value),
+        (DynamicRootKind::IndirectEval, Some(_)) => Err(ConstructorCompletionError::Execution(
+            EngineFault::RuntimeInvariant {
+                message: "indirect eval root retained a construction target",
+            }
+            .into(),
+        )),
     };
     let retirement = runtime.retire_dynamic_root(dynamic.root);
     retirement?;
@@ -917,6 +1253,500 @@ fn apply_dynamic_constructor_prototype(
         )?));
     }
     Ok(completion)
+}
+
+pub(super) fn is_canonical_realm_eval(
+    runtime: &Runtime,
+    function: FunctionId,
+    realm: RealmId,
+) -> Result<bool, EngineFault> {
+    let node = runtime
+        .functions
+        .get(function)
+        .ok_or(EngineFault::StaleHeapEdge {
+            edge: "function",
+            index: function.index(),
+            generation: function.generation(),
+        })?;
+    Ok(matches!(
+        node.native(),
+        Some(native) if native.kind == NativeFunctionKind::Eval && native.realm == realm
+    ))
+}
+
+pub(super) fn direct_eval_compile_request(
+    runtime: &Runtime,
+    frame: &Frame,
+    source: JsString,
+    scope_index: u16,
+) -> Result<DirectEvalCompileRequest, ExecutionError> {
+    let installed_code = code(runtime, frame.code)?;
+    let template = installed_code.authority.function(frame.template).ok_or(
+        EngineFault::InvalidClosureEnvironment {
+            function: frame.template,
+        },
+    )?;
+    let installed_index = usize::try_from(frame.template.get()).map_err(|_| {
+        EngineFault::InvalidClosureEnvironment {
+            function: frame.template,
+        }
+    })?;
+    let installed = installed_code.templates.get(installed_index).ok_or(
+        EngineFault::InvalidClosureEnvironment {
+            function: frame.template,
+        },
+    )?;
+    let bindings =
+        direct_eval_caller_bindings(&template, installed, frame, frame.template, scope_index)?;
+    let function_code = runtime
+        .functions
+        .get(frame.function)
+        .ok_or(EngineFault::StaleHeapEdge {
+            edge: "function",
+            index: frame.function.index(),
+            generation: frame.function.generation(),
+        })?
+        .bytecode()?;
+    let kind = template.metadata().executable_kind();
+    let function_context = !matches!(
+        kind,
+        CompilerExecutableKind::GlobalScript
+            | CompilerExecutableKind::IndirectEvalScript
+            | CompilerExecutableKind::DirectEvalScript
+            | CompilerExecutableKind::DynamicFunctionScript
+    );
+    let variable_environment = if function_context && scope_index == 0 {
+        DirectEvalVariableEnvironment::FunctionParameterInitializer
+    } else {
+        frame.direct_eval_variable_environment
+    };
+    let allows_super_call = match frame.derived_constructor {
+        Some(constructor) => {
+            !runtime
+                .bytecode_function(constructor)
+                .ok_or(EngineFault::InvalidClosureEnvironment {
+                    function: frame.template,
+                })?
+                .has_instance_elements
+        }
+        None => false,
+    };
+    Ok(DirectEvalCompileRequest::new(source, frame.strict)
+        .with_bindings(bindings.into())
+        .with_scope_index(scope_index)
+        .with_variable_environment(variable_environment)
+        .with_new_target(frame.eval_in_function)
+        .with_super_property(function_code.home_object.is_some())
+        .with_super_call(allows_super_call)
+        .with_arguments_allowed(function_context))
+}
+
+#[allow(
+    clippy::too_many_lines,
+    reason = "the adjusted lexical chain, function body, and inherited closures share one ordered caller snapshot"
+)]
+fn direct_eval_caller_bindings(
+    template: &VerifiedBytecodeFunction,
+    installed: &InstalledTemplate,
+    frame: &Frame,
+    function: FunctionTemplateId,
+    scope_index: u16,
+) -> Result<Vec<DirectEvalCallerBinding>, ExecutionError> {
+    let domains = template.function().control_flow().domains();
+    let argument_count = domains.argument_count();
+    let local_count = domains.local_count();
+    let variables = template.metadata().variables();
+    let closures = template.metadata().closures();
+    let has_parameter_environment = template.function().parameter_initialization_end().is_some();
+    let dynamic_bindings = direct_eval_environment_binding_count(frame)?;
+    let capacity = usize::try_from(argument_count)
+        .ok()
+        .and_then(|arguments| {
+            usize::try_from(local_count)
+                .ok()
+                .and_then(|locals| arguments.checked_add(locals))
+        })
+        .and_then(|variables| variables.checked_add(closures.len()))
+        .and_then(|bindings| bindings.checked_add(dynamic_bindings))
+        .ok_or(ExecutionError::AllocationFailed {
+            resource: RuntimeResource::FrameValues,
+            additional: usize::MAX,
+        })?;
+    let mut bindings = Vec::new();
+    bindings
+        .try_reserve_exact(capacity)
+        .map_err(|_| ExecutionError::AllocationFailed {
+            resource: RuntimeResource::FrameValues,
+            additional: capacity,
+        })?;
+
+    let mut is_argument_scope = scope_index == 0;
+    let mut lexical_local = (scope_index >= 2).then(|| u32::from(scope_index - 2));
+    while let Some(local) = lexical_local {
+        if local >= local_count {
+            return Err(EngineFault::InvalidClosureEnvironment { function }.into());
+        }
+        let variable = variables
+            .get(argument_count.saturating_add(local) as usize)
+            .ok_or(EngineFault::InvalidClosureEnvironment { function })?;
+        if !variable.has_scope() {
+            return Err(EngineFault::InvalidClosureEnvironment { function }.into());
+        }
+        push_direct_eval_caller_binding(
+            &mut bindings,
+            installed,
+            variable.name(),
+            variable.policy(),
+            DirectEvalCallerBindingLocation::Local(local),
+            DirectEvalCallerBindingScope::Lexical,
+        )?;
+        lexical_local = match variable.scope_next() {
+            ScopeLink::Local(parent) => Some(parent),
+            ScopeLink::End => None,
+            ScopeLink::ArgumentScopeEnd => {
+                is_argument_scope = true;
+                None
+            }
+        };
+    }
+
+    if is_argument_scope {
+        if !has_parameter_environment {
+            return Err(EngineFault::InvalidClosureEnvironment { function }.into());
+        }
+        for local in 0..local_count {
+            let variable = variables
+                .get(argument_count.saturating_add(local) as usize)
+                .ok_or(EngineFault::InvalidClosureEnvironment { function })?;
+            if !variable.has_scope()
+                && (variable.policy().kind() == CompilerBindingKind::Parameter
+                    || variable.is_arguments_object())
+            {
+                push_direct_eval_caller_binding(
+                    &mut bindings,
+                    installed,
+                    variable.name(),
+                    variable.policy(),
+                    DirectEvalCallerBindingLocation::Local(local),
+                    DirectEvalCallerBindingScope::Lexical,
+                )?;
+            }
+        }
+        push_direct_eval_declaration_environment_bindings(&mut bindings, frame)?;
+        for local in 0..local_count {
+            let variable = variables
+                .get(argument_count.saturating_add(local) as usize)
+                .ok_or(EngineFault::InvalidClosureEnvironment { function })?;
+            if !variable.has_scope()
+                && variable.policy().kind() == CompilerBindingKind::FunctionName
+            {
+                push_direct_eval_caller_binding(
+                    &mut bindings,
+                    installed,
+                    variable.name(),
+                    variable.policy(),
+                    DirectEvalCallerBindingLocation::Local(local),
+                    DirectEvalCallerBindingScope::Outer,
+                )?;
+            }
+        }
+    } else {
+        for local in 0..local_count {
+            let variable = variables
+                .get(argument_count.saturating_add(local) as usize)
+                .ok_or(EngineFault::InvalidClosureEnvironment { function })?;
+            if !variable.has_scope()
+                && direct_eval_local_scope(variable.policy().kind())
+                    == DirectEvalCallerBindingScope::Lexical
+            {
+                push_direct_eval_caller_binding(
+                    &mut bindings,
+                    installed,
+                    variable.name(),
+                    variable.policy(),
+                    DirectEvalCallerBindingLocation::Local(local),
+                    DirectEvalCallerBindingScope::Lexical,
+                )?;
+            }
+        }
+        push_direct_eval_declaration_environment_bindings(&mut bindings, frame)?;
+        for local in 0..local_count {
+            let variable = variables
+                .get(argument_count.saturating_add(local) as usize)
+                .ok_or(EngineFault::InvalidClosureEnvironment { function })?;
+            if !variable.has_scope()
+                && variable.policy().kind() != CompilerBindingKind::Parameter
+                && !variable.is_arguments_object()
+                && direct_eval_local_scope(variable.policy().kind())
+                    == DirectEvalCallerBindingScope::Variable
+            {
+                push_direct_eval_caller_binding(
+                    &mut bindings,
+                    installed,
+                    variable.name(),
+                    variable.policy(),
+                    DirectEvalCallerBindingLocation::Local(local),
+                    DirectEvalCallerBindingScope::Variable,
+                )?;
+            }
+        }
+        if has_parameter_environment {
+            for local in 0..local_count {
+                let variable = variables
+                    .get(argument_count.saturating_add(local) as usize)
+                    .ok_or(EngineFault::InvalidClosureEnvironment { function })?;
+                if !variable.has_scope()
+                    && (variable.policy().kind() == CompilerBindingKind::Parameter
+                        || variable.is_arguments_object())
+                {
+                    push_direct_eval_caller_binding(
+                        &mut bindings,
+                        installed,
+                        variable.name(),
+                        variable.policy(),
+                        DirectEvalCallerBindingLocation::Local(local),
+                        DirectEvalCallerBindingScope::Outer,
+                    )?;
+                }
+            }
+        } else {
+            for argument in 0..argument_count {
+                let variable = variables
+                    .get(argument as usize)
+                    .ok_or(EngineFault::InvalidClosureEnvironment { function })?;
+                push_direct_eval_caller_binding(
+                    &mut bindings,
+                    installed,
+                    variable.name(),
+                    variable.policy(),
+                    DirectEvalCallerBindingLocation::Argument(argument),
+                    DirectEvalCallerBindingScope::Variable,
+                )?;
+            }
+            for local in 0..local_count {
+                let variable = variables
+                    .get(argument_count.saturating_add(local) as usize)
+                    .ok_or(EngineFault::InvalidClosureEnvironment { function })?;
+                if !variable.has_scope()
+                    && (variable.policy().kind() == CompilerBindingKind::Parameter
+                        || variable.is_arguments_object())
+                {
+                    push_direct_eval_caller_binding(
+                        &mut bindings,
+                        installed,
+                        variable.name(),
+                        variable.policy(),
+                        DirectEvalCallerBindingLocation::Local(local),
+                        DirectEvalCallerBindingScope::Variable,
+                    )?;
+                }
+            }
+        }
+        for local in 0..local_count {
+            let variable = variables
+                .get(argument_count.saturating_add(local) as usize)
+                .ok_or(EngineFault::InvalidClosureEnvironment { function })?;
+            if !variable.has_scope()
+                && direct_eval_local_scope(variable.policy().kind())
+                    == DirectEvalCallerBindingScope::Outer
+            {
+                push_direct_eval_caller_binding(
+                    &mut bindings,
+                    installed,
+                    variable.name(),
+                    variable.policy(),
+                    DirectEvalCallerBindingLocation::Local(local),
+                    DirectEvalCallerBindingScope::Outer,
+                )?;
+            }
+        }
+    }
+
+    for (closure, definition) in closures.iter().enumerate() {
+        if !matches!(definition.binding(), CompilerClosureBinding::Captured(_)) {
+            continue;
+        }
+        let closure = u32::try_from(closure)
+            .map_err(|_| EngineFault::InvalidClosureEnvironment { function })?;
+        push_direct_eval_caller_binding(
+            &mut bindings,
+            installed,
+            definition.name(),
+            definition.policy(),
+            DirectEvalCallerBindingLocation::Closure(closure),
+            DirectEvalCallerBindingScope::Outer,
+        )?;
+    }
+    push_direct_eval_outer_environment_bindings(&mut bindings, frame)?;
+    Ok(bindings)
+}
+
+fn direct_eval_environment_binding_count(frame: &Frame) -> Result<usize, EngineFault> {
+    let mut count = 0_usize;
+    let mut current = frame.eval_environment.as_ref().map(Rc::clone);
+    while let Some(environment) = current {
+        let record = environment.borrow();
+        count = count
+            .checked_add(record.bindings.len())
+            .ok_or(EngineFault::RuntimeInvariant {
+                message: "direct-eval variable environment is too large",
+            })?;
+        current = record.parent.as_ref().map(Rc::clone);
+    }
+    Ok(count)
+}
+
+fn push_direct_eval_declaration_environment_bindings(
+    bindings: &mut Vec<DirectEvalCallerBinding>,
+    frame: &Frame,
+) -> Result<(), ExecutionError> {
+    let Some(target) = frame.eval_declaration_environment.as_ref() else {
+        return Ok(());
+    };
+    let mut depth = 0_u32;
+    let mut current = frame.eval_environment.as_ref().map(Rc::clone);
+    while let Some(environment) = current {
+        let record = environment.borrow();
+        if Rc::ptr_eq(&environment, target) {
+            for (index, binding) in record.bindings.iter().enumerate() {
+                if binding.deleted {
+                    continue;
+                }
+                push_direct_eval_environment_binding(
+                    bindings,
+                    binding,
+                    depth,
+                    index,
+                    DirectEvalCallerBindingScope::Variable,
+                )?;
+            }
+            return Ok(());
+        }
+        current = record.parent.as_ref().map(Rc::clone);
+        depth = depth.checked_add(1).ok_or(EngineFault::RuntimeInvariant {
+            message: "direct-eval variable environment depth overflowed",
+        })?;
+    }
+    Err(EngineFault::RuntimeInvariant {
+        message: "direct-eval declaration environment is outside the visible chain",
+    }
+    .into())
+}
+
+fn push_direct_eval_outer_environment_bindings(
+    bindings: &mut Vec<DirectEvalCallerBinding>,
+    frame: &Frame,
+) -> Result<(), ExecutionError> {
+    let target = frame.eval_declaration_environment.as_ref();
+    let mut depth = 0_u32;
+    let mut current = frame.eval_environment.as_ref().map(Rc::clone);
+    while let Some(environment) = current {
+        let record = environment.borrow();
+        if !target.is_some_and(|target| Rc::ptr_eq(&environment, target)) {
+            for (index, binding) in record.bindings.iter().enumerate() {
+                if binding.deleted {
+                    continue;
+                }
+                push_direct_eval_environment_binding(
+                    bindings,
+                    binding,
+                    depth,
+                    index,
+                    DirectEvalCallerBindingScope::Outer,
+                )?;
+            }
+        }
+        current = record.parent.as_ref().map(Rc::clone);
+        depth = depth.checked_add(1).ok_or(EngineFault::RuntimeInvariant {
+            message: "direct-eval variable environment depth overflowed",
+        })?;
+    }
+    Ok(())
+}
+
+fn push_direct_eval_environment_binding(
+    bindings: &mut Vec<DirectEvalCallerBinding>,
+    binding: &EvalVariableBinding,
+    depth: u32,
+    index: usize,
+    scope: DirectEvalCallerBindingScope,
+) -> Result<(), ExecutionError> {
+    let index = u32::try_from(index).map_err(|_| EngineFault::RuntimeInvariant {
+        message: "direct-eval variable binding index is not representable",
+    })?;
+    let policy = quickjs_bytecode::CompilerBindingPolicy::new(
+        CompilerBindingKind::Var,
+        quickjs_bytecode::CompilerInitializationPolicy::UndefinedAtInstantiation,
+        quickjs_bytecode::CompilerWritePolicy::Mutable,
+        false,
+    );
+    bindings.push(
+        DirectEvalCallerBinding::new(
+            binding.name.clone(),
+            policy,
+            DirectEvalCallerBindingLocation::EvalVariable { depth, index },
+        )
+        .with_scope(scope),
+    );
+    Ok(())
+}
+
+const fn direct_eval_local_scope(kind: CompilerBindingKind) -> DirectEvalCallerBindingScope {
+    match kind {
+        CompilerBindingKind::Let
+        | CompilerBindingKind::Const
+        | CompilerBindingKind::ClassName
+        | CompilerBindingKind::WithObject
+        | CompilerBindingKind::Catch => DirectEvalCallerBindingScope::Lexical,
+        CompilerBindingKind::Parameter
+        | CompilerBindingKind::Var
+        | CompilerBindingKind::Function => DirectEvalCallerBindingScope::Variable,
+        CompilerBindingKind::FunctionName
+        | CompilerBindingKind::ClassFieldKey
+        | CompilerBindingKind::ClassPrivateName
+        | CompilerBindingKind::ClassStaticReceiver
+        | CompilerBindingKind::GlobalReference => DirectEvalCallerBindingScope::Outer,
+    }
+}
+
+fn push_direct_eval_caller_binding(
+    bindings: &mut Vec<DirectEvalCallerBinding>,
+    installed: &InstalledTemplate,
+    name: Option<quickjs_bytecode::AtomPoolIndex>,
+    policy: quickjs_bytecode::CompilerBindingPolicy,
+    location: DirectEvalCallerBindingLocation,
+    scope: DirectEvalCallerBindingScope,
+) -> Result<(), ExecutionError> {
+    if matches!(
+        policy.kind(),
+        CompilerBindingKind::ClassFieldKey
+            | CompilerBindingKind::ClassPrivateName
+            | CompilerBindingKind::ClassStaticReceiver
+            | CompilerBindingKind::GlobalReference
+    ) {
+        return Ok(());
+    }
+    let Some(name) = name else {
+        return Ok(());
+    };
+    let atom = installed
+        .atoms
+        .get(name.get() as usize)
+        .ok_or(EngineFault::MissingPoolEntry {
+            pool: "direct-eval caller atom",
+            index: name.get(),
+        })?;
+    let name = atom
+        .description()
+        .ok_or(EngineFault::RuntimeInvariant {
+            message: "direct-eval caller binding has no string atom",
+        })?
+        .clone();
+    if name.code_units().eq("_ret_".encode_utf16()) {
+        return Ok(());
+    }
+    bindings.push(DirectEvalCallerBinding::new(name, policy, location).with_scope(scope));
+    Ok(())
 }
 
 pub(super) fn function_is_constructor(

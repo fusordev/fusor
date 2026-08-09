@@ -213,6 +213,12 @@ pub(in crate::lowering) fn freeze_atom_candidates(
                             invariant: "property atom has one typed lookup key",
                             span: Some(candidate.span),
                         })?;
+                if property_atom_indices
+                    .iter()
+                    .any(|(key, index)| *key == property_key && *index == atom_index)
+                {
+                    continue;
+                }
                 property_atom_indices.push((property_key, atom_index));
             }
         }
@@ -451,5 +457,39 @@ mod tests {
         assert!(string_indices.is_empty());
         assert_eq!(property_indices.len(), 1);
         assert!(atoms[0].is_static_property_only());
+    }
+
+    #[test]
+    fn identical_property_consumers_share_one_typed_lookup_key() {
+        let span = Span::new(8, 13);
+        let value = string(&[
+            u16::from(b'v'),
+            u16::from(b'a'),
+            u16::from(b'l'),
+            u16::from(b'u'),
+            u16::from(b'e'),
+        ]);
+        let candidate = || CompiledAtomCandidate {
+            value: value.clone(),
+            span,
+            purpose: CompiledAtomPurpose::Property,
+            property_key: Some(CompiledPropertyAtomKey::Source(span)),
+        };
+        let mut string_indices = Vec::new();
+        let mut property_indices = Vec::new();
+
+        let (atoms, _) = freeze_atom_candidates(
+            vec![candidate(), candidate()],
+            &mut string_indices,
+            &mut property_indices,
+        )
+        .expect("shared property atom");
+
+        assert!(string_indices.is_empty());
+        assert_eq!(atoms.len(), 1);
+        assert_eq!(
+            property_indices,
+            [(CompiledPropertyAtomKey::Source(span), 0)]
+        );
     }
 }

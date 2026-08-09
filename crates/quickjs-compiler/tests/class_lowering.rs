@@ -112,12 +112,60 @@ fn public_private_instance_fields_receive_fresh_class_scope_names() {
     assert!(opcodes.contains(&FinalOpcode::GetPrivateField));
     assert!(opcodes.contains(&FinalOpcode::PutPrivateField));
     assert!(opcodes.contains(&FinalOpcode::PrivateIn));
+    assert!(
+        tree.root()
+            .control_flow()
+            .instructions()
+            .iter()
+            .any(|instruction| {
+                matches!(
+                    (
+                        instruction.decoded().instruction().opcode(),
+                        instruction.decoded().instruction().operands(),
+                    ),
+                    (
+                        FinalOpcode::DefineClass,
+                        quickjs_bytecode::Operands::AtomU8 { value: 2, .. }
+                    )
+                )
+            })
+    );
     assert!(tree.functions().iter().any(|function| {
         function
             .closure_variables()
             .iter()
             .any(|closure| closure.policy().kind() == DeclarationKind::ClassPrivateName)
     }));
+}
+
+#[test]
+fn private_fields_after_optional_chains_lower_with_brand_checked_reads() {
+    let tree = compile(
+        "function make(){return class Box{#value=7;#read(){return 9;}static direct(value){return value?.#value;}static nested(value){return value?.member.#value;}static directCall(value){return value?.#read();}static optionalCall(value){return value.#read?.();}}}",
+        "make",
+    );
+    let opcodes = tree
+        .functions()
+        .iter()
+        .flat_map(|function| function.control_flow().instructions())
+        .map(|instruction| instruction.decoded().instruction().opcode())
+        .collect::<Vec<_>>();
+
+    assert!(opcodes.contains(&FinalOpcode::IsUndefinedOrNull));
+    assert_eq!(
+        opcodes
+            .iter()
+            .filter(|&&opcode| opcode == FinalOpcode::GetPrivateField)
+            .count(),
+        4
+    );
+    assert_eq!(
+        opcodes
+            .iter()
+            .filter(|&&opcode| opcode == FinalOpcode::CallMethod)
+            .count(),
+        2
+    );
 }
 
 #[test]
@@ -967,6 +1015,24 @@ fn uncomputed_public_instance_field_initializers_lower_into_each_constructor() {
             .count(),
         3,
     );
+    let class_flags = tree
+        .root()
+        .control_flow()
+        .instructions()
+        .iter()
+        .filter_map(|instruction| {
+            match (
+                instruction.decoded().instruction().opcode(),
+                instruction.decoded().instruction().operands(),
+            ) {
+                (FinalOpcode::DefineClass, quickjs_bytecode::Operands::AtomU8 { value, .. }) => {
+                    Some(value)
+                }
+                _ => None,
+            }
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(class_flags, [2, 3, 3]);
 }
 
 #[test]
@@ -1029,6 +1095,38 @@ fn computed_public_instance_fields_capture_a_once_evaluated_class_key() {
             .any(|pair| { pair == [FinalOpcode::PushThis, FinalOpcode::GetVarRefCheck] })
     );
     assert!(opcodes.contains(&FinalOpcode::DefineArrayEl));
+}
+
+#[test]
+fn interleaved_computed_fields_capture_all_keys_before_static_initializers() {
+    let tree = compile(
+        "function make(){let index=0;class Box{[index++]=index++;static[index++]=index++;[index++]=index++;}return Box;}",
+        "make",
+    );
+    let root = tree.root();
+    assert_eq!(
+        root.storage_plan()
+            .bindings()
+            .iter()
+            .filter(|binding| binding.policy().kind() == DeclarationKind::ClassFieldKey)
+            .count(),
+        3
+    );
+    let opcodes = root
+        .control_flow()
+        .instructions()
+        .iter()
+        .map(|instruction| instruction.decoded().instruction().opcode())
+        .collect::<Vec<_>>();
+    let last_key = opcodes
+        .iter()
+        .rposition(|&opcode| opcode == FinalOpcode::ToPropKey)
+        .expect("computed field keys");
+    let first_static_initializer = opcodes
+        .iter()
+        .position(|&opcode| opcode == FinalOpcode::DefineArrayEl)
+        .expect("computed static field initializer");
+    assert!(last_key < first_static_initializer);
 }
 
 #[test]

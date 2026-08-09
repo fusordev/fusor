@@ -1,21 +1,24 @@
+use super::super::layouts::RealmGlobalRootSource;
 use super::super::{
     ArrayExpression, ArrayExpressionElement, ArrowFunctionExpression, AssignmentExpression,
     AssignmentOperator, AssignmentTarget, AstKind, AtomPoolIndex, BinaryOperator, BindingId,
     BranchKind, CallExpression, ChainElement, ChainExpression, Class, ClassElement,
-    CompilationContext, CompiledConstantPool, CompiledMetadataAtomKey, CompilerLabel,
-    ComputedMemberExpression, ConditionalExpression, DeclarationKind, ExecutableId, ExecutableKind,
-    Expression, FinalOpcode, FrameLayout, FrameSlot, Function, FunctionPlanningContext,
-    FunctionTreeLayout, GetSpan, IdentifierReference, InitializationPolicy, LeafCompilationError,
-    LogicalExpression, LogicalOperator, LoweredReference, MethodDefinition, MethodDefinitionKind,
-    NodeId, ObjectExpression, ObjectProperty, ObjectPropertyKind, Operands, OxcPropertyKey,
-    PlannedControlFlow, PlannedInstruction, PrivateFieldExpression, PrivateInExpression,
-    PropertyDefinition, PropertyKind, SequenceExpression, SimpleAssignmentTarget, Span,
-    StatementCompletion, StatementControlStack, StatementPlanningState, StatementWork,
-    StaticMemberExpression, StoragePlacement, UnaryExpression, UnaryOperator,
-    UnsupportedLeafFeature, UpdateExpression, UpdateOperator, compiled_static_property_key,
+    CompilationContext, CompiledConstantPool, CompiledMetadataAtomKey, CompilerClosureBinding,
+    CompilerLabel, ComputedMemberExpression, ConditionalExpression, DeclarationKind, ExecutableId,
+    ExecutableKind, Expression, FinalOpcode, FrameLayout, FrameSlot, Function,
+    FunctionPlanningContext, FunctionTreeLayout, GetSpan, IdentifierReference,
+    InitializationPolicy, LeafCompilationError, LogicalExpression, LogicalOperator,
+    LoweredReference, MethodDefinition, MethodDefinitionKind, NodeId, ObjectExpression,
+    ObjectProperty, ObjectPropertyKind, Operands, OxcPropertyKey, PlannedControlFlow,
+    PlannedInstruction, PrivateFieldExpression, PrivateInExpression, PropertyDefinition,
+    PropertyKind, SequenceExpression, SimpleAssignmentTarget, Span, StatementCompletion,
+    StatementControlStack, StatementPlanningState, StatementWork, StaticMemberExpression,
+    StoragePlacement, UnaryExpression, UnaryOperator, UnsupportedLeafFeature, UpdateExpression,
+    UpdateOperator, compiled_static_property_key, plan_external_put, plan_external_read,
     plan_put_slot, unsupported,
 };
 use super::abrupt::{AbruptMarker, AbruptMarkerKind};
+use super::bindings::WithObjectSource;
 use super::calls::MemberCallee;
 use oxc_ast::ast::{SpreadElement, StaticBlock};
 use std::collections::HashSet;
@@ -225,6 +228,12 @@ pub(in crate::lowering) enum ExpressionWork<'expression, 'arena> {
         chain: &'expression ChainExpression<'arena>,
         preserve_final_reference: bool,
     },
+    IdentifierCallReference(&'expression IdentifierReference<'arena>),
+    IdentifierDelete {
+        identifier: &'expression IdentifierReference<'arena>,
+        delete_span: Span,
+    },
+    IdentifierValueStore(&'expression IdentifierReference<'arena>),
     CallAfterCallee {
         call: &'expression CallExpression<'arena>,
         method: bool,
@@ -289,6 +298,23 @@ impl<'compiler, 'unit, 'arena, 'scope> ExpressionPlanner<'compiler, 'unit, 'aren
     ) -> Self {
         Self { compiler }
     }
+
+    fn class_has_instance_elements(class: &Class<'arena>) -> bool {
+        class.body.body.iter().any(|element| match element {
+            ClassElement::PropertyDefinition(field) => !field.r#static,
+            ClassElement::MethodDefinition(method) => {
+                !method.r#static
+                    && matches!(method.key, OxcPropertyKey::PrivateIdentifier(_))
+                    && matches!(
+                        method.kind,
+                        MethodDefinitionKind::Method
+                            | MethodDefinitionKind::Get
+                            | MethodDefinitionKind::Set
+                    )
+            }
+            _ => false,
+        })
+    }
     #[expect(
         clippy::too_many_lines,
         reason = "the iterative dispatcher is the exhaustive expression-shape boundary"
@@ -309,15 +335,47 @@ impl<'compiler, 'unit, 'arena, 'scope> ExpressionPlanner<'compiler, 'unit, 'aren
                 ExpressionWork::VisitOptionalChain {
                     chain,
                     preserve_final_reference,
-                } => Self::plan_optional_chain(
+                } => self.plan_optional_chain(
                     chain,
                     preserve_final_reference,
+                    layout,
                     constants,
                     flow,
                     &mut work,
                 )?,
                 ExpressionWork::CallAfterCallee { call, method } => {
                     Self::plan_call_after_callee(call, method, &mut work)?;
+                }
+                ExpressionWork::IdentifierCallReference(identifier) => {
+                    self.plan_identifier_call_reference(
+                        identifier,
+                        layout,
+                        tree_layout,
+                        constants,
+                        flow,
+                    )?;
+                }
+                ExpressionWork::IdentifierDelete {
+                    identifier,
+                    delete_span,
+                } => {
+                    self.plan_identifier_delete(
+                        identifier,
+                        delete_span,
+                        layout,
+                        tree_layout,
+                        constants,
+                        flow,
+                    )?;
+                }
+                ExpressionWork::IdentifierValueStore(identifier) => {
+                    self.plan_identifier_value_store(
+                        identifier,
+                        layout,
+                        tree_layout,
+                        constants,
+                        flow,
+                    )?;
                 }
                 ExpressionWork::SuperPropertyBase {
                     span,
@@ -349,7 +407,14 @@ impl<'compiler, 'unit, 'arena, 'scope> ExpressionPlanner<'compiler, 'unit, 'aren
                     }
                     match expression {
                         Expression::Identifier(identifier) => {
-                            self.plan_identifier_read(identifier, layout, tree_layout, flow)?;
+                            self.plan_identifier_read(
+                                identifier,
+                                layout,
+                                tree_layout,
+                                constants,
+                                false,
+                                flow,
+                            )?;
                         }
                         Expression::UnaryExpression(unary) => {
                             self.plan_unary_expression(
@@ -410,7 +475,9 @@ impl<'compiler, 'unit, 'arena, 'scope> ExpressionPlanner<'compiler, 'unit, 'aren
                             self.plan_private_in_expression(private_in, layout, &mut work)?;
                         }
                         Expression::ChainExpression(chain) => {
-                            Self::plan_optional_chain(chain, false, constants, flow, &mut work)?;
+                            self.plan_optional_chain(
+                                chain, false, layout, constants, flow, &mut work,
+                            )?;
                         }
                         Expression::AssignmentExpression(assignment) => {
                             self.plan_assignment_expression(
@@ -428,15 +495,26 @@ impl<'compiler, 'unit, 'arena, 'scope> ExpressionPlanner<'compiler, 'unit, 'aren
                                 layout,
                                 tree_layout,
                                 constants,
+                                flow,
                                 &mut work,
                             )?;
                         }
                         Expression::CallExpression(call) => {
-                            self.plan_call_expression(call, layout, constants, &mut work)?;
+                            self.plan_call_expression(
+                                call,
+                                layout,
+                                tree_layout,
+                                constants,
+                                &mut work,
+                            )?;
                         }
                         Expression::TaggedTemplateExpression(tagged) => {
                             self.plan_tagged_template_expression(
-                                tagged, layout, constants, &mut work,
+                                tagged,
+                                layout,
+                                tree_layout,
+                                constants,
+                                &mut work,
                             )?;
                         }
                         Expression::NewExpression(constructor) => {
@@ -1179,7 +1257,8 @@ impl<'compiler, 'unit, 'arena, 'scope> ExpressionPlanner<'compiler, 'unit, 'aren
             FinalOpcode::DefineClass,
             Operands::AtomU8 {
                 atom: constants.property_atom_index(class.span)?,
-                value: u8::from(has_heritage),
+                value: u8::from(has_heritage)
+                    | (u8::from(Self::class_has_instance_elements(class)) << 1),
             },
             class.span,
         ))?;
@@ -1211,16 +1290,8 @@ impl<'compiler, 'unit, 'arena, 'scope> ExpressionPlanner<'compiler, 'unit, 'aren
                     self.plan_base_class_method(method, layout, tree_layout, constants, flow)?;
                 }
                 ClassElement::PropertyDefinition(field) => {
-                    if field.r#static {
-                        self.plan_base_class_static_field(
-                            field,
-                            layout,
-                            tree_layout,
-                            constants,
-                            flow,
-                        )?;
-                    } else if field.computed {
-                        self.plan_base_class_computed_instance_field_key(
+                    if field.computed {
+                        self.plan_base_class_computed_field_key(
                             field,
                             layout,
                             tree_layout,
@@ -1228,6 +1299,20 @@ impl<'compiler, 'unit, 'arena, 'scope> ExpressionPlanner<'compiler, 'unit, 'aren
                             flow,
                         )?;
                     }
+                }
+                ClassElement::StaticBlock(_) => {}
+                _ => {
+                    return Err(LeafCompilationError::SemanticInvariant {
+                        invariant: "validated class body has only methods, fields, and static blocks",
+                        span: Some(element.span()),
+                    });
+                }
+            }
+        }
+        for element in &class.body.body {
+            match element {
+                ClassElement::PropertyDefinition(field) if field.r#static => {
+                    self.plan_base_class_static_field(field, layout, tree_layout, constants, flow)?;
                 }
                 ClassElement::StaticBlock(block) => {
                     self.plan_base_class_static_block(
@@ -1239,6 +1324,7 @@ impl<'compiler, 'unit, 'arena, 'scope> ExpressionPlanner<'compiler, 'unit, 'aren
                         flow,
                     )?;
                 }
+                ClassElement::MethodDefinition(_) | ClassElement::PropertyDefinition(_) => {}
                 _ => {
                     return Err(LeafCompilationError::SemanticInvariant {
                         invariant: "validated class body has only methods, fields, and static blocks",
@@ -1848,24 +1934,19 @@ impl<'compiler, 'unit, 'arena, 'scope> ExpressionPlanner<'compiler, 'unit, 'aren
         constants: &CompiledConstantPool,
         flow: &mut PlannedControlFlow,
     ) -> Result<(), LeafCompilationError> {
-        let key = field
-            .key
-            .as_expression()
-            .ok_or(LeafCompilationError::Unsupported {
-                feature: UnsupportedLeafFeature::UnsupportedDeclaration,
-                span: field.key.span(),
-            })?;
+        let (binding, slot) = self.computed_class_field_key_binding(field, layout)?;
+        let FrameSlot::Local(_) = slot else {
+            return Err(LeafCompilationError::SemanticInvariant {
+                invariant: "class definition retains its computed static field key locally",
+                span: Some(field.key.span()),
+            });
+        };
         flow.emit(PlannedInstruction::new(
             FinalOpcode::Swap,
             Operands::None,
             field.span,
         ))?;
-        self.plan_expression(key, layout, tree_layout, constants, &[], flow)?;
-        flow.emit(PlannedInstruction::new(
-            FinalOpcode::ToPropKey,
-            Operands::None,
-            field.key.span(),
-        ))?;
+        flow.emit(self.plan_read_slot(binding, slot, field.key.span())?)?;
         if let Some(value) = &field.value {
             let inferred_name = Self::plan_inferred_computed_property_name_for_initializer(value)?;
             self.plan_expression(value, layout, tree_layout, constants, &[], flow)?;
@@ -1896,7 +1977,7 @@ impl<'compiler, 'unit, 'arena, 'scope> ExpressionPlanner<'compiler, 'unit, 'aren
         ))
     }
 
-    fn plan_base_class_computed_instance_field_key(
+    fn plan_base_class_computed_field_key(
         &self,
         field: &PropertyDefinition<'arena>,
         layout: &FrameLayout,
@@ -1911,7 +1992,13 @@ impl<'compiler, 'unit, 'arena, 'scope> ExpressionPlanner<'compiler, 'unit, 'aren
                 feature: UnsupportedLeafFeature::UnsupportedDeclaration,
                 span: field.key.span(),
             })?;
-        let (binding, slot) = self.computed_instance_field_key_binding(field, layout)?;
+        let (binding, slot) = self.computed_class_field_key_binding(field, layout)?;
+        let FrameSlot::Local(_) = slot else {
+            return Err(LeafCompilationError::SemanticInvariant {
+                invariant: "class definition stores each computed field key locally",
+                span: Some(field.key.span()),
+            });
+        };
         self.plan_expression(key, layout, tree_layout, constants, &[], flow)?;
         flow.emit(PlannedInstruction::new(
             FinalOpcode::ToPropKey,
@@ -1924,12 +2011,12 @@ impl<'compiler, 'unit, 'arena, 'scope> ExpressionPlanner<'compiler, 'unit, 'aren
                 .plan
                 .binding(binding)
                 .ok_or(LeafCompilationError::SemanticInvariant {
-                    invariant: "computed instance-field key binding exists after planning",
+                    invariant: "computed class-field key binding exists after planning",
                     span: Some(field.key.span()),
                 })?;
         if storage.policy().kind() != DeclarationKind::ClassFieldKey {
             return Err(LeafCompilationError::SemanticInvariant {
-                invariant: "computed instance-field key writes only its synthetic binding",
+                invariant: "computed class-field key writes only its synthetic binding",
                 span: Some(field.key.span()),
             });
         }
@@ -2191,7 +2278,7 @@ impl<'compiler, 'unit, 'arena, 'scope> ExpressionPlanner<'compiler, 'unit, 'aren
         synthesized_default: bool,
         flow: &mut PlannedControlFlow,
     ) -> Result<(), LeafCompilationError> {
-        let (binding, slot) = self.computed_instance_field_key_binding(field, layout)?;
+        let (binding, slot) = self.computed_class_field_key_binding(field, layout)?;
         let FrameSlot::Capture(_) = slot else {
             return Err(LeafCompilationError::SemanticInvariant {
                 invariant: "instance constructor captures its computed field key",
@@ -2249,14 +2336,14 @@ impl<'compiler, 'unit, 'arena, 'scope> ExpressionPlanner<'compiler, 'unit, 'aren
         Ok(())
     }
 
-    fn computed_instance_field_key_binding(
+    fn computed_class_field_key_binding(
         &self,
         field: &PropertyDefinition<'arena>,
         layout: &FrameLayout,
     ) -> Result<(BindingId, FrameSlot), LeafCompilationError> {
-        if field.r#static || !field.computed {
+        if !field.computed {
             return Err(LeafCompilationError::SemanticInvariant {
-                invariant: "computed instance-field key binding belongs to a computed instance field",
+                invariant: "computed class-field key binding belongs to a computed field",
                 span: Some(field.span),
             });
         }
@@ -2267,7 +2354,7 @@ impl<'compiler, 'unit, 'arena, 'scope> ExpressionPlanner<'compiler, 'unit, 'aren
             .get(&field.node_id.get())
             .copied()
             .ok_or(LeafCompilationError::SemanticInvariant {
-                invariant: "computed instance field has a class-scope key binding",
+                invariant: "computed field has a class-scope key binding",
                 span: Some(field.key.span()),
             })?;
         let storage =
@@ -2275,21 +2362,21 @@ impl<'compiler, 'unit, 'arena, 'scope> ExpressionPlanner<'compiler, 'unit, 'aren
                 .plan
                 .binding(binding)
                 .ok_or(LeafCompilationError::SemanticInvariant {
-                    invariant: "computed instance-field key binding exists",
+                    invariant: "computed class-field key binding exists",
                     span: Some(field.key.span()),
                 })?;
         if storage.policy().kind() != DeclarationKind::ClassFieldKey
             || storage.placement() != StoragePlacement::Local
         {
             return Err(LeafCompilationError::SemanticInvariant {
-                invariant: "computed instance-field key binding is immutable local storage",
+                invariant: "computed class-field key binding is immutable local storage",
                 span: Some(field.key.span()),
             });
         }
         let slot = layout
             .slot(binding)
             .ok_or(LeafCompilationError::SemanticInvariant {
-                invariant: "computed instance-field key binding has a frame slot",
+                invariant: "computed class-field key binding has a frame slot",
                 span: Some(field.key.span()),
             })?;
         Ok((binding, slot))
@@ -2699,8 +2786,10 @@ impl<'compiler, 'unit, 'arena, 'scope> ExpressionPlanner<'compiler, 'unit, 'aren
         reason = "the complete chain-level short-circuit schedule stays visible in execution order"
     )]
     fn plan_optional_chain<'expression>(
+        &self,
         chain: &'expression ChainExpression<'arena>,
         preserve_final_reference: bool,
+        layout: &FrameLayout,
         constants: &CompiledConstantPool,
         flow: &mut PlannedControlFlow,
         work: &mut Vec<ExpressionWork<'expression, 'arena>>,
@@ -2708,6 +2797,7 @@ impl<'compiler, 'unit, 'arena, 'scope> ExpressionPlanner<'compiler, 'unit, 'aren
         enum Step<'expression, 'arena> {
             Static(&'expression StaticMemberExpression<'arena>),
             Computed(&'expression ComputedMemberExpression<'arena>),
+            Private(&'expression PrivateFieldExpression<'arena>),
             Call(&'expression CallExpression<'arena>),
         }
 
@@ -2716,6 +2806,7 @@ impl<'compiler, 'unit, 'arena, 'scope> ExpressionPlanner<'compiler, 'unit, 'aren
                 match self {
                     Self::Static(member) => member.optional,
                     Self::Computed(member) => member.optional,
+                    Self::Private(member) => member.optional,
                     Self::Call(call) => call.optional,
                 }
             }
@@ -2724,12 +2815,13 @@ impl<'compiler, 'unit, 'arena, 'scope> ExpressionPlanner<'compiler, 'unit, 'aren
                 match self {
                     Self::Static(member) => member.span,
                     Self::Computed(member) => member.span,
+                    Self::Private(member) => member.span,
                     Self::Call(call) => call.span,
                 }
             }
 
             const fn is_member(&self) -> bool {
-                matches!(self, Self::Static(_) | Self::Computed(_))
+                matches!(self, Self::Static(_) | Self::Computed(_) | Self::Private(_))
             }
 
             const fn is_call(&self) -> bool {
@@ -2751,7 +2843,11 @@ impl<'compiler, 'unit, 'arena, 'scope> ExpressionPlanner<'compiler, 'unit, 'aren
                 steps.push(Step::Call(call));
                 &call.callee
             }
-            ChainElement::TSNonNullExpression(_) | ChainElement::PrivateFieldExpression(_) => {
+            ChainElement::PrivateFieldExpression(member) => {
+                steps.push(Step::Private(member));
+                &member.object
+            }
+            ChainElement::TSNonNullExpression(_) => {
                 return unsupported(UnsupportedLeafFeature::UnsupportedExpression, chain.span);
             }
         };
@@ -2768,6 +2864,10 @@ impl<'compiler, 'unit, 'arena, 'scope> ExpressionPlanner<'compiler, 'unit, 'aren
                 Expression::CallExpression(call) => {
                     steps.push(Step::Call(call));
                     root = &call.callee;
+                }
+                Expression::PrivateFieldExpression(member) => {
+                    steps.push(Step::Private(member));
+                    root = &member.object;
                 }
                 _ => break,
             }
@@ -2810,7 +2910,28 @@ impl<'compiler, 'unit, 'arena, 'scope> ExpressionPlanner<'compiler, 'unit, 'aren
                 });
             }
             Some(MemberCallee::Private(member)) => {
-                return unsupported(UnsupportedLeafFeature::UnsupportedExpression, member.span);
+                let (binding, slot) = self.private_name_binding_for_access(
+                    member.node_id.get(),
+                    member.field.name.as_str(),
+                    member.span,
+                    layout,
+                )?;
+                planned.push(ExpressionWork::Visit(&member.object));
+                planned.push(ExpressionWork::Emit(PlannedInstruction::new(
+                    FinalOpcode::Dup,
+                    Operands::None,
+                    member.object.span(),
+                )));
+                planned.push(ExpressionWork::Emit(self.plan_read_slot(
+                    binding,
+                    slot,
+                    member.field.span,
+                )?));
+                planned.push(ExpressionWork::Emit(PlannedInstruction::new(
+                    FinalOpcode::GetPrivateField,
+                    Operands::None,
+                    member.span,
+                )));
             }
             None => planned.push(ExpressionWork::Visit(root)),
         }
@@ -2857,6 +2978,33 @@ impl<'compiler, 'unit, 'arena, 'scope> ExpressionPlanner<'compiler, 'unit, 'aren
                         } else {
                             FinalOpcode::GetArrayEl
                         },
+                        Operands::None,
+                        member.span,
+                    )));
+                }
+                Step::Private(member) => {
+                    let preserve_receiver = steps.get(index + 1).is_some_and(Step::is_call)
+                        || (final_step && preserve_final_reference);
+                    let (binding, slot) = self.private_name_binding_for_access(
+                        member.node_id.get(),
+                        member.field.name.as_str(),
+                        member.span,
+                        layout,
+                    )?;
+                    if preserve_receiver {
+                        planned.push(ExpressionWork::Emit(PlannedInstruction::new(
+                            FinalOpcode::Dup,
+                            Operands::None,
+                            member.object.span(),
+                        )));
+                    }
+                    planned.push(ExpressionWork::Emit(self.plan_read_slot(
+                        binding,
+                        slot,
+                        member.field.span,
+                    )?));
+                    planned.push(ExpressionWork::Emit(PlannedInstruction::new(
+                        FinalOpcode::GetPrivateField,
                         Operands::None,
                         member.span,
                     )));
@@ -4231,12 +4379,51 @@ impl<'compiler, 'unit, 'arena, 'scope> ExpressionPlanner<'compiler, 'unit, 'aren
         } else {
             None
         };
+        let with_objects = self.with_object_sources_for_reference(
+            identifier.reference_id.get(),
+            identifier.span,
+            tree_layout,
+        )?;
+        if !with_objects.is_empty() {
+            return self.plan_with_identifier_assignment(
+                assignment,
+                identifier,
+                reference,
+                with_objects,
+                inferred_name,
+                layout,
+                tree_layout,
+                constants,
+                flow,
+                work,
+            );
+        }
+        self.plan_lowered_identifier_assignment(
+            assignment,
+            identifier,
+            reference,
+            inferred_name,
+            flow,
+            work,
+        )
+    }
+
+    fn plan_lowered_identifier_assignment<'expression>(
+        &self,
+        assignment: &'expression AssignmentExpression<'arena>,
+        identifier: &'expression IdentifierReference<'arena>,
+        reference: LoweredReference,
+        inferred_name: Option<PlannedInstruction>,
+        flow: &mut PlannedControlFlow,
+        work: &mut Vec<ExpressionWork<'expression, 'arena>>,
+    ) -> Result<(), LeafCompilationError> {
         let (binding, frame_slot) = match reference {
             LoweredReference::Frame { binding, slot, .. } => (binding, slot),
-            LoweredReference::RealmGlobal { slot, .. } => {
+            LoweredReference::RealmGlobal { slot, binding, .. } => {
                 return Self::plan_realm_global_assignment(
                     assignment,
                     slot,
+                    binding,
                     inferred_name,
                     flow,
                     work,
@@ -4321,6 +4508,315 @@ impl<'compiler, 'unit, 'arena, 'scope> ExpressionPlanner<'compiler, 'unit, 'aren
                     frame_slot,
                     identifier.span,
                 )?));
+            }
+        }
+        Ok(())
+    }
+
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "with assignment preserves the resolved reference, fallback binding, labels, and reverse expression schedule explicitly"
+    )]
+    fn plan_with_identifier_assignment<'expression>(
+        &self,
+        assignment: &'expression AssignmentExpression<'arena>,
+        identifier: &'expression IdentifierReference<'arena>,
+        reference: LoweredReference,
+        with_objects: Vec<WithObjectSource>,
+        inferred_name: Option<PlannedInstruction>,
+        layout: &FrameLayout,
+        tree_layout: &FunctionTreeLayout,
+        constants: &CompiledConstantPool,
+        flow: &mut PlannedControlFlow,
+        work: &mut Vec<ExpressionWork<'expression, 'arena>>,
+    ) -> Result<(), LeafCompilationError> {
+        if assignment.operator == AssignmentOperator::Assign {
+            return self.plan_with_simple_identifier_assignment(
+                assignment,
+                identifier,
+                reference,
+                &with_objects,
+                inferred_name,
+                layout,
+                tree_layout,
+                constants,
+                flow,
+                work,
+            );
+        }
+        let with_reference = flow.new_label(identifier.span)?;
+        let done = flow.new_label(assignment.span)?;
+        let atom = constants.property_atom_index(identifier.span)?;
+        let branch_opcode = if assignment.operator == AssignmentOperator::Assign {
+            FinalOpcode::WithMakeRef
+        } else {
+            FinalOpcode::WithGetRef
+        };
+        for source in with_objects {
+            flow.emit(self.plan_with_object_read(source, layout, tree_layout, identifier.span)?)?;
+            flow.with_branch(branch_opcode, atom, 1, &with_reference, identifier.span)?;
+        }
+
+        work.push(ExpressionWork::Bind(done.clone()));
+        Self::push_with_reference_assignment(
+            assignment,
+            identifier,
+            inferred_name,
+            &done,
+            flow,
+            work,
+        )?;
+        if branch_opcode == FinalOpcode::WithGetRef {
+            work.push(ExpressionWork::Emit(PlannedInstruction::new(
+                FinalOpcode::Swap,
+                Operands::None,
+                identifier.span,
+            )));
+            work.push(ExpressionWork::Emit(PlannedInstruction::new(
+                FinalOpcode::PushAtomValue,
+                Operands::Atom(atom),
+                identifier.span,
+            )));
+        }
+        work.push(ExpressionWork::Bind(with_reference));
+        work.push(ExpressionWork::Branch {
+            kind: BranchKind::Goto,
+            target: done,
+            span: assignment.span,
+        });
+        self.plan_lowered_identifier_assignment(
+            assignment,
+            identifier,
+            reference,
+            inferred_name,
+            flow,
+            work,
+        )
+    }
+
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "the unified with assignment carries its resolved reference, static fallback, source initializer, and control-flow authority explicitly"
+    )]
+    fn plan_with_simple_identifier_assignment<'expression>(
+        &self,
+        assignment: &'expression AssignmentExpression<'arena>,
+        identifier: &'expression IdentifierReference<'arena>,
+        reference: LoweredReference,
+        with_objects: &[WithObjectSource],
+        inferred_name: Option<PlannedInstruction>,
+        layout: &FrameLayout,
+        tree_layout: &FunctionTreeLayout,
+        constants: &CompiledConstantPool,
+        flow: &mut PlannedControlFlow,
+        work: &mut Vec<ExpressionWork<'expression, 'arena>>,
+    ) -> Result<(), LeafCompilationError> {
+        let atom = constants.property_atom_index(identifier.span)?;
+        self.plan_with_make_reference_selection(
+            with_objects,
+            atom,
+            layout,
+            tree_layout,
+            identifier.span,
+            flow,
+        )?;
+        let fallback = flow.new_label(identifier.span)?;
+        let done = flow.new_label(assignment.span)?;
+
+        work.push(ExpressionWork::Bind(done.clone()));
+        self.push_lowered_reference_write(reference, true, identifier.span, work)?;
+        work.push(ExpressionWork::Emit(PlannedInstruction::new(
+            FinalOpcode::Drop,
+            Operands::None,
+            identifier.span,
+        )));
+        work.push(ExpressionWork::Emit(PlannedInstruction::new(
+            FinalOpcode::Swap,
+            Operands::None,
+            identifier.span,
+        )));
+        work.push(ExpressionWork::Emit(PlannedInstruction::new(
+            FinalOpcode::Drop,
+            Operands::None,
+            identifier.span,
+        )));
+        work.push(ExpressionWork::Emit(PlannedInstruction::new(
+            FinalOpcode::Swap,
+            Operands::None,
+            identifier.span,
+        )));
+        work.push(ExpressionWork::Emit(PlannedInstruction::new(
+            FinalOpcode::Drop,
+            Operands::None,
+            identifier.span,
+        )));
+        work.push(ExpressionWork::Bind(fallback.clone()));
+        work.push(ExpressionWork::Branch {
+            kind: BranchKind::Goto,
+            target: done,
+            span: assignment.span,
+        });
+        work.push(ExpressionWork::Emit(PlannedInstruction::new(
+            FinalOpcode::PutRefValue,
+            Operands::None,
+            identifier.span,
+        )));
+        work.push(ExpressionWork::Emit(PlannedInstruction::new(
+            FinalOpcode::Insert3,
+            Operands::None,
+            assignment.span,
+        )));
+        work.push(ExpressionWork::Emit(PlannedInstruction::new(
+            FinalOpcode::Drop,
+            Operands::None,
+            identifier.span,
+        )));
+        work.push(ExpressionWork::Branch {
+            kind: BranchKind::IfFalse,
+            target: fallback,
+            span: assignment.span,
+        });
+        work.push(ExpressionWork::Emit(PlannedInstruction::new(
+            FinalOpcode::Dup,
+            Operands::None,
+            identifier.span,
+        )));
+        work.push(ExpressionWork::Emit(PlannedInstruction::new(
+            FinalOpcode::Swap,
+            Operands::None,
+            identifier.span,
+        )));
+        if let Some(set_name) = inferred_name {
+            work.push(ExpressionWork::Emit(set_name));
+        }
+        work.push(ExpressionWork::Visit(&assignment.right));
+        Ok(())
+    }
+
+    #[allow(
+        clippy::too_many_lines,
+        reason = "compound and logical with-reference stores keep their exact stack permutations and short-circuit branches together"
+    )]
+    fn push_with_reference_assignment<'expression>(
+        assignment: &'expression AssignmentExpression<'arena>,
+        identifier: &'expression IdentifierReference<'arena>,
+        inferred_name: Option<PlannedInstruction>,
+        done: &CompilerLabel,
+        flow: &mut PlannedControlFlow,
+        work: &mut Vec<ExpressionWork<'expression, 'arena>>,
+    ) -> Result<(), LeafCompilationError> {
+        match assignment.operator {
+            AssignmentOperator::Assign => {
+                work.push(ExpressionWork::Emit(PlannedInstruction::new(
+                    FinalOpcode::PutRefValue,
+                    Operands::None,
+                    identifier.span,
+                )));
+                work.push(ExpressionWork::Emit(PlannedInstruction::new(
+                    FinalOpcode::Insert3,
+                    Operands::None,
+                    assignment.span,
+                )));
+                if let Some(set_name) = inferred_name {
+                    work.push(ExpressionWork::Emit(set_name));
+                }
+                work.push(ExpressionWork::Visit(&assignment.right));
+            }
+            AssignmentOperator::LogicalOr
+            | AssignmentOperator::LogicalAnd
+            | AssignmentOperator::LogicalNullish => {
+                let short = flow.new_label(assignment.span)?;
+                let branch_kind = if assignment.operator == AssignmentOperator::LogicalOr {
+                    BranchKind::IfTrue
+                } else {
+                    BranchKind::IfFalse
+                };
+                work.push(ExpressionWork::Emit(PlannedInstruction::new(
+                    FinalOpcode::Drop,
+                    Operands::None,
+                    identifier.span,
+                )));
+                work.push(ExpressionWork::Emit(PlannedInstruction::new(
+                    FinalOpcode::Swap,
+                    Operands::None,
+                    identifier.span,
+                )));
+                work.push(ExpressionWork::Emit(PlannedInstruction::new(
+                    FinalOpcode::Drop,
+                    Operands::None,
+                    identifier.span,
+                )));
+                work.push(ExpressionWork::Emit(PlannedInstruction::new(
+                    FinalOpcode::Swap,
+                    Operands::None,
+                    identifier.span,
+                )));
+                work.push(ExpressionWork::Bind(short.clone()));
+                work.push(ExpressionWork::Branch {
+                    kind: BranchKind::Goto,
+                    target: done.clone(),
+                    span: assignment.span,
+                });
+                work.push(ExpressionWork::Emit(PlannedInstruction::new(
+                    FinalOpcode::PutRefValue,
+                    Operands::None,
+                    identifier.span,
+                )));
+                work.push(ExpressionWork::Emit(PlannedInstruction::new(
+                    FinalOpcode::Insert3,
+                    Operands::None,
+                    assignment.span,
+                )));
+                if let Some(set_name) = inferred_name {
+                    work.push(ExpressionWork::Emit(set_name));
+                }
+                work.push(ExpressionWork::Visit(&assignment.right));
+                work.push(ExpressionWork::Emit(PlannedInstruction::new(
+                    FinalOpcode::Drop,
+                    Operands::None,
+                    identifier.span,
+                )));
+                work.push(ExpressionWork::Branch {
+                    kind: branch_kind,
+                    target: short,
+                    span: assignment.span,
+                });
+                if assignment.operator == AssignmentOperator::LogicalNullish {
+                    work.push(ExpressionWork::Emit(PlannedInstruction::new(
+                        FinalOpcode::IsUndefinedOrNull,
+                        Operands::None,
+                        identifier.span,
+                    )));
+                }
+                work.push(ExpressionWork::Emit(PlannedInstruction::new(
+                    FinalOpcode::Dup,
+                    Operands::None,
+                    identifier.span,
+                )));
+            }
+            operator => {
+                let binary = operator.to_binary_operator().ok_or(
+                    LeafCompilationError::SemanticInvariant {
+                        invariant: "nonlogical compound assignment has a binary operator",
+                        span: Some(assignment.span),
+                    },
+                )?;
+                work.push(ExpressionWork::Emit(PlannedInstruction::new(
+                    FinalOpcode::PutRefValue,
+                    Operands::None,
+                    identifier.span,
+                )));
+                work.push(ExpressionWork::Emit(PlannedInstruction::new(
+                    FinalOpcode::Insert3,
+                    Operands::None,
+                    assignment.span,
+                )));
+                work.push(ExpressionWork::Emit(PlannedInstruction::new(
+                    binary_opcode(binary),
+                    Operands::None,
+                    assignment.span,
+                )));
+                work.push(ExpressionWork::Visit(&assignment.right));
             }
         }
         Ok(())
@@ -5247,6 +5743,7 @@ impl<'compiler, 'unit, 'arena, 'scope> ExpressionPlanner<'compiler, 'unit, 'aren
         layout: &FrameLayout,
         tree_layout: &FunctionTreeLayout,
         constants: &CompiledConstantPool,
+        flow: &mut PlannedControlFlow,
         work: &mut Vec<ExpressionWork<'expression, 'arena>>,
     ) -> Result<(), LeafCompilationError> {
         if let SimpleAssignmentTarget::PrivateFieldExpression(member) = &update.argument {
@@ -5274,12 +5771,40 @@ impl<'compiler, 'unit, 'arena, 'scope> ExpressionPlanner<'compiler, 'unit, 'aren
             tree_layout,
         )?;
         self.validate_lowered_mutation_reference(reference, true, identifier.span)?;
+        let with_objects = self.with_object_sources_for_reference(
+            identifier.reference_id.get(),
+            identifier.span,
+            tree_layout,
+        )?;
+        if !with_objects.is_empty() {
+            return self.plan_with_identifier_update(
+                update,
+                identifier,
+                reference,
+                with_objects,
+                layout,
+                tree_layout,
+                constants,
+                flow,
+                work,
+            );
+        }
+        self.plan_lowered_identifier_update(update, identifier, reference, work)
+    }
+
+    fn plan_lowered_identifier_update<'expression>(
+        &self,
+        update: &'expression UpdateExpression<'arena>,
+        identifier: &'expression IdentifierReference<'arena>,
+        reference: LoweredReference,
+        work: &mut Vec<ExpressionWork<'expression, 'arena>>,
+    ) -> Result<(), LeafCompilationError> {
         let (binding, frame_slot) = match reference {
             LoweredReference::Frame { binding, slot, .. } => (binding, slot),
-            LoweredReference::RealmGlobal { slot, .. } => {
-                work.push(ExpressionWork::Emit(PlannedInstruction::new(
-                    FinalOpcode::PutVar,
-                    Operands::VarRef(slot),
+            LoweredReference::RealmGlobal { slot, binding, .. } => {
+                work.push(ExpressionWork::Emit(plan_external_put(
+                    binding,
+                    slot,
                     identifier.span,
                 )));
                 if update.prefix {
@@ -5294,9 +5819,10 @@ impl<'compiler, 'unit, 'arena, 'scope> ExpressionPlanner<'compiler, 'unit, 'aren
                     Operands::None,
                     update.span,
                 )));
-                work.push(ExpressionWork::Emit(PlannedInstruction::new(
-                    FinalOpcode::GetVar,
-                    Operands::VarRef(slot),
+                work.push(ExpressionWork::Emit(plan_external_read(
+                    binding,
+                    slot,
+                    false,
                     identifier.span,
                 )));
                 return Ok(());
@@ -5315,6 +5841,75 @@ impl<'compiler, 'unit, 'arena, 'scope> ExpressionPlanner<'compiler, 'unit, 'aren
             identifier.span,
         )?));
         Ok(())
+    }
+
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "with update preserves the resolved object reference and the static fallback schedule explicitly"
+    )]
+    fn plan_with_identifier_update<'expression>(
+        &self,
+        update: &'expression UpdateExpression<'arena>,
+        identifier: &'expression IdentifierReference<'arena>,
+        reference: LoweredReference,
+        with_objects: Vec<WithObjectSource>,
+        layout: &FrameLayout,
+        tree_layout: &FunctionTreeLayout,
+        constants: &CompiledConstantPool,
+        flow: &mut PlannedControlFlow,
+        work: &mut Vec<ExpressionWork<'expression, 'arena>>,
+    ) -> Result<(), LeafCompilationError> {
+        let with_reference = flow.new_label(identifier.span)?;
+        let done = flow.new_label(update.span)?;
+        let atom = constants.property_atom_index(identifier.span)?;
+        for source in with_objects {
+            flow.emit(self.plan_with_object_read(source, layout, tree_layout, identifier.span)?)?;
+            flow.with_branch(
+                FinalOpcode::WithGetRef,
+                atom,
+                1,
+                &with_reference,
+                identifier.span,
+            )?;
+        }
+
+        work.push(ExpressionWork::Bind(done.clone()));
+        work.push(ExpressionWork::Emit(PlannedInstruction::new(
+            FinalOpcode::PutRefValue,
+            Operands::None,
+            identifier.span,
+        )));
+        work.push(ExpressionWork::Emit(PlannedInstruction::new(
+            if update.prefix {
+                FinalOpcode::Insert3
+            } else {
+                FinalOpcode::Perm4
+            },
+            Operands::None,
+            update.span,
+        )));
+        work.push(ExpressionWork::Emit(PlannedInstruction::new(
+            update_opcode(update),
+            Operands::None,
+            update.span,
+        )));
+        work.push(ExpressionWork::Emit(PlannedInstruction::new(
+            FinalOpcode::Swap,
+            Operands::None,
+            identifier.span,
+        )));
+        work.push(ExpressionWork::Emit(PlannedInstruction::new(
+            FinalOpcode::PushAtomValue,
+            Operands::Atom(atom),
+            identifier.span,
+        )));
+        work.push(ExpressionWork::Bind(with_reference));
+        work.push(ExpressionWork::Branch {
+            kind: BranchKind::Goto,
+            target: done,
+            span: update.span,
+        });
+        self.plan_lowered_identifier_update(update, identifier, reference, work)
     }
 
     fn plan_unary_expression<'expression>(
@@ -5346,27 +5941,57 @@ impl<'compiler, 'unit, 'arena, 'scope> ExpressionPlanner<'compiler, 'unit, 'aren
                     layout,
                     tree_layout,
                 )?;
-                if let LoweredReference::RealmGlobal { slot, access, .. } = reference {
+                if let LoweredReference::RealmGlobal {
+                    global,
+                    slot: _,
+                    binding,
+                    access,
+                } = reference
+                {
+                    let unresolved_is_undefined =
+                        matches!(binding, CompilerClosureBinding::RealmGlobal(_))
+                            || tree_layout.realm_globals.binding(global).is_some_and(
+                                |descriptor| {
+                                    matches!(
+                                        descriptor.root_source,
+                                        RealmGlobalRootSource::DirectEvalVariable { .. }
+                                    )
+                                },
+                            );
+                    if !unresolved_is_undefined {
+                        return Self::plan_ordinary_unary_expression(unary, constants, work);
+                    }
                     if !access.reads() || access.writes() {
                         return unsupported(
                             UnsupportedLeafFeature::UnsupportedReference,
                             identifier.span,
                         );
                     }
-                    work.push(ExpressionWork::Emit(PlannedInstruction::new(
+                    self.plan_identifier_read(
+                        identifier,
+                        layout,
+                        tree_layout,
+                        constants,
+                        true,
+                        flow,
+                    )?;
+                    flow.emit(PlannedInstruction::new(
                         FinalOpcode::Typeof,
                         Operands::None,
                         unary.span,
-                    )));
-                    work.push(ExpressionWork::Emit(PlannedInstruction::new(
-                        FinalOpcode::GetVarUndef,
-                        Operands::VarRef(slot),
-                        identifier.span,
-                    )));
+                    ))?;
                     return Ok(());
                 }
             }
         }
+        Self::plan_ordinary_unary_expression(unary, constants, work)
+    }
+
+    fn plan_ordinary_unary_expression<'expression>(
+        unary: &'expression UnaryExpression<'arena>,
+        constants: &CompiledConstantPool,
+        work: &mut Vec<ExpressionWork<'expression, 'arena>>,
+    ) -> Result<(), LeafCompilationError> {
         match unary.operator {
             UnaryOperator::UnaryPlus
             | UnaryOperator::UnaryNegation
@@ -5400,7 +6025,7 @@ impl<'compiler, 'unit, 'arena, 'scope> ExpressionPlanner<'compiler, 'unit, 'aren
                 work.push(ExpressionWork::Visit(&unary.argument));
             }
             UnaryOperator::Delete => {
-                self.plan_delete_expression(unary, layout, tree_layout, constants, work)?;
+                Self::plan_delete_expression(unary, constants, work)?;
             }
         }
         Ok(())
@@ -5416,10 +6041,7 @@ impl<'compiler, 'unit, 'arena, 'scope> ExpressionPlanner<'compiler, 'unit, 'aren
     /// Environment Record to observe bindings and configurable properties
     /// installed by earlier Scripts.
     fn plan_delete_expression<'expression>(
-        &self,
         unary: &'expression UnaryExpression<'arena>,
-        layout: &FrameLayout,
-        tree_layout: &FunctionTreeLayout,
         constants: &CompiledConstantPool,
         work: &mut Vec<ExpressionWork<'expression, 'arena>>,
     ) -> Result<(), LeafCompilationError> {
@@ -5459,45 +6081,10 @@ impl<'compiler, 'unit, 'arena, 'scope> ExpressionPlanner<'compiler, 'unit, 'aren
                 Ok(())
             }
             Expression::Identifier(identifier) => {
-                let reference = self.lowered_reference(
-                    identifier.reference_id.get(),
-                    identifier.span,
-                    layout,
-                    tree_layout,
-                )?;
-                let opcode = match reference {
-                    LoweredReference::Frame { .. } => {
-                        PlannedInstruction::new(FinalOpcode::PushFalse, Operands::None, unary.span)
-                    }
-                    LoweredReference::RealmGlobal { global, .. } => {
-                        let binding = tree_layout.realm_globals.binding(global).ok_or(
-                            LeafCompilationError::SemanticInvariant {
-                                invariant: "deleted realm-global binding exists",
-                                span: Some(identifier.span),
-                            },
-                        )?;
-                        if matches!(
-                            binding.policy.kind(),
-                            quickjs_bytecode::CompilerBindingKind::Let
-                                | quickjs_bytecode::CompilerBindingKind::Const
-                        ) {
-                            PlannedInstruction::new(
-                                FinalOpcode::PushFalse,
-                                Operands::None,
-                                unary.span,
-                            )
-                        } else {
-                            PlannedInstruction::new(
-                                FinalOpcode::DeleteVar,
-                                Operands::Atom(constants.metadata_atom_index(
-                                    CompiledMetadataAtomKey::RealmGlobal(global),
-                                )?),
-                                unary.span,
-                            )
-                        }
-                    }
-                };
-                work.push(ExpressionWork::Emit(opcode));
+                work.push(ExpressionWork::IdentifierDelete {
+                    identifier,
+                    delete_span: unary.span,
+                });
                 Ok(())
             }
             _ => {
@@ -5518,6 +6105,97 @@ impl<'compiler, 'unit, 'arena, 'scope> ExpressionPlanner<'compiler, 'unit, 'aren
                 Ok(())
             }
         }
+    }
+
+    fn plan_identifier_delete(
+        &self,
+        identifier: &IdentifierReference<'arena>,
+        delete_span: Span,
+        layout: &FrameLayout,
+        tree_layout: &FunctionTreeLayout,
+        constants: &CompiledConstantPool,
+        flow: &mut PlannedControlFlow,
+    ) -> Result<(), LeafCompilationError> {
+        let fallback = self.plan_identifier_delete_fallback(
+            identifier,
+            delete_span,
+            layout,
+            tree_layout,
+            constants,
+        )?;
+        let with_objects = self.with_object_sources_for_reference(
+            identifier.reference_id.get(),
+            identifier.span,
+            tree_layout,
+        )?;
+        if with_objects.is_empty() {
+            return flow.emit(fallback);
+        }
+        let done = flow.new_label(delete_span)?;
+        let atom = constants.property_atom_index(identifier.span)?;
+        for source in with_objects {
+            flow.emit(self.plan_with_object_read(source, layout, tree_layout, identifier.span)?)?;
+            flow.with_branch(FinalOpcode::WithDeleteVar, atom, 1, &done, delete_span)?;
+        }
+        flow.emit(fallback)?;
+        flow.bind(&done)
+    }
+
+    fn plan_identifier_delete_fallback(
+        &self,
+        identifier: &IdentifierReference<'arena>,
+        delete_span: Span,
+        layout: &FrameLayout,
+        tree_layout: &FunctionTreeLayout,
+        constants: &CompiledConstantPool,
+    ) -> Result<PlannedInstruction, LeafCompilationError> {
+        let reference = self.lowered_reference(
+            identifier.reference_id.get(),
+            identifier.span,
+            layout,
+            tree_layout,
+        )?;
+        let LoweredReference::RealmGlobal {
+            global, binding, ..
+        } = reference
+        else {
+            return Ok(PlannedInstruction::new(
+                FinalOpcode::PushFalse,
+                Operands::None,
+                delete_span,
+            ));
+        };
+        let descriptor = tree_layout.realm_globals.binding(global).ok_or(
+            LeafCompilationError::SemanticInvariant {
+                invariant: "deleted realm-global binding exists",
+                span: Some(identifier.span),
+            },
+        )?;
+        let deletable = match binding {
+            CompilerClosureBinding::Captured(_) => matches!(
+                descriptor.root_source,
+                RealmGlobalRootSource::DirectEvalVariable { .. }
+            ),
+            CompilerClosureBinding::RealmGlobal(_) => !matches!(
+                descriptor.policy.kind(),
+                quickjs_bytecode::CompilerBindingKind::Let
+                    | quickjs_bytecode::CompilerBindingKind::Const
+            ),
+        };
+        if !deletable {
+            return Ok(PlannedInstruction::new(
+                FinalOpcode::PushFalse,
+                Operands::None,
+                delete_span,
+            ));
+        }
+        Ok(PlannedInstruction::new(
+            FinalOpcode::DeleteVar,
+            Operands::Atom(
+                constants.metadata_atom_index(CompiledMetadataAtomKey::RealmGlobal(global))?,
+            ),
+            delete_span,
+        ))
     }
 
     fn plan_conditional_expression<'expression>(

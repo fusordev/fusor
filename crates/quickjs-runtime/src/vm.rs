@@ -37,17 +37,20 @@ use std::{
 use quickjs_bytecode::{
     BytecodePc, CompilerBindingKind, CompilerClosureBinding, CompilerClosureSource,
     CompilerExecutableKind, FinalOpcode, FunctionKind, FunctionTemplateId, InstructionIndex,
-    Operands, SourceByteSpan, VerifiedBytecodeFunction, VerifiedSuccessorKind,
+    Operands, ScopeLink, SourceByteSpan, VerifiedBytecodeFunction, VerifiedSuccessorKind,
 };
 
 #[cfg(test)]
 use crate::runtime::ForInAdvance;
 use crate::{
-    ArrayIndex, BigIntError, Context, DynamicFunctionCompileFailure, DynamicFunctionFamily,
-    EngineFault, ExceptionKind, ExecutionError, Function, HandleError, HandleKind, JsBigInt,
-    JsException, JsNumber, JsStackFrame, JsString, JsStringError, JsValue, MAX_STRING_CODE_UNITS,
-    OrdinaryDynamicFunctionCompiler, OrdinaryDynamicFunctionSource, PredefinedAtom, PropertyKey,
-    PropertyLayout, Runtime, RuntimeError, RuntimeResource,
+    ArrayIndex, BigIntError, Context, DirectEvalCallerBinding, DirectEvalCallerBindingLocation,
+    DirectEvalCallerBindingScope, DirectEvalCompileRequest, DirectEvalVariableEnvironment,
+    DynamicFunctionCompileFailure, DynamicFunctionFamily, EngineFault, ExceptionKind,
+    ExecutionError, Function, GlobalDeclarationRejectionKind, HandleError, HandleKind,
+    IndirectEvalCompileRequest, JsBigInt, JsException, JsNumber, JsStackFrame, JsString,
+    JsStringError, JsValue, MAX_STRING_CODE_UNITS, OrdinaryDynamicFunctionCompiler,
+    OrdinaryDynamicFunctionSource, PredefinedAtom, PropertyKey, PropertyLayout, Runtime,
+    RuntimeError, RuntimeResource,
     conversion::{
         MAX_SAFE_INTEGER, number_to_index, number_to_int8, number_to_int16, number_to_int32,
         number_to_integer_or_infinity, number_to_length, number_to_uint8, number_to_uint16,
@@ -69,7 +72,8 @@ use crate::{
         ArrayLengthWriteOutcome, ArrayMutator, ArrayReduction, ArraySearch, ArraySort, ArrayStatic,
         AtomicsMethod, BindingCell, BoundFunction, BytecodeFunction, CollectionRoot,
         DataViewElementType, DataViewPrototypeMethod, DatePrototypeMethod, DateStaticMethod,
-        EnvironmentBinding, FinalizationRegistryMethod, FrameBindingAddress,
+        EnvironmentBinding, EvalBindingShadow, EvalVariableBinding, EvalVariableEnvironment,
+        EvalVariableEnvironmentKind, FinalizationRegistryMethod, FrameBindingAddress,
         FunctionImplementation, GlobalNumericFunction, HeapFunction, InstalledCode,
         InstalledConstant, InstalledRoot, InstalledTemplate, IntlCollatorPrototypeMethod,
         IntlDateTimeFormatPrototypeMethod, IntlDisplayNamesPrototypeMethod,
@@ -82,18 +86,19 @@ use crate::{
         PromiseCombinatorShared, PromiseFinallyFunction, PromiseFinallyThunkKind, PromiseJob,
         PromiseResolvingFunction, PromiseResolvingKind, PromiseStatic, RealmGlobalBindingState,
         ReflectMethod, RegExpFlag, RegExpSymbolMethod, SetMethod, SetPrototypeOutcome,
-        StringArgument, StringMethod, TemporalDurationPrototypeMethod,
-        TemporalDurationStaticMethod, TemporalInstantPrototypeMethod, TemporalInstantStaticMethod,
-        TemporalNowMethod, TemporalPlainDatePrototypeMethod, TemporalPlainDateStaticMethod,
+        SharedEvalVariableEnvironment, StringArgument, StringMethod,
+        TemporalDurationPrototypeMethod, TemporalDurationStaticMethod,
+        TemporalInstantPrototypeMethod, TemporalInstantStaticMethod, TemporalNowMethod,
+        TemporalPlainDatePrototypeMethod, TemporalPlainDateStaticMethod,
         TemporalPlainDateTimePrototypeMethod, TemporalPlainDateTimeStaticMethod,
         TemporalPlainMonthDayPrototypeMethod, TemporalPlainMonthDayStaticMethod,
         TemporalPlainTimePrototypeMethod, TemporalPlainTimeStaticMethod,
         TemporalPlainYearMonthPrototypeMethod, TemporalPlainYearMonthStaticMethod,
         TypedArrayElementValue, TypedArrayOwnProperty, TypedArrayPropertyKey,
-        TypedArrayPrototypeMethod, TypedArrayStoreOutcome, TypedArrayView, UriFunction,
-        WeakMapMethod, WeakSetMethod, array_length_from_number, check_execution_limit,
-        global_declaration_error, typed_array_element_byte_index, typed_array_read_element,
-        typed_array_write_element, usize_to_u64,
+        TypedArrayPrototypeMethod, TypedArrayStoreOutcome, TypedArrayView, Uint8ArrayMethod,
+        UriFunction, WeakMapMethod, WeakSetMethod, array_length_from_number, check_execution_limit,
+        global_declaration_error, runtime_string, typed_array_element_byte_index,
+        typed_array_read_element, typed_array_write_element, usize_to_u64,
     },
     shared_array_buffer::{
         AtomicsWaiterState, AtomicsWakeResult, BlockingWaiter, SharedDataBlock, SharedWaiter,
@@ -157,9 +162,11 @@ mod string_replace;
 mod string_split;
 mod temporal;
 mod typed_array;
+mod uint8_array;
 mod uri;
 mod weak_collections;
 mod weak_references;
+mod with_environment;
 
 pub(crate) use array_from_async::ArrayFromAsyncRecord;
 use async_function::{begin_async_await, suspend_async_function};
@@ -179,7 +186,8 @@ use {
     locale_string::*, map::*, math::*, math_sum_precise::*, native::*, object_intrinsics::*,
     promise::*, promise_combinators::*, properties::*, proxy::*, reflect::*, regexp::*, set::*,
     stack::*, string_methods::*, string_raw::*, string_replace::*, string_split::*, temporal::*,
-    typed_array::*, uri::*, weak_collections::*, weak_references::*,
+    typed_array::*, uint8_array::*, uri::*, weak_collections::*, weak_references::*,
+    with_environment::*,
 };
 
 /// Inclusive per-call interpreter limits.
@@ -280,6 +288,17 @@ impl ExecutionBudget {
         &mut self,
         source: &OrdinaryDynamicFunctionSource,
     ) -> Result<(), ExecutionError> {
+        self.charge_dynamic_source_units(dynamic_function_source_code_units(source))
+    }
+
+    fn charge_indirect_eval_compilation(
+        &mut self,
+        source: &JsString,
+    ) -> Result<(), ExecutionError> {
+        self.charge_dynamic_source_units(u64::from(source.len()))
+    }
+
+    fn charge_dynamic_source_units(&mut self, additional: u64) -> Result<(), ExecutionError> {
         let compilations = self.compilations.saturating_add(1);
         if compilations > self.compilation_limit {
             return Err(ExecutionError::LimitExceeded {
@@ -288,9 +307,7 @@ impl ExecutionBudget {
                 observed: compilations,
             });
         }
-        let source_code_units = self
-            .source_code_units
-            .saturating_add(dynamic_function_source_code_units(source));
+        let source_code_units = self.source_code_units.saturating_add(additional);
         if source_code_units > self.source_code_unit_limit {
             return Err(ExecutionError::LimitExceeded {
                 resource: RuntimeResource::DynamicSourceCodeUnits,
@@ -346,7 +363,14 @@ pub(crate) struct Frame {
     code: InstalledCodeId,
     template: FunctionTemplateId,
     strict: bool,
+    direct_eval_variable_environment: DirectEvalVariableEnvironment,
+    eval_environment: Option<SharedEvalVariableEnvironment>,
+    eval_declaration_environment: Option<SharedEvalVariableEnvironment>,
+    body_eval_environment: Option<SharedEvalVariableEnvironment>,
+    inherited_eval_environment: Option<SharedEvalVariableEnvironment>,
+    parameter_eval_boundary: Option<SharedEvalVariableEnvironment>,
     receiver: StoredValue,
+    eval_in_function: bool,
     new_target: Option<FunctionId>,
     instruction: InstructionIndex,
     return_to: Option<CallReturn>,
@@ -354,6 +378,8 @@ pub(crate) struct Frame {
     native_returns: Vec<NativeContinuation>,
     transient_cleanup_pending: bool,
     constructor_state: ConstructorState,
+    derived_constructor: Option<FunctionId>,
+    derived_this_cell: Option<BindingCellId>,
     native_caller: Option<SyntheticNativeFrame>,
     generator_resume: Option<ObjectId>,
     generator_result: Option<ObjectId>,
@@ -367,6 +393,7 @@ pub(crate) struct Frame {
     own_cells: Vec<Option<BindingCellId>>,
     own_cell_bindings: Vec<FrameBindingAddress>,
     environment: Vec<EnvironmentBinding>,
+    environment_eval_shadows: Vec<Option<EvalBindingShadow>>,
     stack: Vec<OperandStackEntry>,
 }
 
@@ -450,9 +477,15 @@ impl SyntheticNativeFrame {
 struct DynamicFunctionReturn {
     root: InstalledRoot,
     realm: RealmId,
-    family: DynamicFunctionFamily,
+    kind: DynamicRootKind,
     construction: Option<FunctionId>,
     origin: Option<JsStackFrame>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum DynamicRootKind {
+    Function(DynamicFunctionFamily),
+    IndirectEval,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -784,6 +817,7 @@ enum NativeContinuation {
     TypedArrayPrototypeSlice(Box<TypedArrayPrototypeSliceState>),
     TypedArrayPrototypeMap(Box<TypedArrayPrototypeMapState>),
     TypedArrayPrototypeFilter(Box<TypedArrayPrototypeFilterState>),
+    Uint8ArrayBase64(Box<Uint8ArrayBase64Continuation>),
     DateToJson(DateToJsonContinuation),
     TemporalPlainDateBag(Box<TemporalPlainDateBagContinuation>),
     TemporalPlainMonthDayBag(Box<TemporalPlainMonthDayBagContinuation>),
@@ -840,6 +874,12 @@ enum NativeContinuation {
     ErrorConstructor(ErrorConstructorContinuation),
     ErrorToString(ErrorToStringContinuation),
     IteratorFrom(IteratorFromContinuation),
+    IteratorConcatCreation(IteratorConcatCreationContinuation),
+    IteratorZipCreation(Box<IteratorZipCreationContinuation>),
+    IteratorZipNext(IteratorZipNextContinuation),
+    IteratorZipClose(Box<IteratorZipCloseContinuation>),
+    IteratorConsumer(IteratorConsumerContinuation),
+    IteratorDispose(IteratorDisposeContinuation),
     IteratorHelperCreation(IteratorHelperCreationContinuation),
     IteratorToArray(IteratorToArrayContinuation),
     IteratorHelperNext(IteratorHelperNextContinuation),
@@ -909,6 +949,7 @@ enum NativeContinuation {
     InstanceOf(InstanceOfContinuation),
     Promise(PromiseContinuation),
     PromiseCombinator(Box<PromiseCombinatorContinuation>),
+    WithGet(Box<WithGetContinuation>),
     ProxyGet(Box<ProxyGetContinuation>),
     ProxyCall(Box<ProxyCallContinuation>),
     ProxyBoolean(Box<ProxyBooleanContinuation>),
@@ -967,6 +1008,7 @@ impl NativeContinuation {
             Self::TypedArrayPrototypeSlice(_) => TypedArrayPrototypeSliceState::retained_values(),
             Self::TypedArrayPrototypeMap(_) => TypedArrayPrototypeMapState::retained_values(),
             Self::TypedArrayPrototypeFilter(state) => state.retained_values(),
+            Self::Uint8ArrayBase64(state) => state.retained_values(),
             Self::DateToJson(_) => DateToJsonContinuation::retained_values(),
             Self::TemporalPlainDateBag(_) => TemporalPlainDateBagContinuation::retained_values(),
             Self::TemporalPlainMonthDayBag(_) => {
@@ -1091,10 +1133,16 @@ impl NativeContinuation {
             Self::ErrorConstructor(state) => state.retained_values(),
             Self::ErrorToString(state) => state.retained_values(),
             Self::IteratorFrom(state) => state.retained_values(),
+            Self::IteratorConcatCreation(state) => state.retained_values(),
+            Self::IteratorZipCreation(state) => state.retained_values(),
+            Self::IteratorZipNext(state) => state.retained_values(),
+            Self::IteratorZipClose(state) => state.retained_values(),
+            Self::IteratorConsumer(state) => state.retained_values(),
+            Self::IteratorDispose(_) => IteratorDisposeContinuation::retained_values(),
             Self::IteratorHelperCreation(state) => state.retained_values(),
             Self::IteratorToArray(state) => state.retained_values(),
             Self::IteratorHelperNext(state) => state.retained_values(),
-            Self::IteratorHelperReturn(_) => IteratorHelperReturnContinuation::retained_values(),
+            Self::IteratorHelperReturn(state) => state.retained_values(),
             Self::IteratorWrapperReturn(_) => IteratorWrapperReturnContinuation::retained_values(),
             Self::IteratorPrototypeSetter(_) => {
                 IteratorPrototypeSetterContinuation::retained_values()
@@ -1166,6 +1214,7 @@ impl NativeContinuation {
             Self::InstanceOf(state) => state.retained_values(),
             Self::Promise(state) => state.retained_values(),
             Self::PromiseCombinator(state) => state.retained_values(),
+            Self::WithGet(state) => state.retained_values(),
             Self::ProxyGet(state) => state.retained_values(),
             Self::ProxyCall(state) => state.retained_values(),
             Self::ProxyBoolean(state) => state.retained_values(),
@@ -1198,12 +1247,17 @@ impl NativeContinuation {
                 | Self::ArrayFromAsync(_)
                 | Self::PromiseCombinator(_)
                 | Self::IteratorHelperNext(_)
+                | Self::IteratorHelperReturn(_)
                 | Self::IteratorAppend(_)
                 | Self::IteratorClose(_)
+                | Self::IteratorZipCreation(_)
+                | Self::IteratorZipNext(_)
+                | Self::IteratorZipClose(_)
                 | Self::AsyncFromSync(_)
                 | Self::AsyncFromSyncClose(_)
                 | Self::AsyncGeneratorReturnAwait { .. }
-        ) || matches!(self, Self::Promise(state) if state.handles_abrupt())
+        ) || matches!(self, Self::IteratorConsumer(state) if state.handles_abrupt())
+            || matches!(self, Self::Promise(state) if state.handles_abrupt())
             || matches!(self, Self::RegExp(state) if state.handles_abrupt())
             || matches!(
                 self,
@@ -3598,6 +3652,7 @@ fn trace_native_continuation_roots(
         NativeContinuation::TypedArrayPrototypeSlice(state) => state.trace_roots(mark),
         NativeContinuation::TypedArrayPrototypeMap(state) => state.trace_roots(mark),
         NativeContinuation::TypedArrayPrototypeFilter(state) => state.trace_roots(mark),
+        NativeContinuation::Uint8ArrayBase64(state) => state.trace_roots(mark),
         NativeContinuation::DateToJson(state) => state.trace_roots(mark),
         NativeContinuation::TemporalPlainDateBag(state) => state.trace_roots(mark),
         NativeContinuation::TemporalPlainMonthDayBag(state) => state.trace_roots(mark),
@@ -3734,6 +3789,12 @@ fn trace_native_continuation_roots(
         NativeContinuation::ErrorConstructor(state) => state.trace_roots(mark),
         NativeContinuation::ErrorToString(state) => state.trace_roots(mark),
         NativeContinuation::IteratorFrom(state) => state.trace_roots(mark),
+        NativeContinuation::IteratorConcatCreation(state) => state.trace_roots(mark),
+        NativeContinuation::IteratorZipCreation(state) => state.trace_roots(mark),
+        NativeContinuation::IteratorZipNext(state) => state.trace_roots(mark),
+        NativeContinuation::IteratorZipClose(state) => state.trace_roots(mark),
+        NativeContinuation::IteratorConsumer(state) => state.trace_roots(mark),
+        NativeContinuation::IteratorDispose(state) => state.trace_roots(mark),
         NativeContinuation::IteratorHelperCreation(state) => state.trace_roots(mark),
         NativeContinuation::IteratorToArray(state) => state.trace_roots(mark),
         NativeContinuation::IteratorHelperNext(state) => state.trace_roots(mark),
@@ -3835,6 +3896,7 @@ fn trace_native_continuation_roots(
         }
         NativeContinuation::Promise(state) => state.trace_roots(mark),
         NativeContinuation::PromiseCombinator(state) => state.trace_roots(mark),
+        NativeContinuation::WithGet(state) => state.trace_roots(mark),
         NativeContinuation::ProxyGet(state) => {
             mark(CollectionRoot::Heap(state.proxy));
             mark(CollectionRoot::Heap(state.target));
@@ -3975,6 +4037,12 @@ pub(crate) fn trace_frame_roots(frame: &Frame, mark: &mut dyn FnMut(CollectionRo
     if let Some(new_target) = frame.new_target {
         mark(CollectionRoot::Heap(HeapReference::Function(new_target)));
     }
+    if let Some(constructor) = frame.derived_constructor {
+        mark(CollectionRoot::Heap(HeapReference::Function(constructor)));
+    }
+    if let Some(cell) = frame.derived_this_cell {
+        mark(CollectionRoot::BindingCell(cell));
+    }
     if let Some(arguments) = &frame.arguments_snapshot {
         for value in arguments {
             trace_stored_value_root(value, mark);
@@ -3990,6 +4058,16 @@ pub(crate) fn trace_frame_roots(frame: &Frame, mark: &mut dyn FnMut(CollectionRo
         if let EnvironmentBinding::Captured(cell) = binding {
             mark(CollectionRoot::BindingCell(*cell));
         }
+    }
+    if let Some(environment) = &frame.eval_environment {
+        EvalVariableEnvironment::trace_cells(environment, |cell| {
+            mark(CollectionRoot::BindingCell(cell));
+        });
+    }
+    if let Some(environment) = &frame.body_eval_environment {
+        EvalVariableEnvironment::trace_cells(environment, |cell| {
+            mark(CollectionRoot::BindingCell(cell));
+        });
     }
     for entry in &frame.stack {
         if let OperandStackEntry::JavaScript(value) = entry {
@@ -4124,12 +4202,30 @@ struct FramePlan {
     stack_capacity: usize,
     reserved_values: u64,
     arguments_snapshot_use: ArgumentsSnapshotUse,
-    construction: bool,
+    entry: FrameEntryKind,
+    eval_in_function: bool,
     constructor_profile: ConstructorProfile,
     strict: bool,
     receiver_access: ReceiverAccess,
     asynchronous: bool,
     instruction: InstructionIndex,
+}
+
+#[derive(Clone, Copy)]
+enum FrameEntryKind {
+    Call,
+    Construct,
+    ContextualNewTarget,
+}
+
+impl FrameEntryKind {
+    const fn is_construction(self) -> bool {
+        matches!(self, Self::Construct)
+    }
+
+    const fn has_new_target(self) -> bool {
+        matches!(self, Self::Construct | Self::ContextualNewTarget)
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -4241,6 +4337,9 @@ enum CallInputSource {
         argument_count: usize,
         kind: CallKind,
     },
+    EvalReferenceFrame {
+        argument_count: usize,
+    },
     Prepared(CallInputs),
 }
 
@@ -4248,13 +4347,16 @@ impl CallInputSource {
     const fn is_construction(&self) -> bool {
         match self {
             Self::Frame { kind, .. } => matches!(kind, CallKind::Constructor),
+            Self::EvalReferenceFrame { .. } => false,
             Self::Prepared(inputs) => inputs.new_target.is_some(),
         }
     }
 
     fn argument_count(&self) -> usize {
         match self {
-            Self::Frame { argument_count, .. } => *argument_count,
+            Self::Frame { argument_count, .. } | Self::EvalReferenceFrame { argument_count } => {
+                *argument_count
+            }
             Self::Prepared(inputs) => inputs.arguments.remaining().len(),
         }
     }
@@ -4265,6 +4367,14 @@ enum ReturnDisposition {
     Push,
     Discard,
     InitializeDerivedThis,
+    WithBinding {
+        taken: InstructionIndex,
+        not_taken: InstructionIndex,
+    },
+    WithReference {
+        taken: InstructionIndex,
+        not_taken: InstructionIndex,
+    },
 }
 
 #[derive(Clone, Copy)]
@@ -4294,6 +4404,20 @@ impl CallReturn {
             disposition: ReturnDisposition::InitializeDerivedThis,
         }
     }
+
+    const fn with_binding(taken: InstructionIndex, not_taken: InstructionIndex) -> Self {
+        Self {
+            instruction: not_taken,
+            disposition: ReturnDisposition::WithBinding { taken, not_taken },
+        }
+    }
+
+    const fn with_reference(taken: InstructionIndex, not_taken: InstructionIndex) -> Self {
+        Self {
+            instruction: not_taken,
+            disposition: ReturnDisposition::WithReference { taken, not_taken },
+        }
+    }
 }
 
 #[allow(
@@ -4302,6 +4426,13 @@ impl CallReturn {
 )]
 enum Step {
     Continue,
+    DirectEval {
+        function: FunctionId,
+        inputs: CallInputSource,
+        scope_index: u16,
+        return_to: CallReturn,
+        source_pc: BytecodePc,
+    },
     Call {
         function: FunctionId,
         inputs: CallInputSource,
@@ -4374,6 +4505,37 @@ struct PendingOwnCell {
     own_index: usize,
     address: FrameBindingAddress,
     value: SlotValue,
+}
+
+struct PendingDirectEvalCell {
+    external_index: usize,
+    location: DirectEvalCallerBindingLocation,
+    own_index: Option<usize>,
+    value: SlotValue,
+}
+
+struct PendingDirectEvalVariable {
+    external_index: usize,
+    name: JsString,
+}
+
+struct CreatedDirectEvalCell {
+    location: DirectEvalCallerBindingLocation,
+    own_index: Option<usize>,
+    cell: BindingCellId,
+}
+
+struct DirectEvalEnvironment {
+    bindings: Vec<Option<EnvironmentBinding>>,
+    created_cells: Vec<CreatedDirectEvalCell>,
+    created_variable_environment: Option<(SharedEvalVariableEnvironment, usize)>,
+    created_variable_cells: Vec<BindingCellId>,
+}
+
+impl DirectEvalEnvironment {
+    fn bindings(&self) -> &[Option<EnvironmentBinding>] {
+        &self.bindings
+    }
 }
 
 impl Context<'_> {
@@ -4805,7 +4967,7 @@ impl Context<'_> {
             0,
             0,
             supplied_argument_count,
-            false,
+            FrameEntryKind::Call,
         )?;
         let frame = create_frame(
             self.runtime,
@@ -4858,7 +5020,7 @@ impl Context<'_> {
         limits: ExecutionLimits,
         compiler: Option<&Arc<dyn OrdinaryDynamicFunctionCompiler>>,
     ) -> Result<StoredValue, ExecutionError> {
-        let plan = plan_frame(self.runtime, root.function, 0, 0, 0, false)?;
+        let plan = plan_frame(self.runtime, root.function, 0, 0, 0, FrameEntryKind::Call)?;
         let frame = create_frame(
             self.runtime,
             plan,
@@ -5029,6 +5191,89 @@ fn execute_frame_loop(
         let step = execute_one(runtime, frame, execution_budget)?;
         match step {
             Step::Continue => {}
+            Step::DirectEval {
+                function,
+                inputs,
+                scope_index,
+                return_to,
+                source_pc,
+            } => {
+                let inputs = take_call_inputs(
+                    frames.last_mut().ok_or(EngineFault::MissingInstruction {
+                        function: FunctionTemplateId::new(0),
+                        instruction: 0,
+                    })?,
+                    function,
+                    inputs,
+                )?;
+                let mut arguments = inputs.arguments;
+                let argument = arguments.take_first_or_undefined();
+                let StoredValue::String(source) = argument else {
+                    let parent = frames.last_mut().ok_or(EngineFault::MissingInstruction {
+                        function: FunctionTemplateId::new(0),
+                        instruction: 0,
+                    })?;
+                    push_call_result(runtime, parent, argument, return_to)?;
+                    continue;
+                };
+                let caller = frames.last().ok_or(EngineFault::MissingInstruction {
+                    function: FunctionTemplateId::new(0),
+                    instruction: 0,
+                })?;
+                let realm = code(runtime, caller.code)?.realm;
+                let origin = instruction_location(runtime, caller, source_pc)?;
+                let request = direct_eval_compile_request(runtime, caller, source, scope_index)?;
+                let receiver = caller.receiver.duplicate();
+                let active_frames = active_execution_frames(frames);
+                frames
+                    .try_reserve(1)
+                    .map_err(|_| ExecutionError::AllocationFailed {
+                        resource: RuntimeResource::Frames,
+                        additional: 1,
+                    })?;
+                let Some(compiler) = compiler else {
+                    return Err(DynamicFunctionCompileFailure::Engine {
+                        source: Arc::new(DynamicFunctionServiceUnavailable),
+                    }
+                    .into());
+                };
+                match finish_direct_eval(
+                    runtime,
+                    frames.last_mut().ok_or(EngineFault::MissingInstruction {
+                        function: FunctionTemplateId::new(0),
+                        instruction: 0,
+                    })?,
+                    realm,
+                    request,
+                    receiver,
+                    return_to,
+                    origin,
+                    active_frames,
+                    *active_frame_values,
+                    compiler,
+                    execution_budget,
+                ) {
+                    Ok(child) => {
+                        *active_frame_values =
+                            active_frame_values.saturating_add(child.reserved_values);
+                        frames.push(child);
+                    }
+                    Err(
+                        NativeFailure::Abrupt(pending)
+                        | NativeFailure::AbruptAfterTransient(pending),
+                    ) => {
+                        dispatch_pending_exception(
+                            runtime,
+                            frames,
+                            active_frame_values,
+                            pending,
+                            Some(compiler),
+                            execution_budget,
+                        )?;
+                    }
+                    Err(NativeFailure::Execution(error)) => return Err(error),
+                }
+            }
             Step::Call {
                 function,
                 inputs,
@@ -5198,7 +5443,7 @@ fn execute_frame_loop(
                                     function: FunctionTemplateId::new(0),
                                     instruction: 0,
                                 })?;
-                            push_call_result(parent, value, return_to)?;
+                            push_call_result(runtime, parent, value, return_to)?;
                         }
                         Ok(NativeDispatch::Frame(child)) => {
                             *active_frame_values =
@@ -5308,7 +5553,7 @@ fn execute_frame_loop(
                                     function: FunctionTemplateId::new(0),
                                     instruction: 0,
                                 })?;
-                            push_call_result(parent, value, return_to)?;
+                            push_call_result(runtime, parent, value, return_to)?;
                         }
                         Ok(
                             NativeDispatch::Pair(_, _)
@@ -5425,7 +5670,7 @@ fn execute_frame_loop(
                                     function: FunctionTemplateId::new(0),
                                     instruction: 0,
                                 })?;
-                            push_call_result(parent, value, return_to)?;
+                            push_call_result(runtime, parent, value, return_to)?;
                         }
                         Ok(NativeDispatch::Frame(child)) => {
                             *active_frame_values =
@@ -5524,7 +5769,7 @@ fn execute_frame_loop(
                                     function: FunctionTemplateId::new(0),
                                     instruction: 0,
                                 })?;
-                            push_call_result(parent, value, return_to)?;
+                            push_call_result(runtime, parent, value, return_to)?;
                         }
                         Ok(NativeDispatch::Frame(child)) => {
                             *active_frame_values =
@@ -5627,7 +5872,7 @@ fn execute_frame_loop(
                                     function: FunctionTemplateId::new(0),
                                     instruction: 0,
                                 })?;
-                            push_call_result(parent, value, return_to)?;
+                            push_call_result(runtime, parent, value, return_to)?;
                         }
                         Ok(NativeDispatch::Frame(child)) => {
                             *active_frame_values =
@@ -5731,7 +5976,7 @@ fn execute_frame_loop(
                                     function: FunctionTemplateId::new(0),
                                     instruction: 0,
                                 })?;
-                            push_call_result(parent, value, return_to)?;
+                            push_call_result(runtime, parent, value, return_to)?;
                         }
                         Ok(NativeDispatch::Frame(child)) => {
                             *active_frame_values =
@@ -5819,7 +6064,11 @@ fn execute_frame_loop(
                     active_execution_frames(frames),
                     *active_frame_values,
                     supplied_argument_count,
-                    construction,
+                    if construction {
+                        FrameEntryKind::Construct
+                    } else {
+                        FrameEntryKind::Call
+                    },
                 )?;
                 frames
                     .try_reserve(1)
@@ -5958,7 +6207,7 @@ fn execute_frame_loop(
                             function: FunctionTemplateId::new(0),
                             instruction: 0,
                         })?;
-                        push_call_result(parent, value, return_to)?;
+                        push_call_result(runtime, parent, value, return_to)?;
                     }
                     Ok(NativeDispatch::Frame(child)) => {
                         *active_frame_values =
@@ -6043,7 +6292,7 @@ fn execute_frame_loop(
                             function: FunctionTemplateId::new(0),
                             instruction: 0,
                         })?;
-                        push_call_result(parent, value, return_to)?;
+                        push_call_result(runtime, parent, value, return_to)?;
                     }
                     Ok(NativeDispatch::Pair(original, updated)) => {
                         let parent = frames.last_mut().ok_or(EngineFault::MissingInstruction {
@@ -6300,6 +6549,7 @@ fn execute_frame_loop(
                 }
                 if let Some(parent) = frames.last_mut() {
                     push_call_result(
+                        runtime,
                         parent,
                         result,
                         return_to.ok_or(EngineFault::RuntimeInvariant {
@@ -6444,6 +6694,7 @@ fn execute_frame_loop(
                 }
                 if let Some(parent) = frames.last_mut() {
                     push_call_result(
+                        runtime,
                         parent,
                         result,
                         return_to.ok_or(EngineFault::RuntimeInvariant {
@@ -6601,6 +6852,7 @@ fn execute_frame_loop(
                 }
                 if let Some(parent) = frames.last_mut() {
                     push_call_result(
+                        runtime,
                         parent,
                         result,
                         return_to.ok_or(EngineFault::RuntimeInvariant {
@@ -6618,6 +6870,11 @@ fn execute_frame_loop(
                 return Ok(result);
             }
             Step::Return { value, source_pc } => {
+                if let Some(frame) = frames.last_mut()
+                    && frame.derived_this_cell.is_some()
+                {
+                    sync_derived_this(runtime, frame)?;
+                }
                 if let Some(frame) = frames.last()
                     && matches!(
                         frame.constructor_state,
@@ -6916,7 +7173,7 @@ fn execute_frame_loop(
                     let return_to = return_to.ok_or(EngineFault::RuntimeInvariant {
                         message: "nested frame has no caller continuation",
                     })?;
-                    push_call_result(parent, value, return_to)?;
+                    push_call_result(runtime, parent, value, return_to)?;
                     continue;
                 }
                 if return_to.is_some() {
@@ -6973,6 +7230,7 @@ fn finish_async_suspension(
             suspend_async_generator_await(runtime, generator, frame, promise, origin)?;
         if let Some(parent) = frames.last_mut() {
             push_call_result(
+                runtime,
                 parent,
                 result,
                 return_to.ok_or(EngineFault::RuntimeInvariant {
@@ -7007,6 +7265,7 @@ fn finish_async_suspension(
     }
     if let Some(parent) = frames.last_mut() {
         push_call_result(
+            runtime,
             parent,
             result,
             return_to.ok_or(EngineFault::RuntimeInvariant {
@@ -7191,7 +7450,62 @@ fn resume_suspended_native_returns(
     }
 }
 
+fn sync_derived_this(runtime: &Runtime, frame: &mut Frame) -> Result<bool, ExecutionError> {
+    let Some(cell) = frame.derived_this_cell else {
+        return Ok(frame.constructor_state != ConstructorState::DerivedUninitialized);
+    };
+    let value = match &runtime
+        .cells
+        .get(cell)
+        .ok_or(EngineFault::StaleHeapEdge {
+            edge: "derived-this binding",
+            index: cell.index(),
+            generation: cell.generation(),
+        })?
+        .value
+    {
+        SlotValue::Uninitialized => return Ok(false),
+        SlotValue::Value(value) => value.duplicate(),
+    };
+    frame.receiver = value;
+    if frame.constructor_state == ConstructorState::DerivedUninitialized {
+        frame.constructor_state = ConstructorState::DerivedInitialized;
+    }
+    Ok(true)
+}
+
+fn bind_derived_this(
+    runtime: &mut Runtime,
+    frame: &mut Frame,
+    value: &StoredValue,
+) -> Result<bool, ExecutionError> {
+    let Some(cell) = frame.derived_this_cell else {
+        return Err(EngineFault::RuntimeInvariant {
+            message: "verified derived-this initialization has no shared binding",
+        }
+        .into());
+    };
+    let binding = runtime
+        .cells
+        .get_mut(cell)
+        .ok_or(EngineFault::StaleHeapEdge {
+            edge: "derived-this binding",
+            index: cell.index(),
+            generation: cell.generation(),
+        })?;
+    if matches!(binding.value, SlotValue::Value(_)) {
+        return Ok(false);
+    }
+    binding.value = SlotValue::Value(value.duplicate());
+    frame.receiver = value.duplicate();
+    if frame.constructor_state == ConstructorState::DerivedUninitialized {
+        frame.constructor_state = ConstructorState::DerivedInitialized;
+    }
+    Ok(true)
+}
+
 fn push_call_result(
+    runtime: &mut Runtime,
     parent: &mut Frame,
     value: StoredValue,
     return_to: CallReturn,
@@ -7208,12 +7522,6 @@ fn push_call_result(
         }
         ReturnDisposition::Discard => {}
         ReturnDisposition::InitializeDerivedThis => {
-            if parent.constructor_state != ConstructorState::DerivedUninitialized {
-                return Err(EngineFault::RuntimeInvariant {
-                    message: "derived constructor completion reached an invalid parent frame",
-                }
-                .into());
-            }
             if value.heap_reference().is_none() {
                 return Err(EngineFault::RuntimeInvariant {
                     message: "superclass construction completed without an object receiver",
@@ -7226,9 +7534,19 @@ fn push_call_result(
                 }
                 .into());
             }
-            parent.receiver = value.duplicate();
-            parent.constructor_state = ConstructorState::DerivedInitialized;
+            if !bind_derived_this(runtime, parent, &value)? {
+                return Err(EngineFault::RuntimeInvariant {
+                    message: "synthesized derived constructor initialized this more than once",
+                }
+                .into());
+            }
             push(parent, value);
+        }
+        ReturnDisposition::WithBinding { .. } | ReturnDisposition::WithReference { .. } => {
+            return Err(EngineFault::RuntimeInvariant {
+                message: "with-binding continuation completed without its structured result",
+            }
+            .into());
         }
     }
     parent.instruction = return_to.instruction;
@@ -7241,22 +7559,69 @@ fn push_operator_pair(
     updated: StoredValue,
     return_to: CallReturn,
 ) -> Result<(), ExecutionError> {
-    if !matches!(return_to.disposition, ReturnDisposition::Push) {
-        return Err(EngineFault::RuntimeInvariant {
-            message: "postfix operator pair reached a discarding continuation",
+    match return_to.disposition {
+        ReturnDisposition::Push => {
+            if parent.stack.capacity().saturating_sub(parent.stack.len()) < 2 {
+                return Err(EngineFault::RuntimeInvariant {
+                    message: "verified postfix operator result exceeds frame stack capacity",
+                }
+                .into());
+            }
+            push(parent, original);
+            push(parent, updated);
+            parent.instruction = return_to.instruction;
+            Ok(())
         }
-        .into());
-    }
-    if parent.stack.capacity().saturating_sub(parent.stack.len()) < 2 {
-        return Err(EngineFault::RuntimeInvariant {
-            message: "verified postfix operator result exceeds frame stack capacity",
+        ReturnDisposition::WithBinding { taken, not_taken } => {
+            let StoredValue::Boolean(found) = original else {
+                return Err(EngineFault::RuntimeInvariant {
+                    message: "with-binding continuation returned a non-Boolean status",
+                }
+                .into());
+            };
+            if found {
+                if parent.stack.len() == parent.stack.capacity() {
+                    return Err(EngineFault::RuntimeInvariant {
+                        message: "verified with-binding result exceeds frame stack capacity",
+                    }
+                    .into());
+                }
+                push(parent, updated);
+                parent.instruction = taken;
+            } else {
+                parent.instruction = not_taken;
+            }
+            Ok(())
         }
-        .into());
+        ReturnDisposition::WithReference { taken, not_taken } => {
+            if matches!(original, StoredValue::Undefined) {
+                parent.instruction = not_taken;
+                return Ok(());
+            }
+            if original.heap_reference().is_none() {
+                return Err(EngineFault::RuntimeInvariant {
+                    message: "with-reference continuation returned a non-object receiver",
+                }
+                .into());
+            }
+            if parent.stack.capacity().saturating_sub(parent.stack.len()) < 2 {
+                return Err(EngineFault::RuntimeInvariant {
+                    message: "verified with-reference result exceeds frame stack capacity",
+                }
+                .into());
+            }
+            push(parent, original);
+            push(parent, updated);
+            parent.instruction = taken;
+            Ok(())
+        }
+        ReturnDisposition::Discard | ReturnDisposition::InitializeDerivedThis => {
+            Err(EngineFault::RuntimeInvariant {
+                message: "structured operator pair reached an incompatible continuation",
+            }
+            .into())
+        }
     }
-    push(parent, original);
-    push(parent, updated);
-    parent.instruction = return_to.instruction;
-    Ok(())
 }
 
 fn native_step(

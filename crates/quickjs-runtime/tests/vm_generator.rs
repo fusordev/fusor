@@ -64,6 +64,28 @@ fn private_generator_class_methods_share_a_method_cell_and_preserve_the_home_obj
     );
 }
 
+#[test]
+fn private_generator_yields_nested_in_spreads_preserve_and_abandon_expression_state() {
+    assert_eq!(
+        run(
+            "function run(){class Box{*#values(){yield [...yield];}values(){return this.#values();}}let iterator=new Box().values();let first=iterator.next();let second=iterator.next(['a','b']);return (first.value===void 0)+':'+first.done+'|'+second.value.join(',')+':'+second.done;}"
+        ),
+        "true:false|a,b:false"
+    );
+    assert_eq!(
+        run(
+            "function run(){class Box{*#values(){yield {...yield};}values(){return this.#values();}}let iterator=new Box().values();iterator.next();let result=iterator.next({x:1});return result.value.x+':'+result.done;}"
+        ),
+        "1:false"
+    );
+    assert_eq!(
+        run(
+            "function run(){class Box{static *#values(){yield [...yield];}static values(){return this.#values();}}let iterator=Box.values();iterator.next();let result=iterator.return(9);return result.value+':'+result.done;}"
+        ),
+        "9:true"
+    );
+}
+
 struct GeneratorAllocationCase {
     runtime: Runtime,
     realm: Realm,

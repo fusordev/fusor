@@ -584,7 +584,7 @@ impl Instruction {
         // compiler-owned heritage bit describes the certified lowering shape.
         if matches!(
             (self.opcode, self.operands),
-            (FinalOpcode::DefineClass, Operands::AtomU8 { value: 1, .. })
+            (FinalOpcode::DefineClass, Operands::AtomU8 { value, .. }) if value & 1 != 0
         ) {
             return Ok(StackEffect::new(3, 2));
         }

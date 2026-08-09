@@ -5,8 +5,8 @@ use super::{
     ordinary,
 };
 use crate::runtime::realm::{
-    CONSTRUCTOR_PROTOTYPE_PROPERTY, IDENTITY_PROPERTY, NativeFunctionKind, PredefinedAtom,
-    PropertyLayout,
+    CONSTRUCTOR_PROTOTYPE_PROPERTY, IDENTITY_PROPERTY, IteratorConsumer, NativeFunctionKind,
+    PredefinedAtom, PropertyLayout,
     schema::{
         IntrinsicFunctionId, IntrinsicIdentity, IntrinsicKeySpec, IntrinsicNameSpec,
         IntrinsicObjectId, IntrinsicObjectKind, IntrinsicStringSpec, IntrinsicValueSpec,
@@ -74,6 +74,21 @@ pub(super) fn visit_functions(visit: FunctionSink<'_>) {
             0,
         ),
         (
+            NativeFunctionKind::IteratorConcat,
+            IntrinsicNameSpec::Predefined(PredefinedAtom::Concat),
+            0,
+        ),
+        (
+            NativeFunctionKind::IteratorZip,
+            IntrinsicNameSpec::RealmName(RealmNameId::IteratorZip),
+            1,
+        ),
+        (
+            NativeFunctionKind::IteratorZipKeyed,
+            IntrinsicNameSpec::RealmName(RealmNameId::IteratorZipKeyed),
+            1,
+        ),
+        (
             NativeFunctionKind::IteratorFrom,
             IntrinsicNameSpec::Predefined(PredefinedAtom::From),
             1,
@@ -84,13 +99,43 @@ pub(super) fn visit_functions(visit: FunctionSink<'_>) {
             1,
         ),
         (
+            NativeFunctionKind::IteratorPrototypeConsumer(IteratorConsumer::Every),
+            IntrinsicNameSpec::RealmName(RealmNameId::IteratorConsumer(IteratorConsumer::Every)),
+            1,
+        ),
+        (
             NativeFunctionKind::IteratorPrototypeFilter,
             IntrinsicNameSpec::RealmName(RealmNameId::IteratorFilter),
             1,
         ),
         (
+            NativeFunctionKind::IteratorPrototypeConsumer(IteratorConsumer::Find),
+            IntrinsicNameSpec::RealmName(RealmNameId::IteratorConsumer(IteratorConsumer::Find)),
+            1,
+        ),
+        (
+            NativeFunctionKind::IteratorPrototypeFlatMap,
+            IntrinsicNameSpec::RealmName(RealmNameId::IteratorFlatMap),
+            1,
+        ),
+        (
+            NativeFunctionKind::IteratorPrototypeConsumer(IteratorConsumer::ForEach),
+            IntrinsicNameSpec::RealmName(RealmNameId::IteratorConsumer(IteratorConsumer::ForEach)),
+            1,
+        ),
+        (
             NativeFunctionKind::IteratorPrototypeMap,
             IntrinsicNameSpec::RealmName(RealmNameId::IteratorMap),
+            1,
+        ),
+        (
+            NativeFunctionKind::IteratorPrototypeConsumer(IteratorConsumer::Reduce),
+            IntrinsicNameSpec::RealmName(RealmNameId::IteratorConsumer(IteratorConsumer::Reduce)),
+            1,
+        ),
+        (
+            NativeFunctionKind::IteratorPrototypeConsumer(IteratorConsumer::Some),
+            IntrinsicNameSpec::RealmName(RealmNameId::IteratorConsumer(IteratorConsumer::Some)),
             1,
         ),
         (
@@ -101,6 +146,11 @@ pub(super) fn visit_functions(visit: FunctionSink<'_>) {
         (
             NativeFunctionKind::IteratorPrototypeToArray,
             IntrinsicNameSpec::RealmName(RealmNameId::IteratorToArray),
+            0,
+        ),
+        (
+            NativeFunctionKind::IteratorPrototypeDispose,
+            IntrinsicNameSpec::Literal("[Symbol.dispose]"),
             0,
         ),
         (
@@ -223,6 +273,21 @@ pub(super) fn visit_properties(visit: PropertySink<'_>) {
         IntrinsicKeySpec::PredefinedString(PredefinedAtom::From),
         NativeFunctionKind::IteratorFrom,
     ));
+    visit(method(
+        constructor,
+        IntrinsicKeySpec::PredefinedString(PredefinedAtom::Concat),
+        NativeFunctionKind::IteratorConcat,
+    ));
+    visit(method(
+        constructor,
+        IntrinsicKeySpec::InternedString(RealmNameId::IteratorZip),
+        NativeFunctionKind::IteratorZip,
+    ));
+    visit(method(
+        constructor,
+        IntrinsicKeySpec::InternedString(RealmNameId::IteratorZipKeyed),
+        NativeFunctionKind::IteratorZipKeyed,
+    ));
     visit(accessor(
         prototype,
         IntrinsicKeySpec::PredefinedString(PredefinedAtom::Constructor),
@@ -252,8 +317,18 @@ pub(super) fn visit_properties(visit: PropertySink<'_>) {
     ));
     visit(method(
         prototype,
+        IntrinsicKeySpec::WellKnownSymbol(PredefinedAtom::SymbolDispose),
+        NativeFunctionKind::IteratorPrototypeDispose,
+    ));
+    visit(method(
+        prototype,
         IntrinsicKeySpec::InternedString(RealmNameId::IteratorDrop),
         NativeFunctionKind::IteratorPrototypeDrop,
+    ));
+    visit(method(
+        prototype,
+        IntrinsicKeySpec::InternedString(RealmNameId::IteratorConsumer(IteratorConsumer::Every)),
+        NativeFunctionKind::IteratorPrototypeConsumer(IteratorConsumer::Every),
     ));
     visit(method(
         prototype,
@@ -262,8 +337,33 @@ pub(super) fn visit_properties(visit: PropertySink<'_>) {
     ));
     visit(method(
         prototype,
+        IntrinsicKeySpec::InternedString(RealmNameId::IteratorConsumer(IteratorConsumer::Find)),
+        NativeFunctionKind::IteratorPrototypeConsumer(IteratorConsumer::Find),
+    ));
+    visit(method(
+        prototype,
+        IntrinsicKeySpec::InternedString(RealmNameId::IteratorFlatMap),
+        NativeFunctionKind::IteratorPrototypeFlatMap,
+    ));
+    visit(method(
+        prototype,
+        IntrinsicKeySpec::InternedString(RealmNameId::IteratorConsumer(IteratorConsumer::ForEach)),
+        NativeFunctionKind::IteratorPrototypeConsumer(IteratorConsumer::ForEach),
+    ));
+    visit(method(
+        prototype,
         IntrinsicKeySpec::InternedString(RealmNameId::IteratorMap),
         NativeFunctionKind::IteratorPrototypeMap,
+    ));
+    visit(method(
+        prototype,
+        IntrinsicKeySpec::InternedString(RealmNameId::IteratorConsumer(IteratorConsumer::Reduce)),
+        NativeFunctionKind::IteratorPrototypeConsumer(IteratorConsumer::Reduce),
+    ));
+    visit(method(
+        prototype,
+        IntrinsicKeySpec::InternedString(RealmNameId::IteratorConsumer(IteratorConsumer::Some)),
+        NativeFunctionKind::IteratorPrototypeConsumer(IteratorConsumer::Some),
     ));
     visit(method(
         prototype,

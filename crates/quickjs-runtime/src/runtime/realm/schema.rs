@@ -7,9 +7,9 @@
 
 use super::{
     ArrayCallback, ArrayCopier, ArrayFlatten, ArrayMutator, ArrayReduction, ArraySearch, ArraySort,
-    ArrayStatic, ErrorIntrinsicKind, GlobalNumericFunction, LocaleStringMethod, MapMethod,
-    MathMethod, NativeFunctionKind, NumberFormat, NumberPredicate, PredefinedAtom, PromiseStatic,
-    PropertyLayout, ReflectMethod, SetMethod, StringMethod, UriFunction,
+    ArrayStatic, ErrorIntrinsicKind, GlobalNumericFunction, IteratorConsumer, LocaleStringMethod,
+    MapMethod, MathMethod, NativeFunctionKind, NumberFormat, NumberPredicate, PredefinedAtom,
+    PromiseStatic, PropertyLayout, ReflectMethod, SetMethod, StringMethod, UriFunction,
 };
 use crate::object::TypedArrayElementType;
 use crate::runtime::{
@@ -26,7 +26,7 @@ use crate::runtime::{
     TemporalPlainMonthDayStaticMethod, TemporalPlainTimePrototypeMethod,
     TemporalPlainTimeStaticMethod, TemporalPlainYearMonthPrototypeMethod,
     TemporalPlainYearMonthStaticMethod, TemporalZonedDateTimePrototypeMethod,
-    TemporalZonedDateTimeStaticMethod, TypedArrayPrototypeMethod,
+    TemporalZonedDateTimeStaticMethod, TypedArrayPrototypeMethod, Uint8ArrayMethod,
 };
 
 /// Stable identity of an object allocated by Realm bootstrap.
@@ -253,6 +253,8 @@ pub(in crate::runtime) enum RealmNameId {
     ObjectStatic(NativeFunctionKind),
     BigIntStatic(NativeFunctionKind),
     StringMethod(StringMethod),
+    StringTrimLeft,
+    StringTrimRight,
     NumberValue(&'static str),
     NumberPredicate(NumberPredicate),
     StringStatic(StringMethod),
@@ -267,18 +269,24 @@ pub(in crate::runtime) enum RealmNameId {
     ArrayIsArray,
     ArrayFromAsync,
     IteratorDrop,
+    IteratorConsumer(IteratorConsumer),
     IteratorFilter,
+    IteratorFlatMap,
     IteratorMap,
     IteratorTake,
     IteratorToArray,
+    IteratorZip,
+    IteratorZipKeyed,
     ArrayBufferIsView,
     ArrayBufferPrototype(ArrayBufferPrototypeMethod),
     SharedArrayBufferPrototype(SharedArrayBufferPrototypeMethod),
     DataViewPrototype(DataViewPrototypeMethod),
     TypedArrayPrototype(TypedArrayPrototypeMethod),
+    Uint8ArrayMethod(Uint8ArrayMethod),
     TypedArrayBytesPerElement,
     DateStatic(DateStaticMethod),
     DatePrototype(DatePrototypeMethod),
+    DateToGmtString,
     Temporal,
     TemporalNow,
     TemporalNowMethod(TemporalNowMethod),
@@ -460,14 +468,6 @@ pub(in crate::runtime) struct ConstructorPrototypeSpec {
     pub(in crate::runtime) prototype: IntrinsicIdentity,
 }
 
-/// Expected size of one semantic family before it is materialized as an array.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(in crate::runtime) struct FamilyCardinality {
-    pub(in crate::runtime) family: &'static str,
-    pub(in crate::runtime) actual: usize,
-    pub(in crate::runtime) expected: usize,
-}
-
 /// Ordered intrinsic declaration graph supplied to Realm construction.
 #[derive(Clone, Copy)]
 pub(in crate::runtime) struct IntrinsicSchema<'a> {
@@ -477,7 +477,6 @@ pub(in crate::runtime) struct IntrinsicSchema<'a> {
     pub(in crate::runtime) mandatory_objects: &'a [IntrinsicObjectId],
     pub(in crate::runtime) mandatory_functions: &'a [IntrinsicFunctionId],
     pub(in crate::runtime) constructor_prototypes: &'a [ConstructorPrototypeSpec],
-    pub(in crate::runtime) family_cardinalities: &'a [FamilyCardinality],
 }
 
 // Keep the semantic family types visible in rustdoc for the schema contract.

@@ -28,10 +28,10 @@ ordinary objects and accessors; arrays, synchronous iterators, array spread,
 and `for-of`; operators and coercion; and the initial Boolean, Number, String,
 Symbol, Function, Array, and Error families.
 
-Key gaps remain: complete Error and reflection surfaces, most built-ins,
-BigInt domains, `eval`, destructuring iterators, async/generators, modules,
-Promises/jobs, RegExp, binary data, and the public embedding/tooling surface.
-See [PORTING.md](PORTING.md) for the authoritative checklist and compatibility
+Key gaps remain: direct `eval` and `with`; residual class/compiler semantics;
+modules; the selected Annex B compatibility subset; multi-agent Atomics and
+immutable ArrayBuffer; and the public embedding/tooling surface. See
+[PORTING.md](PORTING.md) for the authoritative checklist and compatibility
 boundaries.
 
 ## Workspace

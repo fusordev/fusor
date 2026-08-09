@@ -5,7 +5,7 @@ use miette::{
     NamedSource, Severity,
 };
 
-use crate::{SourceError, SourceRegistry, SourceSpan};
+use crate::{SourceError, SourceMapError, SourceRegistry, SourceSpan};
 
 /// A validated stable diagnostic code.
 ///
@@ -230,6 +230,116 @@ impl Diagnostic {
     ) -> Result<PrettyDiagnostic, PrettyDiagnosticError> {
         PrettyDiagnostic::new(sources, self.clone())
     }
+
+    /// Resolves every label through the registered incoming source-map chain.
+    ///
+    /// A label uses its deepest registered mapped range when both endpoints
+    /// resolve into one source. Otherwise the validated generated range is
+    /// retained as the safe fallback.
+    ///
+    /// # Errors
+    ///
+    /// Returns a structured source-map error for invalid positions, malformed
+    /// map state, cycles, or excessive chain depth.
+    pub fn resolve_source_maps(&self, sources: &SourceRegistry) -> Result<Self, SourceMapError> {
+        let labels = self
+            .labels
+            .iter()
+            .map(|label| {
+                let resolved = sources.resolve_span(&label.span)?;
+                Ok(DiagnosticLabel {
+                    span: resolved.display_span().clone(),
+                    message: label.message.clone(),
+                    primary: label.primary,
+                })
+            })
+            .collect::<Result<Vec<_>, SourceMapError>>()?;
+        Ok(Self {
+            code: self.code.clone(),
+            severity: self.severity,
+            message: self.message.clone(),
+            help: self.help.clone(),
+            labels,
+        })
+    }
+}
+
+/// One primary diagnostic with zero or more related diagnostics.
+///
+/// Related diagnostics allow each stack frame or compilation note to retain
+/// its own source, which matches Miette's one-source-per-diagnostic model.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct DiagnosticReport {
+    primary: Diagnostic,
+    related: Vec<Diagnostic>,
+}
+
+impl DiagnosticReport {
+    /// Creates a report around one primary diagnostic.
+    #[must_use]
+    pub const fn new(primary: Diagnostic) -> Self {
+        Self {
+            primary,
+            related: Vec::new(),
+        }
+    }
+
+    /// Appends a related diagnostic.
+    #[must_use]
+    pub fn with_related(mut self, diagnostic: Diagnostic) -> Self {
+        self.related.push(diagnostic);
+        self
+    }
+
+    /// Extends the related diagnostic list.
+    #[must_use]
+    pub fn with_related_diagnostics(
+        mut self,
+        diagnostics: impl IntoIterator<Item = Diagnostic>,
+    ) -> Self {
+        self.related.extend(diagnostics);
+        self
+    }
+
+    /// Returns the primary diagnostic.
+    #[must_use]
+    pub const fn primary(&self) -> &Diagnostic {
+        &self.primary
+    }
+
+    /// Returns related diagnostics in presentation order.
+    #[must_use]
+    pub fn related(&self) -> &[Diagnostic] {
+        &self.related
+    }
+
+    /// Resolves all primary and related labels through registered source maps.
+    ///
+    /// # Errors
+    ///
+    /// Returns the first source-map resolution failure.
+    pub fn resolve_source_maps(&self, sources: &SourceRegistry) -> Result<Self, SourceMapError> {
+        Ok(Self {
+            primary: self.primary.resolve_source_maps(sources)?,
+            related: self
+                .related
+                .iter()
+                .map(|diagnostic| diagnostic.resolve_source_maps(sources))
+                .collect::<Result<Vec<_>, _>>()?,
+        })
+    }
+
+    /// Creates an owned Miette report with related diagnostics.
+    ///
+    /// # Errors
+    ///
+    /// Returns an adapter error for a missing, foreign, or mixed source.
+    pub fn to_pretty(
+        &self,
+        sources: &SourceRegistry,
+    ) -> Result<PrettyDiagnosticReport, PrettyDiagnosticError> {
+        PrettyDiagnosticReport::new(sources, self.clone())
+    }
 }
 
 /// An owned [`miette::Diagnostic`] adapter for a stable [`Diagnostic`].
@@ -331,6 +441,80 @@ impl MietteDiagnostic for PrettyDiagnostic {
     }
 }
 
+/// An owned Miette adapter for a [`DiagnosticReport`].
+#[derive(Debug)]
+pub struct PrettyDiagnosticReport {
+    report: DiagnosticReport,
+    primary: PrettyDiagnostic,
+    related: Vec<PrettyDiagnostic>,
+}
+
+impl PrettyDiagnosticReport {
+    fn new(
+        sources: &SourceRegistry,
+        report: DiagnosticReport,
+    ) -> Result<Self, PrettyDiagnosticError> {
+        let primary = PrettyDiagnostic::new(sources, report.primary.clone())?;
+        let related = report
+            .related
+            .iter()
+            .cloned()
+            .map(|diagnostic| PrettyDiagnostic::new(sources, diagnostic))
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(Self {
+            report,
+            primary,
+            related,
+        })
+    }
+
+    /// Returns the stable underlying report.
+    #[must_use]
+    pub const fn report(&self) -> &DiagnosticReport {
+        &self.report
+    }
+}
+
+impl fmt::Display for PrettyDiagnosticReport {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.primary.fmt(formatter)
+    }
+}
+
+impl Error for PrettyDiagnosticReport {}
+
+impl MietteDiagnostic for PrettyDiagnosticReport {
+    fn code<'a>(&'a self) -> Option<Box<dyn fmt::Display + 'a>> {
+        MietteDiagnostic::code(&self.primary)
+    }
+
+    fn severity(&self) -> Option<Severity> {
+        MietteDiagnostic::severity(&self.primary)
+    }
+
+    fn help<'a>(&'a self) -> Option<Box<dyn fmt::Display + 'a>> {
+        MietteDiagnostic::help(&self.primary)
+    }
+
+    fn source_code(&self) -> Option<&dyn miette::SourceCode> {
+        MietteDiagnostic::source_code(&self.primary)
+    }
+
+    fn labels(&self) -> Option<Box<dyn Iterator<Item = LabeledSpan> + '_>> {
+        MietteDiagnostic::labels(&self.primary)
+    }
+
+    fn related<'a>(&'a self) -> Option<Box<dyn Iterator<Item = &'a dyn MietteDiagnostic> + 'a>> {
+        (!self.related.is_empty()).then(|| {
+            Box::new(
+                self.related
+                    .iter()
+                    .map(|diagnostic| diagnostic as &dyn MietteDiagnostic),
+            ) as Box<_>
+        })
+    }
+}
+
 /// Renders deterministic, color-free graphical output with source snippets.
 ///
 /// This explicit adapter avoids process-global Miette hooks and is suitable for
@@ -346,6 +530,32 @@ pub fn render_pretty(
     diagnostic: &Diagnostic,
 ) -> Result<String, PrettyDiagnosticError> {
     let pretty = diagnostic.to_pretty(sources)?;
+    let handler = GraphicalReportHandler::new_themed(GraphicalTheme::none())
+        .with_width(100)
+        .with_context_lines(2)
+        .with_links(false)
+        .with_urls(false)
+        .without_cause_chain()
+        .without_syntax_highlighting();
+    let mut rendered = String::new();
+    handler
+        .render_report(&mut rendered, &pretty)
+        .map_err(|_| PrettyDiagnosticError::Render)?;
+    Ok(rendered)
+}
+
+/// Renders a primary diagnostic and its related diagnostics as deterministic,
+/// color-free Miette output.
+///
+/// # Errors
+///
+/// Returns an adapter error for missing/mixed sources or an unexpected
+/// formatting failure.
+pub fn render_pretty_report(
+    sources: &SourceRegistry,
+    report: &DiagnosticReport,
+) -> Result<String, PrettyDiagnosticError> {
+    let pretty = report.to_pretty(sources)?;
     let handler = GraphicalReportHandler::new_themed(GraphicalTheme::none())
         .with_width(100)
         .with_context_lines(2)

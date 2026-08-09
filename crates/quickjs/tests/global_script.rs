@@ -53,6 +53,22 @@ fn global_script_executes_as_a_whole_graph_and_retains_object_bindings() {
 }
 
 #[test]
+fn global_script_returns_a_directive_expression_completion() {
+    let mut runtime = Runtime::try_new(RuntimeLimits::default()).expect("runtime");
+    let realm = runtime.create_realm().expect("realm");
+    let mut context = runtime.context(&realm).expect("context");
+
+    let value = evaluate_script(
+        &mut context,
+        "'directive completion';",
+        "directive-completion.js",
+        ScriptLimits::default(),
+    )
+    .expect("directive-only Script");
+    assert_eq!(string(&value), "directive completion");
+}
+
+#[test]
 fn global_anonymous_function_initializers_receive_their_binding_name() {
     let mut runtime = Runtime::try_new(RuntimeLimits::default()).expect("runtime");
     let realm = runtime.create_realm().expect("realm");

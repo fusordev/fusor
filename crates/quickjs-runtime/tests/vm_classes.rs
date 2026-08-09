@@ -51,6 +51,17 @@ fn base_class_construction_public_methods_and_accessors_obey_the_class_topology(
 }
 
 #[test]
+fn field_initializer_arrows_capture_the_lexical_super_home_object() {
+    run_with(
+        "function run(){class Base{get value(){return this._value;}set value(next){this._value=next;}method(){return this._value+1;}static get staticValue(){return this._staticValue;}static set staticValue(next){this._staticValue=next;}}class Derived extends Base{read=()=>super.value;nested=()=>()=>super.method();write=next=>super.value=next;methodRead(){return (()=>()=>super.value)()();}static readStatic=()=>super.staticValue;static writeStatic=next=>super.staticValue=next;}let value=new Derived;value._value=3;Derived._staticValue=5;let read=value.read()===3&&value.nested()()===4&&value.methodRead()===3&&Derived.readStatic()===5;let write=value.write(7)===7&&value._value===7&&Derived.writeStatic(9)===9&&Derived._staticValue===9;return read&&write;}",
+        |result| {
+            let value = result.expect("field initializer arrow super execution");
+            assert_eq!(value.as_boolean().expect("live Boolean"), Some(true));
+        },
+    );
+}
+
+#[test]
 fn a_class_constructor_rejects_direct_calls_but_remains_constructable() {
     run_with(
         "function run(){class Box{constructor(){}}Box();}",
@@ -70,6 +81,17 @@ fn named_class_members_retain_the_inner_name_after_outer_reassignment() {
         "function run(){class Box{constructor(){}static self(){return Box;}}let original=Box;Box=0;return original.self()===original;}",
         |result| {
             let value = result.expect("class execution");
+            assert_eq!(value.as_boolean().expect("live Boolean"), Some(true));
+        },
+    );
+}
+
+#[test]
+fn private_fields_after_optional_chains_short_circuit_before_brand_checks() {
+    run_with(
+        "function run(){class Box{#value=7;#read(){return 9;}static direct(value){return value?.#value;}static nested(value){return value?.member.#value;}static directCall(value){return value?.#read();}static optionalCall(value){return value.#read?.();}}let box=new Box();let direct=Box.direct(box)===7&&Box.direct(null)===void 0&&Box.direct(void 0)===void 0;let nested=Box.nested({member:box})===7&&Box.nested(null)===void 0;let calls=Box.directCall(box)===9&&Box.directCall(null)===void 0&&Box.optionalCall(box)===9;let directBrand=false;try{Box.direct({});}catch(error){directBrand=error.name==='TypeError';}let nestedBrand=false;try{Box.nested({member:{}});}catch(error){nestedBrand=error.name==='TypeError';}return direct&&nested&&calls&&directBrand&&nestedBrand;}",
+        |result| {
+            let value = result.expect("private optional-chain execution");
             assert_eq!(value.as_boolean().expect("live Boolean"), Some(true));
         },
     );
@@ -164,6 +186,17 @@ fn private_accessors_merge_by_name_and_preserve_instance_static_and_super_receiv
 }
 
 #[test]
+fn private_accessors_reject_reinitializing_the_same_receiver() {
+    run_with(
+        "function run(){class Base{constructor(value){return value;}}class Getter extends Base{get #value(){}}class Setter extends Base{set #value(next){}}class Pair extends Base{get #value(){}set #value(next){}}let getterTarget={};let setterTarget={};let pairTarget={};new Getter(getterTarget);new Setter(setterTarget);new Pair(pairTarget);let getter=false;let setter=false;let pair=false;try{new Getter(getterTarget);}catch(error){getter=error.name==='TypeError';}try{new Setter(setterTarget);}catch(error){setter=error.name==='TypeError';}try{new Pair(pairTarget);}catch(error){pair=error.name==='TypeError';}return getter&&setter&&pair;}",
+        |result| {
+            let value = result.expect("private accessor reinitialization completion");
+            assert_eq!(value.as_boolean().expect("live Boolean"), Some(true));
+        },
+    );
+}
+
+#[test]
 fn nested_instance_field_classes_keep_private_accessor_names_lexically_distinct() {
     run_with(
         "function run(){class Outer{get #value(){}Inner=class{set #value(next){}read(){return this.#value;}};}class Other{set #value(next){}Inner=class{get #value(){}};read(){return this.#value;}}let innerRejected=false;let outerRejected=false;try{new (new Outer().Inner)().read();}catch(error){innerRejected=error.name==='TypeError';}try{new Other().read();}catch(error){outerRejected=error.name==='TypeError';}return innerRejected&&outerRejected;}",
@@ -180,6 +213,17 @@ fn private_instance_methods_share_a_closure_and_preserve_the_super_home_object()
         "function run(){class Base{value(){return 40;}}class Box extends Base{#method(){return super.value()+2;}call(){return this.#method();}same(other){return this.#method===other.#method;}name(){return this.#method.name;}static has(candidate){return #method in candidate;}}let first=new Box;let second=new Box;let rejected=false;try{Box.prototype.call.call({});}catch(error){rejected=error.name==='TypeError';}return first.call()===42&&first.same(second)&&first.name()==='#method'&&Box.has(first)&&!Box.has({})&&rejected;}",
         |result| {
             let value = result.expect("private instance method execution");
+            assert_eq!(value.as_boolean().expect("live Boolean"), Some(true));
+        },
+    );
+}
+
+#[test]
+fn private_instance_methods_and_accessors_are_installed_before_field_initializers() {
+    run_with(
+        "function run(){class Box{first=this.#method();#value=this.#method();#method(){return 42;}get value(){return this.#value;}same(other){return this.#method===other.#method;}}class Accessors{first=this.#accessor;second=(this.#accessor=7);get #accessor(){return 42;}set #accessor(next){this.seen=next;}}let first=new Box;let second=new Box;let accessors=new Accessors;return first.first===42&&first.value===42&&first.same(second)&&accessors.first===42&&accessors.second===7&&accessors.seen===7;}",
+        |result| {
+            let value = result.expect("private methods and accessors before fields");
             assert_eq!(value.as_boolean().expect("live Boolean"), Some(true));
         },
     );
@@ -252,6 +296,17 @@ fn computed_instance_field_keys_follow_class_element_evaluation_order() {
 }
 
 #[test]
+fn interleaved_computed_fields_evaluate_all_keys_before_static_initializers() {
+    run_with(
+        "function run(){let index=0;class Box{[index++]=index++;static[index++]=index++;[index++]=index++;}let value=new Box;return index===6&&value[0]===4&&value[2]===5&&Box[1]===3&&!value.hasOwnProperty('1')&&!Box.hasOwnProperty('0')&&!Box.hasOwnProperty('2');}",
+        |result| {
+            let value = result.expect("interleaved computed field execution");
+            assert_eq!(value.as_boolean().expect("live Boolean"), Some(true));
+        },
+    );
+}
+
+#[test]
 fn uncomputed_instance_field_initializers_observe_this_super_and_new_target() {
     run_with(
         "function run(){class Base{constructor(value){this._value=value;}get value(){return this._value;}}class Derived extends Base{fromSuper=super.value;target=new.target;constructor(value){super(value);this.bodySeesFields=this.fromSuper===value&&this.target===Derived;}}let value=new Derived(7);return value.fromSuper===7&&value.target===Derived&&value.bodySeesFields;}",
@@ -290,6 +345,17 @@ fn an_explicit_derived_constructor_enforces_the_uninitialized_this_rules() {
         "function run(){class Base{}class Missing extends Base{constructor(){}}class Early extends Base{constructor(){this.value=1;super();}}class Twice extends Base{constructor(){super();super();}}class ObjectReturn extends Base{constructor(){return {marked:true};}}class PrimitiveBefore extends Base{constructor(){return 1;}}class PrimitiveAfter extends Base{constructor(){super();return 1;}}let missing=false;let early=false;let twice=false;let primitiveBefore=false;let primitiveAfter=false;try{new Missing();}catch(error){missing=error.name==='ReferenceError';}try{new Early();}catch(error){early=error.name==='ReferenceError';}try{new Twice();}catch(error){twice=error.name==='ReferenceError';}try{new PrimitiveBefore();}catch(error){primitiveBefore=error.name==='TypeError';}try{new PrimitiveAfter();}catch(error){primitiveAfter=error.name==='TypeError';}return missing&&early&&twice&&primitiveBefore&&primitiveAfter&&new ObjectReturn().marked===true;}",
         |result| {
             let value = result.expect("derived constructor errors are catchable");
+            assert_eq!(value.as_boolean().expect("live Boolean"), Some(true));
+        },
+    );
+}
+
+#[test]
+fn derived_constructor_arrows_share_the_mutable_this_binding_for_super_calls() {
+    run_with(
+        "function run(){let calls=0;let escaped;class Base{constructor(){calls++;}}class First extends Base{constructor(){let call=()=>super();let receiver=call();this.same=receiver===this;}}class Nested extends Base{constructor(){let call=()=>()=>super();call()();this.ready=true;}}class After extends Base{constructor(){let read=()=>this;super();this.arrowSeesReceiver=read()===this;}}class Before extends Base{constructor(){let read=()=>this;let early=false;try{read();}catch(error){early=error.name==='ReferenceError';}super();this.early=early;}}class Override extends Base{constructor(){escaped=()=>this;return {};}}class Twice extends Base{constructor(){let call=()=>super();super();call();}}class DirectTwice extends Base{constructor(){super();super();}}let first=new First;let nested=new Nested;let after=new After;let before=new Before;new Override;let escapedThrows=false;let repeated=false;let directRepeated=false;try{escaped();}catch(error){escapedThrows=error.name==='ReferenceError';}try{new Twice;}catch(error){repeated=error.name==='ReferenceError';}try{new DirectTwice;}catch(error){directRepeated=error.name==='ReferenceError';}return first.same&&nested.ready&&after.arrowSeesReceiver&&before.early&&escapedThrows&&repeated&&directRepeated&&calls===8;}",
+        |result| {
+            let value = result.expect("derived constructor arrow super execution");
             assert_eq!(value.as_boolean().expect("live Boolean"), Some(true));
         },
     );

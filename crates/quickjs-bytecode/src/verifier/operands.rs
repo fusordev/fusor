@@ -320,7 +320,7 @@ pub(super) fn validate_secondary_operands(
         (
             FinalOpcode::DefineClass | FinalOpcode::DefineClassComputed,
             Operands::AtomU8 { value, .. },
-        ) if value > 1 => Err(invalid(
+        ) if value > 3 => Err(invalid(
             SecondaryOperandField::DefineClassFlags,
             u32::from(value),
         )),

@@ -1214,6 +1214,7 @@ version = "0.0.1"
 dependencies = [
  "quickjs-bytecode",
  "quickjs-compiler",
+ "quickjs-diagnostics",
  "quickjs-frontend",
  "quickjs-runtime",
 ]
@@ -1289,6 +1290,7 @@ dependencies = [
  "icu_normalizer",
  "quickjs-bytecode",
  "quickjs-compiler",
+ "quickjs-diagnostics",
  "quickjs-frontend",
  "quickjs-intl",
  "quickjs-regexp",

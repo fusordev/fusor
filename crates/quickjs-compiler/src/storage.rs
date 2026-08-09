@@ -116,6 +116,13 @@ pub enum ExecutableKind {
     ClassDefaultConstructor,
 }
 
+/// Planner state for syntactic direct eval within one executable.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum DirectEvalCallsite {
+    Absent,
+    Present,
+}
+
 /// Compiler-owned metadata for one executable body.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Executable {
@@ -126,6 +133,7 @@ pub struct Executable {
     name: Option<Arc<str>>,
     name_span: Option<Span>,
     strict: bool,
+    direct_eval: DirectEvalCallsite,
     parameter_count: u32,
     defined_parameter_count: u32,
     simple_parameter_list: bool,
@@ -183,6 +191,13 @@ impl Executable {
     #[must_use]
     pub const fn is_strict(&self) -> bool {
         self.strict
+    }
+
+    /// Returns whether this executable contains a syntactic direct-eval
+    /// callsite whose runtime callee identity may select `%eval%`.
+    #[must_use]
+    pub const fn has_direct_eval(&self) -> bool {
+        matches!(self.direct_eval, DirectEvalCallsite::Present)
     }
 
     /// Returns the number of source parameter positions.
@@ -272,6 +287,9 @@ pub enum DeclarationKind {
     /// The compiler-created immutable class-scope cell that holds a class
     /// constructor while its static field initializers execute.
     ClassStaticReceiver,
+    /// The compiler-created immutable cell that retains the object environment
+    /// for one sloppy-mode `with` statement activation.
+    WithObject,
     /// A function declaration.
     Function,
     /// A named function-expression binding.
@@ -617,6 +635,11 @@ pub(crate) struct OxcIdentityMap {
     /// The immutable class-scope receiver cell for each class whose static
     /// field initializer lexically observes `this`.
     pub(crate) class_static_receiver_bindings: HashMap<NodeId, BindingId>,
+    /// The immutable object-environment cell for each `with` statement.
+    pub(crate) with_object_bindings: HashMap<NodeId, BindingId>,
+    /// Reverse lookup used to resolve the ordered object-environment chain
+    /// visible from one semantic reference scope.
+    pub(crate) with_object_binding_by_scope: HashMap<ScopeId, BindingId>,
     pub(crate) scope_by_binding: Box<[Option<ScopeId>]>,
     pub(crate) reference_by_id: Box<[Option<NativeReferenceId>]>,
 }
@@ -744,6 +767,9 @@ pub enum UnsupportedFeature {
     DirectEval,
     /// A `with` statement.
     WithStatement,
+    /// A write or delete whose reference may resolve through a `with`
+    /// object-environment record.
+    WithReferenceMutation,
     /// Annex B's paired block-lexical and var-like function binding.
     AnnexBBlockFunction,
     /// An anonymous `export default class` needs the module execution layer's
@@ -848,6 +874,7 @@ struct BindingDraft {
     class_private_name_nodes: Arc<[NodeId]>,
     class_private_method_node: Option<NodeId>,
     class_static_receiver_node: Option<NodeId>,
+    with_statement_node: Option<NodeId>,
     executable: ExecutableId,
     name: Arc<str>,
     declaration_spans: Arc<[Span]>,
@@ -866,6 +893,7 @@ struct FrozenBindings {
     class_private_name_bindings: HashMap<NodeId, BindingId>,
     class_private_method_bindings: HashMap<NodeId, BindingId>,
     class_static_receiver_bindings: HashMap<NodeId, BindingId>,
+    with_object_bindings: HashMap<NodeId, BindingId>,
 }
 
 #[derive(Default)]
@@ -1011,13 +1039,20 @@ impl<'unit, 'arena, 'scope> Planner<'unit, 'arena, 'scope> {
                 },
             ),
             CompilationGoal::Module => (CompilationUnitKind::Module, ExecutableKind::Module),
-            CompilationGoal::IndirectEval(_) | CompilationGoal::DirectEval(_) => {
+            CompilationGoal::IndirectEval(goal) if !goal.forces_strict() => (
+                CompilationUnitKind::Script,
+                ExecutableKind::Script {
+                    asynchronous: false,
+                },
+            ),
+            CompilationGoal::IndirectEval(_) => {
                 return Err(CompilerError::Unsupported {
                     feature: UnsupportedFeature::EvalCompilationGoal,
                     span: root_span,
                 });
             }
-            CompilationGoal::DynamicFunction(
+            CompilationGoal::DirectEval(_)
+            | CompilationGoal::DynamicFunction(
                 DynamicFunctionKind::Function
                 | DynamicFunctionKind::GeneratorFunction
                 | DynamicFunctionKind::AsyncFunction
@@ -1052,6 +1087,7 @@ impl<'unit, 'arena, 'scope> Planner<'unit, 'arena, 'scope> {
         self.reject_preflight_features()?;
         self.inventory_executables()?;
         self.assign_scope_owners()?;
+        self.mark_direct_eval_executables()?;
         self.reject_synthetic_binding_uses()?;
 
         let mut binding_drafts = self.binding_drafts()?;
@@ -1062,6 +1098,7 @@ impl<'unit, 'arena, 'scope> Planner<'unit, 'arena, 'scope> {
         self.add_class_private_name_bindings(&mut binding_drafts)?;
         self.add_class_private_method_bindings(&mut binding_drafts)?;
         self.add_class_static_receiver_bindings(&mut binding_drafts)?;
+        self.add_with_object_bindings(&mut binding_drafts)?;
         binding_drafts.sort_by_key(|binding| {
             let first = binding
                 .declaration_spans
@@ -1086,6 +1123,7 @@ impl<'unit, 'arena, 'scope> Planner<'unit, 'arena, 'scope> {
             class_private_name_bindings,
             class_private_method_bindings,
             class_static_receiver_bindings,
+            with_object_bindings,
         } = self.freeze_binding_drafts(binding_drafts)?;
         let scope_by_binding = self.binding_scope_map(
             &symbol_bindings,
@@ -1095,17 +1133,21 @@ impl<'unit, 'arena, 'scope> Planner<'unit, 'arena, 'scope> {
             &class_private_name_bindings,
             &class_private_method_bindings,
             &class_static_receiver_bindings,
+            &with_object_bindings,
             &bindings,
         )?;
+        let with_object_binding_by_scope =
+            Self::with_object_binding_by_scope(&with_object_bindings, &scope_by_binding)?;
 
-        let mut resolved_drafts = self.resolved_drafts(
+        let (mut resolved_drafts, parameter_outer_references) = self.resolved_drafts(
             &symbol_bindings,
             &source_symbols,
             &class_name_bindings,
             &bindings,
             &implicit_arguments_references,
         )?;
-        let unresolved_drafts = self.unresolved_drafts()?;
+        let mut unresolved_drafts = self.unresolved_drafts()?;
+        unresolved_drafts.extend(parameter_outer_references);
         let (arguments_references, mut unresolved_drafts) = Self::resolve_arguments_references(
             unresolved_drafts,
             &bindings,
@@ -1129,10 +1171,21 @@ impl<'unit, 'arena, 'scope> Planner<'unit, 'arena, 'scope> {
             self.class_private_method_capture_requests(&class_private_method_bindings, &bindings)?;
         let class_static_receiver_captures = self
             .class_static_receiver_capture_requests(&class_static_receiver_bindings, &bindings)?;
+        let direct_eval_captures =
+            self.direct_eval_capture_requests(&scope_by_binding, &bindings)?;
+        let with_object_captures = self.with_object_capture_requests(
+            &resolved_drafts,
+            &unresolved_drafts,
+            &scope_by_binding,
+            &with_object_binding_by_scope,
+            &bindings,
+        )?;
         let mut synthetic_captures = class_field_key_captures;
         synthetic_captures.extend(class_private_name_captures);
         synthetic_captures.extend(class_private_method_captures);
         synthetic_captures.extend(class_static_receiver_captures);
+        synthetic_captures.extend(direct_eval_captures);
+        synthetic_captures.extend(with_object_captures);
         synthetic_captures.sort_unstable_by_key(|request| {
             (
                 request.executable.index(),
@@ -1206,6 +1259,8 @@ impl<'unit, 'arena, 'scope> Planner<'unit, 'arena, 'scope> {
                 class_private_name_bindings,
                 class_private_method_bindings,
                 class_static_receiver_bindings,
+                with_object_bindings,
+                with_object_binding_by_scope,
                 scope_by_binding: scope_by_binding.into_boxed_slice(),
                 reference_by_id: reference_by_id.into_boxed_slice(),
             },
@@ -1232,6 +1287,7 @@ impl<'unit, 'arena, 'scope> Planner<'unit, 'arena, 'scope> {
         class_private_name_bindings: &HashMap<NodeId, BindingId>,
         class_private_method_bindings: &HashMap<NodeId, BindingId>,
         class_static_receiver_bindings: &HashMap<NodeId, BindingId>,
+        with_object_bindings: &HashMap<NodeId, BindingId>,
         bindings: &[BindingStorage],
     ) -> Result<Vec<Option<ScopeId>>, CompilerError> {
         let scoping = self.unit.semantic().scoping();
@@ -1323,7 +1379,255 @@ impl<'unit, 'arena, 'scope> Planner<'unit, 'arena, 'scope> {
         self.bind_class_private_name_scopes(&mut scopes, class_private_name_bindings)?;
         self.bind_class_private_method_scopes(&mut scopes, class_private_method_bindings)?;
         self.bind_class_static_receiver_scopes(&mut scopes, class_static_receiver_bindings)?;
+        self.bind_with_object_scopes(&mut scopes, with_object_bindings)?;
         Ok(scopes)
+    }
+
+    fn bind_with_object_scopes(
+        &self,
+        scopes: &mut [Option<ScopeId>],
+        with_object_bindings: &HashMap<NodeId, BindingId>,
+    ) -> Result<(), CompilerError> {
+        for (&node_id, &binding) in with_object_bindings {
+            let AstKind::WithStatement(statement) = self.unit.semantic().nodes().kind(node_id)
+            else {
+                return Err(CompilerError::SemanticInvariant {
+                    invariant: "with-object binding belongs to a with statement",
+                    span: None,
+                });
+            };
+            let scope = statement
+                .scope_id
+                .get()
+                .ok_or(CompilerError::SemanticInvariant {
+                    invariant: "with statement has an object-environment scope",
+                    span: Some(statement.span),
+                })?;
+            let target =
+                scopes
+                    .get_mut(binding.index())
+                    .ok_or(CompilerError::SemanticInvariant {
+                        invariant: "with-object binding scope index is in range",
+                        span: Some(statement.span),
+                    })?;
+            if target.replace(scope).is_some() {
+                return Err(CompilerError::SemanticInvariant {
+                    invariant: "with-object binding has one semantic scope",
+                    span: Some(statement.span),
+                });
+            }
+        }
+        Ok(())
+    }
+
+    fn with_object_binding_by_scope(
+        with_object_bindings: &HashMap<NodeId, BindingId>,
+        scope_by_binding: &[Option<ScopeId>],
+    ) -> Result<HashMap<ScopeId, BindingId>, CompilerError> {
+        let mut by_scope = HashMap::with_capacity(with_object_bindings.len());
+        for &binding in with_object_bindings.values() {
+            let scope = scope_by_binding
+                .get(binding.index())
+                .copied()
+                .flatten()
+                .ok_or(CompilerError::SemanticInvariant {
+                    invariant: "with-object binding has a retained scope",
+                    span: None,
+                })?;
+            if by_scope.insert(scope, binding).is_some() {
+                return Err(CompilerError::SemanticInvariant {
+                    invariant: "one with-object binding per semantic scope",
+                    span: None,
+                });
+            }
+        }
+        Ok(by_scope)
+    }
+
+    fn visible_with_object_bindings(
+        &self,
+        reference_id: ReferenceId,
+        stop_scope: Option<ScopeId>,
+        with_object_binding_by_scope: &HashMap<ScopeId, BindingId>,
+    ) -> Vec<BindingId> {
+        let scoping = self.unit.semantic().scoping();
+        let reference = scoping.get_reference(reference_id);
+        let mut visible = Vec::new();
+        for scope in scoping.scope_ancestors(reference.scope_id()) {
+            if Some(scope) == stop_scope {
+                break;
+            }
+            if let Some(&binding) = with_object_binding_by_scope.get(&scope) {
+                visible.push(binding);
+            }
+        }
+        visible
+    }
+
+    fn with_object_capture_requests(
+        &self,
+        resolved: &[ResolvedDraft],
+        unresolved: &[UnresolvedDraft],
+        scope_by_binding: &[Option<ScopeId>],
+        with_object_binding_by_scope: &HashMap<ScopeId, BindingId>,
+        bindings: &[BindingStorage],
+    ) -> Result<Vec<CaptureRequest>, CompilerError> {
+        let mut requests = Vec::new();
+        for (reference_id, executable, stop_scope, span) in resolved
+            .iter()
+            .map(|draft| {
+                (
+                    draft.reference_id,
+                    draft.executable,
+                    scope_by_binding
+                        .get(draft.binding.index())
+                        .copied()
+                        .flatten(),
+                    draft.span,
+                )
+            })
+            .chain(
+                unresolved
+                    .iter()
+                    .map(|draft| (draft.reference_id, draft.executable, None, draft.span)),
+            )
+        {
+            for binding in self.visible_with_object_bindings(
+                reference_id,
+                stop_scope,
+                with_object_binding_by_scope,
+            ) {
+                let storage =
+                    bindings
+                        .get(binding.index())
+                        .ok_or(CompilerError::SemanticInvariant {
+                            invariant: "visible with-object binding exists",
+                            span: Some(span),
+                        })?;
+                if storage.executable != executable {
+                    requests.push(CaptureRequest {
+                        executable,
+                        binding,
+                        span,
+                    });
+                }
+            }
+        }
+        requests.sort_unstable_by_key(|request| {
+            (
+                request.executable.index(),
+                request.binding.index(),
+                request.span.start,
+                request.span.end,
+            )
+        });
+        requests.dedup_by_key(|request| (request.executable, request.binding));
+        Ok(requests)
+    }
+
+    fn direct_eval_capture_requests(
+        &self,
+        scope_by_binding: &[Option<ScopeId>],
+        bindings: &[BindingStorage],
+    ) -> Result<Vec<CaptureRequest>, CompilerError> {
+        let semantic = self.unit.semantic();
+        let scoping = semantic.scoping();
+        let mut bindings_by_scope = vec![Vec::new(); scoping.scopes_len()];
+        for binding in bindings {
+            if !matches!(
+                binding.placement,
+                StoragePlacement::Argument { .. } | StoragePlacement::Local
+            ) || binding.policy.writes == WritePolicy::Internal
+                || matches!(
+                    binding.policy.kind,
+                    DeclarationKind::ClassFieldKey
+                        | DeclarationKind::ClassPrivateName
+                        | DeclarationKind::ClassStaticReceiver
+                        | DeclarationKind::WithObject
+                )
+            {
+                continue;
+            }
+            let Some(scope) = scope_by_binding.get(binding.id.index()).copied().flatten() else {
+                continue;
+            };
+            let scoped = bindings_by_scope.get_mut(scope.index()).ok_or(
+                CompilerError::SemanticInvariant {
+                    invariant: "direct eval binding scope index is in range",
+                    span: binding.declaration_spans.first().copied(),
+                },
+            )?;
+            scoped.push(binding.id);
+        }
+
+        let nodes = semantic.nodes();
+        let mut requests = Vec::new();
+        for (node_id, node) in nodes.iter_enumerated() {
+            let AstKind::CallExpression(call) = node.kind() else {
+                continue;
+            };
+            if call.optional || !call.callee.is_specific_id("eval") {
+                continue;
+            }
+            let owner = self
+                .instance_field_initializer_owner(node_id)?
+                .unwrap_or(self.scope_owner(node.scope_id(), Some(call.span))?);
+            let mut visible_names = HashSet::new();
+            for scope in scoping.scope_ancestors(node.scope_id()) {
+                let scoped = bindings_by_scope.get(scope.index()).ok_or(
+                    CompilerError::SemanticInvariant {
+                        invariant: "direct eval lexical scope index is in range",
+                        span: Some(call.span),
+                    },
+                )?;
+                for &binding_id in scoped {
+                    let binding = bindings.get(binding_id.index()).ok_or(
+                        CompilerError::SemanticInvariant {
+                            invariant: "direct eval visible binding exists",
+                            span: Some(call.span),
+                        },
+                    )?;
+                    if !visible_names.insert(binding.name.clone()) || binding.executable == owner {
+                        continue;
+                    }
+                    requests.push(CaptureRequest {
+                        executable: owner,
+                        binding: binding_id,
+                        span: call.span,
+                    });
+                }
+            }
+        }
+        Ok(requests)
+    }
+
+    fn mark_direct_eval_executables(&mut self) -> Result<(), CompilerError> {
+        let semantic = self.unit.semantic();
+        let mut owners = Vec::new();
+        for (node_id, node) in semantic.nodes().iter_enumerated() {
+            let AstKind::CallExpression(call) = node.kind() else {
+                continue;
+            };
+            if call.optional || !call.callee.is_specific_id("eval") {
+                continue;
+            }
+            owners.push(
+                self.instance_field_initializer_owner(node_id)?
+                    .unwrap_or(self.scope_owner(node.scope_id(), Some(call.span))?),
+            );
+        }
+        owners.sort_unstable_by_key(|owner| owner.index());
+        owners.dedup();
+        for owner in owners {
+            let executable = self.executable_drafts.get_mut(owner.index()).ok_or(
+                CompilerError::SemanticInvariant {
+                    invariant: "direct eval owner executable exists",
+                    span: None,
+                },
+            )?;
+            executable.executable.direct_eval = DirectEvalCallsite::Present;
+        }
+        Ok(())
     }
 
     fn bind_class_field_key_scopes(
@@ -1339,22 +1643,22 @@ impl<'unit, 'arena, 'scope> Planner<'unit, 'arena, 'scope> {
                     span: None,
                 });
             };
-            if field.r#static || !field.computed {
+            if !field.computed {
                 return Err(CompilerError::SemanticInvariant {
-                    invariant: "synthetic class-field key binding belongs to a computed instance field",
+                    invariant: "synthetic class-field key binding belongs to a computed field",
                     span: Some(field.span),
                 });
             }
             let nodes = self.unit.semantic().nodes();
             let AstKind::ClassBody(body) = nodes.parent_kind(node_id) else {
                 return Err(CompilerError::SemanticInvariant {
-                    invariant: "computed instance field belongs to a class body",
+                    invariant: "computed field belongs to a class body",
                     span: Some(field.span),
                 });
             };
             let AstKind::Class(class) = nodes.parent_kind(body.node_id.get()) else {
                 return Err(CompilerError::SemanticInvariant {
-                    invariant: "computed instance field class body belongs to a class",
+                    invariant: "computed field class body belongs to a class",
                     span: Some(body.span),
                 });
             };
@@ -1525,14 +1829,6 @@ impl<'unit, 'arena, 'scope> Planner<'unit, 'arena, 'scope> {
         let nodes = semantic.nodes();
         for (node_id, node) in nodes.iter_enumerated() {
             match node.kind() {
-                AstKind::CallExpression(call)
-                    if !call.optional && call.callee.is_specific_id("eval") =>
-                {
-                    return unsupported(UnsupportedFeature::DirectEval, call.span);
-                }
-                AstKind::WithStatement(statement) => {
-                    return unsupported(UnsupportedFeature::WithStatement, statement.span);
-                }
                 AstKind::Function(function)
                     if function.r#type == FunctionType::FunctionDeclaration
                         && !function.r#async
@@ -1550,18 +1846,6 @@ impl<'unit, 'arena, 'scope> Planner<'unit, 'arena, 'scope> {
             }
         }
 
-        if semantic
-            .scoping()
-            .scope_descendants_from_root()
-            .any(|scope_id| {
-                semantic
-                    .scoping()
-                    .scope_flags(scope_id)
-                    .contains_direct_eval()
-            })
-        {
-            return unsupported(UnsupportedFeature::DirectEval, self.root_span);
-        }
         Ok(())
     }
 
@@ -1738,6 +2022,7 @@ impl<'unit, 'arena, 'scope> Planner<'unit, 'arena, 'scope> {
             name,
             name_span,
             strict,
+            direct_eval: DirectEvalCallsite::Absent,
             parameter_count: parameters.count,
             defined_parameter_count: parameters.defined_count,
             simple_parameter_list: parameters.simple,
@@ -1983,9 +2268,18 @@ impl<'unit, 'arena, 'scope> Planner<'unit, 'arena, 'scope> {
                         {
                             break;
                         }
+                        ExecutableKind::Script { .. }
+                            if matches!(
+                                self.unit.goal(),
+                                CompilationGoal::DirectEval(context)
+                                    if context.capabilities().allows_new_target()
+                            ) =>
+                        {
+                            break;
+                        }
                         ExecutableKind::ClassDefaultConstructor
-                        | ExecutableKind::Script { .. }
-                        | ExecutableKind::Module => {
+                        | ExecutableKind::Module
+                        | ExecutableKind::Script { .. } => {
                             return unsupported(UnsupportedFeature::FunctionSyntheticBinding, span);
                         }
                     }
@@ -2004,14 +2298,18 @@ impl<'unit, 'arena, 'scope> Planner<'unit, 'arena, 'scope> {
             if direct_super_call && instance_field_owner.is_some() {
                 return unsupported(UnsupportedFeature::FunctionSyntheticBinding, span);
             }
-            let derived_constructor =
-                self.executable_drafts
-                    .get(owner.index())
-                    .is_some_and(|candidate| {
-                        matches!(candidate.executable.kind, ExecutableKind::Function { .. })
-                            && is_derived_class_constructor(nodes, candidate.node_id)
-                    });
-            if direct_super_call && derived_constructor {
+            if direct_super_call
+                && let Some(constructor) =
+                    self.executable_lexically_has_derived_constructor(owner, span)?
+            {
+                if constructor != owner
+                    && self.derived_constructor_has_instance_initializers(constructor, span)?
+                {
+                    // Arrow-contained first-super field initialization needs
+                    // the reusable initializer body tracked separately from
+                    // this mutable derived-this environment tranche.
+                    return unsupported(UnsupportedFeature::FunctionSyntheticBinding, span);
+                }
                 continue;
             }
             let direct_super_property = match nodes.parent_kind(node_id) {
@@ -2033,19 +2331,145 @@ impl<'unit, 'arena, 'scope> Planner<'unit, 'arena, 'scope> {
                 }
                 _ => false,
             };
-            let home_object_method =
-                self.executable_drafts
-                    .get(owner.index())
-                    .is_some_and(|candidate| {
-                        matches!(candidate.executable.kind, ExecutableKind::Function { .. })
-                            && is_home_object_method(nodes, candidate.node_id)
-                    });
-            if direct_super_property && home_object_method {
+            if direct_super_property && self.executable_lexically_has_home_object(owner, span)? {
                 continue;
             }
             return unsupported(UnsupportedFeature::FunctionSyntheticBinding, span);
         }
         Ok(())
+    }
+
+    fn executable_lexically_has_derived_constructor(
+        &self,
+        mut executable: ExecutableId,
+        span: Span,
+    ) -> Result<Option<ExecutableId>, CompilerError> {
+        let nodes = self.unit.semantic().nodes();
+        loop {
+            let candidate = self.executable_drafts.get(executable.index()).ok_or(
+                CompilerError::SemanticInvariant {
+                    invariant: "super call owner executable exists",
+                    span: Some(span),
+                },
+            )?;
+            match candidate.executable.kind {
+                ExecutableKind::Arrow { .. } => {
+                    let Some(parent) = candidate.executable.parent else {
+                        return Err(CompilerError::SemanticInvariant {
+                            invariant: "arrow super call has an executable parent",
+                            span: Some(span),
+                        });
+                    };
+                    executable = parent;
+                }
+                ExecutableKind::Function { .. } => {
+                    return Ok(is_derived_class_constructor(nodes, candidate.node_id)
+                        .then_some(executable));
+                }
+                ExecutableKind::ClassDefaultConstructor | ExecutableKind::Module => {
+                    return Ok(None);
+                }
+                ExecutableKind::Script { .. } => {
+                    return Ok(matches!(
+                        self.unit.goal(),
+                        CompilationGoal::DirectEval(context)
+                            if context.capabilities().allows_super_call()
+                    )
+                    .then_some(executable));
+                }
+            }
+        }
+    }
+
+    fn derived_constructor_has_instance_initializers(
+        &self,
+        executable: ExecutableId,
+        span: Span,
+    ) -> Result<bool, CompilerError> {
+        let nodes = self.unit.semantic().nodes();
+        let candidate = self.executable_drafts.get(executable.index()).ok_or(
+            CompilerError::SemanticInvariant {
+                invariant: "derived constructor executable exists",
+                span: Some(span),
+            },
+        )?;
+        let AstKind::Function(function) = nodes.kind(candidate.node_id) else {
+            return Err(CompilerError::SemanticInvariant {
+                invariant: "source derived constructor remains a function",
+                span: Some(span),
+            });
+        };
+        let AstKind::MethodDefinition(method) = nodes.parent_kind(function.node_id.get()) else {
+            return Err(CompilerError::SemanticInvariant {
+                invariant: "derived constructor remains a class method",
+                span: Some(span),
+            });
+        };
+        let AstKind::ClassBody(body) = nodes.parent_kind(method.node_id.get()) else {
+            return Err(CompilerError::SemanticInvariant {
+                invariant: "derived constructor remains in a class body",
+                span: Some(span),
+            });
+        };
+        let AstKind::Class(class) = nodes.parent_kind(body.node_id.get()) else {
+            return Err(CompilerError::SemanticInvariant {
+                invariant: "derived constructor class body remains in a class",
+                span: Some(span),
+            });
+        };
+        Ok(class.body.body.iter().any(|element| match element {
+            ClassElement::PropertyDefinition(field) => !field.r#static,
+            ClassElement::MethodDefinition(method) => {
+                !method.r#static
+                    && matches!(method.key, PropertyKey::PrivateIdentifier(_))
+                    && matches!(
+                        method.kind,
+                        MethodDefinitionKind::Method
+                            | MethodDefinitionKind::Get
+                            | MethodDefinitionKind::Set
+                    )
+            }
+            _ => false,
+        }))
+    }
+
+    fn executable_lexically_has_home_object(
+        &self,
+        mut executable: ExecutableId,
+        span: Span,
+    ) -> Result<bool, CompilerError> {
+        let nodes = self.unit.semantic().nodes();
+        loop {
+            let candidate = self.executable_drafts.get(executable.index()).ok_or(
+                CompilerError::SemanticInvariant {
+                    invariant: "super property owner executable exists",
+                    span: Some(span),
+                },
+            )?;
+            match candidate.executable.kind {
+                ExecutableKind::Arrow { .. } => {
+                    let Some(parent) = candidate.executable.parent else {
+                        return Err(CompilerError::SemanticInvariant {
+                            invariant: "arrow super property has an executable parent",
+                            span: Some(span),
+                        });
+                    };
+                    executable = parent;
+                }
+                ExecutableKind::Function { .. } => {
+                    return Ok(is_home_object_method(nodes, candidate.node_id));
+                }
+                ExecutableKind::ClassDefaultConstructor => return Ok(true),
+                ExecutableKind::Script { .. } => {
+                    return Ok(matches!(
+                        self.unit.goal(),
+                        CompilationGoal::DirectEval(context)
+                            if context.capabilities().allows_super_property()
+                    ));
+                }
+                ExecutableKind::Module => return Ok(false),
+            }
+        }
     }
 
     #[allow(
@@ -2102,6 +2526,7 @@ impl<'unit, 'arena, 'scope> Planner<'unit, 'arena, 'scope> {
                     class_private_name_nodes: Arc::from([]),
                     class_private_method_node: None,
                     class_static_receiver_node: None,
+                    with_statement_node: None,
                     executable: owner,
                     name: Arc::clone(&name),
                     declaration_spans: parameter_spans.into(),
@@ -2122,6 +2547,7 @@ impl<'unit, 'arena, 'scope> Planner<'unit, 'arena, 'scope> {
                     class_private_name_nodes: Arc::from([]),
                     class_private_method_node: None,
                     class_static_receiver_node: None,
+                    with_statement_node: None,
                     executable: owner,
                     name,
                     declaration_spans: body_spans.into(),
@@ -2147,6 +2573,7 @@ impl<'unit, 'arena, 'scope> Planner<'unit, 'arena, 'scope> {
                 class_private_name_nodes: Arc::from([]),
                 class_private_method_node: None,
                 class_static_receiver_node: None,
+                with_statement_node: None,
                 executable: owner,
                 name,
                 declaration_spans,
@@ -2251,7 +2678,16 @@ impl<'unit, 'arena, 'scope> Planner<'unit, 'arena, 'scope> {
         match self.kind {
             CompilationUnitKind::Script => match kind {
                 DeclarationKind::Let | DeclarationKind::Const | DeclarationKind::Class
-                    if crate::is_supported_dynamic_function_goal(self.unit.goal()) =>
+                    if crate::is_supported_dynamic_function_goal(self.unit.goal())
+                        || crate::is_supported_indirect_eval_goal(self.unit.goal())
+                        || crate::is_supported_direct_eval_goal(self.unit.goal()) =>
+                {
+                    Ok(StoragePlacement::Local)
+                }
+                DeclarationKind::Var | DeclarationKind::Function
+                    if (crate::is_supported_indirect_eval_goal(self.unit.goal())
+                        || crate::is_supported_direct_eval_goal(self.unit.goal()))
+                        && self.executable_drafts[owner.index()].executable.is_strict() =>
                 {
                     Ok(StoragePlacement::Local)
                 }
@@ -2266,6 +2702,7 @@ impl<'unit, 'arena, 'scope> Planner<'unit, 'arena, 'scope> {
                 | DeclarationKind::ClassFieldKey
                 | DeclarationKind::ClassPrivateName
                 | DeclarationKind::ClassStaticReceiver
+                | DeclarationKind::WithObject
                 | DeclarationKind::Parameter
                 | DeclarationKind::Catch
                 | DeclarationKind::Import
@@ -2288,6 +2725,7 @@ impl<'unit, 'arena, 'scope> Planner<'unit, 'arena, 'scope> {
                 | DeclarationKind::ClassFieldKey
                 | DeclarationKind::ClassPrivateName
                 | DeclarationKind::ClassStaticReceiver
+                | DeclarationKind::WithObject
                 | DeclarationKind::Parameter
                 | DeclarationKind::Catch
                 | DeclarationKind::SyntheticDefault => Err(CompilerError::SemanticInvariant {
@@ -2326,7 +2764,8 @@ impl<'unit, 'arena, 'scope> Planner<'unit, 'arena, 'scope> {
             | DeclarationKind::ClassName
             | DeclarationKind::ClassFieldKey
             | DeclarationKind::ClassPrivateName
-            | DeclarationKind::ClassStaticReceiver => (
+            | DeclarationKind::ClassStaticReceiver
+            | DeclarationKind::WithObject => (
                 InitializationPolicy::AtDeclaration,
                 WritePolicy::Immutable,
                 true,
@@ -2412,6 +2851,7 @@ impl<'unit, 'arena, 'scope> Planner<'unit, 'arena, 'scope> {
             class_private_name_nodes: Arc::from([]),
             class_private_method_node: None,
             class_static_receiver_node: None,
+            with_statement_node: None,
             executable: ExecutableId(0),
             name: Arc::from("*default*"),
             declaration_spans: synthetic_spans.into(),
@@ -2449,6 +2889,7 @@ impl<'unit, 'arena, 'scope> Planner<'unit, 'arena, 'scope> {
                 class_private_name_nodes: Arc::from([]),
                 class_private_method_node: None,
                 class_static_receiver_node: None,
+                with_statement_node: None,
                 executable: owner,
                 name: Arc::from(identifier.name.as_str()),
                 declaration_spans: Arc::from([identifier.span]),
@@ -2460,9 +2901,9 @@ impl<'unit, 'arena, 'scope> Planner<'unit, 'arena, 'scope> {
         Ok(())
     }
 
-    /// Adds one fresh class-scope cell for every computed public instance
-    /// field. The constructor captures the cell; class definition evaluation
-    /// stores the once-converted property key before the constructor can run.
+    /// Adds one fresh class-scope cell for every computed public field. Class
+    /// definition evaluation stores every once-converted key before static
+    /// initialization; instance constructors additionally capture their keys.
     fn add_class_field_key_bindings(
         &self,
         bindings: &mut Vec<BindingDraft>,
@@ -2478,7 +2919,7 @@ impl<'unit, 'arena, 'scope> Planner<'unit, 'arena, 'scope> {
                 let ClassElement::PropertyDefinition(field) = element else {
                     continue;
                 };
-                if field.r#static || !field.computed {
+                if !field.computed {
                     continue;
                 }
                 let field_node = field.node_id.get();
@@ -2490,6 +2931,7 @@ impl<'unit, 'arena, 'scope> Planner<'unit, 'arena, 'scope> {
                     class_private_name_nodes: Arc::from([]),
                     class_private_method_node: None,
                     class_static_receiver_node: None,
+                    with_statement_node: None,
                     executable: owner,
                     name: Arc::from(format!("[[class-field-key:{}]]", field_node.index())),
                     declaration_spans: Arc::from([field.key.span()]),
@@ -2516,21 +2958,21 @@ impl<'unit, 'arena, 'scope> Planner<'unit, 'arena, 'scope> {
                     span: None,
                 });
             };
-            if field.r#static || !field.computed {
+            if !field.computed {
                 return Err(CompilerError::SemanticInvariant {
-                    invariant: "class-field key capture belongs to a computed instance field",
+                    invariant: "class-field key binding belongs to a computed field",
                     span: Some(field.span),
                 });
             }
             let AstKind::ClassBody(body) = nodes.parent_kind(field_node) else {
                 return Err(CompilerError::SemanticInvariant {
-                    invariant: "computed instance field belongs to a class body",
+                    invariant: "computed field belongs to a class body",
                     span: Some(field.span),
                 });
             };
             let AstKind::Class(class) = nodes.parent_kind(body.node_id.get()) else {
                 return Err(CompilerError::SemanticInvariant {
-                    invariant: "computed instance field class body belongs to a class",
+                    invariant: "computed field class body belongs to a class",
                     span: Some(body.span),
                 });
             };
@@ -2548,6 +2990,9 @@ impl<'unit, 'arena, 'scope> Planner<'unit, 'arena, 'scope> {
                     invariant: "class-field key capture uses an immutable local binding",
                     span: Some(field.key.span()),
                 });
+            }
+            if field.r#static {
+                continue;
             }
             let constructor = self.instance_field_constructor_owner(class.node_id.get(), class)?;
             if constructor == storage.executable {
@@ -2655,6 +3100,7 @@ impl<'unit, 'arena, 'scope> Planner<'unit, 'arena, 'scope> {
                     class_private_name_nodes: name_nodes.into(),
                     class_private_method_node: None,
                     class_static_receiver_node: None,
+                    with_statement_node: None,
                     executable: owner,
                     name: Arc::from(format!("[[class-private-name:{}]]", element_node.index())),
                     declaration_spans: Arc::from([identifier.span]),
@@ -2710,6 +3156,7 @@ impl<'unit, 'arena, 'scope> Planner<'unit, 'arena, 'scope> {
                     class_private_name_nodes: Arc::from([]),
                     class_private_method_node: Some(method_node),
                     class_static_receiver_node: None,
+                    with_statement_node: None,
                     executable: owner,
                     name: Arc::from(format!("[[class-private-method:{}]]", method_node.index())),
                     declaration_spans: Arc::from([identifier.span]),
@@ -3000,11 +3447,48 @@ impl<'unit, 'arena, 'scope> Planner<'unit, 'arena, 'scope> {
                 class_private_name_nodes: Arc::from([]),
                 class_private_method_node: None,
                 class_static_receiver_node: Some(class_node),
+                with_statement_node: None,
                 executable: owner,
                 name: Arc::from(format!("[[class-static-receiver:{}]]", class_node.index())),
                 declaration_spans: Arc::from([class.span]),
                 placement: StoragePlacement::Local,
                 policy: self.declaration_policy(owner, DeclarationKind::ClassStaticReceiver, false),
+                arguments_object: false,
+            });
+        }
+        Ok(())
+    }
+
+    fn add_with_object_bindings(
+        &self,
+        bindings: &mut Vec<BindingDraft>,
+    ) -> Result<(), CompilerError> {
+        for (node_id, node) in self.unit.semantic().nodes().iter_enumerated() {
+            let AstKind::WithStatement(statement) = node.kind() else {
+                continue;
+            };
+            let scope = statement
+                .scope_id
+                .get()
+                .ok_or(CompilerError::SemanticInvariant {
+                    invariant: "with statement has an object-environment scope",
+                    span: Some(statement.span),
+                })?;
+            let owner = self.scope_owner(scope, Some(statement.span))?;
+            bindings.push(BindingDraft {
+                symbol_id: None,
+                primary_symbol_binding: false,
+                class_node: None,
+                class_field_node: None,
+                class_private_name_nodes: Arc::from([]),
+                class_private_method_node: None,
+                class_static_receiver_node: None,
+                with_statement_node: Some(node_id),
+                executable: owner,
+                name: Arc::from(format!("[[with-object:{}]]", node_id.index())),
+                declaration_spans: Arc::from([statement.span]),
+                placement: StoragePlacement::Local,
+                policy: self.declaration_policy(owner, DeclarationKind::WithObject, false),
                 arguments_object: false,
             });
         }
@@ -3204,7 +3688,7 @@ impl<'unit, 'arena, 'scope> Planner<'unit, 'arena, 'scope> {
         class_name_bindings: &HashMap<NodeId, BindingId>,
         bindings: &[BindingStorage],
         implicit_arguments_references: &HashMap<ReferenceId, ExecutableId>,
-    ) -> Result<Vec<ResolvedDraft>, CompilerError> {
+    ) -> Result<(Vec<ResolvedDraft>, Vec<UnresolvedDraft>), CompilerError> {
         let semantic = self.unit.semantic();
         let scoping = semantic.scoping();
         let arguments_bindings = bindings
@@ -3230,6 +3714,7 @@ impl<'unit, 'arena, 'scope> Planner<'unit, 'arena, 'scope> {
             }
         }
         let mut drafts = Vec::with_capacity(scoping.references_len());
+        let mut parameter_outer_references = Vec::new();
         for symbol_id in scoping.symbol_ids() {
             let source_binding = symbol_bindings
                 .get(symbol_id.index())
@@ -3271,6 +3756,26 @@ impl<'unit, 'arena, 'scope> Planner<'unit, 'arena, 'scope> {
                         class_name_bindings,
                     )
                     .unwrap_or(binding);
+                let binding_storage =
+                    bindings
+                        .get(binding.index())
+                        .ok_or(CompilerError::SemanticInvariant {
+                            invariant: "resolved reference binding exists",
+                            span: Some(span),
+                        })?;
+                if self.reference_precedes_body_environment(binding_storage, span) {
+                    parameter_outer_references.push(UnresolvedDraft {
+                        reference_id,
+                        executable,
+                        name: binding_storage.name.clone(),
+                        span,
+                        access: ReferenceAccess {
+                            read: reference.is_read(),
+                            write: reference.is_write(),
+                        },
+                    });
+                    continue;
+                }
                 drafts.push(ResolvedDraft {
                     reference_id,
                     executable,
@@ -3283,7 +3788,31 @@ impl<'unit, 'arena, 'scope> Planner<'unit, 'arena, 'scope> {
                 });
             }
         }
-        Ok(drafts)
+        Ok((drafts, parameter_outer_references))
+    }
+
+    fn reference_precedes_body_environment(&self, binding: &BindingStorage, span: Span) -> bool {
+        if !matches!(
+            binding.policy.kind,
+            DeclarationKind::Var
+                | DeclarationKind::Let
+                | DeclarationKind::Const
+                | DeclarationKind::Class
+                | DeclarationKind::Function
+        ) || !self.executable_drafts[binding.executable.index()]
+            .executable
+            .has_parameter_expressions()
+        {
+            return false;
+        }
+        self.parameter_list_span(binding.executable)
+            .is_some_and(|parameters| {
+                span_within(span, parameters)
+                    && binding
+                        .declaration_spans
+                        .iter()
+                        .all(|declaration| !span_within(*declaration, parameters))
+            })
     }
 
     fn class_name_binding_for_reference(
@@ -3377,6 +3906,7 @@ impl<'unit, 'arena, 'scope> Planner<'unit, 'arena, 'scope> {
                 class_private_name_nodes: Arc::from([]),
                 class_private_method_node: None,
                 class_static_receiver_node: None,
+                with_statement_node: None,
                 executable: owner,
                 name: Arc::from("arguments"),
                 declaration_spans: Arc::from([span]),
@@ -3388,6 +3918,10 @@ impl<'unit, 'arena, 'scope> Planner<'unit, 'arena, 'scope> {
         Ok(reference_owners)
     }
 
+    #[allow(
+        clippy::too_many_lines,
+        reason = "resolved and unresolved arguments references share one owner-selection pass"
+    )]
     fn collect_implicit_arguments_references(
         &self,
         bindings: &[BindingDraft],
@@ -3485,10 +4019,42 @@ impl<'unit, 'arena, 'scope> Planner<'unit, 'arena, 'scope> {
             &arguments_parameter_owners,
             &mut first_references,
         )?;
+        self.seed_direct_eval_arguments_object_requirements(
+            &arguments_parameter_owners,
+            &mut first_references,
+        )?;
         Ok(ImplicitArgumentsPlan {
             reference_owners: implicit_references,
             first_references,
         })
+    }
+
+    fn seed_direct_eval_arguments_object_requirements(
+        &self,
+        arguments_parameter_owners: &HashSet<ExecutableId>,
+        first_references: &mut HashMap<ExecutableId, Span>,
+    ) -> Result<(), CompilerError> {
+        for draft in &self.executable_drafts {
+            if !draft.executable.has_direct_eval() {
+                continue;
+            }
+            let span = draft.executable.span();
+            let Some(owner) = self.arguments_owner(draft.executable.id(), span)? else {
+                continue;
+            };
+            if arguments_parameter_owners.contains(&owner) {
+                continue;
+            }
+            first_references
+                .entry(owner)
+                .and_modify(|first| {
+                    if (span.start, span.end) < (first.start, first.end) {
+                        *first = span;
+                    }
+                })
+                .or_insert(span);
+        }
+        Ok(())
     }
 
     fn seed_body_arguments_object_requirements(
@@ -3502,6 +4068,12 @@ impl<'unit, 'arena, 'scope> Planner<'unit, 'arena, 'scope> {
                 && matches!(
                     binding.policy.kind,
                     DeclarationKind::Var | DeclarationKind::Function
+                )
+                && matches!(
+                    self.executable_drafts[binding.executable.index()]
+                        .executable
+                        .kind(),
+                    ExecutableKind::Function { .. }
                 )
                 && self.executable_drafts[binding.executable.index()]
                     .executable
@@ -3894,6 +4466,7 @@ fn freeze_bindings(
     let mut class_private_name_bindings = HashMap::new();
     let mut class_private_method_bindings = HashMap::new();
     let mut class_static_receiver_bindings = HashMap::new();
+    let mut with_object_bindings = HashMap::new();
     for (index, draft) in drafts.into_iter().enumerate() {
         let id = u32::try_from(index)
             .map(BindingId)
@@ -3971,6 +4544,14 @@ fn freeze_bindings(
                 span: draft.declaration_spans.first().copied(),
             });
         }
+        if let Some(statement_node) = draft.with_statement_node
+            && with_object_bindings.insert(statement_node, id).is_some()
+        {
+            return Err(CompilerError::SemanticInvariant {
+                invariant: "one synthetic with-object binding per with statement",
+                span: draft.declaration_spans.first().copied(),
+            });
+        }
         source_symbols.push(draft.symbol_id);
         bindings.push(BindingStorage {
             id,
@@ -3999,6 +4580,7 @@ fn freeze_bindings(
         class_private_name_bindings,
         class_private_method_bindings,
         class_static_receiver_bindings,
+        with_object_bindings,
     })
 }
 

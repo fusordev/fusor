@@ -548,6 +548,13 @@ pub(super) fn resume_native_continuations(
                     execution_budget,
                 )?
             }
+            NativeContinuation::Uint8ArrayBase64(state) => advance_uint8_array_base64_options(
+                runtime,
+                *state,
+                value,
+                return_to,
+                execution_budget,
+            )?,
             NativeContinuation::ArrayBufferSlice(state) => {
                 advance_array_buffer_slice(runtime, *state, value, return_to, execution_budget)?
             }
@@ -1013,6 +1020,28 @@ pub(super) fn resume_native_continuations(
             NativeContinuation::IteratorFrom(state) => {
                 advance_iterator_from(runtime, state, value, return_to, execution_budget)?
             }
+            NativeContinuation::IteratorConcatCreation(state) => advance_iterator_concat_creation(
+                runtime,
+                state,
+                &value,
+                return_to,
+                execution_budget,
+            )?,
+            NativeContinuation::IteratorZipCreation(state) => {
+                advance_iterator_zip_creation(runtime, *state, value, return_to, execution_budget)?
+            }
+            NativeContinuation::IteratorZipNext(state) => {
+                advance_iterator_zip_next(runtime, state, value, return_to, execution_budget)?
+            }
+            NativeContinuation::IteratorZipClose(state) => {
+                advance_iterator_zip_close(runtime, *state, value, return_to, execution_budget)?
+            }
+            NativeContinuation::IteratorConsumer(state) => {
+                advance_iterator_consumer(runtime, state, value, return_to, execution_budget)?
+            }
+            NativeContinuation::IteratorDispose(state) => {
+                advance_iterator_dispose(state, &value, return_to, execution_budget)?
+            }
             NativeContinuation::IteratorHelperCreation(state) => {
                 advance_iterator_helper_creation(runtime, state, value)?
             }
@@ -1462,6 +1491,13 @@ pub(super) fn resume_native_continuations(
                 execution_budget,
             )?,
             NativeContinuation::PromiseCombinator(state) => advance_promise_combinator(
+                runtime,
+                *state,
+                value.duplicate(),
+                return_to,
+                execution_budget,
+            )?,
+            NativeContinuation::WithGet(state) => advance_with_get(
                 runtime,
                 *state,
                 value.duplicate(),
@@ -2159,7 +2195,11 @@ fn resolve_native_dispatch_inner(
             suspended_frames,
             suspended_values,
             supplied_argument_count,
-            construction.is_some(),
+            if construction.is_some() {
+                FrameEntryKind::Construct
+            } else {
+                FrameEntryKind::Call
+            },
         )
         .map_err(NativeFailure::Execution)?;
         let mut frame = create_frame(
@@ -2204,7 +2244,7 @@ fn apply_native_pre_call(
 }
 
 #[derive(Debug)]
-struct DynamicFunctionServiceUnavailable;
+pub(super) struct DynamicFunctionServiceUnavailable;
 
 impl fmt::Display for DynamicFunctionServiceUnavailable {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -2471,6 +2511,33 @@ pub(super) fn dispatch_native_call_with_frames(
                 inputs.receiver,
                 return_to,
                 origin.unwrap_or_else(native_function_host_origin),
+                execution_budget,
+            )
+        }
+        NativeFunctionKind::Eval => {
+            let mut arguments = inputs.arguments;
+            let argument = arguments.take_first_or_undefined();
+            let StoredValue::String(source) = argument else {
+                return Ok(NativeDispatch::Immediate(argument));
+            };
+            let Some(compiler) = compiler else {
+                return Err(NativeFailure::Execution(
+                    DynamicFunctionCompileFailure::Engine {
+                        source: Arc::new(DynamicFunctionServiceUnavailable),
+                    }
+                    .into(),
+                ));
+            };
+            finish_indirect_eval(
+                runtime,
+                native.realm,
+                source,
+                return_to,
+                origin.unwrap_or_else(native_function_host_origin),
+                active_root_frames,
+                active_frames,
+                active_frame_values,
+                compiler,
                 execution_budget,
             )
         }
@@ -3345,6 +3412,16 @@ pub(super) fn dispatch_native_call_with_frames(
             execution_budget,
         ),
         NativeFunctionKind::TypedArrayPrototype(method) => dispatch_typed_array_prototype(
+            runtime,
+            method,
+            native.realm,
+            &inputs.receiver,
+            inputs.arguments,
+            return_to,
+            origin.unwrap_or_else(native_function_host_origin),
+            execution_budget,
+        ),
+        NativeFunctionKind::Uint8Array(method) => dispatch_uint8_array_method(
             runtime,
             method,
             native.realm,
@@ -4315,6 +4392,57 @@ pub(super) fn dispatch_native_call_with_frames(
             origin.unwrap_or_else(native_function_host_origin),
             execution_budget,
         ),
+        NativeFunctionKind::IteratorConcat => begin_iterator_concat(
+            runtime,
+            inputs.arguments,
+            native.realm,
+            return_to,
+            origin.unwrap_or_else(native_function_host_origin),
+            execution_budget,
+        ),
+        NativeFunctionKind::IteratorZip => begin_iterator_zip(
+            runtime,
+            inputs.arguments,
+            native.realm,
+            return_to,
+            origin.unwrap_or_else(native_function_host_origin),
+            execution_budget,
+        ),
+        NativeFunctionKind::IteratorZipKeyed => begin_iterator_zip_keyed(
+            runtime,
+            inputs.arguments,
+            native.realm,
+            return_to,
+            origin.unwrap_or_else(native_function_host_origin),
+            execution_budget,
+        ),
+        NativeFunctionKind::IteratorPrototypeConsumer(kind) => {
+            let callback = inputs.arguments.take_first_or_undefined();
+            let initial_value = if matches!(kind, crate::runtime::IteratorConsumer::Reduce) {
+                inputs.arguments.take_first()
+            } else {
+                None
+            };
+            begin_iterator_consumer(
+                runtime,
+                kind,
+                inputs.receiver,
+                &callback,
+                initial_value,
+                native.realm,
+                return_to,
+                origin.unwrap_or_else(native_function_host_origin),
+                execution_budget,
+            )
+        }
+        NativeFunctionKind::IteratorPrototypeDispose => begin_iterator_dispose(
+            runtime,
+            inputs.receiver,
+            native.realm,
+            return_to,
+            origin.unwrap_or_else(native_function_host_origin),
+            execution_budget,
+        ),
         NativeFunctionKind::IteratorPrototypeDrop => begin_iterator_drop(
             runtime,
             inputs.receiver,
@@ -4330,6 +4458,18 @@ pub(super) fn dispatch_native_call_with_frames(
                 runtime,
                 inputs.receiver,
                 &predicate,
+                native.realm,
+                return_to,
+                origin.unwrap_or_else(native_function_host_origin),
+                execution_budget,
+            )
+        }
+        NativeFunctionKind::IteratorPrototypeFlatMap => {
+            let mapper = inputs.arguments.take_first_or_undefined();
+            begin_iterator_flat_map(
+                runtime,
+                inputs.receiver,
+                &mapper,
                 native.realm,
                 return_to,
                 origin.unwrap_or_else(native_function_host_origin),

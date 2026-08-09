@@ -26,10 +26,10 @@
 //! Runtime usage accounting, deferred root releases, and iterative cycle collection.
 
 use super::{
-    AtomUsage, BindingCellId, EnvironmentBinding, FunctionId, FunctionImplementation, HashMap,
-    HashSet, HeapReference, InstalledConstant, ObjectId, ObjectRecord, PromiseJob,
-    RealmGlobalBindingState, RealmIntrinsics, Runtime, RuntimeError, RuntimeResource, RuntimeUsage,
-    SlotValue, StoredValue, usize_to_u64,
+    AtomUsage, BindingCellId, EnvironmentBinding, EvalVariableEnvironment, FunctionId,
+    FunctionImplementation, HashMap, HashSet, HeapReference, InstalledConstant, ObjectId,
+    ObjectRecord, PromiseJob, RealmGlobalBindingState, RealmIntrinsics, Runtime, RuntimeError,
+    RuntimeResource, RuntimeUsage, SlotValue, StoredValue, usize_to_u64,
 };
 use crate::{
     atom::WeakAtom,
@@ -948,6 +948,19 @@ impl Runtime {
                                         &mut work,
                                     );
                                 }
+                                if let Some(constructor) = bytecode.lexical_derived_constructor {
+                                    mark_heap_reference(
+                                        HeapReference::Function(constructor),
+                                        &mut marked_functions,
+                                        &mut marked_objects,
+                                        &mut work,
+                                    );
+                                }
+                                if let Some(cell) = bytecode.lexical_derived_this
+                                    && marked_cells.insert(cell)
+                                {
+                                    work.push(GraphNode::Cell(cell));
+                                }
                                 if let Some(home_object) = bytecode.home_object {
                                     mark_heap_reference(
                                         home_object,
@@ -962,6 +975,13 @@ impl Runtime {
                                     {
                                         work.push(GraphNode::Cell(cell));
                                     }
+                                }
+                                if let Some(environment) = &bytecode.eval_environment {
+                                    EvalVariableEnvironment::trace_cells(environment, |cell| {
+                                        if marked_cells.insert(cell) {
+                                            work.push(GraphNode::Cell(cell));
+                                        }
+                                    });
                                 }
                                 if let Some(installed) = self.code.get(bytecode.code)
                                     && let Some(template) = usize::try_from(bytecode.template.get())
@@ -1239,6 +1259,52 @@ impl Runtime {
                                         &mut marked_objects,
                                         &mut work,
                                     );
+                                }
+                                if let Some(helper) = iterator.helper() {
+                                    for value in
+                                        [helper.inner_iterator(), helper.inner_next_method()]
+                                            .into_iter()
+                                            .flatten()
+                                    {
+                                        mark_stored_value(
+                                            value,
+                                            &mut marked_functions,
+                                            &mut marked_objects,
+                                            &mut work,
+                                        );
+                                    }
+                                    for iterable in helper.concat_iterables() {
+                                        mark_stored_value(
+                                            iterable.iterable(),
+                                            &mut marked_functions,
+                                            &mut marked_objects,
+                                            &mut work,
+                                        );
+                                        mark_heap_reference(
+                                            HeapReference::Function(iterable.open_method()),
+                                            &mut marked_functions,
+                                            &mut marked_objects,
+                                            &mut work,
+                                        );
+                                    }
+                                    for record in helper.zip_records() {
+                                        for value in [record.iterator(), record.next_method()] {
+                                            mark_stored_value(
+                                                value,
+                                                &mut marked_functions,
+                                                &mut marked_objects,
+                                                &mut work,
+                                            );
+                                        }
+                                    }
+                                    for value in helper.zip_padding() {
+                                        mark_stored_value(
+                                            value,
+                                            &mut marked_functions,
+                                            &mut marked_objects,
+                                            &mut work,
+                                        );
+                                    }
                                 }
                             }
                             if let Some(view) = object.data_view_state() {

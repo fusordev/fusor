@@ -1,6 +1,6 @@
 use std::collections::VecDeque;
 
-use crate::{DecodedInstruction, FinalOpcode};
+use crate::{DecodedInstruction, FinalOpcode, FunctionKind};
 
 use super::{
     InstructionIndex, VerificationError, VerificationErrorKind, VerificationLimits,
@@ -27,7 +27,7 @@ pub(super) fn analyze_ordinary_stack(
     limits: VerificationLimits,
     require_empty_exits: bool,
 ) -> Result<StackCertificate, VerificationError> {
-    let mut instructions = structurally_verified.into_instructions();
+    let (mut instructions, function_kind) = structurally_verified.into_parts();
     let Some(entry) = instructions.first_mut() else {
         return Err(VerificationError::root(
             VerificationErrorKind::EmptyBytecode,
@@ -166,6 +166,46 @@ pub(super) fn analyze_ordinary_stack(
             } else {
                 None
             };
+        let with_branch_values = match current.decoded.instruction().opcode() {
+            FinalOpcode::WithGetVar | FinalOpcode::WithDeleteVar => 1,
+            FinalOpcode::WithMakeRef | FinalOpcode::WithGetRef => 2,
+            _ => 0,
+        };
+        let with_binding_depth = if with_branch_values != 0 {
+            let depth = u64::from(output_depth)
+                .checked_add(with_branch_values)
+                .ok_or_else(|| {
+                    VerificationError::at_instruction(
+                        current.decoded,
+                        VerificationErrorKind::StackLimitExceeded {
+                            depth: u64::MAX,
+                            limit: limits.max_stack_depth,
+                        },
+                    )
+                })?;
+            if depth > u64::from(limits.max_stack_depth) {
+                return Err(VerificationError::at_instruction(
+                    current.decoded,
+                    VerificationErrorKind::StackLimitExceeded {
+                        depth,
+                        limit: limits.max_stack_depth,
+                    },
+                ));
+            }
+            let depth = u32::try_from(depth).map_err(|_| {
+                VerificationError::at_instruction(
+                    current.decoded,
+                    VerificationErrorKind::StackLimitExceeded {
+                        depth,
+                        limit: limits.max_stack_depth,
+                    },
+                )
+            })?;
+            computed_max = computed_max.max(depth);
+            Some(depth)
+        } else {
+            None
+        };
 
         match current.successors.0 {
             VerifiedSuccessorsRepr::Fallthrough(successor)
@@ -181,7 +221,9 @@ pub(super) fn analyze_ordinary_stack(
                     &mut instructions,
                     &mut worklist,
                     taken,
-                    finally_subroutine_depth.unwrap_or(output_depth),
+                    finally_subroutine_depth
+                        .or(with_binding_depth)
+                        .unwrap_or(output_depth),
                     current.decoded,
                 )?;
                 propagate_stack_depth(
@@ -200,6 +242,17 @@ pub(super) fn analyze_ordinary_stack(
                     );
                 let returns_from_finally =
                     current.decoded.instruction().opcode() == FinalOpcode::Ret;
+                // Resuming a suspended `yield` with `generator.return(value)`
+                // abandons the surrounding expression evaluation. The VM
+                // retains that expression stack in the suspended frame, then
+                // discards the frame after `return_async` consumes `value`.
+                // Async functions have no corresponding suspended expression
+                // context and retain the ordinary empty-exit requirement.
+                let abandons_generator_expression = matches!(
+                    function_kind,
+                    FunctionKind::Generator | FunctionKind::AsyncGenerator
+                ) && current.decoded.instruction().opcode()
+                    == FinalOpcode::ReturnAsync;
                 // This structural pass cannot distinguish the pending
                 // completion and return-address slots introduced by `gosub`.
                 // A body containing `gosub` may therefore defer non-empty
@@ -214,6 +267,7 @@ pub(super) fn analyze_ordinary_stack(
                     && output_depth != 0
                     && !protected_throw
                     && !returns_from_finally
+                    && !abandons_generator_expression
                     && !defers_typed_finally_exit
                 {
                     return Err(VerificationError::at_instruction(

@@ -1,9 +1,10 @@
 use super::super::{
-    Argument, AssignmentExpression, AssignmentOperator, CallExpression, ChainExpression,
-    CompiledConstantPool, ComputedMemberExpression, Expression, FinalOpcode, FrameLayout, GetSpan,
+    Argument, AssignmentExpression, AssignmentOperator, AstKind, CallExpression, ChainExpression,
+    CompilationGoal, CompiledConstantPool, ComputedMemberExpression, ExecutableId, ExecutableKind,
+    Expression, FinalOpcode, FrameLayout, FunctionTreeLayout, GetSpan, IdentifierReference,
     LeafCompilationError, NewExpression, Operands, PlannedInstruction, PrivateFieldExpression,
     Span, StaticMemberExpression, TaggedTemplateExpression, UnsupportedLeafFeature,
-    plan_push_integer, unsupported,
+    binding_has_scope, plan_push_integer, unsupported,
 };
 use super::expressions::{ExpressionPlanner, ExpressionWork};
 
@@ -27,10 +28,114 @@ pub(in crate::lowering) fn plan_direct_call(argument_count: u16, span: Span) -> 
 }
 
 impl<'arena> ExpressionPlanner<'_, '_, 'arena, '_> {
+    fn with_identifier_callee<'expression>(
+        &self,
+        mut callee: &'expression Expression<'arena>,
+        tree_layout: &FunctionTreeLayout,
+    ) -> Result<Option<&'expression IdentifierReference<'arena>>, LeafCompilationError> {
+        while let Expression::ParenthesizedExpression(parenthesized) = callee {
+            callee = &parenthesized.expression;
+        }
+        let Expression::Identifier(identifier) = callee else {
+            return Ok(None);
+        };
+        Ok((!self
+            .with_object_sources_for_reference(
+                identifier.reference_id.get(),
+                identifier.span,
+                tree_layout,
+            )?
+            .is_empty())
+        .then_some(identifier))
+    }
+
+    fn is_contextual_direct_eval_derived_constructor(
+        &self,
+        executable: ExecutableId,
+        span: Span,
+    ) -> Result<bool, LeafCompilationError> {
+        let executable = self.planned.plan.executable(executable).ok_or(
+            LeafCompilationError::SemanticInvariant {
+                invariant: "direct eval derived-constructor executable exists",
+                span: Some(span),
+            },
+        )?;
+        Ok(matches!(executable.kind(), ExecutableKind::Script { .. })
+            && matches!(
+                self.unit.goal(),
+                CompilationGoal::DirectEval(context)
+                    if context.capabilities().allows_super_call()
+            ))
+    }
+
+    fn adjusted_eval_scope_index(
+        &self,
+        call: &CallExpression<'arena>,
+        layout: &FrameLayout,
+    ) -> Result<u16, LeafCompilationError> {
+        let nodes = self.unit.semantic().nodes();
+        let call_node = call.node_id.get();
+        let creator = self
+            .planned
+            .identities
+            .node_by_executable
+            .get(layout.executable.index())
+            .copied()
+            .ok_or(LeafCompilationError::SemanticInvariant {
+                invariant: "eval caller executable has an Oxc node identity",
+                span: Some(call.span),
+            })?;
+        for ancestor in nodes.ancestor_ids(call_node) {
+            if ancestor == creator {
+                break;
+            }
+            match nodes.kind(ancestor) {
+                AstKind::FormalParameters(_) => return Ok(0),
+                AstKind::FunctionBody(_) => break,
+                _ => {}
+            }
+        }
+
+        let scoping = self.unit.semantic().scoping();
+        let mut scope = Some(nodes.get_node(call_node).scope_id());
+        while let Some(active_scope) = scope {
+            for (index, local) in layout.locals.iter().enumerate().rev() {
+                let binding = self.planned.plan.binding(local.binding).ok_or(
+                    LeafCompilationError::SemanticInvariant {
+                        invariant: "eval scope local binding exists",
+                        span: Some(call.span),
+                    },
+                )?;
+                if binding_has_scope(binding.policy())
+                    && self.scope_for_binding(binding.id())? == active_scope
+                {
+                    let adjusted =
+                        index
+                            .checked_add(2)
+                            .ok_or(LeafCompilationError::CapacityExceeded {
+                                domain: "adjusted eval scope indices",
+                            })?;
+                    return u16::try_from(adjusted).map_err(|_| {
+                        LeafCompilationError::CapacityExceeded {
+                            domain: "adjusted eval scope indices",
+                        }
+                    });
+                }
+            }
+            scope = scoping.scope_parent_id(active_scope);
+        }
+        Ok(1)
+    }
+
+    #[expect(
+        clippy::too_many_lines,
+        reason = "tag planning keeps receiver lookup and the reverse work-list schedule together"
+    )]
     pub(in crate::lowering) fn plan_tagged_template_expression<'expression>(
         &self,
         tagged: &'expression TaggedTemplateExpression<'arena>,
         layout: &FrameLayout,
+        tree_layout: &FunctionTreeLayout,
         constants: &CompiledConstantPool,
         work: &mut Vec<ExpressionWork<'expression, 'arena>>,
     ) -> Result<(), LeafCompilationError> {
@@ -53,15 +158,18 @@ impl<'arena> ExpressionPlanner<'_, '_, 'arena, '_> {
                 domain: "tagged template arguments",
             })?;
         let member = Self::member_callee(&tagged.tag)?;
-        work.push(ExpressionWork::Emit(if member.is_some() {
-            PlannedInstruction::new(
-                FinalOpcode::CallMethod,
-                Operands::NPop { argument_count },
-                tagged.span,
-            )
-        } else {
-            plan_direct_call(argument_count, tagged.span)
-        }));
+        let with_identifier = self.with_identifier_callee(&tagged.tag, tree_layout)?;
+        work.push(ExpressionWork::Emit(
+            if member.is_some() || with_identifier.is_some() {
+                PlannedInstruction::new(
+                    FinalOpcode::CallMethod,
+                    Operands::NPop { argument_count },
+                    tagged.span,
+                )
+            } else {
+                plan_direct_call(argument_count, tagged.span)
+            },
+        ));
         for expression in tagged.quasi.expressions.iter().rev() {
             work.push(ExpressionWork::Visit(expression));
         }
@@ -133,7 +241,12 @@ impl<'arena> ExpressionPlanner<'_, '_, 'arena, '_> {
             Some(MemberCallee::Private(member)) => {
                 self.plan_private_member_callee(member, layout, work)?;
             }
-            None => work.push(ExpressionWork::Visit(&tagged.tag)),
+            None => match with_identifier {
+                Some(identifier) => {
+                    work.push(ExpressionWork::IdentifierCallReference(identifier));
+                }
+                None => work.push(ExpressionWork::Visit(&tagged.tag)),
+            },
         }
         Ok(())
     }
@@ -146,6 +259,7 @@ impl<'arena> ExpressionPlanner<'_, '_, 'arena, '_> {
         &self,
         call: &'expression CallExpression<'arena>,
         layout: &FrameLayout,
+        tree_layout: &FunctionTreeLayout,
         constants: &CompiledConstantPool,
         work: &mut Vec<ExpressionWork<'expression, 'arena>>,
     ) -> Result<(), LeafCompilationError> {
@@ -171,20 +285,34 @@ impl<'arena> ExpressionPlanner<'_, '_, 'arena, '_> {
                 Operands::None,
                 call.span,
             )));
-            let instance_fields = self.instance_field_definitions(layout.executable)?.ok_or(
+            let constructor = self.lexical_derived_constructor(layout.executable)?.ok_or(
                 LeafCompilationError::SemanticInvariant {
                     invariant: "super constructor call belongs to a class constructor",
                     span: Some(call.span),
                 },
             )?;
-            if !instance_fields.derived {
-                return Err(LeafCompilationError::SemanticInvariant {
-                    invariant: "super constructor call belongs to a derived class constructor",
-                    span: Some(call.span),
-                });
-            }
-            if !instance_fields.elements.is_empty() {
-                work.push(ExpressionWork::InitializeInstanceFields);
+            if !self.is_contextual_direct_eval_derived_constructor(constructor, call.span)? {
+                let instance_fields = self.instance_field_definitions(constructor)?.ok_or(
+                    LeafCompilationError::SemanticInvariant {
+                        invariant: "super constructor call resolves its derived class constructor",
+                        span: Some(call.span),
+                    },
+                )?;
+                if !instance_fields.derived {
+                    return Err(LeafCompilationError::SemanticInvariant {
+                        invariant: "super constructor call belongs to a derived class constructor",
+                        span: Some(call.span),
+                    });
+                }
+                if constructor != layout.executable && !instance_fields.elements.is_empty() {
+                    return Err(LeafCompilationError::SemanticInvariant {
+                        invariant: "storage rejects arrow super calls that need reusable instance initialization",
+                        span: Some(call.span),
+                    });
+                }
+                if constructor == layout.executable && !instance_fields.elements.is_empty() {
+                    work.push(ExpressionWork::InitializeInstanceFields);
+                }
             }
             work.push(ExpressionWork::Emit(PlannedInstruction::new(
                 FinalOpcode::CheckCtorReturn,
@@ -223,8 +351,16 @@ impl<'arena> ExpressionPlanner<'_, '_, 'arena, '_> {
             )));
             return Ok(());
         }
+        let direct_eval_scope = (!call.optional && call.callee.is_specific_id("eval"))
+            .then(|| self.adjusted_eval_scope_index(call, layout))
+            .transpose()?;
+        let with_identifier = self.with_identifier_callee(&call.callee, tree_layout)?;
         if let Some(spread) = call.arguments.iter().position(Argument::is_spread) {
-            let member = Self::member_callee(&call.callee)?;
+            let member = if direct_eval_scope.is_some() {
+                None
+            } else {
+                Self::member_callee(&call.callee)?
+            };
             let dense_prefix = spread;
             let argument_count = u16::try_from(dense_prefix).map_err(|_| {
                 LeafCompilationError::CapacityExceeded {
@@ -238,13 +374,36 @@ impl<'arena> ExpressionPlanner<'_, '_, 'arena, '_> {
             })?;
             // Execution order: callee first, then the dense prefix, then
             // `array_from`, the dynamic index, each remaining argument, the
-            // index drop, the receiver insert, and finally `apply`.
-            work.push(ExpressionWork::Emit(PlannedInstruction::new(
-                FinalOpcode::Apply,
-                Operands::U16(0),
+            // index drop, the ordinary receiver insert when needed, and
+            // finally `apply` or identity-checked `apply_eval`.
+            let eval_reference_call = direct_eval_scope.is_some() && with_identifier.is_some();
+            if eval_reference_call {
+                work.push(ExpressionWork::Emit(PlannedInstruction::new(
+                    FinalOpcode::Drop,
+                    Operands::None,
+                    call.span,
+                )));
+                work.push(ExpressionWork::Emit(PlannedInstruction::new(
+                    FinalOpcode::Swap,
+                    Operands::None,
+                    call.span,
+                )));
+            }
+            let call_instruction = PlannedInstruction::new(
+                direct_eval_scope.map_or(FinalOpcode::Apply, |_| FinalOpcode::ApplyEval),
+                Operands::U16(direct_eval_scope.unwrap_or(0)),
                 call.span,
-            )));
-            if member.is_some() {
+            );
+            work.push(ExpressionWork::Emit(if eval_reference_call {
+                call_instruction.with_eval_reference_call()
+            } else {
+                call_instruction
+            }));
+            if direct_eval_scope.is_some() {
+                // `apply_eval` normally consumes `func array`. A verified
+                // reference call carries `receiver func array`; the matching
+                // cleanup above discards the retained receiver after return.
+            } else if member.is_some() || with_identifier.is_some() {
                 // `obj func array` -> `func obj array`
                 work.push(ExpressionWork::Emit(PlannedInstruction::new(
                     FinalOpcode::Perm3,
@@ -344,7 +503,12 @@ impl<'arena> ExpressionPlanner<'_, '_, 'arena, '_> {
                 Some(MemberCallee::Private(member)) => {
                     self.plan_private_member_callee(member, layout, work)?;
                 }
-                None => work.push(ExpressionWork::Visit(&call.callee)),
+                None => match with_identifier {
+                    Some(identifier) => {
+                        work.push(ExpressionWork::IdentifierCallReference(identifier));
+                    }
+                    None => work.push(ExpressionWork::Visit(&call.callee)),
+                },
             }
             return Ok(());
         }
@@ -355,7 +519,34 @@ impl<'arena> ExpressionPlanner<'_, '_, 'arena, '_> {
             }
         })?;
         let member = Self::member_callee(&call.callee)?;
-        work.push(ExpressionWork::Emit(if member.is_some() {
+        let eval_reference_call = direct_eval_scope.is_some() && with_identifier.is_some();
+        if eval_reference_call {
+            work.push(ExpressionWork::Emit(PlannedInstruction::new(
+                FinalOpcode::Drop,
+                Operands::None,
+                call.span,
+            )));
+            work.push(ExpressionWork::Emit(PlannedInstruction::new(
+                FinalOpcode::Swap,
+                Operands::None,
+                call.span,
+            )));
+        }
+        let call_instruction = if let Some(scope_index) = direct_eval_scope {
+            let instruction = PlannedInstruction::new(
+                FinalOpcode::Eval,
+                Operands::NPopU16 {
+                    argument_count,
+                    scope_index,
+                },
+                call.span,
+            );
+            if eval_reference_call {
+                instruction.with_eval_reference_call()
+            } else {
+                instruction
+            }
+        } else if member.is_some() || with_identifier.is_some() {
             PlannedInstruction::new(
                 FinalOpcode::CallMethod,
                 Operands::NPop { argument_count },
@@ -363,7 +554,8 @@ impl<'arena> ExpressionPlanner<'_, '_, 'arena, '_> {
             )
         } else {
             plan_direct_call(argument_count, call.span)
-        }));
+        };
+        work.push(ExpressionWork::Emit(call_instruction));
         for argument in call.arguments.iter().rev() {
             let expression =
                 argument
@@ -436,7 +628,12 @@ impl<'arena> ExpressionPlanner<'_, '_, 'arena, '_> {
             Some(MemberCallee::Private(member)) => {
                 self.plan_private_member_callee(member, layout, work)?;
             }
-            None => work.push(ExpressionWork::Visit(&call.callee)),
+            None => match with_identifier {
+                Some(identifier) => {
+                    work.push(ExpressionWork::IdentifierCallReference(identifier));
+                }
+                None => work.push(ExpressionWork::Visit(&call.callee)),
+            },
         }
         Ok(())
     }
@@ -474,20 +671,34 @@ impl<'arena> ExpressionPlanner<'_, '_, 'arena, '_> {
             Operands::None,
             call.span,
         )));
-        let instance_fields = self.instance_field_definitions(layout.executable)?.ok_or(
+        let constructor = self.lexical_derived_constructor(layout.executable)?.ok_or(
             LeafCompilationError::SemanticInvariant {
                 invariant: "super spread call belongs to a class constructor",
                 span: Some(call.span),
             },
         )?;
-        if !instance_fields.derived {
-            return Err(LeafCompilationError::SemanticInvariant {
-                invariant: "super spread call belongs to a derived class constructor",
-                span: Some(call.span),
-            });
-        }
-        if !instance_fields.elements.is_empty() {
-            work.push(ExpressionWork::InitializeInstanceFields);
+        if !self.is_contextual_direct_eval_derived_constructor(constructor, call.span)? {
+            let instance_fields = self.instance_field_definitions(constructor)?.ok_or(
+                LeafCompilationError::SemanticInvariant {
+                    invariant: "super spread call resolves its derived class constructor",
+                    span: Some(call.span),
+                },
+            )?;
+            if !instance_fields.derived {
+                return Err(LeafCompilationError::SemanticInvariant {
+                    invariant: "super spread call belongs to a derived class constructor",
+                    span: Some(call.span),
+                });
+            }
+            if constructor != layout.executable && !instance_fields.elements.is_empty() {
+                return Err(LeafCompilationError::SemanticInvariant {
+                    invariant: "storage rejects arrow super calls that need reusable instance initialization",
+                    span: Some(call.span),
+                });
+            }
+            if constructor == layout.executable && !instance_fields.elements.is_empty() {
+                work.push(ExpressionWork::InitializeInstanceFields);
+            }
         }
         work.push(ExpressionWork::Emit(PlannedInstruction::new(
             FinalOpcode::CheckCtorReturn,

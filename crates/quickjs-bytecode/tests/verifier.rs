@@ -6,10 +6,11 @@ use quickjs_bytecode::{
     AtomPoolIndex, BytecodeBuilder, BytecodePc, CompilerCaptureLayout, CompilerCapturedBinding,
     CompilerConstantKind, CompilerConstantLayout, ControlFlowEdge, DecodeError, FinalOpcode,
     FunctionCountDomain, FunctionIndexDomains, FunctionKind, FunctionKindRequirement,
-    InvalidControlFlowTargetReason, OperandIndexDomain, Operands, SecondaryOperandField,
-    UnsupportedVerifierFeature, UnverifiedCompilerFunctionBody, UnverifiedFunctionBody,
-    UnverifiedFunctionHeader, VerificationError, VerificationErrorKind, VerificationLimits,
-    VerificationResource, VerifiedSuccessorKind, verify_compiler_control_flow, verify_control_flow,
+    InstructionIndex, InvalidControlFlowTargetReason, OperandIndexDomain, Operands,
+    SecondaryOperandField, UnsupportedVerifierFeature, UnverifiedCompilerFunctionBody,
+    UnverifiedFunctionBody, UnverifiedFunctionHeader, VerificationError, VerificationErrorKind,
+    VerificationLimits, VerificationResource, VerifiedSuccessorKind, verify_compiler_control_flow,
+    verify_control_flow,
 };
 
 use support::snapshot_verified_control_flow;
@@ -230,6 +231,44 @@ fn compiler_throw_rejects_values_stranded_below_the_thrown_value() {
     );
     assert_eq!(error.pc(), Some(BytecodePc::new(2)));
     assert_eq!(error.opcode(), Some(FinalOpcode::Throw));
+}
+
+#[test]
+fn compiler_generator_return_async_may_abandon_suspended_expression_values() {
+    let bytecode = encode(&[
+        (FinalOpcode::Object, Operands::None),
+        (FinalOpcode::Push0, Operands::NoneInt),
+        (FinalOpcode::Undefined, Operands::None),
+        (FinalOpcode::ReturnAsync, Operands::None),
+    ]);
+    for kind in [FunctionKind::Generator, FunctionKind::AsyncGenerator] {
+        let generator_header = UnverifiedFunctionHeader::new((kind as u16) << 4, 0, 0, 0);
+        let verified = verify_compiler_control_flow(
+            UnverifiedCompilerFunctionBody::new(
+                bytecode.clone(),
+                FunctionIndexDomains::default(),
+                generator_header,
+            ),
+            VerificationLimits::default(),
+        )
+        .expect("a generator return abandons its suspended enclosing expression state");
+        assert_eq!(verified.instructions()[3].entry_stack_depth(), Some(3));
+    }
+
+    let async_header = UnverifiedFunctionHeader::new((FunctionKind::Async as u16) << 4, 0, 0, 0);
+    let error = verify_compiler_control_flow(
+        UnverifiedCompilerFunctionBody::new(
+            bytecode,
+            FunctionIndexDomains::default(),
+            async_header,
+        ),
+        VerificationLimits::default(),
+    )
+    .expect_err("an async function has no suspended expression stack to abandon");
+    assert_eq!(
+        error.kind(),
+        &VerificationErrorKind::NonEmptyCompilerExitStack { remaining: 2 }
+    );
 }
 
 #[test]
@@ -494,7 +533,7 @@ fn with_targets_use_the_pc_plus_five_base_before_failing_closed() {
     let valid_target = reject(
         encode(&[
             (
-                FinalOpcode::WithGetVar,
+                FinalOpcode::WithPutVar,
                 Operands::AtomLabelU8 {
                     atom: AtomPoolIndex::new(0),
                     label: 5,
@@ -537,6 +576,92 @@ fn with_targets_use_the_pc_plus_five_base_before_failing_closed() {
             reason: InvalidControlFlowTargetReason::NotInstructionBoundary,
         }
     );
+}
+
+#[test]
+fn with_get_var_verifies_as_an_asymmetric_object_environment_branch() {
+    let bytecode = encode(&[
+        (FinalOpcode::PushTrue, Operands::None),
+        (FinalOpcode::ToObject, Operands::None),
+        (
+            FinalOpcode::WithGetVar,
+            Operands::AtomLabelU8 {
+                atom: AtomPoolIndex::new(0),
+                label: 6,
+                value: 1,
+            },
+        ),
+        (FinalOpcode::Push1, Operands::NoneInt),
+        (FinalOpcode::Return, Operands::None),
+    ]);
+    let verified = verify(bytecode, 1, FunctionIndexDomains::new(1, 0, 0, 0, 0));
+    let with_get = &verified.instructions()[2];
+
+    assert_eq!(with_get.entry_stack_depth(), Some(1));
+    assert_eq!(
+        with_get
+            .successors()
+            .fallthrough()
+            .map(InstructionIndex::get),
+        Some(3)
+    );
+    assert_eq!(
+        with_get
+            .successors()
+            .branch_target()
+            .map(InstructionIndex::get),
+        Some(4)
+    );
+    assert_eq!(verified.instructions()[3].entry_stack_depth(), Some(0));
+    assert_eq!(verified.instructions()[4].entry_stack_depth(), Some(1));
+    assert_eq!(verified.computed_stack_size(), 1);
+}
+
+#[test]
+fn with_delete_var_verifies_one_taken_value() {
+    let bytecode = encode(&[
+        (FinalOpcode::PushTrue, Operands::None),
+        (FinalOpcode::ToObject, Operands::None),
+        (
+            FinalOpcode::WithDeleteVar,
+            Operands::AtomLabelU8 {
+                atom: AtomPoolIndex::new(0),
+                label: 6,
+                value: 1,
+            },
+        ),
+        (FinalOpcode::Push1, Operands::NoneInt),
+        (FinalOpcode::Return, Operands::None),
+    ]);
+    let verified = verify(bytecode, 1, FunctionIndexDomains::new(1, 0, 0, 0, 0));
+
+    assert_eq!(verified.instructions()[3].entry_stack_depth(), Some(0));
+    assert_eq!(verified.instructions()[4].entry_stack_depth(), Some(1));
+    assert_eq!(verified.computed_stack_size(), 1);
+}
+
+#[test]
+fn with_get_ref_verifies_receiver_and_callee_on_the_taken_edge() {
+    let bytecode = encode(&[
+        (FinalOpcode::PushTrue, Operands::None),
+        (FinalOpcode::ToObject, Operands::None),
+        (
+            FinalOpcode::WithGetRef,
+            Operands::AtomLabelU8 {
+                atom: AtomPoolIndex::new(0),
+                label: 7,
+                value: 1,
+            },
+        ),
+        (FinalOpcode::Undefined, Operands::None),
+        (FinalOpcode::Push1, Operands::NoneInt),
+        (FinalOpcode::Return, Operands::None),
+    ]);
+    let verified = verify(bytecode, 2, FunctionIndexDomains::new(1, 0, 0, 0, 0));
+
+    assert_eq!(verified.instructions()[3].entry_stack_depth(), Some(0));
+    assert_eq!(verified.instructions()[5].entry_stack_depth(), Some(2));
+    assert_eq!(verified.computed_stack_size(), 2);
 }
 
 #[test]
@@ -771,11 +896,11 @@ fn secondary_operand_domains_are_rejected_before_stack_or_capability_checks() {
             FinalOpcode::DefineClass,
             Operands::AtomU8 {
                 atom: AtomPoolIndex::new(0),
-                value: 2,
+                value: 4,
             },
             FunctionIndexDomains::new(1, 0, 0, 0, 0),
             SecondaryOperandField::DefineClassFlags,
-            2,
+            4,
         ),
         (
             FinalOpcode::IteratorCall,
@@ -830,6 +955,26 @@ fn supported_secondary_operand_boundaries_reach_stack_analysis() {
         FunctionIndexDomains::default(),
     );
     assert_eq!(apply.computed_stack_size(), 3);
+
+    let define_class = verify(
+        encode(&[
+            (FinalOpcode::Push0, Operands::NoneInt),
+            (FinalOpcode::Push0, Operands::NoneInt),
+            (FinalOpcode::Push0, Operands::NoneInt),
+            (
+                FinalOpcode::DefineClass,
+                Operands::AtomU8 {
+                    atom: AtomPoolIndex::new(0),
+                    value: 3,
+                },
+            ),
+            (FinalOpcode::Drop, Operands::None),
+            (FinalOpcode::Return, Operands::None),
+        ]),
+        3,
+        FunctionIndexDomains::new(1, 0, 0, 0, 0),
+    );
+    assert_eq!(define_class.computed_stack_size(), 3);
 }
 
 #[test]

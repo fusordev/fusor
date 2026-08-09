@@ -703,6 +703,13 @@ fn object_define_properties_routes_proxy_internal_methods() {
     );
 }
 
+#[test]
+fn public_class_fields_route_proxy_define_own_property() {
+    assert!(boolean(
+        "var events=[];var expectedTarget;function Base(){expectedTarget=this;return new Proxy(this,{defineProperty(target,key,descriptor){events.push(target===expectedTarget,key,descriptor.value,descriptor.writable,descriptor.enumerable,descriptor.configurable);return Reflect.defineProperty(target,key,descriptor);}});}var computed='second';class Derived extends Base{first=3;[computed]='value';}var value=new Derived;var observed=value.first===3&&value.second==='value'&&events.length===12&&events[0]===true&&events[1]==='first'&&events[2]===3&&events[3]===true&&events[4]===true&&events[5]===true&&events[6]===true&&events[7]==='second'&&events[8]==='value'&&events[9]===true&&events[10]===true&&events[11]===true;function ThrowingBase(){return new Proxy(this,{defineProperty(){throw 42;}});}class Throwing extends ThrowingBase{field=1;}var abrupt=false;try{new Throwing;}catch(error){abrupt=error===42;}return observed&&abrupt;"
+    ));
+}
+
 /// `Object.fromEntries` creates one fresh ordinary object, converts every key
 /// with `ToPropertyKey`, accepts Symbols, and overwrites duplicate values
 /// through fully writable, enumerable, configurable data properties.

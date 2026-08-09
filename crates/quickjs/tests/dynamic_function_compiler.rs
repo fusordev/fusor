@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use quickjs::{DynamicFunctionLimits, OxcDynamicFunctionCompiler};
-use quickjs_bytecode::CompilerExecutableKind;
+use quickjs_bytecode::{CompilerExecutableKind, FinalOpcode};
 use quickjs_frontend::{
     DynamicFunctionKind, DynamicFunctionSource, SourceFragment, with_dynamic_function_source,
 };
@@ -113,16 +113,20 @@ fn invalid_chained_continue_target_is_a_syntax_error() {
 }
 
 #[test]
-fn direct_eval_remains_an_engine_rejection() {
+fn direct_eval_returns_complete_verified_authority() {
     let compiler = OxcDynamicFunctionCompiler::new(DynamicFunctionLimits::default());
-    let error = compiler
+    let authority = compiler
         .compile(source(&[], "return eval('1');"))
-        .expect_err("direct eval remains fail closed");
+        .expect("direct eval compiler authority");
 
-    assert!(error.syntax_message().is_none());
-    let detail = error.engine_source().expect("engine source").to_string();
-    assert!(detail.contains("compiler-planning"), "{detail}");
-    assert!(detail.contains("DirectEval"), "{detail}");
+    assert!(authority.functions().any(|function| {
+        function
+            .function()
+            .control_flow()
+            .instructions()
+            .iter()
+            .any(|instruction| instruction.decoded().instruction().opcode() == FinalOpcode::Eval)
+    }));
 }
 
 #[test]

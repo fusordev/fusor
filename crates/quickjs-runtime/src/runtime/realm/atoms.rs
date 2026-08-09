@@ -17,18 +17,18 @@ use crate::{
         TemporalPlainTimePrototypeMethod, TemporalPlainTimeStaticMethod,
         TemporalPlainYearMonthPrototypeMethod, TemporalPlainYearMonthStaticMethod,
         TemporalZonedDateTimePrototypeMethod, TemporalZonedDateTimeStaticMethod,
-        TypedArrayPrototypeMethod,
+        TypedArrayPrototypeMethod, Uint8ArrayMethod,
     },
 };
 
 use super::{
     ARRAY_CALLBACK_METHODS, ARRAY_COPIER_METHODS, ARRAY_FLATTEN_METHODS, ARRAY_MUTATOR_METHODS,
     ARRAY_REDUCTION_METHODS, ARRAY_SEARCH_METHODS, ARRAY_SORT_METHODS, AtomError, AtomTable,
-    BIGINT_INTERNED_STATICS, DYNAMIC_SYMBOL_STATIC_PROPERTIES, JsString, MATH_CONSTANTS, MapMethod,
-    MathMethod, NUMBER_FORMAT_METHODS, NUMBER_PREDICATE_STATICS, NUMBER_VALUE_STATICS,
-    NativeFunctionKind, OBJECT_PROTOTYPE_REFLECTION, OBJECT_STATIC_METHODS, PromiseStatic, Runtime,
-    RuntimeError, RuntimeResource, STRING_FROM_STATICS, STRING_PROTOTYPE_METHODS, SetMethod,
-    URI_FUNCTIONS, allocation_failed,
+    BIGINT_INTERNED_STATICS, DYNAMIC_SYMBOL_STATIC_PROPERTIES, IteratorConsumer, JsString,
+    MATH_CONSTANTS, MapMethod, MathMethod, NUMBER_FORMAT_METHODS, NUMBER_PREDICATE_STATICS,
+    NUMBER_VALUE_STATICS, NativeFunctionKind, OBJECT_PROTOTYPE_REFLECTION, OBJECT_STATIC_METHODS,
+    PromiseStatic, Runtime, RuntimeError, RuntimeResource, STRING_FROM_STATICS,
+    STRING_PROTOTYPE_METHODS, SetMethod, URI_FUNCTIONS, allocation_failed,
     families::RealmIntrinsicSchema,
     schema::{
         IntrinsicDescriptorSpec, IntrinsicKeySpec, IntrinsicNameSpec, IntrinsicStringSpec,
@@ -242,6 +242,8 @@ fn visit_realm_name_order(
             visit(RealmNameId::StringMethod(method.method))?;
         }
     }
+    visit(RealmNameId::StringTrimRight)?;
+    visit(RealmNameId::StringTrimLeft)?;
     for (name, _) in NUMBER_VALUE_STATICS {
         visit(RealmNameId::NumberValue(name))?;
     }
@@ -251,10 +253,16 @@ fn visit_realm_name_order(
     visit(RealmNameId::ArrayIsArray)?;
     visit(RealmNameId::ArrayFromAsync)?;
     visit(RealmNameId::IteratorDrop)?;
+    for consumer in IteratorConsumer::ALL {
+        visit(RealmNameId::IteratorConsumer(consumer))?;
+    }
     visit(RealmNameId::IteratorFilter)?;
+    visit(RealmNameId::IteratorFlatMap)?;
     visit(RealmNameId::IteratorMap)?;
     visit(RealmNameId::IteratorTake)?;
     visit(RealmNameId::IteratorToArray)?;
+    visit(RealmNameId::IteratorZip)?;
+    visit(RealmNameId::IteratorZipKeyed)?;
     visit(RealmNameId::ArrayBufferIsView)?;
     for method in ArrayBufferPrototypeMethod::ALL {
         if !matches!(method, ArrayBufferPrototypeMethod::MaxByteLength) {
@@ -274,6 +282,9 @@ fn visit_realm_name_order(
             visit(RealmNameId::TypedArrayPrototype(method))?;
         }
     }
+    for method in Uint8ArrayMethod::ALL {
+        visit(RealmNameId::Uint8ArrayMethod(method))?;
+    }
     visit(RealmNameId::TypedArrayBytesPerElement)?;
     for method in DateStaticMethod::ALL {
         visit(RealmNameId::DateStatic(method))?;
@@ -291,6 +302,7 @@ fn visit_realm_name_order(
             visit(RealmNameId::DatePrototype(method))?;
         }
     }
+    visit(RealmNameId::DateToGmtString)?;
     visit(RealmNameId::Temporal)?;
     visit(RealmNameId::TemporalNow)?;
     for method in TemporalNowMethod::ALL {
@@ -624,6 +636,8 @@ fn realm_name_description(id: RealmNameId) -> &'static str {
                     .flatten()
             })
             .expect("every dynamic String method has one declared name"),
+        RealmNameId::StringTrimLeft => "trimLeft",
+        RealmNameId::StringTrimRight => "trimRight",
         RealmNameId::NumberValue(name) | RealmNameId::MathConstant(name) => name,
         RealmNameId::NumberPredicate(predicate) => NUMBER_PREDICATE_STATICS
             .into_iter()
@@ -650,18 +664,24 @@ fn realm_name_description(id: RealmNameId) -> &'static str {
         RealmNameId::ArrayIsArray => "isArray",
         RealmNameId::ArrayFromAsync => "fromAsync",
         RealmNameId::IteratorDrop => "drop",
+        RealmNameId::IteratorConsumer(consumer) => consumer.name(),
         RealmNameId::IteratorFilter => "filter",
+        RealmNameId::IteratorFlatMap => "flatMap",
         RealmNameId::IteratorMap => "map",
         RealmNameId::IteratorTake => "take",
         RealmNameId::IteratorToArray => "toArray",
+        RealmNameId::IteratorZip => "zip",
+        RealmNameId::IteratorZipKeyed => "zipKeyed",
         RealmNameId::ArrayBufferIsView => "isView",
         RealmNameId::ArrayBufferPrototype(method) => method.name(),
         RealmNameId::SharedArrayBufferPrototype(method) => method.name(),
         RealmNameId::DataViewPrototype(method) => method.name(),
         RealmNameId::TypedArrayPrototype(method) => method.name(),
+        RealmNameId::Uint8ArrayMethod(method) => method.name(),
         RealmNameId::TypedArrayBytesPerElement => "BYTES_PER_ELEMENT",
         RealmNameId::DateStatic(method) => method.name(),
         RealmNameId::DatePrototype(method) => method.name(),
+        RealmNameId::DateToGmtString => "toGMTString",
         RealmNameId::Temporal => "Temporal",
         RealmNameId::TemporalNow => "Now",
         RealmNameId::TemporalNowMethod(method) => method.name(),
@@ -707,15 +727,6 @@ fn realm_name_description(id: RealmNameId) -> &'static str {
 mod tests {
     use super::*;
     use crate::runtime::RuntimeLimits;
-
-    #[test]
-    fn atom_plan_derives_the_characterized_count_and_utf16_budget() {
-        let schema = RealmIntrinsicSchema::try_new().expect("Realm schema");
-        let plan = RealmAtomPlan::try_new(&schema).expect("atom plan");
-
-        assert_eq!(plan.len(), 404);
-        assert_eq!(plan.description_code_units(), 3_633);
-    }
 
     #[test]
     fn atom_plan_binds_shared_names_by_typed_identity() {

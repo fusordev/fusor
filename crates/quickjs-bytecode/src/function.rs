@@ -152,6 +152,43 @@ impl fmt::Display for FunctionBitField {
     }
 }
 
+/// Contextual grammar capabilities carried by one direct-eval Script header.
+#[derive(Clone, Copy, Debug, Default, Eq, Hash, PartialEq)]
+pub struct DirectEvalFunctionCapabilities(u8);
+
+impl DirectEvalFunctionCapabilities {
+    const NEW_TARGET: u8 = 1 << 0;
+    const SUPER_PROPERTY: u8 = 1 << 1;
+    const SUPER_CALL: u8 = 1 << 2;
+
+    /// Creates the exact capability set inherited from the caller's verified
+    /// `GetThisEnvironment` result.
+    #[must_use]
+    pub const fn new(new_target: bool, super_property: bool, super_call: bool) -> Self {
+        Self(
+            (if new_target { Self::NEW_TARGET } else { 0 })
+                | (if super_property {
+                    Self::SUPER_PROPERTY
+                } else {
+                    0
+                })
+                | (if super_call { Self::SUPER_CALL } else { 0 }),
+        )
+    }
+
+    const fn allows_new_target(self) -> bool {
+        self.0 & Self::NEW_TARGET != 0
+    }
+
+    const fn allows_super_property(self) -> bool {
+        self.0 & Self::SUPER_PROPERTY != 0
+    }
+
+    const fn allows_super_call(self) -> bool {
+        self.0 & Self::SUPER_CALL != 0
+    }
+}
+
 /// Raw serialized function metadata that has not crossed the verifier.
 #[derive(Clone, Copy, Debug, Default, Eq, Hash, PartialEq)]
 pub struct UnverifiedFunctionHeader {
@@ -478,6 +515,32 @@ impl UnverifiedFunctionHeader {
     pub const fn global_script(strict: bool, variable_reference_count: u32) -> Self {
         Self::new(
             Self::DYNAMIC_FUNCTION_SCRIPT_FLAGS,
+            if strict { 1 } else { 0 },
+            0,
+            variable_reference_count,
+        )
+    }
+
+    /// Creates a direct-eval Script header carrying only the grammar
+    /// capabilities inherited from its verified caller frame.
+    #[must_use]
+    pub const fn direct_eval_script(
+        strict: bool,
+        variable_reference_count: u32,
+        capabilities: DirectEvalFunctionCapabilities,
+    ) -> Self {
+        let mut flags = Self::DYNAMIC_FUNCTION_SCRIPT_FLAGS;
+        if capabilities.allows_new_target() {
+            flags |= 1 << 6;
+        }
+        if capabilities.allows_super_call() {
+            flags |= 1 << 7;
+        }
+        if capabilities.allows_super_property() {
+            flags |= 1 << 8;
+        }
+        Self::new(
+            flags,
             if strict { 1 } else { 0 },
             0,
             variable_reference_count,

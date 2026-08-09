@@ -7,11 +7,11 @@ use quickjs_bytecode::{
     CompilerBindingKind as VerifiedBindingKind, CompilerBindingPolicy, CompilerCaptureLayout,
     CompilerConstantLayout, CompilerExecutableKind,
     CompilerInitializationPolicy as VerifiedInitializationPolicy, CompilerSource,
-    CompilerWritePolicy as VerifiedWritePolicy, FinalOpcode, FunctionIndexDomains, Operands,
-    PcSourceSpan, ScopeLink, SourceByteSpan, UnverifiedFunctionHeader, UnverifiedFunctionMetadata,
-    VariableDefinition, VerificationLimits,
+    CompilerWritePolicy as VerifiedWritePolicy, DirectEvalFunctionCapabilities, FinalOpcode,
+    FunctionIndexDomains, Operands, PcSourceSpan, ScopeLink, SourceByteSpan,
+    UnverifiedFunctionHeader, UnverifiedFunctionMetadata, VariableDefinition, VerificationLimits,
 };
-use quickjs_frontend::Span;
+use quickjs_frontend::{CompilationGoal, Span};
 
 use super::{
     AstKind, ClassElement, CompilationContext, CompiledClosureVariable, CompiledConstant,
@@ -71,8 +71,9 @@ fn synthesized_class_constructor_flow(
     Ok(flow)
 }
 
-/// Each supported instance element is initialized in the constructor frame,
-/// preserving source order for fields and private-method brand installation.
+/// Each supported instance element is initialized in the constructor frame.
+/// Private methods and accessors are installed before any field initializer;
+/// each group otherwise preserves class-element source order.
 pub(in crate::lowering) struct InstanceFieldDefinitions {
     pub(in crate::lowering) derived: bool,
     pub(in crate::lowering) elements: Vec<NodeId>,
@@ -133,7 +134,8 @@ impl CompilationContext<'_, '_, '_> {
             }
             _ => return Ok(None),
         };
-        let mut elements = Vec::new();
+        let mut private_methods = Vec::new();
+        let mut fields = Vec::new();
         for element in &class.body.body {
             match element {
                 ClassElement::PropertyDefinition(field) => {
@@ -166,7 +168,7 @@ impl CompilationContext<'_, '_, '_> {
                             },
                         )?;
                     }
-                    elements.push(field.node_id.get());
+                    fields.push(field.node_id.get());
                 }
                 ClassElement::MethodDefinition(method)
                     if matches!(method.key, super::OxcPropertyKey::PrivateIdentifier(_)) =>
@@ -186,15 +188,51 @@ impl CompilationContext<'_, '_, '_> {
                             method.span,
                         );
                     }
-                    elements.push(method.node_id.get());
+                    private_methods.push(method.node_id.get());
                 }
                 _ => {}
             }
         }
+        private_methods.extend(fields);
         Ok(Some(InstanceFieldDefinitions {
             derived: class.super_class.is_some(),
-            elements,
+            elements: private_methods,
         }))
+    }
+
+    pub(in crate::lowering) fn lexical_derived_constructor(
+        &self,
+        mut executable: ExecutableId,
+    ) -> Result<Option<ExecutableId>, LeafCompilationError> {
+        loop {
+            let planned = self
+                .planned
+                .plan
+                .executable(executable)
+                .ok_or(LeafCompilationError::InvalidExecutable { executable })?;
+            if matches!(planned.kind(), ExecutableKind::Script { .. })
+                && matches!(
+                    self.unit.goal(),
+                    CompilationGoal::DirectEval(context)
+                        if context.capabilities().allows_super_call()
+                )
+            {
+                return Ok(Some(executable));
+            }
+            if !matches!(planned.kind(), ExecutableKind::Arrow { .. }) {
+                return Ok(self
+                    .instance_field_definitions(executable)?
+                    .filter(|definitions| definitions.derived)
+                    .map(|_| executable));
+            }
+            let Some(parent) = planned.parent() else {
+                return Err(LeafCompilationError::SemanticInvariant {
+                    invariant: "arrow super call has an executable parent",
+                    span: Some(planned.span()),
+                });
+            };
+            executable = parent;
+        }
     }
 }
 
@@ -381,6 +419,11 @@ impl<'compiler, 'statement, 'unit, 'arena, 'scope, 'layout>
         planning.validate_owner()?;
         let program_scope =
             compiler.created_scope(program.scope_id.get(), program.node_id.get(), program.span)?;
+        let directives = if compiler.unit.has_synthetic_strict_directive() {
+            &program.directives[1..]
+        } else {
+            &program.directives
+        };
         Ok(Self {
             compiler,
             planning,
@@ -390,6 +433,10 @@ impl<'compiler, 'statement, 'unit, 'arena, 'scope, 'layout>
                     StatementWork::PopScope(program_scope),
                     StatementWork::VisitList {
                         statements: &program.body,
+                        next: 0,
+                    },
+                    StatementWork::VisitDirectiveList {
+                        directives,
                         next: 0,
                     },
                     StatementWork::PushScope {
@@ -848,6 +895,20 @@ impl CompilationContext<'_, '_, '_> {
             if crate::is_supported_global_script_goal(self.unit.goal()) {
                 let (executable, program) = self.selected_global_script(executable_id)?;
                 (executable, program, CompilerExecutableKind::GlobalScript)
+            } else if crate::is_supported_indirect_eval_goal(self.unit.goal()) {
+                let (executable, program) = self.selected_eval_script(executable_id)?;
+                (
+                    executable,
+                    program,
+                    CompilerExecutableKind::IndirectEvalScript,
+                )
+            } else if crate::is_supported_direct_eval_goal(self.unit.goal()) {
+                let (executable, program) = self.selected_eval_script(executable_id)?;
+                (
+                    executable,
+                    program,
+                    CompilerExecutableKind::DirectEvalScript,
+                )
             } else {
                 let (executable, program) = self.selected_dynamic_function_script(executable_id)?;
                 (
@@ -877,7 +938,7 @@ impl CompilationContext<'_, '_, '_> {
         let closure_variables = self.compiled_closure_variables(executable_id, tree_layout)?;
         if !closure_variables.is_empty() {
             return Err(LeafCompilationError::SemanticInvariant {
-                invariant: "dynamic Function Script root imports no caller closure",
+                invariant: "isolated Script root imports no caller closure",
                 span: Some(program.span),
             });
         }
@@ -948,6 +1009,26 @@ struct ValidatedFunction {
     flow: PlannedControlFlow,
 }
 
+const fn direct_eval_header(
+    strict: bool,
+    variable_reference_count: u32,
+    capabilities: Option<quickjs_frontend::DirectEvalCapabilities>,
+) -> UnverifiedFunctionHeader {
+    let capabilities = match capabilities {
+        Some(capabilities) => capabilities,
+        None => quickjs_frontend::DirectEvalCapabilities::new(),
+    };
+    UnverifiedFunctionHeader::direct_eval_script(
+        strict,
+        variable_reference_count,
+        DirectEvalFunctionCapabilities::new(
+            capabilities.allows_new_target(),
+            capabilities.allows_super_property(),
+            capabilities.allows_super_call(),
+        ),
+    )
+}
+
 const fn executable_header(
     kind: CompilerExecutableKind,
     strict: bool,
@@ -955,10 +1036,14 @@ const fn executable_header(
     simple_parameter_list: bool,
     defined_argument_count: u32,
     variable_reference_count: u32,
+    direct_eval_capabilities: Option<quickjs_frontend::DirectEvalCapabilities>,
 ) -> UnverifiedFunctionHeader {
     let header = match kind {
-        CompilerExecutableKind::GlobalScript => {
+        CompilerExecutableKind::GlobalScript | CompilerExecutableKind::IndirectEvalScript => {
             UnverifiedFunctionHeader::global_script(strict, variable_reference_count)
+        }
+        CompilerExecutableKind::DirectEvalScript => {
+            direct_eval_header(strict, variable_reference_count, direct_eval_capabilities)
         }
         CompilerExecutableKind::OrdinaryFunction => {
             UnverifiedFunctionHeader::ordinary_source_function_with_variable_references(
@@ -1046,6 +1131,10 @@ const fn executable_header(
 }
 
 impl CompilationContext<'_, '_, '_> {
+    #[allow(
+        clippy::too_many_lines,
+        reason = "validated layouts, final control flow, source mappings, and metadata are assembled atomically"
+    )]
     pub(in crate::lowering) fn compile_function(
         &self,
         executable: ExecutableId,
@@ -1104,6 +1193,10 @@ impl CompilationContext<'_, '_, '_> {
                 .has_simple_parameter_list(),
             defined_argument_count,
             variable_reference_count,
+            match self.unit.goal() {
+                CompilationGoal::DirectEval(context) => Some(context.capabilities()),
+                _ => None,
+            },
         );
         let constant_layout = CompilerConstantLayout::new(
             constants
@@ -1113,6 +1206,9 @@ impl CompilationContext<'_, '_, '_> {
                 .into(),
         );
         let finished = flow.finish()?;
+        let parameter_initialization_end = finished.parameter_initialization_end();
+        let eval_reference_call_instructions: Arc<[u32]> =
+            finished.eval_reference_call_instructions().into();
         let (source_instructions, control_flow) = finished.verify_with_layouts(
             domains,
             header,
@@ -1151,6 +1247,8 @@ impl CompilationContext<'_, '_, '_> {
             realm_globals: realm_globals.into(),
             source_instructions: source_instructions.into(),
             control_flow: Arc::new(control_flow),
+            eval_reference_call_instructions,
+            parameter_initialization_end,
             metadata,
         })
     }

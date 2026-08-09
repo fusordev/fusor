@@ -6,11 +6,12 @@ use std::{
 use quickjs_diagnostics::{SourceError, SourceRegistry, render_pretty};
 use quickjs_frontend::{
     Allocator, CompilationGoal, DiagnosticStage, DirectEvalBinding, DirectEvalBindingKind,
-    DirectEvalBindingLocation, DirectEvalCapabilities, DirectEvalContext, DirectEvalPrivateName,
-    DirectEvalPrivateNameKind, DirectEvalScopeFrame, DirectEvalScopeKind, DirectEvalScopeSnapshot,
-    DynamicFunctionKind, DynamicFunctionSource, FrontendDiagnosticCode, FrontendLimitError,
-    FrontendLimits, FrontendOptions, FrontendSourceError, GlobalScriptGoal, IndirectEvalGoal,
-    ParseMode, RegisteredFrontendError, SourceFragment, Span, UnsupportedCompilationGoal, parse,
+    DirectEvalBindingLocation, DirectEvalBindingScope, DirectEvalCapabilities, DirectEvalContext,
+    DirectEvalPrivateName, DirectEvalPrivateNameKind, DirectEvalScopeFrame, DirectEvalScopeKind,
+    DirectEvalScopeSnapshot, DirectEvalVariableEnvironment, DynamicFunctionKind,
+    DynamicFunctionSource, FrontendDiagnosticCode, FrontendLimitError, FrontendLimits,
+    FrontendOptions, FrontendSourceError, GlobalScriptGoal, IndirectEvalGoal, ParseMode,
+    RegisteredFrontendError, SourceFragment, Span, UnsupportedCompilationGoal, parse,
     with_dynamic_function_source, with_parsed_program, with_registered_program,
 };
 
@@ -289,7 +290,8 @@ fn compilation_goals_preserve_lossless_direct_eval_context() {
         true,
         false,
         DirectEvalBindingLocation::Closure { index: 3 },
-    )];
+    )
+    .with_scope(DirectEvalBindingScope::Lexical)];
     let private_names = [DirectEvalPrivateName::new(
         "value",
         DirectEvalPrivateNameKind::Field,
@@ -311,7 +313,8 @@ fn compilation_goals_preserve_lossless_direct_eval_context() {
             .with_super_property(true)
             .with_arguments_allowed(true),
         DirectEvalScopeSnapshot::new(&frames),
-    );
+    )
+    .with_variable_environment(DirectEvalVariableEnvironment::Global);
 
     let goals = [
         CompilationGoal::GlobalScript(GlobalScriptGoal::new()),
@@ -338,6 +341,7 @@ fn compilation_goals_preserve_lossless_direct_eval_context() {
         binding.location(),
         DirectEvalBindingLocation::Closure { index: 3 }
     );
+    assert_eq!(binding.scope(), DirectEvalBindingScope::Lexical);
     let private_name = direct_eval.scope_snapshot().frames()[0].private_names()[0];
     assert_eq!(private_name.kind(), DirectEvalPrivateNameKind::Field);
     assert!(private_name.is_lexical());
@@ -362,6 +366,10 @@ fn compilation_goals_preserve_lossless_direct_eval_context() {
     assert!(direct_eval.capabilities().allows_new_target());
     assert!(!direct_eval.capabilities().allows_super_call());
     assert!(direct_eval.capabilities().allows_arguments());
+    assert_eq!(
+        direct_eval.variable_environment(),
+        DirectEvalVariableEnvironment::Global
+    );
 }
 
 #[test]
@@ -372,6 +380,10 @@ fn global_and_eval_goals_reject_top_level_return() {
     for goal in [
         CompilationGoal::GlobalScript(GlobalScriptGoal::new()),
         CompilationGoal::IndirectEval(IndirectEvalGoal::new()),
+        CompilationGoal::DirectEval(DirectEvalContext::new(
+            DirectEvalCapabilities::new(),
+            DirectEvalScopeSnapshot::default(),
+        )),
     ] {
         let error = parse(&allocator, source, FrontendOptions::for_goal(goal))
             .expect_err("top-level return is invalid for global and eval code");
@@ -400,28 +412,12 @@ fn plain_indirect_eval_succeeds_without_losing_its_compilation_goal() {
 }
 
 #[test]
-fn eval_goals_fail_before_oxc_until_their_adapters_are_faithful() {
-    let direct_capabilities = DirectEvalCapabilities::new()
-        .with_strict(true)
-        .with_new_target(true)
-        .with_super_call(true)
-        .with_arguments_allowed(true);
-    let direct_context =
-        DirectEvalContext::new(direct_capabilities, DirectEvalScopeSnapshot::default());
-    let cases = [
-        (
-            CompilationGoal::IndirectEval(IndirectEvalGoal::new().with_forced_strict(true)),
-            UnsupportedCompilationGoal::IndirectEval(
-                IndirectEvalGoal::new().with_forced_strict(true),
-            ),
-            "force_strict=true",
-        ),
-        (
-            CompilationGoal::DirectEval(direct_context),
-            UnsupportedCompilationGoal::DirectEval(direct_capabilities),
-            "strict=true, new_target=true, super_property=false, super_call=true, arguments_allowed=true",
-        ),
-    ];
+fn forced_strict_indirect_eval_fails_before_oxc_until_its_adapter_is_faithful() {
+    let cases = [(
+        CompilationGoal::IndirectEval(IndirectEvalGoal::new().with_forced_strict(true)),
+        UnsupportedCompilationGoal::IndirectEval(IndirectEvalGoal::new().with_forced_strict(true)),
+        "force_strict=true",
+    )];
 
     for (goal, expected, requested_flags) in cases {
         let allocator = Allocator::new();
@@ -444,6 +440,94 @@ fn eval_goals_fail_before_oxc_until_their_adapters_are_faithful() {
         );
         assert!(error.diagnostics()[0].message.contains("not implemented"));
     }
+}
+
+#[test]
+fn direct_eval_parses_as_script_and_inherits_caller_strictness() {
+    let capabilities = DirectEvalCapabilities::new()
+        .with_strict(true)
+        .with_new_target(true)
+        .with_arguments_allowed(true);
+    let context = DirectEvalContext::new(capabilities, DirectEvalScopeSnapshot::default());
+    let allocator = Allocator::new();
+    let unit = parse(
+        &allocator,
+        "let answer = 40 + 2; answer;",
+        FrontendOptions::for_goal(CompilationGoal::DirectEval(context)),
+    )
+    .expect("closed direct eval Script");
+
+    assert_eq!(unit.goal(), CompilationGoal::DirectEval(context));
+    assert!(unit.program().source_type.is_script());
+    assert!(unit.has_synthetic_strict_directive());
+    assert!(unit.source_directives().is_empty());
+}
+
+#[test]
+fn direct_eval_admits_only_inherited_new_target_context() {
+    let allocator = Allocator::new();
+    let allowed = DirectEvalContext::new(
+        DirectEvalCapabilities::new().with_new_target(true),
+        DirectEvalScopeSnapshot::default(),
+    );
+    let unit = parse(
+        &allocator,
+        "new.target;",
+        FrontendOptions::for_goal(CompilationGoal::DirectEval(allowed)),
+    )
+    .expect("direct eval inherits new.target grammar context");
+    assert!(unit.program().source_type.is_script());
+
+    let denied = DirectEvalContext::new(
+        DirectEvalCapabilities::new(),
+        DirectEvalScopeSnapshot::default(),
+    );
+    parse(
+        &allocator,
+        "new.target;",
+        FrontendOptions::for_goal(CompilationGoal::DirectEval(denied)),
+    )
+    .expect_err("direct eval outside function code rejects new.target");
+
+    parse(
+        &allocator,
+        "new.target; if (true) { return; }",
+        FrontendOptions::for_goal(CompilationGoal::DirectEval(allowed)),
+    )
+    .expect_err("contextual new.target does not admit a top-level return");
+}
+
+#[test]
+fn direct_eval_admits_only_lexically_inherited_super_property_context() {
+    let allocator = Allocator::new();
+    let allowed = DirectEvalContext::new(
+        DirectEvalCapabilities::new().with_super_property(true),
+        DirectEvalScopeSnapshot::default(),
+    );
+    parse(
+        &allocator,
+        "super.answer; (() => super.answer)();",
+        FrontendOptions::for_goal(CompilationGoal::DirectEval(allowed)),
+    )
+    .expect("direct eval and nested arrows inherit method super property syntax");
+
+    parse(
+        &allocator,
+        "function nested() { return super.answer; }",
+        FrontendOptions::for_goal(CompilationGoal::DirectEval(allowed)),
+    )
+    .expect_err("ordinary nested functions do not inherit the eval caller's super binding");
+
+    let denied = DirectEvalContext::new(
+        DirectEvalCapabilities::new(),
+        DirectEvalScopeSnapshot::default(),
+    );
+    parse(
+        &allocator,
+        "super.answer;",
+        FrontendOptions::for_goal(CompilationGoal::DirectEval(denied)),
+    )
+    .expect_err("direct eval outside a method rejects super property syntax");
 }
 
 #[test]

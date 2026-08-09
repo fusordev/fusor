@@ -19,6 +19,12 @@ use crate::{
     verifier::{CompilerCaptureLayout, CompilerCapturedBinding, InstructionIndex},
 };
 
+mod lexical_environment;
+mod object_provenance;
+
+use lexical_environment::verify_lexical_arrow_environments;
+use object_provenance::{charge_frame_state_entries, verify_object_definition_provenance};
+
 const DEFAULT_MAX_VARIABLE_DEFINITIONS: u64 = 1_048_576;
 const DEFAULT_MAX_CLOSURE_DEFINITIONS: u64 = 1_048_576;
 const DEFAULT_MAX_SOURCE_BYTES: u64 = 64 * 1024 * 1024;
@@ -44,7 +50,7 @@ pub enum CompilerBindingKind {
     /// The immutable inner binding created for a named class definition.
     ClassName,
     /// The compiler-created immutable class-scope cell for one evaluated
-    /// computed public instance-field key.
+    /// computed public field key.
     ClassFieldKey,
     /// The compiler-created immutable class-scope cell for one fresh private
     /// instance-field name.
@@ -53,6 +59,13 @@ pub enum CompilerBindingKind {
     /// static field initializers that lexically observe `this` or resolve a
     /// `super` property.
     ClassStaticReceiver,
+    /// The compiler-created immutable cell holding an active Object
+    /// Environment Record's binding object for a sloppy `with` statement.
+    ///
+    /// This is not an ECMAScript declarative binding. Its distinct metadata
+    /// kind lets direct eval reconstruct the intervening dynamic environment
+    /// without exposing the compiler's hidden cell name to source code.
+    WithObject,
     /// A function declaration.
     Function,
     /// A named function-expression self binding.
@@ -156,6 +169,7 @@ impl CompilerBindingPolicy {
                 | CompilerBindingKind::ClassFieldKey
                 | CompilerBindingKind::ClassPrivateName
                 | CompilerBindingKind::ClassStaticReceiver
+                | CompilerBindingKind::WithObject
                 | CompilerBindingKind::Catch
         ) || matches!(
             self.initialization,
@@ -187,7 +201,8 @@ impl CompilerBindingPolicy {
             | CompilerBindingKind::ClassName
             | CompilerBindingKind::ClassFieldKey
             | CompilerBindingKind::ClassPrivateName
-            | CompilerBindingKind::ClassStaticReceiver => {
+            | CompilerBindingKind::ClassStaticReceiver
+            | CompilerBindingKind::WithObject => {
                 matches!(
                     self.initialization,
                     CompilerInitializationPolicy::AtDeclaration
@@ -262,6 +277,7 @@ pub struct VariableDefinition {
     scope_next: ScopeLink,
     policy: CompilerBindingPolicy,
     has_scope: bool,
+    arguments_object: bool,
     variable_reference: Option<u32>,
     function_initializer: Option<u32>,
 }
@@ -281,9 +297,17 @@ impl VariableDefinition {
             scope_next,
             policy,
             has_scope,
+            arguments_object: false,
             variable_reference,
             function_initializer: None,
         }
+    }
+
+    /// Marks the compiler-synthesized function `arguments` object binding.
+    #[must_use]
+    pub const fn with_arguments_object(mut self, arguments_object: bool) -> Self {
+        self.arguments_object = arguments_object;
+        self
     }
 
     /// Attaches the function-template constant that initializes this binding.
@@ -315,6 +339,12 @@ impl VariableDefinition {
     #[must_use]
     pub const fn has_scope(&self) -> bool {
         self.has_scope
+    }
+
+    /// Returns whether this is the compiler-synthesized `arguments` object.
+    #[must_use]
+    pub const fn is_arguments_object(&self) -> bool {
+        self.arguments_object
     }
 
     /// Returns the dense own variable-reference index when captured.
@@ -371,6 +401,8 @@ pub struct ClosureVariableDefinition {
     name: Option<AtomPoolIndex>,
     binding: CompilerClosureBinding,
     source: CompilerClosureSource,
+    arguments_object: bool,
+    deletable_eval_variable: bool,
     function_initializer: Option<u32>,
 }
 
@@ -386,6 +418,8 @@ impl ClosureVariableDefinition {
             name,
             binding: CompilerClosureBinding::Captured(policy),
             source,
+            arguments_object: false,
+            deletable_eval_variable: false,
             function_initializer: None,
         }
     }
@@ -402,8 +436,26 @@ impl ClosureVariableDefinition {
             name,
             binding: CompilerClosureBinding::RealmGlobal(policy),
             source,
+            arguments_object: false,
+            deletable_eval_variable: false,
             function_initializer: None,
         }
+    }
+
+    /// Marks a captured compiler-synthesized `arguments` object binding.
+    #[must_use]
+    pub const fn with_arguments_object(mut self, arguments_object: bool) -> Self {
+        self.arguments_object = arguments_object;
+        self
+    }
+
+    /// Marks a captured binding created by sloppy direct eval. Such bindings
+    /// remain dynamically name-resolved because `DeleteBinding` may remove
+    /// them from the caller's variable environment.
+    #[must_use]
+    pub const fn with_deletable_eval_variable(mut self, deletable: bool) -> Self {
+        self.deletable_eval_variable = deletable;
+        self
     }
 
     /// Attaches the function-template constant that initializes a
@@ -436,6 +488,19 @@ impl ClosureVariableDefinition {
     #[must_use]
     pub const fn source(&self) -> CompilerClosureSource {
         self.source
+    }
+
+    /// Returns whether this capture originates at a synthesized `arguments`
+    /// object binding.
+    #[must_use]
+    pub const fn is_arguments_object(&self) -> bool {
+        self.arguments_object
+    }
+
+    /// Returns whether sloppy direct eval created this deletable binding.
+    #[must_use]
+    pub const fn is_deletable_eval_variable(&self) -> bool {
+        self.deletable_eval_variable
     }
 
     /// Returns the function-template constant used for a constructor-realm
@@ -535,6 +600,10 @@ impl CompilerSource {
 pub enum CompilerExecutableKind {
     /// A host-loaded ECMAScript Global Script.
     GlobalScript,
+    /// A Script compiled for an indirect invocation of `%eval%`.
+    IndirectEvalScript,
+    /// A Script compiled for a direct invocation of the caller's `%eval%`.
+    DirectEvalScript,
     /// An ordinary callable JavaScript function.
     #[default]
     OrdinaryFunction,
@@ -799,6 +868,7 @@ const _: () = assert!(
 pub struct VerifiedBytecodeFunction<'graph> {
     function: &'graph VerifiedCompilerFunction,
     metadata: &'graph VerifiedFunctionMetadata,
+    lexical_derived_this: bool,
 }
 
 impl<'graph> VerifiedBytecodeFunction<'graph> {
@@ -813,6 +883,14 @@ impl<'graph> VerifiedBytecodeFunction<'graph> {
     pub const fn metadata(self) -> &'graph VerifiedFunctionMetadata {
         self.metadata
     }
+
+    /// Returns whether this arrow closes over a derived constructor's mutable
+    /// `this` binding. The whole-graph verifier derives this authority from an
+    /// arrow-only ancestry ending at a derived class constructor.
+    #[must_use]
+    pub const fn lexical_derived_this(self) -> bool {
+        self.lexical_derived_this
+    }
 }
 
 /// Immutable execution authority for the current compiler-bytecode profile.
@@ -826,6 +904,7 @@ impl<'graph> VerifiedBytecodeFunction<'graph> {
 pub struct VerifiedBytecode {
     graph: Arc<VerifiedCompilerFunctionGraph>,
     metadata: Arc<Vec<VerifiedFunctionMetadata>>,
+    lexical_derived_this: Arc<[bool]>,
     requirements: Arc<[ExecutionRequirement]>,
     usage: BytecodeGraphUsage,
 }
@@ -844,6 +923,7 @@ impl VerifiedBytecode {
         VerifiedBytecodeFunction {
             function: self.graph.root(),
             metadata: &self.metadata[index],
+            lexical_derived_this: self.lexical_derived_this[index],
         }
     }
 
@@ -860,6 +940,7 @@ impl VerifiedBytecode {
         Some(VerifiedBytecodeFunction {
             function: self.graph.function(id)?,
             metadata: self.metadata.get(index)?,
+            lexical_derived_this: *self.lexical_derived_this.get(index)?,
         })
     }
 
@@ -870,7 +951,14 @@ impl VerifiedBytecode {
             .functions()
             .iter()
             .zip(self.metadata.iter())
-            .map(|(function, metadata)| VerifiedBytecodeFunction { function, metadata })
+            .zip(self.lexical_derived_this.iter().copied())
+            .map(
+                |((function, metadata), lexical_derived_this)| VerifiedBytecodeFunction {
+                    function,
+                    metadata,
+                    lexical_derived_this,
+                },
+            )
     }
 
     /// Returns final metadata in dense function-template order.
@@ -1235,6 +1323,30 @@ pub enum BytecodeVerificationErrorKind {
     /// A Global Script record carries function-name metadata or a named
     /// function self binding.
     GlobalScriptHasFunctionName,
+    /// An indirect-eval Script record is not the graph root.
+    IndirectEvalScriptNotRoot,
+    /// An indirect-eval Script record declares a call-argument domain.
+    IndirectEvalScriptHasArguments {
+        /// Header-defined arguments.
+        defined: u32,
+        /// Frame argument slots.
+        arguments: u32,
+    },
+    /// An indirect-eval Script record carries function-name metadata or a
+    /// named-function self binding.
+    IndirectEvalScriptHasFunctionName,
+    /// A direct-eval Script record is not the graph root.
+    DirectEvalScriptNotRoot,
+    /// A direct-eval Script record declares a call-argument domain.
+    DirectEvalScriptHasArguments {
+        /// Header-defined arguments.
+        defined: u32,
+        /// Frame argument slots.
+        arguments: u32,
+    },
+    /// A direct-eval Script record carries function-name metadata or a
+    /// named-function self binding.
+    DirectEvalScriptHasFunctionName,
     /// A dynamic-Function Script record is not the graph root.
     DynamicFunctionScriptNotRoot,
     /// A dynamic-Function Script record declares a call-argument domain.
@@ -1256,6 +1368,12 @@ pub enum BytecodeVerificationErrorKind {
     /// A constructor-realm global source appears outside a Script authority
     /// root.
     ConstructorRealmGlobalSourceRequiresDynamicFunctionScript {
+        /// Closure-domain slot containing the source.
+        closure: u32,
+    },
+    /// A caller-binding source appears outside a direct-eval Script authority
+    /// root.
+    DirectEvalBindingSourceRequiresDirectEvalScript {
         /// Closure-domain slot containing the source.
         closure: u32,
     },
@@ -1292,6 +1410,14 @@ pub enum BytecodeVerificationErrorKind {
         declared: u64,
         /// Supplied definitions.
         entries: u64,
+    },
+    /// The synthesized `arguments` binding marker does not match its metadata
+    /// or bytecode initializer.
+    ArgumentsObjectMetadataMismatch {
+        /// Marked variable definition, when one was supplied.
+        definition: Option<u32>,
+        /// `special_object` initializer site, when one was encoded.
+        pc: Option<BytecodePc>,
     },
     /// Closure definition count differs from the staged closure domain.
     ClosureDefinitionCountMismatch {
@@ -1355,6 +1481,22 @@ pub enum BytecodeVerificationErrorKind {
     /// A local scope-link chain contains a cycle.
     ScopeLinkCycle {
         /// One local in the cycle.
+        local: u32,
+    },
+    /// An adjusted `eval` scope operand points past the local domain.
+    EvalScopeIndexOutOfBounds {
+        /// Final bytecode position of the eval operation.
+        pc: BytecodePc,
+        /// Rejected adjusted scope operand.
+        scope_index: u16,
+        /// Local-variable count.
+        locals: u32,
+    },
+    /// An adjusted `eval` scope operand selects a function-scoped local.
+    EvalScopeHeadNotLexical {
+        /// Final bytecode position of the eval operation.
+        pc: BytecodePc,
+        /// Rejected zero-based local index.
         local: u32,
     },
     /// A variable-reference index is out of range.
@@ -1706,6 +1848,24 @@ impl fmt::Display for BytecodeVerificationErrorKind {
             ),
             Self::GlobalScriptHasFunctionName => formatter
                 .write_str("Global Script carries function-name metadata or a self binding"),
+            Self::IndirectEvalScriptNotRoot => {
+                formatter.write_str("indirect-eval Script executable is not the graph root")
+            }
+            Self::IndirectEvalScriptHasArguments { defined, arguments } => write!(
+                formatter,
+                "indirect-eval Script declares {defined} defined arguments and {arguments} frame arguments"
+            ),
+            Self::IndirectEvalScriptHasFunctionName => formatter
+                .write_str("indirect-eval Script carries function-name metadata or a self binding"),
+            Self::DirectEvalScriptNotRoot => {
+                formatter.write_str("direct-eval Script executable is not the graph root")
+            }
+            Self::DirectEvalScriptHasArguments { defined, arguments } => write!(
+                formatter,
+                "direct-eval Script declares {defined} defined arguments and {arguments} frame arguments"
+            ),
+            Self::DirectEvalScriptHasFunctionName => formatter
+                .write_str("direct-eval Script carries function-name metadata or a self binding"),
             Self::DynamicFunctionScriptNotRoot => {
                 formatter.write_str("dynamic-Function Script executable is not the graph root")
             }
@@ -1725,6 +1885,10 @@ impl fmt::Display for BytecodeVerificationErrorKind {
             Self::ConstructorRealmGlobalSourceRequiresDynamicFunctionScript { closure } => write!(
                 formatter,
                 "closure slot {closure} originates a constructor-realm global outside a Script root"
+            ),
+            Self::DirectEvalBindingSourceRequiresDirectEvalScript { closure } => write!(
+                formatter,
+                "closure slot {closure} originates a caller binding outside a direct-eval Script root"
             ),
             Self::ClosureBindingOpcodeMismatch {
                 closure,
@@ -1749,6 +1913,10 @@ impl fmt::Display for BytecodeVerificationErrorKind {
             Self::VariableDefinitionCountMismatch { declared, entries } => write!(
                 formatter,
                 "variable definition count {entries} does not equal frame count {declared}"
+            ),
+            Self::ArgumentsObjectMetadataMismatch { definition, pc } => write!(
+                formatter,
+                "arguments-object metadata definition {definition:?} disagrees with initializer site {pc:?}"
             ),
             Self::ClosureDefinitionCountMismatch { declared, entries } => write!(
                 formatter,
@@ -1794,6 +1962,18 @@ impl fmt::Display for BytecodeVerificationErrorKind {
                     "scope-link chain contains a cycle at local {local}"
                 )
             }
+            Self::EvalScopeIndexOutOfBounds {
+                pc,
+                scope_index,
+                locals,
+            } => write!(
+                formatter,
+                "eval scope index {scope_index} at PC {pc} is outside adjusted local count {locals}"
+            ),
+            Self::EvalScopeHeadNotLexical { pc, local } => write!(
+                formatter,
+                "eval scope head local {local} at PC {pc} is not lexical"
+            ),
             Self::VariableReferenceOutOfBounds {
                 definition,
                 reference,
@@ -2045,7 +2225,7 @@ pub fn verify_compiler_bytecode_graph(
     }
 
     let mut usage = preflight_usage(&graph, &metadata, limits)?;
-    verify_function_tree_ownership(&graph)?;
+    let function_parents = verify_function_tree_ownership(&graph)?;
     let mut verified = Vec::new();
     verified.try_reserve_exact(function_count).map_err(|_| {
         BytecodeVerificationError::graph(BytecodeVerificationErrorKind::AllocationFailed {
@@ -2097,6 +2277,8 @@ pub fn verify_compiler_bytecode_graph(
         verified.push(record);
     }
     verify_closure_metadata(&graph, &verified)?;
+    let lexical_derived_this =
+        verify_lexical_arrow_environments(&graph, &verified, &function_parents)?;
     verify_class_field_key_bindings(&graph, &verified)?;
     verify_inferred_function_names(&graph, &verified)?;
     verify_method_definitions(&graph, &verified, limits, &mut usage)?;
@@ -2105,6 +2287,7 @@ pub fn verify_compiler_bytecode_graph(
     Ok(VerifiedBytecode {
         graph,
         metadata: Arc::new(verified),
+        lexical_derived_this: lexical_derived_this.into(),
         requirements: requirements.into(),
         usage,
     })
@@ -2197,7 +2380,7 @@ fn preflight_usage(
 
 fn verify_function_tree_ownership(
     graph: &VerifiedCompilerFunctionGraph,
-) -> Result<(), BytecodeVerificationError> {
+) -> Result<Vec<Option<FunctionTemplateId>>, BytecodeVerificationError> {
     let functions = graph.functions();
     let mut incoming = try_filled_vec(
         graph.root_id(),
@@ -2205,14 +2388,21 @@ fn verify_function_tree_ownership(
         0_u64,
         BytecodeGraphResource::VerifiedMetadata,
     )?;
-    for parent in functions {
+    let mut parents = try_filled_vec(
+        graph.root_id(),
+        functions.len(),
+        None,
+        BytecodeGraphResource::VerifiedMetadata,
+    )?;
+    for (parent_index, parent) in functions.iter().enumerate() {
+        let parent_id = function_id(parent_index)?;
         for constant in parent.constants() {
             let crate::CompilerConstant::Function(child) = constant else {
                 continue;
             };
-            let Some(count) = usize::try_from(child.get())
+            let Some(child_index) = usize::try_from(child.get())
                 .ok()
-                .and_then(|index| incoming.get_mut(index))
+                .filter(|&index| index < incoming.len())
             else {
                 return Err(BytecodeVerificationError::function(
                     *child,
@@ -2222,7 +2412,9 @@ fn verify_function_tree_ownership(
                     },
                 ));
             };
+            let count = &mut incoming[child_index];
             *count = count.saturating_add(1);
+            parents[child_index] = Some(parent_id);
         }
     }
     for (index, &count) in incoming.iter().enumerate() {
@@ -2238,7 +2430,7 @@ fn verify_function_tree_ownership(
             ));
         }
     }
-    Ok(())
+    Ok(parents)
 }
 
 fn charge(
@@ -2358,6 +2550,7 @@ fn verify_function_metadata(
         function,
     )?;
     verify_variables(id, function, &metadata.variables)?;
+    verify_eval_scope_operands(id, flow, &metadata.variables)?;
     verify_closures(
         id,
         graph.root_id(),
@@ -2375,11 +2568,16 @@ fn verify_function_metadata(
         &metadata.closures,
         &internal_stack,
     )?;
+    let function_initializer_prefix = function
+        .parameter_initialization_end()
+        .map_or(realm_global_initializer_prefix, |boundary| {
+            realm_global_initializer_prefix.max(boundary as usize)
+        });
     let initializer_sites = verify_function_initializers(
         id,
         function,
         &metadata.variables,
-        realm_global_initializer_prefix,
+        function_initializer_prefix,
         &internal_stack,
     )?;
     classify_iteration_declarative_local_puts(
@@ -2443,16 +2641,40 @@ fn verify_executable_kind(
                     BytecodeVerificationErrorKind::GlobalScriptNotRoot,
                 ));
             }
-            let has_function_name_binding =
-                metadata.variables.iter().any(|definition| {
-                    definition.policy.kind() == CompilerBindingKind::FunctionName
-                }) || metadata.closures.iter().any(|definition| {
-                    definition.policy().kind() == CompilerBindingKind::FunctionName
-                });
-            if metadata.function_name.is_some() || has_function_name_binding {
+            if metadata_has_function_name(metadata) {
                 return Err(BytecodeVerificationError::function(
                     id,
                     BytecodeVerificationErrorKind::GlobalScriptHasFunctionName,
+                ));
+            }
+            Ok(())
+        }
+        CompilerExecutableKind::IndirectEvalScript => {
+            if id != root {
+                return Err(BytecodeVerificationError::function(
+                    id,
+                    BytecodeVerificationErrorKind::IndirectEvalScriptNotRoot,
+                ));
+            }
+            if metadata_has_function_name(metadata) {
+                return Err(BytecodeVerificationError::function(
+                    id,
+                    BytecodeVerificationErrorKind::IndirectEvalScriptHasFunctionName,
+                ));
+            }
+            Ok(())
+        }
+        CompilerExecutableKind::DirectEvalScript => {
+            if id != root {
+                return Err(BytecodeVerificationError::function(
+                    id,
+                    BytecodeVerificationErrorKind::DirectEvalScriptNotRoot,
+                ));
+            }
+            if metadata_has_local_function_name(metadata) {
+                return Err(BytecodeVerificationError::function(
+                    id,
+                    BytecodeVerificationErrorKind::DirectEvalScriptHasFunctionName,
                 ));
             }
             Ok(())
@@ -2462,13 +2684,7 @@ fn verify_executable_kind(
         | CompilerExecutableKind::AsyncFunction
         | CompilerExecutableKind::AsyncGeneratorFunction => Ok(()),
         CompilerExecutableKind::OrdinaryArrow => {
-            let has_function_name_binding =
-                metadata.variables.iter().any(|definition| {
-                    definition.policy.kind() == CompilerBindingKind::FunctionName
-                }) || metadata.closures.iter().any(|definition| {
-                    definition.policy().kind() == CompilerBindingKind::FunctionName
-                });
-            if metadata.function_name.is_some() || has_function_name_binding {
+            if metadata_has_local_function_name(metadata) {
                 return Err(BytecodeVerificationError::function(
                     id,
                     BytecodeVerificationErrorKind::OrdinaryArrowHasFunctionName,
@@ -2481,13 +2697,7 @@ fn verify_executable_kind(
         | CompilerExecutableKind::AsyncMethod
         | CompilerExecutableKind::AsyncGeneratorMethod
         | CompilerExecutableKind::ClassConstructor => {
-            let has_function_name_binding =
-                metadata.variables.iter().any(|definition| {
-                    definition.policy.kind() == CompilerBindingKind::FunctionName
-                }) || metadata.closures.iter().any(|definition| {
-                    definition.policy().kind() == CompilerBindingKind::FunctionName
-                });
-            if metadata.function_name.is_some() || has_function_name_binding {
+            if metadata_has_local_function_name(metadata) {
                 return Err(BytecodeVerificationError::function(
                     id,
                     BytecodeVerificationErrorKind::OrdinaryMethodHasFunctionName,
@@ -2502,13 +2712,7 @@ fn verify_executable_kind(
                     BytecodeVerificationErrorKind::DynamicFunctionScriptNotRoot,
                 ));
             }
-            let has_function_name_binding =
-                metadata.variables.iter().any(|definition| {
-                    definition.policy.kind() == CompilerBindingKind::FunctionName
-                }) || metadata.closures.iter().any(|definition| {
-                    definition.policy().kind() == CompilerBindingKind::FunctionName
-                });
-            if metadata.function_name.is_some() || has_function_name_binding {
+            if metadata_has_function_name(metadata) {
                 return Err(BytecodeVerificationError::function(
                     id,
                     BytecodeVerificationErrorKind::DynamicFunctionScriptHasFunctionName,
@@ -2517,6 +2721,22 @@ fn verify_executable_kind(
             Ok(())
         }
     }
+}
+
+fn metadata_has_function_name(metadata: &UnverifiedFunctionMetadata) -> bool {
+    metadata_has_local_function_name(metadata)
+        || metadata
+            .closures
+            .iter()
+            .any(|definition| definition.policy().kind() == CompilerBindingKind::FunctionName)
+}
+
+fn metadata_has_local_function_name(metadata: &UnverifiedFunctionMetadata) -> bool {
+    metadata.function_name.is_some()
+        || metadata
+            .variables
+            .iter()
+            .any(|definition| definition.policy.kind() == CompilerBindingKind::FunctionName)
 }
 
 #[allow(
@@ -2545,6 +2765,48 @@ fn verify_header(
                 return Err(BytecodeVerificationError::function(
                     id,
                     BytecodeVerificationErrorKind::GlobalScriptHasArguments {
+                        defined: header.defined_argument_count(),
+                        arguments,
+                    },
+                ));
+            }
+        }
+        CompilerExecutableKind::IndirectEvalScript => {
+            if header.kind() != FunctionKind::Normal
+                || header.flags().bits() != 0x0400
+                || header.mode().bits() & !1 != 0
+            {
+                return Err(BytecodeVerificationError::function(
+                    id,
+                    BytecodeVerificationErrorKind::UnsupportedFunctionHeader,
+                ));
+            }
+            if header.defined_argument_count() != 0 || arguments != 0 {
+                return Err(BytecodeVerificationError::function(
+                    id,
+                    BytecodeVerificationErrorKind::IndirectEvalScriptHasArguments {
+                        defined: header.defined_argument_count(),
+                        arguments,
+                    },
+                ));
+            }
+        }
+        CompilerExecutableKind::DirectEvalScript => {
+            let flags = header.flags().bits();
+            if header.kind() != FunctionKind::Normal
+                || flags & !0x05c0 != 0
+                || flags & 0x0400 == 0
+                || header.mode().bits() & !1 != 0
+            {
+                return Err(BytecodeVerificationError::function(
+                    id,
+                    BytecodeVerificationErrorKind::UnsupportedFunctionHeader,
+                ));
+            }
+            if header.defined_argument_count() != 0 || arguments != 0 {
+                return Err(BytecodeVerificationError::function(
+                    id,
+                    BytecodeVerificationErrorKind::DirectEvalScriptHasArguments {
                         defined: header.defined_argument_count(),
                         arguments,
                     },
@@ -2845,6 +3107,7 @@ fn verify_variables(
                 },
             )
         })?;
+    let mut arguments_object_definition = None;
     for (index, definition) in variables.iter().enumerate() {
         let definition_index = usize_to_u32(index);
         let slot = if index < arguments {
@@ -2858,6 +3121,28 @@ fn verify_variables(
             MetadataAtomField::VariableName(definition_index),
             function,
         )?;
+        if definition.arguments_object {
+            let valid = index >= arguments
+                && arguments_object_definition.is_none()
+                && atom_contents(definition.name, function.atoms())
+                    .is_some_and(|name| name.code_units().eq("arguments".encode_utf16()))
+                && definition.policy.kind() == CompilerBindingKind::Var
+                && definition.policy.initialization()
+                    == CompilerInitializationPolicy::UndefinedAtInstantiation
+                && definition.policy.writes() == CompilerWritePolicy::Mutable
+                && !definition.policy.has_temporal_dead_zone()
+                && !definition.has_scope;
+            if !valid {
+                return Err(BytecodeVerificationError::function(
+                    id,
+                    BytecodeVerificationErrorKind::ArgumentsObjectMetadataMismatch {
+                        definition: Some(definition_index),
+                        pc: None,
+                    },
+                ));
+            }
+            arguments_object_definition = Some(definition_index);
+        }
         if !definition.policy.is_valid_for_function(strict) {
             return Err(policy_error(
                 id,
@@ -3485,6 +3770,54 @@ fn verify_scope_links(
     Ok(())
 }
 
+/// Validates `QuickJS`'s adjusted direct-eval scope encoding.
+///
+/// `0` is `ARG_SCOPE_END`, `1` is the ordinary `-1` end sentinel, and every
+/// larger value is a zero-based local index plus two. A concrete head must be
+/// lexical; function-scoped arguments and locals are appended by direct-eval
+/// environment construction after walking this lexical chain.
+fn verify_eval_scope_operands(
+    id: FunctionTemplateId,
+    flow: &VerifiedControlFlow,
+    variables: &[VariableDefinition],
+) -> Result<(), BytecodeVerificationError> {
+    let arguments = flow.domains().argument_count() as usize;
+    let locals = &variables[arguments..];
+    for verified in flow.instructions() {
+        let decoded = verified.decoded();
+        let instruction = decoded.instruction();
+        let ((FinalOpcode::Eval, Operands::NPopU16 { scope_index, .. })
+        | (FinalOpcode::ApplyEval, Operands::U16(scope_index))) =
+            (instruction.opcode(), instruction.operands())
+        else {
+            continue;
+        };
+        let Some(local) = scope_index.checked_sub(2).map(u32::from) else {
+            continue;
+        };
+        let Some(definition) = locals.get(local as usize) else {
+            return Err(BytecodeVerificationError::function(
+                id,
+                BytecodeVerificationErrorKind::EvalScopeIndexOutOfBounds {
+                    pc: decoded.pc(),
+                    scope_index,
+                    locals: usize_to_u32(locals.len()),
+                },
+            ));
+        };
+        if !definition.has_scope {
+            return Err(BytecodeVerificationError::function(
+                id,
+                BytecodeVerificationErrorKind::EvalScopeHeadNotLexical {
+                    pc: decoded.pc(),
+                    local,
+                },
+            ));
+        }
+    }
+    Ok(())
+}
+
 fn verify_capture_layout(
     id: FunctionTemplateId,
     function: &VerifiedCompilerFunction,
@@ -3671,6 +4004,10 @@ fn verify_realm_global_function_initializers(
     Ok(prefix_index)
 }
 
+#[allow(
+    clippy::too_many_lines,
+    reason = "closure provenance, storage policy, and initializer checks form one audited boundary"
+)]
 fn verify_closures(
     id: FunctionTemplateId,
     root: FunctionTemplateId,
@@ -3681,6 +4018,19 @@ fn verify_closures(
     for (index, (closure, staged_source)) in
         closures.iter().zip(function.closure_sources()).enumerate()
     {
+        if matches!(
+            staged_source,
+            CompilerClosureSource::DirectEvalBinding { .. }
+                | CompilerClosureSource::DirectEvalVariable { .. }
+        ) && (id != root || authority_kind != CompilerExecutableKind::DirectEvalScript)
+        {
+            return Err(BytecodeVerificationError::function(
+                id,
+                BytecodeVerificationErrorKind::DirectEvalBindingSourceRequiresDirectEvalScript {
+                    closure: usize_to_u32(index),
+                },
+            ));
+        }
         let slot = BindingSlot::Closure(usize_to_u32(index));
         verify_required_atom(
             id,
@@ -3689,19 +4039,47 @@ fn verify_closures(
             function,
         )?;
         let policy = closure.policy();
+        let arguments_object_valid = !closure.arguments_object
+            || (atom_contents(closure.name, function.atoms())
+                .is_some_and(|name| name.code_units().eq("arguments".encode_utf16()))
+                && policy.kind() == CompilerBindingKind::Var
+                && policy.initialization()
+                    == CompilerInitializationPolicy::UndefinedAtInstantiation
+                && policy.writes() == CompilerWritePolicy::Mutable
+                && !policy.has_temporal_dead_zone());
+        let deletable_eval_variable_valid = match staged_source {
+            CompilerClosureSource::DirectEvalVariable { .. } => closure.deletable_eval_variable,
+            CompilerClosureSource::ParentClosure(_) => true,
+            CompilerClosureSource::ParentVariableReference(_)
+            | CompilerClosureSource::ConstructorRealmGlobal(_)
+            | CompilerClosureSource::DirectEvalBinding { .. } => !closure.deletable_eval_variable,
+        };
         let binding_valid = match closure.binding {
             CompilerClosureBinding::Captured(_) => {
                 policy.is_valid()
+                    && arguments_object_valid
+                    && deletable_eval_variable_valid
                     && policy.kind() != CompilerBindingKind::GlobalReference
                     && closure.function_initializer.is_none()
                     && matches!(
                         staged_source,
                         CompilerClosureSource::ParentVariableReference(_)
                             | CompilerClosureSource::ParentClosure(_)
+                            | CompilerClosureSource::DirectEvalBinding { .. }
+                            | CompilerClosureSource::DirectEvalVariable { .. }
                     )
+                    && (!matches!(
+                        staged_source,
+                        CompilerClosureSource::DirectEvalVariable { .. }
+                    ) || (matches!(
+                        policy.kind(),
+                        CompilerBindingKind::Var | CompilerBindingKind::Function
+                    ) && closure.name.is_some()))
             }
             CompilerClosureBinding::RealmGlobal(_) => {
-                realm_global_policy_supported(policy)
+                !closure.arguments_object
+                    && !closure.deletable_eval_variable
+                    && realm_global_policy_supported(policy)
                     && (!matches!(
                         policy.kind(),
                         CompilerBindingKind::Let | CompilerBindingKind::Const
@@ -3719,7 +4097,9 @@ fn verify_closures(
                             closure.name == Some(atom)
                         }
                         CompilerClosureSource::ParentClosure(_) => id != root,
-                        CompilerClosureSource::ParentVariableReference(_) => false,
+                        CompilerClosureSource::ParentVariableReference(_)
+                        | CompilerClosureSource::DirectEvalBinding { .. }
+                        | CompilerClosureSource::DirectEvalVariable { .. } => false,
                     }
             }
         };
@@ -3881,6 +4261,7 @@ const fn realm_global_policy_supported(policy: CompilerBindingPolicy) -> bool {
         | CompilerBindingKind::ClassFieldKey
         | CompilerBindingKind::ClassPrivateName
         | CompilerBindingKind::ClassStaticReceiver
+        | CompilerBindingKind::WithObject
         | CompilerBindingKind::Catch => false,
     }
 }
@@ -3888,7 +4269,10 @@ const fn realm_global_policy_supported(policy: CompilerBindingPolicy) -> bool {
 const fn is_script_authority_kind(kind: CompilerExecutableKind) -> bool {
     matches!(
         kind,
-        CompilerExecutableKind::GlobalScript | CompilerExecutableKind::DynamicFunctionScript
+        CompilerExecutableKind::GlobalScript
+            | CompilerExecutableKind::IndirectEvalScript
+            | CompilerExecutableKind::DirectEvalScript
+            | CompilerExecutableKind::DynamicFunctionScript
     )
 }
 
@@ -4155,15 +4539,24 @@ fn verify_closure_metadata(
                     CompilerClosureSource::ParentClosure(index) => usize::try_from(index)
                         .ok()
                         .and_then(|index| parent_metadata.closures.get(index))
-                        .map(|definition| (definition.name, definition.binding, parent.atoms())),
-                    CompilerClosureSource::ConstructorRealmGlobal(_) => None,
+                        .map(|definition| ParentClosureDefinition {
+                            name: definition.name,
+                            binding: definition.binding,
+                            arguments_object: definition.arguments_object,
+                            deletable_eval_variable: definition.deletable_eval_variable,
+                            atoms: parent.atoms(),
+                        }),
+                    CompilerClosureSource::ConstructorRealmGlobal(_)
+                    | CompilerClosureSource::DirectEvalBinding { .. }
+                    | CompilerClosureSource::DirectEvalVariable { .. } => None,
                 };
-                let matches =
-                    expected.is_some_and(|(expected_name, expected_binding, expected_atoms)| {
-                        expected_binding == closure.binding
-                            && atom_contents(expected_name, expected_atoms)
-                                == atom_contents(closure.name, child.atoms())
-                    });
+                let matches = expected.is_some_and(|expected| {
+                    expected.binding == closure.binding
+                        && expected.arguments_object == closure.arguments_object
+                        && expected.deletable_eval_variable == closure.deletable_eval_variable
+                        && atom_contents(expected.name, expected.atoms)
+                            == atom_contents(closure.name, child.atoms())
+                });
                 if !matches {
                     return Err(BytecodeVerificationError::function(
                         *child_id,
@@ -4179,13 +4572,11 @@ fn verify_closure_metadata(
     Ok(())
 }
 
-/// Certifies the synthetic cell that carries one computed public
-/// instance-field key from `ClassDefinitionEvaluation` into its constructor.
-/// The cell is not source-addressable: it has one lexical activation, one
-/// immediately-post-`to_prop_key` initialization, and one direct capture by
-/// the class constructor template it belongs to.  This is what lets the
-/// object-definition provenance pass distinguish a retained, once-evaluated
-/// field key from an arbitrary captured value.
+/// Certifies the synthetic cell that retains one computed public field key.
+/// The cell is not source-addressable: it has one lexical activation and one
+/// immediately-post-`to_prop_key` initialization. An instance key is captured
+/// once by its constructor; a static key is instead read once by the class
+/// definition after all element keys have been evaluated.
 #[allow(
     clippy::too_many_lines,
     reason = "local initialization and every parent-child capture edge are one certificate"
@@ -4199,6 +4590,12 @@ fn verify_class_field_key_bindings(
         let parent_metadata = &metadata[parent_index];
         let arguments = parent.control_flow().domains().argument_count() as usize;
         let mut captures = try_filled_vec(
+            parent_id,
+            parent_metadata.variables.len(),
+            0_u32,
+            BytecodeGraphResource::VariableDefinitions,
+        )?;
+        let mut direct_reads = try_filled_vec(
             parent_id,
             parent_metadata.variables.len(),
             0_u32,
@@ -4220,10 +4617,7 @@ fn verify_class_field_key_bindings(
                     BindingPolicyViolationReason::InvalidDeclarationPolicy,
                 ));
             };
-            if !definition.has_scope
-                || definition.variable_reference.is_none()
-                || definition.function_initializer.is_some()
-            {
+            if !definition.has_scope || definition.function_initializer.is_some() {
                 return Err(policy_error(
                     parent_id,
                     BindingSlot::Local(local),
@@ -4235,12 +4629,29 @@ fn verify_class_field_key_bindings(
             let instructions = parent.control_flow().instructions();
             let mut initialization = None;
             let mut initialization_count = 0_u32;
-            for index in 1..instructions.len() {
+            let mut direct_read_count = 0_u32;
+            for index in 0..instructions.len() {
                 let instruction = instructions[index].decoded().instruction();
-                if local_operand(instruction.opcode(), instruction.operands()) != Some(local)
-                    || !is_unchecked_local_put(instruction.opcode())
-                {
+                if local_operand(instruction.opcode(), instruction.operands()) != Some(local) {
                     continue;
+                }
+                if instruction.opcode() == FinalOpcode::GetLocCheck {
+                    direct_read_count = direct_read_count.saturating_add(1);
+                    continue;
+                }
+                if instruction.opcode() == FinalOpcode::SetLocUninitialized {
+                    continue;
+                }
+                if instruction.opcode() == FinalOpcode::CloseLoc {
+                    continue;
+                }
+                if !is_unchecked_local_put(instruction.opcode()) || index == 0 {
+                    return Err(policy_error(
+                        parent_id,
+                        BindingSlot::Local(local),
+                        Some(instructions[index].decoded().pc()),
+                        BindingPolicyViolationReason::InvalidDeclarationPolicy,
+                    ));
                 }
                 initialization_count = initialization_count.saturating_add(1);
                 let prior = instructions[index - 1].decoded().instruction();
@@ -4272,6 +4683,7 @@ fn verify_class_field_key_bindings(
                     BindingPolicyViolationReason::InvalidLexicalInitialization,
                 ));
             }
+            direct_reads[definition_index] = direct_read_count;
         }
 
         for constant in parent.constants() {
@@ -4374,7 +4786,12 @@ fn verify_class_field_key_bindings(
                         BindingPolicyViolationReason::InvalidDeclarationPolicy,
                     )
                 })?;
-            if captures[definition_index] != 1 {
+            let valid_use = if definition.variable_reference.is_some() {
+                captures[definition_index] == 1 && direct_reads[definition_index] == 0
+            } else {
+                captures[definition_index] == 0 && direct_reads[definition_index] == 1
+            };
+            if !valid_use {
                 return Err(policy_error(
                     parent_id,
                     BindingSlot::Local(local),
@@ -4486,7 +4903,10 @@ fn verify_method_definitions(
                             let instruction = instruction.decoded().instruction();
                             (instruction.opcode(), instruction.operands())
                         }),
-                        Some((FinalOpcode::DefineClass, Operands::AtomU8 { value: 1, .. }))
+                        Some((
+                            FinalOpcode::DefineClass,
+                            Operands::AtomU8 { value, .. },
+                        )) if value & 1 != 0
                     ) && class_definition_pair(
                         graph,
                         parent,
@@ -4634,7 +5054,8 @@ fn verify_method_definitions(
         if instructions.iter().any(|instruction| {
             matches!(
                 instruction.decoded().instruction().opcode(),
-                FinalOpcode::DefineMethod
+                FinalOpcode::ArrayFrom
+                    | FinalOpcode::DefineMethod
                     | FinalOpcode::DefineMethodComputed
                     | FinalOpcode::DefineClass
                     | FinalOpcode::CopyDataProperties
@@ -5179,10 +5600,10 @@ fn inferred_computed_class_name_pair(
 }
 
 /// Certifies `NamedEvaluation` for an anonymous class in a computed public
-/// instance-field initializer. The key is evaluated once during
-/// `ClassDefinitionEvaluation` and captured by every constructor, so this form
-/// reads the compiler-created immutable `ClassFieldKey` closure cell instead
-/// of evaluating `ToPropertyKey` again.
+/// field initializer. The key is evaluated once during
+/// `ClassDefinitionEvaluation` and retained in a compiler-created immutable
+/// `ClassFieldKey` cell: locally for a static field or through the constructor
+/// capture for an instance field.
 #[allow(
     clippy::too_many_arguments,
     reason = "the certificate validates one complete cross-function class-name sequence"
@@ -5221,15 +5642,29 @@ fn inferred_captured_computed_class_name_pair(
         definition_class_index,
     )?;
     let key_read = instructions.get(key_read_index)?.decoded().instruction();
-    let slot = closure_operand(key_read.opcode(), key_read.operands())?;
-    if key_read.opcode() != FinalOpcode::GetVarRefCheck
-        || !parent_metadata
-            .closures()
-            .get(slot as usize)
-            .is_some_and(|definition| {
-                definition.policy().kind() == CompilerBindingKind::ClassFieldKey
-            })
-    {
+    let retained_key = if key_read.opcode() == FinalOpcode::GetVarRefCheck {
+        closure_operand(key_read.opcode(), key_read.operands()).is_some_and(|slot| {
+            parent_metadata
+                .closures()
+                .get(slot as usize)
+                .is_some_and(|definition| {
+                    definition.policy().kind() == CompilerBindingKind::ClassFieldKey
+                })
+        })
+    } else if key_read.opcode() == FinalOpcode::GetLocCheck {
+        local_operand(key_read.opcode(), key_read.operands()).is_some_and(|slot| {
+            let arguments = parent.control_flow().domains().argument_count() as usize;
+            parent_metadata
+                .variables
+                .get(arguments.saturating_add(slot as usize))
+                .is_some_and(|definition| {
+                    definition.policy().kind() == CompilerBindingKind::ClassFieldKey
+                })
+        })
+    } else {
+        false
+    };
+    if !retained_key {
         return None;
     }
     let expected_opcodes = [
@@ -5347,21 +5782,16 @@ fn class_definition_pair(
 ) -> Option<FunctionTemplateId> {
     let definition = instructions.get(definition_index)?;
     let definition_instruction = definition.decoded().instruction();
-    let (
-        FinalOpcode::DefineClass,
-        Operands::AtomU8 {
-            value: heritage, ..
-        },
-    ) = (
+    let (FinalOpcode::DefineClass, Operands::AtomU8 { value: flags, .. }) = (
         definition_instruction.opcode(),
         definition_instruction.operands(),
-    )
-    else {
+    ) else {
         return None;
     };
-    if heritage > 1 || predecessor_counts.get(definition_index) != Some(&1) {
+    if flags > 3 || predecessor_counts.get(definition_index) != Some(&1) {
         return None;
     }
+    let heritage = flags & 1;
     let closure_index = definition_index.checked_sub(1)?;
     if !internal_stack.has_effective_successor(
         instructions,
@@ -5742,1214 +6172,19 @@ fn has_only_effective_successor(
         && successors.next().is_none()
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum ObjectDefinitionProvenance {
-    Unknown,
-    LiteralUndefined,
-    FreshObject(u32),
-    ClassConstructor(u32),
-    ClassPrototype(u32),
-    /// `this` in a class constructor. It is accepted as a dynamic
-    /// `define_array_el` target only with a verified class-field key cell.
-    ClassFieldReceiver(u32),
-    FreshArray {
-        site: u32,
-        minimum_cursor: u32,
-    },
-    ArrayCursorCandidate {
-        site: u32,
-        value: u32,
-    },
-    AppendDestination(u32),
-    CheckedAppendCursor(u32),
-    AppendCursorAfterElision(u32),
-    AppendCursorNeedsIncrement(u32),
-    AppendLengthTarget(u32),
-    AppendLengthCursor(u32),
-    ConvertedPropertyKey(u32),
-    /// A property key that class definition evaluation converted exactly once
-    /// and stored in the constructor's captured class-field-key cell.
-    ClassFieldKey(u32),
-}
-
-#[allow(
-    clippy::too_many_lines,
-    reason = "the bounded CFG worklist and exact operand-stack transfer form one fresh-object certificate"
-)]
-fn verify_object_definition_provenance(
-    id: FunctionTemplateId,
-    function: &VerifiedCompilerFunction,
-    metadata: &VerifiedFunctionMetadata,
-    internal_stack: &InternalStackCertificate,
-    limits: BytecodeGraphVerificationLimits,
-    usage: &mut BytecodeGraphUsage,
-) -> Result<(), BytecodeVerificationError> {
-    let instructions = function.control_flow().instructions();
-    let mut entries = try_filled_vec(
-        id,
-        instructions.len(),
-        None::<Vec<ObjectDefinitionProvenance>>,
-        BytecodeGraphResource::FrameStateEntries,
-    )?;
-    let mut queued = try_filled_vec(
-        id,
-        instructions.len(),
-        false,
-        BytecodeGraphResource::PolicyTransfers,
-    )?;
-    let mut work = VecDeque::new();
-    work.try_reserve_exact(instructions.len()).map_err(|_| {
-        BytecodeVerificationError::function(
-            id,
-            BytecodeVerificationErrorKind::AllocationFailed {
-                resource: BytecodeGraphResource::PolicyTransfers,
-                requested: usize_to_u64(instructions.len()),
-            },
-        )
-    })?;
-
-    let mut next_seed = 0_usize;
-    let mut evaluations = 0_u64;
-    loop {
-        if work.is_empty() {
-            while entries.get(next_seed).is_some_and(Option::is_some)
-                || internal_stack.is_finally_target(next_seed)
-            {
-                next_seed = next_seed.saturating_add(1);
-            }
-            if next_seed == entries.len() {
-                break;
-            }
-            entries[next_seed] = Some(Vec::new());
-            queued[next_seed] = true;
-            work.push_back(next_seed);
-        }
-
-        let Some(index) = work.pop_front() else {
-            continue;
-        };
-        queued[index] = false;
-        let entry = entries[index]
-            .as_deref()
-            .ok_or_else(|| object_definition_error(id, instructions[index].decoded().pc()))?;
-        charge_policy_transfers(
-            id,
-            &mut evaluations,
-            usize_to_u64(entry.len()).saturating_add(1),
-            usage.policy_transfers,
-            limits.max_policy_transfers,
-        )?;
-        let mut state = try_copy_slice(id, entry, BytecodeGraphResource::FrameStateEntries)?;
-        let decoded = instructions[index].decoded();
-        let instruction = decoded.instruction();
-        let opcode = instruction.opcode();
-        if state.iter().copied().any(is_append_length_marker)
-            && (opcode != FinalOpcode::PutField
-                || !is_append_length_finalizer(function, instruction.operands(), &state))
-        {
-            return Err(append_stack_error(id, decoded.pc(), opcode));
-        }
-        if state.iter().any(|value| {
-            matches!(
-                value,
-                ObjectDefinitionProvenance::AppendCursorNeedsIncrement(_)
-            )
-        }) && (opcode != FinalOpcode::Inc
-            || append_pair_needing_increment_at_top(&state).is_none())
-        {
-            return Err(append_stack_error(id, decoded.pc(), opcode));
-        }
-        verify_linear_append_inputs(id, decoded, function, &state)?;
-        match opcode {
-            FinalOpcode::DefineClass => match instruction.operands() {
-                Operands::AtomU8 { value: 0, .. }
-                    if !matches!(
-                        state.get(state.len().saturating_sub(2)),
-                        Some(ObjectDefinitionProvenance::LiteralUndefined)
-                    ) =>
-                {
-                    return Err(BytecodeVerificationError::function(
-                        id,
-                        BytecodeVerificationErrorKind::DefineClassTemplateMismatch {
-                            pc: decoded.pc(),
-                        },
-                    ));
-                }
-                Operands::AtomU8 { value: 1, .. } if state.len() < 3 => {
-                    return Err(BytecodeVerificationError::function(
-                        id,
-                        BytecodeVerificationErrorKind::DefineClassTemplateMismatch {
-                            pc: decoded.pc(),
-                        },
-                    ));
-                }
-                Operands::AtomU8 { value: 0 | 1, .. } => {}
-                _ => {
-                    return Err(BytecodeVerificationError::function(
-                        id,
-                        BytecodeVerificationErrorKind::DefineClassTemplateMismatch {
-                            pc: decoded.pc(),
-                        },
-                    ));
-                }
-            },
-            FinalOpcode::DefineMethod => {
-                let Operands::AtomU8 { value: flags, .. } = instruction.operands() else {
-                    return Err(method_target_error(id, decoded.pc()));
-                };
-                if !method_target_matches_enumerability(
-                    state.get(state.len().saturating_sub(2)),
-                    flags,
-                ) {
-                    return Err(method_target_error(id, decoded.pc()));
-                }
-            }
-            FinalOpcode::DefineMethodComputed => {
-                let Operands::U8(flags) = instruction.operands() else {
-                    return Err(method_target_error(id, decoded.pc()));
-                };
-                if !method_target_matches_enumerability(
-                    state.get(state.len().saturating_sub(3)),
-                    flags,
-                ) {
-                    return Err(method_target_error(id, decoded.pc()));
-                }
-            }
-            FinalOpcode::CopyDataProperties => {
-                let Some(target) =
-                    copy_data_properties_target_index(&state, instruction.operands())
-                else {
-                    return Err(object_definition_error(id, decoded.pc()));
-                };
-                if !matches!(
-                    state.get(target),
-                    Some(ObjectDefinitionProvenance::FreshObject(_))
-                ) {
-                    return Err(object_definition_error(id, decoded.pc()));
-                }
-            }
-            FinalOpcode::DefineArrayEl => {
-                let object = state.get(state.len().saturating_sub(3));
-                let key = state.get(state.len().saturating_sub(2));
-                let object_literal = matches!(
-                    (object, key),
-                    (
-                        Some(ObjectDefinitionProvenance::FreshObject(object_site)),
-                        Some(ObjectDefinitionProvenance::ConvertedPropertyKey(key_site))
-                    ) if object_site == key_site
-                );
-                let static_class_field = matches!(
-                    (object, key),
-                    (
-                        Some(ObjectDefinitionProvenance::ClassConstructor(_)),
-                        Some(ObjectDefinitionProvenance::ConvertedPropertyKey(_))
-                    )
-                );
-                let computed_instance_field = matches!(
-                    (object, key),
-                    (
-                        Some(ObjectDefinitionProvenance::ClassFieldReceiver(_)),
-                        Some(ObjectDefinitionProvenance::ClassFieldKey(_))
-                    )
-                );
-                if !object_literal
-                    && !static_class_field
-                    && !computed_instance_field
-                    && append_pair_for_element(&state).is_none()
-                {
-                    return Err(define_array_element_key_error(id, decoded.pc()));
-                }
-            }
-            FinalOpcode::DefineField
-                if matches!(
-                    state.get(state.len().saturating_sub(2)),
-                    Some(ObjectDefinitionProvenance::FreshArray { .. })
-                ) =>
-            {
-                let Some(index) = static_array_index(function, instruction.operands()) else {
-                    return Err(append_stack_error(id, decoded.pc(), opcode));
-                };
-                let Some(ObjectDefinitionProvenance::FreshArray { minimum_cursor, .. }) =
-                    state.get(state.len() - 2)
-                else {
-                    return Err(append_stack_error(id, decoded.pc(), opcode));
-                };
-                if index < *minimum_cursor {
-                    return Err(append_stack_error(id, decoded.pc(), opcode));
-                }
-            }
-            FinalOpcode::DefinePrivateField
-                if !matches!(
-                    state.get(state.len().saturating_sub(3)),
-                    Some(
-                        ObjectDefinitionProvenance::ClassConstructor(_)
-                            | ObjectDefinitionProvenance::ClassFieldReceiver(_)
-                    )
-                ) =>
-            {
-                return Err(object_definition_error(id, decoded.pc()));
-            }
-            FinalOpcode::Append if append_pair_for_append(&state).is_none() => {
-                return Err(append_stack_error(id, decoded.pc(), opcode));
-            }
-            FinalOpcode::Dup1 if trailing_elision_pair_at_top(&state).is_none() => {
-                return Err(append_stack_error(id, decoded.pc(), opcode));
-            }
-            _ => {}
-        }
-        if !transfer_object_definition_provenance(
-            id,
-            index,
-            decoded,
-            internal_stack.nip_catch_transform(index),
-            function,
-            metadata,
-            &mut state,
-        )? {
-            continue;
-        }
-
-        let mut has_successor = false;
-        for edge in internal_stack.effective_successors(instructions, index) {
-            has_successor = true;
-            let successor = edge.target;
-            if edge.enters_finally {
-                state.try_reserve(1).map_err(|_| {
-                    BytecodeVerificationError::function(
-                        id,
-                        BytecodeVerificationErrorKind::AllocationFailed {
-                            resource: BytecodeGraphResource::FrameStateEntries,
-                            requested: 1,
-                        },
-                    )
-                })?;
-                state.push(ObjectDefinitionProvenance::Unknown);
-            }
-            charge_policy_transfers(
-                id,
-                &mut evaluations,
-                usize_to_u64(state.len()).saturating_add(1),
-                usage.policy_transfers,
-                limits.max_policy_transfers,
-            )?;
-            propagate_object_definition_provenance(
-                id,
-                decoded.pc(),
-                successor,
-                instructions[successor.get() as usize].decoded().pc(),
-                &state,
-                &mut entries,
-                &mut queued,
-                &mut work,
-                limits.max_frame_state_entries,
-                usage,
-            )?;
-            if edge.enters_finally {
-                state.pop();
-            }
-        }
-        if !has_successor && state.iter().copied().any(is_append_provenance) {
-            return Err(BytecodeVerificationError::function(
-                id,
-                BytecodeVerificationErrorKind::AppendMarkerAtExit { pc: decoded.pc() },
-            ));
-        }
-    }
-    charge(
-        &mut usage.policy_transfers,
-        evaluations,
-        limits.max_policy_transfers,
-        BytecodeGraphResource::PolicyTransfers,
-    )
-}
-
-#[allow(
-    clippy::too_many_lines,
-    reason = "fresh object definitions and the exact array-append state machine share one stack transfer boundary"
-)]
-fn transfer_object_definition_provenance(
-    id: FunctionTemplateId,
-    instruction_index: usize,
-    decoded: crate::DecodedInstruction,
-    nip_catch_transform: Option<CertifiedNipCatchTransform>,
-    function: &VerifiedCompilerFunction,
-    metadata: &VerifiedFunctionMetadata,
-    state: &mut Vec<ObjectDefinitionProvenance>,
-) -> Result<bool, BytecodeVerificationError> {
-    let instruction = decoded.instruction();
-    if instruction.opcode() == FinalOpcode::NipCatch {
-        apply_nip_catch_provenance(id, decoded.pc(), nip_catch_transform, state)?;
-        return Ok(true);
-    }
-    let effect = instruction
-        .stack_effect()
-        .map_err(|_| object_definition_error(id, decoded.pc()))?;
-    let pops = effect.pops() as usize;
-    let pushes = effect.pushes() as usize;
-    if state.len() < pops {
-        return Ok(false);
-    }
-    let output_len = state
-        .len()
-        .checked_sub(pops)
-        .and_then(|length| length.checked_add(pushes))
-        .ok_or_else(|| object_definition_error(id, decoded.pc()))?;
-    if output_len > state.len() {
-        let additional = output_len - state.len();
-        state.try_reserve(additional).map_err(|_| {
-            BytecodeVerificationError::function(
-                id,
-                BytecodeVerificationErrorKind::AllocationFailed {
-                    resource: BytecodeGraphResource::FrameStateEntries,
-                    requested: usize_to_u64(additional),
-                },
-            )
-        })?;
-    }
-
-    match instruction.opcode() {
-        FinalOpcode::Undefined => state.push(ObjectDefinitionProvenance::LiteralUndefined),
-        FinalOpcode::PushThis
-            if metadata.executable_kind == CompilerExecutableKind::ClassConstructor =>
-        {
-            state.push(ObjectDefinitionProvenance::ClassFieldReceiver(
-                usize_to_u32(instruction_index),
-            ));
-        }
-        FinalOpcode::GetVarRefCheck
-            if closure_operand(instruction.opcode(), instruction.operands()).is_some_and(
-                |slot| {
-                    metadata
-                        .closures
-                        .get(slot as usize)
-                        .is_some_and(|definition| {
-                            definition.policy().kind() == CompilerBindingKind::ClassFieldKey
-                        })
-                },
-            ) =>
-        {
-            state.push(ObjectDefinitionProvenance::ClassFieldKey(usize_to_u32(
-                instruction_index,
-            )));
-        }
-        FinalOpcode::Object => state.push(ObjectDefinitionProvenance::FreshObject(usize_to_u32(
-            instruction_index,
-        ))),
-        FinalOpcode::DefineClass => {
-            let site = usize_to_u32(instruction_index);
-            let heritage = match instruction.operands() {
-                Operands::AtomU8 { value: 0, .. } => 0,
-                Operands::AtomU8 { value: 1, .. } => 1,
-                _ => return Err(object_definition_error(id, decoded.pc())),
-            };
-            state.truncate(state.len() - 2 - heritage);
-            state.push(ObjectDefinitionProvenance::ClassConstructor(site));
-            state.push(ObjectDefinitionProvenance::ClassPrototype(site));
-        }
-        FinalOpcode::ArrayFrom => {
-            let Some(argument_count) = instruction.operands().dynamic_argument_count() else {
-                return Err(append_stack_error(id, decoded.pc(), instruction.opcode()));
-            };
-            state.truncate(state.len() - pops);
-            state.push(ObjectDefinitionProvenance::FreshArray {
-                site: usize_to_u32(instruction_index),
-                minimum_cursor: u32::from(argument_count),
-            });
-        }
-        FinalOpcode::Dup => {
-            let value = *state
-                .last()
-                .ok_or_else(|| object_definition_error(id, decoded.pc()))?;
-            if is_append_provenance(value) {
-                *state
-                    .last_mut()
-                    .ok_or_else(|| object_definition_error(id, decoded.pc()))? =
-                    ObjectDefinitionProvenance::Unknown;
-                state.push(ObjectDefinitionProvenance::Unknown);
-            } else {
-                state.push(shuffled_object_definition_provenance(value));
-            }
-        }
-        FinalOpcode::Dup1 => {
-            let Some(site) = trailing_elision_pair_at_top(state) else {
-                return Err(append_stack_error(id, decoded.pc(), instruction.opcode()));
-            };
-            let pair = state.len() - 2;
-            state[pair] = ObjectDefinitionProvenance::AppendDestination(site);
-            state[pair + 1] = ObjectDefinitionProvenance::AppendLengthTarget(site);
-            state.push(ObjectDefinitionProvenance::AppendLengthCursor(site));
-        }
-        FinalOpcode::Dup2 => {
-            let left_index = state.len() - 2;
-            let left = shuffled_object_definition_provenance(state[left_index]);
-            let right = shuffled_object_definition_provenance(state[left_index + 1]);
-            state.push(left);
-            state.push(right);
-        }
-        FinalOpcode::Insert2 => {
-            let left_index = state.len() - 2;
-            let left = shuffled_object_definition_provenance(state[left_index]);
-            let right = shuffled_object_definition_provenance(state[left_index + 1]);
-            state[left_index] = right;
-            state[left_index + 1] = left;
-            state.push(right);
-        }
-        FinalOpcode::Insert3 => {
-            let first_index = state.len() - 3;
-            let first = shuffled_object_definition_provenance(state[first_index]);
-            let second = shuffled_object_definition_provenance(state[first_index + 1]);
-            let third = shuffled_object_definition_provenance(state[first_index + 2]);
-            state[first_index] = third;
-            state[first_index + 1] = first;
-            state[first_index + 2] = second;
-            state.push(third);
-        }
-        FinalOpcode::Swap => {
-            // Pure stack rotation: the object-rest exclude list and the
-            // converted computed key keep their provenance through the
-            // pinned `swap` reordering.
-            let left_index = state
-                .len()
-                .checked_sub(2)
-                .ok_or_else(|| object_definition_error(id, decoded.pc()))?;
-            state.swap(left_index, left_index + 1);
-        }
-        FinalOpcode::Perm3 => {
-            // Pure stack rotation: `[a, b, c] -> [b, a, c]` keeps the
-            // exclude list and the converted key below the value.
-            let left_index = state
-                .len()
-                .checked_sub(3)
-                .ok_or_else(|| object_definition_error(id, decoded.pc()))?;
-            state.swap(left_index, left_index + 1);
-        }
-        FinalOpcode::GetField2 => {
-            let base = state.len() - 1;
-            if is_append_provenance(state[base]) {
-                state[base] = ObjectDefinitionProvenance::Unknown;
-            }
-            state.push(ObjectDefinitionProvenance::Unknown);
-        }
-        FinalOpcode::GetArrayEl2 => {
-            let base = retained_object_definition_provenance(state[state.len() - 2]);
-            state.truncate(state.len() - 2);
-            state.push(base);
-            state.push(ObjectDefinitionProvenance::Unknown);
-        }
-        FinalOpcode::ToPropKey => convert_property_key_provenance(state),
-        // The closure-name/home-object primitives retain their surrounding
-        // class provenance. `copy_data_properties` likewise retains all
-        // referenced operands after its resumable work; its fresh target and
-        // packed depths were checked by the entry validation above.
-        FinalOpcode::SetNameComputed
-        | FinalOpcode::SetHomeObject
-        | FinalOpcode::CopyDataProperties => {}
-        FinalOpcode::DefineField => {
-            let base = state[state.len() - 2];
-            let base = match base {
-                ObjectDefinitionProvenance::FreshArray { site, .. } => {
-                    let Some(index) = static_array_index(function, instruction.operands()) else {
-                        return Err(append_stack_error(id, decoded.pc(), instruction.opcode()));
-                    };
-                    ObjectDefinitionProvenance::FreshArray {
-                        site,
-                        minimum_cursor: index.saturating_add(1),
-                    }
-                }
-                value => retained_object_definition_provenance(value),
-            };
-            state.truncate(state.len() - 2);
-            state.push(base);
-        }
-        // Object-literal `__proto__: value` mutates the fresh literal in
-        // place; just like `define_method`, it retains the one valid method
-        // target for a later compiler-shaped definition.
-        FinalOpcode::SetProto | FinalOpcode::DefineMethod => {
-            let base = retained_object_definition_provenance(state[state.len() - 2]);
-            state.truncate(state.len() - 2);
-            state.push(base);
-        }
-        FinalOpcode::DefineArrayEl => {
-            if let Some(site) = append_pair_for_element(state) {
-                state.truncate(state.len() - 3);
-                state.push(ObjectDefinitionProvenance::AppendDestination(site));
-                state.push(ObjectDefinitionProvenance::AppendCursorNeedsIncrement(site));
-            } else {
-                let base = state[state.len() - 3];
-                let key = state[state.len() - 2];
-                state.truncate(state.len() - 3);
-                state.push(base);
-                state.push(key);
-            }
-        }
-        // A computed method definition and private element definition each
-        // preserve their base below key/name and value. Private elements have
-        // already been restricted to a certified class target above.
-        FinalOpcode::DefinePrivateField | FinalOpcode::DefineMethodComputed => {
-            let base = retained_object_definition_provenance(state[state.len() - 3]);
-            state.truncate(state.len() - 3);
-            state.push(base);
-        }
-        FinalOpcode::Append => {
-            let Some(pair) = append_pair_for_append(state) else {
-                return Err(append_stack_error(id, decoded.pc(), instruction.opcode()));
-            };
-            state.truncate(state.len() - 3);
-            state.push(ObjectDefinitionProvenance::AppendDestination(pair.site));
-            state.push(if pair.pending_elision {
-                ObjectDefinitionProvenance::AppendCursorAfterElision(pair.site)
-            } else {
-                ObjectDefinitionProvenance::CheckedAppendCursor(pair.site)
-            });
-        }
-        FinalOpcode::Inc => {
-            let cursor = state.len() - 1;
-            let destination = cursor.saturating_sub(1);
-            let next = match (state.get(destination), state.get(cursor)) {
-                (
-                    Some(ObjectDefinitionProvenance::AppendDestination(destination)),
-                    Some(ObjectDefinitionProvenance::AppendCursorNeedsIncrement(cursor)),
-                ) if destination == cursor => Some(
-                    ObjectDefinitionProvenance::CheckedAppendCursor(*destination),
-                ),
-                (
-                    Some(ObjectDefinitionProvenance::AppendDestination(destination)),
-                    Some(
-                        ObjectDefinitionProvenance::CheckedAppendCursor(cursor)
-                        | ObjectDefinitionProvenance::AppendCursorAfterElision(cursor),
-                    ),
-                ) if destination == cursor => Some(
-                    ObjectDefinitionProvenance::AppendCursorAfterElision(*destination),
-                ),
-                _ => None,
-            };
-            if let Some(next) = next {
-                state[cursor] = next;
-            } else {
-                state.truncate(state.len() - pops);
-                state.resize(output_len, ObjectDefinitionProvenance::Unknown);
-            }
-        }
-        FinalOpcode::ForOfNext => {
-            // The verified for-of step pushes the certified value and done
-            // flag above the record without popping anything. The record
-            // slots and any rest-collector fresh-array/cursor pair remain in
-            // place, so the loop can keep appending to the same array.
-            state.try_reserve(2).map_err(|_| {
-                BytecodeVerificationError::function(
-                    id,
-                    BytecodeVerificationErrorKind::AllocationFailed {
-                        resource: BytecodeGraphResource::FrameStateEntries,
-                        requested: 2,
-                    },
-                )
-            })?;
-            state.push(ObjectDefinitionProvenance::Unknown);
-            state.push(ObjectDefinitionProvenance::Unknown);
-        }
-        FinalOpcode::Drop if checked_append_pair_at_top(state).is_some() => {
-            state.truncate(state.len() - 2);
-            state.push(ObjectDefinitionProvenance::Unknown);
-        }
-        FinalOpcode::PutField
-            if is_append_length_finalizer(function, instruction.operands(), state) =>
-        {
-            state.truncate(state.len() - 3);
-            state.push(ObjectDefinitionProvenance::Unknown);
-        }
-        opcode if integer_opcode_value(opcode, instruction.operands()).is_some() => {
-            let value = integer_opcode_value(opcode, instruction.operands())
-                .and_then(|value| u32::try_from(value).ok());
-            let candidate = state.last().copied().and_then(|provenance| {
-                let ObjectDefinitionProvenance::FreshArray {
-                    site,
-                    minimum_cursor,
-                } = provenance
-                else {
-                    return None;
-                };
-                let value = value.filter(|value| *value >= minimum_cursor)?;
-                Some(ObjectDefinitionProvenance::ArrayCursorCandidate { site, value })
-            });
-            state.push(candidate.unwrap_or(ObjectDefinitionProvenance::Unknown));
-        }
-        _ => {
-            state.truncate(state.len() - pops);
-            state.resize(output_len, ObjectDefinitionProvenance::Unknown);
-        }
-    }
-    if state.len() != output_len {
-        return Err(object_definition_error(id, decoded.pc()));
-    }
-    Ok(true)
-}
-
-/// Returns the target slot of a well-formed packed `copy_data_properties`
-/// operand. Its fixed stack effect requires three values, while the packed
-/// source/excluded depths may refer farther down the stack; prove all three
-/// references are in bounds before granting the mutation authority.
-fn copy_data_properties_target_index(
-    state: &[ObjectDefinitionProvenance],
-    operands: Operands,
-) -> Option<usize> {
-    let Operands::U8(mask) = operands else {
-        return None;
-    };
-    let target_depth = usize::from(mask & 0b11);
-    let source_depth = usize::from((mask >> 2) & 0b111);
-    let excluded_depth = usize::from((mask >> 5) & 0b111);
-    let index_at_depth = |depth: usize| state.len().checked_sub(depth.saturating_add(1));
-    let target = index_at_depth(target_depth)?;
-    index_at_depth(source_depth)?;
-    index_at_depth(excluded_depth)?;
-    Some(target)
-}
-
-fn apply_nip_catch_provenance(
-    id: FunctionTemplateId,
-    pc: BytecodePc,
-    transform: Option<CertifiedNipCatchTransform>,
-    state: &mut Vec<ObjectDefinitionProvenance>,
-) -> Result<(), BytecodeVerificationError> {
-    let Some(transform) = transform else {
-        return Err(object_definition_error(id, pc));
-    };
-    let input_depth = transform.input_depth as usize;
-    let retained_prefix = transform.retained_prefix as usize;
-    if state.len() != input_depth || retained_prefix >= input_depth {
-        return Err(object_definition_error(id, pc));
-    }
-    let value = *state
-        .last()
-        .ok_or_else(|| object_definition_error(id, pc))?;
-    state.truncate(retained_prefix);
-    state.push(value);
-    Ok(())
-}
-
-// A converted key is also a temporal anchor: the certified target must remain
-// immediately below that exact stack slot while the value is evaluated.
-// Copying or moving the marker would let a value evaluated earlier be rotated
-// across the pair and masquerade as the compiler's post-conversion RHS.
-const fn shuffled_object_definition_provenance(
-    value: ObjectDefinitionProvenance,
-) -> ObjectDefinitionProvenance {
-    match value {
-        ObjectDefinitionProvenance::ConvertedPropertyKey(_)
-        | ObjectDefinitionProvenance::FreshArray { .. }
-        | ObjectDefinitionProvenance::ArrayCursorCandidate { .. }
-        | ObjectDefinitionProvenance::AppendDestination(_)
-        | ObjectDefinitionProvenance::CheckedAppendCursor(_)
-        | ObjectDefinitionProvenance::AppendCursorAfterElision(_)
-        | ObjectDefinitionProvenance::AppendCursorNeedsIncrement(_)
-        | ObjectDefinitionProvenance::AppendLengthTarget(_)
-        | ObjectDefinitionProvenance::AppendLengthCursor(_) => ObjectDefinitionProvenance::Unknown,
-        value => value,
-    }
-}
-
-const fn retained_object_definition_provenance(
-    value: ObjectDefinitionProvenance,
-) -> ObjectDefinitionProvenance {
-    if is_append_provenance(value) {
-        ObjectDefinitionProvenance::Unknown
-    } else {
-        value
-    }
-}
-
-const fn is_append_provenance(value: ObjectDefinitionProvenance) -> bool {
-    matches!(
-        value,
-        ObjectDefinitionProvenance::FreshArray { .. }
-            | ObjectDefinitionProvenance::ArrayCursorCandidate { .. }
-            | ObjectDefinitionProvenance::AppendDestination(_)
-            | ObjectDefinitionProvenance::CheckedAppendCursor(_)
-            | ObjectDefinitionProvenance::AppendCursorAfterElision(_)
-            | ObjectDefinitionProvenance::AppendCursorNeedsIncrement(_)
-            | ObjectDefinitionProvenance::AppendLengthTarget(_)
-            | ObjectDefinitionProvenance::AppendLengthCursor(_)
-    )
-}
-
-const fn is_append_length_marker(value: ObjectDefinitionProvenance) -> bool {
-    matches!(
-        value,
-        ObjectDefinitionProvenance::AppendLengthTarget(_)
-            | ObjectDefinitionProvenance::AppendLengthCursor(_)
-    )
-}
-
-const fn is_linear_append_provenance(value: ObjectDefinitionProvenance) -> bool {
-    matches!(
-        value,
-        ObjectDefinitionProvenance::AppendDestination(_)
-            | ObjectDefinitionProvenance::CheckedAppendCursor(_)
-            | ObjectDefinitionProvenance::AppendCursorAfterElision(_)
-            | ObjectDefinitionProvenance::AppendCursorNeedsIncrement(_)
-            | ObjectDefinitionProvenance::AppendLengthTarget(_)
-            | ObjectDefinitionProvenance::AppendLengthCursor(_)
-    )
-}
-
-fn verify_linear_append_inputs(
-    id: FunctionTemplateId,
-    decoded: crate::DecodedInstruction,
-    function: &VerifiedCompilerFunction,
-    state: &[ObjectDefinitionProvenance],
-) -> Result<(), BytecodeVerificationError> {
-    if !state.iter().copied().any(is_linear_append_provenance) {
-        return Ok(());
-    }
-    let instruction = decoded.instruction();
-    let opcode = instruction.opcode();
-    let exact_transition = match opcode {
-        FinalOpcode::Append => {
-            append_pair_for_append(state).is_some()
-                && state
-                    .last()
-                    .copied()
-                    .is_some_and(|value| !is_linear_append_provenance(value))
-        }
-        FinalOpcode::DefineArrayEl => {
-            append_pair_for_element(state).is_some()
-                && state
-                    .last()
-                    .copied()
-                    .is_some_and(|value| !is_linear_append_provenance(value))
-        }
-        FinalOpcode::Inc => append_cursor_pair_at_top(state).is_some(),
-        FinalOpcode::Dup1 => trailing_elision_pair_at_top(state).is_some(),
-        FinalOpcode::PutField => {
-            is_append_length_finalizer(function, instruction.operands(), state)
-        }
-        FinalOpcode::Drop => checked_append_pair_at_top(state).is_some(),
-        // The verified for-of opcodes never consume a tracked fresh-array or
-        // append pair. `for_of_start` pops the iterable into the
-        // internal-stack-certified three-slot record, and `for_of_next`
-        // performs no runtime pops at all (its record-slot stack metadata
-        // models the three-slot record, which this pass never tracks); the
-        // destructuring rest collector therefore keeps its fresh array and
-        // cursor alive across the loop.
-        FinalOpcode::ForOfStart | FinalOpcode::ForAwaitOfStart | FinalOpcode::ForOfNext => true,
-        _ => false,
-    };
-    if exact_transition {
-        return Ok(());
-    }
-    if opcode == FinalOpcode::NipCatch {
-        return Err(append_stack_error(id, decoded.pc(), opcode));
-    }
-    let effect = instruction
-        .stack_effect()
-        .map_err(|_| append_stack_error(id, decoded.pc(), opcode))?;
-    let pops = effect.pops() as usize;
-    let input_start = state
-        .len()
-        .checked_sub(pops)
-        .ok_or_else(|| append_stack_error(id, decoded.pc(), opcode))?;
-    if state[input_start..]
-        .iter()
-        .copied()
-        .any(is_linear_append_provenance)
-    {
-        return Err(append_stack_error(id, decoded.pc(), opcode));
-    }
-    Ok(())
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-struct CertifiedAppendPair {
-    site: u32,
-    pending_elision: bool,
-}
-
-fn append_pair_for_append(state: &[ObjectDefinitionProvenance]) -> Option<CertifiedAppendPair> {
-    let base = state.len().checked_sub(3)?;
-    match (state[base], state[base + 1]) {
-        (
-            ObjectDefinitionProvenance::FreshArray {
-                site,
-                minimum_cursor,
-            },
-            ObjectDefinitionProvenance::ArrayCursorCandidate {
-                site: cursor_site,
-                value,
-            },
-        ) if site == cursor_site && value >= minimum_cursor => Some(CertifiedAppendPair {
-            site,
-            pending_elision: value > minimum_cursor,
-        }),
-        (
-            ObjectDefinitionProvenance::AppendDestination(destination),
-            ObjectDefinitionProvenance::CheckedAppendCursor(cursor),
-        ) if destination == cursor => Some(CertifiedAppendPair {
-            site: destination,
-            pending_elision: false,
-        }),
-        (
-            ObjectDefinitionProvenance::AppendDestination(destination),
-            ObjectDefinitionProvenance::AppendCursorAfterElision(cursor),
-        ) if destination == cursor => Some(CertifiedAppendPair {
-            site: destination,
-            pending_elision: true,
-        }),
-        _ => None,
-    }
-}
-
-fn append_pair_for_element(state: &[ObjectDefinitionProvenance]) -> Option<u32> {
-    let base = state.len().checked_sub(3)?;
-    match (state[base], state[base + 1]) {
-        (
-            ObjectDefinitionProvenance::AppendDestination(destination),
-            ObjectDefinitionProvenance::CheckedAppendCursor(cursor)
-            | ObjectDefinitionProvenance::AppendCursorAfterElision(cursor),
-        ) if destination == cursor => Some(destination),
-        // First use inside an array-destructuring rest-collection loop: the
-        // fresh array and its verified initial cursor write the first
-        // collected value, then `inc` advances into the certified
-        // destination/cursor pair shape shared with the loop backedge. The
-        // straight-line dynamic-array-literal program always converts
-        // through `append` first, so this arm admits exactly the loop form.
-        (
-            ObjectDefinitionProvenance::FreshArray {
-                site,
-                minimum_cursor,
-            },
-            ObjectDefinitionProvenance::ArrayCursorCandidate {
-                site: cursor_site,
-                value,
-            },
-        ) if site == cursor_site && value >= minimum_cursor => Some(site),
-        _ => None,
-    }
-}
-
-fn append_pair_needing_increment_at_top(state: &[ObjectDefinitionProvenance]) -> Option<u32> {
-    let base = state.len().checked_sub(2)?;
-    match (state[base], state[base + 1]) {
-        (
-            ObjectDefinitionProvenance::AppendDestination(destination),
-            ObjectDefinitionProvenance::AppendCursorNeedsIncrement(cursor),
-        ) if destination == cursor => Some(destination),
-        _ => None,
-    }
-}
-
-fn append_cursor_pair_at_top(state: &[ObjectDefinitionProvenance]) -> Option<u32> {
-    let base = state.len().checked_sub(2)?;
-    match (state[base], state[base + 1]) {
-        (
-            ObjectDefinitionProvenance::AppendDestination(destination),
-            ObjectDefinitionProvenance::CheckedAppendCursor(cursor)
-            | ObjectDefinitionProvenance::AppendCursorAfterElision(cursor)
-            | ObjectDefinitionProvenance::AppendCursorNeedsIncrement(cursor),
-        ) if destination == cursor => Some(destination),
-        _ => None,
-    }
-}
-
-fn checked_append_pair_at_top(state: &[ObjectDefinitionProvenance]) -> Option<u32> {
-    let base = state.len().checked_sub(2)?;
-    match (state[base], state[base + 1]) {
-        (
-            ObjectDefinitionProvenance::AppendDestination(destination),
-            ObjectDefinitionProvenance::CheckedAppendCursor(cursor),
-        ) if destination == cursor => Some(destination),
-        _ => None,
-    }
-}
-
-fn trailing_elision_pair_at_top(state: &[ObjectDefinitionProvenance]) -> Option<u32> {
-    let base = state.len().checked_sub(2)?;
-    match (state[base], state[base + 1]) {
-        (
-            ObjectDefinitionProvenance::AppendDestination(destination),
-            ObjectDefinitionProvenance::AppendCursorAfterElision(cursor),
-        ) if destination == cursor => Some(destination),
-        _ => None,
-    }
-}
-
-fn is_append_length_finalizer(
-    function: &VerifiedCompilerFunction,
-    operands: Operands,
-    state: &[ObjectDefinitionProvenance],
-) -> bool {
-    let Some(base) = state.len().checked_sub(3) else {
-        return false;
-    };
-    let (
-        ObjectDefinitionProvenance::AppendDestination(destination),
-        ObjectDefinitionProvenance::AppendLengthTarget(target),
-        ObjectDefinitionProvenance::AppendLengthCursor(cursor),
-    ) = (state[base], state[base + 1], state[base + 2])
-    else {
-        return false;
-    };
-    destination == target
-        && target == cursor
-        && operands
-            .atom_pool_index()
-            .and_then(|index| usize::try_from(index.get()).ok())
-            .and_then(|index| function.atoms().get(index))
-            .is_some_and(|atom| compiler_string_is_ascii(atom.string(), b"length"))
-}
-
-fn static_array_index(function: &VerifiedCompilerFunction, operands: Operands) -> Option<u32> {
-    let atom = operands
-        .atom_pool_index()
-        .and_then(|index| usize::try_from(index.get()).ok())
-        .and_then(|index| function.atoms().get(index))?;
-    if !atom.is_static_property_only() || !atom.string().is_tagged_integer_atom() {
-        return None;
-    }
-    let mut value = 0_u32;
-    for unit in atom.string().code_units() {
-        let digit = u32::from(unit.checked_sub(u16::from(b'0'))?);
-        value = value.checked_mul(10)?.checked_add(digit)?;
-    }
-    (value < i32::MAX as u32).then_some(value)
-}
-
-fn compiler_string_is_ascii(value: &crate::CompilerString, expected: &[u8]) -> bool {
-    value
-        .code_units()
-        .eq(expected.iter().copied().map(u16::from))
-}
-
-const fn integer_opcode_value(opcode: FinalOpcode, operands: Operands) -> Option<i32> {
-    match (opcode, operands) {
-        (FinalOpcode::PushMinus1, Operands::NoneInt) => Some(-1),
-        (FinalOpcode::Push0, Operands::NoneInt) => Some(0),
-        (FinalOpcode::Push1, Operands::NoneInt) => Some(1),
-        (FinalOpcode::Push2, Operands::NoneInt) => Some(2),
-        (FinalOpcode::Push3, Operands::NoneInt) => Some(3),
-        (FinalOpcode::Push4, Operands::NoneInt) => Some(4),
-        (FinalOpcode::Push5, Operands::NoneInt) => Some(5),
-        (FinalOpcode::Push6, Operands::NoneInt) => Some(6),
-        (FinalOpcode::Push7, Operands::NoneInt) => Some(7),
-        (FinalOpcode::PushI8, Operands::I8(value)) => Some(value as i32),
-        (FinalOpcode::PushI16, Operands::I16(value)) => Some(value as i32),
-        (FinalOpcode::PushI32, Operands::I32(value)) => Some(value),
-        _ => None,
-    }
-}
-
-fn convert_property_key_provenance(state: &mut [ObjectDefinitionProvenance]) {
-    let key_index = state.len() - 1;
-    let converted = key_index
-        .checked_sub(1)
-        .and_then(|object_index| state.get(object_index))
-        .and_then(|provenance| match provenance {
-            ObjectDefinitionProvenance::FreshObject(site)
-            | ObjectDefinitionProvenance::ClassConstructor(site) => Some(*site),
-            _ => None,
-        })
-        .map_or(
-            ObjectDefinitionProvenance::Unknown,
-            ObjectDefinitionProvenance::ConvertedPropertyKey,
-        );
-    state[key_index] = converted;
-}
-
-#[allow(clippy::too_many_arguments)]
-fn propagate_object_definition_provenance(
-    id: FunctionTemplateId,
-    source_pc: BytecodePc,
-    successor: InstructionIndex,
-    target_pc: BytecodePc,
-    output: &[ObjectDefinitionProvenance],
-    entries: &mut [Option<Vec<ObjectDefinitionProvenance>>],
-    queued: &mut [bool],
-    work: &mut VecDeque<usize>,
-    state_limit: u64,
-    usage: &mut BytecodeGraphUsage,
-) -> Result<(), BytecodeVerificationError> {
-    let index = successor.get() as usize;
-    let entry = entries
-        .get_mut(index)
-        .ok_or_else(|| method_target_error(id, source_pc))?;
-    let changed = match entry {
-        None => {
-            charge_frame_state_entries(id, usage, output.len(), state_limit)?;
-            *entry = Some(try_copy_slice(
-                id,
-                output,
-                BytecodeGraphResource::FrameStateEntries,
-            )?);
-            true
-        }
-        Some(existing) if existing.len() == output.len() => {
-            let mut changed = false;
-            for (target, incoming) in existing.iter_mut().zip(output) {
-                let merged = match (*target, *incoming) {
-                    (established, incoming) if established == incoming => established,
-                    // The array-destructuring rest-collection loop joins the
-                    // pre-loop fresh-array/cursor pair with the backedge's
-                    // certified destination/cursor pair at the same `array_from`
-                    // site; the post-loop shape strictly extends the pre-loop
-                    // shape, so the backedge state wins.
-                    (
-                        ObjectDefinitionProvenance::FreshArray { site, .. },
-                        ObjectDefinitionProvenance::AppendDestination(destination),
-                    ) if site == destination => {
-                        ObjectDefinitionProvenance::AppendDestination(destination)
-                    }
-                    (
-                        ObjectDefinitionProvenance::AppendDestination(destination),
-                        ObjectDefinitionProvenance::FreshArray { site, .. },
-                    ) if site == destination => {
-                        ObjectDefinitionProvenance::AppendDestination(destination)
-                    }
-                    (
-                        ObjectDefinitionProvenance::ArrayCursorCandidate { site, .. },
-                        ObjectDefinitionProvenance::CheckedAppendCursor(cursor),
-                    ) if site == cursor => ObjectDefinitionProvenance::CheckedAppendCursor(cursor),
-                    (
-                        ObjectDefinitionProvenance::CheckedAppendCursor(cursor),
-                        ObjectDefinitionProvenance::ArrayCursorCandidate { site, .. },
-                    ) if site == cursor => ObjectDefinitionProvenance::CheckedAppendCursor(cursor),
-                    _ => {
-                        if *target != *incoming
-                            && (is_linear_append_provenance(*target)
-                                || is_linear_append_provenance(*incoming))
-                        {
-                            return Err(BytecodeVerificationError::function(
-                                id,
-                                BytecodeVerificationErrorKind::AppendProvenanceJoinMismatch {
-                                    target: target_pc,
-                                    incoming_from: source_pc,
-                                },
-                            ));
-                        }
-                        ObjectDefinitionProvenance::Unknown
-                    }
-                };
-                changed |= merged != *target;
-                *target = merged;
-            }
-            changed
-        }
-        Some(existing) => {
-            if existing.iter().copied().any(is_linear_append_provenance)
-                || output.iter().copied().any(is_linear_append_provenance)
-            {
-                return Err(BytecodeVerificationError::function(
-                    id,
-                    BytecodeVerificationErrorKind::AppendProvenanceJoinMismatch {
-                        target: target_pc,
-                        incoming_from: source_pc,
-                    },
-                ));
-            }
-            let changed = existing
-                .iter()
-                .any(|value| *value != ObjectDefinitionProvenance::Unknown);
-            existing.fill(ObjectDefinitionProvenance::Unknown);
-            changed
-        }
-    };
-    if changed && !queued[index] {
-        queued[index] = true;
-        work.push_back(index);
-    }
-    Ok(())
-}
-
-fn charge_frame_state_entries(
-    id: FunctionTemplateId,
-    usage: &mut BytecodeGraphUsage,
-    amount: usize,
-    limit: u64,
-) -> Result<(), BytecodeVerificationError> {
-    let amount = usize_to_u64(amount);
-    let observed = usage
-        .frame_state_entries
-        .checked_add(amount)
-        .ok_or_else(|| {
-            BytecodeVerificationError::function(
-                id,
-                BytecodeVerificationErrorKind::LimitExceeded {
-                    resource: BytecodeGraphResource::FrameStateEntries,
-                    limit,
-                    observed: u64::MAX,
-                },
-            )
-        })?;
-    if observed > limit {
-        return Err(BytecodeVerificationError::function(
-            id,
-            BytecodeVerificationErrorKind::LimitExceeded {
-                resource: BytecodeGraphResource::FrameStateEntries,
-                limit,
-                observed,
-            },
-        ));
-    }
-    usage.frame_state_entries = observed;
-    Ok(())
-}
-
-fn method_target_error(id: FunctionTemplateId, pc: BytecodePc) -> BytecodeVerificationError {
-    BytecodeVerificationError::function(
-        id,
-        BytecodeVerificationErrorKind::DefineMethodTargetMismatch { pc },
-    )
-}
-
-const fn method_target_matches_enumerability(
-    target: Option<&ObjectDefinitionProvenance>,
-    flags: u8,
-) -> bool {
-    matches!(
-        (target, flags),
-        (Some(ObjectDefinitionProvenance::FreshObject(_)), 4..=6)
-            | (
-                Some(
-                    ObjectDefinitionProvenance::ClassConstructor(_)
-                        | ObjectDefinitionProvenance::ClassPrototype(_)
-                ),
-                0..=2
-            )
-    )
-}
-
-fn define_array_element_key_error(
-    id: FunctionTemplateId,
-    pc: BytecodePc,
-) -> BytecodeVerificationError {
-    BytecodeVerificationError::function(
-        id,
-        BytecodeVerificationErrorKind::DefineArrayElementKeyMismatch { pc },
-    )
-}
-
-fn append_stack_error(
-    id: FunctionTemplateId,
-    pc: BytecodePc,
-    opcode: FinalOpcode,
-) -> BytecodeVerificationError {
-    BytecodeVerificationError::function(
-        id,
-        BytecodeVerificationErrorKind::AppendOperandStackMismatch { pc, opcode },
-    )
-}
-
-fn object_definition_error(id: FunctionTemplateId, pc: BytecodePc) -> BytecodeVerificationError {
-    method_target_error(id, pc)
+struct ParentClosureDefinition<'metadata> {
+    name: Option<AtomPoolIndex>,
+    binding: CompilerClosureBinding,
+    arguments_object: bool,
+    deletable_eval_variable: bool,
+    atoms: &'metadata [crate::CompilerAtom],
 }
 
 fn parent_definition_for_reference<'metadata>(
     parent: &'metadata VerifiedCompilerFunction,
     metadata: &'metadata VerifiedFunctionMetadata,
     reference: u32,
-) -> Option<(
-    Option<AtomPoolIndex>,
-    CompilerClosureBinding,
-    &'metadata [crate::CompilerAtom],
-)> {
+) -> Option<ParentClosureDefinition<'metadata>> {
     let binding = parent
         .control_flow()
         .compiler_capture_layout()?
@@ -6963,11 +6198,13 @@ fn parent_definition_for_reference<'metadata>(
         }
     };
     let definition = metadata.variables.get(index)?;
-    (definition.variable_reference == Some(reference)).then_some((
-        definition.name,
-        CompilerClosureBinding::Captured(definition.policy),
-        parent.atoms(),
-    ))
+    (definition.variable_reference == Some(reference)).then_some(ParentClosureDefinition {
+        name: definition.name,
+        binding: CompilerClosureBinding::Captured(definition.policy),
+        arguments_object: definition.arguments_object,
+        deletable_eval_variable: false,
+        atoms: parent.atoms(),
+    })
 }
 
 fn atom_contents(
@@ -6989,6 +6226,7 @@ fn verify_supported_opcodes(
 ) -> Result<(), BytecodeVerificationError> {
     let executable_kind = metadata.executable_kind;
     let mut arguments_object_count = 0_u8;
+    let mut arguments_object_initializer = None;
     let mut rest_parameter_count = 0_u8;
     let generator = matches!(
         executable_kind,
@@ -7035,6 +6273,7 @@ fn verify_supported_opcodes(
             (FinalOpcode::SpecialObject, Operands::U8(0 | 1))
         ) {
             arguments_object_count = arguments_object_count.saturating_add(1);
+            arguments_object_initializer = Some((instruction_index, decoded.pc()));
         } else if opcode == FinalOpcode::Rest {
             rest_parameter_count = rest_parameter_count.saturating_add(1);
         } else if opcode == FinalOpcode::InitialYield
@@ -7092,22 +6331,30 @@ fn verify_supported_opcodes(
             || (matches!(opcode, FinalOpcode::Return | FinalOpcode::ReturnUndef)
                 && (generator || asynchronous))
             || (opcode == FinalOpcode::CheckCtorReturn
-                && !(executable_kind == CompilerExecutableKind::ClassConstructor
-                    && flow
-                        .function_header()
-                        .flags()
-                        .is_derived_class_constructor()))
+                && !(executable_kind == CompilerExecutableKind::OrdinaryArrow
+                    || (executable_kind == CompilerExecutableKind::DirectEvalScript
+                        && flow.function_header().flags().super_call_allowed())
+                    || (executable_kind == CompilerExecutableKind::ClassConstructor
+                        && flow
+                            .function_header()
+                            .flags()
+                            .is_derived_class_constructor())))
             || (matches!(
                 opcode,
                 FinalOpcode::GetSuper | FinalOpcode::GetSuperValue | FinalOpcode::PutSuperValue
-            ) && !matches!(
-                executable_kind,
-                CompilerExecutableKind::OrdinaryMethod
-                    | CompilerExecutableKind::GeneratorMethod
-                    | CompilerExecutableKind::AsyncMethod
-                    | CompilerExecutableKind::AsyncGeneratorMethod
-                    | CompilerExecutableKind::ClassConstructor
-            ) && !static_field_super)
+            ) && !(executable_kind == CompilerExecutableKind::DirectEvalScript
+                && (flow.function_header().flags().super_allowed()
+                    || flow.function_header().flags().super_call_allowed()))
+                && !matches!(
+                    executable_kind,
+                    CompilerExecutableKind::OrdinaryArrow
+                        | CompilerExecutableKind::OrdinaryMethod
+                        | CompilerExecutableKind::GeneratorMethod
+                        | CompilerExecutableKind::AsyncMethod
+                        | CompilerExecutableKind::AsyncGeneratorMethod
+                        | CompilerExecutableKind::ClassConstructor
+                )
+                && !static_field_super)
             || matches!(
                 (opcode, instruction.operands()),
                 (FinalOpcode::SpecialObject, operands)
@@ -7163,6 +6410,33 @@ fn verify_supported_opcodes(
             ));
         }
     }
+    let arguments_object_definition = metadata
+        .variables
+        .iter()
+        .position(VariableDefinition::is_arguments_object)
+        .map(usize_to_u32);
+    let initialized_definition = arguments_object_initializer.and_then(|(index, _)| {
+        flow.instructions()
+            .get(index.checked_add(1)?)
+            .and_then(|put| {
+                let put = put.decoded().instruction();
+                initializer_put_definition(
+                    put.opcode(),
+                    put.operands(),
+                    flow.domains().argument_count() as usize,
+                )
+                .map(usize_to_u32)
+            })
+    });
+    if arguments_object_definition != initialized_definition {
+        return Err(BytecodeVerificationError::function(
+            id,
+            BytecodeVerificationErrorKind::ArgumentsObjectMetadataMismatch {
+                definition: arguments_object_definition,
+                pc: arguments_object_initializer.map(|(_, pc)| pc),
+            },
+        ));
+    }
     if arguments_object_count == 0 && mapped_arguments_authority {
         return Err(BytecodeVerificationError::function(
             id,
@@ -7195,7 +6469,8 @@ fn compiler_special_object_is_authorized(
 ) -> bool {
     if !matches!(
         executable_kind,
-        CompilerExecutableKind::OrdinaryFunction
+        CompilerExecutableKind::DirectEvalScript
+            | CompilerExecutableKind::OrdinaryFunction
             | CompilerExecutableKind::OrdinaryArrow
             | CompilerExecutableKind::OrdinaryMethod
             | CompilerExecutableKind::ClassConstructor
@@ -7226,20 +6501,28 @@ fn compiler_special_object_is_authorized(
         }
         Operands::U8(3) => flow.function_header().flags().new_target_allowed(),
         Operands::U8(4) => {
-            executable_kind == CompilerExecutableKind::ClassConstructor
-                && flow
-                    .function_header()
-                    .flags()
-                    .is_derived_class_constructor()
+            executable_kind == CompilerExecutableKind::OrdinaryArrow
+                || (executable_kind == CompilerExecutableKind::DirectEvalScript
+                    && flow.function_header().flags().super_call_allowed())
+                || (executable_kind == CompilerExecutableKind::ClassConstructor
+                    && flow
+                        .function_header()
+                        .flags()
+                        .is_derived_class_constructor())
         }
-        Operands::U8(5) => matches!(
-            executable_kind,
-            CompilerExecutableKind::OrdinaryMethod
-                | CompilerExecutableKind::GeneratorMethod
-                | CompilerExecutableKind::AsyncMethod
-                | CompilerExecutableKind::AsyncGeneratorMethod
-                | CompilerExecutableKind::ClassConstructor
-        ),
+        Operands::U8(5) => {
+            (executable_kind == CompilerExecutableKind::DirectEvalScript
+                && flow.function_header().flags().super_allowed())
+                || matches!(
+                    executable_kind,
+                    CompilerExecutableKind::OrdinaryArrow
+                        | CompilerExecutableKind::OrdinaryMethod
+                        | CompilerExecutableKind::GeneratorMethod
+                        | CompilerExecutableKind::AsyncMethod
+                        | CompilerExecutableKind::AsyncGeneratorMethod
+                        | CompilerExecutableKind::ClassConstructor
+                )
+        }
         _ => false,
     }
 }
@@ -7280,6 +6563,13 @@ const fn supported_compiler_opcode(opcode: FinalOpcode) -> bool {
             | FinalOpcode::Call
             | FinalOpcode::CallMethod
             | FinalOpcode::Apply
+            | FinalOpcode::Eval
+            | FinalOpcode::ApplyEval
+            | FinalOpcode::WithGetVar
+            | FinalOpcode::WithDeleteVar
+            | FinalOpcode::WithMakeRef
+            | FinalOpcode::WithGetRef
+            | FinalOpcode::PutRefValue
             | FinalOpcode::ArrayFrom
             | FinalOpcode::CheckCtorReturn
             | FinalOpcode::CheckCtor
@@ -7925,6 +7215,10 @@ fn verify_internal_operand_stack(
                 | FinalOpcode::NipCatch
                 | FinalOpcode::Gosub
                 | FinalOpcode::Ret
+                | FinalOpcode::WithGetVar
+                | FinalOpcode::WithDeleteVar
+                | FinalOpcode::WithMakeRef
+                | FinalOpcode::WithGetRef
         )
     }) {
         return Ok(InternalStackCertificate::default());
@@ -8311,6 +7605,30 @@ fn verify_internal_operand_stack(
             } else {
                 None
             };
+            let with_binding_results = if edge.is_branch_target {
+                match decoded.instruction().opcode() {
+                    FinalOpcode::WithGetVar | FinalOpcode::WithDeleteVar => 1,
+                    FinalOpcode::WithMakeRef | FinalOpcode::WithGetRef => 2,
+                    _ => 0,
+                }
+            } else {
+                0
+            };
+            if with_binding_results != 0 {
+                state.try_reserve(with_binding_results).map_err(|_| {
+                    BytecodeVerificationError::function(
+                        id,
+                        BytecodeVerificationErrorKind::AllocationFailed {
+                            resource: BytecodeGraphResource::FrameStateEntries,
+                            requested: usize_to_u64(with_binding_results),
+                        },
+                    )
+                })?;
+                state.extend(std::iter::repeat_n(
+                    InternalStackValue::Ordinary,
+                    with_binding_results,
+                ));
+            }
             charge_policy_transfers(
                 id,
                 &mut evaluations,
@@ -8366,6 +7684,9 @@ fn verify_internal_operand_stack(
             }
             if let Some((marker_index, site, handler)) = catch_exception {
                 state[marker_index] = InternalStackValue::CatchMarker { site, handler };
+            }
+            if with_binding_results != 0 {
+                state.truncate(state.len() - with_binding_results);
             }
             if let Some((pending_index, original)) = finally_marker {
                 match state.pop() {
@@ -10418,7 +9739,7 @@ fn verify_binding_opcodes(
             };
             let has_binding = closures.iter().any(|definition| {
                 definition.name == Some(atom)
-                    && matches!(
+                    && (matches!(
                         definition.binding,
                         CompilerClosureBinding::RealmGlobal(policy)
                             if matches!(
@@ -10427,7 +9748,7 @@ fn verify_binding_opcodes(
                                     | CompilerBindingKind::Var
                                     | CompilerBindingKind::Function
                             )
-                    )
+                    ) || definition.deletable_eval_variable)
             });
             if !has_binding {
                 return Err(BytecodeVerificationError::function(
@@ -10579,6 +9900,9 @@ fn verify_closure_opcode(
 ) -> Result<(), BytecodeVerificationError> {
     match definition.binding {
         CompilerClosureBinding::Captured(_) if is_realm_global_opcode(opcode) => {
+            if opcode == FinalOpcode::GetVarUndef && definition.deletable_eval_variable {
+                return Ok(());
+            }
             return Err(closure_opcode_mismatch(id, pc, closure, opcode));
         }
         CompilerClosureBinding::RealmGlobal(policy) => {
@@ -10636,17 +9960,10 @@ fn verify_closure_opcode(
             },
         ));
     }
-    if is_closure_write(opcode)
-        && policy.writes != CompilerWritePolicy::Mutable
-        && policy.kind() != CompilerBindingKind::ClassName
-    {
-        return Err(policy_error(
-            id,
-            slot,
-            Some(pc),
-            BindingPolicyViolationReason::ImmutableWrite,
-        ));
-    }
+    // Captured writes retain their declaration policy in the authority. The
+    // VM uses it to throw for immutable bindings or ignore a sloppy write to
+    // an ImmutableInStrictCode binding; these opcodes never grant an
+    // unchecked mutation capability.
     Ok(())
 }
 
@@ -11276,23 +10593,6 @@ const fn is_argument_write(opcode: FinalOpcode) -> bool {
     )
 }
 
-const fn is_closure_write(opcode: FinalOpcode) -> bool {
-    matches!(
-        opcode,
-        FinalOpcode::PutVarRef
-            | FinalOpcode::SetVarRef
-            | FinalOpcode::PutVarRef0
-            | FinalOpcode::PutVarRef1
-            | FinalOpcode::PutVarRef2
-            | FinalOpcode::PutVarRef3
-            | FinalOpcode::SetVarRef0
-            | FinalOpcode::SetVarRef1
-            | FinalOpcode::SetVarRef2
-            | FinalOpcode::SetVarRef3
-            | FinalOpcode::PutVarRefCheck
-    )
-}
-
 fn policy_error(
     id: FunctionTemplateId,
     slot: BindingSlot,
@@ -11391,6 +10691,8 @@ fn collect_requirements(
             | FinalOpcode::Call3
             | FinalOpcode::CallMethod
             | FinalOpcode::Apply
+            | FinalOpcode::Eval
+            | FinalOpcode::ApplyEval
             | FinalOpcode::InitCtor
             | FinalOpcode::GetSuper
             | FinalOpcode::GetSuperValue
@@ -11421,6 +10723,14 @@ fn collect_requirements(
             | FinalOpcode::DefineMethod
             | FinalOpcode::ForInStart => {
                 push_requirement(requirements, ExecutionRequirement::OrdinaryObjects);
+            }
+            FinalOpcode::WithGetVar
+            | FinalOpcode::WithDeleteVar
+            | FinalOpcode::WithMakeRef
+            | FinalOpcode::WithGetRef
+            | FinalOpcode::PutRefValue => {
+                push_requirement(requirements, ExecutionRequirement::OrdinaryObjects);
+                push_requirement(requirements, ExecutionRequirement::Calls);
             }
             FinalOpcode::SpecialObject => match instruction.operands() {
                 Operands::U8(3..=5) => {

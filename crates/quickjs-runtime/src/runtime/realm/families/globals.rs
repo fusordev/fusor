@@ -3,7 +3,7 @@
 use super::{FunctionSink, PropertySink, method, ordinary};
 use crate::runtime::realm::{
     GLOBAL_NUMERIC_FUNCTIONS, GlobalNumericFunction, NUMBER_PREDICATE_STATICS, NativeFunctionKind,
-    NumberPredicate, URI_FUNCTIONS,
+    NumberPredicate, PredefinedAtom, URI_FUNCTIONS,
     schema::{
         IntrinsicFunctionId, IntrinsicIdentity, IntrinsicKeySpec, IntrinsicNameSpec,
         IntrinsicObjectId, RealmNameId,
@@ -11,6 +11,11 @@ use crate::runtime::realm::{
 };
 
 pub(super) fn visit_functions(visit: FunctionSink<'_>) {
+    visit(ordinary(
+        NativeFunctionKind::Eval,
+        IntrinsicNameSpec::Predefined(PredefinedAtom::Eval),
+        1,
+    ));
     for (_, predicate) in NUMBER_PREDICATE_STATICS {
         visit(ordinary(
             NativeFunctionKind::NumberPredicateStatic(predicate),
@@ -36,6 +41,11 @@ pub(super) fn visit_functions(visit: FunctionSink<'_>) {
 }
 
 pub(super) fn visit_properties(visit: PropertySink<'_>) {
+    visit(method(
+        IntrinsicIdentity::Object(IntrinsicObjectId::GlobalObject),
+        IntrinsicKeySpec::PredefinedString(PredefinedAtom::Eval),
+        NativeFunctionKind::Eval,
+    ));
     for (kind, _) in GLOBAL_NUMERIC_FUNCTIONS {
         let name = numeric_name(kind);
         let function = NativeFunctionKind::GlobalNumeric(kind);

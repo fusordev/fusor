@@ -6,10 +6,10 @@ use super::super::{
     BindingPattern, BindingRestElement, BranchKind, CompilationContext, CompiledConstantPool,
     CompiledMetadataAtomKey, DeclarationKind, Expression, ExpressionPlanner, ExpressionWork,
     FinalOpcode, FrameLayout, FunctionTreeLayout, GetSpan, IdentifierReference,
-    InitializationPolicy, LeafCompilationError, LoweredReference, ObjectAssignmentTarget,
-    ObjectPattern, Operands, PlannedControlFlow, PlannedInstruction, Span, StoragePlacement,
-    UnsupportedLeafFeature, WritePolicy, anonymous_class_expression_span,
-    anonymous_named_evaluation_span, anonymous_ordinary_function_span, plan_put_slot, unsupported,
+    InitializationPolicy, LeafCompilationError, ObjectAssignmentTarget, ObjectPattern, Operands,
+    PlannedControlFlow, PlannedInstruction, Span, StoragePlacement, UnsupportedLeafFeature,
+    WritePolicy, anonymous_class_expression_span, anonymous_named_evaluation_span,
+    anonymous_ordinary_function_span, plan_external_put, plan_put_slot, unsupported,
 };
 use super::abrupt::{AbruptMarker, AbruptMarkerKind};
 
@@ -624,16 +624,22 @@ impl<'arena> CompilationContext<'_, 'arena, '_> {
                 layout.executable,
                 global,
             )?;
-            let opcode = if storage.placement() == StoragePlacement::GlobalLexical {
-                FinalOpcode::PutVarInit
+            let instruction = if storage.placement() == StoragePlacement::GlobalLexical {
+                PlannedInstruction::new(
+                    FinalOpcode::PutVarInit,
+                    Operands::VarRef(slot),
+                    identifier.span,
+                )
             } else {
-                FinalOpcode::PutVar
+                let descriptor = tree_layout.realm_globals.binding(global).ok_or(
+                    LeafCompilationError::SemanticInvariant {
+                        invariant: "destructured external binding descriptor exists",
+                        span: Some(identifier.span),
+                    },
+                )?;
+                plan_external_put(descriptor.binding, slot, identifier.span)
             };
-            return flow.emit(PlannedInstruction::new(
-                opcode,
-                Operands::VarRef(slot),
-                identifier.span,
-            ));
+            return flow.emit(instruction);
         }
         let frame_slot = layout
             .slot(binding)
@@ -866,7 +872,8 @@ impl<'arena> CompilationContext<'_, 'arena, '_> {
     ) -> Result<(), LeafCompilationError> {
         match target {
             AssignmentTarget::AssignmentTargetIdentifier(identifier) => {
-                self.plan_assignment_identifier_store(identifier, work, layout, tree_layout)
+                Self::plan_assignment_identifier_store(identifier, work);
+                Ok(())
             }
             AssignmentTarget::StaticMemberExpression(member) if !member.optional => {
                 // The base is evaluated by the reference prelude before the
@@ -926,37 +933,10 @@ impl<'arena> CompilationContext<'_, 'arena, '_> {
 
     /// Stores an already-evaluated value into an identifier reference target.
     fn plan_assignment_identifier_store<'pattern>(
-        &self,
         identifier: &'pattern IdentifierReference<'arena>,
         work: &mut Vec<ExpressionWork<'pattern, 'arena>>,
-        layout: &FrameLayout,
-        tree_layout: &FunctionTreeLayout,
-    ) -> Result<(), LeafCompilationError> {
-        let reference = self.lowered_reference(
-            identifier.reference_id.get(),
-            identifier.span,
-            layout,
-            tree_layout,
-        )?;
-        if !reference.access().writes() {
-            return unsupported(
-                UnsupportedLeafFeature::UnsupportedReference,
-                identifier.span,
-            );
-        }
-        match reference {
-            LoweredReference::Frame { slot, .. } => {
-                work.push(ExpressionWork::Emit(plan_put_slot(slot, identifier.span)));
-            }
-            LoweredReference::RealmGlobal { slot, .. } => {
-                work.push(ExpressionWork::Emit(PlannedInstruction::new(
-                    FinalOpcode::PutVar,
-                    Operands::VarRef(slot),
-                    identifier.span,
-                )));
-            }
-        }
-        Ok(())
+    ) {
+        work.push(ExpressionWork::IdentifierValueStore(identifier));
     }
 
     /// Pushes the `value === undefined` default machinery: when the value is
@@ -1086,12 +1066,7 @@ impl<'arena> CompilationContext<'_, 'arena, '_> {
                         })
                         .transpose()?
                         .flatten();
-                    self.plan_assignment_identifier_store(
-                        &identifier.binding,
-                        work,
-                        layout,
-                        tree_layout,
-                    )?;
+                    Self::plan_assignment_identifier_store(&identifier.binding, work);
                     if let Some(init) = &identifier.init {
                         Self::push_object_property_default(
                             init,
@@ -1123,12 +1098,7 @@ impl<'arena> CompilationContext<'_, 'arena, '_> {
                     )?;
                     match target {
                         AssignmentTarget::AssignmentTargetIdentifier(identifier) => {
-                            self.plan_assignment_identifier_store(
-                                identifier,
-                                work,
-                                layout,
-                                tree_layout,
-                            )?;
+                            Self::plan_assignment_identifier_store(identifier, work);
                         }
                         AssignmentTarget::ArrayAssignmentTarget(_)
                         | AssignmentTarget::ObjectAssignmentTarget(_) => {

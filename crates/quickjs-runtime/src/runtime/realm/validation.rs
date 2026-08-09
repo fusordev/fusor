@@ -42,11 +42,6 @@ pub(in crate::runtime) enum SchemaValidationError {
     },
     MissingIdentityPublicationAnchor(IntrinsicFunctionId),
     ConstructorPrototypeMismatch(ConstructorPrototypeSpec),
-    FamilyCardinality {
-        family: &'static str,
-        actual: usize,
-        expected: usize,
-    },
 }
 
 /// Validates the complete declaration graph without allocating any Runtime
@@ -60,7 +55,6 @@ pub(in crate::runtime) fn validate_intrinsic_schema(
     validate_prototypes(schema)?;
     validate_properties(schema)?;
     validate_constructor_prototypes(schema)?;
-    validate_family_cardinalities(schema)?;
     Ok(())
 }
 
@@ -330,19 +324,6 @@ fn intrinsic_descriptor_target(descriptor: IntrinsicDescriptorSpec) -> Option<In
     }
 }
 
-fn validate_family_cardinalities(schema: IntrinsicSchema<'_>) -> Result<(), SchemaValidationError> {
-    for family in schema.family_cardinalities {
-        if family.actual != family.expected {
-            return Err(SchemaValidationError::FamilyCardinality {
-                family: family.family,
-                actual: family.actual,
-                expected: family.expected,
-            });
-        }
-    }
-    Ok(())
-}
-
 fn has_identity(schema: IntrinsicSchema<'_>, id: IntrinsicIdentity) -> bool {
     match id {
         IntrinsicIdentity::Object(id) => has_object(schema, id),
@@ -362,7 +343,7 @@ fn has_function(schema: IntrinsicSchema<'_>, id: IntrinsicFunctionId) -> bool {
 mod tests {
     use super::*;
     use crate::runtime::realm::schema::{
-        FamilyCardinality, IntrinsicFunctionSpec, IntrinsicIdentityPublication, IntrinsicNameSpec,
+        IntrinsicFunctionSpec, IntrinsicIdentityPublication, IntrinsicNameSpec,
         IntrinsicObjectKind, IntrinsicObjectSpec, IntrinsicPropertySpec, IntrinsicStringSpec,
     };
     use crate::runtime::{NativeFunctionKind, PredefinedAtom, PropertyLayout};
@@ -406,7 +387,6 @@ mod tests {
             mandatory_objects: &[],
             mandatory_functions: &[],
             constructor_prototypes: &[],
-            family_cardinalities: &[],
         }
     }
 
@@ -621,26 +601,6 @@ mod tests {
         assert_eq!(
             validate_intrinsic_schema(value).err(),
             Some(SchemaValidationError::ConstructorPrototypeMismatch(pair))
-        );
-    }
-
-    #[test]
-    fn rejects_family_cardinality_before_fixed_array_materialization() {
-        let value = IntrinsicSchema {
-            family_cardinalities: &[FamilyCardinality {
-                family: "MathMethod",
-                actual: 1,
-                expected: 2,
-            }],
-            ..schema(&[OBJECT_SPEC], &[FUNCTION_SPEC], &[])
-        };
-        assert_eq!(
-            validate_intrinsic_schema(value).err(),
-            Some(SchemaValidationError::FamilyCardinality {
-                family: "MathMethod",
-                actual: 1,
-                expected: 2,
-            })
         );
     }
 

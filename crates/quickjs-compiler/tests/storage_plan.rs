@@ -3,8 +3,8 @@ use quickjs_compiler::{
     InitializationPolicy, StoragePlacement, UnsupportedFeature, WritePolicy, build_storage_plan,
 };
 use quickjs_frontend::{
-    Allocator, CompilationGoal, FrontendOptions, GlobalScriptGoal, ParseMode, parse,
-    with_parsed_program,
+    Allocator, CompilationGoal, FrontendOptions, GlobalScriptGoal, IndirectEvalGoal, ParseMode,
+    parse, with_parsed_program,
 };
 
 fn script(source: &str) -> quickjs_compiler::StoragePlan {
@@ -29,6 +29,16 @@ fn module(source: &str) -> quickjs_compiler::StoragePlan {
     )
     .expect("front-end acceptance")
     .expect("storage plan")
+}
+
+fn indirect_eval(source: &str) -> quickjs_compiler::StoragePlan {
+    with_parsed_program(
+        source,
+        FrontendOptions::for_goal(CompilationGoal::IndirectEval(IndirectEvalGoal::new())),
+        build_storage_plan,
+    )
+    .expect("front-end acceptance")
+    .expect("indirect eval storage plan")
 }
 
 #[test]
@@ -164,6 +174,49 @@ fn script_storage_distinguishes_root_globals_from_nested_blocks() {
     assert!(!lookup("object").policy().has_temporal_dead_zone());
     assert_eq!(lookup("fixed").policy().writes(), WritePolicy::Immutable);
     assert!(lookup("fixed").policy().has_temporal_dead_zone());
+}
+
+#[test]
+fn sloppy_indirect_eval_keeps_lexicals_local_and_vars_global() {
+    let plan =
+        indirect_eval("var shared; function declared() {} let local; const fixed = 1; class C {}");
+    let lookup = |name: &str| {
+        plan.bindings()
+            .iter()
+            .find(|binding| binding.name() == name)
+            .expect("binding")
+    };
+
+    assert_eq!(lookup("shared").placement(), StoragePlacement::GlobalObject);
+    assert_eq!(
+        lookup("declared").placement(),
+        StoragePlacement::GlobalObject
+    );
+    for name in ["local", "fixed", "C"] {
+        assert_eq!(lookup(name).placement(), StoragePlacement::Local, "{name}");
+    }
+}
+
+#[test]
+fn strict_indirect_eval_keeps_every_declaration_local() {
+    let plan = indirect_eval(
+        "\"use strict\"; var localVar; function localFunction() {} let localLet; const localConst = 1; class LocalClass {}",
+    );
+
+    for name in [
+        "localVar",
+        "localFunction",
+        "localLet",
+        "localConst",
+        "LocalClass",
+    ] {
+        let binding = plan
+            .bindings()
+            .iter()
+            .find(|binding| binding.name() == name)
+            .expect("binding");
+        assert_eq!(binding.placement(), StoragePlacement::Local, "{name}");
+    }
 }
 
 #[test]
@@ -466,6 +519,65 @@ fn nested_frame_captures_are_forwarded_through_intermediate_executables() {
 }
 
 #[test]
+fn direct_eval_captures_visible_outer_bindings_without_source_references() {
+    let plan = script(
+        "function outer(value) { \
+             return function inner() { return eval('value'); }; \
+         }",
+    );
+    let outer = plan.executables()[1].id();
+    let inner = plan.executables()[2].id();
+    let value = plan
+        .bindings_for(outer)
+        .unwrap()
+        .iter()
+        .find(|binding| binding.name() == "value")
+        .unwrap();
+
+    assert!(value.is_frame_captured());
+    let captures = plan.frame_captures_for(inner).unwrap();
+    assert_eq!(captures.len(), 1);
+    assert_eq!(captures[0].binding(), value.id());
+    assert_eq!(
+        captures[0].source(),
+        CaptureSource::ParentBinding(value.id())
+    );
+}
+
+#[test]
+fn direct_eval_capture_visibility_respects_lexical_shadowing() {
+    let plan = script(
+        "function outer(value) { \
+             { let value = 2; return function inner() { return eval('value'); }; } \
+         }",
+    );
+    let outer = plan.executables()[1].id();
+    let inner = plan.executables()[2].id();
+    let outer_values = plan
+        .bindings_for(outer)
+        .unwrap()
+        .iter()
+        .filter(|binding| binding.name() == "value")
+        .collect::<Vec<_>>();
+    let parameter = outer_values
+        .iter()
+        .copied()
+        .find(|binding| binding.policy().kind() == DeclarationKind::Parameter)
+        .unwrap();
+    let lexical = outer_values
+        .iter()
+        .copied()
+        .find(|binding| binding.policy().kind() == DeclarationKind::Let)
+        .unwrap();
+
+    assert!(!parameter.is_frame_captured());
+    assert!(lexical.is_frame_captured());
+    let captures = plan.frame_captures_for(inner).unwrap();
+    assert_eq!(captures.len(), 1);
+    assert_eq!(captures[0].binding(), lexical.id());
+}
+
+#[test]
 fn sibling_captures_are_deduplicated_per_executable() {
     let plan = script(
         "function outer(value) { \
@@ -713,6 +825,48 @@ fn top_level_arrow_arguments_remains_an_unresolved_global() {
 
     assert_eq!(unresolved.len(), 1);
     assert_eq!(unresolved[0].name(), "arguments");
+}
+
+#[test]
+fn parameter_initializers_resolve_past_body_only_bindings() {
+    let outer_plan = script("let outer=10;const f=(p=()=>outer)=>{let outer=20;};");
+    let parameter_closure = outer_plan.executables()[2].id();
+    let outer = outer_plan
+        .bindings_for(outer_plan.executables()[0].id())
+        .unwrap()
+        .iter()
+        .find(|binding| binding.name() == "outer")
+        .expect("outer lexical binding");
+    assert_eq!(
+        outer_plan
+            .resolved_references_for(parameter_closure)
+            .unwrap()[0]
+            .binding(),
+        outer.id()
+    );
+
+    for (source, name) in [
+        (
+            "const f=(p=eval('var arguments=1'),q=()=>arguments)=>{let arguments=20;};",
+            "arguments",
+        ),
+        (
+            "const f=(p=eval('var value=1'),q=()=>value)=>{var value=20;};",
+            "value",
+        ),
+    ] {
+        let plan = script(source);
+        let parameter_closure = plan.executables()[2].id();
+        assert!(
+            plan.resolved_references_for(parameter_closure)
+                .unwrap()
+                .is_empty(),
+            "{source}"
+        );
+        let unresolved = plan.unresolved_globals_for(parameter_closure).unwrap();
+        assert_eq!(unresolved.len(), 1, "{source}");
+        assert_eq!(unresolved[0].name(), name, "{source}");
+    }
 }
 
 #[test]
@@ -1156,17 +1310,59 @@ fn unsupported(source: &str, mode: ParseMode) -> (UnsupportedFeature, quickjs_fr
 }
 
 #[test]
-fn unsupported_dynamic_binding_cases_fail_closed_at_exact_spans() {
-    let cases = [
-        ("eval('code')", UnsupportedFeature::DirectEval),
-        ("with (object) value;", UnsupportedFeature::WithStatement),
-    ];
+fn with_object_environment_is_a_hidden_scoped_capture() {
+    let plan = script("function outer(object) { with (object) { return () => value; } }");
+    let outer = plan.executables()[1].id();
+    let arrow = plan.executables()[2].id();
+    let binding = plan
+        .bindings_for(outer)
+        .unwrap()
+        .iter()
+        .find(|binding| binding.policy().kind() == DeclarationKind::WithObject)
+        .expect("hidden with-object binding");
 
-    for (source, expected) in cases {
-        let (actual, span) = unsupported(source, ParseMode::Script);
-        assert_eq!(actual, expected, "{source}");
-        assert!(span.end > span.start, "{source}");
-    }
+    assert_eq!(binding.placement(), StoragePlacement::Local);
+    assert_eq!(
+        binding.policy().initialization(),
+        InitializationPolicy::AtDeclaration
+    );
+    assert_eq!(binding.policy().writes(), WritePolicy::Immutable);
+    assert!(binding.policy().has_temporal_dead_zone());
+    assert!(binding.is_frame_captured());
+    let captures = plan.frame_captures_for(arrow).unwrap();
+    assert_eq!(captures.len(), 1);
+    assert_eq!(captures[0].binding(), binding.id());
+    assert_eq!(
+        captures[0].source(),
+        CaptureSource::ParentBinding(binding.id())
+    );
+}
+
+#[test]
+fn direct_eval_inside_with_retains_the_hidden_object_environment() {
+    let plan = script("function invoke(object) { with (object) return eval('value'); }");
+    let invoke = plan.executables()[1].id();
+    let binding = plan
+        .bindings_for(invoke)
+        .expect("invoke bindings")
+        .iter()
+        .find(|binding| binding.policy().kind() == DeclarationKind::WithObject)
+        .expect("hidden with-object binding");
+
+    assert_eq!(binding.placement(), StoragePlacement::Local);
+    assert!(!binding.is_frame_captured());
+    assert!(plan.executables()[1].has_direct_eval());
+}
+
+#[test]
+fn lexical_bindings_inside_with_shadow_the_object_environment() {
+    let plan = script("with (object) { let value = () => 1; value = () => 2; value(); }");
+    let value = plan
+        .bindings()
+        .iter()
+        .find(|binding| binding.name() == "value")
+        .expect("inner lexical binding");
+    assert_eq!(value.policy().kind(), DeclarationKind::Let);
 }
 
 #[test]
@@ -1224,7 +1420,20 @@ fn host_forced_strict_block_function_is_a_single_local_binding() {
 }
 
 #[test]
-fn shadowed_bare_eval_still_fails_closed() {
-    let (feature, _) = unsupported("function f(eval) { eval('code'); }", ParseMode::Script);
-    assert_eq!(feature, UnsupportedFeature::DirectEval);
+fn shadowed_bare_eval_retains_ordinary_resolved_storage() {
+    let plan = script("function f(eval) { eval('code'); }");
+    let function = plan
+        .executables()
+        .iter()
+        .find(|executable| executable.name() == Some("f"))
+        .expect("function executable");
+    assert!(
+        plan.resolved_references_for(function.id())
+            .expect("function references")
+            .iter()
+            .any(|reference| {
+                plan.binding(reference.binding())
+                    .is_some_and(|binding| binding.name() == "eval")
+            })
+    );
 }

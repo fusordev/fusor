@@ -23,11 +23,12 @@ use super::{
 /// Structurally checked successors before ordinary stack dataflow.
 pub(super) struct StructurallyVerifiedControlFlow {
     instructions: Vec<VerifiedInstruction>,
+    function_kind: FunctionKind,
 }
 
 impl StructurallyVerifiedControlFlow {
-    pub(super) fn into_instructions(self) -> Vec<VerifiedInstruction> {
-        self.instructions
+    pub(super) fn into_parts(self) -> (Vec<VerifiedInstruction>, FunctionKind) {
+        (self.instructions, self.function_kind)
     }
 }
 
@@ -117,13 +118,16 @@ pub(super) fn validate_static_semantics(
                         | FinalOpcode::IteratorNext
                         | FinalOpcode::IteratorCall
                         | FinalOpcode::CopyDataProperties
+                        | FinalOpcode::Eval
+                        | FinalOpcode::ApplyEval
                 )
             {
                 // Compiler-owned control flow is still non-executable. The
-                // whole-function typed stack verifier proves the exact
-                // synchronous iterator record before granting authority, and
-                // `copy_data_properties`' packed stack offsets keep their
-                // net-zero effect (three operand slots popped and re-pushed).
+                // whole-function verifier proves the exact synchronous
+                // iterator record and eval scope metadata before granting
+                // authority. `copy_data_properties`' packed stack offsets keep
+                // their net-zero effect (three operand slots popped and
+                // re-pushed).
             } else {
                 return Err(VerificationError::at_instruction(
                     decoded,
@@ -136,6 +140,7 @@ pub(super) fn validate_static_semantics(
 
     Ok(StructurallyVerifiedControlFlow {
         instructions: verified,
+        function_kind,
     })
 }
 

@@ -67,8 +67,9 @@ pub use disassembly::{
     DisassemblyError, DisassemblyLimits, DisassemblySummary, render_disassembly,
 };
 pub use function::{
-    FunctionBitField, FunctionHeaderFlag, FunctionHeaderFlags, FunctionKind,
-    FunctionKindRequirement, FunctionMode, UnverifiedFunctionHeader, VerifiedFunctionHeader,
+    DirectEvalFunctionCapabilities, FunctionBitField, FunctionHeaderFlag, FunctionHeaderFlags,
+    FunctionKind, FunctionKindRequirement, FunctionMode, UnverifiedFunctionHeader,
+    VerifiedFunctionHeader,
 };
 pub use verified_bytecode::{
     BindingPolicyViolationReason, BindingSlot, BytecodeGraphResource, BytecodeGraphUsage,

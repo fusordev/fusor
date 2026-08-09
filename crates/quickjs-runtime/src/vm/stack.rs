@@ -88,11 +88,14 @@ pub(super) fn take_call_inputs(
     expected_function: FunctionId,
     source: CallInputSource,
 ) -> Result<CallInputs, ExecutionError> {
-    let (argument_count, kind) = match source {
+    let (argument_count, kind, preserve_receiver) = match source {
         CallInputSource::Frame {
             argument_count,
             kind,
-        } => (argument_count, kind),
+        } => (argument_count, kind, false),
+        CallInputSource::EvalReferenceFrame { argument_count } => {
+            (argument_count, CallKind::Method, true)
+        }
         CallInputSource::Prepared(inputs) => return Ok(inputs),
     };
     let required = argument_count.saturating_add(match kind {
@@ -165,6 +168,9 @@ pub(super) fn take_call_inputs(
         CallKind::Method => pop(frame)?,
         CallKind::Direct | CallKind::Constructor => StoredValue::Undefined,
     };
+    if preserve_receiver {
+        push(frame, receiver.duplicate());
+    }
     Ok(CallInputs {
         receiver,
         arguments: CallArguments::from_values(arguments),
@@ -644,6 +650,20 @@ pub(super) fn copy_environment(
             additional: values.len(),
         })?;
     copied.extend_from_slice(values);
+    Ok(copied)
+}
+
+pub(super) fn copy_eval_binding_shadows(
+    values: &[Option<EvalBindingShadow>],
+) -> Result<Vec<Option<EvalBindingShadow>>, ExecutionError> {
+    let mut copied = Vec::new();
+    copied
+        .try_reserve_exact(values.len())
+        .map_err(|_| ExecutionError::AllocationFailed {
+            resource: RuntimeResource::FrameValues,
+            additional: values.len(),
+        })?;
+    copied.extend(values.iter().cloned());
     Ok(copied)
 }
 

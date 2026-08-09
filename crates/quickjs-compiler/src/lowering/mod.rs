@@ -21,16 +21,15 @@ use oxc_ast::{
         VariableDeclarator, WhileStatement,
     },
 };
-use oxc_semantic::{NodeId, ReferenceId, SymbolId};
+use oxc_semantic::{NodeId, ReferenceId, ScopeId, SymbolId};
 use oxc_span::GetSpan;
 use oxc_syntax::operator::{
     AssignmentOperator, BinaryOperator, LogicalOperator, UnaryOperator, UpdateOperator,
 };
 use quickjs_bytecode::{
-    AtomPoolIndex, BranchKind, BytecodeGraphVerificationLimits,
-    CompilerBindingKind as VerifiedBindingKind, FinalOpcode, FunctionGraphVerificationLimits,
-    MAX_FUNCTION_INDEX_ENTRIES, Operands, UnverifiedCompilerBytecodeGraph, VerificationLimits,
-    verify_compiler_bytecode_graph,
+    AtomPoolIndex, BranchKind, BytecodeGraphVerificationLimits, CompilerClosureBinding,
+    FinalOpcode, FunctionGraphVerificationLimits, MAX_FUNCTION_INDEX_ENTRIES, Operands,
+    UnverifiedCompilerBytecodeGraph, VerificationLimits, verify_compiler_bytecode_graph,
 };
 #[cfg(test)]
 use quickjs_bytecode::{
@@ -68,7 +67,7 @@ use atoms::{
     record_string_candidate,
 };
 use constants::CompiledConstantPool;
-pub use context::{CompilationContext, CompilationExecutable};
+pub use context::{CompilationContext, CompilationExecutable, SourceTextSubstitution};
 #[cfg(test)]
 use control_flow::exact_source_span;
 use control_flow::{CompilerLabel, PlannedControlFlow, PlannedInstruction};
@@ -76,7 +75,8 @@ use error::unsupported;
 pub use error::{LeafCompilationError, UnsupportedLeafFeature};
 use function::FunctionPlanningContext;
 use function_graph::{
-    constructor_realm_lookup_policy, verified_storage_policy, verify_compiled_function_graph,
+    binding_has_scope, constructor_realm_lookup_policy, verified_storage_policy,
+    verify_compiled_function_graph,
 };
 use layouts::{
     ArgumentSlot, FrameLayout, FrameLayoutInput, FrameSlot, FunctionTreeLayout,
@@ -92,7 +92,7 @@ use plan::{
     StatementPlanningState, StatementWork, anonymous_class_expression_span,
     anonymous_named_evaluation_span, anonymous_ordinary_function_span, binary_opcode,
     compact_get_argument, compact_get_local, compact_put_local, exact_i32, exact_negated_i32,
-    plan_push_integer, plan_put_slot,
+    plan_external_put, plan_external_read, plan_push_integer, plan_put_slot,
 };
 use validation::OrdinaryFunctionForm;
 
@@ -192,9 +192,18 @@ impl<'arena> CompilationContext<'_, 'arena, '_> {
     }
 
     fn function_tree_layout(&self) -> Result<FunctionTreeLayout, LeafCompilationError> {
+        let direct_eval = match self.unit.goal() {
+            CompilationGoal::DirectEval(context) => Some(context),
+            CompilationGoal::GlobalScript(_)
+            | CompilationGoal::Module
+            | CompilationGoal::IndirectEval(_)
+            | CompilationGoal::DynamicFunction(_) => None,
+        };
         let seed = FunctionTreeLayoutSeed::new(FunctionTreeLayoutSeedInput {
             plan: &self.planned.plan,
-            allow_realm_globals: crate::is_supported_script_root_goal(self.unit.goal()),
+            allow_realm_globals: crate::is_supported_script_root_goal(self.unit.goal())
+                || direct_eval.is_some(),
+            direct_eval,
         })?;
         let mut function_declarations =
             vec![None; self.planned.plan.bindings().len()].into_boxed_slice();

@@ -42,8 +42,8 @@ use super::{
     ErrorIntrinsicKind, ErrorIntrinsics, FinalizationRegistryIntrinsics, FunctionId,
     FunctionImplementation, GeneratorIntrinsics, GlobalNumericFunction, HandleError, HandleKind,
     HashMap, HeapFunction, HeapObject, HeapReference, InterruptState, IntlIntrinsics,
-    IteratorIntrinsics, JsNumber, JsString, LocaleStringMethod, MapIntrinsics, MapMethod,
-    MathMethod, NativeFunction, NativeFunctionKind, NumberFormat, NumberIntrinsics,
+    IteratorConsumer, IteratorIntrinsics, JsNumber, JsString, LocaleStringMethod, MapIntrinsics,
+    MapMethod, MathMethod, NativeFunction, NativeFunctionKind, NumberFormat, NumberIntrinsics,
     NumberPredicate, ObjectId, ObjectRecord, PredefinedAtom, PromiseIntrinsics,
     PromiseRejectionState, PromiseStatic, PropertyKey, PropertyLayout, Rc, Realm, RealmHandle,
     RealmId, RealmIntrinsics, RealmState, RefCell, ReflectMethod, RegExpIntrinsics, ReleaseMailbox,
@@ -74,8 +74,9 @@ const BIGINT_INTERNED_STATICS: [&str; 2] = ["asIntN", "asUintN"];
 /// `QuickJS` own-key order.
 ///
 /// Each `length` matches the pinned oracle, which reports `1` for most methods
-/// and `2` for `replace`, `replaceAll`, `split`, `slice`, and `substring`.
-const STRING_PROTOTYPE_METHODS: [StringPrototypeMethod; 32] = [
+/// and `2` for `replace`, `replaceAll`, `split`, `slice`, `substr`, and
+/// `substring`.
+const STRING_PROTOTYPE_METHODS: [StringPrototypeMethod; 33] = [
     StringPrototypeMethod::interned("at", StringMethod::At, 1),
     StringPrototypeMethod::interned("charCodeAt", StringMethod::CharCodeAt, 1),
     StringPrototypeMethod::interned("charAt", StringMethod::CharAt, 1),
@@ -93,6 +94,7 @@ const STRING_PROTOTYPE_METHODS: [StringPrototypeMethod; 32] = [
     StringPrototypeMethod::interned("search", StringMethod::Search, 1),
     StringPrototypeMethod::interned("split", StringMethod::Split, 2),
     StringPrototypeMethod::interned("substring", StringMethod::Substring, 2),
+    StringPrototypeMethod::interned("substr", StringMethod::Substr, 2),
     StringPrototypeMethod::interned("slice", StringMethod::Slice, 2),
     StringPrototypeMethod::interned("repeat", StringMethod::Repeat, 1),
     StringPrototypeMethod::interned("replace", StringMethod::Replace, 2),
@@ -446,7 +448,7 @@ impl ObjectStaticMethod {
     }
 }
 
-const DYNAMIC_SYMBOL_STATIC_PROPERTIES: [(&str, PredefinedAtom); 12] = [
+const DYNAMIC_SYMBOL_STATIC_PROPERTIES: [(&str, PredefinedAtom); 13] = [
     ("toPrimitive", PredefinedAtom::SymbolToPrimitive),
     ("iterator", PredefinedAtom::SymbolIterator),
     ("match", PredefinedAtom::SymbolMatch),
@@ -462,6 +464,7 @@ const DYNAMIC_SYMBOL_STATIC_PROPERTIES: [(&str, PredefinedAtom); 12] = [
     ("species", PredefinedAtom::SymbolSpecies),
     ("unscopables", PredefinedAtom::SymbolUnscopables),
     ("asyncIterator", PredefinedAtom::SymbolAsyncIterator),
+    ("dispose", PredefinedAtom::SymbolDispose),
 ];
 
 const METHOD_PROPERTY: PropertyLayout = PropertyLayout::data(true, false, true);

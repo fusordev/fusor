@@ -130,6 +130,18 @@ pub(super) fn global_not_defined_exception(
     })
 }
 
+pub(super) fn binding_not_defined_exception(
+    runtime: &Runtime,
+    frame: &Frame,
+    binding: BindingName,
+    pc: BytecodePc,
+) -> Result<PendingException, ExecutionError> {
+    let name = binding_name(runtime, frame, binding)?.ok_or(EngineFault::RuntimeInvariant {
+        message: "missing dynamic binding has no source name",
+    })?;
+    global_not_defined_exception(runtime, frame, &name, pc)
+}
+
 pub(super) fn not_callable_exception(
     runtime: &Runtime,
     frame: &Frame,
@@ -174,6 +186,24 @@ pub(super) fn derived_this_uninitialized_exception(
             kind: ExceptionKind::ReferenceError,
             message: JsString::from_utf8(
                 "Must call super constructor in derived class before accessing 'this' or returning from derived constructor",
+            )?,
+        },
+        origin: instruction_location(runtime, frame, pc)?,
+    })
+}
+
+pub(super) fn derived_this_already_initialized_exception(
+    runtime: &Runtime,
+    frame: &Frame,
+    pc: BytecodePc,
+) -> Result<PendingException, ExecutionError> {
+    let realm = code(runtime, frame.code)?.realm;
+    Ok(PendingException {
+        realm,
+        payload: PendingExceptionPayload::EngineError {
+            kind: ExceptionKind::ReferenceError,
+            message: JsString::from_utf8(
+                "Super constructor may only be called once in a derived constructor",
             )?,
         },
         origin: instruction_location(runtime, frame, pc)?,
@@ -336,7 +366,7 @@ fn required_property_name(name: Option<&JsString>) -> Result<&JsString, EngineFa
     })
 }
 
-fn named_property_message(
+pub(super) fn named_property_message(
     prefix: &str,
     name: &JsString,
     suffix: &str,
@@ -410,6 +440,7 @@ fn exception_caller_frames(
                 | FinalOpcode::Call3
                 | FinalOpcode::CallMethod
                 | FinalOpcode::CallConstructor
+                | FinalOpcode::Eval
                 | FinalOpcode::GetField
                 | FinalOpcode::GetField2
                 | FinalOpcode::PutField
@@ -626,6 +657,7 @@ pub(super) fn dispatch_pending_exception(
             };
             if let Some(parent) = frames.last_mut() {
                 push_call_result(
+                    runtime,
                     parent,
                     result,
                     return_to.ok_or(EngineFault::RuntimeInvariant {
@@ -816,6 +848,7 @@ pub(super) fn dispatch_pending_exception(
                 Ok(NativeDispatch::Immediate(value)) => {
                     if let Some(parent) = frames.last_mut() {
                         push_call_result(
+                            runtime,
                             parent,
                             value,
                             return_to.ok_or(EngineFault::RuntimeInvariant {

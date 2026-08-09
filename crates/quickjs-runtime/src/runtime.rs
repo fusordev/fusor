@@ -39,9 +39,9 @@ use quickjs_bytecode::{
 use crate::promise_rejection::PromiseRejectionState;
 use crate::{
     ArrayIndex, Atom, AtomError, AtomLimits, AtomTable, AtomUsage, DynamicFunctionScriptError,
-    ErrorObjectKind, ExceptionKind, ExecutionLimits, Function, GlobalScriptError, HandleError,
-    HandleKind, InstallError, JsBigInt, JsNumber, JsString, JsValue,
-    OrdinaryDynamicFunctionCompiler, PredefinedAtom, PropertyKey, PropertyLayout,
+    ErrorObjectKind, ExceptionKind, ExecutionLimits, Function, GlobalDeclarationRejectionKind,
+    GlobalScriptError, HandleError, HandleKind, InstallError, JsBigInt, JsNumber, JsString,
+    JsValue, OrdinaryDynamicFunctionCompiler, PredefinedAtom, PropertyKey, PropertyLayout,
     PropertyLayoutKind, RuntimeError, RuntimeResource,
     arena::{Arena, RuntimeIdentity},
     ids::{BindingCellId, FunctionId, InstalledCodeId, ObjectId, RealmGlobalBindingId, RealmId},
@@ -578,11 +578,30 @@ pub(crate) struct BytecodeFunction {
     pub(crate) code: InstalledCodeId,
     pub(crate) template: FunctionTemplateId,
     pub(crate) environment: Vec<EnvironmentBinding>,
+    pub(crate) environment_eval_shadows: Vec<Option<EvalBindingShadow>>,
+    /// Nearest per-activation function variable environment that may receive
+    /// bindings from sloppy direct eval.
+    pub(crate) eval_environment: Option<SharedEvalVariableEnvironment>,
     pub(crate) lexical_receiver: Option<StoredValue>,
+    /// Whether an arrow's lexical `this` chain reaches a Function Environment
+    /// Record. Direct eval uses this independently of the current `new.target`
+    /// value when applying `PerformEval`'s contextual early errors.
+    pub(crate) lexical_eval_in_function: bool,
     pub(crate) lexical_new_target: Option<FunctionId>,
+    /// The derived constructor whose mutable `this` environment is retained
+    /// by this arrow, paired with `lexical_derived_this`.
+    pub(crate) lexical_derived_constructor: Option<FunctionId>,
+    /// Shared lexical derived-`this` binding. It remains uninitialized until
+    /// the first successful `super()` result is bound.
+    pub(crate) lexical_derived_this: Option<BindingCellId>,
+    /// Whether `InitializeInstanceElements` has work for this class
+    /// constructor. Contextual eval `super()` fails closed while that body is
+    /// not yet reusable from a separate eval frame.
+    pub(crate) has_instance_elements: bool,
     /// The ECMAScript `[[HomeObject]]` installed when this closure becomes a
-    /// class method, class constructor, or object-literal method.  It is an
-    /// internal GC edge, not a JavaScript-visible property.
+    /// class method, class constructor, or object-literal method, or inherited
+    /// lexically by an arrow created within one. It is an internal GC edge,
+    /// not a JavaScript-visible property.
     pub(crate) home_object: Option<HeapReference>,
 }
 
@@ -778,6 +797,37 @@ pub(crate) enum ArrayFlatten {
     FlatMap,
 }
 
+/// Which immediate `Iterator.prototype` callback consumer is executing.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum IteratorConsumer {
+    Every,
+    Find,
+    ForEach,
+    Reduce,
+    Some,
+}
+
+impl IteratorConsumer {
+    pub(crate) const ALL: [Self; 5] = [
+        Self::Every,
+        Self::Find,
+        Self::ForEach,
+        Self::Reduce,
+        Self::Some,
+    ];
+
+    /// Returns the property name this consumer is installed under.
+    pub(crate) const fn name(self) -> &'static str {
+        match self {
+            Self::Every => "every",
+            Self::Find => "find",
+            Self::ForEach => "forEach",
+            Self::Reduce => "reduce",
+            Self::Some => "some",
+        }
+    }
+}
+
 /// Which no-`Intl` locale-string built-in is being invoked.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum LocaleStringMethod {
@@ -939,6 +989,7 @@ pub(crate) enum StringMethod {
     Split,
     Slice,
     StartsWith,
+    Substr,
     Substring,
     Trim,
     TrimEnd,
@@ -996,7 +1047,7 @@ impl StringMethod {
                 &[StringArgument::Integer, StringArgument::OptionalString]
             }
             Self::Repeat => &[StringArgument::Integer],
-            Self::Slice | Self::Substring => {
+            Self::Slice | Self::Substr | Self::Substring => {
                 &[StringArgument::Integer, StringArgument::OptionalInteger]
             }
             Self::LocaleCompare => &[
@@ -1357,6 +1408,7 @@ pub(crate) enum NativeFunctionKind {
     TypedArrayStatic(ArrayStatic),
     TypedArraySpeciesGetter,
     TypedArrayPrototype(TypedArrayPrototypeMethod),
+    Uint8Array(Uint8ArrayMethod),
     DateConstructor,
     DateStatic(DateStaticMethod),
     DatePrototype(DatePrototypeMethod),
@@ -1413,6 +1465,8 @@ pub(crate) enum NativeFunctionKind {
     NumberPredicateStatic(NumberPredicate),
     /// One coercing numeric function on the realm's global object.
     GlobalNumeric(GlobalNumericFunction),
+    /// The Realm's `%eval%` intrinsic.
+    Eval,
     /// One global URI encoder or decoder.
     GlobalUri(UriFunction),
     /// `Array.isArray`.
@@ -1457,9 +1511,15 @@ pub(crate) enum NativeFunctionKind {
     SymbolFor,
     SymbolKeyFor,
     IteratorConstructor,
+    IteratorConcat,
+    IteratorZip,
+    IteratorZipKeyed,
     IteratorFrom,
+    IteratorPrototypeDispose,
     IteratorPrototypeDrop,
+    IteratorPrototypeConsumer(IteratorConsumer),
     IteratorPrototypeFilter,
+    IteratorPrototypeFlatMap,
     IteratorPrototypeMap,
     IteratorPrototypeTake,
     IteratorPrototypeToArray,
@@ -1543,6 +1603,51 @@ pub(crate) enum AtomicsMethod {
     WaitAsync,
     Xor,
     Pause,
+}
+
+/// Additional methods installed only on `%Uint8Array%` and
+/// `%Uint8Array.prototype%`.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum Uint8ArrayMethod {
+    FromBase64,
+    FromHex,
+    SetFromBase64,
+    SetFromHex,
+    ToBase64,
+    ToHex,
+}
+
+impl Uint8ArrayMethod {
+    pub(crate) const ALL: [Self; 6] = [
+        Self::FromBase64,
+        Self::FromHex,
+        Self::SetFromBase64,
+        Self::SetFromHex,
+        Self::ToBase64,
+        Self::ToHex,
+    ];
+
+    pub(crate) const fn name(self) -> &'static str {
+        match self {
+            Self::FromBase64 => "fromBase64",
+            Self::FromHex => "fromHex",
+            Self::SetFromBase64 => "setFromBase64",
+            Self::SetFromHex => "setFromHex",
+            Self::ToBase64 => "toBase64",
+            Self::ToHex => "toHex",
+        }
+    }
+
+    pub(crate) const fn length(self) -> i32 {
+        match self {
+            Self::FromBase64 | Self::FromHex | Self::SetFromBase64 | Self::SetFromHex => 1,
+            Self::ToBase64 | Self::ToHex => 0,
+        }
+    }
+
+    pub(crate) const fn is_static(self) -> bool {
+        matches!(self, Self::FromBase64 | Self::FromHex)
+    }
 }
 
 impl AtomicsMethod {
@@ -1681,6 +1786,7 @@ pub(crate) enum DatePrototypeMethod {
     ToLocaleTimeString,
     GetTimezoneOffset,
     GetTime,
+    GetYear,
     GetFullYear,
     GetUtcFullYear,
     GetMonth,
@@ -1710,6 +1816,7 @@ pub(crate) enum DatePrototypeMethod {
     SetUtcDate,
     SetMonth,
     SetUtcMonth,
+    SetYear,
     SetFullYear,
     SetUtcFullYear,
     ToTemporalInstant,
@@ -2090,7 +2197,7 @@ impl IntlLocalePrototypeMethod {
 }
 
 impl DatePrototypeMethod {
-    pub(crate) const ALL: [Self; 45] = [
+    pub(crate) const ALL: [Self; 47] = [
         Self::ValueOf,
         Self::ToString,
         Self::ToUtcString,
@@ -2102,6 +2209,7 @@ impl DatePrototypeMethod {
         Self::ToLocaleTimeString,
         Self::GetTimezoneOffset,
         Self::GetTime,
+        Self::GetYear,
         Self::GetFullYear,
         Self::GetUtcFullYear,
         Self::GetMonth,
@@ -2131,6 +2239,7 @@ impl DatePrototypeMethod {
         Self::SetUtcDate,
         Self::SetMonth,
         Self::SetUtcMonth,
+        Self::SetYear,
         Self::SetFullYear,
         Self::SetUtcFullYear,
         Self::ToTemporalInstant,
@@ -2151,6 +2260,7 @@ impl DatePrototypeMethod {
             Self::ToLocaleTimeString => "toLocaleTimeString",
             Self::GetTimezoneOffset => "getTimezoneOffset",
             Self::GetTime => "getTime",
+            Self::GetYear => "getYear",
             Self::GetFullYear => "getFullYear",
             Self::GetUtcFullYear => "getUTCFullYear",
             Self::GetMonth => "getMonth",
@@ -2180,6 +2290,7 @@ impl DatePrototypeMethod {
             Self::SetUtcDate => "setUTCDate",
             Self::SetMonth => "setMonth",
             Self::SetUtcMonth => "setUTCMonth",
+            Self::SetYear => "setYear",
             Self::SetFullYear => "setFullYear",
             Self::SetUtcFullYear => "setUTCFullYear",
             Self::ToTemporalInstant => "toTemporalInstant",
@@ -2198,6 +2309,7 @@ impl DatePrototypeMethod {
             | Self::SetUtcMilliseconds
             | Self::SetDate
             | Self::SetUtcDate
+            | Self::SetYear
             | Self::ToJson
             | Self::SymbolToPrimitive => 1,
             Self::ValueOf
@@ -2211,6 +2323,7 @@ impl DatePrototypeMethod {
             | Self::ToLocaleTimeString
             | Self::GetTimezoneOffset
             | Self::GetTime
+            | Self::GetYear
             | Self::GetFullYear
             | Self::GetUtcFullYear
             | Self::GetMonth
@@ -5001,6 +5114,62 @@ pub(crate) struct BindingCell {
     pub(crate) value: SlotValue,
 }
 
+#[derive(Clone)]
+pub(crate) struct EvalVariableBinding {
+    pub(crate) name: JsString,
+    pub(crate) cell: BindingCellId,
+    pub(crate) deleted: bool,
+}
+
+#[derive(Clone)]
+pub(crate) struct EvalBindingShadow {
+    pub(crate) head: SharedEvalVariableEnvironment,
+    pub(crate) boundary: Option<SharedEvalVariableEnvironment>,
+}
+
+pub(crate) type SharedEvalVariableEnvironment = Rc<RefCell<EvalVariableEnvironment>>;
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum EvalVariableEnvironmentKind {
+    Function,
+    ParameterInitializer,
+    ParameterBoundary,
+    FunctionBody,
+}
+
+pub(crate) struct EvalVariableEnvironment {
+    pub(crate) kind: EvalVariableEnvironmentKind,
+    pub(crate) parent: Option<SharedEvalVariableEnvironment>,
+    pub(crate) bindings: Vec<EvalVariableBinding>,
+}
+
+impl EvalVariableEnvironment {
+    pub(crate) fn shared(
+        parent: Option<SharedEvalVariableEnvironment>,
+        kind: EvalVariableEnvironmentKind,
+    ) -> SharedEvalVariableEnvironment {
+        Rc::new(RefCell::new(Self {
+            kind,
+            parent,
+            bindings: Vec::new(),
+        }))
+    }
+
+    pub(crate) fn trace_cells(
+        environment: &SharedEvalVariableEnvironment,
+        mut mark: impl FnMut(BindingCellId),
+    ) {
+        let mut current = Some(Rc::clone(environment));
+        while let Some(environment) = current {
+            let record = environment.borrow();
+            for binding in &record.bindings {
+                mark(binding.cell);
+            }
+            current = record.parent.as_ref().map(Rc::clone);
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum EnvironmentBinding {
     Captured(BindingCellId),
@@ -5119,7 +5288,9 @@ const fn global_declaration_property_layout(
         true,
         matches!(
             executable_kind,
-            CompilerExecutableKind::DynamicFunctionScript
+            CompilerExecutableKind::IndirectEvalScript
+                | CompilerExecutableKind::DirectEvalScript
+                | CompilerExecutableKind::DynamicFunctionScript
         ),
     )
 }
@@ -5141,6 +5312,7 @@ fn rejected_global_declaration(
     authority: &VerifiedBytecode,
     closure: u32,
     name: &Atom,
+    kind: GlobalDeclarationRejectionKind,
 ) -> Result<InstallError, InstallError> {
     let root = authority.root();
     let constant = root
@@ -5197,6 +5369,7 @@ fn rejected_global_declaration(
         })?;
     Ok(InstallError::GlobalDeclarationRejected {
         name,
+        kind,
         function: authority.root_id(),
         pc: site.1,
         source_span,
@@ -5412,7 +5585,7 @@ struct RootEnvironment {
     updated_global_properties: Vec<(PropertyKey, OwnProperty)>,
 }
 
-fn runtime_string(
+pub(crate) fn runtime_string(
     value: &quickjs_bytecode::CompilerString,
 ) -> Result<JsString, crate::JsStringError> {
     if let Some(units) = value.latin1_units() {
@@ -5449,6 +5622,12 @@ fn require_root_kind(
     let message = match expected {
         CompilerExecutableKind::GlobalScript => {
             "non-Script executable cannot execute as a host-loaded Global Script"
+        }
+        CompilerExecutableKind::IndirectEvalScript => {
+            "non-eval executable cannot execute as an indirect-eval Script"
+        }
+        CompilerExecutableKind::DirectEvalScript => {
+            "non-eval executable cannot execute as a direct-eval Script"
         }
         CompilerExecutableKind::OrdinaryFunction => {
             "non-instantiable executable cannot be instantiated as a source function"
@@ -5555,6 +5734,7 @@ const fn is_supported_opcode(opcode: FinalOpcode) -> bool {
             | FinalOpcode::CallMethod
             | FinalOpcode::CallConstructor
             | FinalOpcode::Apply
+            | FinalOpcode::Eval
             | FinalOpcode::CheckCtorReturn
             | FinalOpcode::CheckCtor
             | FinalOpcode::InitCtor
@@ -5617,6 +5797,11 @@ const fn is_supported_opcode(opcode: FinalOpcode) -> bool {
             | FinalOpcode::SetProto
             | FinalOpcode::ToObject
             | FinalOpcode::ToPropKey
+            | FinalOpcode::WithGetVar
+            | FinalOpcode::WithDeleteVar
+            | FinalOpcode::WithMakeRef
+            | FinalOpcode::WithGetRef
+            | FinalOpcode::PutRefValue
             | FinalOpcode::CopyDataProperties
             | FinalOpcode::DefineField
             | FinalOpcode::DefinePrivateField

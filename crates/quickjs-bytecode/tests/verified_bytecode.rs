@@ -7,7 +7,7 @@ use quickjs_bytecode::{
     CompilerBindingPolicy, CompilerCaptureLayout, CompilerCapturedBinding, CompilerClosureBinding,
     CompilerClosureSource, CompilerConstantKind, CompilerConstantLayout, CompilerExecutableKind,
     CompilerInitializationPolicy, CompilerSource, CompilerString, CompilerWritePolicy,
-    EXECUTION_REQUIREMENT_COUNT, ExecutionRequirement, FinalOpcode,
+    DirectEvalFunctionCapabilities, EXECUTION_REQUIREMENT_COUNT, ExecutionRequirement, FinalOpcode,
     FunctionGraphVerificationLimits, FunctionIndexDomains, FunctionTemplateId,
     MAX_GOSUB_SITES_PER_FUNCTION, MetadataAtomField, Operands, PcSourceSpan, ScopeLink,
     SourceByteSpan, UnverifiedCompilerBytecodeGraph, UnverifiedCompilerFunction,
@@ -786,6 +786,38 @@ fn final_authority_rejects_append_provenance_at_a_terminal() {
         error.kind(),
         &VerificationErrorKind::NonEmptyCompilerExitStack { remaining: 2 }
     );
+}
+
+#[test]
+fn final_authority_allows_generator_return_to_abandon_append_provenance() {
+    let instructions = [
+        (FinalOpcode::InitialYield, Operands::None),
+        (FinalOpcode::ArrayFrom, Operands::NPop { argument_count: 0 }),
+        (FinalOpcode::Push0, Operands::NoneInt),
+        (FinalOpcode::Undefined, Operands::None),
+        (FinalOpcode::ReturnAsync, Operands::None),
+    ];
+    let text = "function* f(){}";
+    let span = SourceByteSpan::new(0, u32::try_from(text.len()).expect("source length"));
+    let input = profiled_single_input(
+        &instructions,
+        UnverifiedFunctionHeader::generator_source_function_with_variable_references(false, 0, 0),
+        CompilerExecutableKind::GeneratorFunction,
+        &[atom("f")],
+        Some(AtomPoolIndex::new(0)),
+        &[],
+        0,
+        0,
+        &[],
+        source(
+            text,
+            span,
+            Some(SourceByteSpan::new(10, 11)),
+            &[(0, span), (1, span), (4, span), (5, span), (6, span)],
+        ),
+    );
+    verify_compiler_bytecode_graph(input, BytecodeGraphVerificationLimits::default())
+        .expect("generator return discards the suspended array-append state");
 }
 
 #[test]
@@ -3056,8 +3088,26 @@ fn typed_stack_input_with_captures(
     variables: &[VariableDefinition],
     captures: &[CompilerCapturedBinding],
 ) -> UnverifiedCompilerBytecodeGraph {
+    let has_direct_eval = instructions
+        .iter()
+        .any(|(opcode, _)| matches!(opcode, FinalOpcode::Eval | FinalOpcode::ApplyEval));
+    let parameter_initialization_end = instructions
+        .iter()
+        .enumerate()
+        .filter_map(|(index, (opcode, operands))| match (opcode, operands) {
+            (FinalOpcode::Eval, Operands::NPopU16 { scope_index: 0, .. })
+            | (FinalOpcode::ApplyEval, Operands::U16(0)) => u32::try_from(index + 1).ok(),
+            _ => None,
+        })
+        .max();
     let locals = u32::try_from(variables.len()).expect("fixture local count");
-    let flow = flow(
+    let header = UnverifiedFunctionHeader::ordinary_source_function_with_variable_references(
+        false,
+        0,
+        u32::try_from(captures.len()).expect("fixture capture count"),
+    )
+    .with_simple_parameter_list(parameter_initialization_end.is_none());
+    let flow = flow_with_header(
         instructions,
         u32::try_from(atoms.len()).expect("fixture atom count"),
         0,
@@ -3065,6 +3115,7 @@ fn typed_stack_input_with_captures(
         captures,
         0,
         &[],
+        header,
     );
     let text: Arc<str> = Arc::from("typed stack fixture");
     let span = SourceByteSpan::new(0, u32::try_from(text.len()).expect("fixture source length"));
@@ -3085,7 +3136,9 @@ fn typed_stack_input_with_captures(
             FunctionTemplateId::new(0),
             Arc::from([
                 UnverifiedCompilerFunction::new(flow, Arc::from([]), Arc::from([]))
-                    .with_atom_pool(Arc::from(atoms)),
+                    .with_atom_pool(Arc::from(atoms))
+                    .with_parameter_initialization_end(parameter_initialization_end)
+                    .with_direct_eval(has_direct_eval),
             ]),
         ),
         FunctionGraphVerificationLimits::default(),
@@ -3100,6 +3153,116 @@ fn typed_stack_input_with_captures(
             source,
         )]),
     )
+}
+
+#[test]
+fn compiler_eval_scope_operand_is_tied_to_verified_lexical_metadata() {
+    let definition = VariableDefinition::new(
+        Some(AtomPoolIndex::new(0)),
+        ScopeLink::End,
+        let_policy(),
+        true,
+        None,
+    );
+    let eval = |scope_index| {
+        typed_stack_input(
+            &[
+                (FinalOpcode::SetLocUninitialized, Operands::Loc(0)),
+                (FinalOpcode::Push1, Operands::NoneInt),
+                (FinalOpcode::PutLoc0, Operands::NoneLoc),
+                (FinalOpcode::Push7, Operands::NoneInt),
+                (
+                    FinalOpcode::Eval,
+                    Operands::NPopU16 {
+                        argument_count: 0,
+                        scope_index,
+                    },
+                ),
+                (FinalOpcode::Return, Operands::None),
+            ],
+            &[atom("lexical")],
+            std::slice::from_ref(&definition),
+        )
+    };
+
+    verify_compiler_bytecode_graph(eval(2), BytecodeGraphVerificationLimits::default())
+        .expect("adjusted scope index two selects lexical local zero");
+
+    let error = verify_compiler_bytecode_graph(eval(3), BytecodeGraphVerificationLimits::default())
+        .expect_err("an eval scope head cannot exceed the local metadata domain");
+    assert!(matches!(
+        error.kind(),
+        BytecodeVerificationErrorKind::EvalScopeIndexOutOfBounds {
+            scope_index: 3,
+            locals: 1,
+            ..
+        }
+    ));
+
+    let function_scoped = typed_stack_input(
+        &[
+            (FinalOpcode::Push7, Operands::NoneInt),
+            (
+                FinalOpcode::Eval,
+                Operands::NPopU16 {
+                    argument_count: 0,
+                    scope_index: 2,
+                },
+            ),
+            (FinalOpcode::Return, Operands::None),
+        ],
+        &[atom("local")],
+        &[VariableDefinition::new(
+            Some(AtomPoolIndex::new(0)),
+            ScopeLink::End,
+            var_policy(),
+            false,
+            None,
+        )],
+    );
+    let error =
+        verify_compiler_bytecode_graph(function_scoped, BytecodeGraphVerificationLimits::default())
+            .expect_err("the lexical scope chain cannot start at a function-scoped local");
+    assert!(matches!(
+        error.kind(),
+        BytecodeVerificationErrorKind::EvalScopeHeadNotLexical { local: 0, .. }
+    ));
+}
+
+#[test]
+fn compiler_eval_scope_accepts_both_adjusted_sentinels_and_apply_eval() {
+    for scope_index in [0, 1] {
+        let eval = typed_stack_input(
+            &[
+                (FinalOpcode::Push7, Operands::NoneInt),
+                (
+                    FinalOpcode::Eval,
+                    Operands::NPopU16 {
+                        argument_count: 0,
+                        scope_index,
+                    },
+                ),
+                (FinalOpcode::Return, Operands::None),
+            ],
+            &[],
+            &[],
+        );
+        verify_compiler_bytecode_graph(eval, BytecodeGraphVerificationLimits::default())
+            .expect("adjusted eval-scope sentinel");
+
+        let apply_eval = typed_stack_input(
+            &[
+                (FinalOpcode::Push7, Operands::NoneInt),
+                (FinalOpcode::Undefined, Operands::None),
+                (FinalOpcode::ApplyEval, Operands::U16(scope_index)),
+                (FinalOpcode::Return, Operands::None),
+            ],
+            &[],
+            &[],
+        );
+        verify_compiler_bytecode_graph(apply_eval, BytecodeGraphVerificationLimits::default())
+            .expect("apply_eval uses the same adjusted eval-scope sentinel");
+    }
 }
 
 #[test]
@@ -5331,6 +5494,8 @@ fn define_method_input_with_root_arguments(
                 panic!("a define_method child cannot be an arrow")
             }
             CompilerExecutableKind::GlobalScript
+            | CompilerExecutableKind::IndirectEvalScript
+            | CompilerExecutableKind::DirectEvalScript
             | CompilerExecutableKind::DynamicFunctionScript => {
                 panic!("a define_method child cannot be a Script")
             }
@@ -5774,6 +5939,86 @@ fn ordinary_arrow_profile_is_lexical_and_nonconstructable() {
 }
 
 #[test]
+fn ordinary_arrow_home_object_requires_a_verified_method_ancestor() {
+    let text = "()=>super.value";
+    let function_span = SourceByteSpan::new(0, u32::try_from(text.len()).expect("source length"));
+    let input = profiled_single_input(
+        &[
+            (FinalOpcode::SpecialObject, Operands::U8(5)),
+            (FinalOpcode::Drop, Operands::None),
+            (FinalOpcode::ReturnUndef, Operands::None),
+        ],
+        UnverifiedFunctionHeader::ordinary_arrow_with_variable_references(true, 0, 0),
+        CompilerExecutableKind::OrdinaryArrow,
+        &[],
+        None,
+        &[],
+        0,
+        0,
+        &[],
+        source(
+            text,
+            function_span,
+            None,
+            &[(0, function_span), (2, function_span), (3, function_span)],
+        ),
+    );
+    let error = verify_compiler_bytecode_graph(input, BytecodeGraphVerificationLimits::default())
+        .expect_err("an arrow without a method ancestor has no lexical home object");
+    assert!(matches!(
+        error.kind(),
+        BytecodeVerificationErrorKind::UnsupportedCompilerOpcode {
+            pc,
+            opcode: FinalOpcode::SpecialObject,
+        } if *pc == BytecodePc::ZERO
+    ));
+}
+
+#[test]
+fn ordinary_arrow_super_call_requires_a_verified_derived_constructor_ancestor() {
+    let text = "()=>super()";
+    let function_span = SourceByteSpan::new(0, u32::try_from(text.len()).expect("source length"));
+    let instructions = [
+        (FinalOpcode::SpecialObject, Operands::U8(4)),
+        (FinalOpcode::GetSuper, Operands::None),
+        (FinalOpcode::SpecialObject, Operands::U8(3)),
+        (
+            FinalOpcode::CallConstructor,
+            Operands::NPop { argument_count: 0 },
+        ),
+        (FinalOpcode::CheckCtorReturn, Operands::None),
+        (FinalOpcode::Drop, Operands::None),
+        (FinalOpcode::Drop, Operands::None),
+        (FinalOpcode::ReturnUndef, Operands::None),
+    ];
+    let mappings = [0, 2, 3, 5, 8, 9, 10, 11].map(|pc| (pc, function_span));
+    let input = profiled_single_input(
+        &instructions,
+        UnverifiedFunctionHeader::ordinary_arrow_with_variable_references(true, 0, 0),
+        CompilerExecutableKind::OrdinaryArrow,
+        &[],
+        None,
+        &[],
+        0,
+        0,
+        &[],
+        source(text, function_span, None, &mappings),
+    );
+    let error = verify_compiler_bytecode_graph(input, BytecodeGraphVerificationLimits::default())
+        .expect_err("an arrow without a derived constructor ancestor has no super-call binding");
+    assert!(
+        matches!(
+            error.kind(),
+            BytecodeVerificationErrorKind::UnsupportedCompilerOpcode {
+                pc,
+                opcode: FinalOpcode::SpecialObject,
+            } if *pc == BytecodePc::ZERO
+        ),
+        "unexpected error: {error:?}"
+    );
+}
+
+#[test]
 fn dynamic_function_script_profile_rejects_names_and_every_argument_domain() {
     let named_text = "script";
     let named_span = SourceByteSpan::new(0, 6);
@@ -6110,6 +6355,116 @@ fn new_target_special_object_requires_function_header_authority() {
     );
     let error = verify_compiler_bytecode_graph(script, BytecodeGraphVerificationLimits::default())
         .expect_err("a Script frame cannot expose new.target");
+    assert!(matches!(
+        error.kind(),
+        BytecodeVerificationErrorKind::UnsupportedCompilerOpcode {
+            pc,
+            opcode: FinalOpcode::SpecialObject,
+        } if *pc == BytecodePc::ZERO
+    ));
+}
+
+#[test]
+fn direct_eval_contextual_special_objects_require_exact_header_authority() {
+    let text = "new.target; super.value; super()";
+    let function_span = SourceByteSpan::new(0, u32::try_from(text.len()).expect("source length"));
+    let source_for = |pcs: &[u32]| {
+        source(
+            text,
+            function_span,
+            None,
+            &pcs.iter()
+                .copied()
+                .map(|pc| (pc, function_span))
+                .collect::<Vec<_>>(),
+        )
+    };
+    let input_for = |instructions: &[(FinalOpcode, Operands)],
+                     header: UnverifiedFunctionHeader,
+                     executable_kind: CompilerExecutableKind,
+                     pcs: &[u32]| {
+        profiled_single_input(
+            instructions,
+            header,
+            executable_kind,
+            &[],
+            None,
+            &[],
+            0,
+            0,
+            &[],
+            source_for(pcs),
+        )
+    };
+
+    let contextual = input_for(
+        &[
+            (FinalOpcode::SpecialObject, Operands::U8(3)),
+            (FinalOpcode::Drop, Operands::None),
+            (FinalOpcode::SpecialObject, Operands::U8(5)),
+            (FinalOpcode::Drop, Operands::None),
+            (FinalOpcode::SpecialObject, Operands::U8(4)),
+            (FinalOpcode::Drop, Operands::None),
+            (FinalOpcode::ReturnUndef, Operands::None),
+        ],
+        UnverifiedFunctionHeader::direct_eval_script(
+            false,
+            0,
+            DirectEvalFunctionCapabilities::new(true, true, true),
+        ),
+        CompilerExecutableKind::DirectEvalScript,
+        &[0, 2, 3, 5, 6, 8, 9],
+    );
+    verify_compiler_bytecode_graph(contextual, BytecodeGraphVerificationLimits::default())
+        .expect("direct eval may use only the contextual capabilities certified in its header");
+
+    for selector in [3, 4, 5] {
+        let missing_capability = input_for(
+            &[
+                (FinalOpcode::SpecialObject, Operands::U8(selector)),
+                (FinalOpcode::Drop, Operands::None),
+                (FinalOpcode::ReturnUndef, Operands::None),
+            ],
+            UnverifiedFunctionHeader::direct_eval_script(
+                false,
+                0,
+                DirectEvalFunctionCapabilities::default(),
+            ),
+            CompilerExecutableKind::DirectEvalScript,
+            &[0, 2, 3],
+        );
+        assert_contextual_special_object_rejected(missing_capability);
+    }
+
+    for executable_kind in [
+        CompilerExecutableKind::GlobalScript,
+        CompilerExecutableKind::IndirectEvalScript,
+    ] {
+        let leaked_header = input_for(
+            &[(FinalOpcode::ReturnUndef, Operands::None)],
+            UnverifiedFunctionHeader::direct_eval_script(
+                false,
+                0,
+                DirectEvalFunctionCapabilities::new(true, false, false),
+            ),
+            executable_kind,
+            &[0],
+        );
+        let error = verify_compiler_bytecode_graph(
+            leaked_header,
+            BytecodeGraphVerificationLimits::default(),
+        )
+        .expect_err("contextual direct-eval header bits cannot leak into other Script goals");
+        assert_eq!(
+            error.kind(),
+            &BytecodeVerificationErrorKind::UnsupportedFunctionHeader
+        );
+    }
+}
+
+fn assert_contextual_special_object_rejected(input: UnverifiedCompilerBytecodeGraph) {
+    let error = verify_compiler_bytecode_graph(input, BytecodeGraphVerificationLimits::default())
+        .expect_err("a direct-eval contextual object requires its matching header capability");
     assert!(matches!(
         error.kind(),
         BytecodeVerificationErrorKind::UnsupportedCompilerOpcode {
@@ -6564,6 +6919,247 @@ fn ordinary_root_authority_cannot_originate_constructor_realm_globals() {
         &BytecodeVerificationErrorKind::ConstructorRealmGlobalSourceRequiresDynamicFunctionScript {
             closure: 0,
         }
+    );
+}
+
+fn direct_eval_binding_input(
+    executable_kind: CompilerExecutableKind,
+    instructions: &[(FinalOpcode, Operands)],
+    policy: CompilerBindingPolicy,
+) -> UnverifiedCompilerBytecodeGraph {
+    direct_eval_source_input(
+        executable_kind,
+        instructions,
+        policy,
+        CompilerClosureSource::DirectEvalBinding {
+            index: 1,
+            environment_size: 2,
+        },
+        Some(AtomPoolIndex::new(0)),
+    )
+}
+
+fn direct_eval_source_input(
+    executable_kind: CompilerExecutableKind,
+    instructions: &[(FinalOpcode, Operands)],
+    policy: CompilerBindingPolicy,
+    closure_source: CompilerClosureSource,
+    name: Option<AtomPoolIndex>,
+) -> UnverifiedCompilerBytecodeGraph {
+    direct_eval_source_input_with_marker(
+        executable_kind,
+        instructions,
+        policy,
+        closure_source,
+        name,
+        matches!(
+            closure_source,
+            CompilerClosureSource::DirectEvalVariable { .. }
+        ),
+    )
+}
+
+fn direct_eval_source_input_with_marker(
+    executable_kind: CompilerExecutableKind,
+    instructions: &[(FinalOpcode, Operands)],
+    policy: CompilerBindingPolicy,
+    closure_source: CompilerClosureSource,
+    name: Option<AtomPoolIndex>,
+    deletable_eval_variable: bool,
+) -> UnverifiedCompilerBytecodeGraph {
+    let flow = flow_with_header(
+        instructions,
+        1,
+        0,
+        0,
+        &[],
+        1,
+        &[],
+        UnverifiedFunctionHeader::global_script(false, 0),
+    );
+    let graph = Arc::new(
+        verify_compiler_function_graph(
+            UnverifiedCompilerFunctionGraph::new(
+                FunctionTemplateId::new(0),
+                Arc::from([UnverifiedCompilerFunction::new(
+                    Arc::clone(&flow),
+                    Arc::from([]),
+                    Arc::from([closure_source]),
+                )
+                .with_atom_pool(Arc::from([atom("callerValue")]))]),
+            ),
+            FunctionGraphVerificationLimits::default(),
+        )
+        .expect("staged direct-eval caller-binding graph"),
+    );
+    let text = "callerValue";
+    let full_span = SourceByteSpan::new(0, u32::try_from(text.len()).expect("source length"));
+    let mappings = flow
+        .instructions()
+        .iter()
+        .map(|instruction| (instruction.decoded().pc().get(), full_span))
+        .collect::<Vec<_>>();
+    UnverifiedCompilerBytecodeGraph::new(
+        graph,
+        Arc::from([UnverifiedFunctionMetadata::new(
+            None,
+            Arc::from([]),
+            Arc::from(
+                [ClosureVariableDefinition::new(name, policy, closure_source)
+                    .with_deletable_eval_variable(deletable_eval_variable)],
+            ),
+            source(text, full_span, None, &mappings),
+        )
+        .with_executable_kind(executable_kind)]),
+    )
+}
+
+#[test]
+fn direct_eval_new_variables_require_named_mutable_var_or_function_bindings() {
+    let source = CompilerClosureSource::DirectEvalVariable {
+        index: 1,
+        environment_size: 2,
+    };
+    let verified = verify_compiler_bytecode_graph(
+        direct_eval_source_input(
+            CompilerExecutableKind::DirectEvalScript,
+            &[(FinalOpcode::ReturnUndef, Operands::None)],
+            var_policy(),
+            source,
+            Some(AtomPoolIndex::new(0)),
+        ),
+        BytecodeGraphVerificationLimits::default(),
+    )
+    .expect("a named mutable var may be created in the caller variable environment");
+    assert_eq!(verified.root().function().closure_sources(), [source]);
+
+    for (staged_source, marker) in [
+        (source, false),
+        (
+            CompilerClosureSource::DirectEvalBinding {
+                index: 1,
+                environment_size: 2,
+            },
+            true,
+        ),
+    ] {
+        let error = verify_compiler_bytecode_graph(
+            direct_eval_source_input_with_marker(
+                CompilerExecutableKind::DirectEvalScript,
+                &[(FinalOpcode::ReturnUndef, Operands::None)],
+                var_policy(),
+                staged_source,
+                Some(AtomPoolIndex::new(0)),
+                marker,
+            ),
+            BytecodeGraphVerificationLimits::default(),
+        )
+        .expect_err("deletable eval-variable metadata must match its staged source");
+        assert_eq!(
+            error.kind(),
+            &BytecodeVerificationErrorKind::BindingPolicyViolation {
+                slot: BindingSlot::Closure(0),
+                pc: None,
+                reason: BindingPolicyViolationReason::InvalidDeclarationPolicy,
+            }
+        );
+    }
+
+    let error = verify_compiler_bytecode_graph(
+        direct_eval_source_input(
+            CompilerExecutableKind::DirectEvalScript,
+            &[(FinalOpcode::ReturnUndef, Operands::None)],
+            const_policy(),
+            source,
+            Some(AtomPoolIndex::new(0)),
+        ),
+        BytecodeGraphVerificationLimits::default(),
+    )
+    .expect_err("new eval variables must retain mutable var/function policy");
+    assert_eq!(
+        error.kind(),
+        &BytecodeVerificationErrorKind::BindingPolicyViolation {
+            slot: BindingSlot::Closure(0),
+            pc: None,
+            reason: BindingPolicyViolationReason::InvalidDeclarationPolicy,
+        }
+    );
+
+    let error = verify_compiler_bytecode_graph(
+        direct_eval_source_input(
+            CompilerExecutableKind::DirectEvalScript,
+            &[(FinalOpcode::ReturnUndef, Operands::None)],
+            var_policy(),
+            source,
+            None,
+        ),
+        BytecodeGraphVerificationLimits::default(),
+    )
+    .expect_err("a new eval variable must retain its name");
+    assert_eq!(
+        error.kind(),
+        &BytecodeVerificationErrorKind::MissingMetadataAtom {
+            field: MetadataAtomField::ClosureName(0),
+        }
+    );
+}
+
+#[test]
+fn direct_eval_authority_binds_only_direct_eval_caller_sources() {
+    let verified = verify_compiler_bytecode_graph(
+        direct_eval_binding_input(
+            CompilerExecutableKind::DirectEvalScript,
+            &[(FinalOpcode::ReturnUndef, Operands::None)],
+            var_policy(),
+        ),
+        BytecodeGraphVerificationLimits::default(),
+    )
+    .expect("a direct-eval Script root can import a typed caller binding");
+    assert_eq!(
+        verified.root().metadata().executable_kind(),
+        CompilerExecutableKind::DirectEvalScript
+    );
+    assert_eq!(
+        verified.root().metadata().closures()[0].binding(),
+        CompilerClosureBinding::Captured(var_policy())
+    );
+
+    let error = verify_compiler_bytecode_graph(
+        direct_eval_binding_input(
+            CompilerExecutableKind::IndirectEvalScript,
+            &[(FinalOpcode::ReturnUndef, Operands::None)],
+            var_policy(),
+        ),
+        BytecodeGraphVerificationLimits::default(),
+    )
+    .expect_err("an indirect-eval authority cannot import a caller binding");
+    assert_eq!(
+        error.kind(),
+        &BytecodeVerificationErrorKind::DirectEvalBindingSourceRequiresDirectEvalScript {
+            closure: 0,
+        }
+    );
+}
+
+#[test]
+fn direct_eval_immutable_caller_writes_remain_runtime_checked() {
+    let verified = verify_compiler_bytecode_graph(
+        direct_eval_binding_input(
+            CompilerExecutableKind::DirectEvalScript,
+            &[
+                (FinalOpcode::Push1, Operands::NoneInt),
+                (FinalOpcode::PutVarRefCheck, Operands::VarRef(0)),
+                (FinalOpcode::ReturnUndef, Operands::None),
+            ],
+            const_policy(),
+        ),
+        BytecodeGraphVerificationLimits::default(),
+    )
+    .expect("a verified captured write retains immutable caller policy for the VM");
+
+    assert_eq!(
+        verified.root().metadata().closures()[0].policy(),
+        const_policy()
     );
 }
 

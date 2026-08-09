@@ -67,14 +67,31 @@ pub(super) struct DefineMethodComputedOperand {
 pub(super) struct DefineClassOperand {
     pub(super) property: StaticPropertyOperand,
     pub(super) has_heritage: bool,
+    pub(super) has_instance_elements: bool,
 }
 
 pub(super) struct GlobalReferenceOperand {
     binding: RealmGlobalBindingId,
+    eval_binding: Option<EvalVariableOperand>,
     realm: RealmId,
     object: ObjectId,
     pub(super) key: PropertyKey,
     pub(super) name: JsString,
+}
+
+pub(super) struct EvalVariableOperand {
+    environment: SharedEvalVariableEnvironment,
+    index: usize,
+    cell: BindingCellId,
+}
+
+pub(super) enum DeleteBindingOperand {
+    Eval {
+        binding: EvalVariableOperand,
+        name: JsString,
+    },
+    Realm(GlobalReferenceOperand),
+    Missing,
 }
 
 pub(super) enum PropertyReadOutcome {
@@ -157,7 +174,7 @@ pub(super) fn static_property_operand(
     static_property_at(runtime, frame, index)
 }
 
-fn static_property_at(
+pub(super) fn static_property_at(
     runtime: &Runtime,
     frame: &Frame,
     index: quickjs_bytecode::AtomPoolIndex,
@@ -219,9 +236,9 @@ pub(super) fn define_method_operand(
     })
 }
 
-/// Decodes the statically named, verified `define_class` operand.  The
-/// heritage bit selects the certified base (`0`) or derived (`1`) stack shape;
-/// all computed class forms remain outside this execution slice.
+/// Decodes the statically named, verified `define_class` operand. Bit zero
+/// selects the certified base or derived stack shape. Bit one records whether
+/// `InitializeInstanceElements` has work for the constructor.
 pub(super) fn define_class_operand(
     runtime: &Runtime,
     frame: &Frame,
@@ -229,7 +246,7 @@ pub(super) fn define_class_operand(
 ) -> Result<DefineClassOperand, EngineFault> {
     let Operands::AtomU8 {
         atom,
-        value: has_heritage @ (0 | 1),
+        value: value @ 0..=3,
     } = operands
     else {
         return Err(EngineFault::RuntimeInvariant {
@@ -238,7 +255,8 @@ pub(super) fn define_class_operand(
     };
     Ok(DefineClassOperand {
         property: static_property_at(runtime, frame, atom)?,
-        has_heritage: has_heritage != 0,
+        has_heritage: value & 1 != 0,
+        has_instance_elements: value & 2 != 0,
     })
 }
 
@@ -305,13 +323,44 @@ pub(super) fn global_reference_operand(
             pool: "realm global atom description",
             index,
         })?;
+    let eval_binding = lookup_eval_variable_binding(frame, &name);
+    if let Some(binding) = &eval_binding
+        && !runtime.cells.contains(binding.cell)
+    {
+        return Err(EngineFault::StaleHeapEdge {
+            edge: "eval variable cell",
+            index: binding.cell.index(),
+            generation: binding.cell.generation(),
+        });
+    }
     Ok(GlobalReferenceOperand {
         binding: global,
+        eval_binding,
         realm,
         object: runtime.realm_global_object(realm)?,
         key: PropertyKey::from_validated_atom(record.name.clone()),
         name,
     })
+}
+
+fn lookup_eval_variable_binding(frame: &Frame, name: &JsString) -> Option<EvalVariableOperand> {
+    let mut current = frame.eval_environment.as_ref().map(Rc::clone);
+    while let Some(environment) = current {
+        let record = environment.borrow();
+        if let Some((index, binding)) = record.bindings.iter().enumerate().find(|(_, binding)| {
+            !binding.deleted && binding.name.code_units().eq(name.code_units())
+        }) {
+            let cell = binding.cell;
+            drop(record);
+            return Some(EvalVariableOperand {
+                environment,
+                index,
+                cell,
+            });
+        }
+        current = record.parent.as_ref().map(Rc::clone);
+    }
+    None
 }
 
 /// Resolves the atom operand of verified `delete_var` back to its typed Realm
@@ -325,7 +374,7 @@ pub(super) fn delete_global_reference_operand(
     runtime: &Runtime,
     frame: &Frame,
     operands: Operands,
-) -> Result<GlobalReferenceOperand, EngineFault> {
+) -> Result<DeleteBindingOperand, EngineFault> {
     let Operands::Atom(target_index) = operands else {
         return Err(EngineFault::MissingPoolEntry {
             pool: "realm global delete atom",
@@ -347,21 +396,22 @@ pub(super) fn delete_global_reference_operand(
         .ok_or(EngineFault::InvalidClosureEnvironment {
             function: frame.template,
         })?;
-    let closure = verified
+    let (closure, deletable_eval_variable) = verified
         .metadata()
         .closures()
         .iter()
         .enumerate()
         .find_map(|(closure, definition)| {
-            let CompilerClosureBinding::RealmGlobal(policy) = definition.binding() else {
-                return None;
+            let eligible = match definition.binding() {
+                CompilerClosureBinding::RealmGlobal(policy) => matches!(
+                    policy.kind(),
+                    CompilerBindingKind::GlobalReference
+                        | CompilerBindingKind::Var
+                        | CompilerBindingKind::Function
+                ),
+                CompilerClosureBinding::Captured(_) => definition.is_deletable_eval_variable(),
             };
-            if !matches!(
-                policy.kind(),
-                CompilerBindingKind::GlobalReference
-                    | CompilerBindingKind::Var
-                    | CompilerBindingKind::Function
-            ) {
+            if !eligible {
                 return None;
             }
             let name = definition.name()?;
@@ -369,15 +419,27 @@ pub(super) fn delete_global_reference_operand(
                 .atoms
                 .get(name.get() as usize)
                 .is_some_and(|candidate| candidate.is_same_identity(target))
-                .then_some(closure)
+                .then_some((closure, definition.is_deletable_eval_variable()))
         })
         .ok_or(EngineFault::RuntimeInvariant {
             message: "verified delete_var lost its realm-global binding",
         })?;
+    if deletable_eval_variable {
+        let name = target
+            .description()
+            .cloned()
+            .ok_or(EngineFault::RuntimeInvariant {
+                message: "deletable eval variable atom has no string name",
+            })?;
+        return Ok(lookup_eval_variable_binding(frame, &name)
+            .map_or(DeleteBindingOperand::Missing, |binding| {
+                DeleteBindingOperand::Eval { binding, name }
+            }));
+    }
     let closure = u32::try_from(closure).map_err(|_| EngineFault::RuntimeInvariant {
         message: "realm-global delete closure index is not representable",
     })?;
-    global_reference_operand(runtime, frame, closure)
+    global_reference_operand(runtime, frame, closure).map(DeleteBindingOperand::Realm)
 }
 
 /// Applies Global Environment Record `DeleteBinding` for a Realm-global name.
@@ -386,8 +448,48 @@ pub(super) fn delete_global_reference_operand(
 /// configurable attribute. An absent property reports success.
 pub(super) fn delete_realm_global_binding(
     runtime: &mut Runtime,
-    global: &GlobalReferenceOperand,
+    operand: &DeleteBindingOperand,
 ) -> Result<bool, ExecutionError> {
+    let (binding, name) = match operand {
+        DeleteBindingOperand::Eval { binding, name } => (Some(binding), name),
+        DeleteBindingOperand::Realm(global) => (global.eval_binding.as_ref(), &global.name),
+        DeleteBindingOperand::Missing => return Ok(true),
+    };
+    if let Some(binding) = binding {
+        let mut environment = binding.environment.borrow_mut();
+        let current =
+            environment
+                .bindings
+                .get_mut(binding.index)
+                .ok_or(EngineFault::RuntimeInvariant {
+                    message: "eval variable delete lost its environment entry",
+                })?;
+        if current.deleted
+            || current.cell != binding.cell
+            || !current.name.code_units().eq(name.code_units())
+        {
+            return Err(EngineFault::RuntimeInvariant {
+                message: "eval variable delete disagrees with its resolved entry",
+            }
+            .into());
+        }
+        current.deleted = true;
+        drop(environment);
+        runtime
+            .cells
+            .get_mut(binding.cell)
+            .ok_or(EngineFault::StaleHeapEdge {
+                edge: "eval variable cell",
+                index: binding.cell.index(),
+                generation: binding.cell.generation(),
+            })?
+            .value = SlotValue::Value(StoredValue::Undefined);
+        runtime.collection_pending = true;
+        return Ok(true);
+    }
+    let DeleteBindingOperand::Realm(global) = operand else {
+        return Ok(true);
+    };
     let state = runtime
         .global_bindings
         .get(global.binding)
@@ -410,6 +512,21 @@ pub(super) fn read_realm_global(
     runtime: &Runtime,
     global: &GlobalReferenceOperand,
 ) -> Result<RealmGlobalReadOutcome, ExecutionError> {
+    if let Some(cell) = global.eval_binding.as_ref().map(|binding| binding.cell) {
+        let value = &runtime
+            .cells
+            .get(cell)
+            .ok_or(EngineFault::StaleHeapEdge {
+                edge: "eval variable cell",
+                index: cell.index(),
+                generation: cell.generation(),
+            })?
+            .value;
+        return Ok(match value {
+            SlotValue::Uninitialized => RealmGlobalReadOutcome::Uninitialized,
+            SlotValue::Value(value) => RealmGlobalReadOutcome::Value(value.duplicate()),
+        });
+    }
     let binding =
         runtime
             .global_bindings
@@ -465,6 +582,9 @@ pub(super) fn write_realm_global(
     strict: bool,
     execution_budget: &mut ExecutionBudget,
 ) -> Result<RealmGlobalWriteOutcome, ExecutionError> {
+    if let Some(cell) = global.eval_binding.as_ref().map(|binding| binding.cell) {
+        return write_eval_variable(runtime, cell, value);
+    }
     let state = runtime
         .global_bindings
         .get(global.binding)
@@ -562,11 +682,35 @@ pub(super) fn write_realm_global(
     }
 }
 
+fn write_eval_variable(
+    runtime: &mut Runtime,
+    cell: BindingCellId,
+    value: StoredValue,
+) -> Result<RealmGlobalWriteOutcome, ExecutionError> {
+    runtime
+        .cells
+        .get_mut(cell)
+        .ok_or(EngineFault::StaleHeapEdge {
+            edge: "eval variable cell",
+            index: cell.index(),
+            generation: cell.generation(),
+        })?
+        .value = SlotValue::Value(value);
+    runtime.collection_pending = true;
+    Ok(RealmGlobalWriteOutcome::Complete)
+}
+
 pub(super) fn initialize_realm_global(
     runtime: &mut Runtime,
     global: &GlobalReferenceOperand,
     value: StoredValue,
 ) -> Result<(), ExecutionError> {
+    if global.eval_binding.is_some() {
+        return Err(EngineFault::RuntimeInvariant {
+            message: "put_var_init targeted an eval-created variable",
+        }
+        .into());
+    }
     let state = runtime
         .global_bindings
         .get(global.binding)

@@ -18,7 +18,7 @@ use std::{
 
 use crate::{
     AtomPoolIndex, BytecodePc, CompilerAtom, CompilerConstantKind, CompilerString, FinalOpcode,
-    VerifiedControlFlow,
+    InstructionIndex, VerifiedControlFlow,
 };
 
 /// Provisional maximum number of compiler function templates in one graph.
@@ -452,6 +452,28 @@ pub enum CompilerClosureSource {
     /// Function-local atom naming either an unresolved lookup or a
     /// configurable indirect-eval `var` in the constructor realm.
     ConstructorRealmGlobal(AtomPoolIndex),
+    /// One live binding supplied by the calling activation of direct `eval`.
+    ///
+    /// `index` addresses the ordered external environment snapshot while
+    /// `environment_size` binds the authority to the exact snapshot shape.
+    DirectEvalBinding {
+        /// Zero-based entry in the caller-environment snapshot.
+        index: u32,
+        /// Exact number of entries required from that snapshot.
+        environment_size: u32,
+    },
+    /// One mutable binding created in the calling function's variable
+    /// environment by sloppy direct `eval`.
+    ///
+    /// The runtime appends these cells after the ordered caller snapshot.
+    /// `index` and `environment_size` bind the authority to that complete
+    /// installation environment exactly as for [`Self::DirectEvalBinding`].
+    DirectEvalVariable {
+        /// Zero-based entry in the complete direct-eval environment.
+        index: u32,
+        /// Exact number of caller and newly-created entries required.
+        environment_size: u32,
+    },
 }
 
 impl fmt::Display for CompilerClosureSource {
@@ -464,6 +486,20 @@ impl fmt::Display for CompilerClosureSource {
             Self::ConstructorRealmGlobal(atom) => {
                 write!(formatter, "constructor-realm global atom {}", atom.get())
             }
+            Self::DirectEvalBinding {
+                index,
+                environment_size,
+            } => write!(
+                formatter,
+                "direct-eval binding {index} in environment of size {environment_size}"
+            ),
+            Self::DirectEvalVariable {
+                index,
+                environment_size,
+            } => write!(
+                formatter,
+                "direct-eval variable {index} in environment of size {environment_size}"
+            ),
         }
     }
 }
@@ -475,12 +511,15 @@ pub struct UnverifiedCompilerFunction {
     atoms: Option<Arc<[CompilerAtom]>>,
     constants: Arc<[CompilerConstant]>,
     closure_sources: Arc<[CompilerClosureSource]>,
+    parameter_initialization_end: Option<u32>,
+    eval_reference_call_instructions: Arc<[u32]>,
+    has_direct_eval: bool,
 }
 
 impl UnverifiedCompilerFunction {
     /// Creates one unverified compiler function-template record.
     #[must_use]
-    pub const fn new(
+    pub fn new(
         control_flow: Arc<VerifiedControlFlow>,
         constants: Arc<[CompilerConstant]>,
         closure_sources: Arc<[CompilerClosureSource]>,
@@ -490,6 +529,9 @@ impl UnverifiedCompilerFunction {
             atoms: None,
             constants,
             closure_sources,
+            parameter_initialization_end: None,
+            eval_reference_call_instructions: Arc::from([]),
+            has_direct_eval: false,
         }
     }
 
@@ -497,6 +539,33 @@ impl UnverifiedCompilerFunction {
     #[must_use]
     pub fn with_atom_pool(mut self, atoms: Arc<[CompilerAtom]>) -> Self {
         self.atoms = Some(atoms);
+        self
+    }
+
+    /// Declares whether this function contains a direct-eval callsite.
+    ///
+    /// Whole-graph verification ties this marker to the actual `eval` or
+    /// `apply_eval` instruction family before retaining it as runtime
+    /// authority.
+    #[must_use]
+    pub const fn with_direct_eval(mut self, has_direct_eval: bool) -> Self {
+        self.has_direct_eval = has_direct_eval;
+        self
+    }
+
+    /// Attaches the first body instruction following parameter-expression
+    /// evaluation, when the function contains direct eval.
+    #[must_use]
+    pub const fn with_parameter_initialization_end(mut self, boundary: Option<u32>) -> Self {
+        self.parameter_initialization_end = boundary;
+        self
+    }
+
+    /// Attaches the ordered `eval`/`apply_eval` instruction indices whose
+    /// callee Reference carries an ordinary-call receiver.
+    #[must_use]
+    pub fn with_eval_reference_call_instructions(mut self, instructions: Arc<[u32]>) -> Self {
+        self.eval_reference_call_instructions = instructions;
         self
     }
 
@@ -522,6 +591,24 @@ impl UnverifiedCompilerFunction {
     #[must_use]
     pub fn closure_sources(&self) -> &[CompilerClosureSource] {
         &self.closure_sources
+    }
+
+    /// Returns the proposed direct-eval callsite marker.
+    #[must_use]
+    pub const fn has_direct_eval(&self) -> bool {
+        self.has_direct_eval
+    }
+
+    /// Returns the proposed parameter/body instruction boundary.
+    #[must_use]
+    pub const fn parameter_initialization_end(&self) -> Option<u32> {
+        self.parameter_initialization_end
+    }
+
+    /// Returns the proposed receiver-carrying eval instruction indices.
+    #[must_use]
+    pub fn eval_reference_call_instructions(&self) -> &[u32] {
+        &self.eval_reference_call_instructions
     }
 }
 
@@ -886,6 +973,9 @@ pub struct VerifiedCompilerFunction {
     atoms: Arc<[CompilerAtom]>,
     constants: Arc<[CompilerConstant]>,
     closure_sources: Arc<[CompilerClosureSource]>,
+    parameter_initialization_end: Option<u32>,
+    eval_reference_call_instructions: Arc<[u32]>,
+    has_direct_eval: bool,
 }
 
 impl VerifiedCompilerFunction {
@@ -911,6 +1001,36 @@ impl VerifiedCompilerFunction {
     #[must_use]
     pub fn closure_sources(&self) -> &[CompilerClosureSource] {
         &self.closure_sources
+    }
+
+    /// Returns whether the verified body contains a direct-eval callsite.
+    #[must_use]
+    pub const fn has_direct_eval(&self) -> bool {
+        self.has_direct_eval
+    }
+
+    /// Returns the verified first body instruction following parameter
+    /// initialization, when parameter expressions require a distinct body
+    /// variable environment.
+    #[must_use]
+    pub const fn parameter_initialization_end(&self) -> Option<u32> {
+        self.parameter_initialization_end
+    }
+
+    /// Returns the verified ordered instruction indices at which an eval
+    /// call retains the receiver supplied by its source Reference.
+    #[must_use]
+    pub fn eval_reference_call_instructions(&self) -> &[u32] {
+        &self.eval_reference_call_instructions
+    }
+
+    /// Returns whether one instruction is a verified receiver-carrying eval
+    /// callsite.
+    #[must_use]
+    pub fn is_eval_reference_call(&self, instruction: InstructionIndex) -> bool {
+        self.eval_reference_call_instructions
+            .binary_search(&instruction.get())
+            .is_ok()
     }
 }
 
@@ -1056,6 +1176,65 @@ pub enum FunctionGraphVerificationErrorKind {
     MissingCompilerCaptureLayout,
     /// A body did not retain explicit compiler constant metadata.
     MissingCompilerConstantLayout,
+    /// The compiler's direct-eval marker disagrees with the encoded callsite
+    /// family.
+    DirectEvalMarkerMismatch {
+        /// Marker supplied by the compiler planner.
+        declared: bool,
+        /// Whether the verified body contains `eval` or `apply_eval`.
+        encoded: bool,
+    },
+    /// The parameter/body boundary is incompatible with the verified body.
+    DirectEvalParameterBoundaryInvalid {
+        /// Proposed first body instruction.
+        boundary: u32,
+        /// Verified instruction count.
+        instructions: u32,
+        /// Whether the header declares a simple parameter list.
+        simple_parameter_list: bool,
+    },
+    /// An eval callsite's adjusted scope does not agree with the verified
+    /// parameter/body boundary.
+    DirectEvalParameterPhaseMismatch {
+        /// Instruction containing `eval` or `apply_eval`.
+        instruction: u32,
+        /// Encoded adjusted scope index.
+        scope_index: u16,
+        /// Proposed boundary, or no boundary for a parameter-phase callsite.
+        boundary: Option<u32>,
+    },
+    /// Receiver-carrying eval callsite indices are not strictly increasing.
+    EvalReferenceCallInstructionOrder {
+        /// Previous instruction index.
+        previous: u32,
+        /// Repeated or decreasing instruction index.
+        instruction: u32,
+    },
+    /// Receiver-carrying eval metadata names no verified instruction.
+    EvalReferenceCallInstructionOutOfBounds {
+        /// Rejected instruction index.
+        instruction: u32,
+        /// Verified instruction count.
+        instructions: u32,
+    },
+    /// Receiver-carrying eval metadata names an opcode outside the eval
+    /// family.
+    EvalReferenceCallOpcodeMismatch {
+        /// Rejected instruction index.
+        instruction: u32,
+        /// Opcode found at that index.
+        opcode: FinalOpcode,
+    },
+    /// A reachable receiver-carrying eval callsite does not have an additional
+    /// receiver value on its verified operand stack.
+    EvalReferenceCallReceiverMissing {
+        /// Rejected instruction index.
+        instruction: u32,
+        /// Minimum entry stack depth required by the callsite.
+        required: u32,
+        /// Verified entry stack depth, or `None` for unreachable code.
+        actual: Option<u32>,
+    },
     /// A nonempty body atom domain has no supplied atom table.
     MissingAtomPool {
         /// Declared atom entries.
@@ -1135,6 +1314,32 @@ pub enum FunctionGraphVerificationErrorKind {
     ConstructorRealmGlobalSourceNotRoot {
         /// Closure-domain slot containing the source.
         closure: u32,
+    },
+    /// A non-root function tries to originate a direct-eval caller binding
+    /// instead of forwarding the root-owned slot.
+    DirectEvalBindingSourceNotRoot {
+        /// Closure-domain slot containing the source.
+        closure: u32,
+    },
+    /// A direct-eval caller-binding source addresses outside its declared
+    /// external environment.
+    DirectEvalBindingOutOfBounds {
+        /// Closure-domain slot containing the source.
+        closure: u32,
+        /// Rejected external-environment index.
+        index: u32,
+        /// Declared external-environment size.
+        environment_size: u32,
+    },
+    /// Direct-eval caller-binding sources disagree about the external
+    /// environment shape bound into the authority.
+    DirectEvalEnvironmentSizeMismatch {
+        /// First declared external-environment size.
+        expected: u32,
+        /// Closure-domain slot containing the disagreement.
+        closure: u32,
+        /// Conflicting external-environment size.
+        actual: u32,
     },
     /// A compiler function imports the same immediate-parent cell twice.
     DuplicateClosureSource {
@@ -1229,6 +1434,55 @@ impl fmt::Display for FunctionGraphVerificationErrorKind {
             Self::MissingCompilerConstantLayout => {
                 formatter.write_str("body has no explicit compiler constant layout")
             }
+            Self::DirectEvalMarkerMismatch { declared, encoded } => write!(
+                formatter,
+                "direct-eval marker {declared} disagrees with encoded callsite presence {encoded}"
+            ),
+            Self::DirectEvalParameterBoundaryInvalid {
+                boundary,
+                instructions,
+                simple_parameter_list,
+            } => write!(
+                formatter,
+                "direct-eval parameter boundary {boundary} is incompatible with instruction count {instructions} and simple-parameter marker {simple_parameter_list}"
+            ),
+            Self::DirectEvalParameterPhaseMismatch {
+                instruction,
+                scope_index,
+                boundary,
+            } => write!(
+                formatter,
+                "direct-eval scope index {scope_index} at instruction {instruction} disagrees with parameter boundary {boundary:?}"
+            ),
+            Self::EvalReferenceCallInstructionOrder {
+                previous,
+                instruction,
+            } => write!(
+                formatter,
+                "eval reference-call instruction {instruction} does not follow {previous}"
+            ),
+            Self::EvalReferenceCallInstructionOutOfBounds {
+                instruction,
+                instructions,
+            } => write!(
+                formatter,
+                "eval reference-call instruction {instruction} is outside instruction count {instructions}"
+            ),
+            Self::EvalReferenceCallOpcodeMismatch {
+                instruction,
+                opcode,
+            } => write!(
+                formatter,
+                "eval reference-call instruction {instruction} names non-eval opcode {opcode}"
+            ),
+            Self::EvalReferenceCallReceiverMissing {
+                instruction,
+                required,
+                actual,
+            } => write!(
+                formatter,
+                "eval reference-call instruction {instruction} requires entry stack depth {required}, found {actual:?}"
+            ),
             Self::MissingAtomPool { declared } => write!(
                 formatter,
                 "body declares {declared} atoms, but the compiler graph has no atom pool"
@@ -1280,6 +1534,26 @@ impl fmt::Display for FunctionGraphVerificationErrorKind {
             Self::ConstructorRealmGlobalSourceNotRoot { closure } => write!(
                 formatter,
                 "non-root closure slot {closure} originates a constructor-realm global source"
+            ),
+            Self::DirectEvalBindingSourceNotRoot { closure } => write!(
+                formatter,
+                "non-root closure slot {closure} originates a direct-eval caller binding"
+            ),
+            Self::DirectEvalBindingOutOfBounds {
+                closure,
+                index,
+                environment_size,
+            } => write!(
+                formatter,
+                "closure slot {closure} addresses direct-eval binding {index} outside environment size {environment_size}"
+            ),
+            Self::DirectEvalEnvironmentSizeMismatch {
+                expected,
+                closure,
+                actual,
+            } => write!(
+                formatter,
+                "closure slot {closure} declares direct-eval environment size {actual}, expected {expected}"
             ),
             Self::DuplicateClosureSource {
                 first,
@@ -1395,6 +1669,11 @@ pub fn verify_compiler_function_graph(
                 .map_or_else(|| Arc::from([]), Arc::clone),
             constants: Arc::clone(&function.constants),
             closure_sources: Arc::clone(&function.closure_sources),
+            parameter_initialization_end: function.parameter_initialization_end,
+            eval_reference_call_instructions: Arc::clone(
+                &function.eval_reference_call_instructions,
+            ),
+            has_direct_eval: function.has_direct_eval,
         }
     }));
 
@@ -1413,6 +1692,7 @@ fn validate_function_records(
     for (index, function) in functions.iter().enumerate() {
         let id = function_id(index)?;
         let flow = &function.control_flow;
+        validate_direct_eval_record(id, function)?;
         if flow.compiler_capture_layout().is_none() {
             return Err(FunctionGraphVerificationError::at_function(
                 id,
@@ -1497,6 +1777,130 @@ fn validate_function_records(
     Ok(())
 }
 
+fn validate_direct_eval_record(
+    id: FunctionTemplateId,
+    function: &UnverifiedCompilerFunction,
+) -> Result<(), FunctionGraphVerificationError> {
+    let flow = &function.control_flow;
+    let encoded_direct_eval = flow.instructions().iter().any(|instruction| {
+        matches!(
+            instruction.decoded().instruction().opcode(),
+            FinalOpcode::Eval | FinalOpcode::ApplyEval
+        )
+    });
+    if function.has_direct_eval != encoded_direct_eval {
+        return Err(FunctionGraphVerificationError::at_function(
+            id,
+            FunctionGraphVerificationErrorKind::DirectEvalMarkerMismatch {
+                declared: function.has_direct_eval,
+                encoded: encoded_direct_eval,
+            },
+        ));
+    }
+    let instruction_count = usize_to_u32(flow.instructions().len());
+    validate_eval_reference_calls(id, function, instruction_count)?;
+    if let Some(boundary) = function.parameter_initialization_end
+        && (!function.has_direct_eval
+            || boundary > instruction_count
+            || flow.function_header().flags().has_simple_parameter_list())
+    {
+        return Err(FunctionGraphVerificationError::at_function(
+            id,
+            FunctionGraphVerificationErrorKind::DirectEvalParameterBoundaryInvalid {
+                boundary,
+                instructions: instruction_count,
+                simple_parameter_list: flow.function_header().flags().has_simple_parameter_list(),
+            },
+        ));
+    }
+    for (instruction_index, verified) in flow.instructions().iter().enumerate() {
+        let instruction = verified.decoded().instruction();
+        let ((FinalOpcode::Eval, crate::Operands::NPopU16 { scope_index, .. })
+        | (FinalOpcode::ApplyEval, crate::Operands::U16(scope_index))) =
+            (instruction.opcode(), instruction.operands())
+        else {
+            continue;
+        };
+        let instruction_index = usize_to_u32(instruction_index);
+        let parameter_phase = function
+            .parameter_initialization_end
+            .is_some_and(|boundary| instruction_index < boundary);
+        if (scope_index == 0) != parameter_phase {
+            return Err(FunctionGraphVerificationError::at_function(
+                id,
+                FunctionGraphVerificationErrorKind::DirectEvalParameterPhaseMismatch {
+                    instruction: instruction_index,
+                    scope_index,
+                    boundary: function.parameter_initialization_end,
+                },
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn validate_eval_reference_calls(
+    id: FunctionTemplateId,
+    function: &UnverifiedCompilerFunction,
+    instruction_count: u32,
+) -> Result<(), FunctionGraphVerificationError> {
+    let flow = &function.control_flow;
+    let mut previous = None;
+    for &instruction_index in function.eval_reference_call_instructions.iter() {
+        if let Some(previous) = previous
+            && instruction_index <= previous
+        {
+            return Err(FunctionGraphVerificationError::at_function(
+                id,
+                FunctionGraphVerificationErrorKind::EvalReferenceCallInstructionOrder {
+                    previous,
+                    instruction: instruction_index,
+                },
+            ));
+        }
+        previous = Some(instruction_index);
+        let Some(verified) = flow.instructions().get(instruction_index as usize) else {
+            return Err(FunctionGraphVerificationError::at_function(
+                id,
+                FunctionGraphVerificationErrorKind::EvalReferenceCallInstructionOutOfBounds {
+                    instruction: instruction_index,
+                    instructions: instruction_count,
+                },
+            ));
+        };
+        let instruction = verified.decoded().instruction();
+        let required = match (instruction.opcode(), instruction.operands()) {
+            (FinalOpcode::Eval, crate::Operands::NPopU16 { argument_count, .. }) => {
+                u32::from(argument_count).saturating_add(2)
+            }
+            (FinalOpcode::ApplyEval, crate::Operands::U16(_)) => 3,
+            (opcode, _) => {
+                return Err(FunctionGraphVerificationError::at_function(
+                    id,
+                    FunctionGraphVerificationErrorKind::EvalReferenceCallOpcodeMismatch {
+                        instruction: instruction_index,
+                        opcode,
+                    },
+                ));
+            }
+        };
+        if verified
+            .entry_stack_depth()
+            .is_some_and(|actual| actual < required)
+        {
+            return Err(FunctionGraphVerificationError::at_function(
+                id,
+                FunctionGraphVerificationErrorKind::EvalReferenceCallReceiverMissing {
+                    instruction: instruction_index,
+                    required,
+                    actual: verified.entry_stack_depth(),
+                },
+            ));
+        }
+    }
+    Ok(())
+}
+
 fn validate_realm_global_source_atoms(
     function: FunctionTemplateId,
     sources: &[CompilerClosureSource],
@@ -1529,34 +1933,81 @@ fn validate_root_closure_sources(
         if index == root_index {
             continue;
         }
-        if let Some(closure) = function
-            .closure_sources
-            .iter()
-            .position(|source| matches!(source, CompilerClosureSource::ConstructorRealmGlobal(_)))
-        {
-            return Err(FunctionGraphVerificationError::at_function(
-                function_id(index)?,
-                FunctionGraphVerificationErrorKind::ConstructorRealmGlobalSourceNotRoot {
-                    closure: usize_to_u32(closure),
-                },
-            ));
+        for (closure, source) in function.closure_sources.iter().enumerate() {
+            let kind = match source {
+                CompilerClosureSource::ConstructorRealmGlobal(_) => Some(
+                    FunctionGraphVerificationErrorKind::ConstructorRealmGlobalSourceNotRoot {
+                        closure: usize_to_u32(closure),
+                    },
+                ),
+                CompilerClosureSource::DirectEvalBinding { .. }
+                | CompilerClosureSource::DirectEvalVariable { .. } => Some(
+                    FunctionGraphVerificationErrorKind::DirectEvalBindingSourceNotRoot {
+                        closure: usize_to_u32(closure),
+                    },
+                ),
+                CompilerClosureSource::ParentVariableReference(_)
+                | CompilerClosureSource::ParentClosure(_) => None,
+            };
+            if let Some(kind) = kind {
+                return Err(FunctionGraphVerificationError::at_function(
+                    function_id(index)?,
+                    kind,
+                ));
+            }
         }
     }
 
     let root_function = &functions[root_index];
-    if root_function
-        .closure_sources
-        .iter()
-        .all(|source| matches!(source, CompilerClosureSource::ConstructorRealmGlobal(_)))
-    {
-        return Ok(());
+    let mut direct_environment_size = None;
+    for (closure, source) in root_function.closure_sources.iter().enumerate() {
+        match *source {
+            CompilerClosureSource::ConstructorRealmGlobal(_) => {}
+            CompilerClosureSource::DirectEvalBinding {
+                index,
+                environment_size,
+            }
+            | CompilerClosureSource::DirectEvalVariable {
+                index,
+                environment_size,
+            } => {
+                if index >= environment_size {
+                    return Err(FunctionGraphVerificationError::at_function(
+                        root,
+                        FunctionGraphVerificationErrorKind::DirectEvalBindingOutOfBounds {
+                            closure: usize_to_u32(closure),
+                            index,
+                            environment_size,
+                        },
+                    ));
+                }
+                if let Some(expected) = direct_environment_size {
+                    if environment_size != expected {
+                        return Err(FunctionGraphVerificationError::at_function(
+                            root,
+                            FunctionGraphVerificationErrorKind::DirectEvalEnvironmentSizeMismatch {
+                                expected,
+                                closure: usize_to_u32(closure),
+                                actual: environment_size,
+                            },
+                        ));
+                    }
+                } else {
+                    direct_environment_size = Some(environment_size);
+                }
+            }
+            CompilerClosureSource::ParentVariableReference(_)
+            | CompilerClosureSource::ParentClosure(_) => {
+                return Err(FunctionGraphVerificationError::at_function(
+                    root,
+                    FunctionGraphVerificationErrorKind::RootRequiresEnvironment {
+                        closure_variables: root_function.control_flow.domains().closure_var_count(),
+                    },
+                ));
+            }
+        }
     }
-    Err(FunctionGraphVerificationError::at_function(
-        root,
-        FunctionGraphVerificationErrorKind::RootRequiresEnvironment {
-            closure_variables: root_function.control_flow.domains().closure_var_count(),
-        },
-    ))
+    Ok(())
 }
 
 fn preflight_graph_usage(
@@ -1844,6 +2295,8 @@ fn validate_closure_edges(
                     CompilerClosureSource::ConstructorRealmGlobal(_) => {
                         continue;
                     }
+                    CompilerClosureSource::DirectEvalBinding { .. }
+                    | CompilerClosureSource::DirectEvalVariable { .. } => continue,
                 };
                 if source_index >= len {
                     return Err(FunctionGraphVerificationError::at_function(
