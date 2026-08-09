@@ -305,6 +305,9 @@ struct IntlIntrinsics {
     number_format_prototype: ObjectId,
     number_format_constructor: FunctionId,
     number_format_format: FunctionId,
+    date_time_format_prototype: ObjectId,
+    date_time_format_constructor: FunctionId,
+    date_time_format_format: FunctionId,
     locale_prototype: ObjectId,
     locale_constructor: FunctionId,
 }
@@ -1256,6 +1259,14 @@ pub(crate) enum NativeFunctionKind {
     IntlNumberFormatPrototype(IntlNumberFormatPrototypeMethod),
     /// Hidden formatting target bound by the `NumberFormat` `format` getter.
     IntlNumberFormatFormat,
+    /// The `%Intl.DateTimeFormat%` constructor.
+    IntlDateTimeFormatConstructor,
+    /// `Intl.DateTimeFormat.supportedLocalesOf`.
+    IntlDateTimeFormatSupportedLocalesOf,
+    /// One `%Intl.DateTimeFormat.prototype%` accessor or method.
+    IntlDateTimeFormatPrototype(IntlDateTimeFormatPrototypeMethod),
+    /// Hidden formatting target bound by the `DateTimeFormat` `format` getter.
+    IntlDateTimeFormatFormat,
     /// The `%Intl.Locale%` constructor.
     IntlLocaleConstructor,
     /// One `%Intl.Locale.prototype%` accessor or method.
@@ -1640,6 +1651,47 @@ pub(crate) enum IntlNumberFormatPrototypeMethod {
     ResolvedOptions,
     FormatRange,
     FormatRangeToParts,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum IntlDateTimeFormatPrototypeMethod {
+    Format,
+    FormatToParts,
+    ResolvedOptions,
+    FormatRange,
+    FormatRangeToParts,
+}
+
+impl IntlDateTimeFormatPrototypeMethod {
+    pub(crate) const ALL: [Self; 5] = [
+        Self::Format,
+        Self::FormatToParts,
+        Self::ResolvedOptions,
+        Self::FormatRange,
+        Self::FormatRangeToParts,
+    ];
+
+    pub(crate) const fn is_accessor(self) -> bool {
+        matches!(self, Self::Format)
+    }
+
+    pub(crate) const fn name(self) -> &'static str {
+        match self {
+            Self::Format => "format",
+            Self::FormatToParts => "formatToParts",
+            Self::ResolvedOptions => "resolvedOptions",
+            Self::FormatRange => "formatRange",
+            Self::FormatRangeToParts => "formatRangeToParts",
+        }
+    }
+
+    pub(crate) const fn length(self) -> i32 {
+        match self {
+            Self::Format | Self::ResolvedOptions => 0,
+            Self::FormatToParts => 1,
+            Self::FormatRange | Self::FormatRangeToParts => 2,
+        }
+    }
 }
 
 impl IntlNumberFormatPrototypeMethod {
@@ -4313,6 +4365,7 @@ impl NativeFunctionKind {
                 | Self::DateConstructor
                 | Self::IntlCollatorConstructor
                 | Self::IntlNumberFormatConstructor
+                | Self::IntlDateTimeFormatConstructor
                 | Self::IntlLocaleConstructor
                 | Self::TemporalDurationConstructor
                 | Self::TemporalInstantConstructor

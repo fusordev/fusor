@@ -12,6 +12,7 @@ use icu::locale::{
 };
 
 mod collator;
+mod date_time_format;
 mod locale;
 mod locale_info;
 mod number_format;
@@ -20,6 +21,13 @@ mod supported_values;
 pub use collator::{
     CollatorRequestOptions, CollatorSensitivity, CollatorState, CollatorUsage,
     collator_supported_locales, compare_with_collator, resolve_collator,
+};
+pub use date_time_format::{
+    DateTimeComponentStyle, DateTimeFormatError, DateTimeFormatInput, DateTimeFormatInputKind,
+    DateTimeFormatMatcher, DateTimeFormatPart, DateTimeFormatRequestOptions, DateTimeFormatState,
+    DateTimeHourCycle, DateTimeStyle, DateTimeTimeZoneName, canonicalize_time_zone,
+    date_time_format_supported_locales, format_datetime, format_datetime_to_parts,
+    resolve_date_time_format,
 };
 
 pub use locale::{

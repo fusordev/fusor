@@ -14,8 +14,8 @@ use super::{
 use crate::object::TypedArrayElementType;
 use crate::runtime::{
     ArrayBufferPrototypeMethod, AtomicsMethod, DataViewPrototypeMethod, DatePrototypeMethod,
-    DateStaticMethod, IntlCollatorPrototypeMethod, IntlLocalePrototypeMethod,
-    IntlNumberFormatPrototypeMethod, SharedArrayBufferPrototypeMethod,
+    DateStaticMethod, IntlCollatorPrototypeMethod, IntlDateTimeFormatPrototypeMethod,
+    IntlLocalePrototypeMethod, IntlNumberFormatPrototypeMethod, SharedArrayBufferPrototypeMethod,
     TemporalDurationPrototypeMethod, TemporalDurationStaticMethod, TemporalInstantPrototypeMethod,
     TemporalInstantStaticMethod, TemporalNowMethod, TemporalPlainDatePrototypeMethod,
     TemporalPlainDateStaticMethod, TemporalPlainDateTimePrototypeMethod,
@@ -83,6 +83,7 @@ pub(in crate::runtime) enum IntrinsicObjectId {
     Intl,
     IntlCollatorPrototype,
     IntlNumberFormatPrototype,
+    IntlDateTimeFormatPrototype,
     IntlLocalePrototype,
     Reflect,
     Json,
@@ -91,7 +92,7 @@ pub(in crate::runtime) enum IntrinsicObjectId {
 }
 
 impl IntrinsicObjectId {
-    pub(in crate::runtime) const ALL: [Self; 75] = [
+    pub(in crate::runtime) const ALL: [Self; 76] = [
         Self::ObjectPrototype,
         Self::GlobalObject,
         Self::ErrorPrototype(ErrorIntrinsicKind::Error),
@@ -162,6 +163,7 @@ impl IntrinsicObjectId {
         Self::Intl,
         Self::IntlCollatorPrototype,
         Self::IntlNumberFormatPrototype,
+        Self::IntlDateTimeFormatPrototype,
         Self::IntlLocalePrototype,
         Self::Reflect,
         Self::Json,
@@ -197,6 +199,9 @@ pub(in crate::runtime) enum RealmNameId {
     IntlNumberFormat,
     IntlNumberFormatSupportedLocalesOf,
     IntlNumberFormatPrototype(IntlNumberFormatPrototypeMethod),
+    IntlDateTimeFormat,
+    IntlDateTimeFormatSupportedLocalesOf,
+    IntlDateTimeFormatPrototype(IntlDateTimeFormatPrototypeMethod),
     Locale,
     IntlLocalePrototype(IntlLocalePrototypeMethod),
     Reflect,

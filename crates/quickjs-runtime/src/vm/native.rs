@@ -1293,6 +1293,33 @@ pub(super) fn resume_native_continuations(
                     execution_budget,
                 )?
             }
+            NativeContinuation::IntlDateTimeFormatConstructor(state) => {
+                advance_intl_date_time_format_constructor(
+                    runtime,
+                    *state,
+                    Some(value.duplicate()),
+                    return_to,
+                    execution_budget,
+                )?
+            }
+            NativeContinuation::IntlDateTimeFormatUnwrap(state) => {
+                advance_intl_date_time_format_unwrap(
+                    runtime,
+                    *state,
+                    &value,
+                    return_to,
+                    execution_budget,
+                )?
+            }
+            NativeContinuation::IntlDateTimeFormatSupportedLocalesOf(state) => {
+                advance_intl_date_time_format_supported_locales(
+                    runtime,
+                    *state,
+                    Some(value.duplicate()),
+                    return_to,
+                    execution_budget,
+                )?
+            }
             NativeContinuation::IntlLocaleConstructor(state) => advance_intl_locale_constructor(
                 runtime,
                 *state,
@@ -2832,6 +2859,48 @@ pub(super) fn dispatch_native_call_with_frames(
             )
         }
         NativeFunctionKind::IntlNumberFormatFormat => begin_intl_number_format_format(
+            runtime,
+            &inputs.receiver,
+            inputs.arguments,
+            native.realm,
+            return_to,
+            origin.unwrap_or_else(native_function_host_origin),
+            execution_budget,
+        ),
+        NativeFunctionKind::IntlDateTimeFormatConstructor => {
+            begin_intl_date_time_format_constructor(
+                runtime,
+                function,
+                inputs,
+                native.realm,
+                return_to,
+                origin.unwrap_or_else(native_function_host_origin),
+                execution_budget,
+            )
+        }
+        NativeFunctionKind::IntlDateTimeFormatSupportedLocalesOf => {
+            begin_intl_date_time_format_supported_locales_of(
+                runtime,
+                inputs.arguments,
+                native.realm,
+                return_to,
+                origin.unwrap_or_else(native_function_host_origin),
+                execution_budget,
+            )
+        }
+        NativeFunctionKind::IntlDateTimeFormatPrototype(method) => {
+            begin_intl_date_time_format_prototype(
+                runtime,
+                method,
+                &inputs.receiver,
+                inputs.arguments,
+                native.realm,
+                return_to,
+                origin.unwrap_or_else(native_function_host_origin),
+                execution_budget,
+            )
+        }
+        NativeFunctionKind::IntlDateTimeFormatFormat => begin_intl_date_time_format_format(
             runtime,
             &inputs.receiver,
             inputs.arguments,

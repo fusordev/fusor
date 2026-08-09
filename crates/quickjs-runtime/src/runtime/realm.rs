@@ -696,6 +696,11 @@ impl RealmBuildTransaction<'_> {
                     NativeFunctionKind::IntlNumberFormatConstructor,
                 ),
                 number_format_format: function(NativeFunctionKind::IntlNumberFormatFormat),
+                date_time_format_prototype: object(IntrinsicObjectId::IntlDateTimeFormatPrototype),
+                date_time_format_constructor: function(
+                    NativeFunctionKind::IntlDateTimeFormatConstructor,
+                ),
+                date_time_format_format: function(NativeFunctionKind::IntlDateTimeFormatFormat),
                 locale_prototype: object(IntrinsicObjectId::IntlLocalePrototype),
                 locale_constructor: function(NativeFunctionKind::IntlLocaleConstructor),
             },

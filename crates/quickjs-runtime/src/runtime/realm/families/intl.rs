@@ -14,7 +14,8 @@ use crate::runtime::realm::{
     },
 };
 use crate::runtime::{
-    IntlCollatorPrototypeMethod, IntlLocalePrototypeMethod, IntlNumberFormatPrototypeMethod,
+    IntlCollatorPrototypeMethod, IntlDateTimeFormatPrototypeMethod, IntlLocalePrototypeMethod,
+    IntlNumberFormatPrototypeMethod,
 };
 
 pub(super) fn visit_objects(visit: ObjectSink<'_>) {
@@ -22,6 +23,7 @@ pub(super) fn visit_objects(visit: ObjectSink<'_>) {
         IntrinsicObjectId::Intl,
         IntrinsicObjectId::IntlCollatorPrototype,
         IntrinsicObjectId::IntlNumberFormatPrototype,
+        IntrinsicObjectId::IntlDateTimeFormatPrototype,
         IntrinsicObjectId::IntlLocalePrototype,
     ] {
         visit(object(
@@ -32,6 +34,10 @@ pub(super) fn visit_objects(visit: ObjectSink<'_>) {
     }
 }
 
+#[allow(
+    clippy::too_many_lines,
+    reason = "the declarative Intl function graph stays together for identity and arity audits"
+)]
 pub(super) fn visit_functions(visit: FunctionSink<'_>) {
     visit(ordinary(
         NativeFunctionKind::IntlGetCanonicalLocales,
@@ -98,6 +104,33 @@ pub(super) fn visit_functions(visit: FunctionSink<'_>) {
         1,
     ));
     visit(ordinary(
+        NativeFunctionKind::IntlDateTimeFormatConstructor,
+        IntrinsicNameSpec::RealmName(RealmNameId::IntlDateTimeFormat),
+        0,
+    ));
+    visit(ordinary(
+        NativeFunctionKind::IntlDateTimeFormatSupportedLocalesOf,
+        IntrinsicNameSpec::RealmName(RealmNameId::IntlDateTimeFormatSupportedLocalesOf),
+        1,
+    ));
+    for method in IntlDateTimeFormatPrototypeMethod::ALL {
+        let name = if method.is_accessor() {
+            IntrinsicNameSpec::Literal("get format")
+        } else {
+            IntrinsicNameSpec::RealmName(RealmNameId::IntlDateTimeFormatPrototype(method))
+        };
+        visit(ordinary(
+            NativeFunctionKind::IntlDateTimeFormatPrototype(method),
+            name,
+            method.length(),
+        ));
+    }
+    visit(ordinary(
+        NativeFunctionKind::IntlDateTimeFormatFormat,
+        IntrinsicNameSpec::Literal(""),
+        1,
+    ));
+    visit(ordinary(
         NativeFunctionKind::IntlLocaleConstructor,
         IntrinsicNameSpec::RealmName(RealmNameId::Locale),
         1,
@@ -133,6 +166,11 @@ pub(super) fn visit_properties(visit: PropertySink<'_>) {
     ));
     let number_format_prototype =
         IntrinsicIdentity::Object(IntrinsicObjectId::IntlNumberFormatPrototype);
+    let date_time_format_constructor = IntrinsicIdentity::Function(IntrinsicFunctionId(
+        NativeFunctionKind::IntlDateTimeFormatConstructor,
+    ));
+    let date_time_format_prototype =
+        IntrinsicIdentity::Object(IntrinsicObjectId::IntlDateTimeFormatPrototype);
     let locale_constructor = IntrinsicIdentity::Function(IntrinsicFunctionId(
         NativeFunctionKind::IntlLocaleConstructor,
     ));
@@ -151,6 +189,11 @@ pub(super) fn visit_properties(visit: PropertySink<'_>) {
         intl,
         IntrinsicKeySpec::InternedString(RealmNameId::IntlNumberFormat),
         NativeFunctionKind::IntlNumberFormatConstructor,
+    ));
+    visit(method(
+        intl,
+        IntrinsicKeySpec::InternedString(RealmNameId::IntlDateTimeFormat),
+        NativeFunctionKind::IntlDateTimeFormatConstructor,
     ));
     visit(method(
         intl,
@@ -260,6 +303,50 @@ pub(super) fn visit_properties(visit: PropertySink<'_>) {
         IntrinsicKeySpec::WellKnownSymbol(PredefinedAtom::SymbolToStringTag),
         PropertyLayout::data(false, false, true),
         IntrinsicValueSpec::String(IntrinsicStringSpec::Literal("Intl.NumberFormat")),
+    ));
+
+    visit(data(
+        date_time_format_constructor,
+        IntrinsicKeySpec::PredefinedString(PredefinedAtom::Prototype),
+        CONSTRUCTOR_PROTOTYPE_PROPERTY,
+        IntrinsicValueSpec::Object(IntrinsicObjectId::IntlDateTimeFormatPrototype),
+    ));
+    visit(method(
+        date_time_format_constructor,
+        IntrinsicKeySpec::InternedString(RealmNameId::IntlDateTimeFormatSupportedLocalesOf),
+        NativeFunctionKind::IntlDateTimeFormatSupportedLocalesOf,
+    ));
+    visit(method(
+        date_time_format_prototype,
+        IntrinsicKeySpec::PredefinedString(PredefinedAtom::Constructor),
+        NativeFunctionKind::IntlDateTimeFormatConstructor,
+    ));
+    for method_id in IntlDateTimeFormatPrototypeMethod::ALL {
+        let key =
+            IntrinsicKeySpec::InternedString(RealmNameId::IntlDateTimeFormatPrototype(method_id));
+        if method_id.is_accessor() {
+            visit(accessor(
+                date_time_format_prototype,
+                key,
+                PropertyLayout::accessor(false, true),
+                Some(IntrinsicFunctionId(
+                    NativeFunctionKind::IntlDateTimeFormatPrototype(method_id),
+                )),
+                None,
+            ));
+        } else {
+            visit(method(
+                date_time_format_prototype,
+                key,
+                NativeFunctionKind::IntlDateTimeFormatPrototype(method_id),
+            ));
+        }
+    }
+    visit(data(
+        date_time_format_prototype,
+        IntrinsicKeySpec::WellKnownSymbol(PredefinedAtom::SymbolToStringTag),
+        PropertyLayout::data(false, false, true),
+        IntrinsicValueSpec::String(IntrinsicStringSpec::Literal("Intl.DateTimeFormat")),
     ));
 
     visit(data(

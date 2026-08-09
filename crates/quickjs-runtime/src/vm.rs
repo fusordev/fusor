@@ -72,16 +72,17 @@ use crate::{
         EnvironmentBinding, FinalizationRegistryMethod, FrameBindingAddress,
         FunctionImplementation, GlobalNumericFunction, HeapFunction, InstalledCode,
         InstalledConstant, InstalledRoot, InstalledTemplate, IntlCollatorPrototypeMethod,
-        IntlLocalePrototypeMethod, IntlNumberFormatPrototypeMethod, LocaleStringMethod, MapMethod,
-        MathMethod, NativeFunction, NativeFunctionKind, NumberFormat, NumberPredicate,
-        PreparedIteratorResultPlan, PromiseCapabilityCapture, PromiseCapabilityExecutor,
-        PromiseCombinatorElementFunction, PromiseCombinatorElementKind, PromiseCombinatorKind,
-        PromiseCombinatorShared, PromiseFinallyFunction, PromiseFinallyThunkKind, PromiseJob,
-        PromiseResolvingFunction, PromiseResolvingKind, PromiseStatic, RealmGlobalBindingState,
-        ReflectMethod, RegExpFlag, RegExpSymbolMethod, SetMethod, SetPrototypeOutcome,
-        StringArgument, StringMethod, TemporalDurationPrototypeMethod,
-        TemporalDurationStaticMethod, TemporalInstantPrototypeMethod, TemporalInstantStaticMethod,
-        TemporalNowMethod, TemporalPlainDatePrototypeMethod, TemporalPlainDateStaticMethod,
+        IntlDateTimeFormatPrototypeMethod, IntlLocalePrototypeMethod,
+        IntlNumberFormatPrototypeMethod, LocaleStringMethod, MapMethod, MathMethod, NativeFunction,
+        NativeFunctionKind, NumberFormat, NumberPredicate, PreparedIteratorResultPlan,
+        PromiseCapabilityCapture, PromiseCapabilityExecutor, PromiseCombinatorElementFunction,
+        PromiseCombinatorElementKind, PromiseCombinatorKind, PromiseCombinatorShared,
+        PromiseFinallyFunction, PromiseFinallyThunkKind, PromiseJob, PromiseResolvingFunction,
+        PromiseResolvingKind, PromiseStatic, RealmGlobalBindingState, ReflectMethod, RegExpFlag,
+        RegExpSymbolMethod, SetMethod, SetPrototypeOutcome, StringArgument, StringMethod,
+        TemporalDurationPrototypeMethod, TemporalDurationStaticMethod,
+        TemporalInstantPrototypeMethod, TemporalInstantStaticMethod, TemporalNowMethod,
+        TemporalPlainDatePrototypeMethod, TemporalPlainDateStaticMethod,
         TemporalPlainDateTimePrototypeMethod, TemporalPlainDateTimeStaticMethod,
         TemporalPlainMonthDayPrototypeMethod, TemporalPlainMonthDayStaticMethod,
         TemporalPlainTimePrototypeMethod, TemporalPlainTimeStaticMethod,
@@ -875,6 +876,9 @@ enum NativeContinuation {
     IntlNumberFormatConstructor(Box<IntlNumberFormatConstructorContinuation>),
     IntlNumberFormatUnwrap(Box<IntlNumberFormatUnwrapContinuation>),
     IntlNumberFormatSupportedLocalesOf(Box<IntlNumberFormatSupportedLocalesContinuation>),
+    IntlDateTimeFormatConstructor(Box<IntlDateTimeFormatConstructorContinuation>),
+    IntlDateTimeFormatUnwrap(Box<IntlDateTimeFormatUnwrapContinuation>),
+    IntlDateTimeFormatSupportedLocalesOf(Box<IntlDateTimeFormatSupportedLocalesContinuation>),
     IntlLocaleConstructor(Box<IntlLocaleConstructorContinuation>),
     DefineProperty(Box<DefinePropertyContinuation>),
     DefineProperties(Box<DefinePropertiesContinuation>),
@@ -1111,6 +1115,11 @@ impl NativeContinuation {
                 IntlNumberFormatUnwrapContinuation::retained_values()
             }
             Self::IntlNumberFormatSupportedLocalesOf(state) => state.retained_values(),
+            Self::IntlDateTimeFormatConstructor(state) => state.retained_values(),
+            Self::IntlDateTimeFormatUnwrap(_) => {
+                IntlDateTimeFormatUnwrapContinuation::retained_values()
+            }
+            Self::IntlDateTimeFormatSupportedLocalesOf(state) => state.retained_values(),
             Self::IntlLocaleConstructor(state) => state.retained_values(),
             Self::DefineProperty(state) => state.retained_values(),
             Self::DefineProperties(state) => state.retained_values(),
@@ -2495,6 +2504,12 @@ enum OperatorPrimitiveTarget {
     IntlNumberFormatSupportedLocalesOf(Box<IntlNumberFormatSupportedLocalesContinuation>),
     /// A `NumberFormat` operand awaiting `ToPrimitive(number)`.
     IntlNumberFormatValue(Box<IntlNumberFormatValueContinuation>),
+    /// One `%Intl.DateTimeFormat%` option awaiting primitive conversion.
+    IntlDateTimeFormatConstructor(Box<IntlDateTimeFormatConstructorContinuation>),
+    /// `Intl.DateTimeFormat.supportedLocalesOf` matcher awaiting `ToString`.
+    IntlDateTimeFormatSupportedLocalesOf(Box<IntlDateTimeFormatSupportedLocalesContinuation>),
+    /// A `DateTimeFormat` operand awaiting `ToPrimitive(number)`.
+    IntlDateTimeFormatValue(Box<IntlDateTimeFormatValueContinuation>),
     /// The first bound Collator comparison operand awaiting `ToString`.
     IntlCollatorCompareFirst(Box<IntlCollatorCompareContinuation>),
     /// The second bound Collator comparison operand awaiting `ToString`.
@@ -2839,6 +2854,9 @@ impl OperatorPrimitiveTarget {
             Self::IntlNumberFormatConstructor(state) => state.retained_values(),
             Self::IntlNumberFormatSupportedLocalesOf(state) => state.retained_values(),
             Self::IntlNumberFormatValue(state) => state.retained_values(),
+            Self::IntlDateTimeFormatConstructor(state) => state.retained_values(),
+            Self::IntlDateTimeFormatSupportedLocalesOf(state) => state.retained_values(),
+            Self::IntlDateTimeFormatValue(state) => state.retained_values(),
             Self::IntlCollatorCompareFirst(state) | Self::IntlCollatorCompareSecond(state) => {
                 state.retained_values()
             }
@@ -3279,6 +3297,11 @@ fn trace_operator_primitive_target_roots(
             state.trace_roots(mark);
         }
         OperatorPrimitiveTarget::IntlNumberFormatValue(state) => state.trace_roots(mark),
+        OperatorPrimitiveTarget::IntlDateTimeFormatConstructor(state) => state.trace_roots(mark),
+        OperatorPrimitiveTarget::IntlDateTimeFormatSupportedLocalesOf(state) => {
+            state.trace_roots(mark);
+        }
+        OperatorPrimitiveTarget::IntlDateTimeFormatValue(state) => state.trace_roots(mark),
         OperatorPrimitiveTarget::IntlCollatorCompareFirst(state)
         | OperatorPrimitiveTarget::IntlCollatorCompareSecond(state) => state.trace_roots(mark),
         OperatorPrimitiveTarget::ArrayFromAsyncLength { operation } => {
@@ -3390,6 +3413,11 @@ fn trace_native_continuation_roots(
         NativeContinuation::IntlNumberFormatConstructor(state) => state.trace_roots(mark),
         NativeContinuation::IntlNumberFormatUnwrap(state) => state.trace_roots(mark),
         NativeContinuation::IntlNumberFormatSupportedLocalesOf(state) => state.trace_roots(mark),
+        NativeContinuation::IntlDateTimeFormatConstructor(state) => state.trace_roots(mark),
+        NativeContinuation::IntlDateTimeFormatUnwrap(state) => state.trace_roots(mark),
+        NativeContinuation::IntlDateTimeFormatSupportedLocalesOf(state) => {
+            state.trace_roots(mark);
+        }
         NativeContinuation::IntlLocaleConstructor(state) => state.trace_roots(mark),
         NativeContinuation::DefineProperty(state) => state.trace_roots(mark),
         NativeContinuation::FunctionBind(state) => {

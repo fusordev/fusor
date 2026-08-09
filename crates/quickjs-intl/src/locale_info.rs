@@ -112,7 +112,15 @@ pub fn numbering_systems_of_locale(input: &str) -> Result<Vec<String>, InvalidLo
         components
             .numbering_system
             .filter(|value| !value.is_empty())
-            .unwrap_or_else(|| "latn".to_owned()),
+            .unwrap_or_else(|| {
+                match components.language.as_str() {
+                    "ar" => "arab",
+                    "fa" | "ps" | "ur" => "arabext",
+                    "bn" => "beng",
+                    _ => "latn",
+                }
+                .to_owned()
+            }),
     ])
 }
 

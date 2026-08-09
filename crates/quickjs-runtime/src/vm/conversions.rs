@@ -3160,6 +3160,33 @@ fn finish_operator_primitive_target(
                 execution_budget,
             )
         }
+        OperatorPrimitiveTarget::IntlDateTimeFormatConstructor(state) => {
+            advance_intl_date_time_format_constructor(
+                runtime,
+                *state,
+                Some(value),
+                return_to,
+                execution_budget,
+            )
+        }
+        OperatorPrimitiveTarget::IntlDateTimeFormatSupportedLocalesOf(state) => {
+            advance_intl_date_time_format_supported_locales(
+                runtime,
+                *state,
+                Some(value),
+                return_to,
+                execution_budget,
+            )
+        }
+        OperatorPrimitiveTarget::IntlDateTimeFormatValue(state) => {
+            finish_intl_date_time_format_value_primitive(
+                runtime,
+                *state,
+                value,
+                return_to,
+                execution_budget,
+            )
+        }
         OperatorPrimitiveTarget::IntlCollatorCompareFirst(state) => {
             finish_intl_collator_compare_first(runtime, *state, value, return_to, execution_budget)
         }

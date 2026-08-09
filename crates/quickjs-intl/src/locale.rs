@@ -121,9 +121,17 @@ pub fn canonicalize_locale_option(
             };
             validate_type_sequence(weekday).map(|()| weekday.to_owned())
         }
-        LocaleOptionKind::Calendar
-        | LocaleOptionKind::Collation
-        | LocaleOptionKind::NumberingSystem => validate_type_sequence(&lower).map(|()| lower),
+        LocaleOptionKind::Calendar => {
+            validate_type_sequence(&lower)?;
+            Ok(match lower.as_str() {
+                "ethiopic-amete-alem" => "ethioaa".to_owned(),
+                "islamicc" => "islamic-civil".to_owned(),
+                _ => lower,
+            })
+        }
+        LocaleOptionKind::Collation | LocaleOptionKind::NumberingSystem => {
+            validate_type_sequence(&lower).map(|()| lower)
+        }
     }
 }
 

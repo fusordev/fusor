@@ -435,6 +435,24 @@ impl Runtime {
                     &mut work,
                 );
                 mark_heap_reference(
+                    HeapReference::Object(intl.date_time_format_prototype),
+                    &mut marked_functions,
+                    &mut marked_objects,
+                    &mut work,
+                );
+                mark_heap_reference(
+                    HeapReference::Function(intl.date_time_format_constructor),
+                    &mut marked_functions,
+                    &mut marked_objects,
+                    &mut work,
+                );
+                mark_heap_reference(
+                    HeapReference::Function(intl.date_time_format_format),
+                    &mut marked_functions,
+                    &mut marked_objects,
+                    &mut work,
+                );
+                mark_heap_reference(
                     HeapReference::Object(intl.locale_prototype),
                     &mut marked_functions,
                     &mut marked_objects,
@@ -1218,6 +1236,17 @@ impl Runtime {
                             }
                             if let Some(format) = object
                                 .intl_number_format_state()
+                                .and_then(|state| state.bound_format)
+                            {
+                                mark_heap_reference(
+                                    HeapReference::Function(format),
+                                    &mut marked_functions,
+                                    &mut marked_objects,
+                                    &mut work,
+                                );
+                            }
+                            if let Some(format) = object
+                                .intl_date_time_format_state()
                                 .and_then(|state| state.bound_format)
                             {
                                 mark_heap_reference(

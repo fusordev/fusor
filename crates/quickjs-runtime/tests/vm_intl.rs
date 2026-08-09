@@ -425,3 +425,68 @@ fn number_format_notations_localized_specials_and_part_boundaries_are_spec_shape
         "345E-6|5.432E5|-000.0|非數值|integer:988,literal: ,compact:million|minusSign:-,integer:12,group:,,integer:300,percentSign:%|plusSign:+,integer:987,decimal:,,fraction:00,literal: ,currency:$|unit:時速,literal: ,integer:987,literal: ,unit:キロメートル|currency:$:startRange,integer:3:startRange,literal: – :shared,currency:$:endRange,integer:5:endRange"
     );
 }
+
+#[test]
+fn date_time_format_constructor_reads_options_in_normative_order() {
+    assert_eq!(
+        rendered(
+            "var names=['localeMatcher','calendar','numberingSystem','hour12','hourCycle',
+               'timeZone','weekday','era','year','month','day','dayPeriod','hour','minute',
+               'second','fractionalSecondDigits','timeZoneName','formatMatcher','dateStyle','timeStyle'];
+             var values={localeMatcher:'lookup',calendar:'gregory',numberingSystem:'latn',
+               hour12:false,hourCycle:'h12',timeZone:'UTC',weekday:'short',era:'short',
+               year:'numeric',month:'2-digit',day:'2-digit',dayPeriod:'short',hour:'2-digit',
+               minute:'2-digit',second:'2-digit',fractionalSecondDigits:3,timeZoneName:'short',
+               formatMatcher:'basic'};
+             var log=[];var options={};names.forEach(function(name){
+               Object.defineProperty(options,name,{get:function(){log.push(name);return values[name]}})});
+             var formatter=new Intl.DateTimeFormat('en-US',options);var ro=formatter.resolvedOptions();
+             var descriptor=Object.getOwnPropertyDescriptor(Intl.DateTimeFormat.prototype,'format');
+             return [Intl.DateTimeFormat.length,Intl.DateTimeFormat.name,
+               Object.getPrototypeOf(formatter)===Intl.DateTimeFormat.prototype,
+               Object.keys(ro).join(','),ro.locale,ro.calendar,ro.numberingSystem,ro.timeZone,
+               ro.hour12,descriptor.get.name,descriptor.enumerable,descriptor.configurable,
+               log.join(',')].join('|');"
+        ),
+        "0|DateTimeFormat|true|locale,calendar,numberingSystem,timeZone,hourCycle,hour12,weekday,era,year,month,day,dayPeriod,hour,minute,second,fractionalSecondDigits,timeZoneName|en-US|gregory|latn|UTC|false|get format|false|true|localeMatcher,calendar,numberingSystem,hour12,hourCycle,timeZone,weekday,era,year,month,day,dayPeriod,hour,minute,second,fractionalSecondDigits,timeZoneName,formatMatcher,dateStyle,timeStyle"
+    );
+}
+
+#[test]
+fn date_time_format_selects_default_fields_for_each_temporal_kind() {
+    assert_eq!(
+        rendered(
+            "var formatter=new Intl.DateTimeFormat('en-US',{calendar:'iso8601',timeZone:'UTC'});
+             var values=[new Temporal.Instant(1726773817847000000n),
+               new Temporal.PlainDateTime(2024,9,19,12,23,37,847),
+               new Temporal.PlainDate(2024,9,19),new Temporal.PlainYearMonth(2024,9),
+               new Temporal.PlainMonthDay(9,19),new Temporal.PlainTime(12,23,37,847)];
+             var types=values.map(function(value){return formatter.formatToParts(value)
+               .filter(function(part){return part.type!=='literal'})
+               .map(function(part){return part.type}).join(',')});
+             var range=formatter.formatRangeToParts(values[1],new Temporal.PlainDateTime(2024,9,20,12,23,37,847));
+             var sources=range.map(function(part){return part.source}).filter(function(source,index,all){return all.indexOf(source)===index});
+             return types.join('|')+'|'+sources.join(',');"
+        ),
+        "month,day,year,hour,minute,second,dayPeriod|month,day,year,hour,minute,second,dayPeriod|month,day,year|month,year|month,day|hour,minute,second,dayPeriod|startRange,shared,endRange"
+    );
+}
+
+#[test]
+fn date_locale_string_methods_share_date_time_format_option_semantics() {
+    assert_eq!(
+        rendered(
+            "var date=new Date(Date.UTC(2024,0,2,3,4,5));var base={timeZone:'UTC'};
+             var all=new Intl.DateTimeFormat('en-US',{timeZone:'UTC',year:'numeric',month:'numeric',day:'numeric',hour:'numeric',minute:'numeric',second:'numeric'}).format(date);
+             var onlyDate=new Intl.DateTimeFormat('en-US',{timeZone:'UTC',year:'numeric',month:'numeric',day:'numeric'}).format(date);
+             var onlyTime=new Intl.DateTimeFormat('en-US',{timeZone:'UTC',hour:'numeric',minute:'numeric',second:'numeric'}).format(date);
+             var dateError,timeError;
+             try{date.toLocaleDateString('en-US',{timeZone:'UTC',timeStyle:'short'})}catch(error){dateError=error.name}
+             try{date.toLocaleTimeString('en-US',{timeZone:'UTC',dateStyle:'short'})}catch(error){timeError=error.name}
+             return [date.toLocaleString('en-US',base)===all,
+               date.toLocaleDateString('en-US',base)===onlyDate,
+               date.toLocaleTimeString('en-US',base)===onlyTime,dateError,timeError].join('|');"
+        ),
+        "true|true|true|TypeError|TypeError"
+    );
+}

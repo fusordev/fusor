@@ -1477,7 +1477,7 @@ fn parse_non_decimal_integer(input: &str) -> Option<Decimal> {
     value.parse().ok()
 }
 
-fn numbering_system_digits(value: &str) -> Option<&'static str> {
+pub(crate) fn numbering_system_digits(value: &str) -> Option<&'static str> {
     Some(match value {
         "adlm" => "𞥐𞥑𞥒𞥓𞥔𞥕𞥖𞥗𞥘𞥙",
         "ahom" => "𑜰𑜱𑜲𑜳𑜴𑜵𑜶𑜷𑜸𑜹",
