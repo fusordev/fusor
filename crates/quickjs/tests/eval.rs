@@ -177,6 +177,14 @@ fn eval_preserves_lone_surrogates_in_legacy_regexp_literals() {
 }
 
 #[test]
+fn eval_legacy_string_escapes_follow_the_eval_source_strictness() {
+    evaluate(
+        r#"let sloppy=eval("'\\141'");let strict=false;try{eval("'use strict'; '\\1';");}catch(error){strict=error.constructor===SyntaxError;}sloppy==='a'&&strict;"#,
+        |value| assert_eq!(value.as_boolean(), Ok(Some(true))),
+    );
+}
+
+#[test]
 fn direct_eval_inside_with_observes_the_object_environment() {
     evaluate(
         "let object={name:'str2'};with(object){eval(\"'str2'===name\");}",

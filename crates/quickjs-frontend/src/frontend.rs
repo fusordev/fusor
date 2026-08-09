@@ -1786,7 +1786,7 @@ pub enum FrontendDiagnosticCode {
     UnsupportedClassAccessor,
     /// An Annex B HTML-style source comment.
     UnsupportedAnnexBHtmlComment,
-    /// An Annex B legacy octal numeric literal or string escape.
+    /// An Annex B legacy octal numeric literal.
     UnsupportedAnnexBLegacyOctal,
     /// A legacy `assert` import clause.
     UnsupportedLegacyImportAssertion,
@@ -2595,13 +2595,6 @@ fn quickjs_profile_diagnostics(nodes: &AstNodes<'_>) -> Vec<FrontendDiagnostic> 
                     message: "Annex B legacy octal literals are not supported",
                 });
             }
-            AstKind::StringLiteral(literal) if is_annex_b_legacy_octal_escape(literal) => {
-                violations.push(ProfileViolation {
-                    span: literal.span,
-                    code: FrontendDiagnosticCode::UnsupportedAnnexBLegacyOctal,
-                    message: "Annex B legacy octal escapes are not supported",
-                });
-            }
             AstKind::WithClause(clause) if clause.keyword == WithClauseKeyword::Assert => {
                 violations.push(ProfileViolation {
                     span: clause.span,
@@ -2645,35 +2638,6 @@ fn is_annex_b_legacy_octal_numeric_literal(literal: &oxc_ast::ast::NumericLitera
     };
     let bytes = raw.as_bytes();
     bytes.len() > 1 && bytes[0] == b'0' && bytes[1].is_ascii_digit()
-}
-
-fn is_annex_b_legacy_octal_escape(literal: &oxc_ast::ast::StringLiteral<'_>) -> bool {
-    let Some(raw) = literal.raw.as_ref().map(oxc_ast::ast::Str::as_str) else {
-        return false;
-    };
-    let bytes = raw.as_bytes();
-    let mut index = 1;
-    while index + 1 < bytes.len() {
-        if bytes[index] != b'\\' {
-            index += 1;
-            continue;
-        }
-        let mut slash_count = 1;
-        index += 1;
-        while index < bytes.len() && bytes[index] == b'\\' {
-            slash_count += 1;
-            index += 1;
-        }
-        if slash_count % 2 == 1
-            && index < bytes.len()
-            && (matches!(bytes[index], b'1'..=b'9')
-                || (bytes[index] == b'0' && bytes.get(index + 1).is_some_and(u8::is_ascii_digit)))
-        {
-            return true;
-        }
-        index += 1;
-    }
-    false
 }
 
 fn push_call_argument_prefix_violation(

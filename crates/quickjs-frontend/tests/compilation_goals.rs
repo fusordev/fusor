@@ -288,15 +288,15 @@ fn async_global_script_rejects_annex_b_html_comments() {
 }
 
 #[test]
-fn scripts_reject_annex_b_legacy_octal_literals_and_escapes() {
-    for source in ["010;", "09;", r"'\1';", r"'\8';", r"'\08';"] {
+fn scripts_reject_annex_b_legacy_octal_numeric_literals() {
+    for source in ["010;", "09;"] {
         let allocator = Allocator::new();
         let error = parse(
             &allocator,
             source,
             FrontendOptions::for_goal(CompilationGoal::GlobalScript(GlobalScriptGoal::new())),
         )
-        .expect_err("Annex B legacy octal syntax must be rejected");
+        .expect_err("Annex B legacy octal numeric syntax must be rejected");
         assert_eq!(
             error.stage(),
             DiagnosticStage::Profile,
@@ -306,6 +306,40 @@ fn scripts_reject_annex_b_legacy_octal_literals_and_escapes() {
             diagnostic.code == FrontendDiagnosticCode::UnsupportedAnnexBLegacyOctal
         }));
     }
+}
+
+#[test]
+fn sloppy_scripts_admit_annex_b_legacy_string_escapes() {
+    for source in [r"'\1';", r"'\8';", r"'\08';"] {
+        let allocator = Allocator::new();
+        parse(
+            &allocator,
+            source,
+            FrontendOptions::for_goal(CompilationGoal::GlobalScript(GlobalScriptGoal::new())),
+        )
+        .unwrap_or_else(|error| panic!("sloppy Script should admit {source:?}: {error}"));
+    }
+}
+
+#[test]
+fn strict_scripts_reject_annex_b_legacy_string_escapes_as_early_errors() {
+    for source in [r#""use strict"; '\1';"#, r#""use strict"; '\8';"#] {
+        let allocator = Allocator::new();
+        let error = parse(
+            &allocator,
+            source,
+            FrontendOptions::for_goal(CompilationGoal::GlobalScript(GlobalScriptGoal::new())),
+        )
+        .expect_err("strict Script must reject Annex B legacy string escapes");
+        assert!(matches!(
+            error.stage(),
+            DiagnosticStage::Parser | DiagnosticStage::Semantic
+        ));
+    }
+
+    let error = parse_global(r"'\1';", GlobalScriptGoal::new().with_forced_strict(true))
+        .expect_err("host-forced strict Script must reject a legacy string escape");
+    assert_eq!(error.stage(), DiagnosticStage::Semantic);
 }
 
 #[test]
