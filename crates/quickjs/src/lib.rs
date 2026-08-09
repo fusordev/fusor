@@ -13,7 +13,9 @@ use quickjs_bytecode::{
     CompilerInitializationPolicy, CompilerWritePolicy, FunctionGraphVerificationLimits,
     VerificationLimits, VerifiedBytecode,
 };
-use quickjs_compiler::{CompilationContext, CompilerError, LeafCompilationError};
+use quickjs_compiler::{
+    CompilationContext, CompilerError, LeafCompilationError, SourceTextSubstitution,
+};
 pub use quickjs_diagnostics::{
     ByteSpan, ColumnEncoding, Diagnostic, DiagnosticCode, DiagnosticCodeError, DiagnosticLabel,
     DiagnosticReport, DiagnosticSeverity, LineColumn, OriginalLocation, PrettyDiagnostic,
@@ -33,7 +35,7 @@ use quickjs_frontend::{
     DirectEvalVariableEnvironment as FrontendDirectEvalVariableEnvironment, DynamicFunctionError,
     DynamicFunctionKind, DynamicFunctionSource, FrontendError, FrontendLimits, FrontendOptions,
     GlobalScriptGoal, IndirectEvalGoal, PreparedDynamicFunctionSource, RegisteredFrontendError,
-    SourceFragment, with_dynamic_function_source_and_prepared, with_parsed_program,
+    SourceFragment, Span, with_dynamic_function_source_and_prepared, with_parsed_program,
     with_registered_program,
 };
 use quickjs_runtime::{
@@ -388,7 +390,7 @@ fn frontend_diagnostic_report(
 fn source_label(
     sources: &SourceRegistry,
     source_id: &SourceId,
-    span: quickjs_frontend::Span,
+    span: Span,
     message: &'static str,
     primary: bool,
 ) -> Result<DiagnosticLabel, ScriptDiagnosticError> {
@@ -489,12 +491,7 @@ fn lowering_code(error: &LeafCompilationError) -> &'static str {
     }
 }
 
-fn lowering_spans(
-    error: &LeafCompilationError,
-) -> (
-    Option<quickjs_frontend::Span>,
-    Option<quickjs_frontend::Span>,
-) {
+fn lowering_spans(error: &LeafCompilationError) -> (Option<Span>, Option<Span>) {
     match error {
         LeafCompilationError::Unsupported { span, .. }
         | LeafCompilationError::CookedStringDecoding { span, .. }
@@ -956,14 +953,18 @@ fn compile_indirect_eval_source(
     source: &JsString,
     limits: DynamicFunctionLimits,
 ) -> Result<Arc<VerifiedBytecode>, DynamicFunctionCompileFailure> {
-    let source = js_string_to_utf8(source, RuntimeSourceFragment::IndirectEval)?;
+    let source = js_eval_source_to_utf8(source, RuntimeSourceFragment::IndirectEval)?;
     let compiled = with_parsed_program(
-        &source,
+        &source.text,
         FrontendOptions::for_goal(CompilationGoal::IndirectEval(IndirectEvalGoal::new()))
             .with_limits(limits.frontend),
         |unit| {
-            let compiler = CompilationContext::new_with_source_name(unit, Arc::from("<eval>"))
-                .map_err(DynamicFunctionCompilerError::Planning)?;
+            let compiler = CompilationContext::new_with_source_name_and_substitutions(
+                unit,
+                Arc::from("<eval>"),
+                Arc::clone(&source.substitutions),
+            )
+            .map_err(DynamicFunctionCompilerError::Planning)?;
             compiler
                 .compile_indirect_eval_script_with_all_limits(
                     limits.bytecode,
@@ -992,7 +993,7 @@ fn compile_direct_eval_source(
     request: &DirectEvalCompileRequest,
     limits: DynamicFunctionLimits,
 ) -> Result<Arc<VerifiedBytecode>, DynamicFunctionCompileFailure> {
-    let source = js_string_to_utf8(request.source(), RuntimeSourceFragment::DirectEval)?;
+    let source = js_eval_source_to_utf8(request.source(), RuntimeSourceFragment::DirectEval)?;
     let mut binding_names = Vec::new();
     binding_names
         .try_reserve_exact(request.bindings().len())
@@ -1049,12 +1050,16 @@ fn compile_direct_eval_source(
             request.variable_environment(),
         ));
     let compiled = with_parsed_program(
-        &source,
+        &source.text,
         FrontendOptions::for_goal(CompilationGoal::DirectEval(context))
             .with_limits(limits.frontend),
         |unit| {
-            let compiler = CompilationContext::new_with_source_name(unit, Arc::from("<eval>"))
-                .map_err(DynamicFunctionCompilerError::Planning)?;
+            let compiler = CompilationContext::new_with_source_name_and_substitutions(
+                unit,
+                Arc::from("<eval>"),
+                Arc::clone(&source.substitutions),
+            )
+            .map_err(DynamicFunctionCompilerError::Planning)?;
             compiler
                 .compile_direct_eval_script_with_all_limits(
                     limits.bytecode,
@@ -1552,10 +1557,32 @@ fn map_service_compilation_error(
     }
 }
 
+struct Utf8RuntimeSource {
+    text: String,
+    substitutions: Arc<[SourceTextSubstitution]>,
+}
+
 fn js_string_to_utf8(
     source: &JsString,
     fragment: RuntimeSourceFragment,
 ) -> Result<String, DynamicFunctionCompileFailure> {
+    let encoded = encode_runtime_source(source, fragment, false)?;
+    debug_assert!(encoded.substitutions.is_empty());
+    Ok(encoded.text)
+}
+
+fn js_eval_source_to_utf8(
+    source: &JsString,
+    fragment: RuntimeSourceFragment,
+) -> Result<Utf8RuntimeSource, DynamicFunctionCompileFailure> {
+    encode_runtime_source(source, fragment, true)
+}
+
+fn encode_runtime_source(
+    source: &JsString,
+    fragment: RuntimeSourceFragment,
+    preserve_lone_surrogates: bool,
+) -> Result<Utf8RuntimeSource, DynamicFunctionCompileFailure> {
     let code_unit_count = usize::try_from(source.len()).map_err(|error| {
         engine_failure_with_source(
             DynamicFunctionEngineStage::SourceConversion,
@@ -1578,23 +1605,60 @@ fn js_string_to_utf8(
         )
     })?;
 
+    let mut substitutions = Vec::new();
     let mut offset = 0_u32;
     let mut units = source.code_units().peekable();
     while let Some(unit) = units.next() {
-        let (scalar, width) = if (0xd800..=0xdbff).contains(&unit) {
-            let Some(&low) = units.peek() else {
-                return Err(lone_surrogate(fragment, offset, unit));
-            };
-            if !(0xdc00..=0xdfff).contains(&low) {
-                return Err(lone_surrogate(fragment, offset, unit));
-            }
+        let paired_low = (0xd800..=0xdbff)
+            .contains(&unit)
+            .then(|| {
+                units
+                    .peek()
+                    .copied()
+                    .filter(|low| (0xdc00..=0xdfff).contains(low))
+            })
+            .flatten();
+        let (scalar, width) = if let Some(low) = paired_low {
             let _ = units.next();
             (
                 0x1_0000 + ((u32::from(unit) - 0xd800) << 10) + (u32::from(low) - 0xdc00),
                 2,
             )
-        } else if (0xdc00..=0xdfff).contains(&unit) {
-            return Err(lone_surrogate(fragment, offset, unit));
+        } else if (0xd800..=0xdfff).contains(&unit) {
+            if !preserve_lone_surrogates {
+                return Err(lone_surrogate(fragment, offset, unit));
+            }
+            substitutions.try_reserve(1).map_err(|error| {
+                engine_failure_with_source(
+                    DynamicFunctionEngineStage::SourceConversion,
+                    format!("could not reserve a UTF-16 substitution for {fragment}"),
+                    error,
+                )
+            })?;
+            let start = u32::try_from(text.len()).map_err(|error| {
+                engine_failure_with_source(
+                    DynamicFunctionEngineStage::SourceConversion,
+                    format!("{fragment} parser byte offset does not fit u32"),
+                    error,
+                )
+            })?;
+            // A noncharacter is a lexically inert scalar placeholder. Exact
+            // source position, not scalar identity, selects the UTF-16 value
+            // restored by the compiler.
+            text.push('\u{fdd0}');
+            let end = u32::try_from(text.len()).map_err(|error| {
+                engine_failure_with_source(
+                    DynamicFunctionEngineStage::SourceConversion,
+                    format!("{fragment} parser byte offset does not fit u32"),
+                    error,
+                )
+            })?;
+            substitutions.push(SourceTextSubstitution::new(
+                Span::new(start, end),
+                Arc::from([unit]),
+            ));
+            offset = offset.saturating_add(1);
+            continue;
         } else {
             (u32::from(unit), 1)
         };
@@ -1607,7 +1671,10 @@ fn js_string_to_utf8(
         text.push(character);
         offset += width;
     }
-    Ok(text)
+    Ok(Utf8RuntimeSource {
+        text,
+        substitutions: Arc::from(substitutions),
+    })
 }
 
 fn lone_surrogate(

@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::{borrow::Cow, collections::HashMap};
 
 use oxc_allocator::Allocator;
 use oxc_regular_expression::{
@@ -31,10 +31,15 @@ pub(crate) fn compile(
     }
     let flags = RegExpFlags::parse(flag_source)?;
     let canonical_flags = flags.canonical_source();
+    let pattern_source = annex_b_pattern_source(
+        pattern_source,
+        flags.unicode_mode(),
+        limits.max_pattern_bytes,
+    )?;
     let allocator = Allocator::default();
     let pattern = LiteralParser::new(
         &allocator,
-        pattern_source,
+        &pattern_source,
         Some(&canonical_flags),
         Options::default(),
     )
@@ -56,16 +61,106 @@ pub(crate) fn validate_literal(
     }
     let flags = RegExpFlags::parse(flag_source)?;
     let canonical_flags = flags.canonical_source();
+    let pattern_source =
+        annex_b_pattern_source(pattern_source, flags.unicode_mode(), max_pattern_bytes)?;
     let allocator = Allocator::default();
     LiteralParser::new(
         &allocator,
-        pattern_source,
+        &pattern_source,
         Some(&canonical_flags),
         Options::default(),
     )
     .parse()
     .map_err(|error| CompileError::Syntax(error.to_string()))?;
     Ok(())
+}
+
+/// Normalizes the two Annex B productions that the published Oxc regexp AST
+/// currently loses information for. The rewrite is compiler-internal: the
+/// embedding retains the original pattern for `RegExp.prototype.source`.
+///
+/// In non-Unicode mode, `\c` followed by a decimal digit or `_` denotes the
+/// code unit modulo 32 only inside a character class. A three-digit legacy
+/// octal escape beginning with 4--7 consumes two octal digits and leaves the
+/// third digit as a following `PatternCharacter`. Rewriting both forms to an
+/// equivalent hexadecimal escape preserves those ordered grammar semantics
+/// without patching or vendoring the parser dependency.
+fn annex_b_pattern_source(
+    source: &str,
+    unicode_mode: bool,
+    max_pattern_bytes: usize,
+) -> Result<Cow<'_, str>, CompileError> {
+    const HEX: &[u8; 16] = b"0123456789ABCDEF";
+
+    if unicode_mode {
+        return Ok(Cow::Borrowed(source));
+    }
+
+    let bytes = source.as_bytes();
+    let mut replacements = Vec::new();
+    let mut in_class = false;
+    let mut index = 0;
+    while index < bytes.len() {
+        if bytes[index] == b'\\' {
+            if in_class
+                && bytes.get(index + 1) == Some(&b'c')
+                && let Some(&control) = bytes.get(index + 2)
+                && (control.is_ascii_digit() || control == b'_')
+            {
+                replacements.push((index, index + 3, control % 32));
+                index += 3;
+                continue;
+            }
+
+            if let (Some(&first @ b'4'..=b'7'), Some(&second @ b'0'..=b'7'), Some(b'0'..=b'7')) = (
+                bytes.get(index + 1),
+                bytes.get(index + 2),
+                bytes.get(index + 3),
+            ) {
+                replacements.push((index, index + 3, (first - b'0') * 8 + (second - b'0')));
+                index += 3;
+                continue;
+            }
+
+            index = index.saturating_add(2);
+            continue;
+        }
+
+        match bytes[index] {
+            b'[' if !in_class => in_class = true,
+            b']' if in_class => in_class = false,
+            _ => {}
+        }
+        index += 1;
+    }
+
+    if replacements.is_empty() {
+        return Ok(Cow::Borrowed(source));
+    }
+
+    let normalized_len = source
+        .len()
+        .checked_add(replacements.len())
+        .ok_or(CompileError::ResourceLimit("source length"))?;
+    if normalized_len > max_pattern_bytes {
+        return Err(CompileError::ResourceLimit("source length"));
+    }
+    let mut normalized = String::new();
+    normalized
+        .try_reserve_exact(normalized_len)
+        .map_err(|_| CompileError::ResourceLimit("source allocation"))?;
+    let mut copied = 0;
+    for (start, end, value) in replacements {
+        normalized.push_str(&source[copied..start]);
+        normalized.push('\\');
+        normalized.push('x');
+        normalized.push(char::from(HEX[usize::from(value >> 4)]));
+        normalized.push(char::from(HEX[usize::from(value & 0x0f)]));
+        copied = end;
+    }
+    normalized.push_str(&source[copied..]);
+    debug_assert_eq!(normalized.len(), normalized_len);
+    Ok(Cow::Owned(normalized))
 }
 
 #[derive(Clone, Debug)]

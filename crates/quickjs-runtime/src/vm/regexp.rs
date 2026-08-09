@@ -1412,6 +1412,14 @@ pub(super) fn begin_regexp_compile(
     if runtime.regexp_state(*object)?.is_none() {
         return regexp_type_error(realm, origin, "not a RegExp");
     }
+    let intrinsic_prototype = HeapReference::Object(runtime.realm_regexp_prototype(realm)?);
+    if runtime
+        .object_record(HeapReference::Object(*object))?
+        .prototype()
+        != Some(intrinsic_prototype)
+    {
+        return regexp_type_error(realm, origin, "not a direct RegExp instance");
+    }
     let pattern = arguments.take_first_or_undefined();
     let flags = arguments.take_first_or_undefined();
     let (pattern, flags) = if let StoredValue::Object(pattern_object) = pattern {

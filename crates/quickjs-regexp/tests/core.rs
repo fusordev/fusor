@@ -36,6 +36,56 @@ fn ranges(pattern: &str, flags: &str, input: &str) -> Vec<Option<(usize, usize)>
         .collect()
 }
 
+fn matched_text(pattern: &str, flags: &str, input: &str) -> Option<String> {
+    let input_utf16 = input.encode_utf16().collect::<Vec<_>>();
+    compile(pattern, flags)
+        .execute(&input_utf16, 0, ExecLimits::default())
+        .expect("test execution must stay within its limits")
+        .map(|matched| String::from_utf16_lossy(&input_utf16[matched.range()]))
+}
+
+#[test]
+fn annex_b_class_control_letters_use_modulo_32_inside_classes_only() {
+    assert_eq!(matched_text(r"\c0", "", "\u{f}\u{10}\u{11}"), None);
+    assert_eq!(
+        matched_text(r"[\c0]", "", "\u{f}\u{10}\u{11}"),
+        Some("\u{10}".to_owned())
+    );
+    assert_eq!(
+        matched_text(r"[\c00]+", "", "\u{f}0\u{10}\u{11}"),
+        Some("0\u{10}".to_owned())
+    );
+    assert_eq!(
+        matched_text(r"[\c_]", "", "\u{1e}\u{1f} "),
+        Some("\u{1f}".to_owned())
+    );
+}
+
+#[test]
+fn annex_b_legacy_octal_escapes_stop_at_the_specified_digit_count() {
+    for (pattern, input, expected) in [
+        (r"\1", "\u{1}", "\u{1}"),
+        (r"\00", "\0", "\0"),
+        (r"\30", "\u{18}", "\u{18}"),
+        (r"\77", "?", "?"),
+        (r"\400", " 0", " 0"),
+        (r"\770", "?0", "?0"),
+        (r"\377", "\u{ff}", "\u{ff}"),
+        (r"\0111", "\t1", "\t1"),
+        (r"\0022", "\u{2}2", "\u{2}2"),
+    ] {
+        assert_eq!(
+            matched_text(pattern, "", input),
+            Some(expected.to_owned()),
+            "pattern {pattern}"
+        );
+    }
+    assert_eq!(
+        matched_text(r"(.)\1", "", "a\u{1} aa"),
+        Some("aa".to_owned())
+    );
+}
+
 #[test]
 fn validates_and_canonicalizes_es2025_flags() {
     assert_eq!(compile("a", "ymigdsu").flags(), "dgimsuy");

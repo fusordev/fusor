@@ -67,7 +67,7 @@ use atoms::{
     record_string_candidate,
 };
 use constants::CompiledConstantPool;
-pub use context::{CompilationContext, CompilationExecutable};
+pub use context::{CompilationContext, CompilationExecutable, SourceTextSubstitution};
 #[cfg(test)]
 use control_flow::exact_source_span;
 use control_flow::{CompilerLabel, PlannedControlFlow, PlannedInstruction};

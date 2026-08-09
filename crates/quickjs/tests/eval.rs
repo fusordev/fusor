@@ -55,6 +55,19 @@ fn closed_direct_eval_returns_the_script_completion() {
 }
 
 #[test]
+fn eval_preserves_lone_surrogates_in_legacy_regexp_literals() {
+    evaluate(
+        "let unit=String.fromCharCode(0xD800);\
+         let source='/\\\\'+unit+'/';\
+         let direct=eval(source);\
+         let indirect=(0,eval)(source);\
+         direct.source===('\\\\'+unit)&&direct.test(unit)&&\
+           indirect.source===('\\\\'+unit)&&indirect.test(unit);",
+        |value| assert_eq!(value.as_boolean(), Ok(Some(true))),
+    );
+}
+
+#[test]
 fn direct_eval_inside_with_observes_the_object_environment() {
     evaluate(
         "let object={name:'str2'};with(object){eval(\"'str2'===name\");}",

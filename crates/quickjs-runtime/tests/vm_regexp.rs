@@ -299,6 +299,14 @@ fn regexp_compile_reinitializes_only_branded_receivers() {
         thrown("return RegExp.prototype.compile.call({}, 'a');").0,
         ExceptionKind::TypeError
     );
+    assert_eq!(
+        thrown(
+            "var Derived=class extends RegExp {};var value=new Derived('a');\
+             return RegExp.prototype.compile.call(value, 'b');"
+        )
+        .0,
+        ExceptionKind::TypeError
+    );
 }
 
 #[test]

@@ -24,6 +24,7 @@ use tokio::{runtime::Builder as TokioRuntimeBuilder, sync::mpsc};
 const DEFAULT_BASELINE: &str = "tests/test262/upstream";
 const DEFAULT_INSTRUCTION_FUEL: u64 = 10_000_000;
 const STRICT_PREFIX: &str = "\"use strict\";\n";
+const TEST262_DYNAMIC_COMPILATIONS: u64 = 1 << 16;
 const TEST262_WORKER_STACK_SIZE: usize = 64 * 1024 * 1024;
 const TEST262_PROGRESS_CHANNEL_PER_WORKER: usize = 2;
 
@@ -797,7 +798,7 @@ pub fn run_test262(options: &Test262Options) -> Result<bool, String> {
     }
     if options.verbose || options.progress_every.is_some() {
         println!(
-            "test262: selection filter={} files={} admitted-cases={} skipped-cases={} workers={} fuel={} timeout-ms={}",
+            "test262: selection filter={} files={} admitted-cases={} skipped-cases={} workers={} fuel={} dynamic-compilations={} timeout-ms={}",
             options.filter.as_deref().unwrap_or("test"),
             inventory.plans.len(),
             inventory.admitted_cases(),
@@ -808,6 +809,7 @@ pub fn run_test262(options: &Test262Options) -> Result<bool, String> {
                 options.jobs.min(inventory.admitted_cases())
             },
             options.instruction_fuel,
+            TEST262_DYNAMIC_COMPILATIONS,
             options.timeout_ms,
         );
         for (reason, count) in &inventory.skip_counts {
@@ -1110,8 +1112,14 @@ fn execute_case(
     let mut context = runtime
         .context(&realm)
         .map_err(|error| format!("could not enter realm: {error}"))?;
-    let limits = ScriptLimits::default()
-        .with_execution(ExecutionLimits::default().with_instruction_fuel(instruction_fuel));
+    // Generated regexp grammar tests intentionally evaluate almost every BMP
+    // code unit. Keep the engine default defensive, but give each isolated,
+    // deadline-bound Test262 case enough dynamic compilations to complete that
+    // normative inventory.
+    let execution_limits = ExecutionLimits::default()
+        .with_instruction_fuel(instruction_fuel)
+        .with_dynamic_compilations(TEST262_DYNAMIC_COMPILATIONS);
+    let limits = ScriptLimits::default().with_execution(execution_limits);
     let parse_negative = plan
         .metadata
         .negative
@@ -1322,6 +1330,7 @@ fn build_report(
             "admitted_feature": options.admit_feature,
             "limit": options.limit,
             "instruction_fuel": options.instruction_fuel,
+            "dynamic_compilations": TEST262_DYNAMIC_COMPILATIONS,
             "timeout_ms": options.timeout_ms,
             "jobs": options.jobs,
             "progress_every": options.progress_every,
@@ -1691,6 +1700,34 @@ throw new TypeError();",
         .expect("timeout failure");
         assert_eq!(failure.actual, "host-execution");
         assert!(failure.detail.contains("interrupted by the host"));
+    }
+
+    #[test]
+    fn test262_case_budget_admits_generated_eval_stress_shape() {
+        let plan = TestPlan {
+            path: PathBuf::from("generated-eval.js"),
+            relative: "generated-eval.js".to_owned(),
+            metadata: Metadata::default(),
+            modes: vec![TestMode::Raw],
+            skip_reason: None,
+        };
+        let harness = HarnessSources {
+            assert: String::new(),
+            sta: String::new(),
+            root: PathBuf::from("unused-harness"),
+        };
+        assert!(
+            execute_case(
+                &plan,
+                TestMode::Raw,
+                "for (var index = 0; index < 1025; index++) eval('0');",
+                &harness,
+                DEFAULT_INSTRUCTION_FUEL,
+                DEFAULT_TIMEOUT_MS,
+            )
+            .expect("runner result")
+            .is_none()
+        );
     }
 
     fn unique_temp_dir(label: &str) -> PathBuf {

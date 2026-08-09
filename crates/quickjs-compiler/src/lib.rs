@@ -83,7 +83,8 @@ pub use lowering::{
     CompilationContext, CompilationExecutable, CompiledClosureSource, CompiledClosureVariable,
     CompiledConstant, CompiledFunction, CompiledFunctionConstant, CompiledFunctionTree,
     CompiledLeafFunction, CompiledRealmGlobal, CompiledRealmGlobalSource, LeafCompilationError,
-    LocalSlot, LoweredLocal, RealmGlobalId, SourceInstruction, UnsupportedLeafFeature,
+    LocalSlot, LoweredLocal, RealmGlobalId, SourceInstruction, SourceTextSubstitution,
+    UnsupportedLeafFeature,
 };
 pub use storage::{
     BindingId, BindingStorage, CaptureSlot, CaptureSource, CompilationUnitKind, CompilerError,
