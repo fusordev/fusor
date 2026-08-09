@@ -67,6 +67,7 @@ pub(super) struct DefineMethodComputedOperand {
 pub(super) struct DefineClassOperand {
     pub(super) property: StaticPropertyOperand,
     pub(super) has_heritage: bool,
+    pub(super) has_instance_elements: bool,
 }
 
 pub(super) struct GlobalReferenceOperand {
@@ -235,9 +236,9 @@ pub(super) fn define_method_operand(
     })
 }
 
-/// Decodes the statically named, verified `define_class` operand.  The
-/// heritage bit selects the certified base (`0`) or derived (`1`) stack shape;
-/// all computed class forms remain outside this execution slice.
+/// Decodes the statically named, verified `define_class` operand. Bit zero
+/// selects the certified base or derived stack shape. Bit one records whether
+/// `InitializeInstanceElements` has work for the constructor.
 pub(super) fn define_class_operand(
     runtime: &Runtime,
     frame: &Frame,
@@ -245,7 +246,7 @@ pub(super) fn define_class_operand(
 ) -> Result<DefineClassOperand, EngineFault> {
     let Operands::AtomU8 {
         atom,
-        value: has_heritage @ (0 | 1),
+        value: value @ 0..=3,
     } = operands
     else {
         return Err(EngineFault::RuntimeInvariant {
@@ -254,7 +255,8 @@ pub(super) fn define_class_operand(
     };
     Ok(DefineClassOperand {
         property: static_property_at(runtime, frame, atom)?,
-        has_heritage: has_heritage != 0,
+        has_heritage: value & 1 != 0,
+        has_instance_elements: value & 2 != 0,
     })
 }
 

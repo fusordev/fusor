@@ -129,11 +129,12 @@ pub(super) fn verify_object_definition_provenance(
         verify_linear_append_inputs(id, decoded, function, &state)?;
         match opcode {
             FinalOpcode::DefineClass => match instruction.operands() {
-                Operands::AtomU8 { value: 0, .. }
-                    if !matches!(
-                        state.get(state.len().saturating_sub(2)),
-                        Some(ObjectDefinitionProvenance::LiteralUndefined)
-                    ) =>
+                Operands::AtomU8 { value, .. }
+                    if value & 1 == 0
+                        && !matches!(
+                            state.get(state.len().saturating_sub(2)),
+                            Some(ObjectDefinitionProvenance::LiteralUndefined)
+                        ) =>
                 {
                     return Err(BytecodeVerificationError::function(
                         id,
@@ -142,7 +143,7 @@ pub(super) fn verify_object_definition_provenance(
                         },
                     ));
                 }
-                Operands::AtomU8 { value: 1, .. } if state.len() < 3 => {
+                Operands::AtomU8 { value, .. } if value & 1 != 0 && state.len() < 3 => {
                     return Err(BytecodeVerificationError::function(
                         id,
                         BytecodeVerificationErrorKind::DefineClassTemplateMismatch {
@@ -150,7 +151,7 @@ pub(super) fn verify_object_definition_provenance(
                         },
                     ));
                 }
-                Operands::AtomU8 { value: 0 | 1, .. } => {}
+                Operands::AtomU8 { value: 0..=3, .. } => {}
                 _ => {
                     return Err(BytecodeVerificationError::function(
                         id,
@@ -442,8 +443,10 @@ fn transfer_object_definition_provenance(
         FinalOpcode::DefineClass => {
             let site = usize_to_u32(instruction_index);
             let heritage = match instruction.operands() {
-                Operands::AtomU8 { value: 0, .. } => 0,
-                Operands::AtomU8 { value: 1, .. } => 1,
+                Operands::AtomU8 {
+                    value: value @ 0..=3,
+                    ..
+                } => usize::from(value & 1),
                 _ => return Err(object_definition_error(id, decoded.pc())),
             };
             state.truncate(state.len() - 2 - heritage);

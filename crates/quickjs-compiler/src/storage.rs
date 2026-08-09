@@ -2098,9 +2098,18 @@ impl<'unit, 'arena, 'scope> Planner<'unit, 'arena, 'scope> {
                         {
                             break;
                         }
+                        ExecutableKind::Script { .. }
+                            if matches!(
+                                self.unit.goal(),
+                                CompilationGoal::DirectEval(context)
+                                    if context.capabilities().allows_new_target()
+                            ) =>
+                        {
+                            break;
+                        }
                         ExecutableKind::ClassDefaultConstructor
-                        | ExecutableKind::Script { .. }
-                        | ExecutableKind::Module => {
+                        | ExecutableKind::Module
+                        | ExecutableKind::Script { .. } => {
                             return unsupported(UnsupportedFeature::FunctionSyntheticBinding, span);
                         }
                     }
@@ -2187,9 +2196,17 @@ impl<'unit, 'arena, 'scope> Planner<'unit, 'arena, 'scope> {
                     return Ok(is_derived_class_constructor(nodes, candidate.node_id)
                         .then_some(executable));
                 }
-                ExecutableKind::ClassDefaultConstructor
-                | ExecutableKind::Script { .. }
-                | ExecutableKind::Module => return Ok(None),
+                ExecutableKind::ClassDefaultConstructor | ExecutableKind::Module => {
+                    return Ok(None);
+                }
+                ExecutableKind::Script { .. } => {
+                    return Ok(matches!(
+                        self.unit.goal(),
+                        CompilationGoal::DirectEval(context)
+                            if context.capabilities().allows_super_call()
+                    )
+                    .then_some(executable));
+                }
             }
         }
     }
@@ -2273,7 +2290,14 @@ impl<'unit, 'arena, 'scope> Planner<'unit, 'arena, 'scope> {
                     return Ok(is_home_object_method(nodes, candidate.node_id));
                 }
                 ExecutableKind::ClassDefaultConstructor => return Ok(true),
-                ExecutableKind::Script { .. } | ExecutableKind::Module => return Ok(false),
+                ExecutableKind::Script { .. } => {
+                    return Ok(matches!(
+                        self.unit.goal(),
+                        CompilationGoal::DirectEval(context)
+                            if context.capabilities().allows_super_property()
+                    ));
+                }
+                ExecutableKind::Module => return Ok(false),
             }
         }
     }

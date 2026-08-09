@@ -14,8 +14,8 @@ pub use oxc_ast::ast::Program;
 use oxc_ast::{
     AstKind,
     ast::{
-        Argument, Directive, ImportPhase, ModuleExportName, Statement, VariableDeclarationKind,
-        WithClauseKeyword,
+        Argument, Directive, Expression, ImportPhase, ModuleExportName, Statement,
+        VariableDeclarationKind, WithClauseKeyword,
     },
     builder::AstBuilder,
 };
@@ -3065,13 +3065,8 @@ fn parse_in_mode<'arena, 'scope>(
         | CompilationGoal::IndirectEval(_)
         | CompilationGoal::DynamicFunction(_) => (false, false),
     };
-    let mut parsed = if allow_top_level_await {
-        parse_async_global_script(allocator, source_text, mode)
-    } else {
-        Parser::new(allocator, source_text, mode.source_type())
-            .with_options(OxcParseOptions::default())
-            .parse()
-    };
+    let mut parsed =
+        parse_program_for_goal(allocator, source_text, goal, mode, allow_top_level_await);
 
     if parsed.panicked || !parsed.diagnostics.is_empty() {
         return Err(FrontendError::from_oxc(
@@ -3111,9 +3106,16 @@ fn parse_in_mode<'arena, 'scope>(
     let synthetic_strict_directive =
         force_strict && inject_forced_strict_directive(allocator, &mut parsed.program);
     let program: &'arena Program<'arena> = allocator.alloc(parsed.program);
-    let semantic = SemanticBuilder::new_compiler()
+    let mut semantic = SemanticBuilder::new_compiler()
         .with_build_nodes(true)
         .build(program);
+    if let CompilationGoal::DirectEval(context) = goal {
+        remove_admitted_direct_eval_diagnostics(
+            &mut semantic.diagnostics,
+            &semantic.semantic,
+            context.capabilities(),
+        );
+    }
     if allow_top_level_await
         && let Some(span) = async_script_await_identifier_span(&semantic.semantic)
     {
@@ -3154,6 +3156,120 @@ fn parse_in_mode<'arena, 'scope>(
         semantic,
         module_syntax,
         synthetic_strict_directive,
+    })
+}
+
+fn remove_admitted_direct_eval_diagnostics(
+    diagnostics: &mut Diagnostics,
+    semantic: &Semantic<'_>,
+    capabilities: DirectEvalCapabilities,
+) {
+    diagnostics.retain(|diagnostic| {
+        !is_admitted_direct_eval_super_diagnostic(diagnostic, semantic, capabilities)
+    });
+}
+
+fn parse_program_for_goal<'arena>(
+    allocator: &'arena Allocator,
+    source_text: &'arena str,
+    goal: CompilationGoal<'_>,
+    mode: ParseMode,
+    allow_top_level_await: bool,
+) -> ParserReturn<'arena> {
+    if allow_top_level_await {
+        parse_async_global_script(allocator, source_text, mode)
+    } else if let CompilationGoal::DirectEval(context) = goal {
+        parse_direct_eval_script(allocator, source_text, mode, context)
+    } else {
+        Parser::new(allocator, source_text, mode.source_type())
+            .with_options(OxcParseOptions::default())
+            .parse()
+    }
+}
+
+fn parse_direct_eval_script<'arena>(
+    allocator: &'arena Allocator,
+    source_text: &'arena str,
+    mode: ParseMode,
+    context: DirectEvalContext<'_>,
+) -> ParserReturn<'arena> {
+    let parsed = Parser::new(allocator, source_text, mode.source_type())
+        .with_options(OxcParseOptions::default())
+        .parse();
+    if !context.capabilities().allows_new_target()
+        || parsed.panicked
+        || parsed.diagnostics.is_empty()
+        || !parsed
+            .diagnostics
+            .iter()
+            .all(is_new_target_outside_function_diagnostic)
+    {
+        return parsed;
+    }
+
+    let mut contextual = Parser::new(
+        allocator,
+        source_text,
+        mode.source_type().with_commonjs(true),
+    )
+    .with_options(OxcParseOptions::default())
+    .parse();
+    contextual.program.source_type = mode.source_type();
+    contextual
+}
+
+fn is_new_target_outside_function_diagnostic(diagnostic: &OxcDiagnostic) -> bool {
+    diagnostic.to_string() == "Unexpected new.target expression"
+}
+
+fn is_admitted_direct_eval_super_diagnostic(
+    diagnostic: &OxcDiagnostic,
+    semantic: &Semantic<'_>,
+    capabilities: DirectEvalCapabilities,
+) -> bool {
+    let message = diagnostic.to_string();
+    let super_property = message
+        == "'super' can only be referenced in members of derived classes or object literal expressions.";
+    let super_call = message
+        == "Super calls are not permitted outside constructors or in nested functions inside constructors.";
+    if (!super_property || !capabilities.allows_super_property())
+        && (!super_call || !capabilities.allows_super_call())
+    {
+        return false;
+    }
+    let Some(label) = diagnostic.labels.first() else {
+        return false;
+    };
+    let source = label.inner();
+    let diagnostic_span = Span::new(
+        source.offset(),
+        source.offset().saturating_add(source.len()),
+    );
+    let nodes = semantic.nodes();
+    let Some((node_id, _)) = nodes.iter_enumerated().find(|(_, node)| {
+        let AstKind::Super(super_expression) = node.kind() else {
+            return false;
+        };
+        if super_property {
+            return super_expression.span == diagnostic_span;
+        }
+        matches!(
+            nodes.parent_kind(super_expression.node_id.get()),
+            AstKind::CallExpression(call)
+                if call.span == diagnostic_span
+                    && matches!(
+                        &call.callee,
+                        Expression::Super(callee) if callee.node_id.get() == super_expression.node_id.get()
+                    )
+        )
+    }) else {
+        return false;
+    };
+    !nodes.ancestor_ids(node_id).any(|ancestor| {
+        matches!(
+            nodes.kind(ancestor),
+            AstKind::Function(_) | AstKind::StaticBlock(_)
+        )
     })
 }
 

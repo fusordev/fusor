@@ -809,11 +809,11 @@ fn secondary_operand_domains_are_rejected_before_stack_or_capability_checks() {
             FinalOpcode::DefineClass,
             Operands::AtomU8 {
                 atom: AtomPoolIndex::new(0),
-                value: 2,
+                value: 4,
             },
             FunctionIndexDomains::new(1, 0, 0, 0, 0),
             SecondaryOperandField::DefineClassFlags,
-            2,
+            4,
         ),
         (
             FinalOpcode::IteratorCall,
@@ -868,6 +868,26 @@ fn supported_secondary_operand_boundaries_reach_stack_analysis() {
         FunctionIndexDomains::default(),
     );
     assert_eq!(apply.computed_stack_size(), 3);
+
+    let define_class = verify(
+        encode(&[
+            (FinalOpcode::Push0, Operands::NoneInt),
+            (FinalOpcode::Push0, Operands::NoneInt),
+            (FinalOpcode::Push0, Operands::NoneInt),
+            (
+                FinalOpcode::DefineClass,
+                Operands::AtomU8 {
+                    atom: AtomPoolIndex::new(0),
+                    value: 3,
+                },
+            ),
+            (FinalOpcode::Drop, Operands::None),
+            (FinalOpcode::Return, Operands::None),
+        ]),
+        3,
+        FunctionIndexDomains::new(1, 0, 0, 0, 0),
+    );
+    assert_eq!(define_class.computed_stack_size(), 3);
 }
 
 #[test]

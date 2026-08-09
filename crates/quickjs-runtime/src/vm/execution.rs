@@ -45,7 +45,7 @@ pub(super) fn plan_frame(
     active_frames: usize,
     active_frame_values: u64,
     supplied_argument_count: usize,
-    construction: bool,
+    entry: FrameEntryKind,
 ) -> Result<FramePlan, ExecutionError> {
     let observed_frames = usize_to_u64(active_frames).saturating_add(1);
     check_execution_limit(
@@ -138,6 +138,15 @@ pub(super) fn plan_frame(
     }
 
     let control_flow = verified.function().control_flow();
+    let executable_kind = verified.metadata().executable_kind();
+    let eval_in_function = !matches!(
+        executable_kind,
+        CompilerExecutableKind::GlobalScript
+            | CompilerExecutableKind::IndirectEvalScript
+            | CompilerExecutableKind::DirectEvalScript
+            | CompilerExecutableKind::DynamicFunctionScript
+            | CompilerExecutableKind::OrdinaryArrow
+    );
     let asynchronous = control_flow.function_header().kind() == FunctionKind::Async;
     let constructor_profile = if control_flow
         .function_header()
@@ -181,7 +190,7 @@ pub(super) fn plan_frame(
         .checked_add(local_count)
         .and_then(|value| value.checked_add(stack_capacity))
         .and_then(|value| value.checked_add(1))
-        .and_then(|value| value.checked_add(usize::from(construction)))
+        .and_then(|value| value.checked_add(usize::from(entry.has_new_target())))
         .and_then(|value| value.checked_add(if asynchronous { 3 } else { 0 }))
         .and_then(|value| {
             value.checked_add(
@@ -226,7 +235,8 @@ pub(super) fn plan_frame(
         stack_capacity,
         reserved_values: frame_values,
         arguments_snapshot_use,
-        construction,
+        entry,
+        eval_in_function,
         constructor_profile,
         strict,
         receiver_access,
@@ -348,9 +358,9 @@ pub(super) fn create_frame(
     return_to: Option<CallReturn>,
     dynamic_return: Option<DynamicFunctionReturn>,
 ) -> Result<Frame, ExecutionError> {
-    if plan.construction != new_target.is_some() {
+    if plan.entry.has_new_target() != new_target.is_some() {
         return Err(EngineFault::RuntimeInvariant {
-            message: "frame plan construction profile changed before allocation",
+            message: "frame plan new.target profile changed before allocation",
         }
         .into());
     }
@@ -377,6 +387,7 @@ pub(super) fn create_frame(
         .lexical_receiver
         .as_ref()
         .map(StoredValue::duplicate);
+    let lexical_eval_in_function = bytecode.lexical_eval_in_function;
     let lexical_new_target = bytecode.lexical_new_target;
     let lexical_derived_constructor = bytecode.lexical_derived_constructor;
     let lexical_derived_this = bytecode.lexical_derived_this;
@@ -610,41 +621,44 @@ pub(super) fn create_frame(
             additional: plan.stack_capacity,
         })?;
 
-    let (receiver, new_target) = if matches!(plan.receiver_access, ReceiverAccess::Lexical) {
-        if plan.construction || new_target.is_some() {
-            return Err(EngineFault::RuntimeInvariant {
-                message: "lexical arrow entered a construction frame",
+    let (receiver, eval_in_function, new_target) =
+        if matches!(plan.receiver_access, ReceiverAccess::Lexical) {
+            if plan.entry.is_construction() || new_target.is_some() {
+                return Err(EngineFault::RuntimeInvariant {
+                    message: "lexical arrow entered a construction frame",
+                }
+                .into());
             }
-            .into());
-        }
-        let receiver = lexical_receiver.ok_or(EngineFault::InvalidClosureEnvironment {
-            function: plan.template,
-        })?;
-        if lexical_derived_constructor.is_some() != lexical_derived_this.is_some()
-            || lexical_derived_this.is_some_and(|cell| !runtime.cells.contains(cell))
-        {
-            return Err(EngineFault::InvalidClosureEnvironment {
+            let receiver = lexical_receiver.ok_or(EngineFault::InvalidClosureEnvironment {
                 function: plan.template,
+            })?;
+            if lexical_derived_constructor.is_some() != lexical_derived_this.is_some()
+                || lexical_derived_this.is_some_and(|cell| !runtime.cells.contains(cell))
+            {
+                return Err(EngineFault::InvalidClosureEnvironment {
+                    function: plan.template,
+                }
+                .into());
             }
-            .into());
-        }
-        (receiver, lexical_new_target)
-    } else {
-        if lexical_receiver.is_some()
-            || lexical_new_target.is_some()
-            || lexical_derived_constructor.is_some()
-            || lexical_derived_this.is_some()
-        {
-            return Err(EngineFault::InvalidClosureEnvironment {
-                function: plan.template,
+            (receiver, lexical_eval_in_function, lexical_new_target)
+        } else {
+            if lexical_receiver.is_some()
+                || lexical_eval_in_function
+                || lexical_new_target.is_some()
+                || lexical_derived_constructor.is_some()
+                || lexical_derived_this.is_some()
+            {
+                return Err(EngineFault::InvalidClosureEnvironment {
+                    function: plan.template,
+                }
+                .into());
             }
-            .into());
-        }
-        (
-            normalize_receiver(runtime, realm, plan.receiver_access, receiver)?,
-            new_target,
-        )
-    };
+            (
+                normalize_receiver(runtime, realm, plan.receiver_access, receiver)?,
+                plan.eval_in_function,
+                new_target,
+            )
+        };
 
     let mut native_returns = Vec::new();
     if plan.asynchronous {
@@ -658,7 +672,7 @@ pub(super) fn create_frame(
     }
 
     let (derived_constructor, derived_this_cell) =
-        if plan.construction && plan.constructor_profile.is_derived() {
+        if plan.entry.is_construction() && plan.constructor_profile.is_derived() {
             check_execution_limit(
                 RuntimeResource::BindingCells,
                 runtime.limits.max_binding_cells,
@@ -716,13 +730,15 @@ pub(super) fn create_frame(
         inherited_eval_environment: inherited_eval_environment_marker,
         parameter_eval_boundary,
         receiver,
+        eval_in_function,
         new_target,
         instruction: plan.instruction,
         return_to,
         dynamic_return,
         native_returns,
         transient_cleanup_pending: false,
-        constructor_state: if plan.construction && plan.constructor_profile.is_derived() {
+        constructor_state: if plan.entry.is_construction() && plan.constructor_profile.is_derived()
+        {
             ConstructorState::DerivedUninitialized
         } else {
             ConstructorState::NonConstructor
@@ -2718,6 +2734,7 @@ pub(super) fn execute_one(
                 class.property.name,
                 constructor_parent,
                 prototype_parent,
+                class.has_instance_elements,
             )?;
             push(frame, StoredValue::Function(constructor));
             push(frame, StoredValue::Object(prototype));

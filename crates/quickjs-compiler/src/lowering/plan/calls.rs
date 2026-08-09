@@ -1,9 +1,10 @@
 use super::super::{
     Argument, AssignmentExpression, AssignmentOperator, AstKind, CallExpression, ChainExpression,
-    CompiledConstantPool, ComputedMemberExpression, Expression, FinalOpcode, FrameLayout, GetSpan,
-    LeafCompilationError, NewExpression, Operands, PlannedInstruction, PrivateFieldExpression,
-    Span, StaticMemberExpression, TaggedTemplateExpression, UnsupportedLeafFeature,
-    binding_has_scope, plan_push_integer, unsupported,
+    CompilationGoal, CompiledConstantPool, ComputedMemberExpression, ExecutableId, ExecutableKind,
+    Expression, FinalOpcode, FrameLayout, GetSpan, LeafCompilationError, NewExpression, Operands,
+    PlannedInstruction, PrivateFieldExpression, Span, StaticMemberExpression,
+    TaggedTemplateExpression, UnsupportedLeafFeature, binding_has_scope, plan_push_integer,
+    unsupported,
 };
 use super::expressions::{ExpressionPlanner, ExpressionWork};
 
@@ -27,6 +28,25 @@ pub(in crate::lowering) fn plan_direct_call(argument_count: u16, span: Span) -> 
 }
 
 impl<'arena> ExpressionPlanner<'_, '_, 'arena, '_> {
+    fn is_contextual_direct_eval_derived_constructor(
+        &self,
+        executable: ExecutableId,
+        span: Span,
+    ) -> Result<bool, LeafCompilationError> {
+        let executable = self.planned.plan.executable(executable).ok_or(
+            LeafCompilationError::SemanticInvariant {
+                invariant: "direct eval derived-constructor executable exists",
+                span: Some(span),
+            },
+        )?;
+        Ok(matches!(executable.kind(), ExecutableKind::Script { .. })
+            && matches!(
+                self.unit.goal(),
+                CompilationGoal::DirectEval(context)
+                    if context.capabilities().allows_super_call()
+            ))
+    }
+
     fn adjusted_eval_scope_index(
         &self,
         call: &CallExpression<'arena>,
@@ -236,26 +256,28 @@ impl<'arena> ExpressionPlanner<'_, '_, 'arena, '_> {
                     span: Some(call.span),
                 },
             )?;
-            let instance_fields = self.instance_field_definitions(constructor)?.ok_or(
-                LeafCompilationError::SemanticInvariant {
-                    invariant: "super constructor call resolves its derived class constructor",
-                    span: Some(call.span),
-                },
-            )?;
-            if !instance_fields.derived {
-                return Err(LeafCompilationError::SemanticInvariant {
-                    invariant: "super constructor call belongs to a derived class constructor",
-                    span: Some(call.span),
-                });
-            }
-            if constructor != layout.executable && !instance_fields.elements.is_empty() {
-                return Err(LeafCompilationError::SemanticInvariant {
-                    invariant: "storage rejects arrow super calls that need reusable instance initialization",
-                    span: Some(call.span),
-                });
-            }
-            if constructor == layout.executable && !instance_fields.elements.is_empty() {
-                work.push(ExpressionWork::InitializeInstanceFields);
+            if !self.is_contextual_direct_eval_derived_constructor(constructor, call.span)? {
+                let instance_fields = self.instance_field_definitions(constructor)?.ok_or(
+                    LeafCompilationError::SemanticInvariant {
+                        invariant: "super constructor call resolves its derived class constructor",
+                        span: Some(call.span),
+                    },
+                )?;
+                if !instance_fields.derived {
+                    return Err(LeafCompilationError::SemanticInvariant {
+                        invariant: "super constructor call belongs to a derived class constructor",
+                        span: Some(call.span),
+                    });
+                }
+                if constructor != layout.executable && !instance_fields.elements.is_empty() {
+                    return Err(LeafCompilationError::SemanticInvariant {
+                        invariant: "storage rejects arrow super calls that need reusable instance initialization",
+                        span: Some(call.span),
+                    });
+                }
+                if constructor == layout.executable && !instance_fields.elements.is_empty() {
+                    work.push(ExpressionWork::InitializeInstanceFields);
+                }
             }
             work.push(ExpressionWork::Emit(PlannedInstruction::new(
                 FinalOpcode::CheckCtorReturn,
@@ -573,26 +595,28 @@ impl<'arena> ExpressionPlanner<'_, '_, 'arena, '_> {
                 span: Some(call.span),
             },
         )?;
-        let instance_fields = self.instance_field_definitions(constructor)?.ok_or(
-            LeafCompilationError::SemanticInvariant {
-                invariant: "super spread call resolves its derived class constructor",
-                span: Some(call.span),
-            },
-        )?;
-        if !instance_fields.derived {
-            return Err(LeafCompilationError::SemanticInvariant {
-                invariant: "super spread call belongs to a derived class constructor",
-                span: Some(call.span),
-            });
-        }
-        if constructor != layout.executable && !instance_fields.elements.is_empty() {
-            return Err(LeafCompilationError::SemanticInvariant {
-                invariant: "storage rejects arrow super calls that need reusable instance initialization",
-                span: Some(call.span),
-            });
-        }
-        if constructor == layout.executable && !instance_fields.elements.is_empty() {
-            work.push(ExpressionWork::InitializeInstanceFields);
+        if !self.is_contextual_direct_eval_derived_constructor(constructor, call.span)? {
+            let instance_fields = self.instance_field_definitions(constructor)?.ok_or(
+                LeafCompilationError::SemanticInvariant {
+                    invariant: "super spread call resolves its derived class constructor",
+                    span: Some(call.span),
+                },
+            )?;
+            if !instance_fields.derived {
+                return Err(LeafCompilationError::SemanticInvariant {
+                    invariant: "super spread call belongs to a derived class constructor",
+                    span: Some(call.span),
+                });
+            }
+            if constructor != layout.executable && !instance_fields.elements.is_empty() {
+                return Err(LeafCompilationError::SemanticInvariant {
+                    invariant: "storage rejects arrow super calls that need reusable instance initialization",
+                    span: Some(call.span),
+                });
+            }
+            if constructor == layout.executable && !instance_fields.elements.is_empty() {
+                work.push(ExpressionWork::InitializeInstanceFields);
+            }
         }
         work.push(ExpressionWork::Emit(PlannedInstruction::new(
             FinalOpcode::CheckCtorReturn,

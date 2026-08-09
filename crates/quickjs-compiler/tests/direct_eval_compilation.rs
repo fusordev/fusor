@@ -1,5 +1,5 @@
 use quickjs_bytecode::{
-    CompilerClosureBinding, CompilerClosureSource, CompilerExecutableKind, FinalOpcode,
+    CompilerClosureBinding, CompilerClosureSource, CompilerExecutableKind, FinalOpcode, Operands,
     VerificationLimits,
 };
 use quickjs_compiler::{
@@ -43,6 +43,23 @@ fn compile_in_variable_environment(
         },
     )
     .expect("direct eval frontend")
+}
+
+fn compile_with_capabilities(
+    source: &str,
+    capabilities: DirectEvalCapabilities,
+) -> Result<CompiledFunctionTree, LeafCompilationError> {
+    let context = DirectEvalContext::new(capabilities, DirectEvalScopeSnapshot::default());
+    with_parsed_program(
+        source,
+        FrontendOptions::for_goal(CompilationGoal::DirectEval(context)),
+        |unit| {
+            CompilationContext::new(unit)
+                .expect("contextual direct eval storage")
+                .compile_direct_eval_script(VerificationLimits::default())
+        },
+    )
+    .expect("contextual direct eval frontend")
 }
 
 fn compile_with_bindings(
@@ -121,6 +138,99 @@ fn caller_strictness_makes_direct_eval_var_declarations_local() {
             .is_strict()
     );
     assert!(root.metadata().closures().is_empty());
+}
+
+#[test]
+fn direct_eval_certifies_inherited_new_target_authority() {
+    let tree = compile_with_capabilities(
+        "new.target;",
+        DirectEvalCapabilities::new().with_new_target(true),
+    )
+    .expect("contextual new.target direct eval authority");
+    let root = tree.verified_bytecode().root();
+    assert!(
+        root.function()
+            .control_flow()
+            .function_header()
+            .flags()
+            .new_target_allowed()
+    );
+    assert!(
+        root.function()
+            .control_flow()
+            .instructions()
+            .iter()
+            .any(|instruction| {
+                let instruction = instruction.decoded().instruction();
+                instruction.opcode() == FinalOpcode::SpecialObject
+                    && instruction.operands() == Operands::U8(3)
+            })
+    );
+}
+
+#[test]
+fn direct_eval_certifies_inherited_super_property_authority() {
+    let tree = compile_with_capabilities(
+        "super.answer;",
+        DirectEvalCapabilities::new().with_super_property(true),
+    )
+    .expect("contextual super property direct eval authority");
+    let root = tree.verified_bytecode().root();
+    assert!(
+        root.function()
+            .control_flow()
+            .function_header()
+            .flags()
+            .super_allowed()
+    );
+    assert!(
+        root.function()
+            .control_flow()
+            .instructions()
+            .iter()
+            .any(|instruction| {
+                let instruction = instruction.decoded().instruction();
+                instruction.opcode() == FinalOpcode::SpecialObject
+                    && instruction.operands() == Operands::U8(5)
+            })
+    );
+}
+
+#[test]
+fn direct_eval_certifies_inherited_derived_constructor_authority() {
+    let tree = compile_with_capabilities(
+        "super();",
+        DirectEvalCapabilities::new()
+            .with_new_target(true)
+            .with_super_call(true),
+    )
+    .expect("contextual super call direct eval authority");
+    let root = tree.verified_bytecode().root();
+    let header = root.function().control_flow().function_header();
+    assert!(header.flags().new_target_allowed());
+    assert!(header.flags().super_call_allowed());
+    for selector in [3, 4] {
+        assert!(
+            root.function()
+                .control_flow()
+                .instructions()
+                .iter()
+                .any(|instruction| {
+                    let instruction = instruction.decoded().instruction();
+                    instruction.opcode() == FinalOpcode::SpecialObject
+                        && instruction.operands() == Operands::U8(selector)
+                })
+        );
+    }
+    assert!(
+        root.function()
+            .control_flow()
+            .instructions()
+            .iter()
+            .any(|instruction| {
+                instruction.decoded().instruction().opcode() == FinalOpcode::CheckCtorReturn
+            })
+    );
 }
 
 #[test]

@@ -2783,8 +2783,10 @@ fn verify_header(
             }
         }
         CompilerExecutableKind::DirectEvalScript => {
+            let flags = header.flags().bits();
             if header.kind() != FunctionKind::Normal
-                || header.flags().bits() != 0x0400
+                || flags & !0x05c0 != 0
+                || flags & 0x0400 == 0
                 || header.mode().bits() & !1 != 0
             {
                 return Err(BytecodeVerificationError::function(
@@ -4891,7 +4893,10 @@ fn verify_method_definitions(
                             let instruction = instruction.decoded().instruction();
                             (instruction.opcode(), instruction.operands())
                         }),
-                        Some((FinalOpcode::DefineClass, Operands::AtomU8 { value: 1, .. }))
+                        Some((
+                            FinalOpcode::DefineClass,
+                            Operands::AtomU8 { value, .. },
+                        )) if value & 1 != 0
                     ) && class_definition_pair(
                         graph,
                         parent,
@@ -5767,21 +5772,16 @@ fn class_definition_pair(
 ) -> Option<FunctionTemplateId> {
     let definition = instructions.get(definition_index)?;
     let definition_instruction = definition.decoded().instruction();
-    let (
-        FinalOpcode::DefineClass,
-        Operands::AtomU8 {
-            value: heritage, ..
-        },
-    ) = (
+    let (FinalOpcode::DefineClass, Operands::AtomU8 { value: flags, .. }) = (
         definition_instruction.opcode(),
         definition_instruction.operands(),
-    )
-    else {
+    ) else {
         return None;
     };
-    if heritage > 1 || predecessor_counts.get(definition_index) != Some(&1) {
+    if flags > 3 || predecessor_counts.get(definition_index) != Some(&1) {
         return None;
     }
+    let heritage = flags & 1;
     let closure_index = definition_index.checked_sub(1)?;
     if !internal_stack.has_effective_successor(
         instructions,
@@ -6322,6 +6322,8 @@ fn verify_supported_opcodes(
                 && (generator || asynchronous))
             || (opcode == FinalOpcode::CheckCtorReturn
                 && !(executable_kind == CompilerExecutableKind::OrdinaryArrow
+                    || (executable_kind == CompilerExecutableKind::DirectEvalScript
+                        && flow.function_header().flags().super_call_allowed())
                     || (executable_kind == CompilerExecutableKind::ClassConstructor
                         && flow
                             .function_header()
@@ -6330,15 +6332,19 @@ fn verify_supported_opcodes(
             || (matches!(
                 opcode,
                 FinalOpcode::GetSuper | FinalOpcode::GetSuperValue | FinalOpcode::PutSuperValue
-            ) && !matches!(
-                executable_kind,
-                CompilerExecutableKind::OrdinaryArrow
-                    | CompilerExecutableKind::OrdinaryMethod
-                    | CompilerExecutableKind::GeneratorMethod
-                    | CompilerExecutableKind::AsyncMethod
-                    | CompilerExecutableKind::AsyncGeneratorMethod
-                    | CompilerExecutableKind::ClassConstructor
-            ) && !static_field_super)
+            ) && !(executable_kind == CompilerExecutableKind::DirectEvalScript
+                && (flow.function_header().flags().super_allowed()
+                    || flow.function_header().flags().super_call_allowed()))
+                && !matches!(
+                    executable_kind,
+                    CompilerExecutableKind::OrdinaryArrow
+                        | CompilerExecutableKind::OrdinaryMethod
+                        | CompilerExecutableKind::GeneratorMethod
+                        | CompilerExecutableKind::AsyncMethod
+                        | CompilerExecutableKind::AsyncGeneratorMethod
+                        | CompilerExecutableKind::ClassConstructor
+                )
+                && !static_field_super)
             || matches!(
                 (opcode, instruction.operands()),
                 (FinalOpcode::SpecialObject, operands)
@@ -6453,7 +6459,8 @@ fn compiler_special_object_is_authorized(
 ) -> bool {
     if !matches!(
         executable_kind,
-        CompilerExecutableKind::OrdinaryFunction
+        CompilerExecutableKind::DirectEvalScript
+            | CompilerExecutableKind::OrdinaryFunction
             | CompilerExecutableKind::OrdinaryArrow
             | CompilerExecutableKind::OrdinaryMethod
             | CompilerExecutableKind::ClassConstructor
@@ -6485,21 +6492,27 @@ fn compiler_special_object_is_authorized(
         Operands::U8(3) => flow.function_header().flags().new_target_allowed(),
         Operands::U8(4) => {
             executable_kind == CompilerExecutableKind::OrdinaryArrow
+                || (executable_kind == CompilerExecutableKind::DirectEvalScript
+                    && flow.function_header().flags().super_call_allowed())
                 || (executable_kind == CompilerExecutableKind::ClassConstructor
                     && flow
                         .function_header()
                         .flags()
                         .is_derived_class_constructor())
         }
-        Operands::U8(5) => matches!(
-            executable_kind,
-            CompilerExecutableKind::OrdinaryArrow
-                | CompilerExecutableKind::OrdinaryMethod
-                | CompilerExecutableKind::GeneratorMethod
-                | CompilerExecutableKind::AsyncMethod
-                | CompilerExecutableKind::AsyncGeneratorMethod
-                | CompilerExecutableKind::ClassConstructor
-        ),
+        Operands::U8(5) => {
+            (executable_kind == CompilerExecutableKind::DirectEvalScript
+                && flow.function_header().flags().super_allowed())
+                || matches!(
+                    executable_kind,
+                    CompilerExecutableKind::OrdinaryArrow
+                        | CompilerExecutableKind::OrdinaryMethod
+                        | CompilerExecutableKind::GeneratorMethod
+                        | CompilerExecutableKind::AsyncMethod
+                        | CompilerExecutableKind::AsyncGeneratorMethod
+                        | CompilerExecutableKind::ClassConstructor
+                )
+        }
         _ => false,
     }
 }

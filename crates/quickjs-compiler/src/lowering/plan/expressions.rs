@@ -291,6 +291,23 @@ impl<'compiler, 'unit, 'arena, 'scope> ExpressionPlanner<'compiler, 'unit, 'aren
     ) -> Self {
         Self { compiler }
     }
+
+    fn class_has_instance_elements(class: &Class<'arena>) -> bool {
+        class.body.body.iter().any(|element| match element {
+            ClassElement::PropertyDefinition(field) => !field.r#static,
+            ClassElement::MethodDefinition(method) => {
+                !method.r#static
+                    && matches!(method.key, OxcPropertyKey::PrivateIdentifier(_))
+                    && matches!(
+                        method.kind,
+                        MethodDefinitionKind::Method
+                            | MethodDefinitionKind::Get
+                            | MethodDefinitionKind::Set
+                    )
+            }
+            _ => false,
+        })
+    }
     #[expect(
         clippy::too_many_lines,
         reason = "the iterative dispatcher is the exhaustive expression-shape boundary"
@@ -1184,7 +1201,8 @@ impl<'compiler, 'unit, 'arena, 'scope> ExpressionPlanner<'compiler, 'unit, 'aren
             FinalOpcode::DefineClass,
             Operands::AtomU8 {
                 atom: constants.property_atom_index(class.span)?,
-                value: u8::from(has_heritage),
+                value: u8::from(has_heritage)
+                    | (u8::from(Self::class_has_instance_elements(class)) << 1),
             },
             class.span,
         ))?;

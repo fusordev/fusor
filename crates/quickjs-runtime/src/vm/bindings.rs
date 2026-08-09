@@ -706,6 +706,7 @@ pub(super) fn define_class(
     name: JsString,
     constructor_parent: HeapReference,
     prototype_parent: Option<HeapReference>,
+    has_instance_elements: bool,
 ) -> Result<ObjectId, ExecutionError> {
     if !bytecode_function_is_class_constructor(runtime, constructor)? {
         return Err(EngineFault::RuntimeInvariant {
@@ -753,6 +754,12 @@ pub(super) fn define_class(
         .into());
     }
     set_function_home_object(runtime, constructor, HeapReference::Object(prototype))?;
+    runtime
+        .bytecode_function_mut(constructor)
+        .ok_or(EngineFault::RuntimeInvariant {
+            message: "class definition lost its bytecode constructor",
+        })?
+        .has_instance_elements = has_instance_elements;
     Ok(prototype)
 }
 
@@ -1343,9 +1350,11 @@ pub(super) fn create_closure(
             environment_eval_shadows: capture_eval_shadows,
             eval_environment: frame.eval_environment.as_ref().map(Rc::clone),
             lexical_receiver: lexical.then(|| frame.receiver.duplicate()),
+            lexical_eval_in_function: lexical && frame.eval_in_function,
             lexical_new_target: if lexical { frame.new_target } else { None },
             lexical_derived_constructor,
             lexical_derived_this: lexical_derived_this_cell,
+            has_instance_elements: false,
             home_object: if lexical { parent_home_object } else { None },
         }),
         object: function_record,

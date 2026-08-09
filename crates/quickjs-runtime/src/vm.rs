@@ -356,6 +356,7 @@ pub(crate) struct Frame {
     inherited_eval_environment: Option<SharedEvalVariableEnvironment>,
     parameter_eval_boundary: Option<SharedEvalVariableEnvironment>,
     receiver: StoredValue,
+    eval_in_function: bool,
     new_target: Option<FunctionId>,
     instruction: InstructionIndex,
     return_to: Option<CallReturn>,
@@ -3894,12 +3895,30 @@ struct FramePlan {
     stack_capacity: usize,
     reserved_values: u64,
     arguments_snapshot_use: ArgumentsSnapshotUse,
-    construction: bool,
+    entry: FrameEntryKind,
+    eval_in_function: bool,
     constructor_profile: ConstructorProfile,
     strict: bool,
     receiver_access: ReceiverAccess,
     asynchronous: bool,
     instruction: InstructionIndex,
+}
+
+#[derive(Clone, Copy)]
+enum FrameEntryKind {
+    Call,
+    Construct,
+    ContextualNewTarget,
+}
+
+impl FrameEntryKind {
+    const fn is_construction(self) -> bool {
+        matches!(self, Self::Construct)
+    }
+
+    const fn has_new_target(self) -> bool {
+        matches!(self, Self::Construct | Self::ContextualNewTarget)
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -4612,7 +4631,7 @@ impl Context<'_> {
             0,
             0,
             supplied_argument_count,
-            false,
+            FrameEntryKind::Call,
         )?;
         let frame = create_frame(
             self.runtime,
@@ -4665,7 +4684,7 @@ impl Context<'_> {
         limits: ExecutionLimits,
         compiler: Option<&Arc<dyn OrdinaryDynamicFunctionCompiler>>,
     ) -> Result<StoredValue, ExecutionError> {
-        let plan = plan_frame(self.runtime, root.function, 0, 0, 0, false)?;
+        let plan = plan_frame(self.runtime, root.function, 0, 0, 0, FrameEntryKind::Call)?;
         let frame = create_frame(
             self.runtime,
             plan,
@@ -5712,7 +5731,11 @@ fn execute_frame_loop(
                     active_execution_frames(frames),
                     *active_frame_values,
                     supplied_argument_count,
-                    construction,
+                    if construction {
+                        FrameEntryKind::Construct
+                    } else {
+                        FrameEntryKind::Call
+                    },
                 )?;
                 frames
                     .try_reserve(1)

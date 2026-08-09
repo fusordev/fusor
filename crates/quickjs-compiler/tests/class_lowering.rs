@@ -112,6 +112,24 @@ fn public_private_instance_fields_receive_fresh_class_scope_names() {
     assert!(opcodes.contains(&FinalOpcode::GetPrivateField));
     assert!(opcodes.contains(&FinalOpcode::PutPrivateField));
     assert!(opcodes.contains(&FinalOpcode::PrivateIn));
+    assert!(
+        tree.root()
+            .control_flow()
+            .instructions()
+            .iter()
+            .any(|instruction| {
+                matches!(
+                    (
+                        instruction.decoded().instruction().opcode(),
+                        instruction.decoded().instruction().operands(),
+                    ),
+                    (
+                        FinalOpcode::DefineClass,
+                        quickjs_bytecode::Operands::AtomU8 { value: 2, .. }
+                    )
+                )
+            })
+    );
     assert!(tree.functions().iter().any(|function| {
         function
             .closure_variables()
@@ -997,6 +1015,24 @@ fn uncomputed_public_instance_field_initializers_lower_into_each_constructor() {
             .count(),
         3,
     );
+    let class_flags = tree
+        .root()
+        .control_flow()
+        .instructions()
+        .iter()
+        .filter_map(|instruction| {
+            match (
+                instruction.decoded().instruction().opcode(),
+                instruction.decoded().instruction().operands(),
+            ) {
+                (FinalOpcode::DefineClass, quickjs_bytecode::Operands::AtomU8 { value, .. }) => {
+                    Some(value)
+                }
+                _ => None,
+            }
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(class_flags, [2, 3, 3]);
 }
 
 #[test]

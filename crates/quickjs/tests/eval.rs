@@ -488,6 +488,70 @@ fn indirect_eval_resolves_against_the_realm_global_environment() {
 }
 
 #[test]
+fn direct_eval_inherits_new_target_from_function_code() {
+    evaluate(
+        "function target(){return eval('new.target;');}target()===undefined&&new target()===target;",
+        |value| assert_eq!(value.as_boolean(), Ok(Some(true))),
+    );
+}
+
+#[test]
+fn direct_eval_in_arrow_function_code_rejects_new_target() {
+    evaluate(
+        "let caught;let arrow=()=>eval('new.target;');try{arrow();}catch(error){caught=error;}typeof caught==='object'&&caught.constructor===SyntaxError;",
+        |value| assert_eq!(value.as_boolean(), Ok(Some(true))),
+    );
+}
+
+#[test]
+fn direct_eval_in_an_arrow_inherits_the_outer_function_environment() {
+    evaluate(
+        "function target(){return (()=>eval('new.target;'))();}target()===undefined&&new target()===target;",
+        |value| assert_eq!(value.as_boolean(), Ok(Some(true))),
+    );
+}
+
+#[test]
+fn direct_eval_super_call_initializes_the_derived_this_environment() {
+    evaluate(
+        "class Base{constructor(value){this.value=value;}}class Derived extends Base{constructor(){eval('super(42);');}}new Derived().value;",
+        |value| assert!(number(value).strict_equals(JsNumber::from_i32(42))),
+    );
+}
+
+#[test]
+fn direct_eval_super_call_with_instance_fields_fails_closed() {
+    evaluate(
+        "class Base{}class Derived extends Base{answer=42;constructor(){eval('super();');}}let caught;try{new Derived();}catch(error){caught=error;}caught.constructor===SyntaxError;",
+        |value| assert_eq!(value.as_boolean(), Ok(Some(true))),
+    );
+}
+
+#[test]
+fn nested_direct_eval_inherits_the_derived_constructor_environment() {
+    evaluate(
+        "class Base{constructor(value){this.value=value;}}class Derived extends Base{constructor(){eval(\"eval('super(42);')\");}}new Derived().value;",
+        |value| assert!(number(value).strict_equals(JsNumber::from_i32(42))),
+    );
+}
+
+#[test]
+fn arrow_direct_eval_inherits_the_derived_constructor_environment() {
+    evaluate(
+        "class Base{constructor(value){this.value=value;}}class Derived extends Base{constructor(){(()=>eval('super(42);'))();}}new Derived().value;",
+        |value| assert!(number(value).strict_equals(JsNumber::from_i32(42))),
+    );
+}
+
+#[test]
+fn direct_eval_inherits_the_method_home_object_for_super_properties() {
+    evaluate(
+        "let object={method(){return eval('super.answer;');}};Object.setPrototypeOf(object,{answer:42});object.method();",
+        |value| assert!(number(value).strict_equals(JsNumber::from_i32(42))),
+    );
+}
+
+#[test]
 fn sloppy_indirect_eval_publishes_vars_but_not_lexicals() {
     evaluate(
         "(0, eval)(\"var evalVar = 1; let evalLexical = 2; evalVar + evalLexical;\"); evalVar + '|' + typeof evalLexical;",

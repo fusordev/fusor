@@ -464,6 +464,73 @@ fn direct_eval_parses_as_script_and_inherits_caller_strictness() {
 }
 
 #[test]
+fn direct_eval_admits_only_inherited_new_target_context() {
+    let allocator = Allocator::new();
+    let allowed = DirectEvalContext::new(
+        DirectEvalCapabilities::new().with_new_target(true),
+        DirectEvalScopeSnapshot::default(),
+    );
+    let unit = parse(
+        &allocator,
+        "new.target;",
+        FrontendOptions::for_goal(CompilationGoal::DirectEval(allowed)),
+    )
+    .expect("direct eval inherits new.target grammar context");
+    assert!(unit.program().source_type.is_script());
+
+    let denied = DirectEvalContext::new(
+        DirectEvalCapabilities::new(),
+        DirectEvalScopeSnapshot::default(),
+    );
+    parse(
+        &allocator,
+        "new.target;",
+        FrontendOptions::for_goal(CompilationGoal::DirectEval(denied)),
+    )
+    .expect_err("direct eval outside function code rejects new.target");
+
+    parse(
+        &allocator,
+        "new.target; if (true) { return; }",
+        FrontendOptions::for_goal(CompilationGoal::DirectEval(allowed)),
+    )
+    .expect_err("contextual new.target does not admit a top-level return");
+}
+
+#[test]
+fn direct_eval_admits_only_lexically_inherited_super_property_context() {
+    let allocator = Allocator::new();
+    let allowed = DirectEvalContext::new(
+        DirectEvalCapabilities::new().with_super_property(true),
+        DirectEvalScopeSnapshot::default(),
+    );
+    parse(
+        &allocator,
+        "super.answer; (() => super.answer)();",
+        FrontendOptions::for_goal(CompilationGoal::DirectEval(allowed)),
+    )
+    .expect("direct eval and nested arrows inherit method super property syntax");
+
+    parse(
+        &allocator,
+        "function nested() { return super.answer; }",
+        FrontendOptions::for_goal(CompilationGoal::DirectEval(allowed)),
+    )
+    .expect_err("ordinary nested functions do not inherit the eval caller's super binding");
+
+    let denied = DirectEvalContext::new(
+        DirectEvalCapabilities::new(),
+        DirectEvalScopeSnapshot::default(),
+    );
+    parse(
+        &allocator,
+        "super.answer;",
+        FrontendOptions::for_goal(CompilationGoal::DirectEval(denied)),
+    )
+    .expect_err("direct eval outside a method rejects super property syntax");
+}
+
+#[test]
 fn source_byte_limits_reject_malformed_input_before_oxc_for_every_entry() {
     let source = "function {";
     let limits = FrontendLimits::new(source.len() - 1);

@@ -7,7 +7,7 @@ use quickjs_bytecode::{
     CompilerBindingPolicy, CompilerCaptureLayout, CompilerCapturedBinding, CompilerClosureBinding,
     CompilerClosureSource, CompilerConstantKind, CompilerConstantLayout, CompilerExecutableKind,
     CompilerInitializationPolicy, CompilerSource, CompilerString, CompilerWritePolicy,
-    EXECUTION_REQUIREMENT_COUNT, ExecutionRequirement, FinalOpcode,
+    DirectEvalFunctionCapabilities, EXECUTION_REQUIREMENT_COUNT, ExecutionRequirement, FinalOpcode,
     FunctionGraphVerificationLimits, FunctionIndexDomains, FunctionTemplateId,
     MAX_GOSUB_SITES_PER_FUNCTION, MetadataAtomField, Operands, PcSourceSpan, ScopeLink,
     SourceByteSpan, UnverifiedCompilerBytecodeGraph, UnverifiedCompilerFunction,
@@ -6355,6 +6355,116 @@ fn new_target_special_object_requires_function_header_authority() {
     );
     let error = verify_compiler_bytecode_graph(script, BytecodeGraphVerificationLimits::default())
         .expect_err("a Script frame cannot expose new.target");
+    assert!(matches!(
+        error.kind(),
+        BytecodeVerificationErrorKind::UnsupportedCompilerOpcode {
+            pc,
+            opcode: FinalOpcode::SpecialObject,
+        } if *pc == BytecodePc::ZERO
+    ));
+}
+
+#[test]
+fn direct_eval_contextual_special_objects_require_exact_header_authority() {
+    let text = "new.target; super.value; super()";
+    let function_span = SourceByteSpan::new(0, u32::try_from(text.len()).expect("source length"));
+    let source_for = |pcs: &[u32]| {
+        source(
+            text,
+            function_span,
+            None,
+            &pcs.iter()
+                .copied()
+                .map(|pc| (pc, function_span))
+                .collect::<Vec<_>>(),
+        )
+    };
+    let input_for = |instructions: &[(FinalOpcode, Operands)],
+                     header: UnverifiedFunctionHeader,
+                     executable_kind: CompilerExecutableKind,
+                     pcs: &[u32]| {
+        profiled_single_input(
+            instructions,
+            header,
+            executable_kind,
+            &[],
+            None,
+            &[],
+            0,
+            0,
+            &[],
+            source_for(pcs),
+        )
+    };
+
+    let contextual = input_for(
+        &[
+            (FinalOpcode::SpecialObject, Operands::U8(3)),
+            (FinalOpcode::Drop, Operands::None),
+            (FinalOpcode::SpecialObject, Operands::U8(5)),
+            (FinalOpcode::Drop, Operands::None),
+            (FinalOpcode::SpecialObject, Operands::U8(4)),
+            (FinalOpcode::Drop, Operands::None),
+            (FinalOpcode::ReturnUndef, Operands::None),
+        ],
+        UnverifiedFunctionHeader::direct_eval_script(
+            false,
+            0,
+            DirectEvalFunctionCapabilities::new(true, true, true),
+        ),
+        CompilerExecutableKind::DirectEvalScript,
+        &[0, 2, 3, 5, 6, 8, 9],
+    );
+    verify_compiler_bytecode_graph(contextual, BytecodeGraphVerificationLimits::default())
+        .expect("direct eval may use only the contextual capabilities certified in its header");
+
+    for selector in [3, 4, 5] {
+        let missing_capability = input_for(
+            &[
+                (FinalOpcode::SpecialObject, Operands::U8(selector)),
+                (FinalOpcode::Drop, Operands::None),
+                (FinalOpcode::ReturnUndef, Operands::None),
+            ],
+            UnverifiedFunctionHeader::direct_eval_script(
+                false,
+                0,
+                DirectEvalFunctionCapabilities::default(),
+            ),
+            CompilerExecutableKind::DirectEvalScript,
+            &[0, 2, 3],
+        );
+        assert_contextual_special_object_rejected(missing_capability);
+    }
+
+    for executable_kind in [
+        CompilerExecutableKind::GlobalScript,
+        CompilerExecutableKind::IndirectEvalScript,
+    ] {
+        let leaked_header = input_for(
+            &[(FinalOpcode::ReturnUndef, Operands::None)],
+            UnverifiedFunctionHeader::direct_eval_script(
+                false,
+                0,
+                DirectEvalFunctionCapabilities::new(true, false, false),
+            ),
+            executable_kind,
+            &[0],
+        );
+        let error = verify_compiler_bytecode_graph(
+            leaked_header,
+            BytecodeGraphVerificationLimits::default(),
+        )
+        .expect_err("contextual direct-eval header bits cannot leak into other Script goals");
+        assert_eq!(
+            error.kind(),
+            &BytecodeVerificationErrorKind::UnsupportedFunctionHeader
+        );
+    }
+}
+
+fn assert_contextual_special_object_rejected(input: UnverifiedCompilerBytecodeGraph) {
+    let error = verify_compiler_bytecode_graph(input, BytecodeGraphVerificationLimits::default())
+        .expect_err("a direct-eval contextual object requires its matching header capability");
     assert!(matches!(
         error.kind(),
         BytecodeVerificationErrorKind::UnsupportedCompilerOpcode {

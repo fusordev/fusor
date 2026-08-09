@@ -1949,7 +1949,11 @@ fn resolve_native_dispatch_inner(
             suspended_frames,
             suspended_values,
             supplied_argument_count,
-            construction.is_some(),
+            if construction.is_some() {
+                FrameEntryKind::Construct
+            } else {
+                FrameEntryKind::Call
+            },
         )
         .map_err(NativeFailure::Execution)?;
         let mut frame = create_frame(

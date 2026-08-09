@@ -144,7 +144,7 @@ pub(super) fn finish_dynamic_function_constructor(
         active_frames,
         active_frame_values.saturating_add(dynamic_return_values),
         0,
-        false,
+        FrameEntryKind::Call,
     ) {
         Ok(plan) => plan,
         Err(error) => {
@@ -269,7 +269,7 @@ pub(super) fn finish_indirect_eval(
         active_frames,
         active_frame_values,
         0,
-        false,
+        FrameEntryKind::Call,
     ) {
         Ok(plan) => plan,
         Err(error) => {
@@ -334,6 +334,39 @@ pub(super) fn finish_direct_eval(
     execution_budget.charge_indirect_eval_compilation(request.source())?;
     let caller_bindings = request.shared_bindings();
     let variable_environment = request.variable_environment();
+    let allows_new_target = request.allows_new_target();
+    let allows_super_property = request.allows_super_property();
+    let allows_super_call = request.allows_super_call();
+    let inherited_new_target = allows_new_target.then_some(caller.new_target).flatten();
+    let inherited_home_object = if allows_super_property {
+        Some(
+            runtime
+                .bytecode_function(caller.function)
+                .and_then(|function| function.home_object)
+                .ok_or(EngineFault::InvalidClosureEnvironment {
+                    function: caller.template,
+                })?,
+        )
+    } else {
+        None
+    };
+    let inherited_derived_environment = if allows_super_call {
+        let constructor =
+            caller
+                .derived_constructor
+                .ok_or(EngineFault::InvalidClosureEnvironment {
+                    function: caller.template,
+                })?;
+        let this_cell = caller
+            .derived_this_cell
+            .filter(|cell| runtime.cells.contains(*cell))
+            .ok_or(EngineFault::InvalidClosureEnvironment {
+                function: caller.template,
+            })?;
+        Some((constructor, this_cell))
+    } else {
+        None
+    };
     let authority = match compiler.compile_direct_eval(request) {
         Ok(authority) => authority,
         Err(DynamicFunctionCompileFailure::Syntax { message }) => {
@@ -350,6 +383,20 @@ pub(super) fn finish_direct_eval(
             return Err(NativeFailure::Execution(error.into()));
         }
     };
+    let root = authority.root();
+    let flags = root.function().control_flow().function_header().flags();
+    if root.metadata().executable_kind() != CompilerExecutableKind::DirectEvalScript
+        || flags.new_target_allowed() != allows_new_target
+        || flags.super_allowed() != allows_super_property
+        || flags.super_call_allowed() != allows_super_call
+    {
+        return Err(NativeFailure::Execution(
+            EngineFault::RuntimeInvariant {
+                message: "direct eval compiler authority disagrees with caller capabilities",
+            }
+            .into(),
+        ));
+    }
     let exception_authority = Arc::clone(&authority);
     let environment =
         materialize_direct_eval_environment(runtime, caller, &authority, &caller_bindings)
@@ -394,13 +441,25 @@ pub(super) fn finish_direct_eval(
             return Err(NativeFailure::Execution(error.into()));
         }
     };
+    if let Some(home_object) = inherited_home_object {
+        runtime
+            .bytecode_function_mut(installed.function)
+            .ok_or(EngineFault::RuntimeInvariant {
+                message: "installed direct eval root is not a bytecode function",
+            })?
+            .home_object = Some(home_object);
+    }
     let plan = match plan_frame(
         runtime,
         installed.function,
         active_frames,
         active_frame_values,
         0,
-        false,
+        if inherited_new_target.is_some() {
+            FrameEntryKind::ContextualNewTarget
+        } else {
+            FrameEntryKind::Call
+        },
     ) {
         Ok(plan) => plan,
         Err(error) => {
@@ -415,7 +474,7 @@ pub(super) fn finish_direct_eval(
         runtime,
         plan,
         receiver,
-        None,
+        inherited_new_target,
         FrameArguments::Owned(CallArguments::empty()),
         Some(return_to),
         None,
@@ -437,6 +496,11 @@ pub(super) fn finish_direct_eval(
     frame.eval_environment = caller.eval_environment.as_ref().map(Rc::clone);
     frame.eval_declaration_environment =
         caller.eval_declaration_environment.as_ref().map(Rc::clone);
+    frame.eval_in_function = caller.eval_in_function;
+    if let Some((constructor, this_cell)) = inherited_derived_environment {
+        frame.derived_constructor = Some(constructor);
+        frame.derived_this_cell = Some(this_cell);
+    }
     if let Err(error) = installed.commit_environment() {
         let retirement = retire_failed_dynamic_root(runtime, installed);
         let rollback = rollback_direct_eval_environment(runtime, caller, environment);
@@ -1256,16 +1320,24 @@ pub(super) fn direct_eval_compile_request(
     } else {
         frame.direct_eval_variable_environment
     };
+    let allows_super_call = match frame.derived_constructor {
+        Some(constructor) => {
+            !runtime
+                .bytecode_function(constructor)
+                .ok_or(EngineFault::InvalidClosureEnvironment {
+                    function: frame.template,
+                })?
+                .has_instance_elements
+        }
+        None => false,
+    };
     Ok(DirectEvalCompileRequest::new(source, frame.strict)
         .with_bindings(bindings.into())
         .with_scope_index(scope_index)
         .with_variable_environment(variable_environment)
-        .with_new_target(function_context)
+        .with_new_target(frame.eval_in_function)
         .with_super_property(function_code.home_object.is_some())
-        .with_super_call(matches!(
-            frame.constructor_state,
-            ConstructorState::DerivedUninitialized | ConstructorState::DerivedInitialized
-        ))
+        .with_super_call(allows_super_call)
         .with_arguments_allowed(function_context))
 }
 

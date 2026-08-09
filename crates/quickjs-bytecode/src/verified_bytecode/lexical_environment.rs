@@ -105,14 +105,13 @@ pub(super) fn verify_lexical_arrow_environments(
         let boundary = lexical_arrow_boundary(id, metadata, parents);
 
         let derived_constructor = boundary.is_some_and(|(boundary, kind)| {
-            kind == CompilerExecutableKind::ClassConstructor
-                && graph.function(boundary).is_some_and(|function| {
-                    function
-                        .control_flow()
-                        .function_header()
-                        .flags()
-                        .is_derived_class_constructor()
-                })
+            graph.function(boundary).is_some_and(|function| {
+                let flags = function.control_flow().function_header().flags();
+                (kind == CompilerExecutableKind::ClassConstructor
+                    && flags.is_derived_class_constructor())
+                    || (kind == CompilerExecutableKind::DirectEvalScript
+                        && flags.super_call_allowed())
+            })
         });
         if let Some(offending) = derived_super_call
             && !derived_constructor
@@ -126,7 +125,7 @@ pub(super) fn verify_lexical_arrow_environments(
             ));
         }
 
-        let home_object_authorized = boundary.is_some_and(|(_, kind)| {
+        let home_object_authorized = boundary.is_some_and(|(boundary, kind)| {
             matches!(
                 kind,
                 CompilerExecutableKind::OrdinaryMethod
@@ -134,7 +133,14 @@ pub(super) fn verify_lexical_arrow_environments(
                     | CompilerExecutableKind::AsyncMethod
                     | CompilerExecutableKind::AsyncGeneratorMethod
                     | CompilerExecutableKind::ClassConstructor
-            )
+            ) || (kind == CompilerExecutableKind::DirectEvalScript
+                && graph.function(boundary).is_some_and(|function| {
+                    function
+                        .control_flow()
+                        .function_header()
+                        .flags()
+                        .super_allowed()
+                }))
         });
         if let Some(offending) = home_object_use
             && !home_object_authorized

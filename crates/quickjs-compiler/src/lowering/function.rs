@@ -7,11 +7,11 @@ use quickjs_bytecode::{
     CompilerBindingKind as VerifiedBindingKind, CompilerBindingPolicy, CompilerCaptureLayout,
     CompilerConstantLayout, CompilerExecutableKind,
     CompilerInitializationPolicy as VerifiedInitializationPolicy, CompilerSource,
-    CompilerWritePolicy as VerifiedWritePolicy, FinalOpcode, FunctionIndexDomains, Operands,
-    PcSourceSpan, ScopeLink, SourceByteSpan, UnverifiedFunctionHeader, UnverifiedFunctionMetadata,
-    VariableDefinition, VerificationLimits,
+    CompilerWritePolicy as VerifiedWritePolicy, DirectEvalFunctionCapabilities, FinalOpcode,
+    FunctionIndexDomains, Operands, PcSourceSpan, ScopeLink, SourceByteSpan,
+    UnverifiedFunctionHeader, UnverifiedFunctionMetadata, VariableDefinition, VerificationLimits,
 };
-use quickjs_frontend::Span;
+use quickjs_frontend::{CompilationGoal, Span};
 
 use super::{
     AstKind, ClassElement, CompilationContext, CompiledClosureVariable, CompiledConstant,
@@ -210,6 +210,15 @@ impl CompilationContext<'_, '_, '_> {
                 .plan
                 .executable(executable)
                 .ok_or(LeafCompilationError::InvalidExecutable { executable })?;
+            if matches!(planned.kind(), ExecutableKind::Script { .. })
+                && matches!(
+                    self.unit.goal(),
+                    CompilationGoal::DirectEval(context)
+                        if context.capabilities().allows_super_call()
+                )
+            {
+                return Ok(Some(executable));
+            }
             if !matches!(planned.kind(), ExecutableKind::Arrow { .. }) {
                 return Ok(self
                     .instance_field_definitions(executable)?
@@ -1000,6 +1009,26 @@ struct ValidatedFunction {
     flow: PlannedControlFlow,
 }
 
+const fn direct_eval_header(
+    strict: bool,
+    variable_reference_count: u32,
+    capabilities: Option<quickjs_frontend::DirectEvalCapabilities>,
+) -> UnverifiedFunctionHeader {
+    let capabilities = match capabilities {
+        Some(capabilities) => capabilities,
+        None => quickjs_frontend::DirectEvalCapabilities::new(),
+    };
+    UnverifiedFunctionHeader::direct_eval_script(
+        strict,
+        variable_reference_count,
+        DirectEvalFunctionCapabilities::new(
+            capabilities.allows_new_target(),
+            capabilities.allows_super_property(),
+            capabilities.allows_super_call(),
+        ),
+    )
+}
+
 const fn executable_header(
     kind: CompilerExecutableKind,
     strict: bool,
@@ -1007,12 +1036,14 @@ const fn executable_header(
     simple_parameter_list: bool,
     defined_argument_count: u32,
     variable_reference_count: u32,
+    direct_eval_capabilities: Option<quickjs_frontend::DirectEvalCapabilities>,
 ) -> UnverifiedFunctionHeader {
     let header = match kind {
-        CompilerExecutableKind::GlobalScript
-        | CompilerExecutableKind::IndirectEvalScript
-        | CompilerExecutableKind::DirectEvalScript => {
+        CompilerExecutableKind::GlobalScript | CompilerExecutableKind::IndirectEvalScript => {
             UnverifiedFunctionHeader::global_script(strict, variable_reference_count)
+        }
+        CompilerExecutableKind::DirectEvalScript => {
+            direct_eval_header(strict, variable_reference_count, direct_eval_capabilities)
         }
         CompilerExecutableKind::OrdinaryFunction => {
             UnverifiedFunctionHeader::ordinary_source_function_with_variable_references(
@@ -1162,6 +1193,10 @@ impl CompilationContext<'_, '_, '_> {
                 .has_simple_parameter_list(),
             defined_argument_count,
             variable_reference_count,
+            match self.unit.goal() {
+                CompilationGoal::DirectEval(context) => Some(context.capabilities()),
+                _ => None,
+            },
         );
         let constant_layout = CompilerConstantLayout::new(
             constants

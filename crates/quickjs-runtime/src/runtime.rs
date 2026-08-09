@@ -547,6 +547,10 @@ pub(crate) struct BytecodeFunction {
     /// bindings from sloppy direct eval.
     pub(crate) eval_environment: Option<SharedEvalVariableEnvironment>,
     pub(crate) lexical_receiver: Option<StoredValue>,
+    /// Whether an arrow's lexical `this` chain reaches a Function Environment
+    /// Record. Direct eval uses this independently of the current `new.target`
+    /// value when applying `PerformEval`'s contextual early errors.
+    pub(crate) lexical_eval_in_function: bool,
     pub(crate) lexical_new_target: Option<FunctionId>,
     /// The derived constructor whose mutable `this` environment is retained
     /// by this arrow, paired with `lexical_derived_this`.
@@ -554,6 +558,10 @@ pub(crate) struct BytecodeFunction {
     /// Shared lexical derived-`this` binding. It remains uninitialized until
     /// the first successful `super()` result is bound.
     pub(crate) lexical_derived_this: Option<BindingCellId>,
+    /// Whether `InitializeInstanceElements` has work for this class
+    /// constructor. Contextual eval `super()` fails closed while that body is
+    /// not yet reusable from a separate eval frame.
+    pub(crate) has_instance_elements: bool,
     /// The ECMAScript `[[HomeObject]]` installed when this closure becomes a
     /// class method, class constructor, or object-literal method, or inherited
     /// lexically by an arrow created within one. It is an internal GC edge,
