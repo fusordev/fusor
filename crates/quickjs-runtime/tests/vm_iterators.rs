@@ -798,6 +798,67 @@ fn iterator_consumers_close_only_for_validation_callbacks_and_early_exit() {
 }
 
 #[test]
+fn iterator_includes_uses_same_value_zero_skipping_and_normal_close() {
+    let mut runtime = Runtime::try_new(RuntimeLimits::default()).expect("runtime");
+    let realm = runtime.create_realm().expect("realm");
+    let mut context = runtime.context(&realm).expect("context");
+    let function = dynamic_function(
+        &mut context,
+        "let method=Iterator.prototype.includes;
+         let descriptor=Object.getOwnPropertyDescriptor(Iterator.prototype,'includes');
+         let nextGets=0,nextCalls=0,returnCalls=0;
+         let iterator={get next(){nextGets++;return function(){nextCalls++;
+           return nextCalls<=3?{done:false,value:nextCalls}:{done:true};};},
+           return(){returnCalls++;return {};}};
+         let matched=method.call(iterator,2,1);
+         let token={},identity=[{},token].values().includes(token);
+         return [matched,nextGets,nextCalls,returnCalls,[NaN].values().includes(NaN),
+           [-0].values().includes(+0),identity,[4].values().includes(4,1),
+           method.name,method.length,descriptor.writable,!descriptor.enumerable,
+           descriptor.configurable].join('|');",
+    );
+
+    let result = context
+        .call(&function, &[], ExecutionLimits::default())
+        .expect("Iterator.prototype.includes comparison and close");
+    assert_eq!(
+        string_value(&result),
+        "true|1|2|1|true|true|true|false|includes|1|true|true|true"
+    );
+}
+
+#[test]
+fn iterator_includes_validates_before_next_and_does_not_close_step_failures() {
+    let mut runtime = Runtime::try_new(RuntimeLimits::default()).expect("runtime");
+    let realm = runtime.create_realm().expect("realm");
+    let mut context = runtime.context(&realm).expect("context");
+    let function = dynamic_function(
+        &mut context,
+        "let method=Iterator.prototype.includes,validationLog='',valueOfCalls=0;
+         function validation(value){let iterator={get next(){validationLog+='n';throw {};},
+           return(){validationLog+='r';return {};}};let type='';
+           try{method.call(iterator,0,value);}catch(error){type=error.name;}return type;}
+         let objectType=validation({valueOf(){valueOfCalls++;return 0;}});
+         let negativeType=validation(-1),largeType=validation(Number.MAX_SAFE_INTEGER+1);
+         let stepError={},stepCloses=0,stepPreserved=false;
+         try{method.call({next(){return {get done(){throw stepError;}};},
+           return(){stepCloses++;return {};}} ,0);}catch(error){stepPreserved=error===stepError;}
+         let naturalReturns=0,natural=method.call({next(){return {done:true};},
+           return(){naturalReturns++;return {};}} ,0,Infinity);
+         return [objectType,negativeType,largeType,validationLog,valueOfCalls,
+           stepPreserved,stepCloses,natural,naturalReturns].join('|');",
+    );
+
+    let result = context
+        .call(&function, &[], ExecutionLimits::default())
+        .expect("Iterator.prototype.includes validation and abrupt order");
+    assert_eq!(
+        string_value(&result),
+        "TypeError|RangeError|RangeError|rrr|0|true|0|false|0"
+    );
+}
+
+#[test]
 fn iterator_reduce_distinguishes_missing_and_explicit_initial_values() {
     let mut runtime = Runtime::try_new(RuntimeLimits::default()).expect("runtime");
     let realm = runtime.create_realm().expect("realm");

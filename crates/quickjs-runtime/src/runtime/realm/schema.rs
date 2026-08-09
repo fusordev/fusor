@@ -269,6 +269,7 @@ pub(in crate::runtime) enum RealmNameId {
     ArrayIsArray,
     ArrayFromAsync,
     IteratorDrop,
+    IteratorIncludes,
     IteratorConsumer(IteratorConsumer),
     IteratorFilter,
     IteratorFlatMap,

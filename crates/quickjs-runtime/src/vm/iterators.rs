@@ -372,6 +372,65 @@ impl IteratorToArrayContinuation {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum IteratorIncludesStage {
+    NextMethod,
+    NextResult,
+    Done,
+    Value,
+    CloseReturnProperty,
+    CloseReturnCall,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum IteratorIncludesSkip {
+    Finite(u64),
+    Infinite,
+}
+
+impl IteratorIncludesSkip {
+    fn consume_one(&mut self) -> bool {
+        match self {
+            Self::Finite(0) => false,
+            Self::Finite(remaining) => {
+                *remaining = remaining.saturating_sub(1);
+                true
+            }
+            Self::Infinite => true,
+        }
+    }
+}
+
+pub(super) struct IteratorIncludesContinuation {
+    iterator: StoredValue,
+    next_method: Option<FunctionId>,
+    result: Option<StoredValue>,
+    search_element: StoredValue,
+    to_skip: IteratorIncludesSkip,
+    realm: RealmId,
+    stage: IteratorIncludesStage,
+    origin: JsStackFrame,
+}
+
+impl IteratorIncludesContinuation {
+    pub(super) fn retained_values(&self) -> u64 {
+        2_u64
+            .saturating_add(u64::from(self.next_method.is_some()))
+            .saturating_add(u64::from(self.result.is_some()))
+    }
+
+    pub(super) fn trace_roots(&self, mark: &mut dyn FnMut(CollectionRoot)) {
+        trace_stored_value_root(&self.iterator, mark);
+        trace_stored_value_root(&self.search_element, mark);
+        if let Some(next_method) = self.next_method {
+            mark(CollectionRoot::Heap(HeapReference::Function(next_method)));
+        }
+        if let Some(result) = &self.result {
+            trace_stored_value_root(result, mark);
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum IteratorConsumerStage {
     NextMethod,
     NextResult,
@@ -2785,6 +2844,301 @@ pub(super) fn begin_iterator_to_array(
         runtime.predefined_property_key(PredefinedAtom::Next),
         return_to,
         execution_budget,
+    )
+}
+
+#[expect(
+    clippy::float_cmp,
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss,
+    reason = "the proposal requires exact Number integrality and the validated value is a nonnegative safe integer"
+)]
+fn iterator_includes_skip(
+    skipped_elements: Option<&StoredValue>,
+) -> Result<IteratorIncludesSkip, ExceptionKind> {
+    let Some(skipped_elements) = skipped_elements else {
+        return Ok(IteratorIncludesSkip::Finite(0));
+    };
+    let StoredValue::Number(number) = skipped_elements else {
+        return if matches!(skipped_elements, StoredValue::Undefined) {
+            Ok(IteratorIncludesSkip::Finite(0))
+        } else {
+            Err(ExceptionKind::TypeError)
+        };
+    };
+    let value = number.as_f64();
+    if value.is_nan() || (value.is_finite() && value.trunc() != value) {
+        return Err(ExceptionKind::TypeError);
+    }
+    if value < 0.0 {
+        return Err(ExceptionKind::RangeError);
+    }
+    if value.is_infinite() {
+        return Ok(IteratorIncludesSkip::Infinite);
+    }
+    if value > f64::from_bits(0x433f_ffff_ffff_ffff) {
+        return Err(ExceptionKind::RangeError);
+    }
+    Ok(IteratorIncludesSkip::Finite(value as u64))
+}
+
+/// `Iterator.prototype.includes`, including validation-before-`next` and
+/// normal close on a successful match.
+#[allow(
+    clippy::too_many_arguments,
+    reason = "the native boundary keeps both arguments, receiver, realm, source origin, return target, and budget explicit"
+)]
+pub(super) fn begin_iterator_includes(
+    runtime: &mut Runtime,
+    receiver: StoredValue,
+    search_element: StoredValue,
+    skipped_elements: Option<&StoredValue>,
+    realm: RealmId,
+    return_to: Option<CallReturn>,
+    origin: JsStackFrame,
+    execution_budget: &mut ExecutionBudget,
+) -> Result<NativeDispatch, NativeFailure> {
+    if receiver.heap_reference().is_none() {
+        return Err(iterator_exception(
+            realm,
+            origin,
+            ExceptionKind::TypeError,
+            "Iterator.prototype.includes receiver must be an object",
+        )?);
+    }
+    let to_skip = match iterator_includes_skip(skipped_elements) {
+        Ok(to_skip) => to_skip,
+        Err(kind) => {
+            let message = match kind {
+                ExceptionKind::TypeError => {
+                    "Iterator.prototype.includes skippedElements must be an integral Number"
+                }
+                ExceptionKind::RangeError => {
+                    "Iterator.prototype.includes skippedElements is outside the allowed range"
+                }
+                _ => {
+                    return Err(EngineFault::RuntimeInvariant {
+                        message: "Iterator.prototype.includes validation produced an invalid exception kind",
+                    }
+                    .into());
+                }
+            };
+            let pending = PendingException {
+                realm,
+                payload: PendingExceptionPayload::EngineError {
+                    kind,
+                    message: JsString::from_utf8(message)?,
+                },
+                origin,
+            };
+            return begin_exceptional_iterator_close(
+                runtime,
+                receiver,
+                pending,
+                return_to,
+                execution_budget,
+            );
+        }
+    };
+    let state = IteratorIncludesContinuation {
+        iterator: receiver,
+        next_method: None,
+        result: None,
+        search_element,
+        to_skip,
+        realm,
+        stage: IteratorIncludesStage::NextMethod,
+        origin,
+    };
+    read_iterator_includes_property(
+        runtime,
+        state,
+        runtime.predefined_property_key(PredefinedAtom::Next),
+        return_to,
+        execution_budget,
+    )
+}
+
+#[allow(
+    clippy::too_many_lines,
+    reason = "one typed state machine exposes every IteratorStepValue and normal-close suspension boundary"
+)]
+pub(super) fn advance_iterator_includes(
+    runtime: &mut Runtime,
+    mut state: IteratorIncludesContinuation,
+    completion: StoredValue,
+    return_to: Option<CallReturn>,
+    execution_budget: &mut ExecutionBudget,
+) -> Result<NativeDispatch, NativeFailure> {
+    match state.stage {
+        IteratorIncludesStage::NextMethod => {
+            let StoredValue::Function(next_method) = completion else {
+                return Err(iterator_exception(
+                    state.realm,
+                    state.origin,
+                    ExceptionKind::TypeError,
+                    "iterator next method is not callable",
+                )?);
+            };
+            state.next_method = Some(next_method);
+            call_iterator_includes_next(state, return_to, execution_budget)
+        }
+        IteratorIncludesStage::NextResult => {
+            if completion.heap_reference().is_none() {
+                return Err(iterator_exception(
+                    state.realm,
+                    state.origin,
+                    ExceptionKind::TypeError,
+                    "iterator next method did not return an object",
+                )?);
+            }
+            state.result = Some(completion);
+            state.stage = IteratorIncludesStage::Done;
+            read_iterator_includes_property(
+                runtime,
+                state,
+                runtime.predefined_property_key(PredefinedAtom::Done),
+                return_to,
+                execution_budget,
+            )
+        }
+        IteratorIncludesStage::Done => {
+            if runtime.to_boolean(&completion)? {
+                return Ok(NativeDispatch::Immediate(StoredValue::Boolean(false)));
+            }
+            state.stage = IteratorIncludesStage::Value;
+            read_iterator_includes_property(
+                runtime,
+                state,
+                runtime.predefined_property_key(PredefinedAtom::Value),
+                return_to,
+                execution_budget,
+            )
+        }
+        IteratorIncludesStage::Value => {
+            state.result = None;
+            if state.to_skip.consume_one() {
+                return call_iterator_includes_next(state, return_to, execution_budget);
+            }
+            if !completion.same_value_zero(&state.search_element) {
+                return call_iterator_includes_next(state, return_to, execution_budget);
+            }
+            state.stage = IteratorIncludesStage::CloseReturnProperty;
+            read_iterator_includes_property(
+                runtime,
+                state,
+                runtime.predefined_property_key(PredefinedAtom::Return),
+                return_to,
+                execution_budget,
+            )
+        }
+        IteratorIncludesStage::CloseReturnProperty => match completion {
+            StoredValue::Undefined | StoredValue::Null => {
+                Ok(NativeDispatch::Immediate(StoredValue::Boolean(true)))
+            }
+            StoredValue::Function(return_method) => {
+                state.stage = IteratorIncludesStage::CloseReturnCall;
+                execution_budget.charge_instructions(1)?;
+                let receiver = state.iterator.duplicate();
+                let origin = state.origin.clone();
+                iterator_method_call(
+                    return_method,
+                    receiver,
+                    NativeContinuation::IteratorIncludes(state),
+                    return_to,
+                    origin,
+                )
+            }
+            StoredValue::Boolean(_)
+            | StoredValue::Number(_)
+            | StoredValue::BigInt(_)
+            | StoredValue::String(_)
+            | StoredValue::Symbol(_)
+            | StoredValue::Object(_) => Err(iterator_exception(
+                state.realm,
+                state.origin,
+                ExceptionKind::TypeError,
+                "iterator return method is not callable",
+            )?),
+        },
+        IteratorIncludesStage::CloseReturnCall => {
+            if completion.heap_reference().is_none() {
+                return Err(iterator_exception(
+                    state.realm,
+                    state.origin,
+                    ExceptionKind::TypeError,
+                    "iterator return method did not return an object",
+                )?);
+            }
+            Ok(NativeDispatch::Immediate(StoredValue::Boolean(true)))
+        }
+    }
+}
+
+fn call_iterator_includes_next(
+    mut state: IteratorIncludesContinuation,
+    return_to: Option<CallReturn>,
+    execution_budget: &mut ExecutionBudget,
+) -> Result<NativeDispatch, NativeFailure> {
+    let next_method = state.next_method.ok_or(EngineFault::RuntimeInvariant {
+        message: "Iterator.prototype.includes has no callable next method",
+    })?;
+    state.result = None;
+    state.stage = IteratorIncludesStage::NextResult;
+    execution_budget.charge_instructions(1)?;
+    let receiver = state.iterator.duplicate();
+    let origin = state.origin.clone();
+    iterator_method_call(
+        next_method,
+        receiver,
+        NativeContinuation::IteratorIncludes(state),
+        return_to,
+        origin,
+    )
+}
+
+fn read_iterator_includes_property(
+    runtime: &mut Runtime,
+    state: IteratorIncludesContinuation,
+    key: PropertyKey,
+    return_to: Option<CallReturn>,
+    execution_budget: &mut ExecutionBudget,
+) -> Result<NativeDispatch, NativeFailure> {
+    let base = match state.stage {
+        IteratorIncludesStage::NextMethod | IteratorIncludesStage::CloseReturnProperty => {
+            &state.iterator
+        }
+        IteratorIncludesStage::Done | IteratorIncludesStage::Value => {
+            state.result.as_ref().ok_or(EngineFault::RuntimeInvariant {
+                message: "Iterator.prototype.includes result lookup has no result object",
+            })?
+        }
+        IteratorIncludesStage::NextResult | IteratorIncludesStage::CloseReturnCall => {
+            return Err(EngineFault::RuntimeInvariant {
+                message: "Iterator.prototype.includes call stage attempted a property lookup",
+            }
+            .into());
+        }
+    };
+    charge_iterator_property_lookup(runtime, base, execution_budget)?;
+    let dispatch = begin_value_get(
+        runtime,
+        base,
+        key,
+        None,
+        state.realm,
+        return_to,
+        state.origin.clone(),
+        execution_budget,
+    )?;
+    continue_get_after(
+        dispatch,
+        state,
+        NativeContinuation::IteratorIncludes,
+        |state, value| {
+            advance_iterator_includes(runtime, state, value, return_to, execution_budget)
+        },
+        "Iterator.prototype.includes property Get produced a structured result",
     )
 }
 

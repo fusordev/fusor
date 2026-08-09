@@ -99,6 +99,11 @@ pub(super) fn visit_functions(visit: FunctionSink<'_>) {
             1,
         ),
         (
+            NativeFunctionKind::IteratorPrototypeIncludes,
+            IntrinsicNameSpec::RealmName(RealmNameId::IteratorIncludes),
+            1,
+        ),
+        (
             NativeFunctionKind::IteratorPrototypeConsumer(IteratorConsumer::Every),
             IntrinsicNameSpec::RealmName(RealmNameId::IteratorConsumer(IteratorConsumer::Every)),
             1,
@@ -324,6 +329,11 @@ pub(super) fn visit_properties(visit: PropertySink<'_>) {
         prototype,
         IntrinsicKeySpec::InternedString(RealmNameId::IteratorDrop),
         NativeFunctionKind::IteratorPrototypeDrop,
+    ));
+    visit(method(
+        prototype,
+        IntrinsicKeySpec::InternedString(RealmNameId::IteratorIncludes),
+        NativeFunctionKind::IteratorPrototypeIncludes,
     ));
     visit(method(
         prototype,

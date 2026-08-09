@@ -253,6 +253,7 @@ fn visit_realm_name_order(
     visit(RealmNameId::ArrayIsArray)?;
     visit(RealmNameId::ArrayFromAsync)?;
     visit(RealmNameId::IteratorDrop)?;
+    visit(RealmNameId::IteratorIncludes)?;
     for consumer in IteratorConsumer::ALL {
         visit(RealmNameId::IteratorConsumer(consumer))?;
     }
@@ -664,6 +665,7 @@ fn realm_name_description(id: RealmNameId) -> &'static str {
         RealmNameId::ArrayIsArray => "isArray",
         RealmNameId::ArrayFromAsync => "fromAsync",
         RealmNameId::IteratorDrop => "drop",
+        RealmNameId::IteratorIncludes => "includes",
         RealmNameId::IteratorConsumer(consumer) => consumer.name(),
         RealmNameId::IteratorFilter => "filter",
         RealmNameId::IteratorFlatMap => "flatMap",

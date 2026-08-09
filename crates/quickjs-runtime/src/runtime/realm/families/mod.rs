@@ -298,6 +298,7 @@ pub(super) const fn is_declarative_function(id: IntrinsicFunctionId) -> bool {
             | NativeFunctionKind::IteratorFrom
             | NativeFunctionKind::IteratorPrototypeDispose
             | NativeFunctionKind::IteratorPrototypeDrop
+            | NativeFunctionKind::IteratorPrototypeIncludes
             | NativeFunctionKind::IteratorPrototypeConsumer(_)
             | NativeFunctionKind::IteratorPrototypeFilter
             | NativeFunctionKind::IteratorPrototypeFlatMap
@@ -975,6 +976,7 @@ const fn is_iterator_function(id: IntrinsicFunctionId) -> bool {
             | NativeFunctionKind::IteratorFrom
             | NativeFunctionKind::IteratorPrototypeDispose
             | NativeFunctionKind::IteratorPrototypeDrop
+            | NativeFunctionKind::IteratorPrototypeIncludes
             | NativeFunctionKind::IteratorPrototypeConsumer(_)
             | NativeFunctionKind::IteratorPrototypeFilter
             | NativeFunctionKind::IteratorPrototypeFlatMap

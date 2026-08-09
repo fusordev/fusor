@@ -1036,6 +1036,9 @@ pub(super) fn resume_native_continuations(
             NativeContinuation::IteratorZipClose(state) => {
                 advance_iterator_zip_close(runtime, *state, value, return_to, execution_budget)?
             }
+            NativeContinuation::IteratorIncludes(state) => {
+                advance_iterator_includes(runtime, state, value, return_to, execution_budget)?
+            }
             NativeContinuation::IteratorConsumer(state) => {
                 advance_iterator_consumer(runtime, state, value, return_to, execution_budget)?
             }
@@ -4451,6 +4454,20 @@ pub(super) fn dispatch_native_call_with_frames(
                 inputs.receiver,
                 &callback,
                 initial_value,
+                native.realm,
+                return_to,
+                origin.unwrap_or_else(native_function_host_origin),
+                execution_budget,
+            )
+        }
+        NativeFunctionKind::IteratorPrototypeIncludes => {
+            let search_element = inputs.arguments.take_first_or_undefined();
+            let skipped_elements = inputs.arguments.take_first();
+            begin_iterator_includes(
+                runtime,
+                inputs.receiver,
+                search_element,
+                skipped_elements.as_ref(),
                 native.realm,
                 return_to,
                 origin.unwrap_or_else(native_function_host_origin),
