@@ -21,7 +21,7 @@ use oxc_ast::{
         VariableDeclarator, WhileStatement,
     },
 };
-use oxc_semantic::{NodeId, ReferenceId, SymbolId};
+use oxc_semantic::{NodeId, ReferenceId, ScopeId, SymbolId};
 use oxc_span::GetSpan;
 use oxc_syntax::operator::{
     AssignmentOperator, BinaryOperator, LogicalOperator, UnaryOperator, UpdateOperator,

@@ -136,3 +136,72 @@ fn with_delete_preserves_observable_has_unscopables_delete_order() {
         |value| assert_eq!(string(value), "true|false|h:value,g:u,d:value"),
     );
 }
+
+#[test]
+fn with_assignment_resolves_before_rhs_and_sets_the_retained_reference() {
+    evaluate(
+        "let outer=1;let object={value:2};function assign(object){with(object){return value=(delete object.value,3);}}let result=assign(object);result+'|'+outer+'|'+object.value;",
+        |value| assert_eq!(string(value), "3|1|3"),
+    );
+}
+
+#[test]
+fn with_simple_and_compound_assignment_preserve_object_environment_order() {
+    evaluate(
+        "let log=[];let target={value:2};let object=new Proxy(target,{has(t,k){log.push('h:'+(k===Symbol.unscopables?'u':k));return Reflect.has(t,k);},get(t,k,r){log.push('g:'+(k===Symbol.unscopables?'u':k));return Reflect.get(t,k,r);},set(t,k,v,r){log.push('s:'+k);return Reflect.set(t,k,v,r);}});function assign(object){with(object){value=(log.push('rhs1'),3);value+=(log.push('rhs2'),4);return value;}}assign(object)+'|'+log.join(',');",
+        |value| {
+            assert_eq!(
+                string(value),
+                "7|h:value,g:u,h:log,rhs1,h:value,s:value,h:value,g:u,h:value,g:value,h:log,rhs2,h:value,s:value,h:value,g:u,h:value,g:value"
+            );
+        },
+    );
+}
+
+#[test]
+fn with_logical_assignments_short_circuit_and_preserve_reference_writes() {
+    evaluate(
+        "function mutate(object){with(object){let a=value ||= 4;let b=value &&= 5;let c=missing ??= 6;return a*100+b*10+c;}}let object={value:0,missing:null};mutate(object)+'|'+object.value+'|'+object.missing;",
+        |value| assert_eq!(string(value), "456|5|6"),
+    );
+}
+
+#[test]
+fn with_prefix_and_postfix_updates_preserve_completion_values() {
+    evaluate(
+        "function mutate(object){with(object){let old=value++;let current=++value;return old*100+current;}}let object={value:2};mutate(object)+'|'+object.value;",
+        |value| assert_eq!(string(value), "204|4"),
+    );
+}
+
+#[test]
+fn with_destructuring_and_iteration_targets_use_object_environment_references() {
+    evaluate(
+        "let value='outer';function mutate(object){with(object){[value]=[1];({value}={value:2});for(value of [3]){};for(value in {key:0}){};return value;}}let object={value:0};mutate(object)+'|'+object.value+'|'+value;",
+        |value| assert_eq!(string(value), "key|key|outer"),
+    );
+}
+
+#[test]
+fn with_unscopables_routes_assignment_to_the_outer_binding() {
+    evaluate(
+        "let value=1;let object={value:2,[Symbol.unscopables]:{value:true}};function assign(object){with(object){return value=3;}}assign(object)+'|'+value+'|'+object.value;",
+        |value| assert_eq!(string(value), "3|3|2"),
+    );
+}
+
+#[test]
+fn with_var_initializers_resolve_before_the_rhs_and_compile_it_once() {
+    evaluate(
+        "var value='outer',missing='before',holder;let object={value:1,holder:0};with(object){var value=3;var missing='after';var holder={method(){return value;}};}value+'|'+object.value+'|'+missing+'|'+holder+'|'+object.holder.method();",
+        |value| assert_eq!(string(value), "outer|3|after|undefined|3"),
+    );
+}
+
+#[test]
+fn captured_strict_with_assignment_rechecks_binding_existence() {
+    evaluate(
+        "let count=0;let target={value:1};let object=new Proxy(target,{has(target,key){if(key==='value'&&++count===2)return false;return Reflect.has(target,key);}});function make(){with(object){return function(){'use strict';value=2;};}}let assign=make();try{assign();false;}catch(error){error.constructor===ReferenceError&&count===2&&target.value===1;}",
+        |value| assert_eq!(value.as_boolean(), Ok(Some(true))),
+    );
+}

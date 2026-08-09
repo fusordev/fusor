@@ -292,7 +292,7 @@ pub(super) fn verify_object_definition_provenance(
             let with_binding_results = if edge.is_branch_target {
                 match opcode {
                     FinalOpcode::WithGetVar | FinalOpcode::WithDeleteVar => 1,
-                    FinalOpcode::WithGetRef => 2,
+                    FinalOpcode::WithMakeRef | FinalOpcode::WithGetRef => 2,
                     _ => 0,
                 }
             } else {

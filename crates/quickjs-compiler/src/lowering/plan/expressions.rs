@@ -232,6 +232,7 @@ pub(in crate::lowering) enum ExpressionWork<'expression, 'arena> {
         identifier: &'expression IdentifierReference<'arena>,
         delete_span: Span,
     },
+    IdentifierValueStore(&'expression IdentifierReference<'arena>),
     CallAfterCallee {
         call: &'expression CallExpression<'arena>,
         method: bool,
@@ -366,6 +367,15 @@ impl<'compiler, 'unit, 'arena, 'scope> ExpressionPlanner<'compiler, 'unit, 'aren
                         flow,
                     )?;
                 }
+                ExpressionWork::IdentifierValueStore(identifier) => {
+                    self.plan_identifier_value_store(
+                        identifier,
+                        layout,
+                        tree_layout,
+                        constants,
+                        flow,
+                    )?;
+                }
                 ExpressionWork::SuperPropertyBase {
                     span,
                     call_receiver,
@@ -484,6 +494,7 @@ impl<'compiler, 'unit, 'arena, 'scope> ExpressionPlanner<'compiler, 'unit, 'aren
                                 layout,
                                 tree_layout,
                                 constants,
+                                flow,
                                 &mut work,
                             )?;
                         }
@@ -4357,6 +4368,40 @@ impl<'compiler, 'unit, 'arena, 'scope> ExpressionPlanner<'compiler, 'unit, 'aren
         } else {
             None
         };
+        let with_objects = self
+            .with_object_bindings_for_reference(identifier.reference_id.get(), identifier.span)?;
+        if !with_objects.is_empty() {
+            return self.plan_with_identifier_assignment(
+                assignment,
+                identifier,
+                reference,
+                with_objects,
+                inferred_name,
+                layout,
+                constants,
+                flow,
+                work,
+            );
+        }
+        self.plan_lowered_identifier_assignment(
+            assignment,
+            identifier,
+            reference,
+            inferred_name,
+            flow,
+            work,
+        )
+    }
+
+    fn plan_lowered_identifier_assignment<'expression>(
+        &self,
+        assignment: &'expression AssignmentExpression<'arena>,
+        identifier: &'expression IdentifierReference<'arena>,
+        reference: LoweredReference,
+        inferred_name: Option<PlannedInstruction>,
+        flow: &mut PlannedControlFlow,
+        work: &mut Vec<ExpressionWork<'expression, 'arena>>,
+    ) -> Result<(), LeafCompilationError> {
         let (binding, frame_slot) = match reference {
             LoweredReference::Frame { binding, slot, .. } => (binding, slot),
             LoweredReference::RealmGlobal { slot, binding, .. } => {
@@ -4448,6 +4493,311 @@ impl<'compiler, 'unit, 'arena, 'scope> ExpressionPlanner<'compiler, 'unit, 'aren
                     frame_slot,
                     identifier.span,
                 )?));
+            }
+        }
+        Ok(())
+    }
+
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "with assignment preserves the resolved reference, fallback binding, labels, and reverse expression schedule explicitly"
+    )]
+    fn plan_with_identifier_assignment<'expression>(
+        &self,
+        assignment: &'expression AssignmentExpression<'arena>,
+        identifier: &'expression IdentifierReference<'arena>,
+        reference: LoweredReference,
+        with_objects: Vec<BindingId>,
+        inferred_name: Option<PlannedInstruction>,
+        layout: &FrameLayout,
+        constants: &CompiledConstantPool,
+        flow: &mut PlannedControlFlow,
+        work: &mut Vec<ExpressionWork<'expression, 'arena>>,
+    ) -> Result<(), LeafCompilationError> {
+        if assignment.operator == AssignmentOperator::Assign {
+            return self.plan_with_simple_identifier_assignment(
+                assignment,
+                identifier,
+                reference,
+                &with_objects,
+                inferred_name,
+                layout,
+                constants,
+                flow,
+                work,
+            );
+        }
+        let with_reference = flow.new_label(identifier.span)?;
+        let done = flow.new_label(assignment.span)?;
+        let atom = constants.property_atom_index(identifier.span)?;
+        let branch_opcode = if assignment.operator == AssignmentOperator::Assign {
+            FinalOpcode::WithMakeRef
+        } else {
+            FinalOpcode::WithGetRef
+        };
+        for binding in with_objects {
+            let slot = layout
+                .slot(binding)
+                .ok_or(LeafCompilationError::SemanticInvariant {
+                    invariant: "visible with-object binding has a frame slot",
+                    span: Some(identifier.span),
+                })?;
+            flow.emit(self.plan_read_slot(binding, slot, identifier.span)?)?;
+            flow.with_branch(branch_opcode, atom, 1, &with_reference, identifier.span)?;
+        }
+
+        work.push(ExpressionWork::Bind(done.clone()));
+        Self::push_with_reference_assignment(
+            assignment,
+            identifier,
+            inferred_name,
+            &done,
+            flow,
+            work,
+        )?;
+        if branch_opcode == FinalOpcode::WithGetRef {
+            work.push(ExpressionWork::Emit(PlannedInstruction::new(
+                FinalOpcode::Swap,
+                Operands::None,
+                identifier.span,
+            )));
+            work.push(ExpressionWork::Emit(PlannedInstruction::new(
+                FinalOpcode::PushAtomValue,
+                Operands::Atom(atom),
+                identifier.span,
+            )));
+        }
+        work.push(ExpressionWork::Bind(with_reference));
+        work.push(ExpressionWork::Branch {
+            kind: BranchKind::Goto,
+            target: done,
+            span: assignment.span,
+        });
+        self.plan_lowered_identifier_assignment(
+            assignment,
+            identifier,
+            reference,
+            inferred_name,
+            flow,
+            work,
+        )
+    }
+
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "the unified with assignment carries its resolved reference, static fallback, source initializer, and control-flow authority explicitly"
+    )]
+    fn plan_with_simple_identifier_assignment<'expression>(
+        &self,
+        assignment: &'expression AssignmentExpression<'arena>,
+        identifier: &'expression IdentifierReference<'arena>,
+        reference: LoweredReference,
+        with_objects: &[BindingId],
+        inferred_name: Option<PlannedInstruction>,
+        layout: &FrameLayout,
+        constants: &CompiledConstantPool,
+        flow: &mut PlannedControlFlow,
+        work: &mut Vec<ExpressionWork<'expression, 'arena>>,
+    ) -> Result<(), LeafCompilationError> {
+        let atom = constants.property_atom_index(identifier.span)?;
+        self.plan_with_make_reference_selection(with_objects, atom, layout, identifier.span, flow)?;
+        let fallback = flow.new_label(identifier.span)?;
+        let done = flow.new_label(assignment.span)?;
+
+        work.push(ExpressionWork::Bind(done.clone()));
+        self.push_lowered_reference_write(reference, true, identifier.span, work)?;
+        work.push(ExpressionWork::Emit(PlannedInstruction::new(
+            FinalOpcode::Drop,
+            Operands::None,
+            identifier.span,
+        )));
+        work.push(ExpressionWork::Emit(PlannedInstruction::new(
+            FinalOpcode::Swap,
+            Operands::None,
+            identifier.span,
+        )));
+        work.push(ExpressionWork::Emit(PlannedInstruction::new(
+            FinalOpcode::Drop,
+            Operands::None,
+            identifier.span,
+        )));
+        work.push(ExpressionWork::Emit(PlannedInstruction::new(
+            FinalOpcode::Swap,
+            Operands::None,
+            identifier.span,
+        )));
+        work.push(ExpressionWork::Emit(PlannedInstruction::new(
+            FinalOpcode::Drop,
+            Operands::None,
+            identifier.span,
+        )));
+        work.push(ExpressionWork::Bind(fallback.clone()));
+        work.push(ExpressionWork::Branch {
+            kind: BranchKind::Goto,
+            target: done,
+            span: assignment.span,
+        });
+        work.push(ExpressionWork::Emit(PlannedInstruction::new(
+            FinalOpcode::PutRefValue,
+            Operands::None,
+            identifier.span,
+        )));
+        work.push(ExpressionWork::Emit(PlannedInstruction::new(
+            FinalOpcode::Insert3,
+            Operands::None,
+            assignment.span,
+        )));
+        work.push(ExpressionWork::Emit(PlannedInstruction::new(
+            FinalOpcode::Drop,
+            Operands::None,
+            identifier.span,
+        )));
+        work.push(ExpressionWork::Branch {
+            kind: BranchKind::IfFalse,
+            target: fallback,
+            span: assignment.span,
+        });
+        work.push(ExpressionWork::Emit(PlannedInstruction::new(
+            FinalOpcode::Dup,
+            Operands::None,
+            identifier.span,
+        )));
+        work.push(ExpressionWork::Emit(PlannedInstruction::new(
+            FinalOpcode::Swap,
+            Operands::None,
+            identifier.span,
+        )));
+        if let Some(set_name) = inferred_name {
+            work.push(ExpressionWork::Emit(set_name));
+        }
+        work.push(ExpressionWork::Visit(&assignment.right));
+        Ok(())
+    }
+
+    #[allow(
+        clippy::too_many_lines,
+        reason = "compound and logical with-reference stores keep their exact stack permutations and short-circuit branches together"
+    )]
+    fn push_with_reference_assignment<'expression>(
+        assignment: &'expression AssignmentExpression<'arena>,
+        identifier: &'expression IdentifierReference<'arena>,
+        inferred_name: Option<PlannedInstruction>,
+        done: &CompilerLabel,
+        flow: &mut PlannedControlFlow,
+        work: &mut Vec<ExpressionWork<'expression, 'arena>>,
+    ) -> Result<(), LeafCompilationError> {
+        match assignment.operator {
+            AssignmentOperator::Assign => {
+                work.push(ExpressionWork::Emit(PlannedInstruction::new(
+                    FinalOpcode::PutRefValue,
+                    Operands::None,
+                    identifier.span,
+                )));
+                work.push(ExpressionWork::Emit(PlannedInstruction::new(
+                    FinalOpcode::Insert3,
+                    Operands::None,
+                    assignment.span,
+                )));
+                if let Some(set_name) = inferred_name {
+                    work.push(ExpressionWork::Emit(set_name));
+                }
+                work.push(ExpressionWork::Visit(&assignment.right));
+            }
+            AssignmentOperator::LogicalOr
+            | AssignmentOperator::LogicalAnd
+            | AssignmentOperator::LogicalNullish => {
+                let short = flow.new_label(assignment.span)?;
+                let branch_kind = if assignment.operator == AssignmentOperator::LogicalOr {
+                    BranchKind::IfTrue
+                } else {
+                    BranchKind::IfFalse
+                };
+                work.push(ExpressionWork::Emit(PlannedInstruction::new(
+                    FinalOpcode::Drop,
+                    Operands::None,
+                    identifier.span,
+                )));
+                work.push(ExpressionWork::Emit(PlannedInstruction::new(
+                    FinalOpcode::Swap,
+                    Operands::None,
+                    identifier.span,
+                )));
+                work.push(ExpressionWork::Emit(PlannedInstruction::new(
+                    FinalOpcode::Drop,
+                    Operands::None,
+                    identifier.span,
+                )));
+                work.push(ExpressionWork::Emit(PlannedInstruction::new(
+                    FinalOpcode::Swap,
+                    Operands::None,
+                    identifier.span,
+                )));
+                work.push(ExpressionWork::Bind(short.clone()));
+                work.push(ExpressionWork::Branch {
+                    kind: BranchKind::Goto,
+                    target: done.clone(),
+                    span: assignment.span,
+                });
+                work.push(ExpressionWork::Emit(PlannedInstruction::new(
+                    FinalOpcode::PutRefValue,
+                    Operands::None,
+                    identifier.span,
+                )));
+                work.push(ExpressionWork::Emit(PlannedInstruction::new(
+                    FinalOpcode::Insert3,
+                    Operands::None,
+                    assignment.span,
+                )));
+                if let Some(set_name) = inferred_name {
+                    work.push(ExpressionWork::Emit(set_name));
+                }
+                work.push(ExpressionWork::Visit(&assignment.right));
+                work.push(ExpressionWork::Emit(PlannedInstruction::new(
+                    FinalOpcode::Drop,
+                    Operands::None,
+                    identifier.span,
+                )));
+                work.push(ExpressionWork::Branch {
+                    kind: branch_kind,
+                    target: short,
+                    span: assignment.span,
+                });
+                if assignment.operator == AssignmentOperator::LogicalNullish {
+                    work.push(ExpressionWork::Emit(PlannedInstruction::new(
+                        FinalOpcode::IsUndefinedOrNull,
+                        Operands::None,
+                        identifier.span,
+                    )));
+                }
+                work.push(ExpressionWork::Emit(PlannedInstruction::new(
+                    FinalOpcode::Dup,
+                    Operands::None,
+                    identifier.span,
+                )));
+            }
+            operator => {
+                let binary = operator.to_binary_operator().ok_or(
+                    LeafCompilationError::SemanticInvariant {
+                        invariant: "nonlogical compound assignment has a binary operator",
+                        span: Some(assignment.span),
+                    },
+                )?;
+                work.push(ExpressionWork::Emit(PlannedInstruction::new(
+                    FinalOpcode::PutRefValue,
+                    Operands::None,
+                    identifier.span,
+                )));
+                work.push(ExpressionWork::Emit(PlannedInstruction::new(
+                    FinalOpcode::Insert3,
+                    Operands::None,
+                    assignment.span,
+                )));
+                work.push(ExpressionWork::Emit(PlannedInstruction::new(
+                    binary_opcode(binary),
+                    Operands::None,
+                    assignment.span,
+                )));
+                work.push(ExpressionWork::Visit(&assignment.right));
             }
         }
         Ok(())
@@ -5374,6 +5724,7 @@ impl<'compiler, 'unit, 'arena, 'scope> ExpressionPlanner<'compiler, 'unit, 'aren
         layout: &FrameLayout,
         tree_layout: &FunctionTreeLayout,
         constants: &CompiledConstantPool,
+        flow: &mut PlannedControlFlow,
         work: &mut Vec<ExpressionWork<'expression, 'arena>>,
     ) -> Result<(), LeafCompilationError> {
         if let SimpleAssignmentTarget::PrivateFieldExpression(member) = &update.argument {
@@ -5401,6 +5752,30 @@ impl<'compiler, 'unit, 'arena, 'scope> ExpressionPlanner<'compiler, 'unit, 'aren
             tree_layout,
         )?;
         self.validate_lowered_mutation_reference(reference, true, identifier.span)?;
+        let with_objects = self
+            .with_object_bindings_for_reference(identifier.reference_id.get(), identifier.span)?;
+        if !with_objects.is_empty() {
+            return self.plan_with_identifier_update(
+                update,
+                identifier,
+                reference,
+                with_objects,
+                layout,
+                constants,
+                flow,
+                work,
+            );
+        }
+        self.plan_lowered_identifier_update(update, identifier, reference, work)
+    }
+
+    fn plan_lowered_identifier_update<'expression>(
+        &self,
+        update: &'expression UpdateExpression<'arena>,
+        identifier: &'expression IdentifierReference<'arena>,
+        reference: LoweredReference,
+        work: &mut Vec<ExpressionWork<'expression, 'arena>>,
+    ) -> Result<(), LeafCompilationError> {
         let (binding, frame_slot) = match reference {
             LoweredReference::Frame { binding, slot, .. } => (binding, slot),
             LoweredReference::RealmGlobal { slot, binding, .. } => {
@@ -5443,6 +5818,80 @@ impl<'compiler, 'unit, 'arena, 'scope> ExpressionPlanner<'compiler, 'unit, 'aren
             identifier.span,
         )?));
         Ok(())
+    }
+
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "with update preserves the resolved object reference and the static fallback schedule explicitly"
+    )]
+    fn plan_with_identifier_update<'expression>(
+        &self,
+        update: &'expression UpdateExpression<'arena>,
+        identifier: &'expression IdentifierReference<'arena>,
+        reference: LoweredReference,
+        with_objects: Vec<BindingId>,
+        layout: &FrameLayout,
+        constants: &CompiledConstantPool,
+        flow: &mut PlannedControlFlow,
+        work: &mut Vec<ExpressionWork<'expression, 'arena>>,
+    ) -> Result<(), LeafCompilationError> {
+        let with_reference = flow.new_label(identifier.span)?;
+        let done = flow.new_label(update.span)?;
+        let atom = constants.property_atom_index(identifier.span)?;
+        for binding in with_objects {
+            let slot = layout
+                .slot(binding)
+                .ok_or(LeafCompilationError::SemanticInvariant {
+                    invariant: "visible with-object binding has a frame slot",
+                    span: Some(identifier.span),
+                })?;
+            flow.emit(self.plan_read_slot(binding, slot, identifier.span)?)?;
+            flow.with_branch(
+                FinalOpcode::WithGetRef,
+                atom,
+                1,
+                &with_reference,
+                identifier.span,
+            )?;
+        }
+
+        work.push(ExpressionWork::Bind(done.clone()));
+        work.push(ExpressionWork::Emit(PlannedInstruction::new(
+            FinalOpcode::PutRefValue,
+            Operands::None,
+            identifier.span,
+        )));
+        work.push(ExpressionWork::Emit(PlannedInstruction::new(
+            if update.prefix {
+                FinalOpcode::Insert3
+            } else {
+                FinalOpcode::Perm4
+            },
+            Operands::None,
+            update.span,
+        )));
+        work.push(ExpressionWork::Emit(PlannedInstruction::new(
+            update_opcode(update),
+            Operands::None,
+            update.span,
+        )));
+        work.push(ExpressionWork::Emit(PlannedInstruction::new(
+            FinalOpcode::Swap,
+            Operands::None,
+            identifier.span,
+        )));
+        work.push(ExpressionWork::Emit(PlannedInstruction::new(
+            FinalOpcode::PushAtomValue,
+            Operands::Atom(atom),
+            identifier.span,
+        )));
+        work.push(ExpressionWork::Bind(with_reference));
+        work.push(ExpressionWork::Branch {
+            kind: BranchKind::Goto,
+            target: done,
+            span: update.span,
+        });
+        self.plan_lowered_identifier_update(update, identifier, reference, work)
     }
 
     fn plan_unary_expression<'expression>(

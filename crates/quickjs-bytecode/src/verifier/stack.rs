@@ -168,7 +168,7 @@ pub(super) fn analyze_ordinary_stack(
             };
         let with_branch_values = match current.decoded.instruction().opcode() {
             FinalOpcode::WithGetVar | FinalOpcode::WithDeleteVar => 1,
-            FinalOpcode::WithGetRef => 2,
+            FinalOpcode::WithMakeRef | FinalOpcode::WithGetRef => 2,
             _ => 0,
         };
         let with_binding_depth = if with_branch_values != 0 {

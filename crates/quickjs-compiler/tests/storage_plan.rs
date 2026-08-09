@@ -1339,29 +1339,11 @@ fn with_object_environment_is_a_hidden_scoped_capture() {
 }
 
 #[test]
-fn unsupported_with_reference_forms_fail_closed_at_the_identifier() {
-    let cases = [
-        (
-            "with (object) value = 1;",
-            UnsupportedFeature::WithReferenceMutation,
-            "value",
-        ),
-        (
-            "with (object) eval('value');",
-            UnsupportedFeature::WithReferenceCall,
-            "eval",
-        ),
-    ];
-
-    for (source, expected, identifier) in cases {
-        let (actual, span) = unsupported(source, ParseMode::Script);
-        assert_eq!(actual, expected, "{source}");
-        assert_eq!(
-            &source[span.start as usize..span.end as usize],
-            identifier,
-            "{source}"
-        );
-    }
+fn direct_eval_inside_with_fails_closed_at_the_identifier() {
+    let source = "with (object) eval('value');";
+    let (actual, span) = unsupported(source, ParseMode::Script);
+    assert_eq!(actual, UnsupportedFeature::WithReferenceCall);
+    assert_eq!(&source[span.start as usize..span.end as usize], "eval");
 }
 
 #[test]

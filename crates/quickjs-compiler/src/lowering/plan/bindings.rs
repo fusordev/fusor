@@ -4,10 +4,10 @@ use super::super::{
     CompilerClosureBinding, DeclarationKind, DestructuringBindingInitialization, ExecutableId,
     Expression, FinalOpcode, ForStatementLeft, FrameLayout, FrameSlot, FunctionTreeLayout, GetSpan,
     IdentifierReference, LeafCompilationError, LocalSlot, NativeReferenceId, NodeId, Operands,
-    PlannedControlFlow, PlannedInstruction, RealmGlobalId, ReferenceAccess, ReferenceId, Span,
-    StoragePlacement, SymbolId, UnresolvedGlobalId, UnsupportedLeafFeature, VariableDeclaration,
-    VariableDeclarationKind, VariableDeclarator, WritePolicy, anonymous_named_evaluation_span,
-    binary_opcode, unsupported,
+    PlannedControlFlow, PlannedInstruction, RealmGlobalId, ReferenceAccess, ReferenceId, ScopeId,
+    Span, StoragePlacement, SymbolId, UnresolvedGlobalId, UnsupportedLeafFeature,
+    VariableDeclaration, VariableDeclarationKind, VariableDeclarator, WritePolicy,
+    anonymous_named_evaluation_span, binary_opcode, unsupported,
 };
 use super::expressions::{ExpressionPlanner, ExpressionWork};
 
@@ -318,6 +318,73 @@ impl<'arena> ExpressionPlanner<'_, '_, 'arena, '_> {
         flow.bind(&done)
     }
 
+    pub(in crate::lowering) fn plan_identifier_value_store(
+        &self,
+        identifier: &IdentifierReference<'arena>,
+        layout: &FrameLayout,
+        tree_layout: &FunctionTreeLayout,
+        constants: &CompiledConstantPool,
+        flow: &mut PlannedControlFlow,
+    ) -> Result<(), LeafCompilationError> {
+        let reference = self.lowered_reference(
+            identifier.reference_id.get(),
+            identifier.span,
+            layout,
+            tree_layout,
+        )?;
+        self.validate_lowered_mutation_reference(reference, false, identifier.span)?;
+        let with_objects = self
+            .with_object_bindings_for_reference(identifier.reference_id.get(), identifier.span)?;
+        let emit_fallback = |flow: &mut PlannedControlFlow| match reference {
+            LoweredReference::Frame { binding, slot, .. } => {
+                for instruction in self.plan_write_slot(binding, slot, false, identifier.span)? {
+                    flow.emit(instruction)?;
+                }
+                Ok(())
+            }
+            LoweredReference::RealmGlobal { slot, binding, .. } => {
+                flow.emit(plan_external_put(binding, slot, identifier.span))
+            }
+        };
+        if with_objects.is_empty() {
+            return emit_fallback(flow);
+        }
+
+        let with_reference = flow.new_label(identifier.span)?;
+        let done = flow.new_label(identifier.span)?;
+        let atom = constants.property_atom_index(identifier.span)?;
+        for binding in with_objects {
+            let slot = layout
+                .slot(binding)
+                .ok_or(LeafCompilationError::SemanticInvariant {
+                    invariant: "visible with-object binding has a frame slot",
+                    span: Some(identifier.span),
+                })?;
+            flow.emit(self.plan_read_slot(binding, slot, identifier.span)?)?;
+            flow.with_branch(
+                FinalOpcode::WithMakeRef,
+                atom,
+                1,
+                &with_reference,
+                identifier.span,
+            )?;
+        }
+        emit_fallback(flow)?;
+        flow.branch(BranchKind::Goto, &done, identifier.span)?;
+        flow.bind(&with_reference)?;
+        flow.emit(PlannedInstruction::new(
+            FinalOpcode::Rot3l,
+            Operands::None,
+            identifier.span,
+        ))?;
+        flow.emit(PlannedInstruction::new(
+            FinalOpcode::PutRefValue,
+            Operands::None,
+            identifier.span,
+        ))?;
+        flow.bind(&done)
+    }
+
     pub(in crate::lowering) fn plan_realm_global_assignment<'expression>(
         assignment: &'expression AssignmentExpression<'arena>,
         slot: u16,
@@ -560,6 +627,105 @@ impl<'arena> ExpressionPlanner<'_, '_, 'arena, '_> {
         }
         Ok(())
     }
+
+    pub(in crate::lowering) fn push_lowered_reference_write<'expression>(
+        &self,
+        reference: LoweredReference,
+        preserve_value: bool,
+        span: Span,
+        work: &mut Vec<ExpressionWork<'expression, 'arena>>,
+    ) -> Result<(), LeafCompilationError> {
+        match reference {
+            LoweredReference::Frame { binding, slot, .. } => {
+                self.push_slot_write(binding, slot, preserve_value, span, work)
+            }
+            LoweredReference::RealmGlobal { slot, binding, .. } => {
+                work.push(ExpressionWork::Emit(plan_external_put(binding, slot, span)));
+                if preserve_value {
+                    work.push(ExpressionWork::Emit(PlannedInstruction::new(
+                        FinalOpcode::Dup,
+                        Operands::None,
+                        span,
+                    )));
+                }
+                Ok(())
+            }
+        }
+    }
+
+    /// Resolves a `with`-visible object reference while keeping one certified
+    /// object placeholder on the not-found path. Both paths merge as
+    /// `[object, propertyKey, found]`, so the caller can evaluate its RHS once
+    /// before selecting the object or static binding store.
+    pub(in crate::lowering) fn plan_with_make_reference_selection(
+        &self,
+        with_objects: &[BindingId],
+        atom: quickjs_bytecode::AtomPoolIndex,
+        layout: &FrameLayout,
+        span: Span,
+        flow: &mut PlannedControlFlow,
+    ) -> Result<(), LeafCompilationError> {
+        if with_objects.is_empty() {
+            return Err(LeafCompilationError::SemanticInvariant {
+                invariant: "with reference selection has a visible object environment",
+                span: Some(span),
+            });
+        }
+        let resolved = flow.new_label(span)?;
+        let merged = flow.new_label(span)?;
+        for (index, &binding) in with_objects.iter().enumerate() {
+            if index != 0 {
+                flow.emit(PlannedInstruction::new(
+                    FinalOpcode::Drop,
+                    Operands::None,
+                    span,
+                ))?;
+            }
+            let slot = layout
+                .slot(binding)
+                .ok_or(LeafCompilationError::SemanticInvariant {
+                    invariant: "visible with-object binding has a frame slot",
+                    span: Some(span),
+                })?;
+            flow.emit(self.plan_read_slot(binding, slot, span)?)?;
+            flow.emit(PlannedInstruction::new(
+                FinalOpcode::Dup,
+                Operands::None,
+                span,
+            ))?;
+            flow.with_branch(FinalOpcode::WithMakeRef, atom, 1, &resolved, span)?;
+        }
+        flow.emit(PlannedInstruction::new(
+            FinalOpcode::PushAtomValue,
+            Operands::Atom(atom),
+            span,
+        ))?;
+        flow.emit(PlannedInstruction::new(
+            FinalOpcode::PushFalse,
+            Operands::None,
+            span,
+        ))?;
+        flow.branch(BranchKind::Goto, &merged, span)?;
+        flow.bind(&resolved)?;
+        // `WithMakeRef` leaves `[placeholder, object, key]`; the duplicate
+        // placeholder is the same object and can represent the resolved base.
+        flow.emit(PlannedInstruction::new(
+            FinalOpcode::Swap,
+            Operands::None,
+            span,
+        ))?;
+        flow.emit(PlannedInstruction::new(
+            FinalOpcode::Drop,
+            Operands::None,
+            span,
+        ))?;
+        flow.emit(PlannedInstruction::new(
+            FinalOpcode::PushTrue,
+            Operands::None,
+            span,
+        ))?;
+        flow.bind(&merged)
+    }
 }
 
 impl CompilationContext<'_, '_, '_> {
@@ -621,21 +787,51 @@ impl CompilationContext<'_, '_, '_> {
         };
         let scoping = self.unit.semantic().scoping();
         let reference = scoping.get_reference(reference_id);
+        Ok(self.with_object_bindings_for_scope(reference.scope_id(), stop_scope))
+    }
+
+    pub(in crate::lowering) fn with_object_bindings_for_node_before_binding(
+        &self,
+        node: NodeId,
+        binding: BindingId,
+        span: Span,
+    ) -> Result<Vec<BindingId>, LeafCompilationError> {
+        let scope = self.unit.semantic().nodes().get_node(node).scope_id();
+        let stop_scope = self
+            .planned
+            .identities
+            .scope_by_binding
+            .get(binding.index())
+            .copied()
+            .flatten()
+            .ok_or(LeafCompilationError::SemanticInvariant {
+                invariant: "declared binding has a retained semantic scope",
+                span: Some(span),
+            })?;
+        Ok(self.with_object_bindings_for_scope(scope, Some(stop_scope)))
+    }
+
+    fn with_object_bindings_for_scope(
+        &self,
+        scope: ScopeId,
+        stop_scope: Option<ScopeId>,
+    ) -> Vec<BindingId> {
+        let scoping = self.unit.semantic().scoping();
         let mut visible = Vec::new();
-        for scope in scoping.scope_ancestors(reference.scope_id()) {
-            if Some(scope) == stop_scope {
+        for ancestor in scoping.scope_ancestors(scope) {
+            if Some(ancestor) == stop_scope {
                 break;
             }
             if let Some(&binding) = self
                 .planned
                 .identities
                 .with_object_binding_by_scope
-                .get(&scope)
+                .get(&ancestor)
             {
                 visible.push(binding);
             }
         }
-        Ok(visible)
+        visible
     }
 }
 
@@ -783,28 +979,13 @@ impl<'arena> CompilationContext<'_, 'arena, '_> {
                 })?;
         match target {
             AssignmentTarget::AssignmentTargetIdentifier(identifier) => {
-                let reference = self.lowered_reference(
-                    identifier.reference_id.get(),
-                    identifier.span,
+                ExpressionPlanner::new(self).plan_identifier_value_store(
+                    identifier,
                     layout,
                     tree_layout,
+                    constants,
+                    flow,
                 )?;
-                self.validate_lowered_mutation_reference(reference, false, identifier.span)?;
-                match reference {
-                    LoweredReference::Frame { binding, slot, .. } => {
-                        for instruction in ExpressionPlanner::new(self).plan_write_slot(
-                            binding,
-                            slot,
-                            false,
-                            identifier.span,
-                        )? {
-                            flow.emit(instruction)?;
-                        }
-                    }
-                    LoweredReference::RealmGlobal { slot, binding, .. } => {
-                        flow.emit(plan_external_put(binding, slot, identifier.span))?;
-                    }
-                }
             }
             AssignmentTarget::StaticMemberExpression(member) if !member.optional => {
                 self.plan_expression_with_abrupt_markers(
@@ -935,6 +1116,7 @@ impl<'arena> CompilationContext<'_, 'arena, '_> {
                         ExpressionWork::VisitOptionalChain { .. }
                         | ExpressionWork::IdentifierCallReference(_)
                         | ExpressionWork::IdentifierDelete { .. }
+                        | ExpressionWork::IdentifierValueStore(_)
                         | ExpressionWork::CallAfterCallee { .. }
                         | ExpressionWork::SuperPropertyBase { .. }
                         | ExpressionWork::InitializeInstanceFields => {
@@ -1179,6 +1361,29 @@ impl<'arena> CompilationContext<'_, 'arena, '_> {
                     span: Some(identifier.span),
                 },
             )?;
+            if declaration_kind == VariableDeclarationKind::Var
+                && let Some(initializer) = declarator.init.as_ref()
+            {
+                let with_objects = self.with_object_bindings_for_node_before_binding(
+                    initializer.node_id(),
+                    binding,
+                    identifier.span,
+                )?;
+                if !with_objects.is_empty() {
+                    return self.plan_with_identifier_var_initializer(
+                        identifier,
+                        initializer,
+                        binding,
+                        storage,
+                        &with_objects,
+                        layout,
+                        tree_layout,
+                        constants,
+                        abrupt_markers,
+                        flow,
+                    );
+                }
+            }
             if matches!(
                 storage.placement(),
                 StoragePlacement::GlobalObject | StoragePlacement::GlobalLexical
@@ -1305,6 +1510,149 @@ impl<'arena> CompilationContext<'_, 'arena, '_> {
             }
             Ok(())
         }
+    }
+
+    #[allow(
+        clippy::too_many_arguments,
+        clippy::too_many_lines,
+        reason = "with-visible var initialization carries the declaration binding, static fallback, initializer, and whole-graph planning authorities explicitly"
+    )]
+    fn plan_with_identifier_var_initializer(
+        &self,
+        identifier: &BindingIdentifier<'arena>,
+        initializer: &Expression<'arena>,
+        binding: BindingId,
+        storage: &crate::storage::BindingStorage,
+        with_objects: &[BindingId],
+        layout: &FrameLayout,
+        tree_layout: &FunctionTreeLayout,
+        constants: &CompiledConstantPool,
+        abrupt_markers: &[super::abrupt::AbruptMarker],
+        flow: &mut PlannedControlFlow,
+    ) -> Result<(), LeafCompilationError> {
+        let fallback = match storage.placement() {
+            StoragePlacement::Argument { .. } | StoragePlacement::Local => {
+                let slot = layout
+                    .slot(binding)
+                    .ok_or(LeafCompilationError::Unsupported {
+                        feature: UnsupportedLeafFeature::UnsupportedBinding,
+                        span: identifier.span,
+                    })?;
+                self.validate_declaration_storage(
+                    VariableDeclarationKind::Var,
+                    binding,
+                    slot,
+                    identifier.span,
+                )?;
+                ExpressionPlanner::new(self).plan_write_slot(
+                    binding,
+                    slot,
+                    false,
+                    identifier.span,
+                )?
+            }
+            StoragePlacement::GlobalObject | StoragePlacement::GlobalLexical => {
+                self.validate_realm_global_declaration(
+                    VariableDeclarationKind::Var,
+                    storage,
+                    identifier.span,
+                )?;
+                let global = tree_layout.realm_globals.for_binding(binding).ok_or(
+                    LeafCompilationError::SemanticInvariant {
+                        invariant: "declared Program binding has a realm-global identity",
+                        span: Some(identifier.span),
+                    },
+                )?;
+                let slot = tree_layout.realm_globals.closure_slot(
+                    &self.planned.plan,
+                    layout.executable,
+                    global,
+                )?;
+                let descriptor = tree_layout.realm_globals.binding(global).ok_or(
+                    LeafCompilationError::SemanticInvariant {
+                        invariant: "declared external binding descriptor exists",
+                        span: Some(identifier.span),
+                    },
+                )?;
+                vec![plan_external_put(descriptor.binding, slot, identifier.span)]
+            }
+            StoragePlacement::ModuleLocal | StoragePlacement::ModuleImport => {
+                return unsupported(
+                    UnsupportedLeafFeature::UnsupportedDeclaration,
+                    identifier.span,
+                );
+            }
+        };
+
+        let atom = constants.property_atom_index(identifier.span)?;
+        ExpressionPlanner::new(self).plan_with_make_reference_selection(
+            with_objects,
+            atom,
+            layout,
+            identifier.span,
+            flow,
+        )?;
+        self.plan_expression_with_abrupt_markers(
+            initializer,
+            layout,
+            tree_layout,
+            constants,
+            abrupt_markers,
+            flow,
+        )?;
+        if let Some(set_name) =
+            self.plan_inferred_function_name_for_initializer(identifier, initializer, constants)?
+        {
+            flow.emit(set_name)?;
+        }
+
+        let fallback_store = flow.new_label(identifier.span)?;
+        let done = flow.new_label(identifier.span)?;
+        flow.emit(PlannedInstruction::new(
+            FinalOpcode::Swap,
+            Operands::None,
+            identifier.span,
+        ))?;
+        flow.emit(PlannedInstruction::new(
+            FinalOpcode::Dup,
+            Operands::None,
+            identifier.span,
+        ))?;
+        flow.branch(BranchKind::IfFalse, &fallback_store, identifier.span)?;
+        flow.emit(PlannedInstruction::new(
+            FinalOpcode::Drop,
+            Operands::None,
+            identifier.span,
+        ))?;
+        flow.emit(PlannedInstruction::new(
+            FinalOpcode::PutRefValue,
+            Operands::None,
+            identifier.span,
+        ))?;
+        flow.branch(BranchKind::Goto, &done, identifier.span)?;
+
+        flow.bind(&fallback_store)?;
+        flow.emit(PlannedInstruction::new(
+            FinalOpcode::Drop,
+            Operands::None,
+            identifier.span,
+        ))?;
+        for opcode in [
+            FinalOpcode::Swap,
+            FinalOpcode::Drop,
+            FinalOpcode::Swap,
+            FinalOpcode::Drop,
+        ] {
+            flow.emit(PlannedInstruction::new(
+                opcode,
+                Operands::None,
+                identifier.span,
+            ))?;
+        }
+        for instruction in fallback {
+            flow.emit(instruction)?;
+        }
+        flow.bind(&done)
     }
 }
 

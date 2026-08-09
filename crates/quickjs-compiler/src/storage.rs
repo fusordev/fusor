@@ -1481,20 +1481,13 @@ impl<'unit, 'arena, 'scope> Planner<'unit, 'arena, 'scope> {
         with_object_binding_by_scope: &HashMap<ScopeId, BindingId>,
     ) -> Result<(), CompilerError> {
         let nodes = self.unit.semantic().nodes();
-        for (reference_id, binding, access, span) in resolved
+        for (reference_id, binding, span) in resolved
             .iter()
-            .map(|draft| {
-                (
-                    draft.reference_id,
-                    Some(draft.binding),
-                    draft.access,
-                    draft.span,
-                )
-            })
+            .map(|draft| (draft.reference_id, Some(draft.binding), draft.span))
             .chain(
                 unresolved
                     .iter()
-                    .map(|draft| (draft.reference_id, None, draft.access, draft.span)),
+                    .map(|draft| (draft.reference_id, None, draft.span)),
             )
         {
             let stop_scope = binding
@@ -1510,9 +1503,6 @@ impl<'unit, 'arena, 'scope> Planner<'unit, 'arena, 'scope> {
                 .is_empty()
             {
                 continue;
-            }
-            if access.writes() {
-                return unsupported(UnsupportedFeature::WithReferenceMutation, span);
             }
             if self.with_reference_is_direct_eval_call(nodes, reference_id) {
                 return unsupported(UnsupportedFeature::WithReferenceCall, span);

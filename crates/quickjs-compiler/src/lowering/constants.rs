@@ -407,6 +407,34 @@ impl<'arena> CompilationContext<'_, 'arena, '_> {
                     atom_candidates,
                 )?;
             }
+            AstKind::BindingIdentifier(identifier) => {
+                let AstKind::VariableDeclarator(declarator) = nodes.parent_kind(node_id) else {
+                    return Ok(());
+                };
+                if declarator.kind != super::VariableDeclarationKind::Var {
+                    return Ok(());
+                }
+                let Some(initializer) = declarator.init.as_ref() else {
+                    return Ok(());
+                };
+                let binding =
+                    self.binding_for_identifier(identifier.symbol_id.get(), identifier.span)?;
+                if !self
+                    .with_object_bindings_for_node_before_binding(
+                        initializer.node_id(),
+                        binding,
+                        identifier.span,
+                    )?
+                    .is_empty()
+                {
+                    record_property_candidate(
+                        owner,
+                        compiler_identifier_string(identifier.name.as_str(), identifier.span)?,
+                        identifier.span,
+                        atom_candidates,
+                    )?;
+                }
+            }
             AstKind::PrivateIdentifier(identifier)
                 if matches!(
                     nodes.parent_kind(node_id),

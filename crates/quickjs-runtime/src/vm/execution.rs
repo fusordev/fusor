@@ -945,7 +945,10 @@ pub(super) fn execute_one(
                 Err(pending) => return Ok(Step::Abrupt(pending)),
             }
         }
-        FinalOpcode::WithGetVar | FinalOpcode::WithDeleteVar | FinalOpcode::WithGetRef => {
+        FinalOpcode::WithGetVar
+        | FinalOpcode::WithDeleteVar
+        | FinalOpcode::WithMakeRef
+        | FinalOpcode::WithGetRef => {
             let Operands::AtomLabelU8 { atom, value, .. } = operands else {
                 return unsupported_dispatch(opcode);
             };
@@ -963,7 +966,8 @@ pub(super) fn execute_one(
                     pc: source_pc,
                 },
             )?;
-            let return_to = if opcode == FinalOpcode::WithGetRef {
+            let return_to = if matches!(opcode, FinalOpcode::WithMakeRef | FinalOpcode::WithGetRef)
+            {
                 CallReturn::with_reference(taken, not_taken)
             } else {
                 CallReturn::with_binding(taken, not_taken)
@@ -1006,9 +1010,50 @@ pub(super) fn execute_one(
                     origin,
                     execution_budget,
                 ),
+                FinalOpcode::WithMakeRef => begin_with_make_reference(
+                    runtime,
+                    object,
+                    property.key,
+                    property.name,
+                    value != 0,
+                    realm,
+                    Some(return_to),
+                    origin,
+                    execution_budget,
+                ),
                 _ => unreachable!("matched with-environment opcode"),
             };
             return native_step(dispatch, return_to);
+        }
+        FinalOpcode::PutRefValue => {
+            let value = pop(frame)?;
+            let key = pop(frame)?;
+            let object = pop(frame)?;
+            let property = computed_property_operand(runtime, &key)?;
+            let return_to =
+                CallReturn::discard(verified_instruction.successors().fallthrough().ok_or(
+                    EngineFault::InvalidSuccessor {
+                        function: frame.template,
+                        pc: source_pc,
+                    },
+                )?);
+            let realm = code(runtime, frame.code)?.realm;
+            let origin = instruction_location(runtime, frame, source_pc)?;
+            return native_step(
+                begin_with_reference_put(
+                    runtime,
+                    object,
+                    property.key,
+                    property.name,
+                    value,
+                    frame.strict,
+                    realm,
+                    Some(return_to),
+                    origin,
+                    execution_budget,
+                ),
+                return_to,
+            );
         }
         FinalOpcode::Rest => {
             let Operands::U16(first_argument) = operands else {

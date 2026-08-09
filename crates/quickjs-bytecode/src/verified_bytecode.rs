@@ -6557,7 +6557,9 @@ const fn supported_compiler_opcode(opcode: FinalOpcode) -> bool {
             | FinalOpcode::ApplyEval
             | FinalOpcode::WithGetVar
             | FinalOpcode::WithDeleteVar
+            | FinalOpcode::WithMakeRef
             | FinalOpcode::WithGetRef
+            | FinalOpcode::PutRefValue
             | FinalOpcode::ArrayFrom
             | FinalOpcode::CheckCtorReturn
             | FinalOpcode::CheckCtor
@@ -7205,6 +7207,7 @@ fn verify_internal_operand_stack(
                 | FinalOpcode::Ret
                 | FinalOpcode::WithGetVar
                 | FinalOpcode::WithDeleteVar
+                | FinalOpcode::WithMakeRef
                 | FinalOpcode::WithGetRef
         )
     }) {
@@ -7595,7 +7598,7 @@ fn verify_internal_operand_stack(
             let with_binding_results = if edge.is_branch_target {
                 match decoded.instruction().opcode() {
                     FinalOpcode::WithGetVar | FinalOpcode::WithDeleteVar => 1,
-                    FinalOpcode::WithGetRef => 2,
+                    FinalOpcode::WithMakeRef | FinalOpcode::WithGetRef => 2,
                     _ => 0,
                 }
             } else {
@@ -10704,7 +10707,11 @@ fn collect_requirements(
             | FinalOpcode::ForInStart => {
                 push_requirement(requirements, ExecutionRequirement::OrdinaryObjects);
             }
-            FinalOpcode::WithGetVar | FinalOpcode::WithDeleteVar | FinalOpcode::WithGetRef => {
+            FinalOpcode::WithGetVar
+            | FinalOpcode::WithDeleteVar
+            | FinalOpcode::WithMakeRef
+            | FinalOpcode::WithGetRef
+            | FinalOpcode::PutRefValue => {
                 push_requirement(requirements, ExecutionRequirement::OrdinaryObjects);
                 push_requirement(requirements, ExecutionRequirement::Calls);
             }
