@@ -181,6 +181,24 @@ fn nested_catch_and_for_in_abrupt_cleanup_follows_marker_nesting() {
 }
 
 #[test]
+fn caught_throw_inside_for_in_preserves_the_enclosing_iterator_marker() {
+    let compiled = compile(
+        "function run(object){for(const key in object){try{throw key;}catch(error){void error;}}}",
+        "run",
+    );
+    let opcodes = opcodes(&compiled);
+    let throw = opcodes
+        .iter()
+        .position(|&opcode| opcode == FinalOpcode::Throw)
+        .expect("source throw");
+    assert_ne!(
+        throw.checked_sub(1).map(|index| opcodes[index]),
+        Some(FinalOpcode::Nip),
+        "an inner handler, rather than abrupt loop exit, owns this throw"
+    );
+}
+
+#[test]
 fn labeled_loop_jumps_drop_each_crossed_marker() {
     for (name, keyword) in [("breakOuter", "break"), ("continueOuter", "continue")] {
         let source = format!(

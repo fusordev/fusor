@@ -3707,6 +3707,24 @@ fn catch_marker_certificate_accepts_normal_throw_and_nested_for_in_cleanup() {
         BytecodeGraphVerificationLimits::default(),
     )
     .expect("a handler inside a for-in region retains only the enclosing iterator marker");
+
+    let caught_throw_inside_for_in = [
+        (FinalOpcode::Undefined, Operands::None),
+        (FinalOpcode::ForInStart, Operands::None),
+        (FinalOpcode::Catch, Operands::Label(8)),
+        (FinalOpcode::Push1, Operands::NoneInt),
+        (FinalOpcode::Throw, Operands::None),
+        (FinalOpcode::ReturnUndef, Operands::None),
+        (FinalOpcode::ReturnUndef, Operands::None),
+        (FinalOpcode::Drop, Operands::None),
+        (FinalOpcode::Drop, Operands::None),
+        (FinalOpcode::ReturnUndef, Operands::None),
+    ];
+    verify_compiler_bytecode_graph(
+        typed_stack_input(&caught_throw_inside_for_in, &[], &[]),
+        BytecodeGraphVerificationLimits::default(),
+    )
+    .expect("a caught throw preserves a for-in marker owned outside its handler");
 }
 
 #[test]

@@ -9628,11 +9628,21 @@ fn verify_internal_stack_exit(
                     ));
                 }
                 InternalStackValue::ForInIterator(_) => {
-                    return Err(for_in_stack_error(
-                        id,
-                        decoded.pc(),
-                        decoded.instruction().opcode(),
-                    ));
+                    // A catch nested inside the for-in region restores the
+                    // iterator marker beneath its handler value. An uncaught
+                    // throw, or a throw to an outer handler, must instead have
+                    // removed every crossed for-in marker before this terminal.
+                    let retained_by_inner_catch = state[cursor.saturating_add(1)..]
+                        .iter()
+                        .any(|value| matches!(value, InternalStackValue::CatchMarker { .. }));
+                    if !retained_by_inner_catch {
+                        return Err(for_in_stack_error(
+                            id,
+                            decoded.pc(),
+                            decoded.instruction().opcode(),
+                        ));
+                    }
+                    cursor += 1;
                 }
                 _ => {
                     return Err(catch_stack_error(
