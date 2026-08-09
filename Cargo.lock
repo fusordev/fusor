@@ -1164,6 +1164,7 @@ dependencies = [
  "quickjs-frontend",
  "quickjs-regexp",
  "temporal_rs",
+ "tokio",
  "writeable",
 ]
 

@@ -84,7 +84,7 @@ use crate::{
         ReflectMethod, RegExpFlag, RegExpSymbolMethod, SetMethod, SetPrototypeOutcome,
         SharedEvalVariableEnvironment, StringArgument, StringMethod,
         TemporalDurationPrototypeMethod, TemporalDurationStaticMethod,
-        TemporalInstantPrototypeMethod, TemporalInstantStaticMethod,
+        TemporalInstantPrototypeMethod, TemporalInstantStaticMethod, TemporalNowMethod,
         TemporalPlainDatePrototypeMethod, TemporalPlainDateStaticMethod,
         TemporalPlainDateTimePrototypeMethod, TemporalPlainDateTimeStaticMethod,
         TemporalPlainMonthDayPrototypeMethod, TemporalPlainMonthDayStaticMethod,
@@ -93,7 +93,12 @@ use crate::{
         TypedArrayElementValue, TypedArrayOwnProperty, TypedArrayPropertyKey,
         TypedArrayPrototypeMethod, TypedArrayStoreOutcome, TypedArrayView, UriFunction,
         WeakMapMethod, WeakSetMethod, array_length_from_number, check_execution_limit,
-        global_declaration_error, runtime_string, usize_to_u64,
+        global_declaration_error, runtime_string, typed_array_element_byte_index,
+        typed_array_read_element, typed_array_write_element, usize_to_u64,
+    },
+    shared_array_buffer::{
+        AtomicsWaiterState, AtomicsWakeResult, BlockingWaiter, SharedDataBlock, SharedWaiter,
+        SharedWaiterWake, next_atomics_waiter_id, next_atomics_wake_token,
     },
     value::{HeapReference, SlotValue, StoredValue},
 };
@@ -159,6 +164,7 @@ mod with_environment;
 
 pub(crate) use array_from_async::ArrayFromAsyncRecord;
 use async_function::{begin_async_await, suspend_async_function};
+pub(crate) use promise::fulfill_promise_host;
 
 #[allow(
     clippy::wildcard_imports,
@@ -813,6 +819,8 @@ enum NativeContinuation {
     TemporalPlainDateTimeBag(Box<TemporalPlainDateTimeBagContinuation>),
     TemporalZonedDateTimeBag(Box<TemporalZonedDateTimeBagContinuation>),
     TemporalZonedDateTimeOptions(Box<TemporalZonedDateTimeOptionsContinuation>),
+    TemporalZonedDateTimeRoundOptions(Box<TemporalZonedDateTimeRoundContinuation>),
+    TemporalZonedDateTimeDifferenceOptions(Box<TemporalZonedDateTimeDifferenceContinuation>),
     TemporalPlainDateToZonedDateTime(Box<TemporalPlainDateToZonedDateTimeContinuation>),
     TemporalPlainDateTimeToZonedDateTime(Box<TemporalPlainDateTimeToZonedDateTimeContinuation>),
     TemporalPlainTimeBag(Box<TemporalPlainTimeBagContinuation>),
@@ -1030,6 +1038,12 @@ impl NativeContinuation {
             }
             Self::TemporalPlainDateTimeRoundOptions(_) => {
                 TemporalPlainDateTimeRoundContinuation::retained_values()
+            }
+            Self::TemporalZonedDateTimeRoundOptions(_) => {
+                TemporalZonedDateTimeRoundContinuation::retained_values()
+            }
+            Self::TemporalZonedDateTimeDifferenceOptions(_) => {
+                TemporalZonedDateTimeDifferenceContinuation::retained_values()
             }
             Self::TemporalPlainTimeRoundOptions(_) => {
                 TemporalPlainTimeRoundContinuation::retained_values()
@@ -2262,6 +2276,9 @@ enum OperatorPrimitiveTarget {
     DataViewSetValue(Box<DataViewSetValueState>),
     /// An integer-indexed typed-array write after `ToNumber` or `ToBigInt`.
     TypedArrayElementSet(Box<TypedArrayElementSetState>),
+    /// `%TypedArray%.from` or `%TypedArray%.of` after one destination element's
+    /// observable numeric conversion.
+    TypedArrayStaticElement(Box<ArrayStaticContinuation>),
     /// `Atomics.isLockFree` after `ToIntegerOrInfinity`'s primitive conversion.
     AtomicsIsLockFree,
     /// An atomic operation's typed-array index after `ToIndex`.
@@ -2270,7 +2287,7 @@ enum OperatorPrimitiveTarget {
     AtomicsValue(Box<AtomicsContinuation>),
     /// `Atomics.compareExchange`'s replacement value after conversion.
     AtomicsReplacement(Box<AtomicsContinuation>),
-    /// `Atomics.wait`'s timeout after validating the expected value.
+    /// `Atomics.wait` or `waitAsync` after converting the expected value and timeout.
     AtomicsTimeout(Box<AtomicsContinuation>),
     /// `ArrayBuffer.prototype.resize`'s new length, after the brand checks.
     ArrayBufferResize {
@@ -2281,11 +2298,11 @@ enum OperatorPrimitiveTarget {
     SharedArrayBufferGrow {
         object: ObjectId,
     },
-    /// `ArrayBuffer.prototype.transfer` or `transferToFixedLength` after
-    /// `ToIndex(newLength)`.
+    /// An `ArrayBuffer` transfer operation after `ToIndex(newLength)`.
     ArrayBufferTransfer {
         object: ObjectId,
         preserve_resizability: bool,
+        immutable: bool,
     },
     /// `ArrayBuffer.prototype.slice`'s start argument, awaiting
     /// `ToClampedIndex`'s `ToNumber` component.
@@ -2321,7 +2338,6 @@ enum OperatorPrimitiveTarget {
     TemporalPlainMonthDayConstructor(Box<TemporalPlainMonthDayConstructorContinuation>),
     TemporalPlainYearMonthConstructor(Box<TemporalPlainYearMonthConstructorContinuation>),
     TemporalZonedDateTimeConstructor(Box<TemporalZonedDateTimeConstructorContinuation>),
-    TemporalPlainDateEquals(Box<temporal_rs::PlainDate>),
     TemporalPlainDateBag(Box<TemporalPlainDateBagContinuation>),
     TemporalPlainMonthDayBag(Box<TemporalPlainMonthDayBagContinuation>),
     TemporalPlainYearMonthBag(Box<TemporalPlainYearMonthBagContinuation>),
@@ -2374,6 +2390,15 @@ enum OperatorPrimitiveTarget {
     TemporalPlainDateTimeToStringSmallestUnit(Box<TemporalPlainDateTimeToStringContinuation>),
     TemporalZonedDateTimeToString(Box<TemporalZonedDateTimeToStringContinuation>),
     TemporalZonedDateTimeTransition(Box<TemporalZonedDateTimeTransitionContinuation>),
+    TemporalZonedDateTimeRoundRoundingIncrement(Box<TemporalZonedDateTimeRoundContinuation>),
+    TemporalZonedDateTimeRoundRoundingMode(Box<TemporalZonedDateTimeRoundContinuation>),
+    TemporalZonedDateTimeRoundSmallestUnit(Box<TemporalZonedDateTimeRoundContinuation>),
+    TemporalZonedDateTimeDifferenceLargestUnit(Box<TemporalZonedDateTimeDifferenceContinuation>),
+    TemporalZonedDateTimeDifferenceRoundingIncrement(
+        Box<TemporalZonedDateTimeDifferenceContinuation>,
+    ),
+    TemporalZonedDateTimeDifferenceRoundingMode(Box<TemporalZonedDateTimeDifferenceContinuation>),
+    TemporalZonedDateTimeDifferenceSmallestUnit(Box<TemporalZonedDateTimeDifferenceContinuation>),
     TemporalDurationBag(Box<TemporalDurationBagContinuation>),
     TemporalDurationRoundLargestUnit(Box<TemporalDurationRoundContinuation>),
     TemporalDurationRoundRoundingIncrement(Box<TemporalDurationRoundContinuation>),
@@ -2549,8 +2574,7 @@ impl OperatorPrimitiveTarget {
             | Self::GlobalUri(_)
             | Self::BigIntToString { .. }
             | Self::BigIntTruncationBits { .. }
-            | Self::BigIntTruncationValue { .. }
-            | Self::TemporalPlainDateEquals(_) => 0,
+            | Self::BigIntTruncationValue { .. } => 0,
             Self::BinaryRight { .. }
             | Self::BinaryFinish { .. }
             | Self::EqualityFinish { .. }
@@ -2635,6 +2659,9 @@ impl OperatorPrimitiveTarget {
             Self::DataViewSetOffset(_) => DataViewSetOffsetState::retained_values(),
             Self::DataViewSetValue(_) => DataViewSetValueState::retained_values(),
             Self::TypedArrayElementSet(state) => state.retained_values(),
+            Self::TypedArrayStaticElement(state) | Self::ArrayStaticLength(state) => {
+                state.retained_values()
+            }
             Self::AtomicsIndex(state)
             | Self::AtomicsValue(state)
             | Self::AtomicsReplacement(state)
@@ -2738,6 +2765,17 @@ impl OperatorPrimitiveTarget {
             Self::TemporalZonedDateTimeTransition(_) => {
                 TemporalZonedDateTimeTransitionContinuation::retained_values()
             }
+            Self::TemporalZonedDateTimeRoundRoundingIncrement(_)
+            | Self::TemporalZonedDateTimeRoundRoundingMode(_)
+            | Self::TemporalZonedDateTimeRoundSmallestUnit(_) => {
+                TemporalZonedDateTimeRoundContinuation::retained_values()
+            }
+            Self::TemporalZonedDateTimeDifferenceLargestUnit(_)
+            | Self::TemporalZonedDateTimeDifferenceRoundingIncrement(_)
+            | Self::TemporalZonedDateTimeDifferenceRoundingMode(_)
+            | Self::TemporalZonedDateTimeDifferenceSmallestUnit(_) => {
+                TemporalZonedDateTimeDifferenceContinuation::retained_values()
+            }
             Self::TemporalDurationBag(state) => state.retained_values(),
             Self::TemporalDurationRoundLargestUnit(_state)
             | Self::TemporalDurationRoundRoundingIncrement(_state)
@@ -2812,7 +2850,6 @@ impl OperatorPrimitiveTarget {
             Self::ArraySpliceArgument(state) => state.retained_values(),
             Self::ArraySortValue(state) => state.retained_values(),
             Self::ArrayFlattenValue(state) => state.retained_values(),
-            Self::ArrayStaticLength(state) => state.retained_values(),
             Self::StringRawValue(state) => state.retained_values(),
             Self::StringReplaceValue(state) => state.retained_values(),
             Self::StringSplitValue(state) => state.retained_values(),
@@ -2998,7 +3035,6 @@ fn trace_operator_primitive_target_roots(
         | OperatorPrimitiveTarget::JsonRawJsonText
         | OperatorPrimitiveTarget::BigIntToString { .. }
         | OperatorPrimitiveTarget::BigIntTruncationValue { .. }
-        | OperatorPrimitiveTarget::TemporalPlainDateEquals(_)
         // The converted left Number carries no heap edge.
         | OperatorPrimitiveTarget::MathBinaryFinish { .. } => {}
         OperatorPrimitiveTarget::DateSetTime { object }
@@ -3093,6 +3129,17 @@ fn trace_operator_primitive_target_roots(
             state.trace_roots(mark);
         }
         OperatorPrimitiveTarget::TemporalZonedDateTimeTransition(state) => {
+            state.trace_roots(mark);
+        }
+        OperatorPrimitiveTarget::TemporalZonedDateTimeRoundRoundingIncrement(state)
+        | OperatorPrimitiveTarget::TemporalZonedDateTimeRoundRoundingMode(state)
+        | OperatorPrimitiveTarget::TemporalZonedDateTimeRoundSmallestUnit(state) => {
+            state.trace_roots(mark);
+        }
+        OperatorPrimitiveTarget::TemporalZonedDateTimeDifferenceLargestUnit(state)
+        | OperatorPrimitiveTarget::TemporalZonedDateTimeDifferenceRoundingIncrement(state)
+        | OperatorPrimitiveTarget::TemporalZonedDateTimeDifferenceRoundingMode(state)
+        | OperatorPrimitiveTarget::TemporalZonedDateTimeDifferenceSmallestUnit(state) => {
             state.trace_roots(mark);
         }
         OperatorPrimitiveTarget::TemporalDurationBag(state) => state.trace_roots(mark),
@@ -3195,6 +3242,8 @@ fn trace_operator_primitive_target_roots(
         OperatorPrimitiveTarget::DataViewSetOffset(state) => state.trace_roots(mark),
         OperatorPrimitiveTarget::DataViewSetValue(state) => state.trace_roots(mark),
         OperatorPrimitiveTarget::TypedArrayElementSet(state) => state.trace_roots(mark),
+        OperatorPrimitiveTarget::TypedArrayStaticElement(state)
+        | OperatorPrimitiveTarget::ArrayStaticLength(state) => state.trace_roots(mark),
         OperatorPrimitiveTarget::AtomicsIndex(state)
         | OperatorPrimitiveTarget::AtomicsValue(state)
         | OperatorPrimitiveTarget::AtomicsReplacement(state)
@@ -3228,7 +3277,6 @@ fn trace_operator_primitive_target_roots(
         OperatorPrimitiveTarget::ArraySpliceArgument(state) => state.trace_roots(mark),
         OperatorPrimitiveTarget::ArraySortValue(state) => state.trace_roots(mark),
         OperatorPrimitiveTarget::ArrayFlattenValue(state) => state.trace_roots(mark),
-        OperatorPrimitiveTarget::ArrayStaticLength(state) => state.trace_roots(mark),
         OperatorPrimitiveTarget::ArrayFromAsyncLength { operation } => {
             mark(CollectionRoot::Heap(HeapReference::Object(*operation)));
         }
@@ -3365,6 +3413,10 @@ fn trace_native_continuation_roots(
         NativeContinuation::TemporalPlainDateTimeBag(state) => state.trace_roots(mark),
         NativeContinuation::TemporalZonedDateTimeBag(state) => state.trace_roots(mark),
         NativeContinuation::TemporalZonedDateTimeOptions(state) => state.trace_roots(mark),
+        NativeContinuation::TemporalZonedDateTimeRoundOptions(state) => state.trace_roots(mark),
+        NativeContinuation::TemporalZonedDateTimeDifferenceOptions(state) => {
+            state.trace_roots(mark);
+        }
         NativeContinuation::TemporalPlainDateToZonedDateTime(state) => state.trace_roots(mark),
         NativeContinuation::TemporalPlainDateTimeToZonedDateTime(state) => {
             state.trace_roots(mark);
@@ -4324,6 +4376,7 @@ impl Context<'_> {
         }
 
         let mut execution_budget = ExecutionBudget::new(limits);
+        drain_host_jobs(self.runtime, compiler, &mut execution_budget)?;
         let mut function_id = function_id;
         let mut receiver = StoredValue::Undefined;
         let mut owned_arguments: Option<Vec<StoredValue>> = None;

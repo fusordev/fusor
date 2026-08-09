@@ -207,6 +207,7 @@ impl Runtime {
             public_roots: self.public_roots,
             pending_releases: usize_to_u64(self.mailbox.pending_len()),
             pending_promise_jobs: usize_to_u64(self.promise_jobs.len()),
+            pending_atomics_waiters: usize_to_u64(self.atomics_waiters.len()),
             pending_finalization_jobs: usize_to_u64(self.finalization_jobs.len()),
             kept_alive: usize_to_u64(self.kept_alive.len()),
         }
@@ -751,6 +752,14 @@ impl Runtime {
                     );
                 }
             }
+        }
+        for waiter in self.atomics_waiters.values() {
+            mark_heap_reference(
+                HeapReference::Object(waiter.promise),
+                &mut marked_functions,
+                &mut marked_objects,
+                &mut work,
+            );
         }
         for registry in &self.finalization_jobs {
             mark_heap_reference(
@@ -1640,7 +1649,7 @@ impl Runtime {
                 self.array_buffer_bytes = self.array_buffer_bytes.saturating_sub(usize_to_u64(
                     object
                         .array_buffer_state()
-                        .map_or(0, crate::object::ArrayBufferState::byte_length),
+                        .map_or(0, crate::object::ArrayBufferState::accounted_byte_length),
                 ));
                 self.for_in_entries = self
                     .for_in_entries

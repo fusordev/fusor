@@ -6,7 +6,7 @@ use crate::{
         ArrayBufferPrototypeMethod, AtomicsMethod, DataViewPrototypeMethod, DatePrototypeMethod,
         DateStaticMethod, SharedArrayBufferPrototypeMethod, TemporalDurationPrototypeMethod,
         TemporalDurationStaticMethod, TemporalInstantPrototypeMethod, TemporalInstantStaticMethod,
-        TemporalPlainDatePrototypeMethod, TemporalPlainDateStaticMethod,
+        TemporalNowMethod, TemporalPlainDatePrototypeMethod, TemporalPlainDateStaticMethod,
         TemporalPlainDateTimePrototypeMethod, TemporalPlainDateTimeStaticMethod,
         TemporalPlainMonthDayPrototypeMethod, TemporalPlainMonthDayStaticMethod,
         TemporalPlainTimePrototypeMethod, TemporalPlainTimeStaticMethod,
@@ -293,6 +293,10 @@ fn visit_realm_name_order(
         }
     }
     visit(RealmNameId::Temporal)?;
+    visit(RealmNameId::TemporalNow)?;
+    for method in TemporalNowMethod::ALL {
+        visit(RealmNameId::TemporalNowMethod(method))?;
+    }
     visit(RealmNameId::Duration)?;
     visit(RealmNameId::Instant)?;
     visit(RealmNameId::PlainDate)?;
@@ -315,6 +319,7 @@ fn visit_realm_name_order(
         TemporalInstantPrototypeMethod::Since,
         TemporalInstantPrototypeMethod::Round,
         TemporalInstantPrototypeMethod::Equals,
+        TemporalInstantPrototypeMethod::ToZonedDateTimeISO,
     ] {
         visit(RealmNameId::TemporalInstantPrototype(method))?;
     }
@@ -575,6 +580,8 @@ fn realm_name_description(id: RealmNameId) -> &'static str {
         RealmNameId::DateStatic(method) => method.name(),
         RealmNameId::DatePrototype(method) => method.name(),
         RealmNameId::Temporal => "Temporal",
+        RealmNameId::TemporalNow => "Now",
+        RealmNameId::TemporalNowMethod(method) => method.name(),
         RealmNameId::Duration => "Duration",
         RealmNameId::Instant => "Instant",
         RealmNameId::PlainDate => "PlainDate",

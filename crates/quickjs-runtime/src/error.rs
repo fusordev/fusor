@@ -139,7 +139,8 @@ pub enum RuntimeResource {
     HeapFunctions,
     /// Runtime ordinary objects.
     HeapObjects,
-    /// Bytes retained by live `ArrayBuffer` backing data blocks.
+    /// Bytes charged to live buffer objects; growable shared buffers reserve
+    /// their maximum so another agent cannot bypass the local limit.
     ArrayBufferBytes,
     /// Own property slots across ordinary objects and functions.
     ObjectProperties,
@@ -169,6 +170,8 @@ pub enum RuntimeResource {
     ReleaseMailbox,
     /// Jobs retained by the runtime-owned ECMAScript Promise FIFO.
     PromiseJobs,
+    /// Pending `Atomics.waitAsync` waiter records and timeout registrations.
+    AtomicsWaiters,
     /// Cleanup jobs retained for live `FinalizationRegistry` objects.
     FinalizationJobs,
     /// Weak targets retained until the current ECMAScript job completes.
@@ -202,6 +205,7 @@ impl fmt::Display for RuntimeResource {
             Self::Collection => "runtime collection",
             Self::ReleaseMailbox => "release mailbox",
             Self::PromiseJobs => "Promise jobs",
+            Self::AtomicsWaiters => "Atomics waiters",
             Self::FinalizationJobs => "finalization jobs",
             Self::KeptAlive => "kept-alive weak targets",
             Self::RegExpBacktrackStates => "RegExp backtracking states",

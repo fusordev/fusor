@@ -777,6 +777,24 @@ pub(super) fn resume_native_continuations(
                     execution_budget,
                 )?
             }
+            NativeContinuation::TemporalZonedDateTimeRoundOptions(state) => {
+                advance_temporal_zoned_date_time_round_options(
+                    runtime,
+                    *state,
+                    value,
+                    return_to,
+                    execution_budget,
+                )?
+            }
+            NativeContinuation::TemporalZonedDateTimeDifferenceOptions(state) => {
+                advance_temporal_zoned_date_time_difference_options(
+                    runtime,
+                    *state,
+                    value,
+                    return_to,
+                    execution_budget,
+                )?
+            }
             NativeContinuation::TemporalPlainDateTimeToStringOptions(state) => {
                 advance_temporal_plain_date_time_to_string_options(
                     runtime,
@@ -814,7 +832,13 @@ pub(super) fn resume_native_continuations(
                 )?
             }
             NativeContinuation::TemporalDurationCompareOptions(state) => {
-                finish_temporal_duration_compare_options(runtime, &state, &value)?
+                finish_temporal_duration_compare_options(
+                    runtime,
+                    state,
+                    value,
+                    return_to,
+                    execution_budget,
+                )?
             }
             NativeContinuation::TemporalDurationRoundOptions(state) => {
                 advance_temporal_duration_round_options(
@@ -2854,6 +2878,10 @@ pub(super) fn dispatch_native_call_with_frames(
             origin.unwrap_or_else(native_function_host_origin),
             execution_budget,
         ),
+        NativeFunctionKind::TemporalNow(method) => {
+            let origin = origin.unwrap_or_else(native_function_host_origin);
+            dispatch_temporal_now(runtime, method, native.realm, inputs.arguments, &origin)
+        }
         NativeFunctionKind::TemporalDurationConstructor => begin_temporal_duration_constructor(
             runtime,
             native.realm,
@@ -3571,6 +3599,18 @@ pub(super) fn dispatch_native_call_with_frames(
         NativeFunctionKind::ArrayStatic(method) => begin_array_static(
             runtime,
             method,
+            false,
+            native.realm,
+            inputs.receiver,
+            inputs.arguments,
+            return_to,
+            origin.unwrap_or_else(native_function_host_origin),
+            execution_budget,
+        ),
+        NativeFunctionKind::TypedArrayStatic(method) => begin_array_static(
+            runtime,
+            method,
+            true,
             native.realm,
             inputs.receiver,
             inputs.arguments,

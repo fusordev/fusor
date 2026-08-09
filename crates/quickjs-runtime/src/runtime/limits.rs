@@ -44,6 +44,7 @@ const DEFAULT_MAX_PUBLIC_ROOTS: u64 = 1_048_576;
 const DEFAULT_MAX_ACTIVE_FRAMES: u32 = 1_024;
 const DEFAULT_MAX_ACTIVE_FRAME_VALUES: u64 = 16_777_216;
 const DEFAULT_MAX_PENDING_PROMISE_JOBS: u64 = 1_048_576;
+const DEFAULT_MAX_PENDING_ATOMICS_WAITERS: u64 = 1_048_576;
 const DEFAULT_MAX_PENDING_FINALIZATION_JOBS: u64 = 1_048_576;
 const DEFAULT_MAX_KEPT_ALIVE: u64 = 1_048_576;
 
@@ -72,6 +73,7 @@ pub struct RuntimeLimits {
     pub(crate) max_active_frames: u32,
     pub(crate) max_active_frame_values: u64,
     pub(crate) max_pending_promise_jobs: u64,
+    pub(crate) max_pending_atomics_waiters: u64,
     pub(crate) max_pending_finalization_jobs: u64,
     pub(crate) max_kept_alive: u64,
 }
@@ -133,7 +135,8 @@ impl RuntimeLimits {
         self
     }
 
-    /// Replaces the maximum bytes retained by `ArrayBuffer` backing data blocks.
+    /// Replaces the maximum bytes charged to live buffer objects. A growable
+    /// `SharedArrayBuffer` object reserves its maximum byte length up front.
     #[must_use]
     pub const fn with_max_array_buffer_bytes(mut self, maximum: u64) -> Self {
         self.max_array_buffer_bytes = maximum;
@@ -203,6 +206,13 @@ impl RuntimeLimits {
         self
     }
 
+    /// Replaces the maximum number of pending `Atomics.waitAsync` records.
+    #[must_use]
+    pub const fn with_max_pending_atomics_waiters(mut self, maximum: u64) -> Self {
+        self.max_pending_atomics_waiters = maximum;
+        self
+    }
+
     /// Replaces the maximum number of finalization cleanup jobs waiting in the
     /// runtime FIFO.
     #[must_use]
@@ -241,6 +251,7 @@ impl Default for RuntimeLimits {
             max_active_frames: DEFAULT_MAX_ACTIVE_FRAMES,
             max_active_frame_values: DEFAULT_MAX_ACTIVE_FRAME_VALUES,
             max_pending_promise_jobs: DEFAULT_MAX_PENDING_PROMISE_JOBS,
+            max_pending_atomics_waiters: DEFAULT_MAX_PENDING_ATOMICS_WAITERS,
             max_pending_finalization_jobs: DEFAULT_MAX_PENDING_FINALIZATION_JOBS,
             max_kept_alive: DEFAULT_MAX_KEPT_ALIVE,
         }
@@ -269,6 +280,7 @@ pub struct RuntimeUsage {
     pub(super) public_roots: u64,
     pub(super) pending_releases: u64,
     pub(super) pending_promise_jobs: u64,
+    pub(super) pending_atomics_waiters: u64,
     pub(super) pending_finalization_jobs: u64,
     pub(super) kept_alive: u64,
 }
@@ -316,7 +328,8 @@ impl RuntimeUsage {
         self.heap_objects
     }
 
-    /// Returns bytes retained by live `ArrayBuffer` backing data blocks.
+    /// Returns bytes charged to live buffer objects, including maximum-length
+    /// reservations for growable shared buffers.
     #[must_use]
     pub const fn array_buffer_bytes(self) -> u64 {
         self.array_buffer_bytes
@@ -369,6 +382,12 @@ impl RuntimeUsage {
     #[must_use]
     pub const fn pending_promise_jobs(self) -> u64 {
         self.pending_promise_jobs
+    }
+
+    /// Returns the number of pending `Atomics.waitAsync` records.
+    #[must_use]
+    pub const fn pending_atomics_waiters(self) -> u64 {
+        self.pending_atomics_waiters
     }
 
     /// Returns the number of finalization cleanup jobs retained by the runtime

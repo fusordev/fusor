@@ -35,6 +35,7 @@ use super::{
     RuntimeResource, RuntimeUsage, StoredValue, VerifiedBytecode, check_install_limit,
     global_declaration_error, preflight_opcodes, require_root_kind, usize_to_u64,
 };
+use crate::SharedArrayBufferHandle;
 
 struct RootFunctionRecords {
     function: ObjectRecord,
@@ -166,6 +167,61 @@ impl Context<'_> {
     #[must_use]
     pub fn runtime_usage(&self) -> RuntimeUsage {
         self.runtime.usage()
+    }
+
+    /// Exports a thread-safe host capability for a live
+    /// `SharedArrayBuffer`. Other values return `None` without invoking
+    /// JavaScript or observing user properties.
+    ///
+    /// # Errors
+    ///
+    /// Returns a handle or engine error for an orphaned, foreign, stale, or
+    /// internally inconsistent value.
+    pub fn shared_array_buffer_handle(
+        &self,
+        value: &JsValue,
+    ) -> Result<Option<SharedArrayBufferHandle>, crate::ExecutionError> {
+        let owner = value.owner()?;
+        self.runtime.validate_owner(&owner, HandleKind::Value)?;
+        let StoredValue::Object(object) = value.stored()? else {
+            return Ok(None);
+        };
+        if !self.runtime.objects.contains(*object) {
+            return Err(crate::HandleError::Stale {
+                kind: HandleKind::Value,
+                index: object.index(),
+                generation: object.generation(),
+            }
+            .into());
+        }
+        let handle = self
+            .runtime
+            .array_buffer_state(*object)?
+            .and_then(|state| state.shared_data_block())
+            .map(|block| SharedArrayBufferHandle {
+                block: Arc::clone(block),
+            });
+        Ok(handle)
+    }
+
+    /// Imports one shared host capability as a new `SharedArrayBuffer` object
+    /// using this realm's intrinsic prototype.
+    ///
+    /// # Errors
+    ///
+    /// Returns a structured heap, byte-budget, or public-root failure.
+    pub fn import_shared_array_buffer(
+        &mut self,
+        handle: &SharedArrayBufferHandle,
+    ) -> Result<JsValue, crate::ExecutionError> {
+        let prototype = HeapReference::Object(
+            self.runtime
+                .realm_shared_array_buffer_prototype(self.realm)?,
+        );
+        let object = self
+            .runtime
+            .allocate_shared_array_buffer_block(prototype, Arc::clone(&handle.block))?;
+        self.runtime.public_value(StoredValue::Object(object))
     }
 
     /// Creates a runtime-local `undefined` value.

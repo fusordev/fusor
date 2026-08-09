@@ -2067,6 +2067,9 @@ fn finish_operator_primitive_target(
         OperatorPrimitiveTarget::TypedArrayElementSet(state) => {
             finish_typed_array_element_set(runtime, *state, value, return_to, execution_budget)
         }
+        OperatorPrimitiveTarget::TypedArrayStaticElement(state) => {
+            finish_typed_array_static_element(runtime, *state, value, return_to, execution_budget)
+        }
         OperatorPrimitiveTarget::AtomicsIsLockFree => {
             finish_atomics_is_lock_free(value, realm, origin)
         }
@@ -2079,7 +2082,9 @@ fn finish_operator_primitive_target(
         OperatorPrimitiveTarget::AtomicsReplacement(state) => {
             finish_atomics_replacement(runtime, *state, value)
         }
-        OperatorPrimitiveTarget::AtomicsTimeout(state) => finish_atomics_timeout(&state, value),
+        OperatorPrimitiveTarget::AtomicsTimeout(state) => {
+            finish_atomics_timeout(runtime, state.as_ref(), value)
+        }
         OperatorPrimitiveTarget::ArrayBufferResize { object } => {
             finish_array_buffer_resize(runtime, object, value, realm, origin)
         }
@@ -2089,10 +2094,12 @@ fn finish_operator_primitive_target(
         OperatorPrimitiveTarget::ArrayBufferTransfer {
             object,
             preserve_resizability,
+            immutable,
         } => finish_array_buffer_transfer(
             runtime,
             object,
             preserve_resizability,
+            immutable,
             value,
             realm,
             origin,
@@ -2210,9 +2217,6 @@ fn finish_operator_primitive_target(
                 origin,
                 execution_budget,
             )
-        }
-        OperatorPrimitiveTarget::TemporalPlainDateEquals(receiver) => {
-            finish_temporal_plain_date_equals(receiver.as_ref(), value, realm, origin)
         }
         OperatorPrimitiveTarget::TemporalPlainDateBag(state) => {
             advance_temporal_plain_date_property_bag(
@@ -2521,6 +2525,57 @@ fn finish_operator_primitive_target(
         }
         OperatorPrimitiveTarget::TemporalPlainTimeRoundSmallestUnit(state) => {
             finish_temporal_plain_time_round_smallest_unit(runtime, state.as_ref(), value)
+        }
+        OperatorPrimitiveTarget::TemporalZonedDateTimeRoundRoundingIncrement(state) => {
+            finish_temporal_zoned_date_time_round_rounding_increment(
+                runtime,
+                *state,
+                value,
+                return_to,
+                execution_budget,
+            )
+        }
+        OperatorPrimitiveTarget::TemporalZonedDateTimeRoundRoundingMode(state) => {
+            finish_temporal_zoned_date_time_round_rounding_mode(
+                runtime,
+                *state,
+                value,
+                return_to,
+                execution_budget,
+            )
+        }
+        OperatorPrimitiveTarget::TemporalZonedDateTimeRoundSmallestUnit(state) => {
+            finish_temporal_zoned_date_time_round_smallest_unit(runtime, state.as_ref(), value)
+        }
+        OperatorPrimitiveTarget::TemporalZonedDateTimeDifferenceLargestUnit(state) => {
+            finish_temporal_zoned_date_time_difference_largest_unit(
+                runtime,
+                *state,
+                value,
+                return_to,
+                execution_budget,
+            )
+        }
+        OperatorPrimitiveTarget::TemporalZonedDateTimeDifferenceRoundingIncrement(state) => {
+            finish_temporal_zoned_date_time_difference_rounding_increment(
+                runtime,
+                *state,
+                value,
+                return_to,
+                execution_budget,
+            )
+        }
+        OperatorPrimitiveTarget::TemporalZonedDateTimeDifferenceRoundingMode(state) => {
+            finish_temporal_zoned_date_time_difference_rounding_mode(
+                runtime,
+                *state,
+                value,
+                return_to,
+                execution_budget,
+            )
+        }
+        OperatorPrimitiveTarget::TemporalZonedDateTimeDifferenceSmallestUnit(state) => {
+            finish_temporal_zoned_date_time_difference_smallest_unit(runtime, state.as_ref(), value)
         }
         OperatorPrimitiveTarget::TemporalPlainDateTimeToStringCalendarName(state) => {
             finish_temporal_plain_date_time_to_string_calendar_name(
@@ -3953,6 +4008,17 @@ fn finish_property_key_target(
                 );
             }
             if let Some((object, key)) = typed_array_indexed_key(runtime, &base, &property.key)? {
+                if runtime.is_typed_array_backing_buffer_immutable(object)? {
+                    if strict {
+                        return Err(NativeFailure::Abrupt(property_exception_at(
+                            realm,
+                            origin.clone(),
+                            Some(&property.name),
+                            PropertyFailure::ReadOnly,
+                        )?));
+                    }
+                    return Ok(NativeDispatch::Immediate(StoredValue::Undefined));
+                }
                 return begin_typed_array_element_set(
                     runtime,
                     object,

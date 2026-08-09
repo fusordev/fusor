@@ -58,6 +58,7 @@ use crate::{
 
 mod array_buffers;
 mod async_functions;
+mod atomics_waiters;
 mod data_views;
 mod dates;
 mod iterators;
@@ -76,7 +77,8 @@ pub(crate) use iterators::PreparedIteratorResultPlan;
 pub use limits::{RuntimeLimits, RuntimeUsage};
 pub(crate) use typed_arrays::{
     TypedArrayElementValue, TypedArrayOwnProperty, TypedArrayPropertyKey, TypedArrayStoreOutcome,
-    TypedArrayView,
+    TypedArrayView, typed_array_element_byte_index, typed_array_read_element,
+    typed_array_write_element,
 };
 
 struct RealmState {
@@ -297,6 +299,7 @@ struct DateIntrinsics {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 struct TemporalIntrinsics {
     namespace: ObjectId,
+    now: ObjectId,
     duration_prototype: ObjectId,
     duration_constructor: FunctionId,
     instant_prototype: ObjectId,
@@ -1288,11 +1291,13 @@ pub(crate) enum NativeFunctionKind {
     /// `Object.getPrototypeOf(Int8Array)`, but never installed globally.
     TypedArrayBaseConstructor,
     TypedArrayConstructor(TypedArrayElementType),
+    TypedArrayStatic(ArrayStatic),
     TypedArraySpeciesGetter,
     TypedArrayPrototype(TypedArrayPrototypeMethod),
     DateConstructor,
     DateStatic(DateStaticMethod),
     DatePrototype(DatePrototypeMethod),
+    TemporalNow(TemporalNowMethod),
     TemporalDurationConstructor,
     TemporalDurationStatic(TemporalDurationStaticMethod),
     TemporalDurationPrototype(TemporalDurationPrototypeMethod),
@@ -1466,12 +1471,7 @@ pub(crate) enum NativeFunctionKind {
     PromisePrototypeFinally,
 }
 
-/// Synchronous operations exposed by the `%Atomics%` namespace.
-///
-/// `waitAsync` is deliberately absent from this enumeration until the runtime
-/// owns a spec-ordered waiter and Promise-job scheduler. `wait` and `notify`
-/// provide the single-agent synchronous semantics; multi-agent wakeups remain
-/// a host-agent capability rather than Tokio-scheduled JavaScript jobs.
+/// Operations exposed by the `%Atomics%` namespace.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum AtomicsMethod {
     Add,
@@ -1485,12 +1485,13 @@ pub(crate) enum AtomicsMethod {
     Store,
     Sub,
     Wait,
+    WaitAsync,
     Xor,
     Pause,
 }
 
 impl AtomicsMethod {
-    pub(crate) const ALL: [Self; 13] = [
+    pub(crate) const ALL: [Self; 14] = [
         Self::Add,
         Self::And,
         Self::CompareExchange,
@@ -1502,6 +1503,7 @@ impl AtomicsMethod {
         Self::Store,
         Self::Sub,
         Self::Wait,
+        Self::WaitAsync,
         Self::Xor,
         Self::Pause,
     ];
@@ -1519,6 +1521,7 @@ impl AtomicsMethod {
             Self::Store => "store",
             Self::Sub => "sub",
             Self::Wait => "wait",
+            Self::WaitAsync => "waitAsync",
             Self::Xor => "xor",
             Self::Pause => "pause",
         }
@@ -1526,7 +1529,7 @@ impl AtomicsMethod {
 
     pub(crate) const fn length(self) -> i32 {
         match self {
-            Self::CompareExchange | Self::Wait => 4,
+            Self::CompareExchange | Self::Wait | Self::WaitAsync => 4,
             Self::Add
             | Self::And
             | Self::Exchange
@@ -1552,17 +1555,32 @@ impl AtomicsMethod {
                 | Self::Store
                 | Self::Sub
                 | Self::Wait
+                | Self::WaitAsync
                 | Self::Xor
                 | Self::Notify
         )
     }
 
     pub(crate) const fn requires_waitable_element(self) -> bool {
-        matches!(self, Self::Notify | Self::Wait)
+        matches!(self, Self::Notify | Self::Wait | Self::WaitAsync)
     }
 
     pub(crate) const fn requires_shared_buffer(self) -> bool {
-        matches!(self, Self::Wait)
+        matches!(self, Self::Wait | Self::WaitAsync)
+    }
+
+    pub(crate) const fn requires_writable_buffer(self) -> bool {
+        matches!(
+            self,
+            Self::Add
+                | Self::And
+                | Self::CompareExchange
+                | Self::Exchange
+                | Self::Or
+                | Self::Store
+                | Self::Sub
+                | Self::Xor
+        )
     }
 }
 
@@ -1792,12 +1810,15 @@ impl DatePrototypeMethod {
 pub(crate) enum ArrayBufferPrototypeMethod {
     ByteLength,
     Detached,
+    Immutable,
     MaxByteLength,
     Resizable,
     Resize,
     Slice,
+    SliceToImmutable,
     Transfer,
     TransferToFixedLength,
+    TransferToImmutable,
 }
 
 /// Methods and accessors published on `%SharedArrayBuffer.prototype%`.
@@ -2273,43 +2294,92 @@ impl TypedArrayPrototypeMethod {
 }
 
 impl ArrayBufferPrototypeMethod {
-    pub(crate) const ALL: [Self; 8] = [
+    pub(crate) const ALL: [Self; 11] = [
         Self::ByteLength,
         Self::Detached,
+        Self::Immutable,
         Self::MaxByteLength,
         Self::Resizable,
         Self::Resize,
         Self::Slice,
+        Self::SliceToImmutable,
         Self::Transfer,
         Self::TransferToFixedLength,
+        Self::TransferToImmutable,
     ];
 
     pub(crate) const fn name(self) -> &'static str {
         match self {
             Self::ByteLength => "byteLength",
             Self::Detached => "detached",
+            Self::Immutable => "immutable",
             Self::MaxByteLength => "maxByteLength",
             Self::Resizable => "resizable",
             Self::Resize => "resize",
             Self::Slice => "slice",
+            Self::SliceToImmutable => "sliceToImmutable",
             Self::Transfer => "transfer",
             Self::TransferToFixedLength => "transferToFixedLength",
+            Self::TransferToImmutable => "transferToImmutable",
         }
     }
 
     pub(crate) const fn length(self) -> i32 {
         match self {
-            Self::Resize | Self::Transfer | Self::TransferToFixedLength => 1,
-            Self::Slice => 2,
-            Self::ByteLength | Self::Detached | Self::MaxByteLength | Self::Resizable => 0,
+            Self::Resize => 1,
+            Self::Slice | Self::SliceToImmutable => 2,
+            Self::ByteLength
+            | Self::Detached
+            | Self::Immutable
+            | Self::MaxByteLength
+            | Self::Resizable
+            | Self::Transfer
+            | Self::TransferToFixedLength
+            | Self::TransferToImmutable => 0,
         }
     }
 
     pub(crate) const fn is_accessor(self) -> bool {
         matches!(
             self,
-            Self::ByteLength | Self::Detached | Self::MaxByteLength | Self::Resizable
+            Self::ByteLength
+                | Self::Detached
+                | Self::Immutable
+                | Self::MaxByteLength
+                | Self::Resizable
         )
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum TemporalNowMethod {
+    Instant,
+    PlainDateIso,
+    PlainDateTimeIso,
+    PlainTimeIso,
+    TimeZoneId,
+    ZonedDateTimeIso,
+}
+
+impl TemporalNowMethod {
+    pub(crate) const ALL: [Self; 6] = [
+        Self::Instant,
+        Self::PlainDateIso,
+        Self::PlainDateTimeIso,
+        Self::PlainTimeIso,
+        Self::TimeZoneId,
+        Self::ZonedDateTimeIso,
+    ];
+
+    pub(crate) const fn name(self) -> &'static str {
+        match self {
+            Self::Instant => "instant",
+            Self::PlainDateIso => "plainDateISO",
+            Self::PlainDateTimeIso => "plainDateTimeISO",
+            Self::PlainTimeIso => "plainTimeISO",
+            Self::TimeZoneId => "timeZoneId",
+            Self::ZonedDateTimeIso => "zonedDateTimeISO",
+        }
     }
 }
 
@@ -2357,7 +2427,9 @@ pub(crate) enum TemporalInstantPrototypeMethod {
     Round,
     Equals,
     ToString,
+    ToLocaleString,
     ToJson,
+    ToZonedDateTimeISO,
     ValueOf,
 }
 
@@ -2434,10 +2506,15 @@ pub(crate) enum TemporalZonedDateTimePrototypeMethod {
     StartOfDay,
     Equals,
     GetTimeZoneTransition,
+    With,
+    WithCalendar,
     WithPlainTime,
     WithTimeZone,
     Add,
     Subtract,
+    Until,
+    Since,
+    Round,
     ToString,
     ToJson,
     ToLocaleString,
@@ -2469,6 +2546,8 @@ pub(crate) enum TemporalPlainDatePrototypeMethod {
     Since,
     Equals,
     ToPlainDateTime,
+    ToPlainMonthDay,
+    ToPlainYearMonth,
     ToZonedDateTime,
     WithCalendar,
     ToString,
@@ -2511,6 +2590,7 @@ pub(crate) enum TemporalPlainDateTimePrototypeMethod {
     ToZonedDateTime,
     ToPlainDate,
     ToPlainTime,
+    WithPlainTime,
     WithCalendar,
     ToString,
     ToJson,
@@ -2739,7 +2819,7 @@ impl TemporalDurationPrototypeMethod {
 }
 
 impl TemporalInstantPrototypeMethod {
-    pub(crate) const ALL: [Self; 11] = [
+    pub(crate) const ALL: [Self; 13] = [
         Self::EpochMilliseconds,
         Self::EpochNanoseconds,
         Self::Add,
@@ -2749,7 +2829,9 @@ impl TemporalInstantPrototypeMethod {
         Self::Round,
         Self::Equals,
         Self::ToString,
+        Self::ToLocaleString,
         Self::ToJson,
+        Self::ToZonedDateTimeISO,
         Self::ValueOf,
     ];
 
@@ -2764,7 +2846,9 @@ impl TemporalInstantPrototypeMethod {
             Self::Round => "round",
             Self::Equals => "equals",
             Self::ToString => "toString",
+            Self::ToLocaleString => "toLocaleString",
             Self::ToJson => "toJSON",
+            Self::ToZonedDateTimeISO => "toZonedDateTimeISO",
             Self::ValueOf => "valueOf",
         }
     }
@@ -2780,19 +2864,26 @@ impl TemporalInstantPrototypeMethod {
             Self::Round => "round",
             Self::Equals => "equals",
             Self::ToString => "toString",
+            Self::ToLocaleString => "toLocaleString",
             Self::ToJson => "toJSON",
+            Self::ToZonedDateTimeISO => "toZonedDateTimeISO",
             Self::ValueOf => "valueOf",
         }
     }
 
     pub(crate) const fn length(self) -> i32 {
         match self {
-            Self::Add | Self::Subtract | Self::Until | Self::Since | Self::Round | Self::Equals => {
-                1
-            }
+            Self::Add
+            | Self::Subtract
+            | Self::Until
+            | Self::Since
+            | Self::Round
+            | Self::Equals
+            | Self::ToZonedDateTimeISO => 1,
             Self::EpochMilliseconds
             | Self::EpochNanoseconds
             | Self::ToString
+            | Self::ToLocaleString
             | Self::ToJson
             | Self::ValueOf => 0,
         }
@@ -2908,7 +2999,7 @@ impl TemporalZonedDateTimeStaticMethod {
 }
 
 impl TemporalZonedDateTimePrototypeMethod {
-    pub(crate) const ALL: [Self; 43] = [
+    pub(crate) const ALL: [Self; 48] = [
         Self::CalendarId,
         Self::TimeZoneId,
         Self::Year,
@@ -2944,10 +3035,15 @@ impl TemporalZonedDateTimePrototypeMethod {
         Self::StartOfDay,
         Self::Equals,
         Self::GetTimeZoneTransition,
+        Self::With,
+        Self::WithCalendar,
         Self::WithPlainTime,
         Self::WithTimeZone,
         Self::Add,
         Self::Subtract,
+        Self::Until,
+        Self::Since,
+        Self::Round,
         Self::ToString,
         Self::ToJson,
         Self::ToLocaleString,
@@ -2991,10 +3087,15 @@ impl TemporalZonedDateTimePrototypeMethod {
             Self::StartOfDay => "startOfDay",
             Self::Equals => "equals",
             Self::GetTimeZoneTransition => "getTimeZoneTransition",
+            Self::With => "with",
+            Self::WithCalendar => "withCalendar",
             Self::WithPlainTime => "withPlainTime",
             Self::WithTimeZone => "withTimeZone",
             Self::Add => "add",
             Self::Subtract => "subtract",
+            Self::Until => "until",
+            Self::Since => "since",
+            Self::Round => "round",
             Self::ToString => "toString",
             Self::ToJson => "toJSON",
             Self::ToLocaleString => "toLocaleString",
@@ -3046,10 +3147,15 @@ impl TemporalZonedDateTimePrototypeMethod {
                 | Self::StartOfDay
                 | Self::Equals
                 | Self::GetTimeZoneTransition
+                | Self::With
+                | Self::WithCalendar
                 | Self::WithPlainTime
                 | Self::WithTimeZone
                 | Self::Add
                 | Self::Subtract
+                | Self::Until
+                | Self::Since
+                | Self::Round
                 | Self::ToString
                 | Self::ToJson
                 | Self::ToLocaleString
@@ -3063,6 +3169,11 @@ impl TemporalZonedDateTimePrototypeMethod {
             | Self::GetTimeZoneTransition
             | Self::Add
             | Self::Subtract
+            | Self::Until
+            | Self::Since
+            | Self::Round
+            | Self::With
+            | Self::WithCalendar
             | Self::WithTimeZone => 1,
             _ => 0,
         }
@@ -3308,7 +3419,7 @@ impl TemporalPlainYearMonthPrototypeMethod {
 }
 
 impl TemporalPlainDatePrototypeMethod {
-    pub(crate) const ALL: [Self; 29] = [
+    pub(crate) const ALL: [Self; 31] = [
         Self::CalendarId,
         Self::Year,
         Self::Month,
@@ -3332,6 +3443,8 @@ impl TemporalPlainDatePrototypeMethod {
         Self::Since,
         Self::Equals,
         Self::ToPlainDateTime,
+        Self::ToPlainMonthDay,
+        Self::ToPlainYearMonth,
         Self::ToZonedDateTime,
         Self::WithCalendar,
         Self::ToString,
@@ -3365,6 +3478,8 @@ impl TemporalPlainDatePrototypeMethod {
             Self::Since => "since",
             Self::Equals => "equals",
             Self::ToPlainDateTime => "toPlainDateTime",
+            Self::ToPlainMonthDay => "toPlainMonthDay",
+            Self::ToPlainYearMonth => "toPlainYearMonth",
             Self::ToZonedDateTime => "toZonedDateTime",
             Self::WithCalendar => "withCalendar",
             Self::ToString => "toString",
@@ -3399,6 +3514,8 @@ impl TemporalPlainDatePrototypeMethod {
             Self::Since => "since",
             Self::Equals => "equals",
             Self::ToPlainDateTime => "toPlainDateTime",
+            Self::ToPlainMonthDay => "toPlainMonthDay",
+            Self::ToPlainYearMonth => "toPlainYearMonth",
             Self::ToZonedDateTime => "toZonedDateTime",
             Self::WithCalendar => "withCalendar",
             Self::ToString => "toString",
@@ -3446,7 +3563,7 @@ impl TemporalPlainDatePrototypeMethod {
 }
 
 impl TemporalPlainDateTimePrototypeMethod {
-    pub(crate) const ALL: [Self; 37] = [
+    pub(crate) const ALL: [Self; 38] = [
         Self::CalendarId,
         Self::Year,
         Self::Month,
@@ -3479,6 +3596,7 @@ impl TemporalPlainDateTimePrototypeMethod {
         Self::ToZonedDateTime,
         Self::ToPlainDate,
         Self::ToPlainTime,
+        Self::WithPlainTime,
         Self::WithCalendar,
         Self::ToString,
         Self::ToJson,
@@ -3520,6 +3638,7 @@ impl TemporalPlainDateTimePrototypeMethod {
             Self::ToZonedDateTime => "toZonedDateTime",
             Self::ToPlainDate => "toPlainDate",
             Self::ToPlainTime => "toPlainTime",
+            Self::WithPlainTime => "withPlainTime",
             Self::WithCalendar => "withCalendar",
             Self::ToString => "toString",
             Self::ToJson => "toJSON",
@@ -3562,6 +3681,7 @@ impl TemporalPlainDateTimePrototypeMethod {
             Self::ToZonedDateTime => "toZonedDateTime",
             Self::ToPlainDate => "toPlainDate",
             Self::ToPlainTime => "toPlainTime",
+            Self::WithPlainTime => "withPlainTime",
             Self::WithCalendar => "withCalendar",
             Self::ToString => "toString",
             Self::ToJson => "toJSON",
@@ -4769,6 +4889,14 @@ pub struct Runtime {
     pub(crate) interrupts: InterruptState,
     pub(crate) promise_rejections: PromiseRejectionState,
     pub(crate) promise_jobs: VecDeque<PromiseJob>,
+    pub(crate) atomics_waiters: HashMap<u64, atomics_waiters::AsyncAtomicsWaiter>,
+    pub(crate) atomics_ready: VecDeque<crate::shared_array_buffer::AtomicsWakeEvent>,
+    pub(crate) atomics_wake_sender:
+        tokio::sync::mpsc::UnboundedSender<crate::shared_array_buffer::AtomicsWakeEvent>,
+    pub(crate) atomics_wake_receiver:
+        tokio::sync::mpsc::UnboundedReceiver<crate::shared_array_buffer::AtomicsWakeEvent>,
+    pub(crate) atomics_agent_id: usize,
+    pub(crate) atomics_timer: Option<atomics_waiters::AtomicsTimerDriver>,
     pub(crate) finalization_jobs: VecDeque<ObjectId>,
     pub(crate) kept_alive: Vec<StoredValue>,
     pub(crate) generator_states: HashMap<ObjectId, crate::vm::GeneratorRecord>,

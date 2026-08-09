@@ -534,7 +534,6 @@ impl Runtime {
         Ok(promise.constructor)
     }
 
-    #[cfg(test)]
     pub(crate) fn allocate_intrinsic_promise(
         &mut self,
         realm: RealmId,

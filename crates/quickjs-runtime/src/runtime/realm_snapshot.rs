@@ -152,6 +152,7 @@ impl RealmSnapshot {
             (typed_array.prototype, "%TypedArray.prototype%"),
             (date.prototype, "%Date.prototype%"),
             (temporal.namespace, "%Temporal%"),
+            (temporal.now, "%Temporal.Now%"),
             (temporal.duration_prototype, "%Temporal.Duration.prototype%"),
             (temporal.instant_prototype, "%Temporal.Instant.prototype%"),
             (

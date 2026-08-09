@@ -161,6 +161,7 @@ pub(super) const fn is_declarative_object(id: IntrinsicObjectId) -> bool {
             | IntrinsicObjectId::TypedArrayInstancePrototype(_)
             | IntrinsicObjectId::DatePrototype
             | IntrinsicObjectId::Temporal
+            | IntrinsicObjectId::TemporalNow
             | IntrinsicObjectId::TemporalDurationPrototype
             | IntrinsicObjectId::TemporalInstantPrototype
             | IntrinsicObjectId::TemporalPlainDatePrototype
@@ -246,6 +247,7 @@ pub(super) const fn is_declarative_function(id: IntrinsicFunctionId) -> bool {
             | NativeFunctionKind::DataViewPrototype(_)
             | NativeFunctionKind::TypedArrayBaseConstructor
             | NativeFunctionKind::TypedArrayConstructor(_)
+            | NativeFunctionKind::TypedArrayStatic(_)
             | NativeFunctionKind::TypedArraySpeciesGetter
             | NativeFunctionKind::TypedArrayPrototype(_)
             | NativeFunctionKind::ArrayPrototypeJoin
@@ -333,6 +335,7 @@ pub(super) const fn is_declarative_function(id: IntrinsicFunctionId) -> bool {
             | NativeFunctionKind::JsonStringify
             | NativeFunctionKind::Math(_)
             | NativeFunctionKind::Atomics(_)
+            | NativeFunctionKind::TemporalNow(_)
             | NativeFunctionKind::TemporalDurationConstructor
             | NativeFunctionKind::TemporalDurationStatic(_)
             | NativeFunctionKind::TemporalDurationPrototype(_)
@@ -871,6 +874,7 @@ const fn is_array_function(id: IntrinsicFunctionId) -> bool {
             | NativeFunctionKind::DataViewPrototype(_)
             | NativeFunctionKind::TypedArrayBaseConstructor
             | NativeFunctionKind::TypedArrayConstructor(_)
+            | NativeFunctionKind::TypedArrayStatic(_)
             | NativeFunctionKind::TypedArraySpeciesGetter
             | NativeFunctionKind::TypedArrayPrototype(_)
             | NativeFunctionKind::ArrayPrototypeJoin

@@ -491,6 +491,8 @@ impl Runtime {
         let mailbox = Arc::new(ReleaseMailbox::new());
         let runtime_identity =
             RuntimeIdentity::from_address(Arc::as_ptr(&mailbox).cast::<()>() as usize);
+        let atomics_agent_id = Arc::as_ptr(&mailbox).cast::<()>() as usize;
+        let (atomics_wake_sender, atomics_wake_receiver) = tokio::sync::mpsc::unbounded_channel();
         Ok(Self {
             mailbox,
             atoms,
@@ -514,6 +516,12 @@ impl Runtime {
             interrupts: InterruptState::default(),
             promise_rejections: PromiseRejectionState::default(),
             promise_jobs: VecDeque::new(),
+            atomics_waiters: HashMap::new(),
+            atomics_ready: VecDeque::new(),
+            atomics_wake_sender,
+            atomics_wake_receiver,
+            atomics_agent_id,
+            atomics_timer: None,
             finalization_jobs: VecDeque::new(),
             kept_alive: Vec::new(),
             generator_states: HashMap::new(),
@@ -689,6 +697,7 @@ impl RealmBuildTransaction<'_> {
             },
             temporal: TemporalIntrinsics {
                 namespace: object(IntrinsicObjectId::Temporal),
+                now: object(IntrinsicObjectId::TemporalNow),
                 duration_prototype: object(IntrinsicObjectId::TemporalDurationPrototype),
                 duration_constructor: function(NativeFunctionKind::TemporalDurationConstructor),
                 instant_prototype: object(IntrinsicObjectId::TemporalInstantPrototype),
