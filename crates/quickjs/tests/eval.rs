@@ -703,6 +703,24 @@ fn direct_eval_inherits_new_target_from_function_code() {
 }
 
 #[test]
+fn new_target_defaults_survive_nested_declarations_and_direct_eval() {
+    evaluate(
+        "let matches=0;\
+         function check(expected,actual=new.target){if(actual===expected)matches++;}\
+         new check(check);check(undefined);\
+         let evald=eval('('+check.toString()+')');new evald(evald);evald(undefined);\
+         function outer(){\
+           function nested(expected,actual=new.target){if(actual===expected)matches++;}\
+           new nested(nested);nested(undefined);\
+           let evaldNested=eval('('+nested.toString()+')');\
+           new evaldNested(evaldNested);evaldNested(undefined);\
+         }\
+         outer();new outer();matches;",
+        |value| assert!(number(value).strict_equals(JsNumber::from_i32(12))),
+    );
+}
+
+#[test]
 fn direct_eval_in_arrow_function_code_rejects_new_target() {
     evaluate(
         "let caught;let arrow=()=>eval('new.target;');try{arrow();}catch(error){caught=error;}typeof caught==='object'&&caught.constructor===SyntaxError;",

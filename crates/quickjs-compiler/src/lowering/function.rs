@@ -1299,6 +1299,7 @@ impl CompilationContext<'_, '_, '_> {
         );
         let finished = flow.finish()?;
         let parameter_initialization_end = finished.parameter_initialization_end();
+        let function_initializer_prefix_start = finished.function_initializer_prefix_start();
         let eval_reference_call_instructions: Arc<[u32]> =
             finished.eval_reference_call_instructions().into();
         let (source_instructions, control_flow) = finished.verify_with_layouts(
@@ -1341,6 +1342,7 @@ impl CompilationContext<'_, '_, '_> {
             control_flow: Arc::new(control_flow),
             eval_reference_call_instructions,
             parameter_initialization_end,
+            function_initializer_prefix_start,
             metadata,
         })
     }

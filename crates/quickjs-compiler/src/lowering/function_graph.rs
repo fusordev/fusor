@@ -904,6 +904,7 @@ fn build_unverified_graph_records(
             )
             .with_atom_pool(Arc::clone(&function.atoms))
             .with_parameter_initialization_end(function.parameter_initialization_end)
+            .with_function_initializer_prefix_start(function.function_initializer_prefix_start)
             .with_eval_reference_call_instructions(Arc::clone(
                 &function.eval_reference_call_instructions,
             ))

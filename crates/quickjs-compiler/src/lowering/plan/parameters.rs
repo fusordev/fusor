@@ -81,6 +81,12 @@ impl<'arena> CompilationContext<'_, 'arena, '_> {
         )?;
         entries.sort_unstable_by_key(ScopeEntryInitialization::order_key);
         if function_scope {
+            let has_instantiation_function = entries.iter().any(|entry| {
+                matches!(
+                    entry,
+                    ScopeEntryInitialization::Function { scoped: false, .. }
+                )
+            });
             self.emit_parameter_binding_activations(executable, planning.layout, flow)?;
             self.emit_arguments_object_initializer(executable, planning.layout, flow)?;
             self.emit_parameter_pattern_initializers(executable, planning, flow)?;
@@ -94,6 +100,9 @@ impl<'arena> CompilationContext<'_, 'arena, '_> {
                 && executable_metadata.has_direct_eval()
             {
                 flow.mark_parameter_initialization_end(span)?;
+            }
+            if has_instantiation_function {
+                flow.mark_function_initializer_prefix_start(span)?;
             }
             self.emit_realm_global_function_initializers(
                 executable,

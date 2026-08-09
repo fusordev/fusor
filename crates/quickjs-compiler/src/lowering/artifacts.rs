@@ -289,6 +289,7 @@ pub struct CompiledFunction {
     pub(super) control_flow: Arc<VerifiedControlFlow>,
     pub(super) eval_reference_call_instructions: Arc<[u32]>,
     pub(super) parameter_initialization_end: Option<u32>,
+    pub(super) function_initializer_prefix_start: u32,
     pub(super) metadata: UnverifiedFunctionMetadata,
 }
 
@@ -368,6 +369,13 @@ impl CompiledFunction {
     #[must_use]
     pub const fn parameter_initialization_end(&self) -> Option<u32> {
         self.parameter_initialization_end
+    }
+
+    /// Returns the first instruction in the isolated lexical/function
+    /// instantiation prefix after parameter and `arguments` initialization.
+    #[must_use]
+    pub const fn function_initializer_prefix_start(&self) -> u32 {
+        self.function_initializer_prefix_start
     }
 }
 

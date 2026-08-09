@@ -2577,11 +2577,8 @@ fn verify_function_metadata(
         &metadata.closures,
         &internal_stack,
     )?;
-    let function_initializer_prefix = function
-        .parameter_initialization_end()
-        .map_or(realm_global_initializer_prefix, |boundary| {
-            realm_global_initializer_prefix.max(boundary as usize)
-        });
+    let function_initializer_prefix =
+        realm_global_initializer_prefix.max(function.function_initializer_prefix_start() as usize);
     let initializer_sites = verify_function_initializers(
         id,
         function,
