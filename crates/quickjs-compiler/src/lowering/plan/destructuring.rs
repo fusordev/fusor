@@ -613,12 +613,13 @@ impl<'arena> CompilationContext<'_, 'arena, '_> {
                 return unsupported(UnsupportedLeafFeature::UnsupportedBinding, identifier.span);
             };
             self.validate_realm_global_declaration(declaration_kind, storage, identifier.span)?;
-            let global = tree_layout.realm_globals.for_binding(binding).ok_or(
-                LeafCompilationError::SemanticInvariant {
-                    invariant: "destructured Program binding has a realm-global identity",
+            let global = tree_layout
+                .realm_globals
+                .for_binding_reference(binding)
+                .ok_or(LeafCompilationError::SemanticInvariant {
+                    invariant: "destructured Program binding has a realm-global write identity",
                     span: Some(identifier.span),
-                },
-            )?;
+                })?;
             let slot = tree_layout.realm_globals.closure_slot(
                 &self.planned.plan,
                 layout.executable,

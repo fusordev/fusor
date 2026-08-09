@@ -1336,12 +1336,13 @@ impl<'arena> CompilationContext<'_, 'arena, '_> {
                 })?;
         if storage.placement() == StoragePlacement::GlobalObject {
             self.validate_realm_global_declaration(declaration_kind, storage, identifier.span)?;
-            let global = tree_layout.realm_globals.for_binding(binding).ok_or(
-                LeafCompilationError::SemanticInvariant {
-                    invariant: "for-in Program var has a constructor-realm global identity",
+            let global = tree_layout
+                .realm_globals
+                .for_binding_reference(binding)
+                .ok_or(LeafCompilationError::SemanticInvariant {
+                    invariant: "for-in Program var has a realm-global reference identity",
                     span: Some(identifier.span),
-                },
-            )?;
+                })?;
             let slot = tree_layout.realm_globals.closure_slot(
                 &self.planned.plan,
                 layout.executable,
@@ -1542,12 +1543,13 @@ impl<'arena> CompilationContext<'_, 'arena, '_> {
                     None => false,
                 };
                 if initializes {
-                    let global = tree_layout.realm_globals.for_binding(binding).ok_or(
-                        LeafCompilationError::SemanticInvariant {
-                            invariant: "declared Program binding has a realm-global identity",
+                    let global = tree_layout
+                        .realm_globals
+                        .for_binding_reference(binding)
+                        .ok_or(LeafCompilationError::SemanticInvariant {
+                            invariant: "declared Program binding has a realm-global write identity",
                             span: Some(identifier.span),
-                        },
-                    )?;
+                        })?;
                     let slot = tree_layout.realm_globals.closure_slot(
                         &self.planned.plan,
                         layout.executable,
@@ -1671,12 +1673,13 @@ impl<'arena> CompilationContext<'_, 'arena, '_> {
                     storage,
                     identifier.span,
                 )?;
-                let global = tree_layout.realm_globals.for_binding(binding).ok_or(
-                    LeafCompilationError::SemanticInvariant {
-                        invariant: "declared Program binding has a realm-global identity",
+                let global = tree_layout
+                    .realm_globals
+                    .for_binding_reference(binding)
+                    .ok_or(LeafCompilationError::SemanticInvariant {
+                        invariant: "declared Program binding has a realm-global write identity",
                         span: Some(identifier.span),
-                    },
-                )?;
+                    })?;
                 let slot = tree_layout.realm_globals.closure_slot(
                     &self.planned.plan,
                     layout.executable,
@@ -1939,12 +1942,13 @@ impl CompilationContext<'_, '_, '_> {
         if !crate::is_supported_realm_global_binding_goal(self.unit.goal()) {
             return unsupported(UnsupportedLeafFeature::GlobalEnvironment, span);
         }
-        let global = tree_layout.realm_globals.for_binding(binding).ok_or(
-            LeafCompilationError::SemanticInvariant {
-                invariant: "dynamic Program global binding has a realm-global identity",
+        let global = tree_layout
+            .realm_globals
+            .for_binding_reference(binding)
+            .ok_or(LeafCompilationError::SemanticInvariant {
+                invariant: "dynamic Program global reference has a realm-global identity",
                 span: Some(span),
-            },
-        )?;
+            })?;
         let slot = tree_layout.realm_globals.closure_slot(
             &self.planned.plan,
             layout.executable,

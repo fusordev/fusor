@@ -363,6 +363,104 @@ fn sloppy_direct_eval_rejects_an_intervening_lexical_collision() {
 }
 
 #[test]
+fn sloppy_direct_eval_crosses_a_matching_catch_parameter() {
+    let bindings = [DirectEvalBinding::new(
+        "err",
+        DirectEvalBindingKind::Catch,
+        true,
+        false,
+        DirectEvalBindingLocation::Local { index: 0 },
+    )
+    .with_scope(DirectEvalBindingScope::Lexical)];
+    let tree = compile_with_bindings_in_variable_environment(
+        "function err() {}\
+         function* err() {}\
+         async function err() {}\
+         async function* err() {}\
+         var err;\
+         for (var err; false; ) {}\
+         for (var err in []) {}\
+         for (var err of []) {}",
+        false,
+        &bindings,
+        DirectEvalVariableEnvironment::Global,
+    )
+    .expect("Annex B catch parameters do not reject matching eval declarations");
+    let globals = tree.root().realm_globals();
+
+    assert!(globals.iter().any(|global| {
+        global.name() == "err" && global.source() == CompiledRealmGlobalSource::ConstructorRealm
+    }));
+    assert!(globals.iter().any(|global| {
+        global.name() == "err"
+            && global.source()
+                == CompiledRealmGlobalSource::DirectEvalBinding {
+                    index: 0,
+                    environment_size: 1,
+                }
+    }));
+}
+
+#[test]
+fn matching_catch_parameter_does_not_hide_an_outer_lexical_eval_conflict() {
+    let bindings = [
+        DirectEvalBinding::new(
+            "err",
+            DirectEvalBindingKind::Catch,
+            true,
+            false,
+            DirectEvalBindingLocation::Local { index: 0 },
+        )
+        .with_scope(DirectEvalBindingScope::Lexical),
+        DirectEvalBinding::new(
+            "err",
+            DirectEvalBindingKind::Normal,
+            true,
+            false,
+            DirectEvalBindingLocation::Local { index: 1 },
+        )
+        .with_scope(DirectEvalBindingScope::Lexical),
+    ];
+    let error = compile_with_bindings("var err;", false, &bindings)
+        .expect_err("an outer lexical environment still rejects the eval var");
+
+    assert!(matches!(
+        error,
+        LeafCompilationError::EvalDeclarationConflict { ref name, .. }
+            if name.as_ref() == "err"
+    ));
+}
+
+#[test]
+fn sloppy_direct_eval_catch_collision_imports_distinct_write_and_declaration_cells() {
+    let bindings = [DirectEvalBinding::new(
+        "err",
+        DirectEvalBindingKind::Catch,
+        true,
+        false,
+        DirectEvalBindingLocation::Local { index: 0 },
+    )
+    .with_scope(DirectEvalBindingScope::Lexical)];
+    let tree = compile_with_bindings("var err = 42; err;", false, &bindings)
+        .expect("catch-visible eval var initializer");
+    let root = tree.verified_bytecode().root();
+
+    assert_eq!(
+        root.function().closure_sources(),
+        [
+            CompilerClosureSource::DirectEvalVariable {
+                index: 1,
+                environment_size: 2,
+            },
+            CompilerClosureSource::DirectEvalBinding {
+                index: 0,
+                environment_size: 2,
+            },
+        ]
+    );
+}
+
+#[test]
 fn sloppy_direct_eval_reuses_an_existing_function_variable_binding() {
     let bindings = [DirectEvalBinding::new(
         "answer",
