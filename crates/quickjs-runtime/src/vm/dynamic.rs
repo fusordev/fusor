@@ -1930,16 +1930,60 @@ pub(super) fn bytecode_function_is_class_constructor(
     Ok(template.metadata().executable_kind() == CompilerExecutableKind::ClassConstructor)
 }
 
-pub(super) fn create_ordinary_constructor_receiver(
+pub(super) fn begin_ordinary_constructor_receiver(
     runtime: &mut Runtime,
-    new_target: FunctionId,
-) -> Result<ObjectId, ExecutionError> {
+    frame: Frame,
+    realm: RealmId,
+    origin: JsStackFrame,
+    execution_budget: &mut ExecutionBudget,
+) -> Result<NativeDispatch, NativeFailure> {
+    let new_target = frame.new_target.ok_or(EngineFault::RuntimeInvariant {
+        message: "ordinary constructor receiver creation has no new.target",
+    })?;
+    if frame.constructor_state == ConstructorState::DerivedUninitialized {
+        return Err(EngineFault::RuntimeInvariant {
+            message: "derived constructor attempted eager receiver creation",
+        }
+        .into());
+    }
+    let receiver = StoredValue::Function(new_target);
+    charge_heap_property_lookup(runtime, &receiver, execution_budget)?;
     let prototype_key = runtime.predefined_property_key(PredefinedAtom::Prototype);
-    let requested =
-        read_heap_property(runtime, HeapReference::Function(new_target), &prototype_key)?;
+    let return_to = frame.return_to;
+    let state = OrdinaryConstructorPrototypeContinuation { frame };
+    let dispatch = begin_internal_get(
+        runtime,
+        HeapReference::Function(new_target),
+        receiver,
+        prototype_key,
+        realm,
+        return_to,
+        origin,
+        execution_budget,
+    )?;
+    continue_get_after(
+        dispatch,
+        state,
+        |state| NativeContinuation::OrdinaryConstructorPrototype(Box::new(state)),
+        |state, requested| finish_ordinary_constructor_prototype(runtime, state, &requested),
+        "ordinary constructor prototype Get produced a structured result",
+    )
+}
+
+pub(super) fn finish_ordinary_constructor_prototype(
+    runtime: &mut Runtime,
+    mut state: OrdinaryConstructorPrototypeContinuation,
+    requested: &StoredValue,
+) -> Result<NativeDispatch, NativeFailure> {
+    let new_target = state
+        .frame
+        .new_target
+        .ok_or(EngineFault::RuntimeInvariant {
+            message: "ordinary constructor prototype completion lost new.target",
+        })?;
     let prototype = match requested {
-        StoredValue::Function(function) => HeapReference::Function(function),
-        StoredValue::Object(object) => HeapReference::Object(object),
+        StoredValue::Function(function) => HeapReference::Function(*function),
+        StoredValue::Object(object) => HeapReference::Object(*object),
         StoredValue::Undefined
         | StoredValue::Null
         | StoredValue::Boolean(_)
@@ -1951,7 +1995,13 @@ pub(super) fn create_ordinary_constructor_receiver(
             HeapReference::Object(runtime.realm_object_prototype(realm)?)
         }
     };
-    runtime.allocate_ordinary_object_with_prototype(prototype)
+    state.frame.receiver = StoredValue::Object(
+        runtime
+            .allocate_ordinary_object_with_prototype(prototype)
+            .map_err(NativeFailure::Execution)?,
+    );
+    state.frame.constructor_state = ConstructorState::Ordinary;
+    Ok(NativeDispatch::Frame(state.frame))
 }
 
 pub(super) fn retire_active_dynamic_roots(

@@ -69,6 +69,54 @@ fn global_script_returns_a_directive_expression_completion() {
 }
 
 #[test]
+fn proxied_derived_new_target_enforces_the_frozen_class_prototype_get_invariant() {
+    let mut runtime = Runtime::try_new(RuntimeLimits::default()).expect("runtime");
+    let realm = runtime.create_realm().expect("realm");
+    let mut context = runtime.context(&realm).expect("context");
+
+    let value = evaluate_script(
+        &mut context,
+        "class Base{}function get(target,key,receiver){if(key==='prototype')return 42;return Reflect.get(target,key,receiver);}class Explicit extends Base{constructor(){super();}}class Default extends Base{}let explicit=false;let defaulted=false;try{new (new Proxy(Explicit,{get}))();}catch(error){explicit=error.name==='TypeError';}try{new (new Proxy(Default,{get}))();}catch(error){defaulted=error.name==='TypeError';}explicit+'|'+defaulted;",
+        "class-proxy-new-target-prototype.js",
+        ScriptLimits::default(),
+    )
+    .expect("proxied derived construction invariant");
+    assert_eq!(string(&value), "true|true");
+}
+
+#[test]
+fn ordinary_construction_observes_new_target_prototype_before_the_body() {
+    let mut runtime = Runtime::try_new(RuntimeLimits::default()).expect("runtime");
+    let realm = runtime.create_realm().expect("realm");
+    let mut context = runtime.context(&realm).expect("context");
+
+    let value = evaluate_script(
+        &mut context,
+        "let body=0;let gets=0;\
+         function Target(){body++;}\
+         function NewTarget(){}\
+         let primitive=new Proxy(NewTarget,{get(target,key,receiver){\
+             if(key==='prototype'){gets++;return 42;}\
+             return Reflect.get(target,key,receiver);\
+         }});\
+         let value=Reflect.construct(Target,[],primitive);\
+         let fallback=Object.getPrototypeOf(value)===Object.prototype&&body===1&&gets===1;\
+         body=0;gets=0;\
+         let abrupt=new Proxy(NewTarget,{get(target,key,receiver){\
+             if(key==='prototype'){gets++;throw 17;}\
+             return Reflect.get(target,key,receiver);\
+         }});\
+         let preserved=false;\
+         try{Reflect.construct(Target,[],abrupt);}catch(error){preserved=error===17;}\
+         fallback+'|'+preserved+'|'+body+'|'+gets;",
+        "ordinary-constructor-new-target-prototype.js",
+        ScriptLimits::default(),
+    )
+    .expect("observable ordinary constructor prototype lookup");
+    assert_eq!(string(&value), "true|true|0|1");
+}
+
+#[test]
 fn annex_b_catch_var_initializer_updates_only_the_catch_parameter() {
     let mut runtime = Runtime::try_new(RuntimeLimits::default()).expect("runtime");
     let realm = runtime.create_realm().expect("realm");

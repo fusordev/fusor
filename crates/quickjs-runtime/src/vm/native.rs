@@ -1518,6 +1518,9 @@ pub(super) fn resume_native_continuations(
                 return_to,
                 execution_budget,
             )?,
+            NativeContinuation::OrdinaryConstructorPrototype(state) => {
+                finish_ordinary_constructor_prototype(runtime, *state, &value)?
+            }
             NativeContinuation::ProxyGet(state) => advance_proxy_get(
                 runtime,
                 *state,
@@ -2251,6 +2254,11 @@ fn resolve_native_dispatch_inner(
             },
         )
         .map_err(NativeFailure::Execution)?;
+        let operation_realm = if let Some(frame) = active_root_frames.last() {
+            code(runtime, frame.code)?.realm
+        } else {
+            runtime.function_realm(call.function)?
+        };
         let mut frame = create_frame(
             runtime,
             plan,
@@ -2265,16 +2273,65 @@ fn resolve_native_dispatch_inner(
             None,
         )
         .map_err(NativeFailure::Execution)?;
-        if let Some(new_target) = construction
+        frame.native_caller = call.native_caller;
+        apply_native_pre_call(runtime, call.pre_call.as_ref())?;
+        if construction.is_some()
             && frame.constructor_state != ConstructorState::DerivedUninitialized
         {
-            frame.receiver =
-                StoredValue::Object(create_ordinary_constructor_receiver(runtime, new_target)?);
-            frame.constructor_state = ConstructorState::Ordinary;
+            let outcome = begin_ordinary_constructor_receiver(
+                runtime,
+                frame,
+                operation_realm,
+                call.origin,
+                execution_budget,
+            );
+            let outcome = match outcome {
+                Ok(outcome) => outcome,
+                Err(
+                    NativeFailure::Abrupt(pending) | NativeFailure::AbruptAfterTransient(pending),
+                ) => {
+                    dispatch = resume_iterator_abrupt_continuations(
+                        runtime,
+                        call.continuations,
+                        pending,
+                        call.return_to,
+                        active_root_frames,
+                        active_frames,
+                        active_frame_values,
+                        compiler,
+                        execution_budget,
+                    )?;
+                    continue;
+                }
+                Err(NativeFailure::Execution(error)) => {
+                    return Err(NativeFailure::Execution(error));
+                }
+            };
+            match outcome {
+                NativeDispatch::Frame(mut frame) => {
+                    attach_native_continuations(&mut frame, call.continuations)?;
+                    return Ok(NativeDispatch::Frame(frame));
+                }
+                NativeDispatch::Call(mut inner) => {
+                    prepend_native_continuations(&mut inner, call.continuations)?;
+                    dispatch = NativeDispatch::Call(inner);
+                    continue;
+                }
+                NativeDispatch::Immediate(_)
+                | NativeDispatch::Pair(_, _)
+                | NativeDispatch::ForOfRecord { .. }
+                | NativeDispatch::ForOfStep { .. }
+                | NativeDispatch::ForOfClosed
+                | NativeDispatch::CopyDataPropertiesDone
+                | NativeDispatch::AsyncAwait { .. } => {
+                    return Err(EngineFault::RuntimeInvariant {
+                        message: "ordinary constructor prototype Get produced an invalid dispatch",
+                    }
+                    .into());
+                }
+            }
         }
-        frame.native_caller = call.native_caller;
         attach_native_continuations(&mut frame, call.continuations)?;
-        apply_native_pre_call(runtime, call.pre_call.as_ref())?;
         return Ok(NativeDispatch::Frame(frame));
     }
 }

@@ -409,6 +409,16 @@ pub(crate) struct Frame {
     stack: Vec<OperandStackEntry>,
 }
 
+struct OrdinaryConstructorPrototypeContinuation {
+    frame: Frame,
+}
+
+impl OrdinaryConstructorPrototypeContinuation {
+    const fn retained_values(&self) -> u64 {
+        self.frame.reserved_values
+    }
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum GeneratorLifecycle {
     SuspendedStart,
@@ -964,6 +974,7 @@ enum NativeContinuation {
     Promise(PromiseContinuation),
     PromiseCombinator(Box<PromiseCombinatorContinuation>),
     WithGet(Box<WithGetContinuation>),
+    OrdinaryConstructorPrototype(Box<OrdinaryConstructorPrototypeContinuation>),
     ProxyGet(Box<ProxyGetContinuation>),
     ProxyCall(Box<ProxyCallContinuation>),
     ProxyBoolean(Box<ProxyBooleanContinuation>),
@@ -1233,6 +1244,7 @@ impl NativeContinuation {
             Self::Promise(state) => state.retained_values(),
             Self::PromiseCombinator(state) => state.retained_values(),
             Self::WithGet(state) => state.retained_values(),
+            Self::OrdinaryConstructorPrototype(state) => state.retained_values(),
             Self::ProxyGet(state) => state.retained_values(),
             Self::ProxyCall(state) => state.retained_values(),
             Self::ProxyBoolean(state) => state.retained_values(),
@@ -3971,6 +3983,9 @@ fn trace_native_continuation_roots(
         NativeContinuation::Promise(state) => state.trace_roots(mark),
         NativeContinuation::PromiseCombinator(state) => state.trace_roots(mark),
         NativeContinuation::WithGet(state) => state.trace_roots(mark),
+        NativeContinuation::OrdinaryConstructorPrototype(state) => {
+            trace_frame_roots(&state.frame, mark);
+        }
         NativeContinuation::ProxyGet(state) => {
             mark(CollectionRoot::Heap(state.proxy));
             mark(CollectionRoot::Heap(state.target));
@@ -6259,7 +6274,7 @@ fn execute_frame_loop(
                     inputs,
                 )?;
                 let construction = inputs.new_target;
-                let mut child = create_frame(
+                let child = create_frame(
                     runtime,
                     plan,
                     if construction.is_some() {
@@ -6272,16 +6287,68 @@ fn execute_frame_loop(
                     Some(return_to),
                     None,
                 )?;
-                if let Some(new_target) = construction
+                let active_frames = active_execution_frames(frames);
+                let dispatch = if construction.is_some()
                     && child.constructor_state != ConstructorState::DerivedUninitialized
                 {
-                    child.receiver = StoredValue::Object(create_ordinary_constructor_receiver(
-                        runtime, new_target,
-                    )?);
-                    child.constructor_state = ConstructorState::Ordinary;
+                    begin_ordinary_constructor_receiver(
+                        runtime,
+                        child,
+                        operation_realm,
+                        origin,
+                        execution_budget,
+                    )
+                } else {
+                    Ok(NativeDispatch::Frame(child))
+                };
+                let dispatch = match dispatch {
+                    Ok(dispatch) => resolve_native_dispatch(
+                        runtime,
+                        dispatch,
+                        frames,
+                        active_frames,
+                        *active_frame_values,
+                        compiler,
+                        execution_budget,
+                    ),
+                    Err(error) => Err(error),
+                };
+                match dispatch {
+                    Ok(NativeDispatch::Frame(child)) => {
+                        *active_frame_values =
+                            active_frame_values.saturating_add(child.reserved_values);
+                        frames.push(child);
+                    }
+                    Ok(
+                        NativeDispatch::Immediate(_)
+                        | NativeDispatch::Pair(_, _)
+                        | NativeDispatch::ForOfRecord { .. }
+                        | NativeDispatch::ForOfStep { .. }
+                        | NativeDispatch::ForOfClosed
+                        | NativeDispatch::CopyDataPropertiesDone
+                        | NativeDispatch::AsyncAwait { .. }
+                        | NativeDispatch::Call(_),
+                    ) => {
+                        return Err(EngineFault::RuntimeInvariant {
+                            message: "bytecode call preparation produced an invalid dispatch",
+                        }
+                        .into());
+                    }
+                    Err(
+                        NativeFailure::Abrupt(pending)
+                        | NativeFailure::AbruptAfterTransient(pending),
+                    ) => {
+                        dispatch_pending_exception(
+                            runtime,
+                            frames,
+                            active_frame_values,
+                            pending,
+                            compiler,
+                            execution_budget,
+                        )?;
+                    }
+                    Err(NativeFailure::Execution(error)) => return Err(error),
                 }
-                *active_frame_values = active_frame_values.saturating_add(child.reserved_values);
-                frames.push(child);
             }
             Step::Apply {
                 function,
