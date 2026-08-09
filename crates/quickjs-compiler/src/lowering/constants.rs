@@ -409,6 +409,20 @@ impl<'arena> CompilationContext<'_, 'arena, '_> {
                 )?;
                 record_string_candidate(owner, value, literal.span, candidates, atom_candidates)?;
             }
+            AstKind::UnaryExpression(unary)
+                if unary.operator == UnaryOperator::Delete
+                    && delete_operand_is_super_member(&unary.argument) =>
+            {
+                // `throw_error` carries an atom-shaped field even though its
+                // delete-super form does not inspect the atom. Give the
+                // terminal a deterministic in-bounds pool entry of its own.
+                record_property_candidate(
+                    owner,
+                    compiler_identifier_string("", unary.span)?,
+                    unary.span,
+                    atom_candidates,
+                )?;
+            }
             AstKind::IdentifierReference(identifier)
                 if has_direct_eval_with
                     || !self
@@ -1140,6 +1154,22 @@ impl<'arena> CompilationContext<'_, 'arena, '_> {
             )?;
         }
         Ok(())
+    }
+}
+
+fn delete_operand_is_super_member(expression: &Expression<'_>) -> bool {
+    let mut expression = expression;
+    while let Expression::ParenthesizedExpression(parenthesized) = expression {
+        expression = &parenthesized.expression;
+    }
+    match expression {
+        Expression::StaticMemberExpression(member) => {
+            matches!(&member.object, Expression::Super(_))
+        }
+        Expression::ComputedMemberExpression(member) => {
+            matches!(&member.object, Expression::Super(_))
+        }
+        _ => false,
     }
 }
 

@@ -6263,6 +6263,36 @@ impl<'compiler, 'unit, 'arena, 'scope> ExpressionPlanner<'compiler, 'unit, 'aren
             argument = &parenthesized.expression;
         }
         match argument {
+            Expression::StaticMemberExpression(member)
+                if matches!(&member.object, Expression::Super(_)) =>
+            {
+                if member.optional {
+                    return unsupported(UnsupportedLeafFeature::UnsupportedExpression, member.span);
+                }
+                Self::plan_delete_super_reference(
+                    unary,
+                    Some(constants.property_atom_index(member.property.span)?),
+                    None,
+                    member.object.span(),
+                    constants,
+                    work,
+                )
+            }
+            Expression::ComputedMemberExpression(member)
+                if matches!(&member.object, Expression::Super(_)) =>
+            {
+                if member.optional {
+                    return unsupported(UnsupportedLeafFeature::UnsupportedExpression, member.span);
+                }
+                Self::plan_delete_super_reference(
+                    unary,
+                    None,
+                    Some(&member.expression),
+                    member.object.span(),
+                    constants,
+                    work,
+                )
+            }
             Expression::StaticMemberExpression(member) => {
                 if member.optional {
                     return unsupported(UnsupportedLeafFeature::UnsupportedExpression, member.span);
@@ -6318,6 +6348,55 @@ impl<'compiler, 'unit, 'arena, 'scope> ExpressionPlanner<'compiler, 'unit, 'aren
                 Ok(())
             }
         }
+    }
+
+    /// Evaluates a complete `super` property Reference, then throws before
+    /// `ToPropertyKey`, as required by the delete operator. The raw key is
+    /// retained only long enough to preserve evaluation and abrupt-completion
+    /// order; the fixed `ReferenceError` terminal consumes no values.
+    fn plan_delete_super_reference<'expression>(
+        unary: &'expression UnaryExpression<'arena>,
+        static_key: Option<AtomPoolIndex>,
+        computed_key: Option<&'expression Expression<'arena>>,
+        super_span: Span,
+        constants: &CompiledConstantPool,
+        work: &mut Vec<ExpressionWork<'expression, 'arena>>,
+    ) -> Result<(), LeafCompilationError> {
+        if static_key.is_some() == computed_key.is_some() {
+            return Err(LeafCompilationError::SemanticInvariant {
+                invariant: "delete-super reference has exactly one key form",
+                span: Some(unary.span),
+            });
+        }
+        work.push(ExpressionWork::Emit(PlannedInstruction::new(
+            FinalOpcode::ThrowError,
+            Operands::AtomU8 {
+                atom: constants.property_atom_index(unary.span)?,
+                value: 3,
+            },
+            unary.span,
+        )));
+        for _ in 0..3 {
+            work.push(ExpressionWork::Emit(PlannedInstruction::new(
+                FinalOpcode::Drop,
+                Operands::None,
+                unary.span,
+            )));
+        }
+        if let Some(key) = computed_key {
+            work.push(ExpressionWork::Visit(key));
+        } else if let Some(atom) = static_key {
+            work.push(ExpressionWork::Emit(PlannedInstruction::new(
+                FinalOpcode::PushAtomValue,
+                Operands::Atom(atom),
+                unary.argument.span(),
+            )));
+        }
+        work.push(ExpressionWork::SuperPropertyBase {
+            span: super_span,
+            call_receiver: false,
+        });
+        Ok(())
     }
 
     fn plan_identifier_delete(

@@ -974,13 +974,6 @@ fn execution_requirement_capacity_matches_the_exhaustive_sorted_family_set() {
 
 #[test]
 fn final_authority_keeps_throw_error_fail_closed() {
-    let instructions = [(
-        FinalOpcode::ThrowError,
-        Operands::AtomU8 {
-            atom: AtomPoolIndex::new(0),
-            value: 0,
-        },
-    )];
     let text = "function f(argument){var local;return undefined}";
     let variables = [
         VariableDefinition::new(
@@ -1000,25 +993,34 @@ fn final_authority_keeps_throw_error_fail_closed() {
     ];
     let function_span = SourceByteSpan::new(0, u32::try_from(text.len()).expect("source length"));
 
-    let error = verified_single(
-        &instructions,
-        &[atom("f"), atom("argument"), atom("local")],
-        &variables,
-        source(
-            text,
-            function_span,
-            Some(SourceByteSpan::new(9, 10)),
-            &[(0, function_span)],
-        ),
-    )
-    .expect_err("the internal throw-error shortcut remains outside final authority");
-    assert!(matches!(
-        error.kind(),
-        BytecodeVerificationErrorKind::UnsupportedCompilerOpcode {
-            pc,
-            opcode: FinalOpcode::ThrowError,
-        } if *pc == BytecodePc::ZERO
-    ));
+    for value in 0..=3 {
+        let instructions = [(
+            FinalOpcode::ThrowError,
+            Operands::AtomU8 {
+                atom: AtomPoolIndex::new(0),
+                value,
+            },
+        )];
+        let error = verified_single(
+            &instructions,
+            &[atom("f"), atom("argument"), atom("local")],
+            &variables,
+            source(
+                text,
+                function_span,
+                Some(SourceByteSpan::new(9, 10)),
+                &[(0, function_span)],
+            ),
+        )
+        .expect_err("throw-error kinds require their exact compiler authority");
+        assert!(matches!(
+            error.kind(),
+            BytecodeVerificationErrorKind::UnsupportedCompilerOpcode {
+                pc,
+                opcode: FinalOpcode::ThrowError,
+            } if *pc == BytecodePc::ZERO
+        ));
+    }
 }
 
 #[test]

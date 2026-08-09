@@ -5685,7 +5685,10 @@ fn preflight_opcodes(authority: &VerifiedBytecode) -> Result<(), InstallError> {
 const fn is_supported_instruction(instruction: Instruction) -> bool {
     is_supported_opcode(instruction.opcode())
         && (!matches!(instruction.opcode(), FinalOpcode::ThrowError)
-            || matches!(instruction.operands(), Operands::AtomU8 { value: 4, .. }))
+            || matches!(
+                instruction.operands(),
+                Operands::AtomU8 { value: 3 | 4, .. }
+            ))
 }
 
 #[allow(

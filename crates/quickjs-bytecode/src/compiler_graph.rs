@@ -2170,15 +2170,21 @@ fn validate_atoms(
         else {
             continue;
         };
-        if atom.is_static_property_only()
-            && !matches!(
-                decoded.instruction().opcode(),
-                FinalOpcode::DefineField
-                    | FinalOpcode::DefineMethod
-                    | FinalOpcode::DefineClass
-                    | FinalOpcode::SetName
+        let instruction = decoded.instruction();
+        let static_property_operand = matches!(
+            instruction.opcode(),
+            FinalOpcode::DefineField
+                | FinalOpcode::DefineMethod
+                | FinalOpcode::DefineClass
+                | FinalOpcode::SetName
+        ) || matches!(
+            (instruction.opcode(), instruction.operands()),
+            (
+                FinalOpcode::ThrowError,
+                crate::Operands::AtomU8 { value: 3, .. }
             )
-        {
+        );
+        if atom.is_static_property_only() && !static_property_operand {
             return Err(FunctionGraphVerificationError::at_function(
                 function,
                 FunctionGraphVerificationErrorKind::StaticPropertyOnlyAtomOperand {

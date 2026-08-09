@@ -6284,6 +6284,20 @@ fn verify_supported_opcodes(
                 .map(ClosureVariableDefinition::policy),
         )
         .any(|policy| policy.kind() == CompilerBindingKind::ClassStaticReceiver);
+    let super_property_authorized = (executable_kind == CompilerExecutableKind::DirectEvalScript
+        && (flow.function_header().flags().super_allowed()
+            || flow.function_header().flags().super_call_allowed()))
+        || matches!(
+            executable_kind,
+            CompilerExecutableKind::OrdinaryArrow
+                | CompilerExecutableKind::OrdinaryMethod
+                | CompilerExecutableKind::ClassInstanceInitializer
+                | CompilerExecutableKind::GeneratorMethod
+                | CompilerExecutableKind::AsyncMethod
+                | CompilerExecutableKind::AsyncGeneratorMethod
+                | CompilerExecutableKind::ClassConstructor
+        )
+        || static_field_super;
     let mut initial_yield = None;
     let mapped_arguments_authority = flow
         .compiler_capture_layout()
@@ -6313,6 +6327,11 @@ fn verify_supported_opcodes(
                 },
             ));
         }
+        let throw_error_authorized = match instruction.operands() {
+            Operands::AtomU8 { value: 3, .. } => super_property_authorized,
+            Operands::AtomU8 { value: 4, .. } => generator,
+            _ => false,
+        };
         if !supported_compiler_opcode(opcode)
             || (matches!(
                 opcode,
@@ -6352,7 +6371,6 @@ fn verify_supported_opcodes(
                 FinalOpcode::IteratorNext
                     | FinalOpcode::IteratorCall
                     | FinalOpcode::IteratorCheckObject
-                    | FinalOpcode::ThrowError
             ) && !generator)
             || (matches!(opcode, FinalOpcode::Return | FinalOpcode::ReturnUndef)
                 && (generator || asynchronous))
@@ -6368,20 +6386,7 @@ fn verify_supported_opcodes(
             || (matches!(
                 opcode,
                 FinalOpcode::GetSuper | FinalOpcode::GetSuperValue | FinalOpcode::PutSuperValue
-            ) && !(executable_kind == CompilerExecutableKind::DirectEvalScript
-                && (flow.function_header().flags().super_allowed()
-                    || flow.function_header().flags().super_call_allowed()))
-                && !matches!(
-                    executable_kind,
-                    CompilerExecutableKind::OrdinaryArrow
-                        | CompilerExecutableKind::OrdinaryMethod
-                        | CompilerExecutableKind::ClassInstanceInitializer
-                        | CompilerExecutableKind::GeneratorMethod
-                        | CompilerExecutableKind::AsyncMethod
-                        | CompilerExecutableKind::AsyncGeneratorMethod
-                        | CompilerExecutableKind::ClassConstructor
-                )
-                && !static_field_super)
+            ) && !super_property_authorized)
             || matches!(
                 (opcode, instruction.operands()),
                 (FinalOpcode::SpecialObject, operands)
@@ -6421,12 +6426,7 @@ fn verify_supported_opcodes(
                     | (FinalOpcode::DefineMethodComputed, Operands::U8(value))
                     if !matches!(value, 0..=2 | 4..=6)
             )
-            || matches!(
-                (opcode, instruction.operands()),
-                (FinalOpcode::ThrowError, Operands::AtomU8 { value: 4, .. }) if !generator
-            )
-            || matches!(opcode, FinalOpcode::ThrowError)
-                && !matches!(instruction.operands(), Operands::AtomU8 { value: 4, .. })
+            || (opcode == FinalOpcode::ThrowError && !throw_error_authorized)
         {
             return Err(BytecodeVerificationError::function(
                 id,

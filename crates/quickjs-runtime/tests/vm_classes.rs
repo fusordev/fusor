@@ -428,6 +428,17 @@ fn class_super_property_compound_and_logical_assignments_keep_the_reference_once
 }
 
 #[test]
+fn deleting_super_properties_throws_before_key_conversion_and_after_this_binding() {
+    run_with(
+        "function run(){let state={evaluations:0,conversions:0};let key={toString(){state.conversions++;return 'value';}};class Base{}class Derived extends Base{static plain(){try{delete super.value;}catch(error){return error.name==='ReferenceError';}}static computed(){try{delete super[key];}catch(error){return error.name==='ReferenceError';}}constructor(){try{delete super[(state.evaluations++,'value')];}catch(error){state.beforeSuper=error.name;}super();}}let value=new Derived;return Derived.plain()&&Derived.computed()&&value instanceof Derived&&state.evaluations===0&&state.conversions===0&&state.beforeSuper==='ReferenceError';}",
+        |result| {
+            let value = result.expect("delete super execution");
+            assert_eq!(value.as_boolean().expect("live Boolean"), Some(true));
+        },
+    );
+}
+
+#[test]
 fn a_default_class_extending_null_fails_only_when_constructed() {
     run_with(
         "function run(){class Empty extends null{}try{new Empty();}catch(error){return error.name==='TypeError';}return false;}",

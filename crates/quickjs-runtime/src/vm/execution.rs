@@ -3858,15 +3858,23 @@ pub(super) fn execute_one(
             }));
         }
         FinalOpcode::ThrowError => {
-            let Operands::AtomU8 { value: 4, .. } = operands else {
-                return unsupported_dispatch(opcode);
+            let (kind, message) = match operands {
+                Operands::AtomU8 { value: 3, .. } => (
+                    ExceptionKind::ReferenceError,
+                    "unsupported reference to 'super'",
+                ),
+                Operands::AtomU8 { value: 4, .. } => (
+                    ExceptionKind::TypeError,
+                    "iterator does not have a throw method",
+                ),
+                _ => return unsupported_dispatch(opcode),
             };
             let realm = code(runtime, frame.code)?.realm;
             return Ok(Step::Abrupt(PendingException {
                 realm,
                 payload: PendingExceptionPayload::EngineError {
-                    kind: ExceptionKind::TypeError,
-                    message: JsString::from_utf8("iterator does not have a throw method")?,
+                    kind,
+                    message: JsString::from_utf8(message)?,
                 },
                 origin: instruction_location(runtime, frame, source_pc)?,
             }));

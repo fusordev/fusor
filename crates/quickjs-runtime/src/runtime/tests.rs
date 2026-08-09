@@ -1383,6 +1383,16 @@ fn array_spread_opcodes_are_admitted_without_public_iterator_markers() {
         )
         .expect("yield-star missing-throw shortcut")
     ));
+    assert!(is_supported_instruction(
+        Instruction::new(
+            FinalOpcode::ThrowError,
+            Operands::AtomU8 {
+                atom: AtomPoolIndex::new(0),
+                value: 3,
+            },
+        )
+        .expect("delete-super ReferenceError shortcut")
+    ));
     assert!(!is_supported_instruction(
         Instruction::new(
             FinalOpcode::ThrowError,
