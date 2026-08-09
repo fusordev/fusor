@@ -859,6 +859,69 @@ fn iterator_includes_validates_before_next_and_does_not_close_step_failures() {
 }
 
 #[test]
+fn iterator_join_formats_values_and_publishes_the_intrinsic_contract() {
+    let mut runtime = Runtime::try_new(RuntimeLimits::default()).expect("runtime");
+    let realm = runtime.create_realm().expect("realm");
+    let mut context = runtime.context(&realm).expect("context");
+    let function = dynamic_function(
+        &mut context,
+        "let method=Iterator.prototype.join;
+         let descriptor=Object.getOwnPropertyDescriptor(Iterator.prototype,'join');
+         let separatorCalls=0,separator={toString(){separatorCalls++;return '--';}};
+         let result=method.call([1,null,undefined,'x'].values(),separator);
+         let defaulted=[1,null,3].values().join();
+         let empty=[].values().join('-');
+         return [result,defaulted,empty,separatorCalls,method.name,method.length,
+           descriptor.writable,!descriptor.enumerable,descriptor.configurable].join('|');",
+    );
+
+    let result = context
+        .call(&function, &[], ExecutionLimits::default())
+        .expect("Iterator.prototype.join results and descriptor");
+    assert_eq!(
+        string_value(&result),
+        "1------x|1,,3||1|join|1|true|true|true"
+    );
+}
+
+#[test]
+fn iterator_join_closes_only_string_conversion_failures() {
+    let mut runtime = Runtime::try_new(RuntimeLimits::default()).expect("runtime");
+    let realm = runtime.create_realm().expect("realm");
+    let mut context = runtime.context(&realm).expect("context");
+    let function = dynamic_function(
+        &mut context,
+        "let method=Iterator.prototype.join;
+         let bad={toString(){return {};},valueOf(){return {};}};
+         let separatorClose=0,separatorNext=false,separatorType=false;
+         try{method.call({get next(){separatorNext=true;},
+           return(){separatorClose++;}},bad);}catch(error){separatorType=error instanceof TypeError;}
+         let elementClose=0,elementType=false,elementStep=0;
+         try{method.call({next(){elementStep++;return elementStep===1?
+           {done:false,value:bad}:{done:true};},return(){elementClose++;}});}
+           catch(error){elementType=error instanceof TypeError;}
+         let nextError={},nextClose=0,nextPreserved=false;
+         try{method.call({get next(){throw nextError;},return(){nextClose++;}});}
+           catch(error){nextPreserved=error===nextError;}
+         let exhaustionClose=0,exhausted=method.call({next(){return {done:true};},
+           return(){exhaustionClose++;}});
+         let protocolClose=0,protocolType=false;
+         try{method.call({next(){return 1;},return(){protocolClose++;}});}
+           catch(error){protocolType=error instanceof TypeError;}
+         return [separatorType,separatorClose,separatorNext,elementType,elementClose,
+           nextPreserved,nextClose,exhausted,exhaustionClose,protocolType,protocolClose].join('|');",
+    );
+
+    let result = context
+        .call(&function, &[], ExecutionLimits::default())
+        .expect("Iterator.prototype.join close ordering");
+    assert_eq!(
+        string_value(&result),
+        "true|1|false|true|1|true|0||0|true|0"
+    );
+}
+
+#[test]
 fn iterator_chunks_and_windows_use_retained_helper_buffers() {
     let mut runtime = Runtime::try_new(RuntimeLimits::default()).expect("runtime");
     let realm = runtime.create_realm().expect("realm");

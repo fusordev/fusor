@@ -431,6 +431,47 @@ impl IteratorIncludesContinuation {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum IteratorJoinStage {
+    Separator,
+    NextMethod,
+    NextResult,
+    Done,
+    Value,
+    ValueString,
+}
+
+/// One in-progress `Iterator.prototype.join` operation.
+pub(super) struct IteratorJoinContinuation {
+    iterator: StoredValue,
+    next_method: Option<FunctionId>,
+    result: Option<StoredValue>,
+    separator: Option<JsString>,
+    accumulated: JsString,
+    first: bool,
+    realm: RealmId,
+    stage: IteratorJoinStage,
+    origin: JsStackFrame,
+}
+
+impl IteratorJoinContinuation {
+    pub(super) fn retained_values(&self) -> u64 {
+        2_u64
+            .saturating_add(u64::from(self.next_method.is_some()))
+            .saturating_add(u64::from(self.result.is_some()))
+    }
+
+    pub(super) fn trace_roots(&self, mark: &mut dyn FnMut(CollectionRoot)) {
+        trace_stored_value_root(&self.iterator, mark);
+        if let Some(next_method) = self.next_method {
+            mark(CollectionRoot::Heap(HeapReference::Function(next_method)));
+        }
+        if let Some(result) = &self.result {
+            trace_stored_value_root(result, mark);
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum IteratorConsumerStage {
     NextMethod,
     NextResult,
@@ -3141,6 +3182,307 @@ fn read_iterator_includes_property(
             advance_iterator_includes(runtime, state, value, return_to, execution_budget)
         },
         "Iterator.prototype.includes property Get produced a structured result",
+    )
+}
+
+/// Starts `Iterator.prototype.join`.
+///
+/// The separator is converted before `next` is looked up. A separator or
+/// element conversion failure closes the direct iterator record, while errors
+/// produced by iterator stepping itself remain unclosed.
+#[allow(
+    clippy::too_many_arguments,
+    reason = "the native boundary keeps the receiver, separator, realm, source origin, return target, and budget explicit"
+)]
+pub(super) fn begin_iterator_join(
+    runtime: &mut Runtime,
+    receiver: StoredValue,
+    separator: StoredValue,
+    realm: RealmId,
+    return_to: Option<CallReturn>,
+    origin: JsStackFrame,
+    execution_budget: &mut ExecutionBudget,
+) -> Result<NativeDispatch, NativeFailure> {
+    if receiver.heap_reference().is_none() {
+        return Err(iterator_exception(
+            realm,
+            origin,
+            ExceptionKind::TypeError,
+            "Iterator.prototype.join receiver must be an object",
+        )?);
+    }
+    let state = IteratorJoinContinuation {
+        iterator: receiver,
+        next_method: None,
+        result: None,
+        separator: None,
+        accumulated: JsString::empty(),
+        first: true,
+        realm,
+        stage: IteratorJoinStage::Separator,
+        origin,
+    };
+    if matches!(separator, StoredValue::Undefined) {
+        let mut state = state;
+        state.separator = Some(JsString::from_utf8(",")?);
+        state.stage = IteratorJoinStage::NextMethod;
+        return read_iterator_join_property(
+            runtime,
+            state,
+            runtime.predefined_property_key(PredefinedAtom::Next),
+            return_to,
+            execution_budget,
+        );
+    }
+    let origin = state.origin.clone();
+    begin_operator_primitive_conversion(
+        runtime,
+        separator,
+        OperatorPrimitiveHint::String,
+        OperatorPrimitiveTarget::IteratorJoin(Box::new(state)),
+        realm,
+        return_to,
+        origin,
+        execution_budget,
+    )
+}
+
+/// Resumes one observable iterator step in `Iterator.prototype.join`.
+pub(super) fn advance_iterator_join(
+    runtime: &mut Runtime,
+    mut state: IteratorJoinContinuation,
+    completion: StoredValue,
+    return_to: Option<CallReturn>,
+    execution_budget: &mut ExecutionBudget,
+) -> Result<NativeDispatch, NativeFailure> {
+    match state.stage {
+        IteratorJoinStage::NextMethod => {
+            let StoredValue::Function(next_method) = completion else {
+                return Err(iterator_exception(
+                    state.realm,
+                    state.origin,
+                    ExceptionKind::TypeError,
+                    "iterator next method is not callable",
+                )?);
+            };
+            state.next_method = Some(next_method);
+            call_iterator_join_next(state, return_to, execution_budget)
+        }
+        IteratorJoinStage::NextResult => {
+            if completion.heap_reference().is_none() {
+                return Err(iterator_exception(
+                    state.realm,
+                    state.origin,
+                    ExceptionKind::TypeError,
+                    "iterator next method did not return an object",
+                )?);
+            }
+            state.result = Some(completion);
+            state.stage = IteratorJoinStage::Done;
+            read_iterator_join_property(
+                runtime,
+                state,
+                runtime.predefined_property_key(PredefinedAtom::Done),
+                return_to,
+                execution_budget,
+            )
+        }
+        IteratorJoinStage::Done => {
+            if runtime.to_boolean(&completion)? {
+                return Ok(NativeDispatch::Immediate(StoredValue::String(
+                    state.accumulated,
+                )));
+            }
+            state.stage = IteratorJoinStage::Value;
+            read_iterator_join_property(
+                runtime,
+                state,
+                runtime.predefined_property_key(PredefinedAtom::Value),
+                return_to,
+                execution_budget,
+            )
+        }
+        IteratorJoinStage::Value => {
+            state.result = None;
+            if state.first {
+                state.first = false;
+            } else {
+                let separator = state
+                    .separator
+                    .as_ref()
+                    .ok_or(EngineFault::RuntimeInvariant {
+                        message: "Iterator.prototype.join reached a value without a separator",
+                    })?;
+                state.accumulated = state.accumulated.concat(separator)?;
+            }
+            match completion {
+                StoredValue::Undefined | StoredValue::Null => {
+                    call_iterator_join_next(state, return_to, execution_budget)
+                }
+                StoredValue::String(text) => {
+                    state.accumulated = state.accumulated.concat(&text)?;
+                    call_iterator_join_next(state, return_to, execution_budget)
+                }
+                value => {
+                    state.stage = IteratorJoinStage::ValueString;
+                    let realm = state.realm;
+                    let origin = state.origin.clone();
+                    begin_operator_primitive_conversion(
+                        runtime,
+                        value,
+                        OperatorPrimitiveHint::String,
+                        OperatorPrimitiveTarget::IteratorJoin(Box::new(state)),
+                        realm,
+                        return_to,
+                        origin,
+                        execution_budget,
+                    )
+                }
+            }
+        }
+        IteratorJoinStage::Separator | IteratorJoinStage::ValueString => {
+            Err(EngineFault::RuntimeInvariant {
+                message: "Iterator.prototype.join primitive stage reached ordinary resumption",
+            }
+            .into())
+        }
+    }
+}
+
+/// Finishes a separator or element `ToString` conversion.
+pub(super) fn finish_iterator_join_primitive(
+    runtime: &mut Runtime,
+    mut state: IteratorJoinContinuation,
+    value: StoredValue,
+    return_to: Option<CallReturn>,
+    execution_budget: &mut ExecutionBudget,
+) -> Result<NativeDispatch, NativeFailure> {
+    let text = match operator_primitive_to_string(value, state.realm, &state.origin) {
+        Ok(text) => text,
+        Err(NativeFailure::Abrupt(pending) | NativeFailure::AbruptAfterTransient(pending)) => {
+            return resume_iterator_join_abrupt(
+                runtime,
+                state,
+                pending,
+                return_to,
+                execution_budget,
+            );
+        }
+        Err(error) => return Err(error),
+    };
+    match state.stage {
+        IteratorJoinStage::Separator => {
+            state.separator = Some(text);
+            state.stage = IteratorJoinStage::NextMethod;
+            read_iterator_join_property(
+                runtime,
+                state,
+                runtime.predefined_property_key(PredefinedAtom::Next),
+                return_to,
+                execution_budget,
+            )
+        }
+        IteratorJoinStage::ValueString => {
+            state.accumulated = state.accumulated.concat(&text)?;
+            call_iterator_join_next(state, return_to, execution_budget)
+        }
+        IteratorJoinStage::NextMethod
+        | IteratorJoinStage::NextResult
+        | IteratorJoinStage::Done
+        | IteratorJoinStage::Value => Err(EngineFault::RuntimeInvariant {
+            message: "Iterator.prototype.join conversion completed outside a primitive stage",
+        }
+        .into()),
+    }
+}
+
+pub(super) fn resume_iterator_join_abrupt(
+    runtime: &mut Runtime,
+    state: IteratorJoinContinuation,
+    pending: PendingException,
+    return_to: Option<CallReturn>,
+    execution_budget: &mut ExecutionBudget,
+) -> Result<NativeDispatch, NativeFailure> {
+    if !matches!(
+        state.stage,
+        IteratorJoinStage::Separator | IteratorJoinStage::ValueString
+    ) {
+        return Err(EngineFault::RuntimeInvariant {
+            message: "Iterator.prototype.join attempted to close outside string conversion",
+        }
+        .into());
+    }
+    begin_exceptional_iterator_close(
+        runtime,
+        state.iterator,
+        pending,
+        return_to,
+        execution_budget,
+    )
+}
+
+fn call_iterator_join_next(
+    mut state: IteratorJoinContinuation,
+    return_to: Option<CallReturn>,
+    execution_budget: &mut ExecutionBudget,
+) -> Result<NativeDispatch, NativeFailure> {
+    let next_method = state.next_method.ok_or(EngineFault::RuntimeInvariant {
+        message: "Iterator.prototype.join has no callable next method",
+    })?;
+    state.result = None;
+    state.stage = IteratorJoinStage::NextResult;
+    execution_budget.charge_instructions(1)?;
+    let receiver = state.iterator.duplicate();
+    let origin = state.origin.clone();
+    iterator_method_call(
+        next_method,
+        receiver,
+        NativeContinuation::IteratorJoin(state),
+        return_to,
+        origin,
+    )
+}
+
+fn read_iterator_join_property(
+    runtime: &mut Runtime,
+    state: IteratorJoinContinuation,
+    key: PropertyKey,
+    return_to: Option<CallReturn>,
+    execution_budget: &mut ExecutionBudget,
+) -> Result<NativeDispatch, NativeFailure> {
+    let base = match state.stage {
+        IteratorJoinStage::NextMethod => &state.iterator,
+        IteratorJoinStage::Done | IteratorJoinStage::Value => {
+            state.result.as_ref().ok_or(EngineFault::RuntimeInvariant {
+                message: "Iterator.prototype.join result lookup has no result object",
+            })?
+        }
+        IteratorJoinStage::Separator
+        | IteratorJoinStage::NextResult
+        | IteratorJoinStage::ValueString => {
+            return Err(EngineFault::RuntimeInvariant {
+                message: "Iterator.prototype.join call stage attempted a property lookup",
+            }
+            .into());
+        }
+    };
+    charge_iterator_property_lookup(runtime, base, execution_budget)?;
+    let dispatch = begin_value_get(
+        runtime,
+        base,
+        key,
+        None,
+        state.realm,
+        return_to,
+        state.origin.clone(),
+        execution_budget,
+    )?;
+    continue_get_after(
+        dispatch,
+        state,
+        NativeContinuation::IteratorJoin,
+        |state, value| advance_iterator_join(runtime, state, value, return_to, execution_budget),
+        "Iterator.prototype.join property Get produced a structured result",
     )
 }
 

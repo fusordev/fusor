@@ -255,6 +255,7 @@ fn visit_realm_name_order(
     visit(RealmNameId::IteratorChunks)?;
     visit(RealmNameId::IteratorDrop)?;
     visit(RealmNameId::IteratorIncludes)?;
+    visit(RealmNameId::IteratorJoin)?;
     for consumer in IteratorConsumer::ALL {
         visit(RealmNameId::IteratorConsumer(consumer))?;
     }
@@ -669,6 +670,7 @@ fn realm_name_description(id: RealmNameId) -> &'static str {
         RealmNameId::IteratorChunks => "chunks",
         RealmNameId::IteratorDrop => "drop",
         RealmNameId::IteratorIncludes => "includes",
+        RealmNameId::IteratorJoin => "join",
         RealmNameId::IteratorConsumer(consumer) => consumer.name(),
         RealmNameId::IteratorFilter => "filter",
         RealmNameId::IteratorFlatMap => "flatMap",

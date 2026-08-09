@@ -879,6 +879,7 @@ enum NativeContinuation {
     IteratorZipNext(IteratorZipNextContinuation),
     IteratorZipClose(Box<IteratorZipCloseContinuation>),
     IteratorIncludes(IteratorIncludesContinuation),
+    IteratorJoin(IteratorJoinContinuation),
     IteratorConsumer(IteratorConsumerContinuation),
     IteratorDispose(IteratorDisposeContinuation),
     IteratorHelperCreation(IteratorHelperCreationContinuation),
@@ -1139,6 +1140,7 @@ impl NativeContinuation {
             Self::IteratorZipNext(state) => state.retained_values(),
             Self::IteratorZipClose(state) => state.retained_values(),
             Self::IteratorIncludes(state) => state.retained_values(),
+            Self::IteratorJoin(state) => state.retained_values(),
             Self::IteratorConsumer(state) => state.retained_values(),
             Self::IteratorDispose(_) => IteratorDisposeContinuation::retained_values(),
             Self::IteratorHelperCreation(state) => state.retained_values(),
@@ -1268,6 +1270,7 @@ impl NativeContinuation {
                         &state.target,
                         OperatorPrimitiveTarget::ArrayFromAsyncLength { .. }
                             | OperatorPrimitiveTarget::IteratorLimit(_)
+                            | OperatorPrimitiveTarget::IteratorJoin(_)
                     ) || matches!(
                         &state.target,
                         OperatorPrimitiveTarget::RegExpValue(state) if state.handles_abrupt()
@@ -2569,6 +2572,8 @@ enum OperatorPrimitiveTarget {
     ArrayIteratorLength(ArrayIteratorNextContinuation),
     /// An Iterator Helper limit, awaiting `ToNumber`.
     IteratorLimit(Box<IteratorLimitContinuation>),
+    /// `Iterator.prototype.join`, awaiting separator or element `ToString`.
+    IteratorJoin(Box<IteratorJoinContinuation>),
     FunctionApplyLength(FunctionApplyContinuation),
     ProxyOwnKeysLength(Box<ProxyOwnKeysContinuation>),
     /// `BigInt.prototype.toString`'s radix, awaiting `ToNumber`.
@@ -2985,6 +2990,7 @@ impl OperatorPrimitiveTarget {
             }
             Self::ArrayIteratorLength(state) => state.retained_values(),
             Self::IteratorLimit(_) => IteratorLimitContinuation::retained_values(),
+            Self::IteratorJoin(state) => state.retained_values(),
             Self::FunctionApplyLength(state) => state.retained_values(),
             Self::ProxyOwnKeysLength(state) => state.retained_values(),
             Self::ArrayJoinSeparator(_) | Self::ArrayJoinElement(_) => {
@@ -3450,6 +3456,7 @@ fn trace_operator_primitive_target_roots(
             trace_stored_value_root(&state.iterated, mark);
         }
         OperatorPrimitiveTarget::IteratorLimit(state) => state.trace_roots(mark),
+        OperatorPrimitiveTarget::IteratorJoin(state) => state.trace_roots(mark),
         OperatorPrimitiveTarget::FunctionApplyLength(state) => {
             trace_function_apply_roots(state, mark);
         }
@@ -3818,6 +3825,7 @@ fn trace_native_continuation_roots(
         NativeContinuation::IteratorZipNext(state) => state.trace_roots(mark),
         NativeContinuation::IteratorZipClose(state) => state.trace_roots(mark),
         NativeContinuation::IteratorIncludes(state) => state.trace_roots(mark),
+        NativeContinuation::IteratorJoin(state) => state.trace_roots(mark),
         NativeContinuation::IteratorConsumer(state) => state.trace_roots(mark),
         NativeContinuation::IteratorDispose(state) => state.trace_roots(mark),
         NativeContinuation::IteratorHelperCreation(state) => state.trace_roots(mark),

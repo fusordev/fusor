@@ -289,6 +289,13 @@ pub(super) fn resume_iterator_abrupt_continuations(
                     return_to,
                     execution_budget,
                 ),
+                OperatorPrimitiveTarget::IteratorJoin(state) => resume_iterator_join_abrupt(
+                    runtime,
+                    *state,
+                    pending,
+                    return_to,
+                    execution_budget,
+                ),
                 OperatorPrimitiveTarget::RegExpValue(state) if state.handles_abrupt() => {
                     resume_regexp_abrupt(runtime, &state, pending)
                 }
@@ -1038,6 +1045,9 @@ pub(super) fn resume_native_continuations(
             }
             NativeContinuation::IteratorIncludes(state) => {
                 advance_iterator_includes(runtime, state, value, return_to, execution_budget)?
+            }
+            NativeContinuation::IteratorJoin(state) => {
+                advance_iterator_join(runtime, state, value, return_to, execution_budget)?
             }
             NativeContinuation::IteratorConsumer(state) => {
                 advance_iterator_consumer(runtime, state, value, return_to, execution_budget)?
@@ -4505,6 +4515,15 @@ pub(super) fn dispatch_native_call_with_frames(
                 execution_budget,
             )
         }
+        NativeFunctionKind::IteratorPrototypeJoin => begin_iterator_join(
+            runtime,
+            inputs.receiver,
+            inputs.arguments.take_first_or_undefined(),
+            native.realm,
+            return_to,
+            origin.unwrap_or_else(native_function_host_origin),
+            execution_budget,
+        ),
         NativeFunctionKind::IteratorPrototypeChunks => {
             let chunk_size = inputs.arguments.take_first_or_undefined();
             begin_iterator_chunks(

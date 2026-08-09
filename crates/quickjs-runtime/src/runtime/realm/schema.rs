@@ -271,6 +271,7 @@ pub(in crate::runtime) enum RealmNameId {
     IteratorChunks,
     IteratorDrop,
     IteratorIncludes,
+    IteratorJoin,
     IteratorConsumer(IteratorConsumer),
     IteratorFilter,
     IteratorFlatMap,
