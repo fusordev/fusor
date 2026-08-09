@@ -5734,6 +5734,7 @@ const fn is_supported_opcode(opcode: FinalOpcode) -> bool {
             | FinalOpcode::Swap
             | FinalOpcode::Rot3l
             | FinalOpcode::Rot3r
+            | FinalOpcode::Rot4l
             | FinalOpcode::Call
             | FinalOpcode::CallMethod
             | FinalOpcode::CallConstructor

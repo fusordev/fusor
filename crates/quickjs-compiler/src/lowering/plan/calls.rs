@@ -217,8 +217,11 @@ impl<'arena> ExpressionPlanner<'_, '_, 'arena, '_> {
                         Operands::None,
                         member.expression.span(),
                     )));
+                    work.push(ExpressionWork::SuperPropertyBaseAfterKey {
+                        span: member.object.span(),
+                    });
                     work.push(ExpressionWork::Visit(&member.expression));
-                    work.push(ExpressionWork::SuperPropertyBase {
+                    work.push(ExpressionWork::SuperPropertyReceiver {
                         span: member.object.span(),
                         call_receiver: true,
                     });
@@ -601,8 +604,11 @@ impl<'arena> ExpressionPlanner<'_, '_, 'arena, '_> {
                         Operands::None,
                         member.expression.span(),
                     )));
+                    work.push(ExpressionWork::SuperPropertyBaseAfterKey {
+                        span: member.object.span(),
+                    });
                     work.push(ExpressionWork::Visit(&member.expression));
-                    work.push(ExpressionWork::SuperPropertyBase {
+                    work.push(ExpressionWork::SuperPropertyReceiver {
                         span: member.object.span(),
                         call_receiver: true,
                     });
@@ -1133,8 +1139,11 @@ impl<'arena> ExpressionPlanner<'_, '_, 'arena, '_> {
                 Operands::None,
                 member.expression.span(),
             )));
+            work.push(ExpressionWork::SuperPropertyBaseAfterKey {
+                span: member.object.span(),
+            });
             work.push(ExpressionWork::Visit(&member.expression));
-            work.push(ExpressionWork::SuperPropertyBase {
+            work.push(ExpressionWork::SuperPropertyReceiver {
                 span: member.object.span(),
                 call_receiver: false,
             });
@@ -1222,14 +1231,29 @@ impl<'arena> ExpressionPlanner<'_, '_, 'arena, '_> {
                 Operands::None,
                 assignment.span,
             )));
-            work.push(ExpressionWork::Visit(&assignment.right));
+            // A computed super reference retains its raw key through RHS
+            // evaluation. PutValue performs ToPropertyKey only afterwards.
+            work.push(ExpressionWork::Emit(PlannedInstruction::new(
+                FinalOpcode::Swap,
+                Operands::None,
+                member.span,
+            )));
             work.push(ExpressionWork::Emit(PlannedInstruction::new(
                 FinalOpcode::ToPropKey,
                 Operands::None,
                 member.expression.span(),
             )));
+            work.push(ExpressionWork::Emit(PlannedInstruction::new(
+                FinalOpcode::Swap,
+                Operands::None,
+                member.span,
+            )));
+            work.push(ExpressionWork::Visit(&assignment.right));
+            work.push(ExpressionWork::SuperPropertyBaseAfterKey {
+                span: member.object.span(),
+            });
             work.push(ExpressionWork::Visit(&member.expression));
-            work.push(ExpressionWork::SuperPropertyBase {
+            work.push(ExpressionWork::SuperPropertyReceiver {
                 span: member.object.span(),
                 call_receiver: false,
             });

@@ -242,6 +242,13 @@ pub(in crate::lowering) enum ExpressionWork<'expression, 'arena> {
         span: Span,
         call_receiver: bool,
     },
+    SuperPropertyReceiver {
+        span: Span,
+        call_receiver: bool,
+    },
+    SuperPropertyBaseAfterKey {
+        span: Span,
+    },
     InitializeInstanceFields {
         constructor: ExecutableId,
         span: Span,
@@ -384,6 +391,13 @@ impl<'compiler, 'unit, 'arena, 'scope> ExpressionPlanner<'compiler, 'unit, 'aren
                     span,
                     call_receiver,
                 } => self.plan_super_property_base(span, call_receiver, layout, flow)?,
+                ExpressionWork::SuperPropertyReceiver {
+                    span,
+                    call_receiver,
+                } => self.plan_super_property_receiver(span, call_receiver, layout, flow)?,
+                ExpressionWork::SuperPropertyBaseAfterKey { span } => {
+                    self.plan_super_property_base_after_key(span, layout, flow)?;
+                }
                 ExpressionWork::InitializeInstanceFields { constructor, span } => {
                     self.plan_call_instance_initializer(constructor, layout, span, flow)?;
                 }
@@ -3701,7 +3715,7 @@ impl<'compiler, 'unit, 'arena, 'scope> ExpressionPlanner<'compiler, 'unit, 'aren
         Ok(Some(self.plan_read_slot(binding, slot, span)?))
     }
 
-    fn plan_super_property_base(
+    pub(in crate::lowering) fn plan_super_property_base(
         &self,
         span: Span,
         call_receiver: bool,
@@ -3743,6 +3757,70 @@ impl<'compiler, 'unit, 'arena, 'scope> ExpressionPlanner<'compiler, 'unit, 'aren
         }
         flow.emit(PlannedInstruction::new(
             FinalOpcode::GetSuper,
+            Operands::None,
+            span,
+        ))?;
+        Ok(())
+    }
+
+    pub(in crate::lowering) fn plan_super_property_receiver(
+        &self,
+        span: Span,
+        call_receiver: bool,
+        layout: &FrameLayout,
+        flow: &mut PlannedControlFlow,
+    ) -> Result<(), LeafCompilationError> {
+        if let Some(receiver) = self.static_class_receiver_read(span, layout)? {
+            flow.emit(receiver)?;
+        } else {
+            flow.emit(PlannedInstruction::new(
+                FinalOpcode::PushThis,
+                Operands::None,
+                span,
+            ))?;
+        }
+        if call_receiver {
+            flow.emit(PlannedInstruction::new(
+                FinalOpcode::Dup,
+                Operands::None,
+                span,
+            ))?;
+        }
+        Ok(())
+    }
+
+    fn plan_super_property_home_base(
+        &self,
+        span: Span,
+        layout: &FrameLayout,
+        flow: &mut PlannedControlFlow,
+    ) -> Result<(), LeafCompilationError> {
+        if let Some(home_object) = self.static_class_receiver_read(span, layout)? {
+            flow.emit(home_object)?;
+        } else {
+            flow.emit(PlannedInstruction::new(
+                FinalOpcode::SpecialObject,
+                Operands::U8(5),
+                span,
+            ))?;
+        }
+        flow.emit(PlannedInstruction::new(
+            FinalOpcode::GetSuper,
+            Operands::None,
+            span,
+        ))?;
+        Ok(())
+    }
+
+    pub(in crate::lowering) fn plan_super_property_base_after_key(
+        &self,
+        span: Span,
+        layout: &FrameLayout,
+        flow: &mut PlannedControlFlow,
+    ) -> Result<(), LeafCompilationError> {
+        self.plan_super_property_home_base(span, layout, flow)?;
+        flow.emit(PlannedInstruction::new(
+            FinalOpcode::Swap,
             Operands::None,
             span,
         ))?;
@@ -5141,8 +5219,11 @@ impl<'compiler, 'unit, 'arena, 'scope> ExpressionPlanner<'compiler, 'unit, 'aren
             Operands::None,
             member.expression.span(),
         )));
+        work.push(ExpressionWork::SuperPropertyBaseAfterKey {
+            span: member.object.span(),
+        });
         work.push(ExpressionWork::Visit(&member.expression));
-        work.push(ExpressionWork::SuperPropertyBase {
+        work.push(ExpressionWork::SuperPropertyReceiver {
             span: member.object.span(),
             call_receiver: false,
         });
@@ -5280,8 +5361,11 @@ impl<'compiler, 'unit, 'arena, 'scope> ExpressionPlanner<'compiler, 'unit, 'aren
             Operands::None,
             member.expression.span(),
         )));
+        work.push(ExpressionWork::SuperPropertyBaseAfterKey {
+            span: member.object.span(),
+        });
         work.push(ExpressionWork::Visit(&member.expression));
-        work.push(ExpressionWork::SuperPropertyBase {
+        work.push(ExpressionWork::SuperPropertyReceiver {
             span: member.object.span(),
             call_receiver: false,
         });
@@ -5378,8 +5462,11 @@ impl<'compiler, 'unit, 'arena, 'scope> ExpressionPlanner<'compiler, 'unit, 'aren
             Operands::None,
             member.expression.span(),
         )));
+        work.push(ExpressionWork::SuperPropertyBaseAfterKey {
+            span: member.object.span(),
+        });
         work.push(ExpressionWork::Visit(&member.expression));
-        work.push(ExpressionWork::SuperPropertyBase {
+        work.push(ExpressionWork::SuperPropertyReceiver {
             span: member.object.span(),
             call_receiver: false,
         });

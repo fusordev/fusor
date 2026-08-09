@@ -1479,6 +1479,16 @@ pub(super) fn execute_one(
             push(frame, first);
             push(frame, second);
         }
+        FinalOpcode::Rot4l => {
+            let fourth = pop(frame)?;
+            let third = pop(frame)?;
+            let second = pop(frame)?;
+            let first = pop(frame)?;
+            push(frame, second);
+            push(frame, third);
+            push(frame, fourth);
+            push(frame, first);
+        }
         FinalOpcode::Call
         | FinalOpcode::Call0
         | FinalOpcode::Call1

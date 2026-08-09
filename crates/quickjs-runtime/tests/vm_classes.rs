@@ -384,6 +384,17 @@ fn private_destructuring_target_checks_this_before_invoking_the_source_getter() 
 }
 
 #[test]
+fn super_assignment_targets_write_through_the_actual_receiver() {
+    run_with(
+        "function run(){class Base{set value(next){this._value=next;this.writes.push(next);}set rest(next){this._rest=next;}}class Derived extends Base{check(){this.writes=[];[super.value,super['value'],...super.rest]=[1,2,3,4];let array=this._value===2&&this._rest.join(',')==='3,4'&&this.writes.join(',')==='1,2';this.writes=[];({first:super.value,second:super['value'],...super.rest}={first:5,second:6,extra:7});let object=this._value===6&&this._rest.extra===7&&this.writes.join(',')==='5,6';for(super.value in {first:0,second:0}){}let forIn=this._value==='second';for(super['value'] of [8,9]){}let forOf=this._value===9;return array&&object&&forIn&&forOf;}}return new Derived().check();}",
+        |result| {
+            let value = result.expect("super assignment targets");
+            assert_eq!(value.as_boolean().expect("live Boolean"), Some(true));
+        },
+    );
+}
+
+#[test]
 fn class_super_properties_keep_the_method_receiver_for_reads_calls_and_writes() {
     run_with(
         "function run(){class Base{get value(){return this._value;}set value(next){this._value=next;}method(){return this._value+1;}static get answer(){return this._answer;}static set answer(next){this._answer=next;}static method(){return this._answer+1;}}class Derived extends Base{constructor(value){super();this._value=value;this.constructorRead=super.value;}read(){return super.value;}readComputed(){return super['value'];}call(){return super.method();}callComputed(){return super['method']();}write(next){return super.value=next;}writeComputed(next){return super['value']=next;}static read(){return super.answer;}static readComputed(){return super['answer'];}static call(){return super.method();}static callComputed(){return super['method']();}static write(next){return super.answer=next;}static writeComputed(next){return super['answer']=next;}}let value=new Derived(3);Derived._answer=11;return value.constructorRead===3&&value.read()===3&&value.readComputed()===3&&value.call()===4&&value.callComputed()===4&&value.write(7)===7&&value._value===7&&value.writeComputed(9)===9&&value._value===9&&Derived.read()===11&&Derived.readComputed()===11&&Derived.call()===12&&Derived.callComputed()===12&&Derived.write(13)===13&&Derived._answer===13&&Derived.writeComputed(17)===17&&Derived._answer===17;}",

@@ -4,13 +4,13 @@ use super::super::{
     ArrayAssignmentTarget, ArrayPattern, AssignmentTarget, AssignmentTargetMaybeDefault,
     AssignmentTargetProperty, AssignmentTargetRest, AtomPoolIndex, BindingIdentifier,
     BindingPattern, BindingRestElement, BranchKind, CompilationContext, CompiledConstantPool,
-    CompiledMetadataAtomKey, DeclarationKind, Expression, ExpressionPlanner, ExpressionWork,
-    FinalOpcode, FrameLayout, FunctionTreeLayout, GetSpan, IdentifierReference,
-    InitializationPolicy, LeafCompilationError, ObjectAssignmentTarget, ObjectPattern, Operands,
-    PlannedControlFlow, PlannedInstruction, Span, StoragePlacement, UnsupportedLeafFeature,
-    WritePolicy, anonymous_class_expression_span, anonymous_named_evaluation_span,
-    anonymous_ordinary_function_span, plan_external_put, plan_push_integer, plan_put_slot,
-    unsupported,
+    CompiledMetadataAtomKey, ComputedMemberExpression, DeclarationKind, Expression,
+    ExpressionPlanner, ExpressionWork, FinalOpcode, FrameLayout, FunctionTreeLayout, GetSpan,
+    IdentifierReference, InitializationPolicy, LeafCompilationError, ObjectAssignmentTarget,
+    ObjectPattern, Operands, PlannedControlFlow, PlannedInstruction, Span, StoragePlacement,
+    UnsupportedLeafFeature, WritePolicy, anonymous_class_expression_span,
+    anonymous_named_evaluation_span, anonymous_ordinary_function_span, plan_external_put,
+    plan_push_integer, plan_put_slot, unsupported,
 };
 use super::abrupt::{AbruptMarker, AbruptMarkerKind};
 
@@ -989,6 +989,14 @@ impl<'arena> CompilationContext<'_, 'arena, '_> {
                 Ok(())
             }
             AssignmentTarget::StaticMemberExpression(member) if !member.optional => {
+                if matches!(&member.object, Expression::Super(_)) {
+                    work.push(ExpressionWork::Emit(PlannedInstruction::new(
+                        FinalOpcode::PutSuperValue,
+                        Operands::None,
+                        member.span,
+                    )));
+                    return Ok(());
+                }
                 // The base is evaluated by the reference prelude before the
                 // `for_of_next` step; the store consumes it with the value.
                 work.push(ExpressionWork::Emit(PlannedInstruction::new(
@@ -999,6 +1007,10 @@ impl<'arena> CompilationContext<'_, 'arena, '_> {
                 Ok(())
             }
             AssignmentTarget::ComputedMemberExpression(member) if !member.optional => {
+                if matches!(&member.object, Expression::Super(_)) {
+                    Self::push_computed_super_assignment_store(member, work);
+                    return Ok(());
+                }
                 work.push(ExpressionWork::Emit(PlannedInstruction::new(
                     FinalOpcode::PutArrayEl,
                     Operands::None,
@@ -1050,6 +1062,36 @@ impl<'arena> CompilationContext<'_, 'arena, '_> {
                 unsupported(UnsupportedLeafFeature::UnsupportedPattern, target.span())
             }
         }
+    }
+
+    /// Converts a retained computed-super key at `PutValue` time. The incoming
+    /// stack is `[receiver, base, rawKey, value]`; the two swaps expose only
+    /// the key to `to_propkey` after source/default evaluation and restore the
+    /// exact `put_super_value` operand order.
+    fn push_computed_super_assignment_store<'pattern>(
+        member: &'pattern ComputedMemberExpression<'arena>,
+        work: &mut Vec<ExpressionWork<'pattern, 'arena>>,
+    ) {
+        work.push(ExpressionWork::Emit(PlannedInstruction::new(
+            FinalOpcode::PutSuperValue,
+            Operands::None,
+            member.span,
+        )));
+        work.push(ExpressionWork::Emit(PlannedInstruction::new(
+            FinalOpcode::Swap,
+            Operands::None,
+            member.span,
+        )));
+        work.push(ExpressionWork::Emit(PlannedInstruction::new(
+            FinalOpcode::ToPropKey,
+            Operands::None,
+            member.expression.span(),
+        )));
+        work.push(ExpressionWork::Emit(PlannedInstruction::new(
+            FinalOpcode::Swap,
+            Operands::None,
+            member.span,
+        )));
     }
 
     /// Stores an already-evaluated value into an identifier reference target.
@@ -1107,15 +1149,13 @@ impl<'arena> CompilationContext<'_, 'arena, '_> {
     /// Destructures an on-stack value through an object assignment pattern:
     /// `to_object`, one `get_field2`/`get_array_el2` per property, then
     /// `drop` the source. Property targets are identifier stores, member
-    /// stores, or nested patterns. A member target evaluates its base (and
-    /// computed key) after the property read and rotates the reference below
-    /// the fetched value with the pinned `perm3`/`swap` shape before the
-    /// `put_field`/`put_array_el` store. Object rest (`{...rest}`) creates
-    /// the exclude list below the source right after conversion, records
-    /// every destructured key in it, and copies the remaining own enumerable
-    /// string properties into a fresh target before both list and source
-    /// drop. The original RHS copy stays below the whole sequence and
-    /// remains the assignment expression's value.
+    /// stores, or nested patterns. A member target evaluates and retains its
+    /// reference before the source getter/default initializer, then a pinned
+    /// permutation restores the source below that reference for `PutValue`.
+    /// Object rest (`{...rest}`) creates the exclude list below the source,
+    /// records every destructured key, evaluates its target reference before
+    /// allocating/copying the rest object, and then drops both list and source.
+    /// The original RHS copy stays below the sequence as the expression value.
     #[allow(
         clippy::too_many_lines,
         reason = "object-pattern assignment stays one LIFO work-list transaction; member references and the exclude-list recording extend the same push sequence"
@@ -1141,13 +1181,17 @@ impl<'arena> CompilationContext<'_, 'arena, '_> {
             pattern.span,
         )));
         if let Some(rest) = pattern.rest.as_deref() {
-            // [rhsCopy, excludeList, source] -> target -> copy -> assign ->
-            // drop source -> drop exclude list.
+            // Evaluate the rest target reference before allocating or copying
+            // the rest object. Its retained slots sit between source and the
+            // fresh target, so the packed offsets account for that depth.
+            // The store consumes the reference plus target, then the source
+            // and exclude list are dropped.
             work.push(ExpressionWork::Emit(PlannedInstruction::new(
                 FinalOpcode::Drop,
                 Operands::None,
                 rest.span,
             )));
+            let reference_depth = Self::assignment_target_depth(&rest.target)?;
             self.plan_assignment_target_value(
                 &rest.target,
                 work,
@@ -1156,10 +1200,13 @@ impl<'arena> CompilationContext<'_, 'arena, '_> {
                 tree_layout,
                 constants,
             )?;
-            Self::push_object_assignment_member_prelude(&rest.target, constants, work)?;
             work.push(ExpressionWork::Emit(PlannedInstruction::new(
                 FinalOpcode::CopyDataProperties,
-                Operands::U8(Self::copy_data_properties_offsets(0, 1, 2)),
+                Operands::U8(Self::copy_data_properties_offsets(
+                    0,
+                    reference_depth + 1,
+                    reference_depth + 2,
+                )),
                 rest.span,
             )));
             work.push(ExpressionWork::Emit(PlannedInstruction::new(
@@ -1167,6 +1214,7 @@ impl<'arena> CompilationContext<'_, 'arena, '_> {
                 Operands::None,
                 rest.span,
             )));
+            self.plan_assignment_target_prelude(&rest.target, layout, constants, work)?;
         }
         for property in pattern.properties.iter().rev() {
             match property {
@@ -1287,7 +1335,9 @@ impl<'arena> CompilationContext<'_, 'arena, '_> {
                             Operands::None,
                             property.span,
                         )));
-                        self.push_object_assignment_reference_prelude(target, true, layout, work)?;
+                        self.push_object_assignment_reference_prelude(
+                            target, true, layout, constants, work,
+                        )?;
                         if has_rest {
                             Self::push_object_rest_computed_key_record(property.span, work);
                         } else {
@@ -1305,7 +1355,9 @@ impl<'arena> CompilationContext<'_, 'arena, '_> {
                             property.span,
                             work,
                         )?;
-                        self.push_object_assignment_reference_prelude(target, false, layout, work)?;
+                        self.push_object_assignment_reference_prelude(
+                            target, false, layout, constants, work,
+                        )?;
                         if has_rest {
                             Self::push_object_rest_static_key_record(
                                 constants.property_atom_index(property.name.span())?,
@@ -1408,62 +1460,6 @@ impl<'arena> CompilationContext<'_, 'arena, '_> {
         )));
     }
 
-    /// Evaluates the member base and computed key of an object-assignment
-    /// target after the fetched value and rotates the reference below it:
-    /// static targets run `visit(base); swap`, computed targets run
-    /// `visit(base); visit(key); to_propkey; perm3; swap`, leaving
-    /// `[source, base, value]` / `[source, base, key, value]` for the
-    /// pinned `put_field`/`put_array_el` store.
-    fn push_object_assignment_member_prelude<'pattern>(
-        target: &'pattern AssignmentTarget<'arena>,
-        _constants: &CompiledConstantPool,
-        work: &mut Vec<ExpressionWork<'pattern, 'arena>>,
-    ) -> Result<(), LeafCompilationError> {
-        match target {
-            AssignmentTarget::StaticMemberExpression(member) if !member.optional => {
-                work.push(ExpressionWork::Emit(PlannedInstruction::new(
-                    FinalOpcode::Swap,
-                    Operands::None,
-                    member.span,
-                )));
-                work.push(ExpressionWork::Visit(&member.object));
-                Ok(())
-            }
-            AssignmentTarget::ComputedMemberExpression(member) if !member.optional => {
-                work.push(ExpressionWork::Emit(PlannedInstruction::new(
-                    FinalOpcode::Swap,
-                    Operands::None,
-                    member.span,
-                )));
-                work.push(ExpressionWork::Emit(PlannedInstruction::new(
-                    FinalOpcode::Perm3,
-                    Operands::None,
-                    member.span,
-                )));
-                work.push(ExpressionWork::Emit(PlannedInstruction::new(
-                    FinalOpcode::ToPropKey,
-                    Operands::None,
-                    member.expression.span(),
-                )));
-                work.push(ExpressionWork::Visit(&member.expression));
-                work.push(ExpressionWork::Visit(&member.object));
-                Ok(())
-            }
-            AssignmentTarget::AssignmentTargetIdentifier(_)
-            | AssignmentTarget::ArrayAssignmentTarget(_)
-            | AssignmentTarget::ObjectAssignmentTarget(_) => Ok(()),
-            AssignmentTarget::StaticMemberExpression(_)
-            | AssignmentTarget::ComputedMemberExpression(_)
-            | AssignmentTarget::TSAsExpression(_)
-            | AssignmentTarget::TSSatisfiesExpression(_)
-            | AssignmentTarget::TSNonNullExpression(_)
-            | AssignmentTarget::TSTypeAssertion(_)
-            | AssignmentTarget::PrivateFieldExpression(_) => {
-                unsupported(UnsupportedLeafFeature::UnsupportedPattern, target.span())
-            }
-        }
-    }
-
     /// Evaluates a non-pattern object-destructuring target before reading the
     /// source property, as required by `KeyedDestructuringAssignmentEvaluation`.
     /// The source (and a computed source key, when present) is rotated above
@@ -1473,8 +1469,13 @@ impl<'arena> CompilationContext<'_, 'arena, '_> {
         target: &'pattern AssignmentTarget<'arena>,
         computed_source: bool,
         layout: &FrameLayout,
+        constants: &CompiledConstantPool,
         work: &mut Vec<ExpressionWork<'pattern, 'arena>>,
     ) -> Result<(), LeafCompilationError> {
+        if Self::push_object_super_assignment_reference_prelude(target, constants, work)? {
+            return Ok(());
+        }
+
         match target {
             AssignmentTarget::StaticMemberExpression(member) if !member.optional => {
                 if computed_source {
@@ -1548,6 +1549,61 @@ impl<'arena> CompilationContext<'_, 'arena, '_> {
         }
     }
 
+    /// Schedules the three-slot reference for a `super` assignment target.
+    /// Returns whether the target was a supported static or computed `super`
+    /// member, allowing ordinary target planning to remain independent.
+    fn push_object_super_assignment_reference_prelude<'pattern>(
+        target: &'pattern AssignmentTarget<'arena>,
+        constants: &CompiledConstantPool,
+        work: &mut Vec<ExpressionWork<'pattern, 'arena>>,
+    ) -> Result<bool, LeafCompilationError> {
+        match target {
+            AssignmentTarget::StaticMemberExpression(member)
+                if !member.optional && matches!(&member.object, Expression::Super(_)) =>
+            {
+                // [source, (sourceKey), receiver, base, targetKey] ->
+                // [receiver, base, targetKey, source, (sourceKey)]
+                work.push(ExpressionWork::Emit(PlannedInstruction::new(
+                    FinalOpcode::Rot4l,
+                    Operands::None,
+                    member.span,
+                )));
+                work.push(ExpressionWork::Emit(PlannedInstruction::new(
+                    FinalOpcode::PushAtomValue,
+                    Operands::Atom(constants.property_atom_index(member.property.span)?),
+                    member.property.span,
+                )));
+                work.push(ExpressionWork::SuperPropertyBase {
+                    span: member.object.span(),
+                    call_receiver: false,
+                });
+                Ok(true)
+            }
+            AssignmentTarget::ComputedMemberExpression(member)
+                if !member.optional && matches!(&member.object, Expression::Super(_)) =>
+            {
+                // Super reference evaluation retains the raw key. Rotating
+                // the top four slots works with either a static or computed
+                // source key and leaves the source operands on top for GetV.
+                work.push(ExpressionWork::Emit(PlannedInstruction::new(
+                    FinalOpcode::Rot4l,
+                    Operands::None,
+                    member.span,
+                )));
+                work.push(ExpressionWork::SuperPropertyBaseAfterKey {
+                    span: member.object.span(),
+                });
+                work.push(ExpressionWork::Visit(&member.expression));
+                work.push(ExpressionWork::SuperPropertyReceiver {
+                    span: member.object.span(),
+                    call_receiver: false,
+                });
+                Ok(true)
+            }
+            _ => Ok(false),
+        }
+    }
+
     /// Rotates a computed or private two-slot reference below the source.
     /// Work is LIFO, so these instructions are pushed in reverse execution
     /// order.
@@ -1588,8 +1644,18 @@ impl<'arena> CompilationContext<'_, 'arena, '_> {
         work: &mut Vec<ExpressionWork<'pattern, 'arena>>,
     ) -> Result<(), LeafCompilationError> {
         let (opcode, span) = match target {
+            AssignmentTarget::StaticMemberExpression(member)
+                if !member.optional && matches!(&member.object, Expression::Super(_)) =>
+            {
+                (FinalOpcode::Perm5, member.span)
+            }
             AssignmentTarget::StaticMemberExpression(member) if !member.optional => {
                 (FinalOpcode::Perm3, member.span)
+            }
+            AssignmentTarget::ComputedMemberExpression(member)
+                if !member.optional && matches!(&member.object, Expression::Super(_)) =>
+            {
+                (FinalOpcode::Perm5, member.span)
             }
             AssignmentTarget::ComputedMemberExpression(member) if !member.optional => {
                 (FinalOpcode::Perm4, member.span)
@@ -1642,6 +1708,16 @@ impl<'arena> CompilationContext<'_, 'arena, '_> {
             AssignmentTarget::AssignmentTargetIdentifier(_)
             | AssignmentTarget::ArrayAssignmentTarget(_)
             | AssignmentTarget::ObjectAssignmentTarget(_) => Ok(0),
+            AssignmentTarget::StaticMemberExpression(member)
+                if !member.optional && matches!(&member.object, Expression::Super(_)) =>
+            {
+                Ok(3)
+            }
+            AssignmentTarget::ComputedMemberExpression(member)
+                if !member.optional && matches!(&member.object, Expression::Super(_)) =>
+            {
+                Ok(3)
+            }
             AssignmentTarget::StaticMemberExpression(member) if !member.optional => Ok(1),
             AssignmentTarget::ComputedMemberExpression(member) if !member.optional => Ok(2),
             AssignmentTarget::PrivateFieldExpression(member) if !member.optional => Ok(2),
@@ -1664,15 +1740,42 @@ impl<'arena> CompilationContext<'_, 'arena, '_> {
         &self,
         target: &'pattern AssignmentTarget<'arena>,
         layout: &FrameLayout,
-        _constants: &CompiledConstantPool,
+        constants: &CompiledConstantPool,
         work: &mut Vec<ExpressionWork<'pattern, 'arena>>,
     ) -> Result<(), LeafCompilationError> {
         match target {
             AssignmentTarget::AssignmentTargetIdentifier(_)
             | AssignmentTarget::ArrayAssignmentTarget(_)
             | AssignmentTarget::ObjectAssignmentTarget(_) => Ok(()),
+            AssignmentTarget::StaticMemberExpression(member)
+                if !member.optional && matches!(&member.object, Expression::Super(_)) =>
+            {
+                work.push(ExpressionWork::Emit(PlannedInstruction::new(
+                    FinalOpcode::PushAtomValue,
+                    Operands::Atom(constants.property_atom_index(member.property.span)?),
+                    member.property.span,
+                )));
+                work.push(ExpressionWork::SuperPropertyBase {
+                    span: member.object.span(),
+                    call_receiver: false,
+                });
+                Ok(())
+            }
             AssignmentTarget::StaticMemberExpression(member) if !member.optional => {
                 work.push(ExpressionWork::Visit(&member.object));
+                Ok(())
+            }
+            AssignmentTarget::ComputedMemberExpression(member)
+                if !member.optional && matches!(&member.object, Expression::Super(_)) =>
+            {
+                work.push(ExpressionWork::SuperPropertyBaseAfterKey {
+                    span: member.object.span(),
+                });
+                work.push(ExpressionWork::Visit(&member.expression));
+                work.push(ExpressionWork::SuperPropertyReceiver {
+                    span: member.object.span(),
+                    call_receiver: false,
+                });
                 Ok(())
             }
             AssignmentTarget::ComputedMemberExpression(member) if !member.optional => {

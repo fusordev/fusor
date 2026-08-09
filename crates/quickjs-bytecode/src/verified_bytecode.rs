@@ -6588,6 +6588,7 @@ const fn supported_compiler_opcode(opcode: FinalOpcode) -> bool {
             | FinalOpcode::Swap
             | FinalOpcode::Rot3l
             | FinalOpcode::Rot3r
+            | FinalOpcode::Rot4l
             | FinalOpcode::CallConstructor
             | FinalOpcode::Call
             | FinalOpcode::CallMethod

@@ -386,6 +386,31 @@ fn class_super_properties_lower_through_home_object_and_receiver_aware_opcodes()
 }
 
 #[test]
+fn super_destructuring_and_iteration_targets_keep_complete_references() {
+    let tree = compile(
+        "function make(){class Base{}class Derived extends Base{write(source,key){[super.value,super[key],...super.rest]=source;({first:super.value,second:super[key],...super.rest}=source);for(super.value in source){}for(super[key] of source){}}}return Derived;}",
+        "make",
+    );
+    let opcodes = tree
+        .functions()
+        .iter()
+        .flat_map(|function| function.control_flow().instructions())
+        .map(|instruction| instruction.decoded().instruction().opcode())
+        .collect::<Vec<_>>();
+
+    assert!(
+        opcodes
+            .iter()
+            .filter(|&&opcode| opcode == FinalOpcode::PutSuperValue)
+            .count()
+            >= 8
+    );
+    assert!(opcodes.contains(&FinalOpcode::Rot4l));
+    assert!(opcodes.contains(&FinalOpcode::Perm5));
+    assert!(opcodes.contains(&FinalOpcode::CopyDataProperties));
+}
+
+#[test]
 fn a_named_base_class_expression_uses_the_same_typed_definition_path() {
     let tree = compile(
         "function make(){let Result=class Box{static self(){return Box;}};return Result;}",
