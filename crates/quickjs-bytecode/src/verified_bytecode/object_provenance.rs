@@ -289,18 +289,29 @@ pub(super) fn verify_object_definition_provenance(
         for edge in internal_stack.effective_successors(instructions, index) {
             has_successor = true;
             let successor = edge.target;
-            let with_binding_result = opcode == FinalOpcode::WithGetVar && edge.is_branch_target;
-            if with_binding_result {
-                state.try_reserve(1).map_err(|_| {
+            let with_binding_results = if edge.is_branch_target {
+                match opcode {
+                    FinalOpcode::WithGetVar | FinalOpcode::WithDeleteVar => 1,
+                    FinalOpcode::WithGetRef => 2,
+                    _ => 0,
+                }
+            } else {
+                0
+            };
+            if with_binding_results != 0 {
+                state.try_reserve(with_binding_results).map_err(|_| {
                     BytecodeVerificationError::function(
                         id,
                         BytecodeVerificationErrorKind::AllocationFailed {
                             resource: BytecodeGraphResource::FrameStateEntries,
-                            requested: 1,
+                            requested: usize_to_u64(with_binding_results),
                         },
                     )
                 })?;
-                state.push(ObjectDefinitionProvenance::Unknown);
+                state.extend(std::iter::repeat_n(
+                    ObjectDefinitionProvenance::Unknown,
+                    with_binding_results,
+                ));
             }
             if edge.enters_finally {
                 state.try_reserve(1).map_err(|_| {
@@ -336,8 +347,8 @@ pub(super) fn verify_object_definition_provenance(
             if edge.enters_finally {
                 state.pop();
             }
-            if with_binding_result {
-                state.pop();
+            if with_binding_results != 0 {
+                state.truncate(state.len() - with_binding_results);
             }
         }
         let abandons_generator_expression = decoded.instruction().opcode()

@@ -261,6 +261,63 @@ impl<'arena> ExpressionPlanner<'_, '_, 'arena, '_> {
         flow.bind(&done)
     }
 
+    pub(in crate::lowering) fn plan_identifier_call_reference(
+        &self,
+        identifier: &IdentifierReference<'arena>,
+        layout: &FrameLayout,
+        tree_layout: &FunctionTreeLayout,
+        constants: &CompiledConstantPool,
+        flow: &mut PlannedControlFlow,
+    ) -> Result<(), LeafCompilationError> {
+        let reference = self.lowered_reference(
+            identifier.reference_id.get(),
+            identifier.span,
+            layout,
+            tree_layout,
+        )?;
+        if !reference.access().reads() || reference.access().writes() {
+            return unsupported(
+                UnsupportedLeafFeature::UnsupportedReference,
+                identifier.span,
+            );
+        }
+        let instruction = match reference {
+            LoweredReference::Frame { binding, slot, .. } => {
+                self.plan_read_slot(binding, slot, identifier.span)?
+            }
+            LoweredReference::RealmGlobal { slot, binding, .. } => {
+                plan_external_read(binding, slot, false, identifier.span)
+            }
+        };
+        let with_objects = self
+            .with_object_bindings_for_reference(identifier.reference_id.get(), identifier.span)?;
+        if with_objects.is_empty() {
+            return Err(LeafCompilationError::SemanticInvariant {
+                invariant: "with call-reference lowering has a visible object environment",
+                span: Some(identifier.span),
+            });
+        }
+        let done = flow.new_label(identifier.span)?;
+        let atom = constants.property_atom_index(identifier.span)?;
+        for binding in with_objects {
+            let slot = layout
+                .slot(binding)
+                .ok_or(LeafCompilationError::SemanticInvariant {
+                    invariant: "visible with-object binding has a frame slot",
+                    span: Some(identifier.span),
+                })?;
+            flow.emit(self.plan_read_slot(binding, slot, identifier.span)?)?;
+            flow.with_branch(FinalOpcode::WithGetRef, atom, 1, &done, identifier.span)?;
+        }
+        flow.emit(PlannedInstruction::new(
+            FinalOpcode::Undefined,
+            Operands::None,
+            identifier.span,
+        ))?;
+        flow.emit(instruction)?;
+        flow.bind(&done)
+    }
+
     pub(in crate::lowering) fn plan_realm_global_assignment<'expression>(
         assignment: &'expression AssignmentExpression<'arena>,
         slot: u16,
@@ -876,6 +933,8 @@ impl<'arena> CompilationContext<'_, 'arena, '_> {
                             )?;
                         }
                         ExpressionWork::VisitOptionalChain { .. }
+                        | ExpressionWork::IdentifierCallReference(_)
+                        | ExpressionWork::IdentifierDelete { .. }
                         | ExpressionWork::CallAfterCallee { .. }
                         | ExpressionWork::SuperPropertyBase { .. }
                         | ExpressionWork::InitializeInstanceFields => {

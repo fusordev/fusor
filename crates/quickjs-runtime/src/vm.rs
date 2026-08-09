@@ -4062,6 +4062,10 @@ enum ReturnDisposition {
         taken: InstructionIndex,
         not_taken: InstructionIndex,
     },
+    WithReference {
+        taken: InstructionIndex,
+        not_taken: InstructionIndex,
+    },
 }
 
 #[derive(Clone, Copy)]
@@ -4096,6 +4100,13 @@ impl CallReturn {
         Self {
             instruction: not_taken,
             disposition: ReturnDisposition::WithBinding { taken, not_taken },
+        }
+    }
+
+    const fn with_reference(taken: InstructionIndex, not_taken: InstructionIndex) -> Self {
+        Self {
+            instruction: not_taken,
+            disposition: ReturnDisposition::WithReference { taken, not_taken },
         }
     }
 }
@@ -7224,7 +7235,7 @@ fn push_call_result(
             }
             push(parent, value);
         }
-        ReturnDisposition::WithBinding { .. } => {
+        ReturnDisposition::WithBinding { .. } | ReturnDisposition::WithReference { .. } => {
             return Err(EngineFault::RuntimeInvariant {
                 message: "with-binding continuation completed without its structured result",
             }
@@ -7273,6 +7284,28 @@ fn push_operator_pair(
             } else {
                 parent.instruction = not_taken;
             }
+            Ok(())
+        }
+        ReturnDisposition::WithReference { taken, not_taken } => {
+            if matches!(original, StoredValue::Undefined) {
+                parent.instruction = not_taken;
+                return Ok(());
+            }
+            if original.heap_reference().is_none() {
+                return Err(EngineFault::RuntimeInvariant {
+                    message: "with-reference continuation returned a non-object receiver",
+                }
+                .into());
+            }
+            if parent.stack.capacity().saturating_sub(parent.stack.len()) < 2 {
+                return Err(EngineFault::RuntimeInvariant {
+                    message: "verified with-reference result exceeds frame stack capacity",
+                }
+                .into());
+            }
+            push(parent, original);
+            push(parent, updated);
+            parent.instruction = taken;
             Ok(())
         }
         ReturnDisposition::Discard | ReturnDisposition::InitializeDerivedThis => {

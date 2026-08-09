@@ -1330,10 +1330,14 @@ fn realm_global_delete_opcode_is_admitted_by_whole_graph_runtime_preflight() {
 }
 
 #[test]
-fn with_get_opcode_is_admitted_by_whole_graph_runtime_preflight() {
-    assert!(is_supported_opcode(
-        quickjs_bytecode::FinalOpcode::WithGetVar
-    ));
+fn implemented_with_environment_opcodes_are_admitted_by_runtime_preflight() {
+    for opcode in [
+        quickjs_bytecode::FinalOpcode::WithGetVar,
+        quickjs_bytecode::FinalOpcode::WithDeleteVar,
+        quickjs_bytecode::FinalOpcode::WithGetRef,
+    ] {
+        assert!(is_supported_opcode(opcode), "{opcode:?}");
+    }
 }
 
 #[test]

@@ -83,3 +83,56 @@ fn typeof_uses_with_lookup_before_its_unresolvable_reference_fallback() {
         |value| assert_eq!(string(value), "number|undefined"),
     );
 }
+
+#[test]
+fn with_identifier_calls_use_the_object_environment_as_receiver() {
+    evaluate(
+        "function call(object){with(object){return method();}}call({marker:42,method(){return this.marker;}});",
+        |value| assert!(number(value).strict_equals(JsNumber::from_i32(42))),
+    );
+}
+
+#[test]
+fn with_identifier_call_fallback_preserves_an_undefined_receiver() {
+    evaluate(
+        "let fallback=function(){'use strict';return this===undefined;};function call(object){with(object){return fallback();}}call({});",
+        |value| assert_eq!(value.as_boolean(), Ok(Some(true))),
+    );
+}
+
+#[test]
+fn captured_strict_with_calls_preserve_get_binding_value_errors() {
+    evaluate(
+        "let count=0;let target={method(){return 1;}};let object=new Proxy(target,{has(target,key){if(key==='method'&&++count===2)return false;return Reflect.has(target,key);}});function make(){with(object){return function(){'use strict';return method();};}}let call=make();try{call();false;}catch(error){error.constructor===ReferenceError&&count===2;}",
+        |value| assert_eq!(value.as_boolean(), Ok(Some(true))),
+    );
+}
+
+#[test]
+fn with_calls_and_tags_preserve_lookup_order_and_receiver() {
+    evaluate(
+        "let log=[];let target={marker:37,method(a,b){return this.marker+a+b;},tag(strings,value){return this.marker+strings[0]+value+strings[1];}};let object=new Proxy(target,{has(t,k){log.push('h:'+(k===Symbol.unscopables?'u':k));return Reflect.has(t,k);},get(t,k,r){log.push('g:'+(k===Symbol.unscopables?'u':k));return Reflect.get(t,k,r);}});function spread(object){with(object){return method(...[2,3]);}}function tagged(object){with(object){return tag`x${2}y`;}}spread(object)+'|'+tagged(object)+'|'+log.join(',');",
+        |value| {
+            assert_eq!(
+                string(value),
+                "42|37x2y|h:method,g:u,h:method,g:method,g:marker,h:tag,g:u,h:tag,g:tag,g:marker"
+            );
+        },
+    );
+}
+
+#[test]
+fn with_delete_resolves_own_inherited_blocked_and_missing_bindings() {
+    evaluate(
+        "let value=1;function remove(object){with(object){return delete value;}}let own={value:2};let inherited=Object.create({value:3});let blocked={value:4,[Symbol.unscopables]:{value:true}};let result=[remove(own),!('value'in own),remove(inherited),inherited.value,remove(blocked),blocked.value];result.join('|');",
+        |value| assert_eq!(string(value), "true|true|true|3|false|4"),
+    );
+}
+
+#[test]
+fn with_delete_preserves_observable_has_unscopables_delete_order() {
+    evaluate(
+        "let log=[];let target={value:42};let object=new Proxy(target,{has(t,k){log.push('h:'+(k===Symbol.unscopables?'u':k));return Reflect.has(t,k);},get(t,k,r){log.push('g:'+(k===Symbol.unscopables?'u':k));return Reflect.get(t,k,r);},deleteProperty(t,k){log.push('d:'+k);return Reflect.deleteProperty(t,k);}});function remove(object){with(object){return delete value;}}remove(object)+'|'+('value'in target)+'|'+log.join(',');",
+        |value| assert_eq!(string(value), "true|false|h:value,g:u,d:value"),
+    );
+}

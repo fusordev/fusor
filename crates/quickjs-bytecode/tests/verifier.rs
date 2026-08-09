@@ -618,6 +618,53 @@ fn with_get_var_verifies_as_an_asymmetric_object_environment_branch() {
 }
 
 #[test]
+fn with_delete_var_verifies_one_taken_value() {
+    let bytecode = encode(&[
+        (FinalOpcode::PushTrue, Operands::None),
+        (FinalOpcode::ToObject, Operands::None),
+        (
+            FinalOpcode::WithDeleteVar,
+            Operands::AtomLabelU8 {
+                atom: AtomPoolIndex::new(0),
+                label: 6,
+                value: 1,
+            },
+        ),
+        (FinalOpcode::Push1, Operands::NoneInt),
+        (FinalOpcode::Return, Operands::None),
+    ]);
+    let verified = verify(bytecode, 1, FunctionIndexDomains::new(1, 0, 0, 0, 0));
+
+    assert_eq!(verified.instructions()[3].entry_stack_depth(), Some(0));
+    assert_eq!(verified.instructions()[4].entry_stack_depth(), Some(1));
+    assert_eq!(verified.computed_stack_size(), 1);
+}
+
+#[test]
+fn with_get_ref_verifies_receiver_and_callee_on_the_taken_edge() {
+    let bytecode = encode(&[
+        (FinalOpcode::PushTrue, Operands::None),
+        (FinalOpcode::ToObject, Operands::None),
+        (
+            FinalOpcode::WithGetRef,
+            Operands::AtomLabelU8 {
+                atom: AtomPoolIndex::new(0),
+                label: 7,
+                value: 1,
+            },
+        ),
+        (FinalOpcode::Undefined, Operands::None),
+        (FinalOpcode::Push1, Operands::NoneInt),
+        (FinalOpcode::Return, Operands::None),
+    ]);
+    let verified = verify(bytecode, 2, FunctionIndexDomains::new(1, 0, 0, 0, 0));
+
+    assert_eq!(verified.instructions()[3].entry_stack_depth(), Some(0));
+    assert_eq!(verified.instructions()[5].entry_stack_depth(), Some(2));
+    assert_eq!(verified.computed_stack_size(), 2);
+}
+
+#[test]
 fn complete_predecode_reports_a_later_truncation_before_unsupported_semantics() {
     let mut bytecode = encode(&[(FinalOpcode::PushConst, Operands::Const(0))]);
     bytecode.push(FinalOpcode::PushI32.encoded_byte());

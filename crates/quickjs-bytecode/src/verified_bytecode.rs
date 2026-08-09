@@ -6556,6 +6556,8 @@ const fn supported_compiler_opcode(opcode: FinalOpcode) -> bool {
             | FinalOpcode::Eval
             | FinalOpcode::ApplyEval
             | FinalOpcode::WithGetVar
+            | FinalOpcode::WithDeleteVar
+            | FinalOpcode::WithGetRef
             | FinalOpcode::ArrayFrom
             | FinalOpcode::CheckCtorReturn
             | FinalOpcode::CheckCtor
@@ -7202,6 +7204,8 @@ fn verify_internal_operand_stack(
                 | FinalOpcode::Gosub
                 | FinalOpcode::Ret
                 | FinalOpcode::WithGetVar
+                | FinalOpcode::WithDeleteVar
+                | FinalOpcode::WithGetRef
         )
     }) {
         return Ok(InternalStackCertificate::default());
@@ -7588,19 +7592,29 @@ fn verify_internal_operand_stack(
             } else {
                 None
             };
-            let with_binding_result =
-                decoded.instruction().opcode() == FinalOpcode::WithGetVar && edge.is_branch_target;
-            if with_binding_result {
-                state.try_reserve(1).map_err(|_| {
+            let with_binding_results = if edge.is_branch_target {
+                match decoded.instruction().opcode() {
+                    FinalOpcode::WithGetVar | FinalOpcode::WithDeleteVar => 1,
+                    FinalOpcode::WithGetRef => 2,
+                    _ => 0,
+                }
+            } else {
+                0
+            };
+            if with_binding_results != 0 {
+                state.try_reserve(with_binding_results).map_err(|_| {
                     BytecodeVerificationError::function(
                         id,
                         BytecodeVerificationErrorKind::AllocationFailed {
                             resource: BytecodeGraphResource::FrameStateEntries,
-                            requested: 1,
+                            requested: usize_to_u64(with_binding_results),
                         },
                     )
                 })?;
-                state.push(InternalStackValue::Ordinary);
+                state.extend(std::iter::repeat_n(
+                    InternalStackValue::Ordinary,
+                    with_binding_results,
+                ));
             }
             charge_policy_transfers(
                 id,
@@ -7658,8 +7672,8 @@ fn verify_internal_operand_stack(
             if let Some((marker_index, site, handler)) = catch_exception {
                 state[marker_index] = InternalStackValue::CatchMarker { site, handler };
             }
-            if with_binding_result {
-                state.pop();
+            if with_binding_results != 0 {
+                state.truncate(state.len() - with_binding_results);
             }
             if let Some((pending_index, original)) = finally_marker {
                 match state.pop() {
@@ -10690,7 +10704,7 @@ fn collect_requirements(
             | FinalOpcode::ForInStart => {
                 push_requirement(requirements, ExecutionRequirement::OrdinaryObjects);
             }
-            FinalOpcode::WithGetVar => {
+            FinalOpcode::WithGetVar | FinalOpcode::WithDeleteVar | FinalOpcode::WithGetRef => {
                 push_requirement(requirements, ExecutionRequirement::OrdinaryObjects);
                 push_requirement(requirements, ExecutionRequirement::Calls);
             }

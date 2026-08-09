@@ -13,6 +13,14 @@ enum WithGetStage {
     GetBlocked,
     HasValue,
     GetValue,
+    DeleteValue,
+}
+
+#[derive(Clone, Copy)]
+enum WithBindingOperation {
+    Get,
+    GetReference,
+    Delete,
 }
 
 pub(super) struct WithGetContinuation {
@@ -22,6 +30,7 @@ pub(super) struct WithGetContinuation {
     name: JsString,
     is_with: bool,
     strict: bool,
+    operation: WithBindingOperation,
     realm: RealmId,
     origin: JsStackFrame,
     stage: WithGetStage,
@@ -58,6 +67,22 @@ fn with_boolean(completion: &StoredValue) -> Result<bool, NativeFailure> {
         .into());
     };
     Ok(*value)
+}
+
+fn with_not_found(operation: WithBindingOperation) -> NativeDispatch {
+    let status = match operation {
+        WithBindingOperation::Get | WithBindingOperation::Delete => StoredValue::Boolean(false),
+        WithBindingOperation::GetReference => StoredValue::Undefined,
+    };
+    NativeDispatch::Pair(status, StoredValue::Undefined)
+}
+
+fn with_resolved(state: &WithGetContinuation, value: StoredValue) -> NativeDispatch {
+    let status = match state.operation {
+        WithBindingOperation::Get | WithBindingOperation::Delete => StoredValue::Boolean(true),
+        WithBindingOperation::GetReference => state.object.duplicate(),
+    };
+    NativeDispatch::Pair(status, value)
 }
 
 fn continue_with_get_after(
@@ -97,21 +122,85 @@ fn continue_with_get_after(
     }
 }
 
-fn begin_value_has(
+fn begin_binding_operation(
     runtime: &mut Runtime,
     mut state: WithGetContinuation,
     return_to: Option<CallReturn>,
     execution_budget: &mut ExecutionBudget,
 ) -> Result<NativeDispatch, NativeFailure> {
-    state.stage = WithGetStage::HasValue;
     state.unscopables = None;
+    let dispatch = match state.operation {
+        WithBindingOperation::Get | WithBindingOperation::GetReference => {
+            state.stage = WithGetStage::HasValue;
+            begin_internal_has(
+                runtime,
+                with_reference(&state)?,
+                state.key.clone(),
+                state.realm,
+                return_to,
+                state.origin.clone(),
+                execution_budget,
+            )?
+        }
+        WithBindingOperation::Delete => {
+            state.stage = WithGetStage::DeleteValue;
+            begin_internal_delete(
+                runtime,
+                with_reference(&state)?,
+                state.key.clone(),
+                false,
+                true,
+                state.realm,
+                return_to,
+                state.origin.clone(),
+                execution_budget,
+            )?
+        }
+    };
+    continue_with_get_after(runtime, dispatch, state, return_to, execution_budget)
+}
+
+#[allow(
+    clippy::too_many_arguments,
+    reason = "with lookup carries explicit object-environment, source, continuation, and budget authority"
+)]
+fn begin_with_binding_operation(
+    runtime: &mut Runtime,
+    object: StoredValue,
+    key: PropertyKey,
+    name: JsString,
+    is_with: bool,
+    strict: bool,
+    operation: WithBindingOperation,
+    realm: RealmId,
+    return_to: Option<CallReturn>,
+    origin: JsStackFrame,
+    execution_budget: &mut ExecutionBudget,
+) -> Result<NativeDispatch, NativeFailure> {
+    let reference = object
+        .heap_reference()
+        .ok_or(EngineFault::RuntimeInvariant {
+            message: "with_get_var operand is not an object",
+        })?;
+    let state = WithGetContinuation {
+        object,
+        unscopables: None,
+        key: key.clone(),
+        name,
+        is_with,
+        strict,
+        operation,
+        realm,
+        origin: origin.clone(),
+        stage: WithGetStage::HasBinding,
+    };
     let dispatch = begin_internal_has(
         runtime,
-        with_reference(&state)?,
-        state.key.clone(),
-        state.realm,
+        reference,
+        key,
+        realm,
         return_to,
-        state.origin.clone(),
+        origin,
         execution_budget,
     )?;
     continue_with_get_after(runtime, dispatch, state, return_to, execution_budget)
@@ -133,32 +222,80 @@ pub(super) fn begin_with_get(
     origin: JsStackFrame,
     execution_budget: &mut ExecutionBudget,
 ) -> Result<NativeDispatch, NativeFailure> {
-    let reference = object
-        .heap_reference()
-        .ok_or(EngineFault::RuntimeInvariant {
-            message: "with_get_var operand is not an object",
-        })?;
-    let state = WithGetContinuation {
+    begin_with_binding_operation(
+        runtime,
         object,
-        unscopables: None,
-        key: key.clone(),
+        key,
         name,
         is_with,
         strict,
-        realm,
-        origin: origin.clone(),
-        stage: WithGetStage::HasBinding,
-    };
-    let dispatch = begin_internal_has(
-        runtime,
-        reference,
-        key,
+        WithBindingOperation::Get,
         realm,
         return_to,
         origin,
         execution_budget,
-    )?;
-    continue_with_get_after(runtime, dispatch, state, return_to, execution_budget)
+    )
+}
+
+#[allow(
+    clippy::too_many_arguments,
+    reason = "with lookup carries explicit object-environment, source, continuation, and budget authority"
+)]
+pub(super) fn begin_with_get_reference(
+    runtime: &mut Runtime,
+    object: StoredValue,
+    key: PropertyKey,
+    name: JsString,
+    is_with: bool,
+    strict: bool,
+    realm: RealmId,
+    return_to: Option<CallReturn>,
+    origin: JsStackFrame,
+    execution_budget: &mut ExecutionBudget,
+) -> Result<NativeDispatch, NativeFailure> {
+    begin_with_binding_operation(
+        runtime,
+        object,
+        key,
+        name,
+        is_with,
+        strict,
+        WithBindingOperation::GetReference,
+        realm,
+        return_to,
+        origin,
+        execution_budget,
+    )
+}
+
+#[allow(
+    clippy::too_many_arguments,
+    reason = "with lookup carries explicit object-environment, source, continuation, and budget authority"
+)]
+pub(super) fn begin_with_delete(
+    runtime: &mut Runtime,
+    object: StoredValue,
+    key: PropertyKey,
+    name: JsString,
+    is_with: bool,
+    realm: RealmId,
+    return_to: Option<CallReturn>,
+    origin: JsStackFrame,
+    execution_budget: &mut ExecutionBudget,
+) -> Result<NativeDispatch, NativeFailure> {
+    begin_with_binding_operation(
+        runtime,
+        object,
+        key,
+        name,
+        is_with,
+        false,
+        WithBindingOperation::Delete,
+        realm,
+        return_to,
+        origin,
+        execution_budget,
+    )
 }
 
 pub(super) fn advance_with_get(
@@ -171,13 +308,10 @@ pub(super) fn advance_with_get(
     match state.stage {
         WithGetStage::HasBinding => {
             if !with_boolean(&completion)? {
-                return Ok(NativeDispatch::Pair(
-                    StoredValue::Boolean(false),
-                    StoredValue::Undefined,
-                ));
+                return Ok(with_not_found(state.operation));
             }
             if !state.is_with {
-                return begin_value_has(runtime, state, return_to, execution_budget);
+                return begin_binding_operation(runtime, state, return_to, execution_budget);
             }
             state.stage = WithGetStage::GetUnscopables;
             let reference = with_reference(&state)?;
@@ -195,7 +329,7 @@ pub(super) fn advance_with_get(
         }
         WithGetStage::GetUnscopables => {
             let Some(reference) = completion.heap_reference() else {
-                return begin_value_has(runtime, state, return_to, execution_budget);
+                return begin_binding_operation(runtime, state, return_to, execution_budget);
             };
             state.stage = WithGetStage::GetBlocked;
             state.unscopables = Some(completion);
@@ -218,12 +352,9 @@ pub(super) fn advance_with_get(
         }
         WithGetStage::GetBlocked => {
             if completion.is_truthy() {
-                return Ok(NativeDispatch::Pair(
-                    StoredValue::Boolean(false),
-                    StoredValue::Undefined,
-                ));
+                return Ok(with_not_found(state.operation));
             }
-            begin_value_has(runtime, state, return_to, execution_budget)
+            begin_binding_operation(runtime, state, return_to, execution_budget)
         }
         WithGetStage::HasValue => {
             if !with_boolean(&completion)? {
@@ -237,10 +368,7 @@ pub(super) fn advance_with_get(
                         origin: state.origin,
                     }));
                 }
-                return Ok(NativeDispatch::Pair(
-                    StoredValue::Boolean(true),
-                    StoredValue::Undefined,
-                ));
+                return Ok(with_resolved(&state, StoredValue::Undefined));
             }
             state.stage = WithGetStage::GetValue;
             let reference = with_reference(&state)?;
@@ -256,6 +384,6 @@ pub(super) fn advance_with_get(
             )?;
             continue_with_get_after(runtime, dispatch, state, return_to, execution_budget)
         }
-        WithGetStage::GetValue => Ok(NativeDispatch::Pair(StoredValue::Boolean(true), completion)),
+        WithGetStage::GetValue | WithGetStage::DeleteValue => Ok(with_resolved(&state, completion)),
     }
 }

@@ -1347,16 +1347,6 @@ fn unsupported_with_reference_forms_fail_closed_at_the_identifier() {
             "value",
         ),
         (
-            "with (object) delete value;",
-            UnsupportedFeature::WithReferenceMutation,
-            "value",
-        ),
-        (
-            "with (object) value();",
-            UnsupportedFeature::WithReferenceCall,
-            "value",
-        ),
-        (
             "with (object) eval('value');",
             UnsupportedFeature::WithReferenceCall,
             "eval",

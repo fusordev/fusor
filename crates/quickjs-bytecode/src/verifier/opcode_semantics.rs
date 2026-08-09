@@ -49,7 +49,9 @@ pub(super) const fn opcode_semantics(opcode: FinalOpcode) -> OpcodeSemantics {
         | FinalOpcode::IfTrue8
         | FinalOpcode::Catch
         | FinalOpcode::Gosub
-        | FinalOpcode::WithGetVar => OpcodeSemantics::Conditional,
+        | FinalOpcode::WithGetVar
+        | FinalOpcode::WithDeleteVar
+        | FinalOpcode::WithGetRef => OpcodeSemantics::Conditional,
 
         FinalOpcode::Goto | FinalOpcode::Goto8 | FinalOpcode::Goto16 => OpcodeSemantics::Jump,
 
@@ -89,10 +91,7 @@ pub(super) const fn opcode_semantics(opcode: FinalOpcode) -> OpcodeSemantics {
             SuccessorShape::Fallthrough,
         ),
 
-        FinalOpcode::WithPutVar
-        | FinalOpcode::WithDeleteVar
-        | FinalOpcode::WithMakeRef
-        | FinalOpcode::WithGetRef => OpcodeSemantics::Unsupported(
+        FinalOpcode::WithPutVar | FinalOpcode::WithMakeRef => OpcodeSemantics::Unsupported(
             UnsupportedVerifierFeature::WithEnvironmentBranches,
             SuccessorShape::Branch,
         ),

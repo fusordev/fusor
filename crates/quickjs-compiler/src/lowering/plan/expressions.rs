@@ -227,6 +227,11 @@ pub(in crate::lowering) enum ExpressionWork<'expression, 'arena> {
         chain: &'expression ChainExpression<'arena>,
         preserve_final_reference: bool,
     },
+    IdentifierCallReference(&'expression IdentifierReference<'arena>),
+    IdentifierDelete {
+        identifier: &'expression IdentifierReference<'arena>,
+        delete_span: Span,
+    },
     CallAfterCallee {
         call: &'expression CallExpression<'arena>,
         method: bool,
@@ -338,6 +343,28 @@ impl<'compiler, 'unit, 'arena, 'scope> ExpressionPlanner<'compiler, 'unit, 'aren
                 )?,
                 ExpressionWork::CallAfterCallee { call, method } => {
                     Self::plan_call_after_callee(call, method, &mut work)?;
+                }
+                ExpressionWork::IdentifierCallReference(identifier) => {
+                    self.plan_identifier_call_reference(
+                        identifier,
+                        layout,
+                        tree_layout,
+                        constants,
+                        flow,
+                    )?;
+                }
+                ExpressionWork::IdentifierDelete {
+                    identifier,
+                    delete_span,
+                } => {
+                    self.plan_identifier_delete(
+                        identifier,
+                        delete_span,
+                        layout,
+                        tree_layout,
+                        constants,
+                        flow,
+                    )?;
                 }
                 ExpressionWork::SuperPropertyBase {
                     span,
@@ -5465,13 +5492,7 @@ impl<'compiler, 'unit, 'arena, 'scope> ExpressionPlanner<'compiler, 'unit, 'aren
                                 },
                             );
                     if !unresolved_is_undefined {
-                        return self.plan_ordinary_unary_expression(
-                            unary,
-                            layout,
-                            tree_layout,
-                            constants,
-                            work,
-                        );
+                        return Self::plan_ordinary_unary_expression(unary, constants, work);
                     }
                     if !access.reads() || access.writes() {
                         return unsupported(
@@ -5496,14 +5517,11 @@ impl<'compiler, 'unit, 'arena, 'scope> ExpressionPlanner<'compiler, 'unit, 'aren
                 }
             }
         }
-        self.plan_ordinary_unary_expression(unary, layout, tree_layout, constants, work)
+        Self::plan_ordinary_unary_expression(unary, constants, work)
     }
 
     fn plan_ordinary_unary_expression<'expression>(
-        &self,
         unary: &'expression UnaryExpression<'arena>,
-        layout: &FrameLayout,
-        tree_layout: &FunctionTreeLayout,
         constants: &CompiledConstantPool,
         work: &mut Vec<ExpressionWork<'expression, 'arena>>,
     ) -> Result<(), LeafCompilationError> {
@@ -5540,7 +5558,7 @@ impl<'compiler, 'unit, 'arena, 'scope> ExpressionPlanner<'compiler, 'unit, 'aren
                 work.push(ExpressionWork::Visit(&unary.argument));
             }
             UnaryOperator::Delete => {
-                self.plan_delete_expression(unary, layout, tree_layout, constants, work)?;
+                Self::plan_delete_expression(unary, constants, work)?;
             }
         }
         Ok(())
@@ -5556,10 +5574,7 @@ impl<'compiler, 'unit, 'arena, 'scope> ExpressionPlanner<'compiler, 'unit, 'aren
     /// Environment Record to observe bindings and configurable properties
     /// installed by earlier Scripts.
     fn plan_delete_expression<'expression>(
-        &self,
         unary: &'expression UnaryExpression<'arena>,
-        layout: &FrameLayout,
-        tree_layout: &FunctionTreeLayout,
         constants: &CompiledConstantPool,
         work: &mut Vec<ExpressionWork<'expression, 'arena>>,
     ) -> Result<(), LeafCompilationError> {
@@ -5599,14 +5614,10 @@ impl<'compiler, 'unit, 'arena, 'scope> ExpressionPlanner<'compiler, 'unit, 'aren
                 Ok(())
             }
             Expression::Identifier(identifier) => {
-                let opcode = self.plan_identifier_delete(
+                work.push(ExpressionWork::IdentifierDelete {
                     identifier,
-                    unary.span,
-                    layout,
-                    tree_layout,
-                    constants,
-                )?;
-                work.push(ExpressionWork::Emit(opcode));
+                    delete_span: unary.span,
+                });
                 Ok(())
             }
             _ => {
@@ -5630,6 +5641,43 @@ impl<'compiler, 'unit, 'arena, 'scope> ExpressionPlanner<'compiler, 'unit, 'aren
     }
 
     fn plan_identifier_delete(
+        &self,
+        identifier: &IdentifierReference<'arena>,
+        delete_span: Span,
+        layout: &FrameLayout,
+        tree_layout: &FunctionTreeLayout,
+        constants: &CompiledConstantPool,
+        flow: &mut PlannedControlFlow,
+    ) -> Result<(), LeafCompilationError> {
+        let fallback = self.plan_identifier_delete_fallback(
+            identifier,
+            delete_span,
+            layout,
+            tree_layout,
+            constants,
+        )?;
+        let with_objects = self
+            .with_object_bindings_for_reference(identifier.reference_id.get(), identifier.span)?;
+        if with_objects.is_empty() {
+            return flow.emit(fallback);
+        }
+        let done = flow.new_label(delete_span)?;
+        let atom = constants.property_atom_index(identifier.span)?;
+        for binding in with_objects {
+            let slot = layout
+                .slot(binding)
+                .ok_or(LeafCompilationError::SemanticInvariant {
+                    invariant: "visible with-object binding has a frame slot",
+                    span: Some(identifier.span),
+                })?;
+            flow.emit(self.plan_read_slot(binding, slot, identifier.span)?)?;
+            flow.with_branch(FinalOpcode::WithDeleteVar, atom, 1, &done, delete_span)?;
+        }
+        flow.emit(fallback)?;
+        flow.bind(&done)
+    }
+
+    fn plan_identifier_delete_fallback(
         &self,
         identifier: &IdentifierReference<'arena>,
         delete_span: Span,

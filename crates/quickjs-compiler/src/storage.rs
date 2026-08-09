@@ -1511,49 +1511,35 @@ impl<'unit, 'arena, 'scope> Planner<'unit, 'arena, 'scope> {
             {
                 continue;
             }
-            if access.writes() || self.with_reference_is_delete(reference_id) {
+            if access.writes() {
                 return unsupported(UnsupportedFeature::WithReferenceMutation, span);
             }
-            if self.with_reference_is_call_or_tag(nodes, reference_id) {
+            if self.with_reference_is_direct_eval_call(nodes, reference_id) {
                 return unsupported(UnsupportedFeature::WithReferenceCall, span);
             }
         }
         Ok(())
     }
 
-    fn with_reference_is_delete(&self, reference_id: ReferenceId) -> bool {
-        let semantic = self.unit.semantic();
-        let reference = semantic.scoping().get_reference(reference_id);
-        let nodes = semantic.nodes();
-        let mut node_id = reference.node_id();
-        loop {
-            let parent = nodes.parent_id(node_id);
-            match nodes.kind(parent) {
-                AstKind::ParenthesizedExpression(_) => node_id = parent,
-                AstKind::UnaryExpression(unary) => {
-                    return unary.operator == oxc_syntax::operator::UnaryOperator::Delete;
-                }
-                _ => return false,
-            }
-        }
-    }
-
-    fn with_reference_is_call_or_tag(
+    fn with_reference_is_direct_eval_call(
         &self,
         nodes: &AstNodes<'_>,
         reference_id: ReferenceId,
     ) -> bool {
         let reference = self.unit.semantic().scoping().get_reference(reference_id);
+        let AstKind::IdentifierReference(identifier) = nodes.kind(reference.node_id()) else {
+            return false;
+        };
+        if identifier.name.as_str() != "eval" {
+            return false;
+        }
         let mut node_id = reference.node_id();
         loop {
             let parent = nodes.parent_id(node_id);
             match nodes.kind(parent) {
                 AstKind::ParenthesizedExpression(_) => node_id = parent,
                 AstKind::CallExpression(call) => {
-                    return call.callee.span() == nodes.kind(node_id).span();
-                }
-                AstKind::TaggedTemplateExpression(tagged) => {
-                    return tagged.tag.span() == nodes.kind(node_id).span();
+                    return !call.optional && call.callee.span() == nodes.kind(node_id).span();
                 }
                 _ => return false,
             }

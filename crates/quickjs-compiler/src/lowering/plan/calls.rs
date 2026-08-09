@@ -1,10 +1,10 @@
 use super::super::{
     Argument, AssignmentExpression, AssignmentOperator, AstKind, CallExpression, ChainExpression,
     CompilationGoal, CompiledConstantPool, ComputedMemberExpression, ExecutableId, ExecutableKind,
-    Expression, FinalOpcode, FrameLayout, GetSpan, LeafCompilationError, NewExpression, Operands,
-    PlannedInstruction, PrivateFieldExpression, Span, StaticMemberExpression,
-    TaggedTemplateExpression, UnsupportedLeafFeature, binding_has_scope, plan_push_integer,
-    unsupported,
+    Expression, FinalOpcode, FrameLayout, GetSpan, IdentifierReference, LeafCompilationError,
+    NewExpression, Operands, PlannedInstruction, PrivateFieldExpression, Span,
+    StaticMemberExpression, TaggedTemplateExpression, UnsupportedLeafFeature, binding_has_scope,
+    plan_push_integer, unsupported,
 };
 use super::expressions::{ExpressionPlanner, ExpressionWork};
 
@@ -28,6 +28,22 @@ pub(in crate::lowering) fn plan_direct_call(argument_count: u16, span: Span) -> 
 }
 
 impl<'arena> ExpressionPlanner<'_, '_, 'arena, '_> {
+    fn with_identifier_callee<'expression>(
+        &self,
+        mut callee: &'expression Expression<'arena>,
+    ) -> Result<Option<&'expression IdentifierReference<'arena>>, LeafCompilationError> {
+        while let Expression::ParenthesizedExpression(parenthesized) = callee {
+            callee = &parenthesized.expression;
+        }
+        let Expression::Identifier(identifier) = callee else {
+            return Ok(None);
+        };
+        Ok((!self
+            .with_object_bindings_for_reference(identifier.reference_id.get(), identifier.span)?
+            .is_empty())
+        .then_some(identifier))
+    }
+
     fn is_contextual_direct_eval_derived_constructor(
         &self,
         executable: ExecutableId,
@@ -106,6 +122,10 @@ impl<'arena> ExpressionPlanner<'_, '_, 'arena, '_> {
         Ok(1)
     }
 
+    #[expect(
+        clippy::too_many_lines,
+        reason = "tag planning keeps receiver lookup and the reverse work-list schedule together"
+    )]
     pub(in crate::lowering) fn plan_tagged_template_expression<'expression>(
         &self,
         tagged: &'expression TaggedTemplateExpression<'arena>,
@@ -132,15 +152,18 @@ impl<'arena> ExpressionPlanner<'_, '_, 'arena, '_> {
                 domain: "tagged template arguments",
             })?;
         let member = Self::member_callee(&tagged.tag)?;
-        work.push(ExpressionWork::Emit(if member.is_some() {
-            PlannedInstruction::new(
-                FinalOpcode::CallMethod,
-                Operands::NPop { argument_count },
-                tagged.span,
-            )
-        } else {
-            plan_direct_call(argument_count, tagged.span)
-        }));
+        let with_identifier = self.with_identifier_callee(&tagged.tag)?;
+        work.push(ExpressionWork::Emit(
+            if member.is_some() || with_identifier.is_some() {
+                PlannedInstruction::new(
+                    FinalOpcode::CallMethod,
+                    Operands::NPop { argument_count },
+                    tagged.span,
+                )
+            } else {
+                plan_direct_call(argument_count, tagged.span)
+            },
+        ));
         for expression in tagged.quasi.expressions.iter().rev() {
             work.push(ExpressionWork::Visit(expression));
         }
@@ -212,7 +235,12 @@ impl<'arena> ExpressionPlanner<'_, '_, 'arena, '_> {
             Some(MemberCallee::Private(member)) => {
                 self.plan_private_member_callee(member, layout, work)?;
             }
-            None => work.push(ExpressionWork::Visit(&tagged.tag)),
+            None => match with_identifier {
+                Some(identifier) => {
+                    work.push(ExpressionWork::IdentifierCallReference(identifier));
+                }
+                None => work.push(ExpressionWork::Visit(&tagged.tag)),
+            },
         }
         Ok(())
     }
@@ -319,6 +347,13 @@ impl<'arena> ExpressionPlanner<'_, '_, 'arena, '_> {
         let direct_eval_scope = (!call.optional && call.callee.is_specific_id("eval"))
             .then(|| self.adjusted_eval_scope_index(call, layout))
             .transpose()?;
+        let with_identifier = self.with_identifier_callee(&call.callee)?;
+        if direct_eval_scope.is_some() && with_identifier.is_some() {
+            return Err(LeafCompilationError::SemanticInvariant {
+                invariant: "direct eval inside with fails storage preflight",
+                span: Some(call.callee.span()),
+            });
+        }
         if let Some(spread) = call.arguments.iter().position(Argument::is_spread) {
             let member = if direct_eval_scope.is_some() {
                 None
@@ -348,7 +383,7 @@ impl<'arena> ExpressionPlanner<'_, '_, 'arena, '_> {
             if direct_eval_scope.is_some() {
                 // `apply_eval` consumes exactly `func array`; its fallback
                 // ordinary call supplies an undefined receiver itself.
-            } else if member.is_some() {
+            } else if member.is_some() || with_identifier.is_some() {
                 // `obj func array` -> `func obj array`
                 work.push(ExpressionWork::Emit(PlannedInstruction::new(
                     FinalOpcode::Perm3,
@@ -448,7 +483,12 @@ impl<'arena> ExpressionPlanner<'_, '_, 'arena, '_> {
                 Some(MemberCallee::Private(member)) => {
                     self.plan_private_member_callee(member, layout, work)?;
                 }
-                None => work.push(ExpressionWork::Visit(&call.callee)),
+                None => match with_identifier {
+                    Some(identifier) => {
+                        work.push(ExpressionWork::IdentifierCallReference(identifier));
+                    }
+                    None => work.push(ExpressionWork::Visit(&call.callee)),
+                },
             }
             return Ok(());
         }
@@ -469,7 +509,7 @@ impl<'arena> ExpressionPlanner<'_, '_, 'arena, '_> {
                     },
                     call.span,
                 )
-            } else if member.is_some() {
+            } else if member.is_some() || with_identifier.is_some() {
                 PlannedInstruction::new(
                     FinalOpcode::CallMethod,
                     Operands::NPop { argument_count },
@@ -551,7 +591,12 @@ impl<'arena> ExpressionPlanner<'_, '_, 'arena, '_> {
             Some(MemberCallee::Private(member)) => {
                 self.plan_private_member_callee(member, layout, work)?;
             }
-            None => work.push(ExpressionWork::Visit(&call.callee)),
+            None => match with_identifier {
+                Some(identifier) => {
+                    work.push(ExpressionWork::IdentifierCallReference(identifier));
+                }
+                None => work.push(ExpressionWork::Visit(&call.callee)),
+            },
         }
         Ok(())
     }

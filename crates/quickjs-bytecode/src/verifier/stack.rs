@@ -166,9 +166,15 @@ pub(super) fn analyze_ordinary_stack(
             } else {
                 None
             };
-        let with_binding_depth =
-            if current.decoded.instruction().opcode() == FinalOpcode::WithGetVar {
-                let depth = u64::from(output_depth).checked_add(1).ok_or_else(|| {
+        let with_branch_values = match current.decoded.instruction().opcode() {
+            FinalOpcode::WithGetVar | FinalOpcode::WithDeleteVar => 1,
+            FinalOpcode::WithGetRef => 2,
+            _ => 0,
+        };
+        let with_binding_depth = if with_branch_values != 0 {
+            let depth = u64::from(output_depth)
+                .checked_add(with_branch_values)
+                .ok_or_else(|| {
                     VerificationError::at_instruction(
                         current.decoded,
                         VerificationErrorKind::StackLimitExceeded {
@@ -177,29 +183,29 @@ pub(super) fn analyze_ordinary_stack(
                         },
                     )
                 })?;
-                if depth > u64::from(limits.max_stack_depth) {
-                    return Err(VerificationError::at_instruction(
-                        current.decoded,
-                        VerificationErrorKind::StackLimitExceeded {
-                            depth,
-                            limit: limits.max_stack_depth,
-                        },
-                    ));
-                }
-                let depth = u32::try_from(depth).map_err(|_| {
-                    VerificationError::at_instruction(
-                        current.decoded,
-                        VerificationErrorKind::StackLimitExceeded {
-                            depth,
-                            limit: limits.max_stack_depth,
-                        },
-                    )
-                })?;
-                computed_max = computed_max.max(depth);
-                Some(depth)
-            } else {
-                None
-            };
+            if depth > u64::from(limits.max_stack_depth) {
+                return Err(VerificationError::at_instruction(
+                    current.decoded,
+                    VerificationErrorKind::StackLimitExceeded {
+                        depth,
+                        limit: limits.max_stack_depth,
+                    },
+                ));
+            }
+            let depth = u32::try_from(depth).map_err(|_| {
+                VerificationError::at_instruction(
+                    current.decoded,
+                    VerificationErrorKind::StackLimitExceeded {
+                        depth,
+                        limit: limits.max_stack_depth,
+                    },
+                )
+            })?;
+            computed_max = computed_max.max(depth);
+            Some(depth)
+        } else {
+            None
+        };
 
         match current.successors.0 {
             VerifiedSuccessorsRepr::Fallthrough(successor)

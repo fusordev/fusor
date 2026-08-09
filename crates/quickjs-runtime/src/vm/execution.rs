@@ -945,7 +945,7 @@ pub(super) fn execute_one(
                 Err(pending) => return Ok(Step::Abrupt(pending)),
             }
         }
-        FinalOpcode::WithGetVar => {
+        FinalOpcode::WithGetVar | FinalOpcode::WithDeleteVar | FinalOpcode::WithGetRef => {
             let Operands::AtomLabelU8 { atom, value, .. } = operands else {
                 return unsupported_dispatch(opcode);
             };
@@ -963,11 +963,15 @@ pub(super) fn execute_one(
                     pc: source_pc,
                 },
             )?;
-            let return_to = CallReturn::with_binding(taken, not_taken);
+            let return_to = if opcode == FinalOpcode::WithGetRef {
+                CallReturn::with_reference(taken, not_taken)
+            } else {
+                CallReturn::with_binding(taken, not_taken)
+            };
             let realm = code(runtime, frame.code)?.realm;
             let origin = instruction_location(runtime, frame, source_pc)?;
-            return native_step(
-                begin_with_get(
+            let dispatch = match opcode {
+                FinalOpcode::WithGetVar => begin_with_get(
                     runtime,
                     object,
                     property.key,
@@ -979,8 +983,32 @@ pub(super) fn execute_one(
                     origin,
                     execution_budget,
                 ),
-                return_to,
-            );
+                FinalOpcode::WithGetRef => begin_with_get_reference(
+                    runtime,
+                    object,
+                    property.key,
+                    property.name,
+                    value != 0,
+                    frame.strict,
+                    realm,
+                    Some(return_to),
+                    origin,
+                    execution_budget,
+                ),
+                FinalOpcode::WithDeleteVar => begin_with_delete(
+                    runtime,
+                    object,
+                    property.key,
+                    property.name,
+                    value != 0,
+                    realm,
+                    Some(return_to),
+                    origin,
+                    execution_budget,
+                ),
+                _ => unreachable!("matched with-environment opcode"),
+            };
+            return native_step(dispatch, return_to);
         }
         FinalOpcode::Rest => {
             let Operands::U16(first_argument) = operands else {
