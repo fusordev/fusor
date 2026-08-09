@@ -692,6 +692,44 @@ impl Runtime {
         Ok(intl.date_time_format_constructor)
     }
 
+    pub(crate) fn realm_intl_duration_format_constructor(
+        &self,
+        realm: RealmId,
+    ) -> Result<FunctionId, crate::EngineFault> {
+        let state = self
+            .realms
+            .get(realm)
+            .ok_or(crate::EngineFault::StaleHeapEdge {
+                edge: "realm",
+                index: realm.index(),
+                generation: realm.generation(),
+            })?;
+        let RealmIntrinsics::Ready { intl, .. } = state.intrinsics else {
+            return Err(crate::EngineFault::RuntimeInvariant {
+                message: "realm Intl intrinsics are not initialized",
+            });
+        };
+        let function = self.functions.get(intl.duration_format_constructor).ok_or(
+            crate::EngineFault::StaleHeapEdge {
+                edge: "Intl.DurationFormat constructor intrinsic",
+                index: intl.duration_format_constructor.index(),
+                generation: intl.duration_format_constructor.generation(),
+            },
+        )?;
+        if !matches!(
+            function.native(),
+            Some(super::NativeFunction {
+                realm: function_realm,
+                kind: NativeFunctionKind::IntlDurationFormatConstructor,
+            }) if *function_realm == realm
+        ) {
+            return Err(crate::EngineFault::RuntimeInvariant {
+                message: "Intl.DurationFormat constructor intrinsic has the wrong implementation",
+            });
+        }
+        Ok(intl.duration_format_constructor)
+    }
+
     pub(crate) fn allocate_intl_number_format(
         &mut self,
         prototype: HeapReference,

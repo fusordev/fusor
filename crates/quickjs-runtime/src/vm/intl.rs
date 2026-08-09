@@ -1238,6 +1238,7 @@ impl IntlDurationFormatOption {
 
 pub(super) struct IntlDurationFormatConstructorContinuation {
     new_target: FunctionId,
+    format_value: Option<temporal_rs::Duration>,
     locales_argument: Option<StoredValue>,
     options_argument: StoredValue,
     options_object: Option<StoredValue>,
@@ -8290,6 +8291,7 @@ pub(super) fn begin_intl_duration_format_constructor(
     let options_argument = inputs.arguments.take_first_or_undefined();
     let state = IntlDurationFormatConstructorContinuation {
         new_target,
+        format_value: None,
         locales_argument: Some(locales_argument),
         options_argument,
         options_object: None,
@@ -8319,6 +8321,46 @@ pub(super) fn begin_intl_duration_format_constructor(
         state,
         runtime,
         return_to,
+        execution_budget,
+    )
+}
+
+#[allow(
+    clippy::too_many_arguments,
+    reason = "native dispatch keeps the Temporal value, arguments, realm, return target, origin, and budget explicit"
+)]
+pub(super) fn begin_intl_duration_to_locale_string(
+    runtime: &mut Runtime,
+    duration: temporal_rs::Duration,
+    mut arguments: CallArguments,
+    realm: RealmId,
+    return_to: Option<CallReturn>,
+    origin: JsStackFrame,
+    execution_budget: &mut ExecutionBudget,
+) -> Result<NativeDispatch, NativeFailure> {
+    let locales = arguments.take_first_or_undefined();
+    let options_argument = arguments.take_first_or_undefined();
+    let state = IntlDurationFormatConstructorContinuation {
+        new_target: runtime.realm_intl_duration_format_constructor(realm)?,
+        format_value: Some(duration),
+        locales_argument: None,
+        options_argument,
+        options_object: None,
+        prototype: None,
+        requested_locales: Vec::new(),
+        options: DurationFormatRequestOptions::default(),
+        option_index: 0,
+        realm,
+        stage: IntlDurationFormatConstructorStage::ReadOption,
+        origin: origin.clone(),
+    };
+    begin_intl_locale_list(
+        runtime,
+        locales,
+        IntlLocaleListTarget::DurationFormatConstructor(Box::new(state)),
+        realm,
+        return_to,
+        origin,
         execution_budget,
     )
 }
@@ -8605,6 +8647,29 @@ fn finish_intl_duration_format_options(
                 .into(),
             }
         })?;
+    if let Some(duration) = state.format_value {
+        let formatted = format_duration(&resolved, duration_record_from_temporal(duration))
+            .map_err(|error| match error {
+                DurationFormatError::InvalidDuration => NativeFailure::Abrupt(PendingException {
+                    realm: state.realm,
+                    payload: PendingExceptionPayload::EngineError {
+                        kind: ExceptionKind::RangeError,
+                        message: JsString::from_utf8("invalid duration record")
+                            .expect("static Intl error is valid UTF-8"),
+                    },
+                    origin: state.origin.clone(),
+                }),
+                DurationFormatError::InvalidLocale
+                | DurationFormatError::InvalidOption
+                | DurationFormatError::Data => EngineFault::RuntimeInvariant {
+                    message: "resolved Temporal.Duration locale-string slots failed ICU formatting",
+                }
+                .into(),
+            })?;
+        return Ok(NativeDispatch::Immediate(StoredValue::String(
+            JsString::from_utf8(&formatted)?,
+        )));
+    }
     let prototype = state.prototype.ok_or(EngineFault::RuntimeInvariant {
         message: "Intl.DurationFormat allocation lost its prototype",
     })?;

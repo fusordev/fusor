@@ -2082,7 +2082,7 @@ fn duration_constructor_and_accessors_preserve_all_ten_fields() {
                d.milliseconds,d.microseconds,d.nanoseconds,d.sign,d.blank,
                d.toString(),d.toJSON(),d.toLocaleString(),z.sign,z.blank,z.toString()].join('|');"
         ),
-        "1|2|3|4|5|6|7|8|9|10|1|false|P1Y2M3W4DT5H6M7.00800901S|P1Y2M3W4DT5H6M7.00800901S|P1Y2M3W4DT5H6M7.00800901S|0|true|PT0S"
+        "1|2|3|4|5|6|7|8|9|10|1|false|P1Y2M3W4DT5H6M7.00800901S|P1Y2M3W4DT5H6M7.00800901S|1 yr, 2 mths, 3 wks, 4 days, 5 hr, 6 min, 7 sec, 8 ms, 9 μs, 10 ns|0|true|PT0S"
     );
 }
 
@@ -2122,7 +2122,7 @@ fn duration_to_string_observes_options_and_coercions_in_specified_order() {
 }
 
 #[test]
-fn duration_to_string_rejects_invalid_options_and_keeps_json_locale_defaults() {
+fn duration_to_string_rejects_invalid_options_and_keeps_json_separate_from_locale_output() {
     assert_eq!(
         thrown("return new Temporal.Duration().toString(1);"),
         ExceptionKind::TypeError
@@ -2153,7 +2153,7 @@ fn duration_to_string_rejects_invalid_options_and_keeps_json_locale_defaults() {
             "var duration=Temporal.Duration.from('PT1.23456789S');
              return [duration.toJSON(),duration.toLocaleString('fr',{smallestUnit:'second'})].join('|');"
         ),
-        "PT1.23456789S|PT1.23456789S"
+        "PT1.23456789S|1\u{202f}s, 234\u{202f}ms, 567\u{202f}μs et 890\u{202f}ns"
     );
 }
 
