@@ -7709,6 +7709,32 @@ fn dynamic_function_authority_carries_verified_constructor_realm_global_referenc
 }
 
 #[test]
+fn constructor_realm_global_reference_transactions_are_verified() {
+    let input = dynamic_realm_global_input(
+        &[
+            (
+                FinalOpcode::MakeVarRefRef,
+                Operands::AtomU16 {
+                    atom: AtomPoolIndex::new(1),
+                    value: 0,
+                },
+            ),
+            (FinalOpcode::Push1, Operands::NoneInt),
+            (FinalOpcode::Insert3, Operands::None),
+            (FinalOpcode::PutRefValue, Operands::None),
+            (FinalOpcode::Return, Operands::None),
+        ],
+        &[atom("anonymous"), atom("realmValue")],
+        true,
+        true,
+        global_reference_policy(),
+    );
+
+    verify_compiler_bytecode_graph(input, BytecodeGraphVerificationLimits::default())
+        .expect("realm-global reference transactions retain typed closure authority");
+}
+
+#[test]
 fn constructor_realm_global_opcodes_cannot_cross_captured_slot_boundaries() {
     let realm_slot_with_capture_opcode = dynamic_realm_global_input(
         &[

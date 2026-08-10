@@ -577,6 +577,7 @@ pub(super) fn dispatch_pending_exception(
                     Some(
                         OperandStackEntry::JavaScript(_)
                         | OperandStackEntry::CapturedReference { .. }
+                        | OperandStackEntry::RealmGlobalReference { .. }
                         | OperandStackEntry::CapturedReferenceAnchor
                         | OperandStackEntry::FinallyReturn { .. },
                     )
@@ -1046,6 +1047,7 @@ pub(super) fn dispatch_pending_exception(
             Some(
                 OperandStackEntry::JavaScript(_)
                 | OperandStackEntry::CapturedReference { .. }
+                | OperandStackEntry::RealmGlobalReference { .. }
                 | OperandStackEntry::CapturedReferenceAnchor
                 | OperandStackEntry::ForOfCatch { .. }
                 | OperandStackEntry::FinallyReturn { .. },

@@ -258,6 +258,12 @@ fn verify_closure_opcode(
             return Err(closure_opcode_mismatch(id, pc, closure, opcode));
         }
         CompilerClosureBinding::RealmGlobal(policy) => {
+            if opcode == FinalOpcode::MakeVarRefRef {
+                // Reference creation snapshots whether the global Environment
+                // Record resolved this name before the RHS executes. The
+                // retained `put_ref_value` performs the policy-checked write.
+                return Ok(());
+            }
             if !is_realm_global_opcode(opcode) {
                 return Err(closure_opcode_mismatch(id, pc, closure, opcode));
             }

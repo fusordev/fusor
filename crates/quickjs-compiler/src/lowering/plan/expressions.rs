@@ -5106,6 +5106,7 @@ impl<'compiler, 'unit, 'arena, 'scope> ExpressionPlanner<'compiler, 'unit, 'aren
 
     #[allow(
         clippy::too_many_arguments,
+        clippy::too_many_lines,
         reason = "identifier assignment carries its resolved storage, inferred name, atom pool, and reverse expression schedule explicitly"
     )]
     fn plan_lowered_identifier_assignment<'expression>(
@@ -5123,9 +5124,11 @@ impl<'compiler, 'unit, 'arena, 'scope> ExpressionPlanner<'compiler, 'unit, 'aren
             LoweredReference::RealmGlobal { slot, binding, .. } => {
                 return Self::plan_realm_global_assignment(
                     assignment,
+                    identifier,
                     slot,
                     binding,
                     inferred_name,
+                    constants,
                     flow,
                     work,
                 );
@@ -5134,6 +5137,16 @@ impl<'compiler, 'unit, 'arena, 'scope> ExpressionPlanner<'compiler, 'unit, 'aren
 
         match assignment.operator {
             AssignmentOperator::Assign => {
+                if let FrameSlot::Capture(slot) = frame_slot {
+                    return Self::push_retained_identifier_simple_assignment(
+                        assignment,
+                        identifier,
+                        slot,
+                        inferred_name,
+                        constants,
+                        work,
+                    );
+                }
                 self.push_slot_write(binding, frame_slot, true, identifier.span, work)?;
                 if let Some(set_name) = inferred_name {
                     work.push(ExpressionWork::Emit(set_name));
@@ -5216,6 +5229,37 @@ impl<'compiler, 'unit, 'arena, 'scope> ExpressionPlanner<'compiler, 'unit, 'aren
                 )?));
             }
         }
+        Ok(())
+    }
+
+    pub(in crate::lowering) fn push_retained_identifier_simple_assignment<'expression>(
+        assignment: &'expression AssignmentExpression<'arena>,
+        identifier: &'expression IdentifierReference<'arena>,
+        slot: u16,
+        inferred_name: Option<PlannedInstruction>,
+        constants: &CompiledConstantPool,
+        work: &mut Vec<ExpressionWork<'expression, 'arena>>,
+    ) -> Result<(), LeafCompilationError> {
+        let atom = constants.property_atom_index(identifier.span)?;
+        work.push(ExpressionWork::Emit(PlannedInstruction::new(
+            FinalOpcode::PutRefValue,
+            Operands::None,
+            identifier.span,
+        )));
+        work.push(ExpressionWork::Emit(PlannedInstruction::new(
+            FinalOpcode::Insert3,
+            Operands::None,
+            assignment.span,
+        )));
+        if let Some(set_name) = inferred_name {
+            work.push(ExpressionWork::Emit(set_name));
+        }
+        work.push(ExpressionWork::Visit(&assignment.right));
+        work.push(ExpressionWork::Emit(PlannedInstruction::new(
+            FinalOpcode::MakeVarRefRef,
+            Operands::AtomU16 { atom, value: slot },
+            identifier.span,
+        )));
         Ok(())
     }
 

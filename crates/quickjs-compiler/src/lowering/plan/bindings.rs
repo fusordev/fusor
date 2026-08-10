@@ -426,11 +426,17 @@ impl<'arena> ExpressionPlanner<'_, '_, 'arena, '_> {
         flow.bind(&done)
     }
 
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "realm-global assignment carries the retained identifier, atom pool, and reverse expression schedule explicitly"
+    )]
     pub(in crate::lowering) fn plan_realm_global_assignment<'expression>(
         assignment: &'expression AssignmentExpression<'arena>,
+        identifier: &'expression IdentifierReference<'arena>,
         slot: u16,
         binding: CompilerClosureBinding,
         inferred_name: Option<PlannedInstruction>,
+        constants: &CompiledConstantPool,
         flow: &mut PlannedControlFlow,
         work: &mut Vec<ExpressionWork<'expression, 'arena>>,
     ) -> Result<(), LeafCompilationError> {
@@ -438,16 +444,14 @@ impl<'arena> ExpressionPlanner<'_, '_, 'arena, '_> {
         let write = plan_external_put(binding, slot, assignment.left.span());
         match assignment.operator {
             AssignmentOperator::Assign => {
-                work.push(ExpressionWork::Emit(write));
-                work.push(ExpressionWork::Emit(PlannedInstruction::new(
-                    FinalOpcode::Dup,
-                    Operands::None,
-                    assignment.span,
-                )));
-                if let Some(set_name) = inferred_name {
-                    work.push(ExpressionWork::Emit(set_name));
-                }
-                work.push(ExpressionWork::Visit(&assignment.right));
+                return Self::push_retained_identifier_simple_assignment(
+                    assignment,
+                    identifier,
+                    slot,
+                    inferred_name,
+                    constants,
+                    work,
+                );
             }
             AssignmentOperator::LogicalOr
             | AssignmentOperator::LogicalAnd

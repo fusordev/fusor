@@ -377,6 +377,38 @@ fn sloppy_direct_eval_var_without_initializer_preserves_an_existing_local() {
 }
 
 #[test]
+fn simple_assignment_retains_its_pre_rhs_environment_reference() {
+    evaluate(
+        "function initialized(){var x=0;let inner=(function(){x=(eval('var x=2;'),1);return x;})();return x===1&&inner===2;}function uninitialized(){var x=0;let inner=(function(){x=(eval('var x;'),1);return x;})();return x===1&&inner===undefined;}initialized()&&uninitialized();",
+        |value| assert_eq!(value.as_boolean(), Ok(Some(true))),
+    );
+}
+
+#[test]
+fn strict_unresolvable_assignment_stays_unresolvable_across_the_rhs() {
+    evaluate(
+        "(function(){'use strict';try{missing=(globalThis.missing=5);return false;}catch(error){return error.constructor===ReferenceError&&globalThis.missing===5;}})();",
+        |value| assert_eq!(value.as_boolean(), Ok(Some(true))),
+    );
+}
+
+#[test]
+fn strict_resolved_global_assignment_stays_resolved_across_the_rhs() {
+    evaluate(
+        "Object.defineProperty(globalThis,'retained',{value:1,writable:true,configurable:true});(function(){'use strict';let result=retained=(delete globalThis.retained,7);return result===7&&globalThis.retained===7;})();",
+        |value| assert_eq!(value.as_boolean(), Ok(Some(true))),
+    );
+}
+
+#[test]
+fn sloppy_assignment_recreates_an_eval_binding_deleted_by_its_rhs() {
+    evaluate(
+        "function local(){let assign=function(){return retained=(eval('delete retained'),7);};eval('var retained=1;');let result=assign();try{return result===7&&eval('retained')===7;}catch(error){return false;}}local();",
+        |value| assert_eq!(value.as_boolean(), Ok(Some(true))),
+    );
+}
+
+#[test]
 fn sloppy_direct_eval_creates_a_new_function_variable_binding() {
     evaluate(
         "var answer=1;function local(){eval('var answer=42;');return answer;}local()+answer;",

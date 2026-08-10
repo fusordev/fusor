@@ -427,6 +427,62 @@ fn captured_write_action(
     Ok(binding_write_action(policy.writes(), strict))
 }
 
+fn realm_global_write_step(
+    runtime: &mut Runtime,
+    frame: &Frame,
+    outcome: RealmGlobalWriteOutcome,
+    index: u32,
+    name: &JsString,
+    source_pc: BytecodePc,
+    fallthrough: InstructionIndex,
+) -> Result<Option<Step>, ExecutionError> {
+    Ok(match outcome {
+        RealmGlobalWriteOutcome::Complete => None,
+        RealmGlobalWriteOutcome::Setter {
+            function,
+            receiver,
+            value,
+        } => {
+            let mut arguments = Vec::new();
+            arguments
+                .try_reserve_exact(1)
+                .map_err(|_| ExecutionError::AllocationFailed {
+                    resource: RuntimeResource::FrameValues,
+                    additional: 1,
+                })?;
+            arguments.push(value);
+            Some(Step::Call {
+                function,
+                inputs: CallInputSource::Prepared(CallInputs {
+                    receiver,
+                    arguments: CallArguments::from_values(arguments),
+                    new_target: None,
+                }),
+                return_to: CallReturn::discard(fallthrough),
+                source_pc,
+            })
+        }
+        RealmGlobalWriteOutcome::Missing => Some(Step::Abrupt(global_not_defined_exception(
+            runtime, frame, name, source_pc,
+        )?)),
+        RealmGlobalWriteOutcome::Uninitialized => Some(Step::Abrupt(tdz_exception(
+            runtime,
+            frame,
+            BindingName::Closure(index),
+            source_pc,
+        )?)),
+        RealmGlobalWriteOutcome::Immutable => Some(Step::Abrupt(immutable_binding_exception(
+            runtime,
+            frame,
+            BindingName::Closure(index),
+            source_pc,
+        )?)),
+        RealmGlobalWriteOutcome::Property(failure) => Some(Step::Abrupt(property_exception(
+            runtime, frame, source_pc, name, failure,
+        )?)),
+    })
+}
+
 #[allow(
     clippy::too_many_lines,
     reason = "failure-atomic frame allocation and initialization remain one transaction"
@@ -1139,17 +1195,37 @@ pub(super) fn execute_one(
                 return unsupported_dispatch(opcode);
             };
             let index = u32::from(value);
-            let Some(cell) = resolve_environment_cell(runtime, frame, index)? else {
-                return Ok(Step::Abrupt(binding_not_defined_exception(
-                    runtime,
-                    frame,
-                    BindingName::Closure(index),
-                    source_pc,
-                )?));
-            };
-            frame
-                .stack
-                .push(OperandStackEntry::CapturedReference { index, cell });
+            let binding = code(runtime, frame.code)?
+                .authority
+                .function(frame.template)
+                .and_then(|function| function.metadata().closures().get(index as usize))
+                .ok_or(EngineFault::MissingPoolEntry {
+                    pool: "retained identifier reference",
+                    index,
+                })?
+                .binding();
+            match binding {
+                CompilerClosureBinding::Captured(_) => {
+                    let Some(cell) = resolve_environment_cell(runtime, frame, index)? else {
+                        return Ok(Step::Abrupt(binding_not_defined_exception(
+                            runtime,
+                            frame,
+                            BindingName::Closure(index),
+                            source_pc,
+                        )?));
+                    };
+                    frame
+                        .stack
+                        .push(OperandStackEntry::CapturedReference { index, cell });
+                }
+                CompilerClosureBinding::RealmGlobal(_) => {
+                    let operand = global_reference_operand(runtime, frame, index)?;
+                    let reference = retain_realm_global_reference(runtime, operand)?;
+                    frame
+                        .stack
+                        .push(OperandStackEntry::RealmGlobalReference { index, reference });
+                }
+            }
             frame.stack.push(OperandStackEntry::CapturedReferenceAnchor);
         }
         FinalOpcode::GetRefValue => {
@@ -1159,64 +1235,165 @@ pub(super) fn execute_one(
                 }
                 .into());
             };
-            let (index, cell) = match (&frame.stack[base], &frame.stack[base + 1]) {
-                (
-                    OperandStackEntry::CapturedReference { index, cell },
-                    OperandStackEntry::CapturedReferenceAnchor,
-                ) => (*index, *cell),
+            if !matches!(
+                frame.stack[base + 1],
+                OperandStackEntry::CapturedReferenceAnchor
+            ) {
+                return Err(EngineFault::RuntimeInvariant {
+                    message: "verified get_ref_value has an invalid reference anchor",
+                }
+                .into());
+            }
+            match &frame.stack[base] {
+                OperandStackEntry::CapturedReference { index, cell } => {
+                    let (index, cell) = (*index, *cell);
+                    let value = match duplicate_binding(
+                        runtime,
+                        &FrameBinding::Captured(cell),
+                        true,
+                        frame,
+                    ) {
+                        Ok(value) => value,
+                        Err(BindingAccessError::Uninitialized) => {
+                            return Ok(Step::Abrupt(tdz_exception(
+                                runtime,
+                                frame,
+                                BindingName::Closure(index),
+                                source_pc,
+                            )?));
+                        }
+                        Err(BindingAccessError::Missing) => {
+                            return Err(EngineFault::RuntimeInvariant {
+                                message: "resolved captured reference became missing",
+                            }
+                            .into());
+                        }
+                        Err(BindingAccessError::Fault(fault)) => return Err(fault.into()),
+                    };
+                    push(frame, value);
+                }
+                OperandStackEntry::RealmGlobalReference { index, reference } => {
+                    let index = *index;
+                    let name = reference.name().clone();
+                    match read_retained_realm_global(runtime, reference)? {
+                        RealmGlobalReadOutcome::Value(value) => push(frame, value),
+                        RealmGlobalReadOutcome::Getter { function, receiver } => {
+                            let return_to = CallReturn::push(
+                                verified_instruction.successors().fallthrough().ok_or(
+                                    EngineFault::InvalidSuccessor {
+                                        function: frame.template,
+                                        pc: source_pc,
+                                    },
+                                )?,
+                            );
+                            return Ok(Step::Call {
+                                function,
+                                inputs: CallInputSource::Prepared(CallInputs {
+                                    receiver,
+                                    arguments: CallArguments::empty(),
+                                    new_target: None,
+                                }),
+                                return_to,
+                                source_pc,
+                            });
+                        }
+                        RealmGlobalReadOutcome::Missing => {
+                            return Ok(Step::Abrupt(global_not_defined_exception(
+                                runtime, frame, &name, source_pc,
+                            )?));
+                        }
+                        RealmGlobalReadOutcome::Uninitialized => {
+                            return Ok(Step::Abrupt(tdz_exception(
+                                runtime,
+                                frame,
+                                BindingName::Closure(index),
+                                source_pc,
+                            )?));
+                        }
+                    }
+                }
                 _ => {
                     return Err(EngineFault::RuntimeInvariant {
-                        message: "verified get_ref_value has an invalid captured reference",
+                        message: "verified get_ref_value has an invalid retained reference",
                     }
                     .into());
                 }
-            };
-            let value = match duplicate_binding(runtime, &FrameBinding::Captured(cell), true, frame)
-            {
-                Ok(value) => value,
-                Err(BindingAccessError::Uninitialized) => {
-                    return Ok(Step::Abrupt(tdz_exception(
-                        runtime,
-                        frame,
-                        BindingName::Closure(index),
-                        source_pc,
-                    )?));
-                }
-                Err(BindingAccessError::Missing) => {
-                    return Err(EngineFault::RuntimeInvariant {
-                        message: "resolved captured reference became missing",
-                    }
-                    .into());
-                }
-                Err(BindingAccessError::Fault(fault)) => return Err(fault.into()),
-            };
-            push(frame, value);
+            }
         }
         FinalOpcode::PutRefValue => {
-            let captured = frame.stack.len().checked_sub(3).and_then(|base| {
-                match (&frame.stack[base], &frame.stack[base + 1]) {
-                    (
-                        OperandStackEntry::CapturedReference { index, cell },
-                        OperandStackEntry::CapturedReferenceAnchor,
-                    ) => Some((base, *index, *cell)),
-                    _ => None,
-                }
+            let retained = frame.stack.len().checked_sub(3).is_some_and(|base| {
+                matches!(
+                    frame.stack[base],
+                    OperandStackEntry::CapturedReference { .. }
+                        | OperandStackEntry::RealmGlobalReference { .. }
+                ) && matches!(
+                    frame.stack[base + 1],
+                    OperandStackEntry::CapturedReferenceAnchor
+                )
             });
-            if let Some((base, index, cell)) = captured {
+            if retained {
                 let value = pop(frame)?;
-                frame.stack.truncate(base);
-                match captured_write_action(runtime, frame, strict, index)? {
-                    BindingWriteAction::Throw => {
-                        return Ok(Step::Abrupt(immutable_binding_exception(
+                let anchor = frame.stack.pop().ok_or(EngineFault::RuntimeInvariant {
+                    message: "verified put_ref_value lost its retained-reference anchor",
+                })?;
+                if !matches!(anchor, OperandStackEntry::CapturedReferenceAnchor) {
+                    return Err(EngineFault::RuntimeInvariant {
+                        message: "verified put_ref_value has an invalid retained-reference anchor",
+                    }
+                    .into());
+                }
+                let reference = frame.stack.pop().ok_or(EngineFault::RuntimeInvariant {
+                    message: "verified put_ref_value lost its retained reference",
+                })?;
+                match reference {
+                    OperandStackEntry::CapturedReference { index, cell } => {
+                        match captured_write_action(runtime, frame, strict, index)? {
+                            BindingWriteAction::Throw => {
+                                return Ok(Step::Abrupt(immutable_binding_exception(
+                                    runtime,
+                                    frame,
+                                    BindingName::Closure(index),
+                                    source_pc,
+                                )?));
+                            }
+                            BindingWriteAction::Ignore => {}
+                            BindingWriteAction::Write => {
+                                write_binding_cell(runtime, cell, SlotValue::Value(value))?;
+                            }
+                        }
+                    }
+                    OperandStackEntry::RealmGlobalReference { index, reference } => {
+                        let name = reference.name().clone();
+                        let outcome = write_retained_realm_global(
+                            runtime,
+                            &reference,
+                            value,
+                            strict,
+                            execution_budget,
+                        )?;
+                        let fallthrough = verified_instruction.successors().fallthrough().ok_or(
+                            EngineFault::InvalidSuccessor {
+                                function: frame.template,
+                                pc: source_pc,
+                            },
+                        )?;
+                        if let Some(step) = realm_global_write_step(
                             runtime,
                             frame,
-                            BindingName::Closure(index),
+                            outcome,
+                            index,
+                            &name,
                             source_pc,
-                        )?));
+                            fallthrough,
+                        )? {
+                            return Ok(step);
+                        }
                     }
-                    BindingWriteAction::Ignore => {}
-                    BindingWriteAction::Write => {
-                        write_binding_cell(runtime, cell, SlotValue::Value(value))?;
+                    _ => {
+                        return Err(EngineFault::RuntimeInvariant {
+                            message: "verified put_ref_value has an invalid retained reference",
+                        }
+                        .into());
                     }
                 }
             } else {
@@ -1663,7 +1840,7 @@ pub(super) fn execute_one(
             push(frame, right);
         }
         FinalOpcode::Insert3 => {
-            let captured = frame.stack.len().checked_sub(3).is_some_and(|base| {
+            let retained = frame.stack.len().checked_sub(3).is_some_and(|base| {
                 matches!(
                     (
                         &frame.stack[base],
@@ -1671,13 +1848,14 @@ pub(super) fn execute_one(
                         &frame.stack[base + 2]
                     ),
                     (
-                        OperandStackEntry::CapturedReference { .. },
+                        OperandStackEntry::CapturedReference { .. }
+                            | OperandStackEntry::RealmGlobalReference { .. },
                         OperandStackEntry::CapturedReferenceAnchor,
                         OperandStackEntry::JavaScript(_),
                     )
                 )
             });
-            if captured {
+            if retained {
                 let third = pop(frame)?;
                 let anchor = frame.stack.pop().ok_or(EngineFault::RuntimeInvariant {
                     message: "verified insert3 lost its captured-reference anchor",
@@ -3384,66 +3562,23 @@ pub(super) fn execute_one(
             let global = global_reference_operand(runtime, frame, index)?;
             let name = global.name.clone();
             let value = pop(frame)?;
-            match write_realm_global(runtime, global, value, strict, execution_budget)? {
-                RealmGlobalWriteOutcome::Complete => {}
-                RealmGlobalWriteOutcome::Setter {
-                    function,
-                    receiver,
-                    value,
-                } => {
-                    let mut arguments = Vec::new();
-                    arguments.try_reserve_exact(1).map_err(|_| {
-                        ExecutionError::AllocationFailed {
-                            resource: RuntimeResource::FrameValues,
-                            additional: 1,
-                        }
-                    })?;
-                    arguments.push(value);
-                    let return_to = CallReturn::discard(
-                        verified_instruction.successors().fallthrough().ok_or(
-                            EngineFault::InvalidSuccessor {
-                                function: frame.template,
-                                pc: source_pc,
-                            },
-                        )?,
-                    );
-                    return Ok(Step::Call {
-                        function,
-                        inputs: CallInputSource::Prepared(CallInputs {
-                            receiver,
-                            arguments: CallArguments::from_values(arguments),
-                            new_target: None,
-                        }),
-                        return_to,
-                        source_pc,
-                    });
-                }
-                RealmGlobalWriteOutcome::Missing => {
-                    return Ok(Step::Abrupt(global_not_defined_exception(
-                        runtime, frame, &name, source_pc,
-                    )?));
-                }
-                RealmGlobalWriteOutcome::Uninitialized => {
-                    return Ok(Step::Abrupt(tdz_exception(
-                        runtime,
-                        frame,
-                        BindingName::Closure(index),
-                        source_pc,
-                    )?));
-                }
-                RealmGlobalWriteOutcome::Immutable => {
-                    return Ok(Step::Abrupt(immutable_binding_exception(
-                        runtime,
-                        frame,
-                        BindingName::Closure(index),
-                        source_pc,
-                    )?));
-                }
-                RealmGlobalWriteOutcome::Property(failure) => {
-                    return Ok(Step::Abrupt(property_exception(
-                        runtime, frame, source_pc, &name, failure,
-                    )?));
-                }
+            let outcome = write_realm_global(runtime, &global, value, strict, execution_budget)?;
+            let fallthrough = verified_instruction.successors().fallthrough().ok_or(
+                EngineFault::InvalidSuccessor {
+                    function: frame.template,
+                    pc: source_pc,
+                },
+            )?;
+            if let Some(step) = realm_global_write_step(
+                runtime,
+                frame,
+                outcome,
+                index,
+                &name,
+                source_pc,
+                fallthrough,
+            )? {
+                return Ok(step);
             }
         }
         FinalOpcode::PutVarInit => {
@@ -3745,6 +3880,7 @@ pub(super) fn execute_one(
                         | StoredValue::Object(_),
                     )
                     | OperandStackEntry::CapturedReference { .. }
+                    | OperandStackEntry::RealmGlobalReference { .. }
                     | OperandStackEntry::CapturedReferenceAnchor
                     | OperandStackEntry::Catch { .. }
                     | OperandStackEntry::ForOfCatch { .. }

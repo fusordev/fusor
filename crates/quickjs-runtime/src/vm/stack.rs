@@ -192,6 +192,7 @@ pub(super) fn pop(frame: &mut Frame) -> Result<StoredValue, EngineFault> {
         }
         Some(
             OperandStackEntry::CapturedReference { .. }
+            | OperandStackEntry::RealmGlobalReference { .. }
             | OperandStackEntry::CapturedReferenceAnchor,
         ) => Err(EngineFault::RuntimeInvariant {
             message: "verified JavaScript value operation consumed an internal captured reference",
@@ -218,6 +219,7 @@ pub(super) fn peek(frame: &Frame) -> Result<&StoredValue, EngineFault> {
         }
         Some(
             OperandStackEntry::CapturedReference { .. }
+            | OperandStackEntry::RealmGlobalReference { .. }
             | OperandStackEntry::CapturedReferenceAnchor,
         ) => Err(EngineFault::RuntimeInvariant {
             message: "verified JavaScript value operation inspected an internal captured reference",
@@ -244,6 +246,7 @@ pub(super) fn stack_value_at(frame: &Frame, index: usize) -> Result<&StoredValue
         }
         Some(
             OperandStackEntry::CapturedReference { .. }
+            | OperandStackEntry::RealmGlobalReference { .. }
             | OperandStackEntry::CapturedReferenceAnchor,
         ) => Err(EngineFault::RuntimeInvariant {
             message: "verified JavaScript value operation indexed an internal captured reference",
@@ -266,6 +269,7 @@ pub(super) fn pop_finally_continuation(frame: &mut Frame) -> Result<InstructionI
         Some(
             OperandStackEntry::JavaScript(_)
             | OperandStackEntry::CapturedReference { .. }
+            | OperandStackEntry::RealmGlobalReference { .. }
             | OperandStackEntry::CapturedReferenceAnchor
             | OperandStackEntry::Catch { .. }
             | OperandStackEntry::ForOfCatch { .. },
@@ -412,6 +416,7 @@ pub(super) fn deactivate_for_of_record(
         Some(
             OperandStackEntry::JavaScript(_)
             | OperandStackEntry::CapturedReference { .. }
+            | OperandStackEntry::RealmGlobalReference { .. }
             | OperandStackEntry::CapturedReferenceAnchor
             | OperandStackEntry::Catch { .. }
             | OperandStackEntry::ForOfCatch { .. }
@@ -471,6 +476,7 @@ pub(super) fn finish_for_of_step(
         Some(
             OperandStackEntry::JavaScript(_)
             | OperandStackEntry::CapturedReference { .. }
+            | OperandStackEntry::RealmGlobalReference { .. }
             | OperandStackEntry::CapturedReferenceAnchor
             | OperandStackEntry::Catch { .. }
             | OperandStackEntry::ForOfCatch { .. }
@@ -565,6 +571,7 @@ pub(super) fn take_for_of_record_at(
         Some(
             OperandStackEntry::JavaScript(_)
             | OperandStackEntry::CapturedReference { .. }
+            | OperandStackEntry::RealmGlobalReference { .. }
             | OperandStackEntry::CapturedReferenceAnchor
             | OperandStackEntry::Catch { .. }
             | OperandStackEntry::FinallyReturn { .. },

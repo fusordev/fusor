@@ -433,7 +433,7 @@ impl<'arena> CompilationContext<'_, 'arena, '_> {
                         )?
                         .is_empty();
                 if with_visible
-                    || self.captured_mutation_requires_reference_atom(
+                    || self.retained_mutation_requires_reference_atom(
                         owner,
                         identifier.reference_id.get(),
                         identifier.span,
@@ -729,7 +729,7 @@ impl<'arena> CompilationContext<'_, 'arena, '_> {
         Ok(())
     }
 
-    fn captured_mutation_requires_reference_atom(
+    fn retained_mutation_requires_reference_atom(
         &self,
         owner: ExecutableId,
         reference_id: Option<ReferenceId>,
@@ -750,8 +750,20 @@ impl<'arena> CompilationContext<'_, 'arena, '_> {
                 invariant: "Oxc reference has compiler identity",
                 span: Some(span),
             })?;
-        let NativeReferenceId::Resolved(reference) = native else {
-            return Ok(false);
+        let reference = match native {
+            NativeReferenceId::Resolved(reference) => reference,
+            NativeReferenceId::Unresolved(reference) => {
+                let reference = self
+                    .planned
+                    .plan
+                    .unresolved_globals()
+                    .get(reference.index())
+                    .ok_or(LeafCompilationError::SemanticInvariant {
+                        invariant: "unresolved compiler reference exists",
+                        span: Some(span),
+                    })?;
+                return Ok(reference.access().writes());
+            }
         };
         let reference = self.planned.plan.resolved_reference(reference).ok_or(
             LeafCompilationError::SemanticInvariant {
@@ -765,7 +777,7 @@ impl<'arena> CompilationContext<'_, 'arena, '_> {
                 span: Some(span),
             });
         }
-        if !reference.access().reads() || !reference.access().writes() {
+        if !reference.access().writes() {
             return Ok(false);
         }
         let binding = self.planned.plan.binding(reference.binding()).ok_or(
@@ -774,11 +786,13 @@ impl<'arena> CompilationContext<'_, 'arena, '_> {
                 span: Some(span),
             },
         )?;
-        Ok(binding.executable() != owner
-            && matches!(
-                binding.placement(),
-                StoragePlacement::Argument { .. } | StoragePlacement::Local
-            ))
+        Ok(match binding.placement() {
+            StoragePlacement::Argument { .. } | StoragePlacement::Local => {
+                binding.executable() != owner
+            }
+            StoragePlacement::GlobalObject | StoragePlacement::GlobalLexical => true,
+            StoragePlacement::ModuleLocal | StoragePlacement::ModuleImport => false,
+        })
     }
 
     fn class_instance_initializer_owner(

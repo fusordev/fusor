@@ -79,6 +79,26 @@ pub(super) struct GlobalReferenceOperand {
     pub(super) name: JsString,
 }
 
+pub(super) struct RetainedRealmGlobalReference {
+    operand: GlobalReferenceOperand,
+    resolved: bool,
+}
+
+impl RetainedRealmGlobalReference {
+    pub(super) fn trace_roots(&self, mark: &mut dyn FnMut(CollectionRoot)) {
+        mark(CollectionRoot::Heap(HeapReference::Object(
+            self.operand.object,
+        )));
+        if let Some(binding) = &self.operand.eval_binding {
+            mark(CollectionRoot::BindingCell(binding.cell));
+        }
+    }
+
+    pub(super) fn name(&self) -> &JsString {
+        &self.operand.name
+    }
+}
+
 pub(super) struct EvalVariableOperand {
     environment: SharedEvalVariableEnvironment,
     index: usize,
@@ -388,6 +408,35 @@ pub(super) fn global_reference_operand(
     })
 }
 
+pub(super) fn retain_realm_global_reference(
+    runtime: &Runtime,
+    operand: GlobalReferenceOperand,
+) -> Result<RetainedRealmGlobalReference, ExecutionError> {
+    let resolved = if operand.eval_binding.is_some() {
+        true
+    } else {
+        let state = runtime
+            .global_bindings
+            .get(operand.binding)
+            .ok_or(EngineFault::StaleHeapEdge {
+                edge: "realm global binding",
+                index: operand.binding.index(),
+                generation: operand.binding.generation(),
+            })?
+            .state;
+        match state {
+            RealmGlobalBindingState::Unresolved => lookup_heap_property(
+                runtime,
+                Some(HeapReference::Object(operand.object)),
+                &operand.key,
+            )?
+            .is_some(),
+            RealmGlobalBindingState::Object | RealmGlobalBindingState::Lexical { .. } => true,
+        }
+    };
+    Ok(RetainedRealmGlobalReference { operand, resolved })
+}
+
 fn lookup_eval_variable_binding(frame: &Frame, name: &JsString) -> Option<EvalVariableOperand> {
     let mut current = frame.eval_environment.as_ref().map(Rc::clone);
     while let Some(environment) = current {
@@ -620,13 +669,58 @@ pub(super) fn read_realm_global(
     }
 }
 
+pub(super) fn read_retained_realm_global(
+    runtime: &Runtime,
+    reference: &RetainedRealmGlobalReference,
+) -> Result<RealmGlobalReadOutcome, ExecutionError> {
+    if !reference.resolved {
+        return Ok(RealmGlobalReadOutcome::Missing);
+    }
+    read_realm_global(runtime, &reference.operand)
+}
+
 pub(super) fn write_realm_global(
     runtime: &mut Runtime,
-    global: GlobalReferenceOperand,
+    global: &GlobalReferenceOperand,
     value: StoredValue,
     strict: bool,
     execution_budget: &mut ExecutionBudget,
 ) -> Result<RealmGlobalWriteOutcome, ExecutionError> {
+    write_realm_global_with_resolution(runtime, global, value, strict, None, execution_budget)
+}
+
+pub(super) fn write_retained_realm_global(
+    runtime: &mut Runtime,
+    reference: &RetainedRealmGlobalReference,
+    value: StoredValue,
+    strict: bool,
+    execution_budget: &mut ExecutionBudget,
+) -> Result<RealmGlobalWriteOutcome, ExecutionError> {
+    let resolved = reference.resolved;
+    write_realm_global_with_resolution(
+        runtime,
+        &reference.operand,
+        value,
+        strict,
+        Some(resolved),
+        execution_budget,
+    )
+}
+
+fn write_realm_global_with_resolution(
+    runtime: &mut Runtime,
+    global: &GlobalReferenceOperand,
+    value: StoredValue,
+    strict: bool,
+    retained_resolution: Option<bool>,
+    execution_budget: &mut ExecutionBudget,
+) -> Result<RealmGlobalWriteOutcome, ExecutionError> {
+    if retained_resolution == Some(false) {
+        if strict {
+            return Ok(RealmGlobalWriteOutcome::Missing);
+        }
+        return write_realm_global_object(runtime, global, value, false, execution_budget);
+    }
     if let Some(cell) = global.eval_binding.as_ref().map(|binding| binding.cell) {
         return write_eval_variable(runtime, cell, value);
     }
@@ -641,69 +735,22 @@ pub(super) fn write_realm_global(
         .state;
     match state {
         RealmGlobalBindingState::Unresolved => {
-            let present = lookup_heap_property(
-                runtime,
-                Some(HeapReference::Object(global.object)),
-                &global.key,
-            )?
-            .is_some();
+            let present = match retained_resolution {
+                Some(resolved) => resolved,
+                None => lookup_heap_property(
+                    runtime,
+                    Some(HeapReference::Object(global.object)),
+                    &global.key,
+                )?
+                .is_some(),
+            };
             if !present && strict {
                 return Ok(RealmGlobalWriteOutcome::Missing);
             }
-            let base = StoredValue::Object(global.object);
-            Ok(
-                match write_static_property(
-                    runtime,
-                    global.realm,
-                    &base,
-                    global.key,
-                    value,
-                    strict,
-                    execution_budget,
-                )? {
-                    PropertyWriteOutcome::Complete => RealmGlobalWriteOutcome::Complete,
-                    PropertyWriteOutcome::Setter {
-                        function,
-                        receiver,
-                        value,
-                    } => RealmGlobalWriteOutcome::Setter {
-                        function,
-                        receiver,
-                        value,
-                    },
-                    PropertyWriteOutcome::Failed(failure) => {
-                        RealmGlobalWriteOutcome::Property(failure)
-                    }
-                },
-            )
+            write_realm_global_object(runtime, global, value, strict, execution_budget)
         }
         RealmGlobalBindingState::Object => {
-            let base = StoredValue::Object(global.object);
-            Ok(
-                match write_static_property(
-                    runtime,
-                    global.realm,
-                    &base,
-                    global.key,
-                    value,
-                    strict,
-                    execution_budget,
-                )? {
-                    PropertyWriteOutcome::Complete => RealmGlobalWriteOutcome::Complete,
-                    PropertyWriteOutcome::Setter {
-                        function,
-                        receiver,
-                        value,
-                    } => RealmGlobalWriteOutcome::Setter {
-                        function,
-                        receiver,
-                        value,
-                    },
-                    PropertyWriteOutcome::Failed(failure) => {
-                        RealmGlobalWriteOutcome::Property(failure)
-                    }
-                },
-            )
+            write_realm_global_object(runtime, global, value, strict, execution_budget)
         }
         RealmGlobalBindingState::Lexical { cell, mutable } => {
             let binding = runtime
@@ -725,6 +772,39 @@ pub(super) fn write_realm_global(
             Ok(RealmGlobalWriteOutcome::Complete)
         }
     }
+}
+
+fn write_realm_global_object(
+    runtime: &mut Runtime,
+    global: &GlobalReferenceOperand,
+    value: StoredValue,
+    strict: bool,
+    execution_budget: &mut ExecutionBudget,
+) -> Result<RealmGlobalWriteOutcome, ExecutionError> {
+    let base = StoredValue::Object(global.object);
+    Ok(
+        match write_static_property(
+            runtime,
+            global.realm,
+            &base,
+            global.key.clone(),
+            value,
+            strict,
+            execution_budget,
+        )? {
+            PropertyWriteOutcome::Complete => RealmGlobalWriteOutcome::Complete,
+            PropertyWriteOutcome::Setter {
+                function,
+                receiver,
+                value,
+            } => RealmGlobalWriteOutcome::Setter {
+                function,
+                receiver,
+                value,
+            },
+            PropertyWriteOutcome::Failed(failure) => RealmGlobalWriteOutcome::Property(failure),
+        },
+    )
 }
 
 fn write_eval_variable(

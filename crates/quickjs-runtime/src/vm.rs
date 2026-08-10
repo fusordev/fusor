@@ -329,11 +329,25 @@ enum FrameBinding {
 
 enum OperandStackEntry {
     JavaScript(StoredValue),
-    CapturedReference { index: u32, cell: BindingCellId },
+    CapturedReference {
+        index: u32,
+        cell: BindingCellId,
+    },
+    RealmGlobalReference {
+        index: u32,
+        reference: RetainedRealmGlobalReference,
+    },
     CapturedReferenceAnchor,
-    Catch { handler: InstructionIndex },
-    ForOfCatch { active: bool, asynchronous: bool },
-    FinallyReturn { continuation: InstructionIndex },
+    Catch {
+        handler: InstructionIndex,
+    },
+    ForOfCatch {
+        active: bool,
+        asynchronous: bool,
+    },
+    FinallyReturn {
+        continuation: InstructionIndex,
+    },
 }
 
 enum PendingAsyncIteratorClose {
@@ -4312,6 +4326,9 @@ pub(crate) fn trace_frame_roots(frame: &Frame, mark: &mut dyn FnMut(CollectionRo
             OperandStackEntry::JavaScript(value) => trace_stored_value_root(value, mark),
             OperandStackEntry::CapturedReference { cell, .. } => {
                 mark(CollectionRoot::BindingCell(*cell));
+            }
+            OperandStackEntry::RealmGlobalReference { reference, .. } => {
+                reference.trace_roots(mark);
             }
             OperandStackEntry::CapturedReferenceAnchor
             | OperandStackEntry::Catch { .. }
