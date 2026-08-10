@@ -1728,6 +1728,22 @@ fn proxy_get_drives_operator_and_property_key_conversion() {
 }
 
 #[test]
+fn symbol_primitive_get_uses_the_mutable_intrinsic_prototype_and_original_receiver() {
+    assert_eq!(
+        text(
+            "var value=Symbol('value'),seen=[];\
+             Object.defineProperty(Symbol.prototype,'getter',{configurable:true,get:function(){\
+               'use strict';seen.push(this===value);return 'getter';}});\
+             var proxy=new Proxy({}, {get:function(target,key,receiver){\
+               seen.push(key==='key');seen.push(receiver===value);return 'proxy';}});\
+             Object.setPrototypeOf(Symbol.prototype,proxy);\
+             return [value.getter,value.key,seen.join(',')].join('|');"
+        ),
+        "getter|proxy|true,true,true"
+    );
+}
+
+#[test]
 fn object_prototype_to_string_uses_the_regexp_matcher_builtin_tag() {
     assert_eq!(
         text("return Object.prototype.toString.call(/./);"),
