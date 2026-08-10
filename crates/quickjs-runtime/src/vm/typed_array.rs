@@ -2464,10 +2464,10 @@ pub(super) fn finish_typed_array_prototype_includes_from_index(
     let start = typed_array_relative_bound(relative, state.length);
     for index in start..state.length {
         execution_budget.charge_instructions(1)?;
-        if runtime
+        let element = runtime
             .typed_array_read_index(state.object, index)?
-            .is_some_and(|element| state.needle.same_value_zero(&element))
-        {
+            .unwrap_or(StoredValue::Undefined);
+        if state.needle.same_value_zero(&element) {
             return Ok(NativeDispatch::Immediate(StoredValue::Boolean(true)));
         }
     }

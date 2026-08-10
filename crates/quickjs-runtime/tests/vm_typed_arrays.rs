@@ -454,6 +454,16 @@ fn typed_array_includes_uses_same_value_zero_without_coercing_the_search_value()
         ),
         "false"
     );
+    assert_eq!(
+        rendered(
+            "var fixedBuffer=new ArrayBuffer(4,{maxByteLength:4}),fixed=new Uint8Array(fixedBuffer,0,4);\
+             var fixedResult=fixed.includes(undefined,{valueOf(){fixedBuffer.resize(2);return 0}});\
+             var autoBuffer=new ArrayBuffer(4,{maxByteLength:4}),auto=new Uint8Array(autoBuffer);\
+             var autoResult=auto.includes(undefined,{valueOf(){autoBuffer.resize(0);return 0}});\
+             return [fixedResult,autoResult].join('|');"
+        ),
+        "true|true"
+    );
 }
 
 #[test]
