@@ -2723,7 +2723,7 @@ pub(super) fn execute_one(
             let value = pop(frame)?;
             let base = pop(frame)?;
             if let Some(reference) = base.heap_reference()
-                && runtime.proxy_state(reference)?.is_some()
+                && static_property_set_reaches_proxy(runtime, reference, &property.key)?
             {
                 let return_to =
                     CallReturn::discard(verified_instruction.successors().fallthrough().ok_or(

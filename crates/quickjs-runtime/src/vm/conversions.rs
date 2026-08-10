@@ -4273,13 +4273,16 @@ fn finish_property_key_target(
         }
         .into()),
         PropertyKeyTarget::Read { base, realm } => {
-            if let Some(reference) = base.heap_reference()
-                && runtime.proxy_state(reference)?.is_some()
+            let outcome = read_observable_static_property(runtime, realm, &base, &property.key)?;
+            if let ObservablePropertyReadOutcome::Proxy {
+                reference,
+                receiver,
+            } = outcome
             {
                 return begin_internal_get(
                     runtime,
                     reference,
-                    base.duplicate(),
+                    receiver,
                     property.key,
                     realm,
                     return_to,
@@ -4287,7 +4290,10 @@ fn finish_property_key_target(
                     execution_budget,
                 );
             }
-            match read_static_property(runtime, realm, &base, &property.key)? {
+            let ObservablePropertyReadOutcome::Complete(outcome) = outcome else {
+                unreachable!("observable computed property read classification is exhaustive")
+            };
+            match outcome {
                 PropertyReadOutcome::Value(value) => Ok(NativeDispatch::Immediate(value)),
                 PropertyReadOutcome::Getter { function, receiver } => {
                     Ok(NativeDispatch::Call(NativeCall {

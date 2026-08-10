@@ -866,6 +866,49 @@ pub(super) fn read_observable_static_property(
     }
 }
 
+/// Reports whether an ordinary `[[Set]]` walk must cross a Proxy before an
+/// own property determines the write. This keeps the direct named-write fast
+/// path for ordinary chains while preserving the observable internal-method
+/// dispatch required when a Proxy appears in the prototype chain.
+pub(super) fn static_property_set_reaches_proxy(
+    runtime: &Runtime,
+    mut reference: HeapReference,
+    key: &PropertyKey,
+) -> Result<bool, ExecutionError> {
+    let mut remaining = runtime
+        .functions
+        .len()
+        .saturating_add(runtime.objects.len())
+        .saturating_add(1);
+    loop {
+        if remaining == 0 {
+            return Err(EngineFault::RuntimeInvariant {
+                message: "ordinary prototype chain contains a cycle",
+            }
+            .into());
+        }
+        remaining -= 1;
+        if runtime.proxy_state(reference)?.is_some() {
+            return Ok(true);
+        }
+        if let HeapReference::Object(object) = reference
+            && matches!(
+                runtime.typed_array_own_property(object, key)?,
+                TypedArrayOwnProperty::IntegerIndexed(_)
+            )
+        {
+            return Ok(false);
+        }
+        if heap_own_property(runtime, reference, key)?.is_some() {
+            return Ok(false);
+        }
+        let Some(prototype) = runtime.object_record(reference)?.prototype() else {
+            return Ok(false);
+        };
+        reference = prototype;
+    }
+}
+
 fn static_property_base(
     runtime: &Runtime,
     realm: RealmId,

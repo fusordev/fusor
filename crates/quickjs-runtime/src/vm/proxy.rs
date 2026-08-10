@@ -491,6 +491,14 @@ fn finish_proxy_get_own_descriptor(
         return Ok(NativeDispatch::Immediate(StoredValue::Undefined));
     };
     let setting_config_false = !result.layout().is_configurable();
+    let reporting_non_writable_data = matches!(
+        &result,
+        OwnProperty::Data { layout, .. } if layout.writable() == Some(false)
+    );
+    let target_is_writable_data = matches!(
+        &target,
+        Some(OwnProperty::Data { layout, .. }) if layout.writable() == Some(true)
+    );
     let definition = definition_from_complete_own(&result);
     let compatible = match &target {
         Some(target) => !matches!(
@@ -507,6 +515,7 @@ fn finish_proxy_get_own_descriptor(
         || target
             .as_ref()
             .is_some_and(|target| target.layout().is_configurable() && setting_config_false)
+        || (setting_config_false && reporting_non_writable_data && target_is_writable_data)
     {
         return proxy_abrupt(
             state.realm,
@@ -1109,6 +1118,12 @@ pub(super) fn advance_proxy_define(
                     message: "Proxy define validation lost its target descriptor",
                 })?;
             let setting_config_false = state.definition.requested_configurable() == Some(false);
+            let setting_writable_false = state.definition.requested_writable() == Some(false);
+            let target_is_non_configurable_writable_data = matches!(
+                target,
+                Some(OwnProperty::Data { layout, .. })
+                    if !layout.is_configurable() && layout.writable() == Some(true)
+            );
             let compatible = match target {
                 Some(target) => !matches!(
                     validate_and_apply_existing(&state.definition, target),
@@ -1124,6 +1139,7 @@ pub(super) fn advance_proxy_define(
                 || target
                     .as_ref()
                     .is_some_and(|target| target.layout().is_configurable() && setting_config_false)
+                || (setting_writable_false && target_is_non_configurable_writable_data)
             {
                 return proxy_abrupt(
                     state.realm,
