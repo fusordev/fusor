@@ -122,8 +122,30 @@ fn normal_finalizer_expressions_do_not_replace_script_completion() {
     assert!(
         opcodes
             .windows(2)
-            .any(|window| window == [FinalOpcode::Push2, FinalOpcode::Drop]),
-        "the normally completing finalizer discards its expression value"
+            .any(|window| window == [FinalOpcode::Push2, FinalOpcode::PutLoc0]),
+        "the finalizer records its own Script completion until it returns normally"
+    );
+    assert!(
+        opcodes.windows(5).any(|window| {
+            window
+                == [
+                    FinalOpcode::GetLoc0,
+                    FinalOpcode::PutLoc1,
+                    FinalOpcode::Undefined,
+                    FinalOpcode::PutLoc0,
+                    FinalOpcode::Gosub,
+                ]
+        }),
+        "the protected completion is saved before entering the finalizer"
+    );
+    assert!(
+        opcodes.windows(3).any(|window| window
+            == [
+                FinalOpcode::Gosub,
+                FinalOpcode::GetLoc1,
+                FinalOpcode::PutLoc0
+            ]),
+        "a normally completing finalizer restores the protected completion"
     );
 }
 

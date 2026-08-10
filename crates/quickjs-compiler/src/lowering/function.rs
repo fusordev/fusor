@@ -41,6 +41,61 @@ fn script_completion_variable_definition(
     ))
 }
 
+fn script_finally_completion_variable_definition(
+    constants: &CompiledConstantPool,
+) -> Result<VariableDefinition, LeafCompilationError> {
+    Ok(VariableDefinition::new(
+        Some(constants.metadata_atom_index(CompiledMetadataAtomKey::ScriptFinallyCompletion)?),
+        ScopeLink::End,
+        CompilerBindingPolicy::new(
+            VerifiedBindingKind::Var,
+            VerifiedInitializationPolicy::UndefinedAtInstantiation,
+            VerifiedWritePolicy::Mutable,
+            false,
+        ),
+        false,
+        None,
+    ))
+}
+
+fn script_internal_local_count(
+    finally_completion_count: usize,
+) -> Result<usize, LeafCompilationError> {
+    finally_completion_count
+        .checked_add(1)
+        .ok_or(LeafCompilationError::CapacityExceeded {
+            domain: "script internal locals",
+        })
+}
+
+fn append_script_internal_variable_definitions(
+    variable_definitions: &mut Vec<VariableDefinition>,
+    constants: &CompiledConstantPool,
+    finally_completion_count: usize,
+) -> Result<(), LeafCompilationError> {
+    variable_definitions
+        .try_reserve(script_internal_local_count(finally_completion_count)?)
+        .map_err(|_| LeafCompilationError::CapacityExceeded {
+            domain: "script internal variable definitions",
+        })?;
+    variable_definitions.push(script_completion_variable_definition(constants)?);
+    for _ in 0..finally_completion_count {
+        variable_definitions.push(script_finally_completion_variable_definition(constants)?);
+    }
+    Ok(())
+}
+
+fn lowered_locals(layout: &FrameLayout) -> Vec<LoweredLocal> {
+    layout
+        .locals
+        .iter()
+        .map(|local| LoweredLocal {
+            binding: local.binding,
+            slot: local.slot,
+        })
+        .collect()
+}
+
 const fn source_byte_span(span: Span) -> SourceByteSpan {
     SourceByteSpan::new(span.start, span.end)
 }
@@ -348,6 +403,8 @@ impl<'compiler, 'statement, 'unit, 'arena, 'scope, 'layout>
                 abrupt_markers: Vec::new(),
                 disconnected_abrupt_floors: Vec::new(),
                 completion: StatementCompletion::Discard,
+                next_script_finally_completion: 0,
+                script_finally_completion_limit: 0,
             },
             flow,
             terminal,
@@ -429,6 +486,8 @@ impl<'compiler, 'statement, 'unit, 'arena, 'scope, 'layout>
                 abrupt_markers: Vec::new(),
                 disconnected_abrupt_floors: Vec::new(),
                 completion: StatementCompletion::Discard,
+                next_script_finally_completion: 0,
+                script_finally_completion_limit: 0,
             },
             flow,
             terminal: if arrow.r#async {
@@ -443,6 +502,7 @@ impl<'compiler, 'statement, 'unit, 'arena, 'scope, 'layout>
         compiler: &'compiler CompilationContext<'unit, 'arena, 'scope>,
         program: &'statement Program<'arena>,
         completion: LocalSlot,
+        script_internal_local_count: usize,
         planning: FunctionPlanningContext<'layout>,
         limits: VerificationLimits,
     ) -> Result<Self, LeafCompilationError> {
@@ -480,6 +540,8 @@ impl<'compiler, 'statement, 'unit, 'arena, 'scope, 'layout>
                 abrupt_markers: Vec::new(),
                 disconnected_abrupt_floors: Vec::new(),
                 completion: StatementCompletion::Script(completion),
+                next_script_finally_completion: 1,
+                script_finally_completion_limit: script_internal_local_count,
             },
             flow: PlannedControlFlow::new(limits),
             terminal: FunctionTerminal::Script(completion),
@@ -500,6 +562,8 @@ impl<'compiler, 'statement, 'unit, 'arena, 'scope, 'layout>
             || !self.state.controls.is_empty()
             || !self.state.abrupt_markers.is_empty()
             || !self.state.disconnected_abrupt_floors.is_empty()
+            || self.state.next_script_finally_completion
+                != self.state.script_finally_completion_limit
         {
             return Err(LeafCompilationError::SemanticInvariant {
                 invariant: match self.terminal {
@@ -643,14 +707,7 @@ impl CompilationContext<'_, '_, '_> {
             local_count: layout.local_count,
             capture_count,
             capture_layout,
-            locals: layout
-                .locals
-                .iter()
-                .map(|local| LoweredLocal {
-                    binding: local.binding,
-                    slot: local.slot,
-                })
-                .collect(),
+            locals: lowered_locals(&layout),
             constants: Arc::clone(constants.entries()),
             atoms: Arc::clone(constants.atoms()),
             closure_variables,
@@ -738,14 +795,7 @@ impl CompilationContext<'_, '_, '_> {
             local_count: layout.local_count,
             capture_count,
             capture_layout,
-            locals: layout
-                .locals
-                .iter()
-                .map(|local| LoweredLocal {
-                    binding: local.binding,
-                    slot: local.slot,
-                })
-                .collect(),
+            locals: lowered_locals(&layout),
             constants: Arc::clone(constants.entries()),
             atoms: Arc::clone(constants.atoms()),
             closure_variables,
@@ -813,14 +863,7 @@ impl CompilationContext<'_, '_, '_> {
             local_count: layout.local_count,
             capture_count,
             capture_layout,
-            locals: layout
-                .locals
-                .iter()
-                .map(|local| LoweredLocal {
-                    binding: local.binding,
-                    slot: local.slot,
-                })
-                .collect(),
+            locals: lowered_locals(&layout),
             constants: Arc::clone(constants.entries()),
             atoms: Arc::clone(constants.atoms()),
             closure_variables,
@@ -964,14 +1007,7 @@ impl CompilationContext<'_, '_, '_> {
             local_count: layout.local_count,
             capture_count,
             capture_layout,
-            locals: layout
-                .locals
-                .iter()
-                .map(|local| LoweredLocal {
-                    binding: local.binding,
-                    slot: local.slot,
-                })
-                .collect(),
+            locals: lowered_locals(&layout),
             constants: Arc::clone(constants.entries()),
             atoms: Arc::clone(constants.atoms()),
             closure_variables,
@@ -1017,8 +1053,11 @@ impl CompilationContext<'_, '_, '_> {
                     CompilerExecutableKind::DynamicFunctionScript,
                 )
             };
+        let finally_completion_count = self.script_finally_completion_count(executable_id)?;
+        let internal_local_count = script_internal_local_count(finally_completion_count)?;
         let layout = FrameLayout::new(
-            FrameLayoutInput::new(&self.planned.plan, executable_id).with_internal_locals(1),
+            FrameLayoutInput::new(&self.planned.plan, executable_id)
+                .with_internal_locals(internal_local_count),
         )?;
         let completion = layout.internal_local(0)?;
         let constants = tree_layout.constant_pool(executable_id)?;
@@ -1028,9 +1067,15 @@ impl CompilationContext<'_, '_, '_> {
             tree_layout,
             constants,
         };
-        let flow =
-            FunctionLoweringSession::for_program(self, program, completion, planning, limits)?
-                .lower()?;
+        let flow = FunctionLoweringSession::for_program(
+            self,
+            program,
+            completion,
+            internal_local_count,
+            planning,
+            limits,
+        )?
+        .lower()?;
         let program_scope =
             self.created_scope(program.scope_id.get(), program.node_id.get(), program.span)?;
         let capture_layout =
@@ -1050,7 +1095,11 @@ impl CompilationContext<'_, '_, '_> {
             tree_layout,
             constants,
         )?;
-        variable_definitions.push(script_completion_variable_definition(constants)?);
+        append_script_internal_variable_definitions(
+            &mut variable_definitions,
+            constants,
+            finally_completion_count,
+        )?;
         let closure_definitions =
             self.compiled_closure_definitions(&closure_variables, &realm_globals, constants)?;
         let capture_count =
@@ -1065,14 +1114,7 @@ impl CompilationContext<'_, '_, '_> {
             local_count: layout.local_count,
             capture_count,
             capture_layout,
-            locals: layout
-                .locals
-                .iter()
-                .map(|local| LoweredLocal {
-                    binding: local.binding,
-                    slot: local.slot,
-                })
-                .collect(),
+            locals: lowered_locals(&layout),
             constants: Arc::clone(constants.entries()),
             atoms: Arc::clone(constants.atoms()),
             closure_variables,
@@ -1084,6 +1126,57 @@ impl CompilationContext<'_, '_, '_> {
             function_name_span: None,
             flow,
         })
+    }
+
+    pub(in crate::lowering) fn script_finally_completion_count(
+        &self,
+        executable: ExecutableId,
+    ) -> Result<usize, LeafCompilationError> {
+        let nodes = self.unit.semantic().nodes();
+        let mut owners = vec![None; nodes.len()];
+        let mut count = 0_usize;
+        for (node_id, node) in nodes.iter_enumerated() {
+            let owner = match node.kind() {
+                AstKind::Program(_)
+                | AstKind::Function(_)
+                | AstKind::ArrowFunctionExpression(_) => self
+                    .planned
+                    .identities
+                    .executable_by_node
+                    .get(node_id.index())
+                    .copied()
+                    .flatten(),
+                AstKind::StaticBlock(_) => None,
+                _ => {
+                    let parent = nodes.parent_id(node_id);
+                    if parent.index() >= node_id.index() {
+                        return Err(LeafCompilationError::SemanticInvariant {
+                            invariant: "semantic parents precede children in node order",
+                            span: Some(node.kind().span()),
+                        });
+                    }
+                    owners.get(parent.index()).copied().flatten()
+                }
+            };
+            let owner_slot =
+                owners
+                    .get_mut(node_id.index())
+                    .ok_or(LeafCompilationError::SemanticInvariant {
+                        invariant: "semantic node identity indexes script finalizer ownership",
+                        span: Some(node.kind().span()),
+                    })?;
+            *owner_slot = owner;
+            if owner == Some(executable)
+                && matches!(node.kind(), AstKind::TryStatement(statement) if statement.finalizer.is_some())
+            {
+                count = count
+                    .checked_add(1)
+                    .ok_or(LeafCompilationError::CapacityExceeded {
+                        domain: "script finalizers",
+                    })?;
+            }
+        }
+        Ok(count)
     }
 }
 

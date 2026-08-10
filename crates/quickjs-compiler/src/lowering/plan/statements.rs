@@ -7,8 +7,8 @@ use super::super::{
     ForStatementInit, FrameLayout, FrameSlot, FunctionPlanningContext, FunctionTreeLayout, GetSpan,
     IfStatement, InitializationPolicy, LabelIdentifier, LabeledStatement, LeafCompilationError,
     Operands, PlannedControlFlow, ReturnStatement, StoragePlacement, ThrowStatement, TryStatement,
-    UnsupportedLeafFeature, WhileStatement, WritePolicy, compact_put_local, plan_put_slot,
-    unsupported,
+    UnsupportedLeafFeature, WhileStatement, WritePolicy, compact_get_local, compact_put_local,
+    plan_put_slot, unsupported,
 };
 
 use oxc_ast::ast::{
@@ -22,7 +22,8 @@ use quickjs_frontend::Span;
 use crate::lowering::{CompilerLabel, LocalSlot, PlannedInstruction};
 
 use super::abrupt::{
-    AbruptMarker, AbruptMarkerKind, AbruptMarkerTag, TryFinallyCatchPlan, TryFinallyLabels,
+    AbruptMarker, AbruptMarkerKind, AbruptMarkerTag, FinallyTarget, ScriptCompletionPreservation,
+    TryFinallyCatchPlan, TryFinallyLabels,
 };
 use super::control::{
     ControlRegion, LoopJump, StatementControlStack, SwitchControlLabels,
@@ -113,6 +114,8 @@ pub(in crate::lowering) struct StatementPlanningState<'statement, 'arena> {
     /// dead tails remain lowered, but cannot consume markers they cannot reach.
     pub(in crate::lowering) disconnected_abrupt_floors: Vec<usize>,
     pub(in crate::lowering) completion: StatementCompletion,
+    pub(in crate::lowering) next_script_finally_completion: usize,
+    pub(in crate::lowering) script_finally_completion_limit: usize,
 }
 
 #[derive(Clone, Copy)]
@@ -781,6 +784,25 @@ impl<'arena> CompilationContext<'_, 'arena, '_> {
         flow.emit(PlannedInstruction::new(opcode, operands, span))
     }
 
+    fn push_reset_script_completion<'statement>(
+        completion: StatementCompletion,
+        span: Span,
+        work: &mut Vec<StatementWork<'statement, 'arena>>,
+    ) {
+        let StatementCompletion::Script(slot) = completion else {
+            return;
+        };
+        let (opcode, operands) = compact_put_local(slot);
+        work.push(StatementWork::Emit(PlannedInstruction::new(
+            opcode, operands, span,
+        )));
+        work.push(StatementWork::Emit(PlannedInstruction::new(
+            FinalOpcode::Undefined,
+            Operands::None,
+            span,
+        )));
+    }
+
     #[expect(
         clippy::too_many_arguments,
         reason = "return scheduling keeps cleanup, completion, await, and tail-position decisions explicit"
@@ -919,11 +941,7 @@ impl<'arena> CompilationContext<'_, 'arena, '_> {
             match &marker.kind {
                 AbruptMarkerKind::Catch { finalizer } => {
                     if let Some(finalizer) = finalizer {
-                        work.push(StatementWork::Branch {
-                            kind: BranchKind::Gosub,
-                            target: finalizer.clone(),
-                            span,
-                        });
+                        Self::push_finalizer_gosub(work, finalizer, span);
                     }
                     work.push(StatementWork::Emit(PlannedInstruction::new(
                         FinalOpcode::NipCatch,
@@ -1095,6 +1113,7 @@ impl<'arena> CompilationContext<'_, 'arena, '_> {
         state.work.push(StatementWork::Bind(done.clone()));
         state.work.push(StatementWork::PopScope(catch_scope));
         state.work.push(StatementWork::VisitBlock(&handler.body));
+        Self::push_reset_script_completion(state.completion, handler.body.span, &mut state.work);
         state.work.push(StatementWork::CatchBinding {
             handler,
             body_scope: catch_body_scope,
@@ -1146,9 +1165,34 @@ impl<'arena> CompilationContext<'_, 'arena, '_> {
         flow: &mut PlannedControlFlow,
         state: &mut StatementPlanningState<'statement, 'arena>,
     ) -> Result<(), LeafCompilationError> {
+        let script_completion = match state.completion {
+            StatementCompletion::Discard => None,
+            StatementCompletion::Script(current) => {
+                let index = state.next_script_finally_completion;
+                if index >= state.script_finally_completion_limit {
+                    return Err(LeafCompilationError::SemanticInvariant {
+                        invariant: "script finalizer completion slot belongs to the immutable frame layout",
+                        span: Some(finalizer.span),
+                    });
+                }
+                state.next_script_finally_completion =
+                    index
+                        .checked_add(1)
+                        .ok_or(LeafCompilationError::CapacityExceeded {
+                            domain: "script finalizer completion slots",
+                        })?;
+                Some(ScriptCompletionPreservation {
+                    current,
+                    saved: layout.internal_local(index)?,
+                })
+            }
+        };
         let labels = TryFinallyLabels {
             handler: flow.new_statement_label_with_offset(statement.span, 1)?,
-            finalizer: flow.new_statement_label_with_offset(finalizer.span, 2)?,
+            finalizer: FinallyTarget {
+                label: flow.new_statement_label_with_offset(finalizer.span, 2)?,
+                script_completion,
+            },
             done: flow.new_statement_label(statement.span)?,
         };
         let catch_plan = self.create_try_finally_catch_plan(statement, layout, flow)?;
@@ -1220,7 +1264,14 @@ impl<'arena> CompilationContext<'_, 'arena, '_> {
         ));
         work.push(StatementWork::SetCompletion(completion));
         work.push(StatementWork::VisitBlock(finalizer));
-        work.push(StatementWork::SetCompletion(StatementCompletion::Discard));
+        work.push(StatementWork::SetCompletion(
+            labels
+                .finalizer
+                .script_completion
+                .map_or(StatementCompletion::Discard, |completion| {
+                    StatementCompletion::Script(completion.current)
+                }),
+        ));
         work.push(StatementWork::PushAbruptMarker(
             AbruptMarkerKind::FinallySubroutine,
         ));
@@ -1229,7 +1280,7 @@ impl<'arena> CompilationContext<'_, 'arena, '_> {
                 span: finalizer.span,
             });
         }
-        work.push(StatementWork::Bind(labels.finalizer.clone()));
+        work.push(StatementWork::Bind(labels.finalizer.label.clone()));
     }
 
     fn push_try_finally_handler_path<'statement>(
@@ -1246,11 +1297,7 @@ impl<'arena> CompilationContext<'_, 'arena, '_> {
                 catch.handler.body.span,
             )));
             Self::schedule_throw_cleanup(outer_abrupt_markers, catch.handler.body.span, work)?;
-            work.push(StatementWork::Branch {
-                kind: BranchKind::Gosub,
-                target: labels.finalizer.clone(),
-                span: catch.handler.body.span,
-            });
+            Self::push_finalizer_gosub(work, &labels.finalizer, catch.handler.body.span);
             work.push(StatementWork::Bind(catch.rethrow.clone()));
 
             Self::push_normal_finalizer_path(
@@ -1265,6 +1312,16 @@ impl<'arena> CompilationContext<'_, 'arena, '_> {
                 span: catch.handler.body.span,
             });
             work.push(StatementWork::VisitBlock(&catch.handler.body));
+            Self::push_reset_script_completion(
+                labels
+                    .finalizer
+                    .script_completion
+                    .map_or(StatementCompletion::Discard, |completion| {
+                        StatementCompletion::Script(completion.current)
+                    }),
+                catch.handler.body.span,
+                work,
+            );
             work.push(StatementWork::PushAbruptMarker(AbruptMarkerKind::Catch {
                 finalizer: Some(labels.finalizer.clone()),
             }));
@@ -1293,11 +1350,7 @@ impl<'arena> CompilationContext<'_, 'arena, '_> {
                 statement.span,
             )));
             Self::schedule_throw_cleanup(outer_abrupt_markers, statement.span, work)?;
-            work.push(StatementWork::Branch {
-                kind: BranchKind::Gosub,
-                target: labels.finalizer.clone(),
-                span: statement.span,
-            });
+            Self::push_finalizer_gosub(work, &labels.finalizer, statement.span);
             work.push(StatementWork::Bind(labels.handler.clone()));
         }
         Ok(())
@@ -1334,7 +1387,7 @@ impl<'arena> CompilationContext<'_, 'arena, '_> {
 
     fn push_normal_finalizer_path<'statement>(
         work: &mut Vec<StatementWork<'statement, 'arena>>,
-        finalizer: &CompilerLabel,
+        finalizer: &FinallyTarget,
         done: &CompilerLabel,
         span: Span,
     ) {
@@ -1348,11 +1401,7 @@ impl<'arena> CompilationContext<'_, 'arena, '_> {
             Operands::None,
             span,
         )));
-        work.push(StatementWork::Branch {
-            kind: BranchKind::Gosub,
-            target: finalizer.clone(),
-            span,
-        });
+        Self::push_finalizer_gosub(work, finalizer, span);
         work.push(StatementWork::Emit(PlannedInstruction::new(
             FinalOpcode::Undefined,
             Operands::None,
@@ -1363,6 +1412,47 @@ impl<'arena> CompilationContext<'_, 'arena, '_> {
             Operands::None,
             span,
         )));
+    }
+
+    fn push_finalizer_gosub<'statement>(
+        work: &mut Vec<StatementWork<'statement, 'arena>>,
+        finalizer: &FinallyTarget,
+        span: Span,
+    ) {
+        if let Some(completion) = finalizer.script_completion {
+            let (put, operands) = compact_put_local(completion.current);
+            work.push(StatementWork::Emit(PlannedInstruction::new(
+                put, operands, span,
+            )));
+            let (get, operands) = compact_get_local(completion.saved);
+            work.push(StatementWork::Emit(PlannedInstruction::new(
+                get, operands, span,
+            )));
+        }
+        work.push(StatementWork::Branch {
+            kind: BranchKind::Gosub,
+            target: finalizer.label.clone(),
+            span,
+        });
+        if let Some(completion) = finalizer.script_completion {
+            let (put, operands) = compact_put_local(completion.current);
+            work.push(StatementWork::Emit(PlannedInstruction::new(
+                put, operands, span,
+            )));
+            work.push(StatementWork::Emit(PlannedInstruction::new(
+                FinalOpcode::Undefined,
+                Operands::None,
+                span,
+            )));
+            let (put, operands) = compact_put_local(completion.saved);
+            work.push(StatementWork::Emit(PlannedInstruction::new(
+                put, operands, span,
+            )));
+            let (get, operands) = compact_get_local(completion.current);
+            work.push(StatementWork::Emit(PlannedInstruction::new(
+                get, operands, span,
+            )));
+        }
     }
 
     fn plan_catch_binding(
@@ -2448,7 +2538,7 @@ impl<'arena> CompilationContext<'_, 'arena, '_> {
                     Operands::None,
                     span,
                 ))?;
-                flow.branch(BranchKind::Gosub, finalizer, span)?;
+                Self::emit_finalizer_gosub(flow, finalizer, span)?;
                 flow.emit(PlannedInstruction::new(
                     FinalOpcode::Drop,
                     Operands::None,
@@ -2471,6 +2561,34 @@ impl<'arena> CompilationContext<'_, 'arena, '_> {
                     ))?;
                 }
             }
+        }
+        Ok(())
+    }
+
+    fn emit_finalizer_gosub(
+        flow: &mut PlannedControlFlow,
+        finalizer: &FinallyTarget,
+        span: Span,
+    ) -> Result<(), LeafCompilationError> {
+        if let Some(completion) = finalizer.script_completion {
+            let (get, operands) = compact_get_local(completion.current);
+            flow.emit(PlannedInstruction::new(get, operands, span))?;
+            let (put, operands) = compact_put_local(completion.saved);
+            flow.emit(PlannedInstruction::new(put, operands, span))?;
+            flow.emit(PlannedInstruction::new(
+                FinalOpcode::Undefined,
+                Operands::None,
+                span,
+            ))?;
+            let (put, operands) = compact_put_local(completion.current);
+            flow.emit(PlannedInstruction::new(put, operands, span))?;
+        }
+        flow.branch(BranchKind::Gosub, &finalizer.label, span)?;
+        if let Some(completion) = finalizer.script_completion {
+            let (get, operands) = compact_get_local(completion.saved);
+            flow.emit(PlannedInstruction::new(get, operands, span))?;
+            let (put, operands) = compact_put_local(completion.current);
+            flow.emit(PlannedInstruction::new(put, operands, span))?;
         }
         Ok(())
     }

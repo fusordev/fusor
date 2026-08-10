@@ -119,6 +119,16 @@ impl<'arena> CompilationContext<'_, 'arena, '_> {
                     value: compiler_identifier_string("_ret_", executable.span())?,
                     span: executable.span(),
                 });
+                if self.script_finally_completion_count(executable.id())? != 0 {
+                    owner.push(CompiledMetadataAtomCandidate {
+                        key: CompiledMetadataAtomKey::ScriptFinallyCompletion,
+                        value: compiler_identifier_string(
+                            "<finally-completion>",
+                            executable.span(),
+                        )?,
+                        span: executable.span(),
+                    });
+                }
             }
             self.record_raw_parameter_metadata_candidates(executable, owner)?;
             for binding in self.planned.plan.bindings_for(executable.id()).ok_or(

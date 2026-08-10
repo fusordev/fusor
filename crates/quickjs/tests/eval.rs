@@ -91,6 +91,27 @@ fn closed_direct_eval_returns_the_script_completion() {
 }
 
 #[test]
+fn try_finally_preserves_and_replaces_eval_completion_values() {
+    evaluate(
+        r#"let normal=eval("try{'try'}finally{'finally'}");
+           let abrupt=eval("do{try{'try'}finally{'finally';break;}}while(false);");
+           let emptyFinally=eval("do{try{'try'}finally{break;}}while(false);");
+           let emptyCatch=eval("try{'try';throw 0}catch{}");
+           let nested=eval("do{try{'outer'}finally{'before';try{'inner'}finally{'nested'}break;}}while(false);");
+           normal==='try'&&abrupt==='finally'&&emptyFinally===undefined&&emptyCatch===undefined&&nested==='inner';"#,
+        |value| assert_eq!(value.as_boolean(), Ok(Some(true))),
+    );
+}
+
+#[test]
+fn class_static_block_finalizers_do_not_consume_script_completion_storage() {
+    evaluate(
+        r#"eval("class C{static{try{'try'}finally{'finally'}}}'after'")==='after';"#,
+        |value| assert_eq!(value.as_boolean(), Ok(Some(true))),
+    );
+}
+
+#[test]
 fn spread_direct_eval_materializes_the_iterator_and_evaluates_only_the_first_argument() {
     evaluate(
         "let elements=['x=1;','x=2;'],nextCount=0;let iterable={[Symbol.iterator](){return{next(){let index=nextCount++;return index<elements.length?{done:false,value:elements[index]}:{done:true};}};}};let result=(function(){let x='local';eval(...iterable);return x;})();result===1&&nextCount===3;",

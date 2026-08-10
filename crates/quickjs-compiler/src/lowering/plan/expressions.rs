@@ -2259,6 +2259,8 @@ impl<'compiler, 'unit, 'arena, 'scope> ExpressionPlanner<'compiler, 'unit, 'aren
             abrupt_markers: Vec::new(),
             disconnected_abrupt_floors: Vec::new(),
             completion: StatementCompletion::Discard,
+            next_script_finally_completion: 0,
+            script_finally_completion_limit: 0,
         };
         while let Some(task) = state.work.pop() {
             self.process_statement_work(task, block.span, &planning, flow, &mut state)?;
@@ -3829,7 +3831,7 @@ impl<'compiler, 'unit, 'arena, 'scope> ExpressionPlanner<'compiler, 'unit, 'aren
                     if let Some(finalizer) = finalizer {
                         work.push(ExpressionWork::Branch {
                             kind: BranchKind::Gosub,
-                            target: finalizer.clone(),
+                            target: finalizer.label.clone(),
                             span,
                         });
                     }

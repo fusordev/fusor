@@ -1,11 +1,23 @@
 use oxc_ast::ast::CatchClause;
 use oxc_semantic::ScopeId;
 
-use crate::lowering::CompilerLabel;
+use crate::lowering::{CompilerLabel, LocalSlot};
+
+#[derive(Clone, Copy)]
+pub(in crate::lowering) struct ScriptCompletionPreservation {
+    pub(in crate::lowering) current: LocalSlot,
+    pub(in crate::lowering) saved: LocalSlot,
+}
+
+#[derive(Clone)]
+pub(in crate::lowering) struct FinallyTarget {
+    pub(in crate::lowering) label: CompilerLabel,
+    pub(in crate::lowering) script_completion: Option<ScriptCompletionPreservation>,
+}
 
 pub(in crate::lowering) struct TryFinallyLabels {
     pub(in crate::lowering) handler: CompilerLabel,
-    pub(in crate::lowering) finalizer: CompilerLabel,
+    pub(in crate::lowering) finalizer: FinallyTarget,
     pub(in crate::lowering) done: CompilerLabel,
 }
 
@@ -39,7 +51,7 @@ impl AbruptMarker {
 
 #[derive(Clone)]
 pub(in crate::lowering) enum AbruptMarkerKind {
-    Catch { finalizer: Option<CompilerLabel> },
+    Catch { finalizer: Option<FinallyTarget> },
     ForIn,
     ForOf,
     FinallySubroutine,

@@ -275,6 +275,8 @@ fn abrupt_cleanup_fixture(
                 abrupt_markers: Vec::new(),
                 disconnected_abrupt_floors: Vec::new(),
                 completion: StatementCompletion::Discard,
+                next_script_finally_completion: 0,
+                script_finally_completion_limit: 0,
             };
             context
                 .plan_control_jump(
