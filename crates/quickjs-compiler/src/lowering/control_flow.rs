@@ -1,13 +1,17 @@
 use quickjs_bytecode::{
     AssemblerError, AssemblerLabel, AssemblerLimits, AssemblerResource, BranchKind,
-    BytecodeAssembler, BytecodePc, CompilerCaptureLayout, CompilerConstantLayout, FinalOpcode,
-    FunctionIndexDomains, Operands, UnverifiedCompilerFunctionBody, UnverifiedFunctionHeader,
-    VerificationErrorKind, VerificationLimits, VerifiedControlFlow, verify_compiler_control_flow,
+    BytecodeAssembler, BytecodePc, CompilerAtom, CompilerCaptureLayout, CompilerConstantLayout,
+    FinalOpcode, FunctionIndexDomains, Operands, UnverifiedCompilerFunctionBody,
+    UnverifiedFunctionHeader, VerificationErrorKind, VerificationLimits, VerifiedControlFlow,
+    verify_compiler_control_flow,
 };
 use quickjs_frontend::Span;
 
-use super::{LeafCompilationError, LocalSlot, SourceInstruction, compact_get_local};
+use super::{
+    CompiledConstant, LeafCompilationError, LocalSlot, SourceInstruction, compact_get_local,
+};
 
+mod optimizer;
 #[cfg(test)]
 mod tests;
 
@@ -47,6 +51,37 @@ pub(in crate::lowering) struct FinishedControlFlow {
     parameter_initialization_end: Option<u32>,
     function_initializer_prefix_start: u32,
     stack_anchors: Vec<ResolvedStackAnchor>,
+}
+
+pub(in crate::lowering) struct VerifiedFinishedControlFlow {
+    source_instructions: Vec<SourceInstruction>,
+    control_flow: VerifiedControlFlow,
+    eval_reference_call_instructions: Vec<u32>,
+    parameter_initialization_end: Option<u32>,
+    function_initializer_prefix_start: u32,
+}
+
+pub(in crate::lowering) struct ControlFlowVerificationInputs<'a> {
+    capture_layout: CompilerCaptureLayout,
+    constant_layout: CompilerConstantLayout,
+    atoms: &'a [CompilerAtom],
+    constants: &'a [CompiledConstant],
+}
+
+impl<'a> ControlFlowVerificationInputs<'a> {
+    pub(in crate::lowering) const fn new(
+        capture_layout: CompilerCaptureLayout,
+        constant_layout: CompilerConstantLayout,
+        atoms: &'a [CompilerAtom],
+        constants: &'a [CompiledConstant],
+    ) -> Self {
+        Self {
+            capture_layout,
+            constant_layout,
+            atoms,
+            constants,
+        }
+    }
 }
 
 impl PlannedControlFlow {
@@ -480,18 +515,6 @@ impl PlannedControlFlow {
 }
 
 impl FinishedControlFlow {
-    pub(in crate::lowering) const fn parameter_initialization_end(&self) -> Option<u32> {
-        self.parameter_initialization_end
-    }
-
-    pub(in crate::lowering) const fn function_initializer_prefix_start(&self) -> u32 {
-        self.function_initializer_prefix_start
-    }
-
-    pub(in crate::lowering) fn eval_reference_call_instructions(&self) -> &[u32] {
-        &self.eval_reference_call_instructions
-    }
-
     #[cfg(test)]
     fn verify(
         self,
@@ -510,97 +533,189 @@ impl FinishedControlFlow {
         capture_layout: CompilerCaptureLayout,
         limits: VerificationLimits,
     ) -> Result<(Vec<SourceInstruction>, VerifiedControlFlow), LeafCompilationError> {
-        self.verify_with_layouts(
+        self.verify_with_inputs(
             domains,
             header,
-            capture_layout,
-            CompilerConstantLayout::default(),
+            ControlFlowVerificationInputs::new(
+                capture_layout,
+                CompilerConstantLayout::default(),
+                &[],
+                &[],
+            ),
             limits,
         )
+        .map(VerifiedFinishedControlFlow::into_control_flow)
     }
 
-    pub(in crate::lowering) fn verify_with_layouts(
+    pub(in crate::lowering) fn verify_with_inputs(
         self,
         domains: FunctionIndexDomains,
         header: UnverifiedFunctionHeader,
-        capture_layout: CompilerCaptureLayout,
-        constant_layout: CompilerConstantLayout,
+        inputs: ControlFlowVerificationInputs<'_>,
         limits: VerificationLimits,
-    ) -> Result<(Vec<SourceInstruction>, VerifiedControlFlow), LeafCompilationError> {
+    ) -> Result<VerifiedFinishedControlFlow, LeafCompilationError> {
+        let ControlFlowVerificationInputs {
+            capture_layout,
+            constant_layout,
+            atoms,
+            constants,
+        } = inputs;
         let Self {
             bytecode,
-            source_instructions,
-            eval_reference_call_instructions: _,
-            parameter_initialization_end: _,
-            function_initializer_prefix_start: _,
-            stack_anchors,
+            mut source_instructions,
+            mut eval_reference_call_instructions,
+            mut parameter_initialization_end,
+            mut function_initializer_prefix_start,
+            mut stack_anchors,
         } = self;
-        let control_flow = match verify_compiler_control_flow(
-            UnverifiedCompilerFunctionBody::new(bytecode, domains, header)
-                .with_capture_layout(capture_layout)
-                .with_constant_layout(constant_layout),
+        let initial_control_flow = verify_staged_control_flow(
+            bytecode,
+            domains,
+            header,
+            capture_layout.clone(),
+            constant_layout.clone(),
             limits,
-        ) {
-            Ok(control_flow) => control_flow,
-            Err(source) => {
-                let span = match source.pc() {
-                    Some(pc) => Some(exact_source_span(&source_instructions, pc).ok_or(
-                        LeafCompilationError::SemanticInvariant {
-                            invariant:
-                                "verifier instruction PC resolves to an exact source instruction",
-                            span: None,
-                        },
-                    )?),
-                    None => None,
-                };
-                let related_span = match source.kind() {
-                VerificationErrorKind::InconsistentStackAtJoin { target, .. } => {
-                        Some(exact_source_span(&source_instructions, *target).ok_or(
-                            LeafCompilationError::SemanticInvariant {
-                                invariant:
-                                    "verifier join target resolves to an exact source instruction",
-                                span: None,
-                            },
-                        )?)
-                }
-                _ => None,
-            };
-                return Err(LeafCompilationError::BytecodeVerification {
-                    span,
-                    related_span,
-                    source,
-                });
-            }
+            &source_instructions,
+        )?;
+
+        let control_flow = if let Some(optimized) = optimizer::propagate_constants(
+            &initial_control_flow,
+            &source_instructions,
+            &eval_reference_call_instructions,
+            parameter_initialization_end,
+            function_initializer_prefix_start,
+            &stack_anchors,
+            atoms,
+            constants,
+            limits,
+        )? {
+            source_instructions = optimized.source_instructions;
+            eval_reference_call_instructions = optimized.eval_reference_call_instructions;
+            parameter_initialization_end = optimized.parameter_initialization_end;
+            function_initializer_prefix_start = optimized.function_initializer_prefix_start;
+            stack_anchors = optimized.stack_anchors;
+            verify_staged_control_flow(
+                optimized.bytecode,
+                domains,
+                header,
+                capture_layout,
+                constant_layout,
+                limits,
+                &source_instructions,
+            )?
+        } else {
+            initial_control_flow
         };
 
-        for anchor in stack_anchors {
-            let Some(index) = control_flow.instruction_index_at(anchor.pc) else {
-                return Err(LeafCompilationError::SemanticInvariant {
-                    invariant: "resolved statement stack anchor remains an instruction start",
-                    span: Some(anchor.span),
-                });
-            };
-            let Some(instruction) = control_flow.instruction(index) else {
-                return Err(LeafCompilationError::SemanticInvariant {
-                    invariant: "resolved statement stack anchor has a verified instruction",
-                    span: Some(anchor.span),
-                });
-            };
-            let Some(actual) = instruction.entry_stack_depth() else {
-                continue;
-            };
-            if actual != anchor.expected_depth {
-                return Err(LeafCompilationError::BytecodeStackInvariant {
-                    span: anchor.span,
-                    pc: anchor.pc,
-                    expected: anchor.expected_depth,
-                    actual,
-                });
-            }
-        }
+        validate_stack_anchors(&control_flow, &stack_anchors)?;
 
-        Ok((source_instructions, control_flow))
+        Ok(VerifiedFinishedControlFlow {
+            source_instructions,
+            control_flow,
+            eval_reference_call_instructions,
+            parameter_initialization_end,
+            function_initializer_prefix_start,
+        })
     }
+}
+
+impl VerifiedFinishedControlFlow {
+    pub(in crate::lowering) const fn parameter_initialization_end(&self) -> Option<u32> {
+        self.parameter_initialization_end
+    }
+
+    pub(in crate::lowering) const fn function_initializer_prefix_start(&self) -> u32 {
+        self.function_initializer_prefix_start
+    }
+
+    pub(in crate::lowering) fn eval_reference_call_instructions(&self) -> &[u32] {
+        &self.eval_reference_call_instructions
+    }
+
+    pub(in crate::lowering) fn into_control_flow(
+        self,
+    ) -> (Vec<SourceInstruction>, VerifiedControlFlow) {
+        (self.source_instructions, self.control_flow)
+    }
+}
+
+fn verify_staged_control_flow(
+    bytecode: Vec<u8>,
+    domains: FunctionIndexDomains,
+    header: UnverifiedFunctionHeader,
+    capture_layout: CompilerCaptureLayout,
+    constant_layout: CompilerConstantLayout,
+    limits: VerificationLimits,
+    source_instructions: &[SourceInstruction],
+) -> Result<VerifiedControlFlow, LeafCompilationError> {
+    match verify_compiler_control_flow(
+        UnverifiedCompilerFunctionBody::new(bytecode, domains, header)
+            .with_capture_layout(capture_layout)
+            .with_constant_layout(constant_layout),
+        limits,
+    ) {
+        Ok(control_flow) => Ok(control_flow),
+        Err(source) => {
+            let span = match source.pc() {
+                Some(pc) => Some(exact_source_span(source_instructions, pc).ok_or(
+                    LeafCompilationError::SemanticInvariant {
+                        invariant:
+                            "verifier instruction PC resolves to an exact source instruction",
+                        span: None,
+                    },
+                )?),
+                None => None,
+            };
+            let related_span = match source.kind() {
+                VerificationErrorKind::InconsistentStackAtJoin { target, .. } => Some(
+                    exact_source_span(source_instructions, *target).ok_or(
+                        LeafCompilationError::SemanticInvariant {
+                            invariant: "verifier join target resolves to an exact source instruction",
+                            span: None,
+                        },
+                    )?,
+                ),
+                _ => None,
+            };
+            Err(LeafCompilationError::BytecodeVerification {
+                span,
+                related_span,
+                source,
+            })
+        }
+    }
+}
+
+fn validate_stack_anchors(
+    control_flow: &VerifiedControlFlow,
+    stack_anchors: &[ResolvedStackAnchor],
+) -> Result<(), LeafCompilationError> {
+    for anchor in stack_anchors {
+        let Some(index) = control_flow.instruction_index_at(anchor.pc) else {
+            return Err(LeafCompilationError::SemanticInvariant {
+                invariant: "resolved statement stack anchor remains an instruction start",
+                span: Some(anchor.span),
+            });
+        };
+        let Some(instruction) = control_flow.instruction(index) else {
+            return Err(LeafCompilationError::SemanticInvariant {
+                invariant: "resolved statement stack anchor has a verified instruction",
+                span: Some(anchor.span),
+            });
+        };
+        let Some(actual) = instruction.entry_stack_depth() else {
+            continue;
+        };
+        if actual != anchor.expected_depth {
+            return Err(LeafCompilationError::BytecodeStackInvariant {
+                span: anchor.span,
+                pc: anchor.pc,
+                expected: anchor.expected_depth,
+                actual,
+            });
+        }
+    }
+    Ok(())
 }
 
 pub(in crate::lowering) fn exact_source_span(
