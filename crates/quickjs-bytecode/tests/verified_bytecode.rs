@@ -1203,6 +1203,38 @@ fn finally_return_address_certificate_accepts_shared_and_nested_subroutines() {
 }
 
 #[test]
+fn finally_return_address_certificate_rejects_different_shared_prefixes() {
+    let instructions = [
+        (FinalOpcode::PushTrue, Operands::None),
+        (FinalOpcode::IfFalse8, Operands::Label8(9)),
+        (FinalOpcode::Undefined, Operands::None),
+        (FinalOpcode::Gosub, Operands::Label(16)),
+        (FinalOpcode::Drop, Operands::None),
+        (FinalOpcode::ReturnUndef, Operands::None),
+        (FinalOpcode::Push1, Operands::NoneInt),
+        (FinalOpcode::Push2, Operands::NoneInt),
+        (FinalOpcode::Gosub, Operands::Label(7)),
+        (FinalOpcode::Drop, Operands::None),
+        (FinalOpcode::Drop, Operands::None),
+        (FinalOpcode::ReturnUndef, Operands::None),
+        (FinalOpcode::Ret, Operands::None),
+    ];
+
+    let error = verify_compiler_bytecode_graph(
+        typed_stack_input(&instructions, &[], &[]),
+        BytecodeGraphVerificationLimits::default(),
+    )
+    .expect_err("nominal gosub depth deferral cannot hide different typed prefixes");
+    assert!(
+        matches!(
+            error.kind(),
+            BytecodeVerificationErrorKind::FinallyReturnJoinMismatch { .. }
+        ),
+        "{error:?}"
+    );
+}
+
+#[test]
 fn finally_return_address_certificate_rejects_marker_misuse_and_ordinary_entry() {
     for (opcode, operands) in [
         (FinalOpcode::Dup, Operands::None),
@@ -1483,6 +1515,52 @@ fn finally_abrupt_exits_discard_only_complete_typed_pairs() {
                 opcode: FinalOpcode::Return,
                 ..
             }
+        ),
+        "{error:?}"
+    );
+}
+
+#[test]
+fn finally_throw_preserves_only_a_complete_pair_beneath_a_nested_catch() {
+    let instructions = [
+        (FinalOpcode::Undefined, Operands::None),
+        (FinalOpcode::Gosub, Operands::Label(6)),
+        (FinalOpcode::Drop, Operands::None),
+        (FinalOpcode::ReturnUndef, Operands::None),
+        (FinalOpcode::Catch, Operands::Label(6)),
+        (FinalOpcode::Push1, Operands::NoneInt),
+        (FinalOpcode::Throw, Operands::None),
+        (FinalOpcode::Drop, Operands::None),
+        (FinalOpcode::Ret, Operands::None),
+    ];
+
+    verify_compiler_bytecode_graph(
+        typed_stack_input(&instructions, &[], &[]),
+        BytecodeGraphVerificationLimits::default(),
+    )
+    .expect("a local catch preserves the enclosing finalizer continuation across its throw");
+
+    let malformed = [
+        (FinalOpcode::Undefined, Operands::None),
+        (FinalOpcode::Gosub, Operands::Label(6)),
+        (FinalOpcode::Drop, Operands::None),
+        (FinalOpcode::ReturnUndef, Operands::None),
+        (FinalOpcode::Drop, Operands::None),
+        (FinalOpcode::Catch, Operands::Label(6)),
+        (FinalOpcode::Push1, Operands::NoneInt),
+        (FinalOpcode::Throw, Operands::None),
+        (FinalOpcode::Drop, Operands::None),
+        (FinalOpcode::ReturnUndef, Operands::None),
+    ];
+    let error = verify_compiler_bytecode_graph(
+        typed_stack_input(&malformed, &[], &[]),
+        BytecodeGraphVerificationLimits::default(),
+    )
+    .expect_err("a nested catch cannot authorize a split finalizer continuation pair");
+    assert!(
+        matches!(
+            error.kind(),
+            BytecodeVerificationErrorKind::FinallyReturnMarkerAtExit { .. }
         ),
         "{error:?}"
     );
@@ -4500,6 +4578,45 @@ fn marker_free_dead_gosub_can_reuse_an_already_verified_finalizer() {
 }
 
 #[test]
+fn marker_free_dead_loop_backedge_may_target_an_already_verified_finalizer() {
+    let instructions = [
+        (FinalOpcode::Undefined, Operands::None),
+        (FinalOpcode::Gosub, Operands::Label(6)),
+        (FinalOpcode::Drop, Operands::None),
+        (FinalOpcode::ReturnUndef, Operands::None),
+        (FinalOpcode::Ret, Operands::None),
+        (FinalOpcode::Push0, Operands::NoneInt),
+        (FinalOpcode::IfTrue8, Operands::Label8(-3)),
+        (FinalOpcode::ReturnUndef, Operands::None),
+    ];
+
+    verify_compiler_bytecode_graph(
+        typed_stack_input(&instructions, &[], &[]),
+        BytecodeGraphVerificationLimits::default(),
+    )
+    .expect("dead marker-free loop scaffolding cannot re-enter the live finalizer at runtime");
+}
+
+#[test]
+fn live_loop_backedge_may_reenter_a_finalizer_with_its_exact_active_pair() {
+    let instructions = [
+        (FinalOpcode::Undefined, Operands::None),
+        (FinalOpcode::Gosub, Operands::Label(6)),
+        (FinalOpcode::Drop, Operands::None),
+        (FinalOpcode::ReturnUndef, Operands::None),
+        (FinalOpcode::Push0, Operands::NoneInt),
+        (FinalOpcode::IfTrue8, Operands::Label8(-2)),
+        (FinalOpcode::Ret, Operands::None),
+    ];
+
+    verify_compiler_bytecode_graph(
+        typed_stack_input(&instructions, &[], &[]),
+        BytecodeGraphVerificationLimits::default(),
+    )
+    .expect("the target-bound active pair proves a loop backedge stays inside its finalizer");
+}
+
+#[test]
 fn for_in_marker_certificate_rejects_crossed_and_marker_free_nip() {
     let cases = [
         vec![
@@ -5086,6 +5203,73 @@ fn for_of_marker_certificate_accepts_exact_loop_close_return_and_throw_grammars(
         BytecodeGraphVerificationLimits::default(),
     )
     .expect("a complete for-of catch record may remain for exceptional VM cleanup");
+}
+
+#[test]
+fn throw_may_retain_outer_for_in_beneath_a_complete_for_of_handler() {
+    let instructions = [
+        (FinalOpcode::Undefined, Operands::None),
+        (FinalOpcode::ForInStart, Operands::None),
+        (FinalOpcode::Undefined, Operands::None),
+        (FinalOpcode::ForOfStart, Operands::None),
+        (FinalOpcode::Push1, Operands::NoneInt),
+        (FinalOpcode::Throw, Operands::None),
+    ];
+
+    verify_compiler_bytecode_graph(
+        typed_stack_input(&instructions, &[], &[]),
+        BytecodeGraphVerificationLimits::default(),
+    )
+    .expect("the active inner for-of handler owns exceptional cleanup above outer for-in");
+}
+
+#[test]
+fn nip_catch_discards_expression_temporaries_above_a_for_of_marker() {
+    let returning = [
+        (FinalOpcode::InitialYield, Operands::None),
+        (FinalOpcode::Undefined, Operands::None),
+        (FinalOpcode::ForOfStart, Operands::None),
+        (FinalOpcode::Push1, Operands::NoneInt),
+        (FinalOpcode::Push2, Operands::NoneInt),
+        (FinalOpcode::NipCatch, Operands::None),
+        (FinalOpcode::Rot3r, Operands::None),
+        (FinalOpcode::Undefined, Operands::None),
+        (FinalOpcode::IteratorClose, Operands::None),
+        (FinalOpcode::ReturnAsync, Operands::None),
+    ];
+    let text = "function* f(){}";
+    let span = SourceByteSpan::new(0, u32::try_from(text.len()).expect("source length"));
+    let input = profiled_single_input(
+        &returning,
+        UnverifiedFunctionHeader::generator_source_function_with_variable_references(false, 0, 0),
+        CompilerExecutableKind::GeneratorFunction,
+        &[atom("f")],
+        Some(AtomPoolIndex::new(0)),
+        &[],
+        0,
+        0,
+        &[],
+        source(
+            text,
+            span,
+            Some(SourceByteSpan::new(10, 11)),
+            &[
+                (0, span),
+                (1, span),
+                (2, span),
+                (3, span),
+                (4, span),
+                (5, span),
+                (6, span),
+                (7, span),
+                (8, span),
+                (9, span),
+            ],
+        ),
+    );
+
+    verify_compiler_bytecode_graph(input, BytecodeGraphVerificationLimits::default())
+        .expect("nip_catch discards expression temporaries while retaining the return value");
 }
 
 #[track_caller]
@@ -7522,6 +7706,32 @@ fn dynamic_function_authority_carries_verified_constructor_realm_global_referenc
             .binding(),
         CompilerClosureBinding::RealmGlobal(global_reference_policy())
     );
+}
+
+#[test]
+fn constructor_realm_global_reference_transactions_are_verified() {
+    let input = dynamic_realm_global_input(
+        &[
+            (
+                FinalOpcode::MakeVarRefRef,
+                Operands::AtomU16 {
+                    atom: AtomPoolIndex::new(1),
+                    value: 0,
+                },
+            ),
+            (FinalOpcode::Push1, Operands::NoneInt),
+            (FinalOpcode::Insert3, Operands::None),
+            (FinalOpcode::PutRefValue, Operands::None),
+            (FinalOpcode::Return, Operands::None),
+        ],
+        &[atom("anonymous"), atom("realmValue")],
+        true,
+        true,
+        global_reference_policy(),
+    );
+
+    verify_compiler_bytecode_graph(input, BytecodeGraphVerificationLimits::default())
+        .expect("realm-global reference transactions retain typed closure authority");
 }
 
 #[test]

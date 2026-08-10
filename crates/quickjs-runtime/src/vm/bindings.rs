@@ -1851,6 +1851,62 @@ fn closure_eval_shadow_cell(
     )
 }
 
+pub(super) fn resolve_environment_cell(
+    runtime: &Runtime,
+    frame: &Frame,
+    index: u32,
+) -> Result<Option<BindingCellId>, EngineFault> {
+    if let Some(cell) = closure_eval_shadow_cell(runtime, frame, index)? {
+        return Ok(Some(cell));
+    }
+    let function = code(runtime, frame.code)?
+        .authority
+        .function(frame.template)
+        .ok_or(EngineFault::InvalidClosureEnvironment {
+            function: frame.template,
+        })?;
+    let definition = function.metadata().closures().get(index as usize).ok_or(
+        EngineFault::MissingPoolEntry {
+            pool: "closure metadata",
+            index,
+        },
+    )?;
+    if definition.is_deletable_eval_variable() {
+        return Ok(None);
+    }
+    let binding = *frame
+        .environment
+        .get(index as usize)
+        .ok_or(EngineFault::MissingPoolEntry {
+            pool: "closure environment",
+            index,
+        })?;
+    let EnvironmentBinding::Captured(cell) = binding else {
+        return Err(EngineFault::InvalidClosureEnvironment {
+            function: frame.template,
+        });
+    };
+    Ok(Some(cell))
+}
+
+pub(super) fn write_binding_cell(
+    runtime: &mut Runtime,
+    cell: BindingCellId,
+    value: SlotValue,
+) -> Result<(), ExecutionError> {
+    runtime
+        .cells
+        .get_mut(cell)
+        .ok_or(EngineFault::StaleHeapEdge {
+            edge: "binding cell",
+            index: cell.index(),
+            generation: cell.generation(),
+        })?
+        .value = value;
+    runtime.collection_pending = true;
+    Ok(())
+}
+
 fn write_binding(
     runtime: &mut Runtime,
     binding: &mut FrameBinding,
@@ -1859,16 +1915,7 @@ fn write_binding(
     match binding {
         FrameBinding::Direct(current) => *current = value,
         FrameBinding::Captured(cell) => {
-            runtime
-                .cells
-                .get_mut(*cell)
-                .ok_or(EngineFault::StaleHeapEdge {
-                    edge: "binding cell",
-                    index: cell.index(),
-                    generation: cell.generation(),
-                })?
-                .value = value;
-            runtime.collection_pending = true;
+            write_binding_cell(runtime, *cell, value)?;
         }
     }
     Ok(())

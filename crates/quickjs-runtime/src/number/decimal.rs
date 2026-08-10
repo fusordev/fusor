@@ -144,7 +144,12 @@ pub(crate) fn exact_significant(value: f64, precision: u32) -> Result<DecimalDig
 
     // Estimate the decimal exponent, then correct it after rounding, since the
     // rounding itself can carry into a new leading digit.
-    let mut decimal_exponent = estimate_decimal_exponent(significand, exponent);
+    // Begin one decade below the floating estimate. At a power-of-ten
+    // boundary, `log10` can round a value from just below the boundary onto
+    // it; rounding the significand first can then conceal that overestimate
+    // behind a carry. The exact digit-width correction below advances to the
+    // right decade when the lower candidate is genuinely too small.
+    let mut decimal_exponent = estimate_decimal_exponent(significand, exponent) - 1;
     for _ in 0..4 {
         let scale = i64::from(precision) - 1 - i64::from(decimal_exponent);
         let scaled = scale_and_round(significand, exponent, scale)?;
@@ -298,6 +303,8 @@ mod tests {
             (12345.0, 2, "12", 4),
             (0.000_001, 2, "10", -6),
             (1e21, 3, "100", 21),
+            (1e-21, 16, "9999999999999999", -22),
+            (1e-21, 21, "999999999999999907537", -22),
             (1e-7, 4, "1000", -7),
             // A tie rounds away from zero here too.
             (1.5, 1, "2", 0),

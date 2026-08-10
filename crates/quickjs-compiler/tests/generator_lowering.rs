@@ -85,6 +85,53 @@ fn nested_yield_spreads_retain_the_enclosing_expression_stack_across_suspension(
 }
 
 #[test]
+fn yield_return_closes_iterators_active_in_assignment_destructuring() {
+    for source in [
+        "let x; function* g(values) { [x = yield] = values; }",
+        "let x; function* g(values) { for ({x = yield} of values) {} }",
+        "let x = {}; function* g(values) { [...[x[yield]]] = values; }",
+    ] {
+        let compiled = compile(source, "g");
+        let opcodes = compiled
+            .control_flow()
+            .instructions()
+            .iter()
+            .map(|instruction| instruction.decoded().instruction().opcode())
+            .collect::<Vec<_>>();
+
+        assert!(
+            opcodes.windows(5).any(|window| {
+                window
+                    == [
+                        FinalOpcode::NipCatch,
+                        FinalOpcode::Rot3r,
+                        FinalOpcode::Undefined,
+                        FinalOpcode::IteratorClose,
+                        FinalOpcode::ReturnAsync,
+                    ]
+            }),
+            "yield return did not close the active iterator: {opcodes:?}"
+        );
+    }
+}
+
+#[test]
+fn disconnected_generator_resume_cleanup_uses_only_local_markers() {
+    let compiled = compile(
+        "function* g(){try{yield 1;throw 2;try{yield 3;}catch(error){yield error;}}finally{yield 4;}}",
+        "g",
+    );
+    assert!(
+        compiled
+            .control_flow()
+            .instructions()
+            .iter()
+            .any(|instruction| instruction.entry_stack_depth().is_none()),
+        "the nested try remains structurally disconnected after the source throw"
+    );
+}
+
+#[test]
 fn empty_generator_has_an_explicit_undefined_async_return() {
     let compiled = compile("function* empty() {}", "empty");
     assert_eq!(

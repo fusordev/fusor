@@ -141,6 +141,57 @@ fn error_families_publish_exact_core_metadata_and_branded_call_new_results() {
 }
 
 #[test]
+fn error_stack_accessor_preserves_internal_data_and_spec_setter_semantics() {
+    let result = call(
+        "\
+            let descriptor=Object.getOwnPropertyDescriptor(Error.prototype,'stack');\
+            let error=new TypeError('boom');\
+            let fresh=typeof error.stack+':'+Object.prototype.hasOwnProperty.call(error,'stack');\
+            descriptor.set.call(error,'override');\
+            let own=Object.getOwnPropertyDescriptor(error,'stack');\
+            let assigned=error.stack+':'+own.writable+':'+own.enumerable+':'+own.configurable;\
+            delete error.stack;\
+            let restored=typeof descriptor.get.call(error);\
+            let plain=descriptor.get.call({});\
+            let badValue=false,home=false;\
+            try{descriptor.set.call(error,0);}catch(thrown){badValue=thrown instanceof TypeError;}\
+            try{descriptor.set.call(Error.prototype,'x');}catch(thrown){home=thrown instanceof TypeError;}\
+            return [descriptor.get.name,descriptor.get.length,descriptor.set.name,descriptor.set.length,\
+                descriptor.enumerable,descriptor.configurable,fresh,assigned,restored,\
+                plain===void 0,badValue,home].join('|');",
+        string,
+    );
+    assert_eq!(
+        result,
+        "get stack|0|set stack|1|false|true|string:false|override:true:true:true|string|true|true|true"
+    );
+}
+
+#[test]
+fn error_stack_setter_observes_proxy_get_own_then_define_or_set() {
+    let result = call(
+        "\
+            let setter=Object.getOwnPropertyDescriptor(Error.prototype,'stack').set;\
+            let log='';\
+            let createdTarget={};\
+            let created=new Proxy(createdTarget,{\
+                getOwnPropertyDescriptor(target,key){log=log+'g1|';return Reflect.getOwnPropertyDescriptor(target,key);},\
+                defineProperty(target,key,descriptor){log=log+'d1|';return Reflect.defineProperty(target,key,descriptor);}\
+            });\
+            setter.call(created,'created');\
+            let updatedTarget={stack:'old'};\
+            let updated=new Proxy(updatedTarget,{\
+                getOwnPropertyDescriptor(target,key){log=log+'g2|';return Reflect.getOwnPropertyDescriptor(target,key);},\
+                set(target,key,value,receiver){log=log+'s2|';return Reflect.set(target,key,value,receiver);}\
+            });\
+            setter.call(updated,'updated');\
+            return log+createdTarget.stack+'|'+updatedTarget.stack;",
+        string,
+    );
+    assert_eq!(result, "g1|d1|g2|s2|g2|created|updated");
+}
+
+#[test]
 fn error_message_and_cause_follow_quickjs_conversion_and_get_order() {
     let result = call(
         "\
@@ -271,6 +322,24 @@ fn caught_engine_errors_are_branded_and_freeze_a_throw_site_stack() {
         string,
     );
     assert!(stack.starts_with("    at fail ("));
+}
+
+#[test]
+fn tail_elided_native_origins_use_the_newest_surviving_stack_location() {
+    let stack = call(
+        "\
+            function tail(){'use strict';return JSON.stringify(0n,()=>0n);}\
+            try{tail();}catch(error){return error.stack;}",
+        string,
+    );
+    assert!(
+        stack.starts_with("    at anonymous ("),
+        "surviving caller frame first: {stack:?}"
+    );
+    assert!(
+        !stack.contains("    at tail ("),
+        "PrepareForTailCall must elide the tail caller: {stack:?}"
+    );
 }
 
 #[test]

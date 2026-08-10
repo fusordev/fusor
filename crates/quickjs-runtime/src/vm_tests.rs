@@ -497,8 +497,20 @@ fn inactive_for_of_record_cannot_be_stepped_again_but_can_be_closed() {
 
 #[test]
 fn exception_unwind_discards_intervening_finally_return_addresses() {
-    let (mut runtime, realm, mut frame) = ordinary_test_frame();
-    let handler = frame.instruction;
+    let authority = compile_test_function(
+        "function run(){try{throw 1}catch(error){return error;}}",
+        "run",
+    );
+    let handler = authority
+        .root()
+        .function()
+        .control_flow()
+        .instructions()
+        .iter()
+        .find(|instruction| instruction.decoded().instruction().opcode() == FinalOpcode::Catch)
+        .and_then(|instruction| instruction.successors().branch_target())
+        .expect("verified catch handler");
+    let (mut runtime, realm, mut frame) = test_frame_for_authority(authority);
     let continuation = frame.instruction;
     frame.stack.push(OperandStackEntry::Catch { handler });
     push(&mut frame, StoredValue::Number(JsNumber::from_i32(1)));
@@ -1643,6 +1655,12 @@ fn execute_one_and_resolve_pair(
 
 fn ordinary_test_frame() -> (Runtime, RealmId, Frame) {
     let authority = compile_test_function("function run(){return 0;}", "run");
+    test_frame_for_authority(authority)
+}
+
+fn test_frame_for_authority(
+    authority: Arc<quickjs_bytecode::VerifiedBytecode>,
+) -> (Runtime, RealmId, Frame) {
     let mut runtime = Runtime::try_new(RuntimeLimits::default()).expect("runtime");
     let realm = runtime.create_realm().expect("realm");
     let realm_id = runtime.context(&realm).expect("context").realm;
@@ -3686,6 +3704,18 @@ fn property_key_continuations_charge_every_suspended_javascript_value() {
         })
         .retained_values(),
         2
+    );
+    assert_eq!(
+        continuation(PropertyKeyTarget::ReadRetain {
+            base: StoredValue::Undefined,
+            realm,
+        })
+        .retained_values(),
+        2
+    );
+    assert_eq!(
+        NativeContinuation::RetainedPropertyKey(StoredValue::Undefined).retained_values(),
+        1
     );
     assert_eq!(
         continuation(PropertyKeyTarget::Write {

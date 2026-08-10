@@ -79,6 +79,26 @@ pub(super) struct GlobalReferenceOperand {
     pub(super) name: JsString,
 }
 
+pub(super) struct RetainedRealmGlobalReference {
+    operand: GlobalReferenceOperand,
+    resolved: bool,
+}
+
+impl RetainedRealmGlobalReference {
+    pub(super) fn trace_roots(&self, mark: &mut dyn FnMut(CollectionRoot)) {
+        mark(CollectionRoot::Heap(HeapReference::Object(
+            self.operand.object,
+        )));
+        if let Some(binding) = &self.operand.eval_binding {
+            mark(CollectionRoot::BindingCell(binding.cell));
+        }
+    }
+
+    pub(super) fn name(&self) -> &JsString {
+        &self.operand.name
+    }
+}
+
 pub(super) struct EvalVariableOperand {
     environment: SharedEvalVariableEnvironment,
     index: usize,
@@ -132,6 +152,35 @@ pub(super) enum PropertyWriteOutcome {
 pub(super) enum PropertyDefinitionOutcome {
     Complete,
     Failed(PropertyFailure),
+}
+
+#[derive(Clone, Copy)]
+enum SetterIgnoringPrototypeStage {
+    OwnDescriptor,
+    Complete,
+}
+
+pub(super) struct SetterIgnoringPrototypeContinuation {
+    receiver: StoredValue,
+    value: StoredValue,
+    key: PropertyKey,
+    name: JsString,
+    reference: HeapReference,
+    realm: RealmId,
+    stage: SetterIgnoringPrototypeStage,
+    origin: JsStackFrame,
+}
+
+impl SetterIgnoringPrototypeContinuation {
+    pub(super) const fn retained_values() -> u64 {
+        3
+    }
+
+    pub(super) fn trace_roots(&self, mark: &mut dyn FnMut(CollectionRoot)) {
+        trace_stored_value_root(&self.receiver, mark);
+        trace_stored_value_root(&self.value, mark);
+        mark(CollectionRoot::Heap(self.reference));
+    }
 }
 
 pub(super) enum RealmGlobalReadOutcome {
@@ -357,6 +406,35 @@ pub(super) fn global_reference_operand(
         key: PropertyKey::from_validated_atom(record.name.clone()),
         name,
     })
+}
+
+pub(super) fn retain_realm_global_reference(
+    runtime: &Runtime,
+    operand: GlobalReferenceOperand,
+) -> Result<RetainedRealmGlobalReference, ExecutionError> {
+    let resolved = if operand.eval_binding.is_some() {
+        true
+    } else {
+        let state = runtime
+            .global_bindings
+            .get(operand.binding)
+            .ok_or(EngineFault::StaleHeapEdge {
+                edge: "realm global binding",
+                index: operand.binding.index(),
+                generation: operand.binding.generation(),
+            })?
+            .state;
+        match state {
+            RealmGlobalBindingState::Unresolved => lookup_heap_property(
+                runtime,
+                Some(HeapReference::Object(operand.object)),
+                &operand.key,
+            )?
+            .is_some(),
+            RealmGlobalBindingState::Object | RealmGlobalBindingState::Lexical { .. } => true,
+        }
+    };
+    Ok(RetainedRealmGlobalReference { operand, resolved })
 }
 
 fn lookup_eval_variable_binding(frame: &Frame, name: &JsString) -> Option<EvalVariableOperand> {
@@ -591,13 +669,58 @@ pub(super) fn read_realm_global(
     }
 }
 
+pub(super) fn read_retained_realm_global(
+    runtime: &Runtime,
+    reference: &RetainedRealmGlobalReference,
+) -> Result<RealmGlobalReadOutcome, ExecutionError> {
+    if !reference.resolved {
+        return Ok(RealmGlobalReadOutcome::Missing);
+    }
+    read_realm_global(runtime, &reference.operand)
+}
+
 pub(super) fn write_realm_global(
     runtime: &mut Runtime,
-    global: GlobalReferenceOperand,
+    global: &GlobalReferenceOperand,
     value: StoredValue,
     strict: bool,
     execution_budget: &mut ExecutionBudget,
 ) -> Result<RealmGlobalWriteOutcome, ExecutionError> {
+    write_realm_global_with_resolution(runtime, global, value, strict, None, execution_budget)
+}
+
+pub(super) fn write_retained_realm_global(
+    runtime: &mut Runtime,
+    reference: &RetainedRealmGlobalReference,
+    value: StoredValue,
+    strict: bool,
+    execution_budget: &mut ExecutionBudget,
+) -> Result<RealmGlobalWriteOutcome, ExecutionError> {
+    let resolved = reference.resolved;
+    write_realm_global_with_resolution(
+        runtime,
+        &reference.operand,
+        value,
+        strict,
+        Some(resolved),
+        execution_budget,
+    )
+}
+
+fn write_realm_global_with_resolution(
+    runtime: &mut Runtime,
+    global: &GlobalReferenceOperand,
+    value: StoredValue,
+    strict: bool,
+    retained_resolution: Option<bool>,
+    execution_budget: &mut ExecutionBudget,
+) -> Result<RealmGlobalWriteOutcome, ExecutionError> {
+    if retained_resolution == Some(false) {
+        if strict {
+            return Ok(RealmGlobalWriteOutcome::Missing);
+        }
+        return write_realm_global_object(runtime, global, value, false, execution_budget);
+    }
     if let Some(cell) = global.eval_binding.as_ref().map(|binding| binding.cell) {
         return write_eval_variable(runtime, cell, value);
     }
@@ -612,69 +735,22 @@ pub(super) fn write_realm_global(
         .state;
     match state {
         RealmGlobalBindingState::Unresolved => {
-            let present = lookup_heap_property(
-                runtime,
-                Some(HeapReference::Object(global.object)),
-                &global.key,
-            )?
-            .is_some();
+            let present = match retained_resolution {
+                Some(resolved) => resolved,
+                None => lookup_heap_property(
+                    runtime,
+                    Some(HeapReference::Object(global.object)),
+                    &global.key,
+                )?
+                .is_some(),
+            };
             if !present && strict {
                 return Ok(RealmGlobalWriteOutcome::Missing);
             }
-            let base = StoredValue::Object(global.object);
-            Ok(
-                match write_static_property(
-                    runtime,
-                    global.realm,
-                    &base,
-                    global.key,
-                    value,
-                    strict,
-                    execution_budget,
-                )? {
-                    PropertyWriteOutcome::Complete => RealmGlobalWriteOutcome::Complete,
-                    PropertyWriteOutcome::Setter {
-                        function,
-                        receiver,
-                        value,
-                    } => RealmGlobalWriteOutcome::Setter {
-                        function,
-                        receiver,
-                        value,
-                    },
-                    PropertyWriteOutcome::Failed(failure) => {
-                        RealmGlobalWriteOutcome::Property(failure)
-                    }
-                },
-            )
+            write_realm_global_object(runtime, global, value, strict, execution_budget)
         }
         RealmGlobalBindingState::Object => {
-            let base = StoredValue::Object(global.object);
-            Ok(
-                match write_static_property(
-                    runtime,
-                    global.realm,
-                    &base,
-                    global.key,
-                    value,
-                    strict,
-                    execution_budget,
-                )? {
-                    PropertyWriteOutcome::Complete => RealmGlobalWriteOutcome::Complete,
-                    PropertyWriteOutcome::Setter {
-                        function,
-                        receiver,
-                        value,
-                    } => RealmGlobalWriteOutcome::Setter {
-                        function,
-                        receiver,
-                        value,
-                    },
-                    PropertyWriteOutcome::Failed(failure) => {
-                        RealmGlobalWriteOutcome::Property(failure)
-                    }
-                },
-            )
+            write_realm_global_object(runtime, global, value, strict, execution_budget)
         }
         RealmGlobalBindingState::Lexical { cell, mutable } => {
             let binding = runtime
@@ -696,6 +772,39 @@ pub(super) fn write_realm_global(
             Ok(RealmGlobalWriteOutcome::Complete)
         }
     }
+}
+
+fn write_realm_global_object(
+    runtime: &mut Runtime,
+    global: &GlobalReferenceOperand,
+    value: StoredValue,
+    strict: bool,
+    execution_budget: &mut ExecutionBudget,
+) -> Result<RealmGlobalWriteOutcome, ExecutionError> {
+    let base = StoredValue::Object(global.object);
+    Ok(
+        match write_static_property(
+            runtime,
+            global.realm,
+            &base,
+            global.key.clone(),
+            value,
+            strict,
+            execution_budget,
+        )? {
+            PropertyWriteOutcome::Complete => RealmGlobalWriteOutcome::Complete,
+            PropertyWriteOutcome::Setter {
+                function,
+                receiver,
+                value,
+            } => RealmGlobalWriteOutcome::Setter {
+                function,
+                receiver,
+                value,
+            },
+            PropertyWriteOutcome::Failed(failure) => RealmGlobalWriteOutcome::Property(failure),
+        },
+    )
 }
 
 fn write_eval_variable(
@@ -832,6 +941,49 @@ pub(super) fn read_observable_static_property(
             return Ok(ObservablePropertyReadOutcome::Complete(
                 PropertyReadOutcome::Value(StoredValue::Undefined),
             ));
+        };
+        reference = prototype;
+    }
+}
+
+/// Reports whether an ordinary `[[Set]]` walk must cross a Proxy before an
+/// own property determines the write. This keeps the direct named-write fast
+/// path for ordinary chains while preserving the observable internal-method
+/// dispatch required when a Proxy appears in the prototype chain.
+pub(super) fn static_property_set_reaches_proxy(
+    runtime: &Runtime,
+    mut reference: HeapReference,
+    key: &PropertyKey,
+) -> Result<bool, ExecutionError> {
+    let mut remaining = runtime
+        .functions
+        .len()
+        .saturating_add(runtime.objects.len())
+        .saturating_add(1);
+    loop {
+        if remaining == 0 {
+            return Err(EngineFault::RuntimeInvariant {
+                message: "ordinary prototype chain contains a cycle",
+            }
+            .into());
+        }
+        remaining -= 1;
+        if runtime.proxy_state(reference)?.is_some() {
+            return Ok(true);
+        }
+        if let HeapReference::Object(object) = reference
+            && matches!(
+                runtime.typed_array_own_property(object, key)?,
+                TypedArrayOwnProperty::IntegerIndexed(_)
+            )
+        {
+            return Ok(false);
+        }
+        if heap_own_property(runtime, reference, key)?.is_some() {
+            return Ok(false);
+        }
+        let Some(prototype) = runtime.object_record(reference)?.prototype() else {
+            return Ok(false);
         };
         reference = prototype;
     }
@@ -1469,6 +1621,52 @@ pub(super) fn write_static_property(
     Ok(PropertyWriteOutcome::Complete)
 }
 
+fn define_static_array_property(
+    runtime: &mut Runtime,
+    object: ObjectId,
+    key: PropertyKey,
+    definition: &PropertyDefinition,
+    execution_budget: &mut ExecutionBudget,
+) -> Result<PropertyWriteOutcome, ExecutionError> {
+    if key.as_atom().and_then(crate::Atom::predefined_atom) == Some(PredefinedAtom::Length) {
+        return Ok(PropertyWriteOutcome::Failed(
+            PropertyFailure::NotConfigurable,
+        ));
+    }
+    let exists = runtime.array_own_property(object, &key)?;
+    let extensible = runtime
+        .object_record(HeapReference::Object(object))?
+        .is_extensible();
+    let decision = match &exists {
+        Some(existing) => validate_and_apply_existing(definition, existing),
+        None => validate_and_apply_new(definition, extensible),
+    };
+    match decision {
+        DefinitionDecision::Unchanged => Ok(PropertyWriteOutcome::Complete),
+        DefinitionDecision::Rejected if exists.is_some() => Ok(PropertyWriteOutcome::Failed(
+            PropertyFailure::NotConfigurable,
+        )),
+        DefinitionDecision::Rejected => {
+            Ok(PropertyWriteOutcome::Failed(PropertyFailure::NonExtensible))
+        }
+        DefinitionDecision::Replace(property) | DefinitionDecision::Create(property) => {
+            let work = runtime.preview_array_data_property_work(object, &key)?;
+            execution_budget.charge_instructions(work)?;
+            Ok(
+                match runtime.define_array_own_property(object, key, property)? {
+                    ArrayDefineOutcome::Complete => PropertyWriteOutcome::Complete,
+                    ArrayDefineOutcome::ReadOnlyLength => {
+                        PropertyWriteOutcome::Failed(PropertyFailure::ReadOnly)
+                    }
+                    ArrayDefineOutcome::NonExtensible => {
+                        PropertyWriteOutcome::Failed(PropertyFailure::NonExtensible)
+                    }
+                },
+            )
+        }
+    }
+}
+
 pub(super) fn define_static_property(
     runtime: &mut Runtime,
     base: &StoredValue,
@@ -1489,6 +1687,9 @@ pub(super) fn define_static_property(
             return Ok(PropertyWriteOutcome::Failed(PropertyFailure::NotObject));
         }
     };
+    let definition = PropertyDefinition::data(Requested::Present(value), Requested::Present(true))
+        .with_enumerable(Requested::Present(true))
+        .with_configurable(Requested::Present(true));
     let mapped_cell = match reference {
         HeapReference::Object(object) => runtime.mapped_arguments_cell(object, &key)?,
         HeapReference::Function(_) => None,
@@ -1496,29 +1697,7 @@ pub(super) fn define_static_property(
     if let HeapReference::Object(object) = reference
         && runtime.is_array_object(object)?
     {
-        if key.as_atom().and_then(crate::Atom::predefined_atom) == Some(PredefinedAtom::Length) {
-            return Ok(PropertyWriteOutcome::Failed(
-                PropertyFailure::NotConfigurable,
-            ));
-        }
-        let work = runtime.preview_array_data_property_work(object, &key)?;
-        execution_budget.charge_instructions(work)?;
-        return Ok(
-            match runtime.define_array_data_property(
-                object,
-                key,
-                PropertyLayout::data(true, true, true),
-                value,
-            )? {
-                ArrayDefineOutcome::Complete => PropertyWriteOutcome::Complete,
-                ArrayDefineOutcome::ReadOnlyLength => {
-                    PropertyWriteOutcome::Failed(PropertyFailure::ReadOnly)
-                }
-                ArrayDefineOutcome::NonExtensible => {
-                    PropertyWriteOutcome::Failed(PropertyFailure::NonExtensible)
-                }
-            },
-        );
+        return define_static_array_property(runtime, object, key, &definition, execution_budget);
     }
     let (exists, extensible) = {
         (
@@ -1532,9 +1711,6 @@ pub(super) fn define_static_property(
     // `ValidateAndApplyPropertyDescriptor` keeps one authority for the
     // compatibility rules, so redefining a non-configurable property is
     // rejected here exactly as it is for an explicit `defineProperty`.
-    let definition = PropertyDefinition::data(Requested::Present(value), Requested::Present(true))
-        .with_enumerable(Requested::Present(true))
-        .with_configurable(Requested::Present(true));
     let decision = match &exists {
         Some(existing) => validate_and_apply_existing(&definition, existing),
         None => validate_and_apply_new(&definition, extensible),
@@ -2340,4 +2516,139 @@ fn apply_mapped_arguments_definition(
         debug_assert_eq!(detached, Some(cell));
     }
     Ok(())
+}
+
+#[allow(
+    clippy::too_many_arguments,
+    reason = "SetterThatIgnoresPrototypeProperties retains its home, key, receiver, value, realm, and caller continuation explicitly"
+)]
+pub(super) fn begin_setter_ignoring_prototype_properties(
+    runtime: &mut Runtime,
+    receiver: StoredValue,
+    value: StoredValue,
+    home: HeapReference,
+    key: PropertyKey,
+    name: JsString,
+    realm: RealmId,
+    return_to: Option<CallReturn>,
+    origin: JsStackFrame,
+    execution_budget: &mut ExecutionBudget,
+) -> Result<NativeDispatch, NativeFailure> {
+    let Some(reference) = receiver.heap_reference() else {
+        return Err(NativeFailure::Abrupt(PendingException {
+            realm,
+            payload: PendingExceptionPayload::EngineError {
+                kind: ExceptionKind::TypeError,
+                message: JsString::from_utf8(
+                    "intrinsic prototype setter receiver must be an object",
+                )?,
+            },
+            origin,
+        }));
+    };
+    if reference == home {
+        return Err(NativeFailure::Abrupt(PendingException {
+            realm,
+            payload: PendingExceptionPayload::EngineError {
+                kind: ExceptionKind::TypeError,
+                message: JsString::from_utf8(
+                    "cannot replace an intrinsic prototype accessor property",
+                )?,
+            },
+            origin,
+        }));
+    }
+    execution_budget.charge_instructions(1)?;
+    let state = SetterIgnoringPrototypeContinuation {
+        receiver,
+        value,
+        key: key.clone(),
+        name,
+        reference,
+        realm,
+        stage: SetterIgnoringPrototypeStage::OwnDescriptor,
+        origin,
+    };
+    let dispatch = begin_internal_get_own_property(
+        runtime,
+        reference,
+        key,
+        realm,
+        return_to,
+        state.origin.clone(),
+        execution_budget,
+    )?;
+    continue_get_after(
+        dispatch,
+        state,
+        NativeContinuation::SetterIgnoringPrototype,
+        |state, value| {
+            advance_setter_ignoring_prototype_properties(
+                runtime,
+                state,
+                &value,
+                return_to,
+                execution_budget,
+            )
+        },
+        "SetterThatIgnoresPrototypeProperties [[GetOwnProperty]] produced a structured result",
+    )
+}
+
+pub(super) fn advance_setter_ignoring_prototype_properties(
+    runtime: &mut Runtime,
+    mut state: SetterIgnoringPrototypeContinuation,
+    completion: &StoredValue,
+    return_to: Option<CallReturn>,
+    execution_budget: &mut ExecutionBudget,
+) -> Result<NativeDispatch, NativeFailure> {
+    match state.stage {
+        SetterIgnoringPrototypeStage::Complete => {
+            Ok(NativeDispatch::Immediate(StoredValue::Undefined))
+        }
+        SetterIgnoringPrototypeStage::OwnDescriptor => {
+            state.stage = SetterIgnoringPrototypeStage::Complete;
+            let dispatch = if matches!(completion, StoredValue::Undefined) {
+                let definition = PropertyDefinition::data(
+                    Requested::Present(state.value.duplicate()),
+                    Requested::Present(true),
+                )
+                .with_enumerable(Requested::Present(true))
+                .with_configurable(Requested::Present(true));
+                begin_internal_define_own_property(
+                    runtime,
+                    state.reference,
+                    state.key.clone(),
+                    definition,
+                    state.realm,
+                    return_to,
+                    state.origin.clone(),
+                    execution_budget,
+                    DefinePropertyResult::Target,
+                )?
+            } else {
+                begin_internal_set(
+                    runtime,
+                    state.reference,
+                    state.key.clone(),
+                    state.name.clone(),
+                    state.value.duplicate(),
+                    state.receiver.duplicate(),
+                    true,
+                    false,
+                    state.realm,
+                    return_to,
+                    state.origin.clone(),
+                    execution_budget,
+                )?
+            };
+            continue_get_after(
+                dispatch,
+                state,
+                NativeContinuation::SetterIgnoringPrototype,
+                |_state, _value| Ok(NativeDispatch::Immediate(StoredValue::Undefined)),
+                "SetterThatIgnoresPrototypeProperties write produced a structured result",
+            )
+        }
+    }
 }

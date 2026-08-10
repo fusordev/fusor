@@ -21,6 +21,37 @@ fn capture_names_follow_match_capture_indices() {
     );
 }
 
+#[test]
+fn capture_names_and_references_share_the_cooked_identifier() {
+    let source = r"(?:(?<𝑓>a)|(?<\u{1D453}>b))\k<\uD835\uDC53>";
+    let expression = CompiledRegExp::compile_utf16(
+        &source.encode_utf16().collect::<Vec<_>>(),
+        &[],
+        CompileLimits::default(),
+    )
+    .expect("disjoint duplicate names with mixed spellings are valid");
+    assert_eq!(
+        expression.capture_names(),
+        [None, Some("𝑓".to_owned()), Some("𝑓".to_owned())]
+    );
+    assert_eq!(
+        expression
+            .execute(
+                &"aa".encode_utf16().collect::<Vec<_>>(),
+                0,
+                ExecLimits::default(),
+            )
+            .expect("bounded execution")
+            .expect("cooked backreference matches")
+            .range(),
+        0..2
+    );
+    assert!(matches!(
+        CompiledRegExp::compile(r"(?<A>a)(?<\u0041>b)", "", CompileLimits::default()),
+        Err(CompileError::Syntax(_))
+    ));
+}
+
 fn ranges(pattern: &str, flags: &str, input: &str) -> Vec<Option<(usize, usize)>> {
     compile(pattern, flags)
         .execute(
@@ -105,14 +136,14 @@ fn validates_and_canonicalizes_es2025_flags() {
 }
 
 #[test]
-fn literal_validation_is_syntax_only_and_does_not_require_executor_support() {
+fn literal_validation_and_execution_accept_rgi_emoji_properties() {
     assert!(validate_literal("[z-a]", "u", usize::MAX).is_err());
     assert!(validate_literal("a", "gg", usize::MAX).is_err());
     assert!(validate_literal(r"\p{RGI_Emoji_ZWJ_Sequence}", "v", usize::MAX).is_ok());
-    assert!(matches!(
-        CompiledRegExp::compile(r"\p{RGI_Emoji_ZWJ_Sequence}", "v", CompileLimits::default()),
-        Err(CompileError::Unsupported(_))
-    ));
+    assert!(
+        CompiledRegExp::compile(r"\p{RGI_Emoji_ZWJ_Sequence}", "v", CompileLimits::default())
+            .is_ok()
+    );
 }
 
 #[test]
@@ -139,6 +170,55 @@ fn unicode_mode_consumes_a_surrogate_pair_as_one_character() {
             )
             .expect("execution must stay within its limits")
             .is_none()
+    );
+}
+
+#[test]
+fn optional_zero_length_repeats_rollback_the_attempted_capture() {
+    assert_eq!(
+        ranges("(?:(?=(abc)))a", "", "abc"),
+        [Some((0, 1)), Some((0, 3))]
+    );
+    assert_eq!(ranges("(?:(?=(abc)))?a", "", "abc"), [Some((0, 1)), None]);
+    assert_eq!(
+        ranges("(?:(?=(abc))){1,1}a", "", "abc"),
+        [Some((0, 1)), Some((0, 3))]
+    );
+    assert_eq!(
+        ranges("(?:(?=(abc))){0,1}a", "", "abc"),
+        [Some((0, 1)), None]
+    );
+}
+
+#[test]
+fn class_string_disjunction_is_one_set_operand() {
+    assert_eq!(
+        matched_text(r"^[\d&&\q{0|2|4|9\uFE0F\u20E3}]+$", "v", "024"),
+        Some("024".to_owned())
+    );
+    assert_eq!(
+        matched_text(
+            r"^[\q{0|2|4|9\uFE0F\u20E3}--\d]+$",
+            "v",
+            "9\u{fe0f}\u{20e3}",
+        ),
+        Some("9\u{fe0f}\u{20e3}".to_owned())
+    );
+    assert_eq!(
+        matched_text(
+            r"^[\q{0|2|4|9\uFE0F\u20E3}&&\q{2|4|9\uFE0F\u20E3}]+$",
+            "v",
+            "24",
+        ),
+        Some("24".to_owned())
+    );
+    assert_eq!(
+        matched_text(
+            r"^[\d&&\q{0|2|4|9\uFE0F\u20E3}]+$",
+            "v",
+            "9\u{fe0f}\u{20e3}"
+        ),
+        None
     );
 }
 
@@ -171,6 +251,84 @@ fn malformed_patterns_and_structural_limits_fail_before_execution() {
         ),
         Err(CompileError::ResourceLimit("source length"))
     ));
+}
+
+#[test]
+fn unicode_mode_rejects_restricted_identity_and_control_escapes() {
+    let compile_utf16 = |pattern: &[u16]| {
+        CompiledRegExp::compile_utf16(pattern, &[u16::from(b'u')], CompileLimits::default())
+    };
+    let atom_escapes = b"bBfnrtvdDsSwW";
+    let class_escapes = b"bfnrtvdDsSwW";
+    for letter in b'A'..=b'Z' {
+        if !atom_escapes.contains(&letter) {
+            assert!(
+                compile_utf16(&[u16::from(b'\\'), u16::from(letter)]).is_err(),
+                "atom identity escape {letter:?}"
+            );
+        }
+        if !class_escapes.contains(&letter) {
+            assert!(
+                compile_utf16(&[
+                    u16::from(b'['),
+                    u16::from(b'\\'),
+                    u16::from(letter),
+                    u16::from(b']'),
+                ])
+                .is_err(),
+                "class identity escape {letter:?}"
+            );
+        }
+    }
+    for letter in b'a'..=b'z' {
+        if !atom_escapes.contains(&letter) {
+            assert!(
+                compile_utf16(&[u16::from(b'\\'), u16::from(letter)]).is_err(),
+                "atom identity escape {letter:?}"
+            );
+        }
+        if !class_escapes.contains(&letter) {
+            assert!(
+                compile_utf16(&[
+                    u16::from(b'['),
+                    u16::from(b'\\'),
+                    u16::from(letter),
+                    u16::from(b']'),
+                ])
+                .is_err(),
+                "class identity escape {letter:?}"
+            );
+        }
+    }
+    assert!(compile_utf16(&[u16::from(b'\\'), u16::from(b'c')]).is_err());
+    assert!(
+        compile_utf16(&[
+            u16::from(b'['),
+            u16::from(b'\\'),
+            u16::from(b'c'),
+            u16::from(b']'),
+        ])
+        .is_err()
+    );
+    for value in 0_u16..=0x7f {
+        if !u8::try_from(value).is_ok_and(|value| value.is_ascii_alphabetic()) {
+            assert!(
+                compile_utf16(&[u16::from(b'\\'), u16::from(b'c'), value]).is_err(),
+                "atom control escape {value:#x}"
+            );
+            assert!(
+                compile_utf16(&[
+                    u16::from(b'['),
+                    u16::from(b'\\'),
+                    u16::from(b'c'),
+                    value,
+                    u16::from(b']'),
+                ])
+                .is_err(),
+                "class control escape {value:#x}"
+            );
+        }
+    }
 }
 
 #[test]

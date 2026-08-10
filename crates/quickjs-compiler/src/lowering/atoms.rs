@@ -137,6 +137,7 @@ impl CompiledPropertyAtomKey {
 pub(in crate::lowering) enum CompiledMetadataAtomKey {
     FunctionName,
     ScriptCompletion,
+    ScriptFinallyCompletion,
     RawParameter(u32),
     Binding(BindingId),
     RealmGlobal(RealmGlobalId),

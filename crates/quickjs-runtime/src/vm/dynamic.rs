@@ -1935,7 +1935,11 @@ pub(super) fn begin_ordinary_constructor_receiver(
     charge_heap_property_lookup(runtime, &receiver, execution_budget)?;
     let prototype_key = runtime.predefined_property_key(PredefinedAtom::Prototype);
     let return_to = frame.return_to;
-    let state = OrdinaryConstructorPrototypeContinuation { frame };
+    let state = OrdinaryConstructorPrototypeContinuation {
+        frame,
+        realm,
+        origin: origin.clone(),
+    };
     let dispatch = begin_internal_get(
         runtime,
         HeapReference::Function(new_target),
@@ -1976,7 +1980,12 @@ pub(super) fn finish_ordinary_constructor_prototype(
         | StoredValue::BigInt(_)
         | StoredValue::String(_)
         | StoredValue::Symbol(_) => {
-            let realm = runtime.function_realm(new_target)?;
+            let realm = ordinary_constructor_function_realm(
+                runtime,
+                new_target,
+                state.realm,
+                &state.origin,
+            )?;
             HeapReference::Object(runtime.realm_object_prototype(realm)?)
         }
     };
@@ -1987,6 +1996,57 @@ pub(super) fn finish_ordinary_constructor_prototype(
     );
     state.frame.constructor_state = ConstructorState::Ordinary;
     Ok(NativeDispatch::Frame(state.frame))
+}
+
+fn ordinary_constructor_function_realm(
+    runtime: &Runtime,
+    mut function: FunctionId,
+    realm: RealmId,
+    origin: &JsStackFrame,
+) -> Result<RealmId, NativeFailure> {
+    let mut remaining = runtime.functions.len().saturating_add(1);
+    loop {
+        let node = runtime
+            .functions
+            .get(function)
+            .ok_or(EngineFault::StaleHeapEdge {
+                edge: "function",
+                index: function.index(),
+                generation: function.generation(),
+            })?;
+        if let Some(bound) = node.bound() {
+            function = bound.target;
+        } else if let Some(proxy) = node.proxy() {
+            if proxy.handler.is_none() {
+                return Err(NativeFailure::Abrupt(PendingException {
+                    realm,
+                    payload: PendingExceptionPayload::EngineError {
+                        kind: ExceptionKind::TypeError,
+                        message: JsString::from_utf8("revoked Proxy")?,
+                    },
+                    origin: origin.clone(),
+                }));
+            }
+            let Some(HeapReference::Function(target)) = proxy.target else {
+                return Err(EngineFault::RuntimeInvariant {
+                    message: "callable Proxy has a non-function target",
+                }
+                .into());
+            };
+            function = target;
+        } else {
+            return runtime
+                .function_realm(function)
+                .map_err(|fault| NativeFailure::Execution(fault.into()));
+        }
+        if remaining == 0 {
+            return Err(EngineFault::RuntimeInvariant {
+                message: "GetFunctionRealm target chain exceeds the heap size",
+            }
+            .into());
+        }
+        remaining -= 1;
+    }
 }
 
 pub(super) fn retire_active_dynamic_roots(

@@ -31,11 +31,13 @@ pub(crate) fn compile(
     }
     let flags = RegExpFlags::parse(flag_source)?;
     let canonical_flags = flags.canonical_source();
-    let pattern_source = annex_b_pattern_source(
+    let annex_b_source = annex_b_pattern_source(
         pattern_source,
         flags.unicode_mode(),
         limits.max_pattern_bytes,
     )?;
+    validate_unicode_control_escapes(annex_b_source.as_ref(), flags.unicode_mode())?;
+    let pattern_source = normalize_group_name_source(annex_b_source.as_ref())?;
     let allocator = Allocator::default();
     let pattern = LiteralParser::new(
         &allocator,
@@ -61,8 +63,10 @@ pub(crate) fn validate_literal(
     }
     let flags = RegExpFlags::parse(flag_source)?;
     let canonical_flags = flags.canonical_source();
-    let pattern_source =
+    let annex_b_source =
         annex_b_pattern_source(pattern_source, flags.unicode_mode(), max_pattern_bytes)?;
+    validate_unicode_control_escapes(annex_b_source.as_ref(), flags.unicode_mode())?;
+    let pattern_source = normalize_group_name_source(annex_b_source.as_ref())?;
     let allocator = Allocator::default();
     LiteralParser::new(
         &allocator,
@@ -161,6 +165,220 @@ fn annex_b_pattern_source(
     normalized.push_str(&source[copied..]);
     debug_assert_eq!(normalized.len(), normalized_len);
     Ok(Cow::Owned(normalized))
+}
+
+/// Enforces the Unicode grammar's `c AsciiLetter` boundary before Oxc's class
+/// parser can recover a bare `\c` as a legacy identity escape.
+fn validate_unicode_control_escapes(source: &str, unicode_mode: bool) -> Result<(), CompileError> {
+    if !unicode_mode {
+        return Ok(());
+    }
+    let bytes = source.as_bytes();
+    let mut index = 0;
+    while index < bytes.len() {
+        if bytes[index] != b'\\' {
+            index += 1;
+            continue;
+        }
+        let Some(&escaped) = bytes.get(index + 1) else {
+            break;
+        };
+        if escaped == b'c' && !bytes.get(index + 2).is_some_and(u8::is_ascii_alphabetic) {
+            return Err(CompileError::Syntax(
+                "Unicode control escape requires an ASCII letter".to_owned(),
+            ));
+        }
+        index = index.saturating_add(if escaped == b'c' { 3 } else { 2 });
+    }
+    Ok(())
+}
+
+/// Cooks the `RegExpIdentifierName` inside named captures and backreferences.
+///
+/// Oxc deliberately retains the source spelling in its AST. That spelling is
+/// not the ECMAScript `StringValue`: `A`, `\u0041`, and `\u{41}` name the same
+/// capture, and the UTF-16 constructor transport writes a supplementary name
+/// as two surrogate escapes in non-Unicode mode. Rewriting only the grammar's
+/// name positions before parsing gives Oxc the canonical identifier for its
+/// duplicate validation and gives this compiler one key for capture metadata
+/// and backreference lookup. The runtime still retains the original pattern
+/// source separately for `RegExp.prototype.source`.
+fn normalize_group_name_source(source: &str) -> Result<Cow<'_, str>, CompileError> {
+    let bytes = source.as_bytes();
+    let mut replacements = Vec::new();
+    let mut in_class = false;
+    let mut index = 0;
+    while index < bytes.len() {
+        if bytes[index] == b'\\' {
+            if !in_class && bytes.get(index + 1..index + 3) == Some(b"k<") {
+                let name_start = index + 3;
+                let Some(relative_end) = bytes[name_start..].iter().position(|byte| *byte == b'>')
+                else {
+                    break;
+                };
+                let name_end = name_start + relative_end;
+                collect_group_name_replacement(source, name_start, name_end, &mut replacements)?;
+                index = name_end + 1;
+                continue;
+            }
+            index = index.saturating_add(2);
+            continue;
+        }
+
+        if !in_class
+            && bytes[index] == b'('
+            && bytes.get(index + 1..index + 3) == Some(b"?<")
+            && !matches!(bytes.get(index + 3), Some(b'=' | b'!'))
+        {
+            let name_start = index + 3;
+            let Some(relative_end) = bytes[name_start..].iter().position(|byte| *byte == b'>')
+            else {
+                break;
+            };
+            let name_end = name_start + relative_end;
+            collect_group_name_replacement(source, name_start, name_end, &mut replacements)?;
+            index = name_end + 1;
+            continue;
+        }
+
+        match bytes[index] {
+            b'[' if !in_class => in_class = true,
+            b']' if in_class => in_class = false,
+            _ => {}
+        }
+        index += 1;
+    }
+
+    if replacements.is_empty() {
+        return Ok(Cow::Borrowed(source));
+    }
+    let mut normalized = String::new();
+    normalized
+        .try_reserve_exact(source.len())
+        .map_err(|_| CompileError::ResourceLimit("capture name allocation"))?;
+    let mut copied = 0;
+    for (start, end, name) in replacements {
+        normalized.push_str(&source[copied..start]);
+        normalized.push_str(&name);
+        copied = end;
+    }
+    normalized.push_str(&source[copied..]);
+    debug_assert!(normalized.len() <= source.len());
+    Ok(Cow::Owned(normalized))
+}
+
+fn collect_group_name_replacement(
+    source: &str,
+    start: usize,
+    end: usize,
+    replacements: &mut Vec<(usize, usize, String)>,
+) -> Result<(), CompileError> {
+    let raw = &source[start..end];
+    let cooked = cook_group_name(raw)?;
+    if cooked != raw {
+        replacements
+            .try_reserve(1)
+            .map_err(|_| CompileError::ResourceLimit("capture name replacements"))?;
+        replacements.push((start, end, cooked));
+    }
+    Ok(())
+}
+
+fn cook_group_name(raw: &str) -> Result<String, CompileError> {
+    let syntax = || CompileError::Syntax("invalid named capture identifier".to_owned());
+    let mut cooked = String::new();
+    cooked
+        .try_reserve_exact(raw.len())
+        .map_err(|_| CompileError::ResourceLimit("capture name allocation"))?;
+    let mut characters = raw.chars().peekable();
+    let mut pending_high_surrogate = None;
+    while let Some(character) = characters.next() {
+        if character != '\\' {
+            if pending_high_surrogate.is_some() {
+                return Err(syntax());
+            }
+            cooked.push(character);
+            continue;
+        }
+        if characters.next() != Some('u') {
+            return Err(syntax());
+        }
+        let first = characters.next().ok_or_else(&syntax)?;
+        if first == '{' {
+            if pending_high_surrogate.is_some() {
+                return Err(syntax());
+            }
+            let mut scalar = 0_u32;
+            let mut digits = 0_u8;
+            loop {
+                let digit = characters.next().ok_or_else(&syntax)?;
+                if digit == '}' {
+                    break;
+                }
+                scalar = scalar
+                    .checked_mul(16)
+                    .and_then(|value| {
+                        digit
+                            .to_digit(16)
+                            .and_then(|digit| value.checked_add(digit))
+                    })
+                    .ok_or_else(&syntax)?;
+                digits = digits.checked_add(1).ok_or_else(&syntax)?;
+            }
+            if digits == 0 {
+                return Err(syntax());
+            }
+            cooked.push(char::from_u32(scalar).ok_or_else(&syntax)?);
+            continue;
+        }
+
+        let mut unit = first.to_digit(16).ok_or_else(&syntax)?;
+        for _ in 0..3 {
+            unit = unit
+                .checked_mul(16)
+                .and_then(|value| {
+                    characters
+                        .next()
+                        .and_then(|digit| digit.to_digit(16))
+                        .and_then(|digit| value.checked_add(digit))
+                })
+                .ok_or_else(&syntax)?;
+        }
+        push_group_name_code_unit(
+            &mut cooked,
+            &mut pending_high_surrogate,
+            u16::try_from(unit).map_err(|_| syntax())?,
+        )?;
+    }
+    if pending_high_surrogate.is_some() {
+        return Err(syntax());
+    }
+    Ok(cooked)
+}
+
+fn push_group_name_code_unit(
+    cooked: &mut String,
+    pending_high_surrogate: &mut Option<u16>,
+    unit: u16,
+) -> Result<(), CompileError> {
+    if let Some(high) = pending_high_surrogate.take() {
+        if !(0xdc00..=0xdfff).contains(&unit) {
+            return Err(CompileError::Syntax(
+                "invalid named capture surrogate pair".to_owned(),
+            ));
+        }
+        let scalar = 0x1_0000 + ((u32::from(high) - 0xd800) << 10) + (u32::from(unit) - 0xdc00);
+        cooked.push(char::from_u32(scalar).expect("a validated surrogate pair is a scalar"));
+    } else if (0xd800..=0xdbff).contains(&unit) {
+        *pending_high_surrogate = Some(unit);
+    } else if (0xdc00..=0xdfff).contains(&unit) {
+        return Err(CompileError::Syntax(
+            "invalid named capture surrogate pair".to_owned(),
+        ));
+    } else {
+        cooked.push(char::from_u32(u32::from(unit)).expect("a non-surrogate u16 is a scalar"));
+    }
+    Ok(())
 }
 
 #[derive(Clone, Debug)]
@@ -675,6 +893,7 @@ fn lower_character_class(
                 items.push(CharacterClassItem::Nested(Box::new(nested)));
             }
             CharacterClassContents::ClassStringDisjunction(disjunction) => {
+                let mut alternatives = Vec::with_capacity(disjunction.body.len());
                 for string in &disjunction.body {
                     let value = string
                         .body
@@ -682,8 +901,19 @@ fn lower_character_class(
                         .map(|character| character.value)
                         .collect::<Vec<_>>();
                     strings.push(value.clone());
-                    items.push(CharacterClassItem::String(value));
+                    alternatives.push(value);
                 }
+                items.push(CharacterClassItem::Nested(Box::new(CharacterClass {
+                    negative: false,
+                    kind: CharacterClassKind::Union,
+                    items: alternatives
+                        .iter()
+                        .cloned()
+                        .map(CharacterClassItem::String)
+                        .collect(),
+                    strings: alternatives,
+                    has_string_properties: false,
+                })));
             }
         }
     }

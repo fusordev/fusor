@@ -584,7 +584,7 @@ fn anonymous_base_class_binding_defaults_infer_their_identifier_names() {
 #[test]
 fn anonymous_base_class_assignment_defaults_infer_their_identifier_names() {
     run_with(
-        "function run(){let ArrayName;[ArrayName=class{}]=[];let ObjectName;({value:ObjectName=class{}}={});return ArrayName.name==='ArrayName'&&ObjectName.name==='ObjectName';}",
+        "function run(){let ArrayName;[ArrayName=class{}]=[];let ObjectName;({value:ObjectName=class{}}={});let ShorthandName;({ShorthandName=class{}}={});let LoopName;for({LoopName=class{}}of[{}]){}return ArrayName.name==='ArrayName'&&ObjectName.name==='ObjectName'&&ShorthandName.name==='ShorthandName'&&LoopName.name==='LoopName';}",
         |result| {
             let value = result.expect("anonymous class assignment default execution");
             assert_eq!(value.as_boolean().expect("live Boolean"), Some(true));
@@ -672,7 +672,7 @@ fn anonymous_base_classes_in_logical_static_property_assignments_keep_an_empty_n
 #[test]
 fn anonymous_base_classes_in_logical_computed_property_assignments_keep_an_empty_name() {
     run_with(
-        "function run(){let events=[];function field(name){events.push('class-'+name);return 3;}function key(name){return {toString(){events.push('key-'+name);return name;}};}let written;let holder={and:1,nullish:null,get or(){events.push('get-or');return 0;},set or(value){events.push('set-or');written=value;}};let Or=holder[key('or')]||=class{static answer=field('or');};let And=holder[key('and')]&&=class{static answer=field('and');};let Nullish=holder[key('nullish')]??=class{static answer=field('nullish');};return Or.name===''&&And.name===''&&Nullish.name===''&&written===Or&&Or.answer===3&&And.answer===3&&Nullish.answer===3&&events.join(',')==='key-or,get-or,class-or,key-or,set-or,key-and,class-and,key-and,key-nullish,class-nullish,key-nullish';}",
+        "function run(){let events=[];function field(name){events.push('class-'+name);return 3;}function key(name){return {toString(){events.push('key-'+name);return name;}};}let written;let holder={and:1,nullish:null,get or(){events.push('get-or');return 0;},set or(value){events.push('set-or');written=value;}};let Or=holder[key('or')]||=class{static answer=field('or');};let And=holder[key('and')]&&=class{static answer=field('and');};let Nullish=holder[key('nullish')]??=class{static answer=field('nullish');};return Or.name===''&&And.name===''&&Nullish.name===''&&written===Or&&Or.answer===3&&And.answer===3&&Nullish.answer===3&&events.join(',')==='key-or,get-or,class-or,set-or,key-and,class-and,key-nullish,class-nullish';}",
         |result| {
             let value = result.expect("anonymous logical computed-property class execution");
             assert_eq!(value.as_boolean().expect("live Boolean"), Some(true));

@@ -83,6 +83,13 @@ fn source_slice_at<'source>(
     &source[span.start as usize..span.end as usize]
 }
 
+fn has_source_slice(compiled: &CompiledLeafFunction, source: &str, expected: &str) -> bool {
+    compiled.source_instructions().iter().any(|entry| {
+        let span = entry.span();
+        &source[span.start as usize..span.end as usize] == expected
+    })
+}
+
 #[test]
 fn debugger_statement_lowers_to_an_exact_source_mapped_nop() {
     let source = "function f(value){ debugger; return value; }";
@@ -294,34 +301,28 @@ fn unlabeled_break_and_continue_target_the_innermost_loop() {
             (
                 BytecodePc::new(1),
                 FinalOpcode::IfFalse8,
-                Operands::Label8(10),
+                Operands::Label8(6),
             ),
             (BytecodePc::new(3), FinalOpcode::GetArg0, Operands::NoneArg),
             (
                 BytecodePc::new(4),
                 FinalOpcode::IfFalse8,
-                Operands::Label8(7),
+                Operands::Label8(3),
             ),
             (BytecodePc::new(6), FinalOpcode::Goto8, Operands::Label8(-7)),
-            (BytecodePc::new(8), FinalOpcode::Goto8, Operands::Label8(3)),
-            (
-                BytecodePc::new(10),
-                FinalOpcode::Goto8,
-                Operands::Label8(-11),
-            ),
-            (BytecodePc::new(12), FinalOpcode::GetArg0, Operands::NoneArg),
-            (BytecodePc::new(13), FinalOpcode::Return, Operands::None),
+            (BytecodePc::new(8), FinalOpcode::GetArg0, Operands::NoneArg),
+            (BytecodePc::new(9), FinalOpcode::Return, Operands::None),
         ]
     );
     assert_eq!(
         source_slice_at(&compiled, source, BytecodePc::new(6)),
         "continue;"
     );
-    assert_eq!(
-        source_slice_at(&compiled, source, BytecodePc::new(8)),
-        "break;"
+    assert!(
+        !has_source_slice(&compiled, source, "break;"),
+        "the threaded break trampoline is excised"
     );
-    for pc in [0, 3, 6, 12] {
+    for pc in [0, 3, 6, 8] {
         let instruction = compiled
             .control_flow()
             .instructions()
@@ -334,13 +335,6 @@ fn unlabeled_break_and_continue_target_the_innermost_loop() {
             "statement boundary at PC {pc} has an empty operand stack"
         );
     }
-    let unreachable_break = compiled
-        .control_flow()
-        .instructions()
-        .iter()
-        .find(|instruction| instruction.decoded().pc() == BytecodePc::new(8))
-        .expect("preserved break source instruction");
-    assert_eq!(unreachable_break.entry_stack_depth(), None);
 }
 
 #[test]
@@ -355,27 +349,26 @@ fn do_while_continue_targets_the_trailing_test_and_break_targets_the_exit() {
             (
                 BytecodePc::new(1),
                 FinalOpcode::IfFalse8,
-                Operands::Label8(8),
+                Operands::Label8(6),
             ),
-            (BytecodePc::new(3), FinalOpcode::Goto8, Operands::Label8(3)),
-            (BytecodePc::new(5), FinalOpcode::Goto8, Operands::Label8(4)),
-            (BytecodePc::new(7), FinalOpcode::GetArg1, Operands::NoneArg),
+            (BytecodePc::new(3), FinalOpcode::Goto8, Operands::Label8(1)),
+            (BytecodePc::new(5), FinalOpcode::GetArg1, Operands::NoneArg),
             (
-                BytecodePc::new(8),
+                BytecodePc::new(6),
                 FinalOpcode::IfTrue8,
-                Operands::Label8(-9),
+                Operands::Label8(-7),
             ),
-            (BytecodePc::new(10), FinalOpcode::GetArg1, Operands::NoneArg),
-            (BytecodePc::new(11), FinalOpcode::Return, Operands::None),
+            (BytecodePc::new(8), FinalOpcode::GetArg1, Operands::NoneArg),
+            (BytecodePc::new(9), FinalOpcode::Return, Operands::None),
         ]
     );
     assert_eq!(
         source_slice_at(&compiled, source, BytecodePc::new(3)),
         "continue;"
     );
-    assert_eq!(
-        source_slice_at(&compiled, source, BytecodePc::new(5)),
-        "break;"
+    assert!(
+        !has_source_slice(&compiled, source, "break;"),
+        "the condition targets the loop exit after the dead break trampoline is excised"
     );
 }
 
@@ -481,7 +474,7 @@ fn nested_loops_select_the_nearest_break_and_continue_targets() {
             (
                 BytecodePc::new(1),
                 FinalOpcode::IfFalse8,
-                Operands::Label8(12),
+                Operands::Label8(6),
             ),
             (BytecodePc::new(3), FinalOpcode::GetArg1, Operands::NoneArg),
             (
@@ -490,28 +483,17 @@ fn nested_loops_select_the_nearest_break_and_continue_targets() {
                 Operands::Label8(-5),
             ),
             (BytecodePc::new(6), FinalOpcode::Goto8, Operands::Label8(-7)),
-            (BytecodePc::new(8), FinalOpcode::Goto8, Operands::Label8(-6)),
-            (
-                BytecodePc::new(10),
-                FinalOpcode::Goto8,
-                Operands::Label8(-11),
-            ),
-            (
-                BytecodePc::new(12),
-                FinalOpcode::Goto8,
-                Operands::Label8(-13),
-            ),
-            (BytecodePc::new(14), FinalOpcode::GetArg0, Operands::NoneArg),
-            (BytecodePc::new(15), FinalOpcode::Return, Operands::None),
+            (BytecodePc::new(8), FinalOpcode::GetArg0, Operands::NoneArg),
+            (BytecodePc::new(9), FinalOpcode::Return, Operands::None),
         ]
     );
     assert_eq!(
         source_slice_at(&compiled, source, BytecodePc::new(6)),
         "break;"
     );
-    assert_eq!(
-        source_slice_at(&compiled, source, BytecodePc::new(10)),
-        "continue;"
+    assert!(
+        !has_source_slice(&compiled, source, "continue;"),
+        "the break target is threaded through the dead continue trampoline"
     );
 }
 
@@ -541,7 +523,7 @@ fn a_late_lexical_is_tdz_initialized_when_its_block_is_entered() {
 }
 
 #[test]
-fn unreachable_statements_are_validated_and_receive_a_structural_terminal() {
+fn unreachable_statement_tails_are_excised_after_initial_verification() {
     let compiled = compile("function f(a){ return a; a; }", "f");
 
     assert_eq!(
@@ -549,19 +531,20 @@ fn unreachable_statements_are_validated_and_receive_a_structural_terminal() {
         [
             (BytecodePc::new(0), FinalOpcode::GetArg0, Operands::NoneArg),
             (BytecodePc::new(1), FinalOpcode::Return, Operands::None),
-            (BytecodePc::new(2), FinalOpcode::GetArg0, Operands::NoneArg),
-            (BytecodePc::new(3), FinalOpcode::Drop, Operands::None),
-            (BytecodePc::new(4), FinalOpcode::ReturnUndef, Operands::None),
         ]
     );
-    assert_eq!(
-        compiled.control_flow().instructions()[2].entry_stack_depth(),
-        None
+    assert_eq!(compiled.source_instructions().len(), 2);
+    assert!(
+        compiled
+            .control_flow()
+            .instructions()
+            .iter()
+            .all(|instruction| instruction.entry_stack_depth().is_some())
     );
 }
 
 #[test]
-fn a_join_after_two_returning_branches_is_backed_by_a_real_terminal() {
+fn two_returning_branches_leave_no_dead_join_scaffold() {
     let compiled = compile("function f(a,b){ if(a) return b; else return a; }", "f");
 
     assert_eq!(
@@ -571,23 +554,20 @@ fn a_join_after_two_returning_branches_is_backed_by_a_real_terminal() {
             (
                 BytecodePc::new(1),
                 FinalOpcode::IfFalse8,
-                Operands::Label8(5),
+                Operands::Label8(3),
             ),
             (BytecodePc::new(3), FinalOpcode::GetArg1, Operands::NoneArg),
             (BytecodePc::new(4), FinalOpcode::Return, Operands::None),
-            (BytecodePc::new(5), FinalOpcode::Goto8, Operands::Label8(3)),
-            (BytecodePc::new(7), FinalOpcode::GetArg0, Operands::NoneArg),
-            (BytecodePc::new(8), FinalOpcode::Return, Operands::None),
-            (BytecodePc::new(9), FinalOpcode::ReturnUndef, Operands::None),
+            (BytecodePc::new(5), FinalOpcode::GetArg0, Operands::NoneArg),
+            (BytecodePc::new(6), FinalOpcode::Return, Operands::None),
         ]
     );
-    assert_eq!(
-        compiled.control_flow().instructions()[4].entry_stack_depth(),
-        None
-    );
-    assert_eq!(
-        compiled.control_flow().instructions()[7].entry_stack_depth(),
-        None
+    assert!(
+        compiled
+            .control_flow()
+            .instructions()
+            .iter()
+            .all(|instruction| instruction.entry_stack_depth().is_some())
     );
 }
 
@@ -617,25 +597,27 @@ fn labeled_break_and_continue_select_the_named_iteration() {
         "a"
     );
 
-    let break_jump = instructions
+    let continue_index = instructions
         .iter()
-        .find(|instruction| {
-            source_slice_at(&compiled, source, instruction.decoded().pc()) == "break outer;"
-        })
-        .expect("labeled break jump");
-    assert_eq!(
-        break_jump.decoded().instruction().opcode(),
-        FinalOpcode::Goto8
-    );
-    let break_target = break_jump
+        .position(|instruction| instruction.decoded().pc() == continue_jump.decoded().pc())
+        .expect("continue instruction index");
+    let break_test = instructions
+        .get(continue_index.saturating_sub(1))
+        .expect("conditional break predecessor");
+    assert!(matches!(
+        break_test.decoded().instruction().opcode(),
+        FinalOpcode::IfFalse | FinalOpcode::IfFalse8
+    ));
+    let break_target = break_test
         .successors()
-        .jump_target()
+        .branch_target()
         .and_then(|target| compiled.control_flow().instruction(target))
-        .expect("labeled break target");
+        .expect("threaded labeled break target");
     assert_eq!(
         source_slice_at(&compiled, source, break_target.decoded().pc()),
         "b"
     );
+    assert!(!has_source_slice(&compiled, source, "break outer;"));
 }
 
 #[test]
@@ -661,17 +643,18 @@ fn chained_labels_share_the_iteration_continue_target() {
         "a"
     );
 
-    let break_jump = instructions
+    let continue_index = instructions
         .iter()
-        .find(|instruction| {
-            source_slice_at(&compiled, source, instruction.decoded().pc()) == "break second;"
-        })
-        .expect("inner chained break jump");
-    let break_target = break_jump
+        .position(|instruction| instruction.decoded().pc() == continue_jump.decoded().pc())
+        .expect("continue instruction index");
+    let break_test = instructions
+        .get(continue_index.saturating_sub(1))
+        .expect("conditional break predecessor");
+    let break_target = break_test
         .successors()
-        .jump_target()
+        .branch_target()
         .and_then(|target| compiled.control_flow().instruction(target))
-        .expect("shared loop break target");
+        .expect("threaded shared loop break target");
     assert_eq!(
         source_slice_at(&compiled, source, break_target.decoded().pc()),
         "false"
@@ -681,6 +664,7 @@ fn chained_labels_share_the_iteration_continue_target() {
         FinalOpcode::PushFalse
     );
     assert_ne!(continue_target.decoded().pc(), break_target.decoded().pc());
+    assert!(!has_source_slice(&compiled, source, "break second;"));
 }
 
 #[test]

@@ -440,6 +440,22 @@ fn promise_with_resolvers_returns_one_generic_capability_record() {
 }
 
 #[test]
+fn promise_capability_executor_replaces_only_undefined_slots() {
+    assert_eq!(
+        rendered(
+            "(function(){function C(executor){let out={};executor();executor(undefined,undefined);executor(function(value){out.value=value;},function(reason){out.reason=reason;});return out;}C.resolve=function(value){return value;};let out=Promise.all.call(C,[]);return Array.isArray(out.value)+':'+out.value.length+':'+String(out.reason);})()"
+        ),
+        "true:0:undefined"
+    );
+    assert_eq!(
+        rendered(
+            "(function(){function C(executor){executor(undefined,function(){});executor(function(){},function(){});return {};}try{Promise.resolve.call(C,1);}catch(error){return error.name;}})()"
+        ),
+        "TypeError"
+    );
+}
+
+#[test]
 fn promise_combinators_settle_in_input_order_and_empty_cases_are_exact() {
     let actual = turn_result(
         "let box={log:'',race:false};\n\
@@ -528,6 +544,16 @@ fn promise_combinators_get_resolve_before_the_iterator_and_close_on_abrupt() {
             "(function(){let log='';function C(executor){let out={};executor(function(){throw 'resolve-throw';},function(reason){out.reason=reason;});return out;}C.resolve=function(value){return value;};let empty=Promise.all.call(C,[]);let iterable={[Symbol.iterator]:function(){let done=false;return {next:function(){if(done)return {done:true};done=true;return {value:1,done:false};},get return(){log=log+'return-get|';throw 'close-throw';}};}};C.resolve=function(){throw 'original';};let abrupt=Promise.all.call(C,iterable);return empty.reason+'|'+log+abrupt.reason;})()"
         ),
         "resolve-throw|return-get|original"
+    );
+}
+
+#[test]
+fn promise_combinator_iterator_step_failures_mark_the_record_done() {
+    assert_eq!(
+        rendered(
+            "(function(){let closed=0;function iterable(kind){return {[Symbol.iterator]:function(){return {next:function(){if(kind===0)throw 'next';if(kind===1)return 1;if(kind===2)return {get done(){throw 'done';}};return {done:false,get value(){throw 'value';}};},return:function(){closed++;return {};}};}};}let methods=['all','allSettled','any','race'];for(let method of methods){for(let kind=0;kind<4;kind++)Promise[method](iterable(kind));}return closed;})()"
+        ),
+        "0"
     );
 }
 

@@ -549,7 +549,10 @@ pub(super) fn finish_intrinsic_get(
             new_target,
             element,
             length,
-        } => finish_typed_array_constructor_wrapper(runtime, new_target, element, length, &value),
+            origin,
+        } => finish_typed_array_constructor_wrapper(
+            runtime, new_target, element, length, &value, &origin,
+        ),
         IntrinsicGetContinuation::TemporalInstantConstructor {
             new_target,
             epoch_nanoseconds,
@@ -4084,12 +4087,14 @@ pub(super) fn begin_abstract_equality(
         // A `BigInt` compares across the domains by mathematical value, so the
         // Boolean-to-Number rewrite below must not reach it: `0n == false` is
         // `true` through the BigInt comparison, not through a rounded Number.
-        let comparison = bigint_relational_ordering(&left, &right, realm, &origin)?;
-        if comparison != BigIntComparison::NotApplicable {
-            let equal = comparison == BigIntComparison::Ordered(Ordering::Equal);
-            return Ok(NativeDispatch::Immediate(StoredValue::Boolean(
-                equal ^ invert,
-            )));
+        if !is_object_value(&left) && !is_object_value(&right) {
+            let comparison = bigint_relational_ordering(&left, &right, realm, &origin)?;
+            if comparison != BigIntComparison::NotApplicable {
+                let equal = comparison == BigIntComparison::Ordered(Ordering::Equal);
+                return Ok(NativeDispatch::Immediate(StoredValue::Boolean(
+                    equal ^ invert,
+                )));
+            }
         }
 
         match (&left, &right) {
@@ -4154,7 +4159,10 @@ const fn is_object_value(value: &StoredValue) -> bool {
 const fn is_equality_conversion_primitive(value: &StoredValue) -> bool {
     matches!(
         value,
-        StoredValue::Number(_) | StoredValue::String(_) | StoredValue::Symbol(_)
+        StoredValue::Number(_)
+            | StoredValue::BigInt(_)
+            | StoredValue::String(_)
+            | StoredValue::Symbol(_)
     )
 }
 
@@ -4268,13 +4276,16 @@ fn finish_property_key_target(
         }
         .into()),
         PropertyKeyTarget::Read { base, realm } => {
-            if let Some(reference) = base.heap_reference()
-                && runtime.proxy_state(reference)?.is_some()
+            let outcome = read_observable_static_property(runtime, realm, &base, &property.key)?;
+            if let ObservablePropertyReadOutcome::Proxy {
+                reference,
+                receiver,
+            } = outcome
             {
                 return begin_internal_get(
                     runtime,
                     reference,
-                    base.duplicate(),
+                    receiver,
                     property.key,
                     realm,
                     return_to,
@@ -4282,7 +4293,10 @@ fn finish_property_key_target(
                     execution_budget,
                 );
             }
-            match read_static_property(runtime, realm, &base, &property.key)? {
+            let ObservablePropertyReadOutcome::Complete(outcome) = outcome else {
+                unreachable!("observable computed property read classification is exhaustive")
+            };
+            match outcome {
                 PropertyReadOutcome::Value(value) => Ok(NativeDispatch::Immediate(value)),
                 PropertyReadOutcome::Getter { function, receiver } => {
                     Ok(NativeDispatch::Call(NativeCall {
@@ -4297,6 +4311,58 @@ fn finish_property_key_target(
                         native_caller: None,
                     }))
                 }
+                PropertyReadOutcome::Failed(failure) => Err(NativeFailure::Abrupt(
+                    property_exception_at(realm, origin.clone(), Some(&property.name), failure)?,
+                )),
+            }
+        }
+        PropertyKeyTarget::ReadRetain { base, realm } => {
+            let outcome = read_observable_static_property(runtime, realm, &base, &property.key)?;
+            if let ObservablePropertyReadOutcome::Proxy {
+                reference,
+                receiver,
+            } = outcome
+            {
+                let dispatch = begin_internal_get(
+                    runtime,
+                    reference,
+                    receiver,
+                    property.key,
+                    realm,
+                    return_to,
+                    origin.clone(),
+                    execution_budget,
+                )?;
+                return continue_get_after(
+                    dispatch,
+                    value,
+                    NativeContinuation::RetainedPropertyKey,
+                    |key, result| Ok(NativeDispatch::Pair(key, result)),
+                    "retained computed property read produced a structured result",
+                );
+            }
+            let ObservablePropertyReadOutcome::Complete(outcome) = outcome else {
+                unreachable!("observable computed property read classification is exhaustive")
+            };
+            match outcome {
+                PropertyReadOutcome::Value(result) => Ok(NativeDispatch::Pair(value, result)),
+                PropertyReadOutcome::Getter { function, receiver } => continue_get_after(
+                    NativeDispatch::Call(NativeCall {
+                        function,
+                        receiver,
+                        arguments: CallArguments::empty(),
+                        return_to,
+                        origin: origin.clone(),
+                        continuations: Vec::new(),
+                        pre_call: None,
+                        new_target: None,
+                        native_caller: None,
+                    }),
+                    value,
+                    NativeContinuation::RetainedPropertyKey,
+                    |key, result| Ok(NativeDispatch::Pair(key, result)),
+                    "retained computed property getter produced a structured result",
+                ),
                 PropertyReadOutcome::Failed(failure) => Err(NativeFailure::Abrupt(
                     property_exception_at(realm, origin.clone(), Some(&property.name), failure)?,
                 )),

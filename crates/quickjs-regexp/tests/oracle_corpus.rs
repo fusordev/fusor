@@ -454,6 +454,41 @@ const CASES: &[Case] = &[
         start: 0,
         expected: Some(&[Some((0, 2))]),
     },
+    Case {
+        pattern: r"^\p{RGI_Emoji_ZWJ_Sequence}$",
+        flags: "v",
+        input: "❤️‍🔥",
+        start: 0,
+        expected: Some(&[Some((0, 5))]),
+    },
+    Case {
+        pattern: r"^\p{RGI_Emoji}$",
+        flags: "v",
+        input: "👨🏻‍🐰‍👨🏼",
+        start: 0,
+        expected: Some(&[Some((0, 12))]),
+    },
+    Case {
+        pattern: r"^\p{RGI_Emoji_ZWJ_Sequence}$",
+        flags: "v",
+        input: "🦃‍🦃",
+        start: 0,
+        expected: None,
+    },
+    Case {
+        pattern: r"^\p{RGI_Emoji}$",
+        flags: "v",
+        input: "🐿",
+        start: 0,
+        expected: None,
+    },
+    Case {
+        pattern: r"^\p{RGI_Emoji}$",
+        flags: "v",
+        input: "🐿️",
+        start: 0,
+        expected: Some(&[Some((0, 3))]),
+    },
 ];
 
 #[test]

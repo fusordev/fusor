@@ -31,8 +31,8 @@ use super::{
     HeapObject, HeapReference, JsBigInt, JsNumber, JsString, NativeFunction, NativeFunctionKind,
     ObjectId, ObjectRecord, OwnProperty, PredefinedAtom, PropertyDeletion, PropertyKey,
     PropertyLayout, PropertyLayoutKind, Rc, RealmId, RealmIntrinsics, ReleaseMailbox, Runtime,
-    RuntimeResource, SetPrototypeOutcome, SlotValue, StoredValue, array_length_from_number,
-    check_execution_limit, stale_heap_reference, usize_to_u64,
+    RuntimeResource, SetPrototypeOutcome, SlotValue, StoredValue, check_execution_limit,
+    stale_heap_reference, usize_to_u64,
 };
 
 #[derive(Clone, Copy)]
@@ -413,23 +413,9 @@ impl Runtime {
                     index: array.prototype.index(),
                     generation: array.prototype.generation(),
                 })?;
-        let array_length = prototype
-            .array_state()
-            .ok_or(crate::EngineFault::RuntimeInvariant {
-                message: "Array.prototype intrinsic has no array state",
-            })?
-            .length();
-        let length_key = self.predefined_property_key(PredefinedAtom::Length);
-        if !matches!(
-            prototype.record.own_property(&length_key),
-            Some(OwnProperty::Data {
-                layout,
-                value: StoredValue::Number(value),
-            }) if layout == PropertyLayout::data(true, false, false)
-                && array_length_from_number(value) == Some(array_length)
-        ) {
+        if prototype.array_state().is_none() {
             return Err(crate::EngineFault::RuntimeInvariant {
-                message: "Array.prototype intrinsic has an invalid length property",
+                message: "Array.prototype intrinsic has no array state",
             });
         }
         Ok(array.prototype)
@@ -597,7 +583,10 @@ impl Runtime {
                 additional: 1,
             })?;
         let object = self
-            .insert_heap_object(HeapObject::error(ObjectRecord::empty(Some(prototype))))
+            .insert_heap_object(HeapObject::error(
+                ObjectRecord::empty(Some(prototype)),
+                JsString::empty(),
+            ))
             .map_err(|_| crate::ExecutionError::AllocationFailed {
                 resource: RuntimeResource::HeapObjects,
                 additional: 1,
@@ -614,10 +603,7 @@ impl Runtime {
     ) -> Result<(), crate::ExecutionError> {
         if !matches!(
             atom,
-            PredefinedAtom::Message
-                | PredefinedAtom::Cause
-                | PredefinedAtom::Errors
-                | PredefinedAtom::Stack
+            PredefinedAtom::Message | PredefinedAtom::Cause | PredefinedAtom::Errors
         ) {
             return Err(crate::EngineFault::RuntimeInvariant {
                 message: "Error construction received an unsupported own data property",
@@ -657,6 +643,40 @@ impl Runtime {
                 generation: object.generation(),
             },
         )
+    }
+
+    pub(crate) fn error_stack(
+        &self,
+        object: ObjectId,
+    ) -> Result<Option<&JsString>, crate::EngineFault> {
+        self.objects.get(object).map(HeapObject::error_stack).ok_or(
+            crate::EngineFault::StaleHeapEdge {
+                edge: "Error object",
+                index: object.index(),
+                generation: object.generation(),
+            },
+        )
+    }
+
+    pub(crate) fn replace_error_stack(
+        &mut self,
+        object: ObjectId,
+        stack: JsString,
+    ) -> Result<(), crate::EngineFault> {
+        let node = self
+            .objects
+            .get_mut(object)
+            .ok_or(crate::EngineFault::StaleHeapEdge {
+                edge: "Error object",
+                index: object.index(),
+                generation: object.generation(),
+            })?;
+        if !node.replace_error_stack(stack) {
+            return Err(crate::EngineFault::RuntimeInvariant {
+                message: "Error stack target does not have [[ErrorData]]",
+            });
+        }
+        Ok(())
     }
 
     pub(crate) fn error_object_kind(
@@ -715,7 +735,7 @@ impl Runtime {
         stack: Option<JsString>,
     ) -> Result<ObjectId, crate::ExecutionError> {
         let prototype = self.realm_error_prototype(realm, kind)?;
-        let property_count = 1_usize.saturating_add(usize::from(stack.is_some()));
+        let property_count = 1_usize;
         check_execution_limit(
             RuntimeResource::HeapObjects,
             self.limits.max_heap_objects,
@@ -750,20 +770,11 @@ impl Runtime {
                 resource: RuntimeResource::ObjectProperties,
                 additional: 1,
             })?;
-        if let Some(stack) = stack {
-            record
-                .append_data(
-                    self.predefined_property_key(PredefinedAtom::Stack),
-                    PropertyLayout::data(true, false, true),
-                    StoredValue::String(stack),
-                )
-                .map_err(|_| crate::ExecutionError::AllocationFailed {
-                    resource: RuntimeResource::ObjectProperties,
-                    additional: 1,
-                })?;
-        }
         let object = self
-            .insert_heap_object(HeapObject::error(record))
+            .insert_heap_object(HeapObject::error(
+                record,
+                stack.unwrap_or_else(JsString::empty),
+            ))
             .map_err(|_| crate::ExecutionError::AllocationFailed {
                 resource: RuntimeResource::HeapObjects,
                 additional: 1,

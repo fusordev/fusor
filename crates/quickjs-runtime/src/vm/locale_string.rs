@@ -27,10 +27,10 @@
 //!
 //! Number and `BigInt` delegate to the realm's intrinsic `NumberFormat`
 //! semantics. The profile selects `","` as Array's implementation-defined list
-//! separator. Object and Array remain
-//! fully observable: both invoke a property dynamically, and Array additionally
-//! suspends at every length conversion, element getter, locale method, and
-//! conversion of that method's result.
+//! separator. Object, Array, and `TypedArray` remain fully observable: they invoke
+//! element properties dynamically, while Array additionally suspends at length
+//! lookup and conversion. `TypedArray` validates and snapshots its internal length
+//! before entering the shared element loop.
 
 #[allow(
     clippy::wildcard_imports,
@@ -50,7 +50,7 @@ enum LocaleStringStage {
     AwaitElementString,
 }
 
-/// One in-progress generic Object or Array locale-string call.
+/// One in-progress Object, Array, or `TypedArray` locale-string call.
 pub(crate) struct LocaleStringContinuation {
     method: LocaleStringMethod,
     target: StoredValue,
@@ -142,6 +142,29 @@ pub(super) fn begin_locale_string(
             return advance_locale_string(runtime, state, None, return_to, execution_budget);
         }
         LocaleStringMethod::Array => {}
+        LocaleStringMethod::TypedArray => {
+            let StoredValue::Object(object) = receiver else {
+                return typed_array_type_error(realm, &origin, "not a TypedArray");
+            };
+            let (_, length) = typed_array_require_in_bounds(runtime, object, realm, &origin)?;
+            let state = LocaleStringContinuation {
+                method,
+                target: StoredValue::Object(object),
+                element: None,
+                arguments: vec![
+                    arguments.take_first_or_undefined(),
+                    arguments.take_first_or_undefined(),
+                ],
+                separator: JsString::from_utf8(",")?,
+                accumulated: JsString::empty(),
+                length: usize_to_u64(length),
+                next: 0,
+                realm,
+                stage: LocaleStringStage::NextElement,
+                origin,
+            };
+            return advance_locale_string(runtime, state, None, return_to, execution_budget);
+        }
     }
 
     let forwarded_arguments = vec![

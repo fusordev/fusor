@@ -5384,7 +5384,11 @@ impl<'unit, 'arena, 'scope> Planner<'unit, 'arena, 'scope> {
                 .has_parameter_expressions()
                 && matches!(
                     binding.policy.kind,
-                    DeclarationKind::Var | DeclarationKind::Function
+                    DeclarationKind::Var
+                        | DeclarationKind::Let
+                        | DeclarationKind::Const
+                        | DeclarationKind::Class
+                        | DeclarationKind::Function
                 )
             {
                 let parameters = self.parameter_list_span(arguments_owner).ok_or(

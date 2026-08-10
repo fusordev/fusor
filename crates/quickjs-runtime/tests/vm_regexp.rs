@@ -314,9 +314,29 @@ fn regexp_escape_follows_the_spec_scalar_and_punctuator_rules() {
     assert_eq!(
         rendered(
             "return [RegExp.escape('foo'),RegExp.escape('1a'),RegExp.escape('a-b'),RegExp.escape('a/b'),\
-                     RegExp.escape('a b'),RegExp.escape('[x]'),RegExp.escape('é'),RegExp.escape('\\ud800')].join('|');"
+                     RegExp.escape('a b'),RegExp.escape('[x]'),RegExp.escape('é'),RegExp.escape('\\ud800'),\
+                     RegExp.escape('\\u00a0'),RegExp.escape('\\ufeff'),RegExp.escape('\\u202f')].join('|');"
         ),
-        "\\x66oo|\\x31a|\\x61\\x2db|\\x61\\/b|\\x61\\x20b|\\[x\\]|é|\\ud800"
+        "\\x66oo|\\x31a|\\x61\\x2db|\\x61\\/b|\\x61\\x20b|\\[x\\]|é|\\ud800|\\xa0|\\ufeff|\\u202f"
+    );
+    for source in ["123", "({})", "[]", "null", "undefined"] {
+        assert_eq!(
+            thrown(&format!("return RegExp.escape({source});")).0,
+            ExceptionKind::TypeError,
+            "{source}"
+        );
+    }
+}
+
+#[test]
+fn regexp_named_capture_names_use_cooked_unicode_identifiers() {
+    assert_eq!(
+        rendered(
+            "var bmp=/(?<π>a)/du.exec('bab');var astral=/(?<𝑓>a)/d.exec('bab');\
+             return [bmp[0],bmp.groups.π,Object.keys(bmp.groups)[0],\
+                     bmp.indices.groups.π.join(','),astral.groups.𝑓,Object.keys(astral.groups)[0]].join('|');"
+        ),
+        "a|a|π|1,2|a|𝑓"
     );
 }
 
@@ -643,6 +663,26 @@ fn regexp_symbol_match_all_clones_last_index_and_exposes_the_exact_iterator_surf
                      iterator[Symbol.iterator]()===iterator].join('|');"
         ),
         "1|a|1|a|false||2|undefined|false|true|[object RegExp String Iterator]|next|0|true"
+    );
+}
+
+#[test]
+fn regexp_string_iterator_next_rejects_incompatible_objects_as_type_errors() {
+    assert_eq!(
+        thrown(
+            "var iterator=/./[Symbol.matchAll]('');\
+             return Object.create(iterator).next();"
+        )
+        .0,
+        ExceptionKind::TypeError
+    );
+    assert_eq!(
+        thrown(
+            "var iterator=/./[Symbol.matchAll]('');\
+             return iterator.next.call({});"
+        )
+        .0,
+        ExceptionKind::TypeError
     );
 }
 

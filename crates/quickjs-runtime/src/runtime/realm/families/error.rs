@@ -1,9 +1,10 @@
 //! Error constructor and prototype declarations.
 
 use super::{
-    FunctionSink, ObjectSink, PropertySink, data, function_prototype, method, object,
+    FunctionSink, ObjectSink, PropertySink, accessor, data, function_prototype, method, object,
     object_prototype, ordinary,
 };
+use crate::runtime::PropertyLayout;
 use crate::runtime::realm::{
     CONSTRUCTOR_PROTOTYPE_PROPERTY, ErrorIntrinsicKind, METHOD_PROPERTY, NativeFunctionKind,
     PredefinedAtom,
@@ -39,6 +40,17 @@ pub(super) fn visit_properties(visit: PropertySink<'_>) {
                 prototype,
                 IntrinsicKeySpec::PredefinedString(PredefinedAtom::ToString),
                 NativeFunctionKind::ErrorPrototypeToString,
+            ));
+            visit(accessor(
+                prototype,
+                IntrinsicKeySpec::PredefinedString(PredefinedAtom::Stack),
+                PropertyLayout::accessor(false, true),
+                Some(IntrinsicFunctionId(
+                    NativeFunctionKind::ErrorPrototypeStackGetter,
+                )),
+                Some(IntrinsicFunctionId(
+                    NativeFunctionKind::ErrorPrototypeStackSetter,
+                )),
             ));
         }
         visit(data(
@@ -110,6 +122,16 @@ pub(super) fn visit_functions(visit: FunctionSink<'_>) {
             NativeFunctionKind::ErrorPrototypeToString,
             IntrinsicNameSpec::Predefined(PredefinedAtom::ToString),
             0,
+        ),
+        (
+            NativeFunctionKind::ErrorPrototypeStackGetter,
+            IntrinsicNameSpec::Literal("get stack"),
+            0,
+        ),
+        (
+            NativeFunctionKind::ErrorPrototypeStackSetter,
+            IntrinsicNameSpec::Literal("set stack"),
+            1,
         ),
         (
             NativeFunctionKind::ErrorIsError,

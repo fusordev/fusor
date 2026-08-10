@@ -644,7 +644,7 @@ fn anonymous_base_class_formal_parameter_defaults_respect_the_binding_shape() {
 #[test]
 fn anonymous_base_class_assignment_defaults_use_their_target_names() {
     let tree = compile(
-        "function make(){let ArrayName;[ArrayName=class{}]=[];let ObjectName;({value:ObjectName=class{}}={});return [ArrayName,ObjectName];}",
+        "function make(){let ArrayName;[ArrayName=class{}]=[];let ObjectName;({value:ObjectName=class{}}={});let ShorthandName;({ShorthandName=class{}}={});return [ArrayName,ObjectName,ShorthandName];}",
         "make",
     );
     assert_eq!(
@@ -655,8 +655,8 @@ fn anonymous_base_class_assignment_defaults_use_their_target_names() {
             .filter(|instruction| instruction.decoded().instruction().opcode()
                 == FinalOpcode::DefineClass)
             .count(),
-        2,
-        "both defaults receive their inferred name through define_class"
+        3,
+        "array, explicit object, and shorthand object defaults receive their inferred name through define_class"
     );
     assert!(
         !tree
@@ -1001,7 +1001,7 @@ fn logical_static_property_class_assignments_use_the_typed_empty_name_path() {
 }
 
 #[test]
-fn logical_computed_property_class_assignments_preserve_the_raw_key_for_read_and_write() {
+fn logical_computed_property_class_assignments_reuse_one_converted_key() {
     let tree = compile(
         "function make(holder,orKey,andKey,nullishKey){holder[orKey]||=class{static answer(){return 3;}};holder[andKey]&&=class{static answer(){return 4;}};holder[nullishKey]??=class{static answer(){return 5;}};return holder;}",
         "make",
@@ -1020,7 +1020,8 @@ fn logical_computed_property_class_assignments_preserve_the_raw_key_for_read_and
         root.control_flow()
             .instructions()
             .iter()
-            .filter(|instruction| instruction.decoded().instruction().opcode() == FinalOpcode::Dup2)
+            .filter(|instruction| instruction.decoded().instruction().opcode()
+                == FinalOpcode::GetArrayEl3)
             .count(),
         3,
     );
@@ -1029,9 +1030,9 @@ fn logical_computed_property_class_assignments_preserve_the_raw_key_for_read_and
             .instructions()
             .iter()
             .filter(|instruction| instruction.decoded().instruction().opcode()
-                == FinalOpcode::GetArrayEl)
+                == FinalOpcode::ToPropKey)
             .count(),
-        3,
+        0,
     );
 }
 

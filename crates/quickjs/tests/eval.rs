@@ -91,6 +91,27 @@ fn closed_direct_eval_returns_the_script_completion() {
 }
 
 #[test]
+fn try_finally_preserves_and_replaces_eval_completion_values() {
+    evaluate(
+        r#"let normal=eval("try{'try'}finally{'finally'}");
+           let abrupt=eval("do{try{'try'}finally{'finally';break;}}while(false);");
+           let emptyFinally=eval("do{try{'try'}finally{break;}}while(false);");
+           let emptyCatch=eval("try{'try';throw 0}catch{}");
+           let nested=eval("do{try{'outer'}finally{'before';try{'inner'}finally{'nested'}break;}}while(false);");
+           normal==='try'&&abrupt==='finally'&&emptyFinally===undefined&&emptyCatch===undefined&&nested==='inner';"#,
+        |value| assert_eq!(value.as_boolean(), Ok(Some(true))),
+    );
+}
+
+#[test]
+fn class_static_block_finalizers_do_not_consume_script_completion_storage() {
+    evaluate(
+        r#"eval("class C{static{try{'try'}finally{'finally'}}}'after'")==='after';"#,
+        |value| assert_eq!(value.as_boolean(), Ok(Some(true))),
+    );
+}
+
+#[test]
 fn spread_direct_eval_materializes_the_iterator_and_evaluates_only_the_first_argument() {
     evaluate(
         "let elements=['x=1;','x=2;'],nextCount=0;let iterable={[Symbol.iterator](){return{next(){let index=nextCount++;return index<elements.length?{done:false,value:elements[index]}:{done:true};}};}};let result=(function(){let x='local';eval(...iterable);return x;})();result===1&&nextCount===3;",
@@ -373,6 +394,38 @@ fn sloppy_direct_eval_var_without_initializer_preserves_an_existing_local() {
     evaluate(
         "function local(){var answer=42;eval('var answer;');return answer;}local();",
         |value| assert!(number(value).strict_equals(JsNumber::from_i32(42))),
+    );
+}
+
+#[test]
+fn simple_assignment_retains_its_pre_rhs_environment_reference() {
+    evaluate(
+        "function initialized(){var x=0;let inner=(function(){x=(eval('var x=2;'),1);return x;})();return x===1&&inner===2;}function uninitialized(){var x=0;let inner=(function(){x=(eval('var x;'),1);return x;})();return x===1&&inner===undefined;}initialized()&&uninitialized();",
+        |value| assert_eq!(value.as_boolean(), Ok(Some(true))),
+    );
+}
+
+#[test]
+fn strict_unresolvable_assignment_stays_unresolvable_across_the_rhs() {
+    evaluate(
+        "(function(){'use strict';try{missing=(globalThis.missing=5);return false;}catch(error){return error.constructor===ReferenceError&&globalThis.missing===5;}})();",
+        |value| assert_eq!(value.as_boolean(), Ok(Some(true))),
+    );
+}
+
+#[test]
+fn strict_resolved_global_assignment_stays_resolved_across_the_rhs() {
+    evaluate(
+        "Object.defineProperty(globalThis,'retained',{value:1,writable:true,configurable:true});(function(){'use strict';let result=retained=(delete globalThis.retained,7);return result===7&&globalThis.retained===7;})();",
+        |value| assert_eq!(value.as_boolean(), Ok(Some(true))),
+    );
+}
+
+#[test]
+fn sloppy_assignment_recreates_an_eval_binding_deleted_by_its_rhs() {
+    evaluate(
+        "function local(){let assign=function(){return retained=(eval('delete retained'),7);};eval('var retained=1;');let result=assign();try{return result===7&&eval('retained')===7;}catch(error){return false;}}local();",
+        |value| assert_eq!(value.as_boolean(), Ok(Some(true))),
     );
 }
 

@@ -122,6 +122,7 @@ pub(super) fn validate_static_semantics(
                         | FinalOpcode::CopyDataProperties
                         | FinalOpcode::Eval
                         | FinalOpcode::ApplyEval
+                        | FinalOpcode::MakeVarRefRef
                 )
             {
                 // Compiler-owned control flow is still non-executable. The

@@ -127,19 +127,14 @@ pub(super) fn begin_string_replace(
 
     if matches!(
         state.search_value,
-        StoredValue::Undefined | StoredValue::Null
+        StoredValue::Function(_) | StoredValue::Object(_)
     ) {
-        return begin_replace_fallback(runtime, state, return_to, execution_budget);
+        if replace_all {
+            return read_match_property(runtime, state, return_to, execution_budget);
+        }
+        return read_replace_method(runtime, state, return_to, execution_budget);
     }
-    if replace_all
-        && matches!(
-            state.search_value,
-            StoredValue::Function(_) | StoredValue::Object(_)
-        )
-    {
-        return read_match_property(runtime, state, return_to, execution_budget);
-    }
-    read_replace_method(runtime, state, return_to, execution_budget)
+    begin_replace_fallback(runtime, state, return_to, execution_budget)
 }
 
 /// Resumes a protocol getter, fallback conversion, replacer call, or callback

@@ -225,6 +225,8 @@ pub(super) const fn is_declarative_function(id: IntrinsicFunctionId) -> bool {
         id.0,
         NativeFunctionKind::ErrorConstructor(_)
             | NativeFunctionKind::ErrorPrototypeToString
+            | NativeFunctionKind::ErrorPrototypeStackGetter
+            | NativeFunctionKind::ErrorPrototypeStackSetter
             | NativeFunctionKind::ErrorIsError
             | NativeFunctionKind::BooleanConstructor
             | NativeFunctionKind::BooleanPrototypeToString
@@ -248,6 +250,7 @@ pub(super) const fn is_declarative_function(id: IntrinsicFunctionId) -> bool {
                 super::LocaleStringMethod::Number
                     | super::LocaleStringMethod::BigInt
                     | super::LocaleStringMethod::Array
+                    | super::LocaleStringMethod::TypedArray
             )
             | NativeFunctionKind::ArrayConstructor
             | NativeFunctionKind::ArraySpeciesGetter
@@ -494,6 +497,8 @@ pub(super) fn property_batch(property: IntrinsicPropertySpec) -> DeclarativeBatc
             Some(IntrinsicFunctionId(
                 NativeFunctionKind::ErrorConstructor(_)
                     | NativeFunctionKind::ErrorPrototypeToString
+                    | NativeFunctionKind::ErrorPrototypeStackGetter
+                    | NativeFunctionKind::ErrorPrototypeStackSetter
                     | NativeFunctionKind::ErrorIsError
             ))
         )
@@ -647,6 +652,8 @@ const fn is_error_identity(id: IntrinsicIdentity) -> bool {
             | IntrinsicIdentity::Function(IntrinsicFunctionId(
                 NativeFunctionKind::ErrorConstructor(_)
                     | NativeFunctionKind::ErrorPrototypeToString
+                    | NativeFunctionKind::ErrorPrototypeStackGetter
+                    | NativeFunctionKind::ErrorPrototypeStackSetter
                     | NativeFunctionKind::ErrorIsError,
             ))
     )
@@ -943,6 +950,7 @@ const fn is_array_function(id: IntrinsicFunctionId) -> bool {
             | NativeFunctionKind::TypedArraySpeciesGetter
             | NativeFunctionKind::TypedArrayPrototype(_)
             | NativeFunctionKind::Uint8Array(_)
+            | NativeFunctionKind::LocaleString(super::LocaleStringMethod::TypedArray)
             | NativeFunctionKind::ArrayPrototypeJoin
             | NativeFunctionKind::ArrayPrototypeToString
             | NativeFunctionKind::ArrayPrototypeSearch(_)
@@ -1033,6 +1041,8 @@ pub(super) const fn function_batch(id: IntrinsicFunctionId) -> DeclarativeBatch 
         id.0,
         NativeFunctionKind::ErrorConstructor(_)
             | NativeFunctionKind::ErrorPrototypeToString
+            | NativeFunctionKind::ErrorPrototypeStackGetter
+            | NativeFunctionKind::ErrorPrototypeStackSetter
             | NativeFunctionKind::ErrorIsError
     ) {
         DeclarativeBatch::Errors

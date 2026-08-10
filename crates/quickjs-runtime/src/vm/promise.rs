@@ -898,7 +898,15 @@ pub(super) fn dispatch_promise_capability_executor(
             .map_err(|_| EngineFault::RuntimeInvariant {
                 message: "Promise capability executor capture is already borrowed",
             })?;
-    if capture.resolve.is_some() || capture.reject.is_some() {
+    if capture
+        .resolve
+        .as_ref()
+        .is_some_and(|value| !matches!(value, StoredValue::Undefined))
+        || capture
+            .reject
+            .as_ref()
+            .is_some_and(|value| !matches!(value, StoredValue::Undefined))
+    {
         return promise_type_error(
             executor.realm,
             "Promise capability executor was called more than once",

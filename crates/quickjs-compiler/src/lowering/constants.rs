@@ -15,11 +15,12 @@ use super::atoms::{
 use super::{
     ArrayExpression, ArrayExpressionElement, AssignmentTargetProperty, AstKind, BindingPattern,
     CompilationContext, CompiledConstant, CompiledFunctionConstant, Executable, Expression,
-    ExpressionPlanner, FunctionTreeLayoutSeed, GetSpan, LeafCompilationError, NodeId,
-    OxcPropertyKey, ParsedUnit, PlannedInstruction, PropertyKind, RegExpLiteral, StoragePlacement,
-    UnaryOperator, checked_function_entry_count, compiled_static_property_key,
-    compiler_identifier_string, decode_compiler_string, exact_i32, exact_negated_i32,
-    record_property_candidate, record_property_candidate_for, record_string_candidate,
+    ExpressionPlanner, FunctionTreeLayoutSeed, GetSpan, LeafCompilationError, NativeReferenceId,
+    NodeId, OxcPropertyKey, ParsedUnit, PlannedInstruction, PropertyKind, ReferenceId,
+    RegExpLiteral, StoragePlacement, UnaryOperator, checked_function_entry_count,
+    compiled_static_property_key, compiler_identifier_string, decode_compiler_string, exact_i32,
+    exact_negated_i32, record_property_candidate, record_property_candidate_for,
+    record_string_candidate,
 };
 
 impl<'arena> CompilationContext<'_, 'arena, '_> {
@@ -118,6 +119,16 @@ impl<'arena> CompilationContext<'_, 'arena, '_> {
                     value: compiler_identifier_string("_ret_", executable.span())?,
                     span: executable.span(),
                 });
+                if self.script_finally_completion_count(executable.id())? != 0 {
+                    owner.push(CompiledMetadataAtomCandidate {
+                        key: CompiledMetadataAtomKey::ScriptFinallyCompletion,
+                        value: compiler_identifier_string(
+                            "<finally-completion>",
+                            executable.span(),
+                        )?,
+                        span: executable.span(),
+                    });
+                }
             }
             self.record_raw_parameter_metadata_candidates(executable, owner)?;
             for binding in self.planned.plan.bindings_for(executable.id()).ok_or(
@@ -423,21 +434,28 @@ impl<'arena> CompilationContext<'_, 'arena, '_> {
                     atom_candidates,
                 )?;
             }
-            AstKind::IdentifierReference(identifier)
-                if has_direct_eval_with
+            AstKind::IdentifierReference(identifier) => {
+                let with_visible = has_direct_eval_with
                     || !self
                         .with_object_bindings_for_reference(
                             identifier.reference_id.get(),
                             identifier.span,
                         )?
-                        .is_empty() =>
-            {
-                record_property_candidate(
-                    owner,
-                    compiler_identifier_string(identifier.name.as_str(), identifier.span)?,
-                    identifier.span,
-                    atom_candidates,
-                )?;
+                        .is_empty();
+                if with_visible
+                    || self.retained_mutation_requires_reference_atom(
+                        owner,
+                        identifier.reference_id.get(),
+                        identifier.span,
+                    )?
+                {
+                    record_property_candidate(
+                        owner,
+                        compiler_identifier_string(identifier.name.as_str(), identifier.span)?,
+                        identifier.span,
+                        atom_candidates,
+                    )?;
+                }
             }
             AstKind::BindingIdentifier(identifier) => {
                 let AstKind::VariableDeclarator(declarator) = nodes.parent_kind(node_id) else {
@@ -721,6 +739,72 @@ impl<'arena> CompilationContext<'_, 'arena, '_> {
         Ok(())
     }
 
+    fn retained_mutation_requires_reference_atom(
+        &self,
+        owner: ExecutableId,
+        reference_id: Option<ReferenceId>,
+        span: Span,
+    ) -> Result<bool, LeafCompilationError> {
+        let reference_id = reference_id.ok_or(LeafCompilationError::SemanticInvariant {
+            invariant: "identifier reference has Oxc reference identity",
+            span: Some(span),
+        })?;
+        let native = self
+            .planned
+            .identities
+            .reference_by_id
+            .get(reference_id.index())
+            .copied()
+            .flatten()
+            .ok_or(LeafCompilationError::SemanticInvariant {
+                invariant: "Oxc reference has compiler identity",
+                span: Some(span),
+            })?;
+        let reference = match native {
+            NativeReferenceId::Resolved(reference) => reference,
+            NativeReferenceId::Unresolved(reference) => {
+                let reference = self
+                    .planned
+                    .plan
+                    .unresolved_globals()
+                    .get(reference.index())
+                    .ok_or(LeafCompilationError::SemanticInvariant {
+                        invariant: "unresolved compiler reference exists",
+                        span: Some(span),
+                    })?;
+                return Ok(reference.access().writes());
+            }
+        };
+        let reference = self.planned.plan.resolved_reference(reference).ok_or(
+            LeafCompilationError::SemanticInvariant {
+                invariant: "resolved compiler reference exists",
+                span: Some(span),
+            },
+        )?;
+        if reference.span() != span {
+            return Err(LeafCompilationError::SemanticInvariant {
+                invariant: "resolved compiler reference retains its Oxc span",
+                span: Some(span),
+            });
+        }
+        if !reference.access().writes() {
+            return Ok(false);
+        }
+        let binding = self.planned.plan.binding(reference.binding()).ok_or(
+            LeafCompilationError::SemanticInvariant {
+                invariant: "resolved compiler binding exists",
+                span: Some(span),
+            },
+        )?;
+        Ok(match binding.placement() {
+            StoragePlacement::Argument { .. } | StoragePlacement::Local => {
+                binding.executable() != owner
+            }
+            StoragePlacement::GlobalObject | StoragePlacement::GlobalLexical => true,
+            StoragePlacement::ModuleLocal | StoragePlacement::ModuleImport => false,
+        })
+    }
+
     fn class_instance_initializer_owner(
         &self,
         class_node: NodeId,
@@ -776,6 +860,11 @@ impl<'arena> CompilationContext<'_, 'arena, '_> {
                 }
                 AstKind::AssignmentTargetWithDefault(assignment) => {
                     return Self::direct_class_assignment_default_name(node_id, class, assignment);
+                }
+                AstKind::AssignmentTargetPropertyIdentifier(property) => {
+                    return Self::direct_class_assignment_property_default_name(
+                        node_id, class, property,
+                    );
                 }
                 AstKind::FormalParameter(parameter) => {
                     return Self::class_formal_parameter_default_name(node_id, class, parameter);
@@ -1015,6 +1104,38 @@ impl<'arena> CompilationContext<'_, 'arena, '_> {
         Ok((
             compiler_identifier_string(identifier.name.as_str(), identifier.span)?,
             identifier.span,
+        ))
+    }
+
+    fn direct_class_assignment_property_default_name(
+        node_id: NodeId,
+        class: &super::Class<'arena>,
+        property: &super::AssignmentTargetPropertyIdentifier<'arena>,
+    ) -> Result<(CompilerString, Span), LeafCompilationError> {
+        let Some(mut initializer) = property.init.as_ref() else {
+            return Err(LeafCompilationError::SemanticInvariant {
+                invariant: "anonymous class shorthand assignment property has a default initializer",
+                span: Some(class.span),
+            });
+        };
+        while let Expression::ParenthesizedExpression(parenthesized) = initializer {
+            initializer = &parenthesized.expression;
+        }
+        let Expression::ClassExpression(initializer) = initializer else {
+            return Err(LeafCompilationError::SemanticInvariant {
+                invariant: "anonymous class remains the direct shorthand assignment property initializer",
+                span: Some(class.span),
+            });
+        };
+        if initializer.node_id() != node_id {
+            return Err(LeafCompilationError::SemanticInvariant {
+                invariant: "anonymous class name is inferred from its shorthand assignment property",
+                span: Some(class.span),
+            });
+        }
+        Ok((
+            compiler_identifier_string(property.binding.name.as_str(), property.binding.span)?,
+            property.binding.span,
         ))
     }
 

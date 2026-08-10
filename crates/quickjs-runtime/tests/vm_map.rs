@@ -203,9 +203,11 @@ fn map_for_each_and_insert_helpers_preserve_reentrant_spec_order() {
              m.forEach(function(value,key,map){seen.push(key+value+(map===m));if(key===1){m.delete(2);m.set(3,'c')}});\
              var first=m.getOrInsert('x',7);var existing=m.getOrInsert('x',8);\
              var computed=m.getOrInsertComputed('y',function(key){m.set(key,9);m.set('tail',11);return 10});\
-             return [seen.join(','),first,existing,computed,m.get('y'),Array.from(m.keys()).join(':')].join('|');"
+             var canonical;new Map().getOrInsertComputed(-0,function(key){canonical=key});\
+             return [seen.join(','),first,existing,computed,m.get('y'),Array.from(m.keys()).join(':'),\
+               Object.is(canonical,0)].join('|');"
         ),
-        "1atrue,3ctrue|7|7|10|10|1:3:x:y:tail"
+        "1atrue,3ctrue|7|7|10|10|1:3:x:y:tail|true"
     );
 }
 

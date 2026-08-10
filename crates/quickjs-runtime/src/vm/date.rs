@@ -368,16 +368,7 @@ fn begin_date_utc(
 ) -> Result<NativeDispatch, NativeFailure> {
     let mut values = arguments.into_remaining_values();
     values.truncate(7);
-    let conversion_count = values.len().max(2);
-    values
-        .try_reserve(conversion_count.saturating_sub(values.len()))
-        .map_err(|_| ExecutionError::AllocationFailed {
-            resource: RuntimeResource::FrameValues,
-            additional: conversion_count.saturating_sub(values.len()),
-        })?;
-    while values.len() < conversion_count {
-        values.push(StoredValue::Undefined);
-    }
+    let conversion_count = values.len();
     let mut converted = Vec::new();
     converted.try_reserve_exact(conversion_count).map_err(|_| {
         ExecutionError::AllocationFailed {
@@ -1153,7 +1144,6 @@ pub(super) fn time_clip(value: f64) -> JsNumber {
 fn date_utc_from_components(values: &[JsNumber]) -> JsNumber {
     let mut components = [0.0; 7];
     components[0] = f64::NAN;
-    components[1] = f64::NAN;
     components[2] = 1.0;
     for (index, value) in values.iter().enumerate() {
         components[index] = value.as_f64();
@@ -1336,15 +1326,22 @@ fn local_component(method: DatePrototypeMethod, value: f64) -> JsNumber {
         DatePrototypeMethod::GetMilliseconds => JsNumber::from_i64(i64::from(fields.millisecond())),
         DatePrototypeMethod::GetDay => JsNumber::from_i64(i64::from(fields.day_of_week() % 7)),
         DatePrototypeMethod::GetTimezoneOffset => {
-            #[allow(
-                clippy::cast_precision_loss,
-                reason = "time-zone offsets are far below Number's exact-integer boundary"
-            )]
-            let offset_nanoseconds = fields.offset_nanoseconds() as f64;
-            JsNumber::from_f64(-offset_nanoseconds / (MS_PER_MINUTE * 1_000_000.0))
+            timezone_offset_minutes(fields.offset_nanoseconds())
         }
         _ => unreachable!("non-local-component Date method"),
     }
+}
+
+fn timezone_offset_minutes(offset_nanoseconds: i64) -> JsNumber {
+    if offset_nanoseconds == 0 {
+        return JsNumber::from_i32(0);
+    }
+    #[allow(
+        clippy::cast_precision_loss,
+        reason = "time-zone offsets are far below Number's exact-integer boundary"
+    )]
+    let offset_nanoseconds = offset_nanoseconds as f64;
+    JsNumber::from_f64(-offset_nanoseconds / (MS_PER_MINUTE * 1_000_000.0))
 }
 
 fn to_iso_string(value: f64) -> Option<String> {
@@ -1738,6 +1735,20 @@ mod tests {
         assert_eq!(
             format_local_date_string(&date_time),
             "Wed Dec 31 1969 19:00:00 GMT-0500"
+        );
+    }
+
+    #[test]
+    fn zero_timezone_offset_is_positive_zero() {
+        assert_eq!(
+            timezone_offset_minutes(0).as_f64().to_bits(),
+            0.0_f64.to_bits()
+        );
+        assert_eq!(
+            timezone_offset_minutes(3_600_000_000_000)
+                .as_f64()
+                .to_bits(),
+            (-60.0_f64).to_bits()
         );
     }
 

@@ -351,7 +351,7 @@ pub(super) fn finish_data_view_constructor_prototype(
         DataViewByteLength::Auto => Some(buffer_byte_length),
     };
     if state.byte_offset > buffer_byte_length || end.is_none_or(|end| end > buffer_byte_length) {
-        return data_view_type_error(
+        return data_view_range_error(
             state.realm,
             &state.origin,
             "DataView backing buffer changed",

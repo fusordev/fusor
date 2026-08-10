@@ -190,6 +190,13 @@ pub(super) fn pop(frame: &mut Frame) -> Result<StoredValue, EngineFault> {
                 message: "verified JavaScript value operation consumed an internal catch marker",
             })
         }
+        Some(
+            OperandStackEntry::CapturedReference { .. }
+            | OperandStackEntry::RealmGlobalReference { .. }
+            | OperandStackEntry::CapturedReferenceAnchor,
+        ) => Err(EngineFault::RuntimeInvariant {
+            message: "verified JavaScript value operation consumed an internal captured reference",
+        }),
         Some(OperandStackEntry::FinallyReturn { .. }) => Err(EngineFault::RuntimeInvariant {
             message: "verified JavaScript value operation consumed an internal finally return address",
         }),
@@ -210,6 +217,13 @@ pub(super) fn peek(frame: &Frame) -> Result<&StoredValue, EngineFault> {
                 message: "verified JavaScript value operation inspected an internal catch marker",
             })
         }
+        Some(
+            OperandStackEntry::CapturedReference { .. }
+            | OperandStackEntry::RealmGlobalReference { .. }
+            | OperandStackEntry::CapturedReferenceAnchor,
+        ) => Err(EngineFault::RuntimeInvariant {
+            message: "verified JavaScript value operation inspected an internal captured reference",
+        }),
         Some(OperandStackEntry::FinallyReturn { .. }) => Err(EngineFault::RuntimeInvariant {
             message: "verified JavaScript value operation inspected an internal finally return address",
         }),
@@ -230,6 +244,13 @@ pub(super) fn stack_value_at(frame: &Frame, index: usize) -> Result<&StoredValue
                 message: "verified JavaScript value operation indexed an internal catch marker",
             })
         }
+        Some(
+            OperandStackEntry::CapturedReference { .. }
+            | OperandStackEntry::RealmGlobalReference { .. }
+            | OperandStackEntry::CapturedReferenceAnchor,
+        ) => Err(EngineFault::RuntimeInvariant {
+            message: "verified JavaScript value operation indexed an internal captured reference",
+        }),
         Some(OperandStackEntry::FinallyReturn { .. }) => Err(EngineFault::RuntimeInvariant {
             message: "verified JavaScript value operation indexed an internal finally return address",
         }),
@@ -247,6 +268,9 @@ pub(super) fn pop_finally_continuation(frame: &mut Frame) -> Result<InstructionI
         Some(OperandStackEntry::FinallyReturn { continuation }) => Ok(continuation),
         Some(
             OperandStackEntry::JavaScript(_)
+            | OperandStackEntry::CapturedReference { .. }
+            | OperandStackEntry::RealmGlobalReference { .. }
+            | OperandStackEntry::CapturedReferenceAnchor
             | OperandStackEntry::Catch { .. }
             | OperandStackEntry::ForOfCatch { .. },
         ) => Err(EngineFault::RuntimeInvariant {
@@ -271,6 +295,46 @@ pub(super) fn enter_finally_subroutine(
         .stack
         .push(OperandStackEntry::FinallyReturn { continuation });
     frame.instruction = target;
+    Ok(())
+}
+
+pub(super) fn normalize_stack_depth_correction(
+    runtime: &Runtime,
+    frame: &mut Frame,
+    instruction: InstructionIndex,
+) -> Result<(), EngineFault> {
+    let verified = code(runtime, frame.code)?
+        .authority
+        .function(frame.template)
+        .and_then(|function| function.function().control_flow().instruction(instruction))
+        .copied()
+        .ok_or(EngineFault::MissingInstruction {
+            function: frame.template,
+            instruction: instruction.get(),
+        })?;
+    let structural_depth =
+        verified
+            .entry_stack_depth()
+            .ok_or(EngineFault::UnreachableInstruction {
+                function: frame.template,
+                pc: verified.decoded().pc(),
+            })?;
+    let actual_depth =
+        u32::try_from(frame.stack.len()).map_err(|_| EngineFault::StackDepthMismatch {
+            function: frame.template,
+            pc: verified.decoded().pc(),
+            expected: structural_depth,
+            actual: frame.stack.len(),
+        })?;
+    frame.stack_depth_correction =
+        structural_depth
+            .checked_sub(actual_depth)
+            .ok_or(EngineFault::StackDepthMismatch {
+                function: frame.template,
+                pc: verified.decoded().pc(),
+                expected: structural_depth,
+                actual: frame.stack.len(),
+            })?;
     Ok(())
 }
 
@@ -351,6 +415,9 @@ pub(super) fn deactivate_for_of_record(
         Some(OperandStackEntry::JavaScript(StoredValue::Undefined)) if allow_return_dummy => {}
         Some(
             OperandStackEntry::JavaScript(_)
+            | OperandStackEntry::CapturedReference { .. }
+            | OperandStackEntry::RealmGlobalReference { .. }
+            | OperandStackEntry::CapturedReferenceAnchor
             | OperandStackEntry::Catch { .. }
             | OperandStackEntry::ForOfCatch { .. }
             | OperandStackEntry::FinallyReturn { .. },
@@ -408,6 +475,9 @@ pub(super) fn finish_for_of_step(
         }
         Some(
             OperandStackEntry::JavaScript(_)
+            | OperandStackEntry::CapturedReference { .. }
+            | OperandStackEntry::RealmGlobalReference { .. }
+            | OperandStackEntry::CapturedReferenceAnchor
             | OperandStackEntry::Catch { .. }
             | OperandStackEntry::ForOfCatch { .. }
             | OperandStackEntry::FinallyReturn { .. },
@@ -500,6 +570,9 @@ pub(super) fn take_for_of_record_at(
         }) => (active, asynchronous),
         Some(
             OperandStackEntry::JavaScript(_)
+            | OperandStackEntry::CapturedReference { .. }
+            | OperandStackEntry::RealmGlobalReference { .. }
+            | OperandStackEntry::CapturedReferenceAnchor
             | OperandStackEntry::Catch { .. }
             | OperandStackEntry::FinallyReturn { .. },
         )

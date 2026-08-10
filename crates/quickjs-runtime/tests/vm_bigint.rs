@@ -471,6 +471,16 @@ fn the_constructor_rejects_inconvertible_arguments() {
         "invalid bigint literal",
     );
     assert_throws(
+        "return BigInt('-0x1');",
+        ExceptionKind::SyntaxError,
+        "invalid bigint literal",
+    );
+    assert_throws(
+        "return BigInt('+0b1');",
+        ExceptionKind::SyntaxError,
+        "invalid bigint literal",
+    );
+    assert_throws(
         "return BigInt(null);",
         ExceptionKind::TypeError,
         "cannot convert to BigInt",
@@ -706,6 +716,8 @@ fn loose_equality_compares_across_the_domains_by_value() {
     assert!(!boolean("return BigInt(1)==1.5;"));
     assert!(!boolean("return BigInt(1)==NaN;"));
     assert!(boolean("return BigInt(1)!=2;"));
+    assert!(boolean("return Object(BigInt(1))==BigInt(1);"));
+    assert!(boolean("return BigInt(1)==Object(BigInt(1));"));
     // Exactness holds here too.
     assert!(!boolean(
         "return BigInt('9007199254740993')==9007199254740992;"

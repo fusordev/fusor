@@ -953,6 +953,43 @@ fn function_prototype_has_restricted_caller_and_arguments_properties() {
     assert_eq!(value.as_boolean().expect("live Boolean"), Some(true));
 }
 
+/// The admitted legacy accessor never exposes a caller function. It only
+/// preserves the ES5-compatible `undefined` result for zero-argument reads on
+/// sloppy constructable bytecode functions; every setter and restricted
+/// function kind still reaches `%ThrowTypeError%`.
+#[test]
+fn legacy_restricted_function_reads_are_narrow_and_never_expose_callers() {
+    let mut runtime = Runtime::try_new(RuntimeLimits::default()).expect("runtime");
+    let realm = runtime.create_realm().expect("realm");
+    let inspect = dynamic_function(
+        &mut runtime.context(&realm).expect("context"),
+        &[],
+        "function sloppy(){}\
+         function strict(){'use strict';}\
+         var arrow=()=>0,method=({method(){}}).method;\
+         var caller=Object.getOwnPropertyDescriptor(Function.prototype,'caller');\
+         var args=Object.getOwnPropertyDescriptor(Function.prototype,'arguments');\
+         var strictError=false,arrowError=false,methodError=false;\
+         var callerSetError=false,argsSetError=false;\
+         try{strict.caller;}catch(error){strictError=error instanceof TypeError;}\
+         try{arrow.caller;}catch(error){arrowError=error instanceof TypeError;}\
+         try{method.caller;}catch(error){methodError=error instanceof TypeError;}\
+         try{sloppy.caller=null;}catch(error){callerSetError=error instanceof TypeError;}\
+         try{sloppy.arguments=null;}catch(error){argsSetError=error instanceof TypeError;}\
+         return sloppy.caller===undefined&&sloppy.arguments===undefined&&\
+           caller.get.call(sloppy)===undefined&&args.get.call(sloppy)===undefined&&\
+           !Object.hasOwn(sloppy,'caller')&&!Object.hasOwn(sloppy,'arguments')&&\
+           strictError&&arrowError&&methodError&&callerSetError&&argsSetError;",
+    );
+    let value = runtime
+        .context(&realm)
+        .expect("context")
+        .call(&inspect, &[], ExecutionLimits::default())
+        .expect("legacy restricted Function accessor");
+
+    assert_eq!(value.as_boolean().expect("live Boolean"), Some(true));
+}
+
 #[test]
 fn function_prototype_call_has_native_source_and_is_not_constructable() {
     let mut runtime = Runtime::try_new(RuntimeLimits::default()).expect("runtime");

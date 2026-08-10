@@ -329,9 +329,25 @@ enum FrameBinding {
 
 enum OperandStackEntry {
     JavaScript(StoredValue),
-    Catch { handler: InstructionIndex },
-    ForOfCatch { active: bool, asynchronous: bool },
-    FinallyReturn { continuation: InstructionIndex },
+    CapturedReference {
+        index: u32,
+        cell: BindingCellId,
+    },
+    RealmGlobalReference {
+        index: u32,
+        reference: RetainedRealmGlobalReference,
+    },
+    CapturedReferenceAnchor,
+    Catch {
+        handler: InstructionIndex,
+    },
+    ForOfCatch {
+        active: bool,
+        asynchronous: bool,
+    },
+    FinallyReturn {
+        continuation: InstructionIndex,
+    },
 }
 
 enum PendingAsyncIteratorClose {
@@ -398,6 +414,7 @@ pub(crate) struct Frame {
     resume_abrupt: Option<PendingException>,
     pending_tail_completion: Option<(StoredValue, BytecodePc)>,
     pending_async_iterator_close: Option<PendingAsyncIteratorClose>,
+    stack_depth_correction: u32,
     reserved_values: u64,
     arguments_snapshot_use: ArgumentsSnapshotUse,
     arguments_snapshot: Option<Vec<StoredValue>>,
@@ -413,6 +430,8 @@ pub(crate) struct Frame {
 
 struct OrdinaryConstructorPrototypeContinuation {
     frame: Frame,
+    realm: RealmId,
+    origin: JsStackFrame,
 }
 
 impl OrdinaryConstructorPrototypeContinuation {
@@ -940,6 +959,7 @@ enum NativeContinuation {
     FunctionApply(FunctionApplyContinuation),
     FunctionBind(FunctionBindContinuation),
     PropertyKey(PropertyKeyContinuation),
+    RetainedPropertyKey(StoredValue),
     OperatorPrimitive(OperatorPrimitiveContinuation),
     ArrayBufferConstructor(Box<ArrayBufferConstructorContinuation>),
     ArrayBufferSlice(Box<ArrayBufferSliceContinuation>),
@@ -1021,7 +1041,7 @@ enum NativeContinuation {
     IteratorHelperNext(IteratorHelperNextContinuation),
     IteratorHelperReturn(IteratorHelperReturnContinuation),
     IteratorWrapperReturn(IteratorWrapperReturnContinuation),
-    IteratorPrototypeSetter(IteratorPrototypeSetterContinuation),
+    SetterIgnoringPrototype(SetterIgnoringPrototypeContinuation),
     ArrayIteratorNext(ArrayIteratorNextContinuation),
     ForOfStart(ForOfStartContinuation),
     ForOfNext(ForOfNextContinuation),
@@ -1053,6 +1073,7 @@ enum NativeContinuation {
     StringRaw(Box<StringRawContinuation>),
     StringReplace(Box<StringReplaceContinuation>),
     StringSplit(Box<StringSplitContinuation>),
+    StringMethod(Box<StringMethodContinuation>),
     RegExp(Box<RegExpContinuation>),
     LocaleString(Box<LocaleStringContinuation>),
     IntlLocaleList(Box<IntlLocaleListContinuation>),
@@ -1288,8 +1309,8 @@ impl NativeContinuation {
             Self::IteratorHelperNext(state) => state.retained_values(),
             Self::IteratorHelperReturn(state) => state.retained_values(),
             Self::IteratorWrapperReturn(_) => IteratorWrapperReturnContinuation::retained_values(),
-            Self::IteratorPrototypeSetter(_) => {
-                IteratorPrototypeSetterContinuation::retained_values()
+            Self::SetterIgnoringPrototype(_) => {
+                SetterIgnoringPrototypeContinuation::retained_values()
             }
             Self::ArrayIteratorNext(state) => state.retained_values(),
             Self::ForOfStart(state) => state.retained_values(),
@@ -1322,6 +1343,7 @@ impl NativeContinuation {
             Self::StringRaw(state) => state.retained_values(),
             Self::StringReplace(state) => state.retained_values(),
             Self::StringSplit(state) => state.retained_values(),
+            Self::StringMethod(state) => state.retained_values(),
             Self::RegExp(state) => state.retained_values(),
             Self::LocaleString(state) => state.retained_values(),
             Self::IntlLocaleList(state) => state.retained_values(),
@@ -1381,7 +1403,7 @@ impl NativeContinuation {
             | Self::ReflectSet
             | Self::ProxyWrite
             | Self::FunctionCall => 0,
-            Self::AsyncGeneratorReturnAwait { .. } => 1,
+            Self::RetainedPropertyKey(_) | Self::AsyncGeneratorReturnAwait { .. } => 1,
         }
     }
 
@@ -1657,6 +1679,7 @@ enum IntrinsicGetContinuation {
         new_target: FunctionId,
         element: TypedArrayElementType,
         length: usize,
+        origin: JsStackFrame,
     },
     TemporalInstantConstructor {
         new_target: FunctionId,
@@ -2143,6 +2166,10 @@ enum PropertyKeyTarget {
         base: StoredValue,
         realm: RealmId,
     },
+    ReadRetain {
+        base: StoredValue,
+        realm: RealmId,
+    },
     Write {
         base: StoredValue,
         value: StoredValue,
@@ -2232,6 +2259,7 @@ impl PropertyKeyTarget {
         match self {
             Self::ToKey => 0,
             Self::Read { .. }
+            | Self::ReadRetain { .. }
             | Self::Delete { .. }
             | Self::OwnPropertyDescriptor { .. }
             | Self::HasOwnProperty { .. }
@@ -3322,6 +3350,7 @@ fn trace_property_key_target_roots(
     match target {
         PropertyKeyTarget::ToKey => {}
         PropertyKeyTarget::Read { base, .. }
+        | PropertyKeyTarget::ReadRetain { base, .. }
         | PropertyKeyTarget::Delete { base, .. }
         | PropertyKeyTarget::OwnPropertyDescriptor { target: base, .. }
         | PropertyKeyTarget::HasOwnProperty { target: base, .. }
@@ -3799,6 +3828,7 @@ fn trace_native_continuation_roots(
         NativeContinuation::StringRaw(state) => state.trace_roots(mark),
         NativeContinuation::StringReplace(state) => state.trace_roots(mark),
         NativeContinuation::StringSplit(state) => state.trace_roots(mark),
+        NativeContinuation::StringMethod(state) => state.trace_roots(mark),
         NativeContinuation::RegExp(state) => state.trace_roots(mark),
         NativeContinuation::LocaleString(state) => state.trace_roots(mark),
         NativeContinuation::IntlLocaleList(state) => state.trace_roots(mark),
@@ -3837,6 +3867,7 @@ fn trace_native_continuation_roots(
             trace_stored_value_root(&state.receiver, mark);
             trace_property_key_target_roots(&state.target, mark);
         }
+        NativeContinuation::RetainedPropertyKey(key) => trace_stored_value_root(key, mark),
         NativeContinuation::OperatorPrimitive(state) => {
             trace_stored_value_root(&state.receiver, mark);
             trace_operator_primitive_target_roots(&state.target, mark);
@@ -4002,7 +4033,7 @@ fn trace_native_continuation_roots(
         NativeContinuation::IteratorHelperNext(state) => state.trace_roots(mark),
         NativeContinuation::IteratorHelperReturn(state) => state.trace_roots(mark),
         NativeContinuation::IteratorWrapperReturn(state) => state.trace_roots(mark),
-        NativeContinuation::IteratorPrototypeSetter(state) => state.trace_roots(mark),
+        NativeContinuation::SetterIgnoringPrototype(state) => state.trace_roots(mark),
         NativeContinuation::ArrayIteratorNext(state) => {
             mark(CollectionRoot::Heap(HeapReference::Object(state.iterator)));
             trace_stored_value_root(&state.iterated, mark);
@@ -4291,8 +4322,18 @@ pub(crate) fn trace_frame_roots(frame: &Frame, mark: &mut dyn FnMut(CollectionRo
         });
     }
     for entry in &frame.stack {
-        if let OperandStackEntry::JavaScript(value) = entry {
-            trace_stored_value_root(value, mark);
+        match entry {
+            OperandStackEntry::JavaScript(value) => trace_stored_value_root(value, mark),
+            OperandStackEntry::CapturedReference { cell, .. } => {
+                mark(CollectionRoot::BindingCell(*cell));
+            }
+            OperandStackEntry::RealmGlobalReference { reference, .. } => {
+                reference.trace_roots(mark);
+            }
+            OperandStackEntry::CapturedReferenceAnchor
+            | OperandStackEntry::Catch { .. }
+            | OperandStackEntry::ForOfCatch { .. }
+            | OperandStackEntry::FinallyReturn { .. } => {}
         }
     }
     for continuation in &frame.native_returns {

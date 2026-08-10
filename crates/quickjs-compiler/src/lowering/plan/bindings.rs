@@ -7,8 +7,8 @@ use super::super::{
     NativeReferenceId, NodeId, Operands, PlannedControlFlow, PlannedInstruction,
     PrivateFieldExpression, RealmGlobalId, ReferenceAccess, ReferenceId, ScopeId, Span,
     StaticMemberExpression, StoragePlacement, SymbolId, UnresolvedGlobalId, UnsupportedLeafFeature,
-    VariableDeclaration, VariableDeclarationKind, VariableDeclarator, WritePolicy,
-    anonymous_named_evaluation_span, binary_opcode, unsupported,
+    VariableDeclaration, VariableDeclarationKind, VariableDeclarator, WritePolicy, binary_opcode,
+    unsupported,
 };
 use super::expressions::{ExpressionPlanner, ExpressionWork};
 
@@ -426,11 +426,17 @@ impl<'arena> ExpressionPlanner<'_, '_, 'arena, '_> {
         flow.bind(&done)
     }
 
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "realm-global assignment carries the retained identifier, atom pool, and reverse expression schedule explicitly"
+    )]
     pub(in crate::lowering) fn plan_realm_global_assignment<'expression>(
         assignment: &'expression AssignmentExpression<'arena>,
+        identifier: &'expression IdentifierReference<'arena>,
         slot: u16,
         binding: CompilerClosureBinding,
         inferred_name: Option<PlannedInstruction>,
+        constants: &CompiledConstantPool,
         flow: &mut PlannedControlFlow,
         work: &mut Vec<ExpressionWork<'expression, 'arena>>,
     ) -> Result<(), LeafCompilationError> {
@@ -438,16 +444,14 @@ impl<'arena> ExpressionPlanner<'_, '_, 'arena, '_> {
         let write = plan_external_put(binding, slot, assignment.left.span());
         match assignment.operator {
             AssignmentOperator::Assign => {
-                work.push(ExpressionWork::Emit(write));
-                work.push(ExpressionWork::Emit(PlannedInstruction::new(
-                    FinalOpcode::Dup,
-                    Operands::None,
-                    assignment.span,
-                )));
-                if let Some(set_name) = inferred_name {
-                    work.push(ExpressionWork::Emit(set_name));
-                }
-                work.push(ExpressionWork::Visit(&assignment.right));
+                return Self::push_retained_identifier_simple_assignment(
+                    assignment,
+                    identifier,
+                    slot,
+                    inferred_name,
+                    constants,
+                    work,
+                );
             }
             AssignmentOperator::LogicalOr
             | AssignmentOperator::LogicalAnd
@@ -976,9 +980,8 @@ impl<'arena> CompilationContext<'_, 'arena, '_> {
                 declaration.span,
             );
         }
-        if let Some(span) = anonymous_named_evaluation_span(initializer) {
-            return unsupported(UnsupportedLeafFeature::InferredFunctionName, span);
-        }
+        let inferred_name =
+            self.plan_inferred_function_name_for_initializer(identifier, initializer, constants)?;
         self.plan_expression_with_abrupt_markers(
             initializer,
             layout,
@@ -987,6 +990,9 @@ impl<'arena> CompilationContext<'_, 'arena, '_> {
             abrupt_markers,
             flow,
         )?;
+        if let Some(inferred_name) = inferred_name {
+            flow.emit(inferred_name)?;
+        }
         self.emit_for_in_declaration_write(declaration.kind, identifier, layout, tree_layout, flow)
     }
 
@@ -1394,11 +1400,41 @@ impl<'arena> CompilationContext<'_, 'arena, '_> {
         abrupt_markers: &[super::abrupt::AbruptMarker],
         flow: &mut PlannedControlFlow,
     ) -> Result<(), LeafCompilationError> {
+        let initial_abrupt_marker_count = abrupt_markers.len();
+        let mut active_abrupt_markers = Vec::new();
+        active_abrupt_markers
+            .try_reserve_exact(initial_abrupt_marker_count)
+            .map_err(|_| LeafCompilationError::CapacityExceeded {
+                domain: "assignment-pattern abrupt-marker stack",
+            })?;
+        active_abrupt_markers.extend_from_slice(abrupt_markers);
         let mut work = Vec::new();
         self.plan_assignment_target_value(target, &mut work, flow, layout, tree_layout, constants)?;
         while let Some(task) = work.pop() {
             match task {
                 ExpressionWork::Emit(instruction) => flow.emit(instruction)?,
+                ExpressionWork::EnterAbruptMarker(marker) => {
+                    active_abrupt_markers.try_reserve(1).map_err(|_| {
+                        LeafCompilationError::CapacityExceeded {
+                            domain: "assignment-pattern abrupt-marker stack",
+                        }
+                    })?;
+                    active_abrupt_markers.push(marker);
+                }
+                ExpressionWork::ExitAbruptMarker { expected, span } => {
+                    let Some(marker) = active_abrupt_markers.pop() else {
+                        return Err(LeafCompilationError::SemanticInvariant {
+                            invariant: "assignment-pattern abrupt-marker exit has an active marker",
+                            span: Some(span),
+                        });
+                    };
+                    if marker.tag() != expected {
+                        return Err(LeafCompilationError::SemanticInvariant {
+                            invariant: "assignment-pattern abrupt-marker exits in LIFO order",
+                            span: Some(span),
+                        });
+                    }
+                }
                 ExpressionWork::Branch { kind, target, span } => {
                     flow.branch(kind, &target, span)?;
                 }
@@ -1409,7 +1445,7 @@ impl<'arena> CompilationContext<'_, 'arena, '_> {
                         layout,
                         tree_layout,
                         constants,
-                        abrupt_markers,
+                        &active_abrupt_markers,
                         flow,
                     )?;
                 }
@@ -1439,6 +1475,12 @@ impl<'arena> CompilationContext<'_, 'arena, '_> {
                     });
                 }
             }
+        }
+        if active_abrupt_markers.len() != initial_abrupt_marker_count {
+            return Err(LeafCompilationError::SemanticInvariant {
+                invariant: "assignment-pattern abrupt-marker scheduling is balanced",
+                span: Some(target.span()),
+            });
         }
         Ok(())
     }

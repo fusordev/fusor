@@ -1,11 +1,14 @@
 //! Pinned Test262 inventory and Global Script execution.
 
 use crate::DEFAULT_TIMEOUT_MS;
-use quickjs::{ScriptEvaluationError, ScriptLimits, evaluate_script};
+use quickjs::{
+    DynamicFunctionLimits, ScriptEvaluationError, ScriptLimits, call_with_dynamic_function_support,
+    evaluate_script,
+};
 use quickjs_frontend::DiagnosticStage;
 use quickjs_runtime::{
-    Context, ExceptionKind, ExecutionError, ExecutionLimits, GlobalScriptError, JsException,
-    Runtime, RuntimeLimits,
+    Context, ExceptionKind, ExecutionError, ExecutionLimits, Function, GlobalScriptError,
+    JsException, Runtime, RuntimeLimits,
 };
 use rayon::ThreadPoolBuilder;
 use serde_json::{Value as JsonValue, json};
@@ -32,6 +35,21 @@ var $262 = {
     IsHTMLDDA: value => value === undefined || value === "" ? null : undefined
 };
 $262.IsHTMLDDA;
+"#;
+const TEST262_ERROR_CLASSIFIER_SOURCE: &str = r#"
+(function () {
+    var prototype = Test262Error.prototype;
+    var getPrototypeOf = Object.getPrototypeOf;
+    return function (value) {
+        for (var remaining = 1024; remaining > 0 && value !== null; remaining--) {
+            var kind = typeof value;
+            if (kind !== "object" && kind !== "function") return false;
+            value = getPrototypeOf(value);
+            if (value === prototype) return true;
+        }
+        return false;
+    };
+})()
 "#;
 
 #[derive(Debug, Eq, PartialEq)]
@@ -1176,6 +1194,7 @@ fn execute_case(
         .with_instruction_fuel(instruction_fuel)
         .with_dynamic_compilations(TEST262_DYNAMIC_COMPILATIONS);
     let limits = ScriptLimits::default().with_execution(execution_limits);
+    let classifier_limits = DynamicFunctionLimits::default().with_execution(execution_limits);
     let parse_negative = plan
         .metadata
         .negative
@@ -1184,6 +1203,7 @@ fn execute_case(
     if plan.metadata.features.contains("IsHTMLDDA") {
         install_test262_is_html_dda(&mut context, limits)?;
     }
+    let mut test262_error_classifier = None;
     if mode != TestMode::Raw && !parse_negative {
         for (name, harness_source) in [
             ("harness/assert.js", harness.assert.as_str()),
@@ -1192,6 +1212,15 @@ fn execute_case(
             if let Err(error) = evaluate_script(&mut context, harness_source, name, limits) {
                 return Ok(Some(harness_failure(plan, mode, name, &error)));
             }
+        }
+        if plan
+            .metadata
+            .negative
+            .as_ref()
+            .is_some_and(|negative| negative.error_type == "Test262Error")
+        {
+            test262_error_classifier =
+                Some(install_test262_error_classifier(&mut context, limits)?);
         }
         for include in &plan.metadata.includes {
             let path = safe_harness_include(&harness.root, include)?;
@@ -1216,9 +1245,26 @@ fn execute_case(
     Ok(compare_result(
         plan,
         mode,
-        &context,
+        &mut context,
+        test262_error_classifier.as_ref(),
+        classifier_limits,
         result.as_ref().map(|_| ()),
     ))
+}
+
+fn install_test262_error_classifier(
+    context: &mut Context<'_>,
+    limits: ScriptLimits,
+) -> Result<Function, String> {
+    evaluate_script(
+        context,
+        TEST262_ERROR_CLASSIFIER_SOURCE,
+        "harness/runner-Test262Error-classifier.js",
+        limits,
+    )
+    .map_err(|error| format!("could not install Test262Error classifier: {error}"))?
+    .into_function()
+    .map_err(|error| format!("Test262Error classifier was not a function: {error}"))
 }
 
 fn install_test262_is_html_dda(
@@ -1259,14 +1305,17 @@ fn harness_failure(
 fn compare_result(
     plan: &TestPlan,
     mode: TestMode,
-    context: &Context<'_>,
+    context: &mut Context<'_>,
+    test262_error_classifier: Option<&Function>,
+    classifier_limits: DynamicFunctionLimits,
     result: Result<(), &ScriptEvaluationError>,
 ) -> Option<FailureRecord> {
     let expected = plan.metadata.negative.as_ref();
     match (expected, result) {
         (None, Ok(())) => None,
         (None, Err(error)) => {
-            let actual = classify_error(context, error);
+            let actual =
+                classify_error(context, error, test262_error_classifier, classifier_limits);
             Some(FailureRecord {
                 path: plan.relative.clone(),
                 mode: mode.name(),
@@ -1283,7 +1332,8 @@ fn compare_result(
             detail: "negative test completed normally".to_owned(),
         }),
         (Some(expected), Err(error)) => {
-            let actual = classify_error(context, error);
+            let actual =
+                classify_error(context, error, test262_error_classifier, classifier_limits);
             if actual.phase == expected.phase
                 && actual.error_type.as_deref() == Some(&expected.error_type)
             {
@@ -1322,7 +1372,12 @@ impl ActualError {
     }
 }
 
-fn classify_error(context: &Context<'_>, error: &ScriptEvaluationError) -> ActualError {
+fn classify_error(
+    context: &mut Context<'_>,
+    error: &ScriptEvaluationError,
+    test262_error_classifier: Option<&Function>,
+    classifier_limits: DynamicFunctionLimits,
+) -> ActualError {
     match error {
         ScriptEvaluationError::Frontend(frontend)
             if matches!(
@@ -1347,7 +1402,12 @@ fn classify_error(context: &Context<'_>, error: &ScriptEvaluationError) -> Actua
             ExecutionError::Exception(exception),
         )) => ActualError {
             phase: "runtime".to_owned(),
-            error_type: exception_type(context, exception),
+            error_type: exception_type(
+                context,
+                exception,
+                test262_error_classifier,
+                classifier_limits,
+            ),
         },
         ScriptEvaluationError::Runtime(GlobalScriptError::Install(_)) => ActualError {
             phase: "installation".to_owned(),
@@ -1360,16 +1420,28 @@ fn classify_error(context: &Context<'_>, error: &ScriptEvaluationError) -> Actua
     }
 }
 
-fn exception_type(context: &Context<'_>, exception: &JsException) -> Option<String> {
+fn exception_type(
+    context: &mut Context<'_>,
+    exception: &JsException,
+    test262_error_classifier: Option<&Function>,
+    classifier_limits: DynamicFunctionLimits,
+) -> Option<String> {
     if let Some(kind) = exception.kind() {
         return Some(exception_kind_name(kind).to_owned());
     }
     let value = exception.thrown_value()?;
-    context
-        .error_object_kind(value)
-        .ok()
-        .flatten()
-        .map(|kind| kind.constructor_name().to_owned())
+    if let Some(kind) = context.error_object_kind(value).ok().flatten() {
+        return Some(kind.constructor_name().to_owned());
+    }
+    let classifier = test262_error_classifier?;
+    let result = call_with_dynamic_function_support(
+        context,
+        classifier,
+        std::slice::from_ref(value),
+        classifier_limits,
+    )
+    .ok()?;
+    (result.as_boolean().ok().flatten() == Some(true)).then(|| "Test262Error".to_owned())
 }
 
 const fn exception_kind_name(kind: ExceptionKind) -> &'static str {
@@ -1906,6 +1978,49 @@ throw new TypeError();",
             .is_none()
         );
         fs::remove_dir_all(root).expect("remove fixture");
+    }
+
+    #[test]
+    fn typed_negative_comparison_accepts_harness_test262_errors() {
+        let source = "/*---\nnegative:\n  phase: runtime\n  type: Test262Error\n---*/\nvar expected = new Test262Error('expected');\nTest262Error = function Replacement() {};\nthrow expected;";
+        let metadata = parse_metadata(source).expect("metadata");
+        let plan = TestPlan {
+            path: PathBuf::from("test262-error-negative.js"),
+            relative: "test262-error-negative.js".to_owned(),
+            modes: modes(&metadata).expect("modes"),
+            metadata,
+            skip_reason: None,
+        };
+        let harness = HarnessSources {
+            assert: "void 0;".to_owned(),
+            sta: r#"
+function Test262Error(message) {
+    if (!(this instanceof Test262Error)) return new Test262Error(message);
+    this.message = message || "";
+}
+Test262Error.prototype.toString = function () {
+    return "Test262Error: " + this.message;
+};
+"#
+            .to_owned(),
+            root: PathBuf::from("unused-harness"),
+        };
+
+        for mode in [TestMode::NonStrict, TestMode::Strict] {
+            assert!(
+                execute_case(
+                    &plan,
+                    mode,
+                    source,
+                    &harness,
+                    DEFAULT_INSTRUCTION_FUEL,
+                    DEFAULT_TIMEOUT_MS,
+                )
+                .expect("execute")
+                .is_none(),
+                "{mode:?} mode must retain the captured harness constructor identity"
+            );
+        }
     }
 
     #[test]

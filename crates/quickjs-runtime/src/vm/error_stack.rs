@@ -75,7 +75,9 @@ enum ErrorStackSite {
 /// not have a [`Frame`] in this VM, so iterating from the newest frame outward
 /// already implements `QuickJS`'s `SKIP_FIRST_LEVEL` constructor-frame rule.
 /// `origin` is the exact call expression that entered the constructor and is
-/// used for the newest frame; older frames are parked at their own call sites.
+/// used while it still names the newest frame. A resumable native operation
+/// can finish after `PrepareForTailCall` discarded that origin's frame; in
+/// that case the newest surviving frame is parked at its own call site.
 ///
 /// No JavaScript code runs. Source positions are computed iteratively and, for
 /// frames sharing a retained source artifact, scan that artifact at most once
@@ -94,14 +96,13 @@ pub(super) fn capture_error_stack(
         })?;
 
     for (depth, frame) in frames.iter().rev().enumerate() {
-        let location = if depth == 0 {
-            if origin.function() != frame.template {
-                return Err(EngineFault::RuntimeInvariant {
-                    message: "Error stack origin does not name the active function template",
-                }
-                .into());
+        let location = if depth == 0 && origin.function() == frame.template {
+            let active = active_frame_location(runtime, frame)?;
+            if stack_source_identity(origin) == stack_source_identity(&active) {
+                origin.clone()
+            } else {
+                active
             }
-            origin.clone()
         } else {
             active_frame_location(runtime, frame)?
         };

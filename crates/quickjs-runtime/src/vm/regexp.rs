@@ -103,11 +103,6 @@ pub(super) struct RegExpFlagsContinuation {
     origin: JsStackFrame,
 }
 
-pub(super) struct RegExpEscapeContinuation {
-    realm: RealmId,
-    origin: JsStackFrame,
-}
-
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum RegExpCompileStage {
     AwaitPatternConversion,
@@ -605,7 +600,6 @@ pub(super) enum RegExpContinuation {
     Constructor(Box<RegExpConstructorContinuation>),
     Flags(Box<RegExpFlagsContinuation>),
     ToString(Box<RegExpToStringContinuation>),
-    Escape(RegExpEscapeContinuation),
     Compile(Box<RegExpCompileContinuation>),
     Exec(Box<RegExpExecContinuation>),
     ExecProtocol(Box<RegExpExecProtocolContinuation>),
@@ -629,7 +623,6 @@ impl RegExpContinuation {
                 .saturating_add(u64::from(state.original_flags.is_some())),
             Self::Flags(_) => 2,
             Self::ToString(state) => 1_u64.saturating_add(u64::from(state.source.is_some())),
-            Self::Escape(_) => 0,
             Self::Compile(state) => 3_u64
                 .saturating_add(u64::from(state.source.is_some()))
                 .saturating_add(u64::from(state.original_flags.is_some())),
@@ -671,7 +664,6 @@ impl RegExpContinuation {
             }
             Self::Flags(state) => trace_stored_value_root(&state.receiver, mark),
             Self::ToString(state) => trace_stored_value_root(&state.receiver, mark),
-            Self::Escape(_) => {}
             Self::Compile(state) => {
                 mark(CollectionRoot::Heap(HeapReference::Object(state.object)));
                 trace_stored_value_root(&state.pattern, mark);
@@ -708,7 +700,6 @@ impl RegExpContinuation {
             Self::Constructor(_)
             | Self::Flags(_)
             | Self::ToString(_)
-            | Self::Escape(_)
             | Self::Compile(_)
             | Self::Test(_)
             | Self::Match(_)
@@ -785,7 +776,7 @@ pub(super) fn advance_regexp_continuation(
     execution_budget: &mut ExecutionBudget,
 ) -> Result<NativeDispatch, NativeFailure> {
     let abrupt_iterator = state.abrupt_match_all_iterator();
-    let dispatch = (|| match state {
+    let dispatch = match state {
         RegExpContinuation::Constructor(state) => {
             advance_regexp_constructor(runtime, *state, completion, return_to, execution_budget)
         }
@@ -794,12 +785,6 @@ pub(super) fn advance_regexp_continuation(
         }
         RegExpContinuation::ToString(state) => {
             advance_regexp_to_string(runtime, *state, completion, return_to, execution_budget)
-        }
-        RegExpContinuation::Escape(state) => {
-            let text = operator_primitive_to_string(completion, state.realm, &state.origin)?;
-            Ok(NativeDispatch::Immediate(StoredValue::String(
-                escape_regexp_text(&text)?,
-            )))
         }
         RegExpContinuation::Compile(state) => {
             advance_regexp_compile(runtime, *state, completion, return_to, execution_budget)
@@ -838,7 +823,7 @@ pub(super) fn advance_regexp_continuation(
         RegExpContinuation::StringProtocol(state) => {
             advance_string_regexp_protocol(runtime, *state, completion, return_to, execution_budget)
         }
-    })();
+    };
     if dispatch.is_err()
         && let Some(iterator) = abrupt_iterator
     {
@@ -1380,21 +1365,19 @@ fn read_regexp_to_string_property(
 }
 
 pub(super) fn begin_regexp_escape(
-    runtime: &mut Runtime,
+    _runtime: &mut Runtime,
     realm: RealmId,
     value: StoredValue,
-    return_to: Option<CallReturn>,
+    _return_to: Option<CallReturn>,
     origin: JsStackFrame,
-    execution_budget: &mut ExecutionBudget,
+    _execution_budget: &mut ExecutionBudget,
 ) -> Result<NativeDispatch, NativeFailure> {
-    convert_regexp_value(
-        runtime,
-        RegExpContinuation::Escape(RegExpEscapeContinuation { realm, origin }),
-        value,
-        OperatorPrimitiveHint::String,
-        return_to,
-        execution_budget,
-    )
+    let StoredValue::String(text) = value else {
+        return regexp_type_error(realm, origin, "RegExp.escape requires a string");
+    };
+    Ok(NativeDispatch::Immediate(StoredValue::String(
+        escape_regexp_text(&text)?,
+    )))
 }
 
 pub(super) fn begin_regexp_compile(
@@ -3048,6 +3031,14 @@ pub(super) fn begin_regexp_string_iterator_next(
     let StoredValue::Object(iterator) = receiver else {
         return regexp_type_error(realm, origin, "not a RegExp String Iterator");
     };
+    if runtime
+        .objects
+        .get(iterator)
+        .and_then(crate::object::HeapObject::regexp_string_iterator_state)
+        .is_none()
+    {
+        return regexp_type_error(realm, origin, "not a RegExp String Iterator");
+    }
     let snapshot = runtime.regexp_string_iterator_snapshot(iterator)?;
     match snapshot.phase {
         crate::object::RegExpStringIteratorPhase::Done => {
@@ -4812,17 +4803,17 @@ pub(super) fn begin_string_regexp_protocol(
         stage: StringRegExpProtocolStage::AwaitMethod,
         origin,
     };
-    if matches!(state.regexp, StoredValue::Undefined | StoredValue::Null) {
-        begin_string_regexp_fallback(runtime, state, return_to, execution_budget)
-    } else if matches!(method, RegExpSymbolMethod::MatchAll)
-        && matches!(
-            state.regexp,
-            StoredValue::Function(_) | StoredValue::Object(_)
-        )
-    {
-        read_string_match_all_match_property(runtime, state, return_to, execution_budget)
+    if matches!(
+        state.regexp,
+        StoredValue::Function(_) | StoredValue::Object(_)
+    ) {
+        if matches!(method, RegExpSymbolMethod::MatchAll) {
+            read_string_match_all_match_property(runtime, state, return_to, execution_budget)
+        } else {
+            read_string_regexp_method(runtime, state, false, return_to, execution_budget)
+        }
     } else {
-        read_string_regexp_method(runtime, state, false, return_to, execution_budget)
+        begin_string_regexp_fallback(runtime, state, return_to, execution_budget)
     }
 }
 
@@ -5114,7 +5105,6 @@ fn regexp_continuation_context(state: &RegExpContinuation) -> (RealmId, JsStackF
         RegExpContinuation::Constructor(state) => (state.realm, state.origin.clone()),
         RegExpContinuation::Flags(state) => (state.realm, state.origin.clone()),
         RegExpContinuation::ToString(state) => (state.realm, state.origin.clone()),
-        RegExpContinuation::Escape(state) => (state.realm, state.origin.clone()),
         RegExpContinuation::Compile(state) => (state.realm, state.origin.clone()),
         RegExpContinuation::Exec(state) => (state.realm, state.origin.clone()),
         RegExpContinuation::ExecProtocol(state) => (state.realm, state.origin.clone()),
@@ -5291,6 +5281,9 @@ fn escape_regexp_text(source: &JsString) -> Result<JsString, NativeFailure> {
                 0x000c => output.extend([u16::from(b'\\'), u16::from(b'f')]),
                 unit if unit == u16::from(b'\r') => {
                     output.extend([u16::from(b'\\'), u16::from(b'r')]);
+                }
+                _ if unit <= 0x00ff && is_ecmascript_whitespace_or_line_terminator(unit) => {
+                    push_hex_escape_units(&mut output, unit);
                 }
                 _ if is_ecmascript_whitespace_or_line_terminator(unit)
                     || is_lone_surrogate(&units, index) =>

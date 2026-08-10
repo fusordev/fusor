@@ -7,8 +7,8 @@ use super::super::{
     ForStatementInit, FrameLayout, FrameSlot, FunctionPlanningContext, FunctionTreeLayout, GetSpan,
     IfStatement, InitializationPolicy, LabelIdentifier, LabeledStatement, LeafCompilationError,
     Operands, PlannedControlFlow, ReturnStatement, StoragePlacement, ThrowStatement, TryStatement,
-    UnsupportedLeafFeature, WhileStatement, WritePolicy, compact_put_local, plan_put_slot,
-    unsupported,
+    UnsupportedLeafFeature, WhileStatement, WritePolicy, compact_get_local, compact_put_local,
+    plan_put_slot, unsupported,
 };
 
 use oxc_ast::ast::{
@@ -22,7 +22,8 @@ use quickjs_frontend::Span;
 use crate::lowering::{CompilerLabel, LocalSlot, PlannedInstruction};
 
 use super::abrupt::{
-    AbruptMarker, AbruptMarkerKind, AbruptMarkerTag, TryFinallyCatchPlan, TryFinallyLabels,
+    AbruptMarker, AbruptMarkerKind, AbruptMarkerTag, FinallyTarget, ScriptCompletionPreservation,
+    TryFinallyCatchPlan, TryFinallyLabels,
 };
 use super::control::{
     ControlRegion, LoopJump, StatementControlStack, SwitchControlLabels,
@@ -35,6 +36,10 @@ pub(in crate::lowering) enum StatementWork<'statement, 'arena> {
     VisitList {
         statements: &'statement [Statement<'arena>],
         next: usize,
+    },
+    EnterDisconnectedAbruptContext,
+    ExitDisconnectedAbruptContext {
+        span: Span,
     },
     VisitDirectiveList {
         directives: &'statement [Directive<'arena>],
@@ -105,13 +110,31 @@ pub(in crate::lowering) struct StatementPlanningState<'statement, 'arena> {
     pub(in crate::lowering) active_scopes: Vec<ScopeId>,
     pub(in crate::lowering) controls: StatementControlStack<'statement>,
     pub(in crate::lowering) abrupt_markers: Vec<AbruptMarker>,
+    /// Marker prefixes owned by an earlier effective component. Source-mapped
+    /// dead tails remain lowered, but cannot consume markers they cannot reach.
+    pub(in crate::lowering) disconnected_abrupt_floors: Vec<usize>,
     pub(in crate::lowering) completion: StatementCompletion,
+    pub(in crate::lowering) next_script_finally_completion: usize,
+    pub(in crate::lowering) script_finally_completion_limit: usize,
 }
 
 #[derive(Clone, Copy)]
 pub(in crate::lowering) enum StatementCompletion {
     Discard,
     Script(LocalSlot),
+}
+
+impl StatementPlanningState<'_, '_> {
+    fn executable_abrupt_marker_floor(&self, span: Span) -> Result<usize, LeafCompilationError> {
+        let floor = self.disconnected_abrupt_floors.last().copied().unwrap_or(0);
+        if floor > self.abrupt_markers.len() {
+            return Err(LeafCompilationError::SemanticInvariant {
+                invariant: "disconnected abrupt-context floor is active",
+                span: Some(span),
+            });
+        }
+        Ok(floor)
+    }
 }
 
 impl<'arena> CompilationContext<'_, 'arena, '_> {
@@ -130,11 +153,60 @@ impl<'arena> CompilationContext<'_, 'arena, '_> {
         match task {
             StatementWork::VisitList { statements, next } => {
                 if let Some(statement) = statements.get(next) {
-                    state.work.push(StatementWork::VisitList {
-                        statements,
-                        next: next + 1,
+                    let next =
+                        next.checked_add(1)
+                            .ok_or(LeafCompilationError::CapacityExceeded {
+                                domain: "statement-list index",
+                            })?;
+                    if flow.current_path_can_fall_through() {
+                        state
+                            .work
+                            .push(StatementWork::VisitList { statements, next });
+                        state.work.push(StatementWork::Visit(statement));
+                    } else {
+                        state.work.try_reserve(4).map_err(|_| {
+                            LeafCompilationError::CapacityExceeded {
+                                domain: "statement work stack",
+                            }
+                        })?;
+                        state
+                            .work
+                            .push(StatementWork::ExitDisconnectedAbruptContext {
+                                span: statement.span(),
+                            });
+                        state
+                            .work
+                            .push(StatementWork::VisitList { statements, next });
+                        state.work.push(StatementWork::Visit(statement));
+                        state
+                            .work
+                            .push(StatementWork::EnterDisconnectedAbruptContext);
+                    }
+                }
+            }
+            StatementWork::EnterDisconnectedAbruptContext => {
+                state
+                    .disconnected_abrupt_floors
+                    .try_reserve(1)
+                    .map_err(|_| LeafCompilationError::CapacityExceeded {
+                        domain: "disconnected abrupt-context stack",
+                    })?;
+                state
+                    .disconnected_abrupt_floors
+                    .push(state.abrupt_markers.len());
+            }
+            StatementWork::ExitDisconnectedAbruptContext { span } => {
+                let Some(floor) = state.disconnected_abrupt_floors.pop() else {
+                    return Err(LeafCompilationError::SemanticInvariant {
+                        invariant: "disconnected abrupt-context exit has an active floor",
+                        span: Some(span),
                     });
-                    state.work.push(StatementWork::Visit(statement));
+                };
+                if floor > state.abrupt_markers.len() {
+                    return Err(LeafCompilationError::SemanticInvariant {
+                        invariant: "disconnected abrupt-context preserves outer markers",
+                        span: Some(span),
+                    });
                 }
             }
             StatementWork::VisitDirectiveList { directives, next } => {
@@ -285,51 +357,64 @@ impl<'arena> CompilationContext<'_, 'arena, '_> {
             StatementWork::SetCompletion(completion) => {
                 state.completion = completion;
             }
-            StatementWork::ForInHead(left) => self.plan_for_in_head(
-                left,
-                planning.layout,
-                planning.tree_layout,
-                planning.constants,
-                &state.abrupt_markers,
-                flow,
-            )?,
+            StatementWork::ForInHead(left) => {
+                let floor = state.executable_abrupt_marker_floor(body_span)?;
+                self.plan_for_in_head(
+                    left,
+                    planning.layout,
+                    planning.tree_layout,
+                    planning.constants,
+                    &state.abrupt_markers[floor..],
+                    flow,
+                )?;
+            }
             StatementWork::ForOfHead(left) => {
                 self.plan_for_of_head(left, planning.layout)?;
             }
-            StatementWork::ForInAssignment(left) => self.plan_for_in_assignment(
-                left,
-                planning.layout,
-                planning.tree_layout,
-                planning.constants,
-                &state.abrupt_markers,
-                flow,
-            )?,
-            StatementWork::ForOfAssignment(left) => self.plan_for_of_assignment(
-                left,
-                planning.layout,
-                planning.tree_layout,
-                planning.constants,
-                &state.abrupt_markers,
-                flow,
-            )?,
+            StatementWork::ForInAssignment(left) => {
+                let floor = state.executable_abrupt_marker_floor(body_span)?;
+                self.plan_for_in_assignment(
+                    left,
+                    planning.layout,
+                    planning.tree_layout,
+                    planning.constants,
+                    &state.abrupt_markers[floor..],
+                    flow,
+                )?;
+            }
+            StatementWork::ForOfAssignment(left) => {
+                let floor = state.executable_abrupt_marker_floor(body_span)?;
+                self.plan_for_of_assignment(
+                    left,
+                    planning.layout,
+                    planning.tree_layout,
+                    planning.constants,
+                    &state.abrupt_markers[floor..],
+                    flow,
+                )?;
+            }
             StatementWork::IterationRotate(scope) => {
                 self.plan_iteration_rotation(planning.executable, scope, planning.layout, flow)?;
             }
-            StatementWork::Expression(expression) => self.plan_expression_with_abrupt_markers(
-                expression,
-                planning.layout,
-                planning.tree_layout,
-                planning.constants,
-                &state.abrupt_markers,
-                flow,
-            )?,
+            StatementWork::Expression(expression) => {
+                let floor = state.executable_abrupt_marker_floor(expression.span())?;
+                self.plan_expression_with_abrupt_markers(
+                    expression,
+                    planning.layout,
+                    planning.tree_layout,
+                    planning.constants,
+                    &state.abrupt_markers[floor..],
+                    flow,
+                )?;
+            }
             StatementWork::TailExpression(expression) => {
+                let floor = state.executable_abrupt_marker_floor(expression.span())?;
                 ExpressionPlanner::new(self).plan_tail_expression(
                     expression,
                     planning.layout,
                     planning.tree_layout,
                     planning.constants,
-                    &state.abrupt_markers,
+                    &state.abrupt_markers[floor..],
                     flow,
                 )?;
             }
@@ -341,23 +426,27 @@ impl<'arena> CompilationContext<'_, 'arena, '_> {
                     flow,
                 )?;
             }
-            StatementWork::Declaration(declaration) => self.validate_declaration(
-                declaration,
-                planning.layout,
-                planning.tree_layout,
-                planning.constants,
-                &state.abrupt_markers,
-                flow,
-            )?,
+            StatementWork::Declaration(declaration) => {
+                let floor = state.executable_abrupt_marker_floor(declaration.span)?;
+                self.validate_declaration(
+                    declaration,
+                    planning.layout,
+                    planning.tree_layout,
+                    planning.constants,
+                    &state.abrupt_markers[floor..],
+                    flow,
+                )?;
+            }
             StatementWork::CatchBinding {
                 handler,
                 body_scope,
             } => {
+                let floor = state.executable_abrupt_marker_floor(handler.span)?;
                 self.plan_catch_binding(
                     handler,
                     body_scope,
                     planning,
-                    &state.abrupt_markers,
+                    &state.abrupt_markers[floor..],
                     flow,
                 )?;
             }
@@ -436,12 +525,13 @@ impl<'arena> CompilationContext<'_, 'arena, '_> {
                 )?;
             }
             Statement::VariableDeclaration(declaration) => {
+                let floor = state.executable_abrupt_marker_floor(declaration.span)?;
                 self.validate_declaration(
                     declaration,
                     layout,
                     tree_layout,
                     constants,
-                    &state.abrupt_markers,
+                    &state.abrupt_markers[floor..],
                     flow,
                 )?;
             }
@@ -486,9 +576,11 @@ impl<'arena> CompilationContext<'_, 'arena, '_> {
                 } else {
                     FinalOpcode::Return
                 };
+                let floor = state.executable_abrupt_marker_floor(statement.span)?;
                 Self::schedule_return_statement(
                     statement,
-                    &state.abrupt_markers,
+                    &state.abrupt_markers[floor..],
+                    flow.current_path_can_fall_through(),
                     return_opcode,
                     async_generator,
                     return_opcode == FinalOpcode::Return
@@ -504,7 +596,13 @@ impl<'arena> CompilationContext<'_, 'arena, '_> {
                 )?;
             }
             Statement::ThrowStatement(statement) => {
-                Self::schedule_throw_statement(statement, &state.abrupt_markers, &mut state.work)?;
+                let floor = state.executable_abrupt_marker_floor(statement.span)?;
+                Self::schedule_throw_statement(
+                    statement,
+                    &state.abrupt_markers[floor..],
+                    flow.current_path_can_fall_through(),
+                    &mut state.work,
+                )?;
             }
             Statement::IfStatement(statement) => {
                 Self::reset_script_completion(state.completion, statement.span, flow)?;
@@ -686,15 +784,44 @@ impl<'arena> CompilationContext<'_, 'arena, '_> {
         flow.emit(PlannedInstruction::new(opcode, operands, span))
     }
 
+    fn push_reset_script_completion<'statement>(
+        completion: StatementCompletion,
+        span: Span,
+        work: &mut Vec<StatementWork<'statement, 'arena>>,
+    ) {
+        let StatementCompletion::Script(slot) = completion else {
+            return;
+        };
+        let (opcode, operands) = compact_put_local(slot);
+        work.push(StatementWork::Emit(PlannedInstruction::new(
+            opcode, operands, span,
+        )));
+        work.push(StatementWork::Emit(PlannedInstruction::new(
+            FinalOpcode::Undefined,
+            Operands::None,
+            span,
+        )));
+    }
+
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "return scheduling keeps cleanup, completion, await, and tail-position decisions explicit"
+    )]
     fn schedule_return_statement<'statement>(
         statement: &'statement ReturnStatement<'arena>,
         abrupt_markers: &[AbruptMarker],
+        cleanup_abrupt_context: bool,
         return_opcode: FinalOpcode,
         await_value: bool,
         tail_position: bool,
         flow: &mut PlannedControlFlow,
         work: &mut Vec<StatementWork<'statement, 'arena>>,
     ) -> Result<(), LeafCompilationError> {
+        let abrupt_markers = if cleanup_abrupt_context {
+            abrupt_markers
+        } else {
+            &[]
+        };
         let crosses_finalizer = abrupt_markers
             .iter()
             .any(|marker| matches!(&marker.kind, AbruptMarkerKind::Catch { finalizer: Some(_) }));
@@ -814,11 +941,7 @@ impl<'arena> CompilationContext<'_, 'arena, '_> {
             match &marker.kind {
                 AbruptMarkerKind::Catch { finalizer } => {
                     if let Some(finalizer) = finalizer {
-                        work.push(StatementWork::Branch {
-                            kind: BranchKind::Gosub,
-                            target: finalizer.clone(),
-                            span,
-                        });
+                        Self::push_finalizer_gosub(work, finalizer, span);
                     }
                     work.push(StatementWork::Emit(PlannedInstruction::new(
                         FinalOpcode::NipCatch,
@@ -871,6 +994,31 @@ impl<'arena> CompilationContext<'_, 'arena, '_> {
     fn schedule_throw_statement<'statement>(
         statement: &'statement ThrowStatement<'arena>,
         abrupt_markers: &[AbruptMarker],
+        cleanup_abrupt_context: bool,
+        work: &mut Vec<StatementWork<'statement, 'arena>>,
+    ) -> Result<(), LeafCompilationError> {
+        let abrupt_markers = if cleanup_abrupt_context {
+            abrupt_markers
+        } else {
+            &[]
+        };
+        work.try_reserve(2)
+            .map_err(|_| LeafCompilationError::CapacityExceeded {
+                domain: "statement work stack",
+            })?;
+        work.push(StatementWork::Emit(PlannedInstruction::new(
+            FinalOpcode::Throw,
+            Operands::None,
+            statement.span,
+        )));
+        Self::schedule_throw_cleanup(abrupt_markers, statement.span, work)?;
+        work.push(StatementWork::Expression(&statement.argument));
+        Ok(())
+    }
+
+    fn schedule_throw_cleanup<'statement>(
+        abrupt_markers: &[AbruptMarker],
+        span: Span,
         work: &mut Vec<StatementWork<'statement, 'arena>>,
     ) -> Result<(), LeafCompilationError> {
         let removable_markers = abrupt_markers
@@ -896,15 +1044,11 @@ impl<'arena> CompilationContext<'_, 'arena, '_> {
                     domain: "statement throw cleanup",
                 })?
         };
-        work.try_reserve(cleanup_instructions.saturating_add(2))
-            .map_err(|_| LeafCompilationError::CapacityExceeded {
+        work.try_reserve(cleanup_instructions).map_err(|_| {
+            LeafCompilationError::CapacityExceeded {
                 domain: "statement work stack",
-            })?;
-        work.push(StatementWork::Emit(PlannedInstruction::new(
-            FinalOpcode::Throw,
-            Operands::None,
-            statement.span,
-        )));
+            }
+        })?;
         if !preserves_for_of_marker {
             for marker in removable_markers {
                 let nips = match marker.tag() {
@@ -916,12 +1060,11 @@ impl<'arena> CompilationContext<'_, 'arena, '_> {
                     work.push(StatementWork::Emit(PlannedInstruction::new(
                         FinalOpcode::Nip,
                         Operands::None,
-                        statement.span,
+                        span,
                     )));
                 }
             }
         }
-        work.push(StatementWork::Expression(&statement.argument));
         Ok(())
     }
 
@@ -970,6 +1113,7 @@ impl<'arena> CompilationContext<'_, 'arena, '_> {
         state.work.push(StatementWork::Bind(done.clone()));
         state.work.push(StatementWork::PopScope(catch_scope));
         state.work.push(StatementWork::VisitBlock(&handler.body));
+        Self::push_reset_script_completion(state.completion, handler.body.span, &mut state.work);
         state.work.push(StatementWork::CatchBinding {
             handler,
             body_scope: catch_body_scope,
@@ -1021,9 +1165,34 @@ impl<'arena> CompilationContext<'_, 'arena, '_> {
         flow: &mut PlannedControlFlow,
         state: &mut StatementPlanningState<'statement, 'arena>,
     ) -> Result<(), LeafCompilationError> {
+        let script_completion = match state.completion {
+            StatementCompletion::Discard => None,
+            StatementCompletion::Script(current) => {
+                let index = state.next_script_finally_completion;
+                if index >= state.script_finally_completion_limit {
+                    return Err(LeafCompilationError::SemanticInvariant {
+                        invariant: "script finalizer completion slot belongs to the immutable frame layout",
+                        span: Some(finalizer.span),
+                    });
+                }
+                state.next_script_finally_completion =
+                    index
+                        .checked_add(1)
+                        .ok_or(LeafCompilationError::CapacityExceeded {
+                            domain: "script finalizer completion slots",
+                        })?;
+                Some(ScriptCompletionPreservation {
+                    current,
+                    saved: layout.internal_local(index)?,
+                })
+            }
+        };
         let labels = TryFinallyLabels {
             handler: flow.new_statement_label_with_offset(statement.span, 1)?,
-            finalizer: flow.new_statement_label_with_offset(finalizer.span, 2)?,
+            finalizer: FinallyTarget {
+                label: flow.new_statement_label_with_offset(finalizer.span, 2)?,
+                script_completion,
+            },
             done: flow.new_statement_label(statement.span)?,
         };
         let catch_plan = self.create_try_finally_catch_plan(statement, layout, flow)?;
@@ -1036,7 +1205,14 @@ impl<'arena> CompilationContext<'_, 'arena, '_> {
             })?;
 
         Self::push_finalizer_subroutine(&mut state.work, finalizer, &labels, state.completion);
-        Self::push_try_finally_handler_path(&mut state.work, statement, catch_plan, &labels);
+        let floor = state.executable_abrupt_marker_floor(statement.span)?;
+        Self::push_try_finally_handler_path(
+            &mut state.work,
+            statement,
+            catch_plan,
+            &labels,
+            &state.abrupt_markers[floor..],
+        )?;
         Self::push_try_finally_body(&mut state.work, statement, &labels);
         Ok(())
     }
@@ -1088,7 +1264,14 @@ impl<'arena> CompilationContext<'_, 'arena, '_> {
         ));
         work.push(StatementWork::SetCompletion(completion));
         work.push(StatementWork::VisitBlock(finalizer));
-        work.push(StatementWork::SetCompletion(StatementCompletion::Discard));
+        work.push(StatementWork::SetCompletion(
+            labels
+                .finalizer
+                .script_completion
+                .map_or(StatementCompletion::Discard, |completion| {
+                    StatementCompletion::Script(completion.current)
+                }),
+        ));
         work.push(StatementWork::PushAbruptMarker(
             AbruptMarkerKind::FinallySubroutine,
         ));
@@ -1097,7 +1280,7 @@ impl<'arena> CompilationContext<'_, 'arena, '_> {
                 span: finalizer.span,
             });
         }
-        work.push(StatementWork::Bind(labels.finalizer.clone()));
+        work.push(StatementWork::Bind(labels.finalizer.label.clone()));
     }
 
     fn push_try_finally_handler_path<'statement>(
@@ -1105,18 +1288,16 @@ impl<'arena> CompilationContext<'_, 'arena, '_> {
         statement: &'statement TryStatement<'arena>,
         catch_plan: Option<TryFinallyCatchPlan<'statement, 'arena>>,
         labels: &TryFinallyLabels,
-    ) {
+        outer_abrupt_markers: &[AbruptMarker],
+    ) -> Result<(), LeafCompilationError> {
         if let Some(catch) = catch_plan {
             work.push(StatementWork::Emit(PlannedInstruction::new(
                 FinalOpcode::Throw,
                 Operands::None,
                 catch.handler.body.span,
             )));
-            work.push(StatementWork::Branch {
-                kind: BranchKind::Gosub,
-                target: labels.finalizer.clone(),
-                span: catch.handler.body.span,
-            });
+            Self::schedule_throw_cleanup(outer_abrupt_markers, catch.handler.body.span, work)?;
+            Self::push_finalizer_gosub(work, &labels.finalizer, catch.handler.body.span);
             work.push(StatementWork::Bind(catch.rethrow.clone()));
 
             Self::push_normal_finalizer_path(
@@ -1131,6 +1312,16 @@ impl<'arena> CompilationContext<'_, 'arena, '_> {
                 span: catch.handler.body.span,
             });
             work.push(StatementWork::VisitBlock(&catch.handler.body));
+            Self::push_reset_script_completion(
+                labels
+                    .finalizer
+                    .script_completion
+                    .map_or(StatementCompletion::Discard, |completion| {
+                        StatementCompletion::Script(completion.current)
+                    }),
+                catch.handler.body.span,
+                work,
+            );
             work.push(StatementWork::PushAbruptMarker(AbruptMarkerKind::Catch {
                 finalizer: Some(labels.finalizer.clone()),
             }));
@@ -1158,13 +1349,11 @@ impl<'arena> CompilationContext<'_, 'arena, '_> {
                 Operands::None,
                 statement.span,
             )));
-            work.push(StatementWork::Branch {
-                kind: BranchKind::Gosub,
-                target: labels.finalizer.clone(),
-                span: statement.span,
-            });
+            Self::schedule_throw_cleanup(outer_abrupt_markers, statement.span, work)?;
+            Self::push_finalizer_gosub(work, &labels.finalizer, statement.span);
             work.push(StatementWork::Bind(labels.handler.clone()));
         }
+        Ok(())
     }
 
     fn push_try_finally_body<'statement>(
@@ -1198,7 +1387,7 @@ impl<'arena> CompilationContext<'_, 'arena, '_> {
 
     fn push_normal_finalizer_path<'statement>(
         work: &mut Vec<StatementWork<'statement, 'arena>>,
-        finalizer: &CompilerLabel,
+        finalizer: &FinallyTarget,
         done: &CompilerLabel,
         span: Span,
     ) {
@@ -1212,11 +1401,7 @@ impl<'arena> CompilationContext<'_, 'arena, '_> {
             Operands::None,
             span,
         )));
-        work.push(StatementWork::Branch {
-            kind: BranchKind::Gosub,
-            target: finalizer.clone(),
-            span,
-        });
+        Self::push_finalizer_gosub(work, finalizer, span);
         work.push(StatementWork::Emit(PlannedInstruction::new(
             FinalOpcode::Undefined,
             Operands::None,
@@ -1227,6 +1412,47 @@ impl<'arena> CompilationContext<'_, 'arena, '_> {
             Operands::None,
             span,
         )));
+    }
+
+    fn push_finalizer_gosub<'statement>(
+        work: &mut Vec<StatementWork<'statement, 'arena>>,
+        finalizer: &FinallyTarget,
+        span: Span,
+    ) {
+        if let Some(completion) = finalizer.script_completion {
+            let (put, operands) = compact_put_local(completion.current);
+            work.push(StatementWork::Emit(PlannedInstruction::new(
+                put, operands, span,
+            )));
+            let (get, operands) = compact_get_local(completion.saved);
+            work.push(StatementWork::Emit(PlannedInstruction::new(
+                get, operands, span,
+            )));
+        }
+        work.push(StatementWork::Branch {
+            kind: BranchKind::Gosub,
+            target: finalizer.label.clone(),
+            span,
+        });
+        if let Some(completion) = finalizer.script_completion {
+            let (put, operands) = compact_put_local(completion.current);
+            work.push(StatementWork::Emit(PlannedInstruction::new(
+                put, operands, span,
+            )));
+            work.push(StatementWork::Emit(PlannedInstruction::new(
+                FinalOpcode::Undefined,
+                Operands::None,
+                span,
+            )));
+            let (put, operands) = compact_put_local(completion.saved);
+            work.push(StatementWork::Emit(PlannedInstruction::new(
+                put, operands, span,
+            )));
+            let (get, operands) = compact_get_local(completion.current);
+            work.push(StatementWork::Emit(PlannedInstruction::new(
+                get, operands, span,
+            )));
+        }
     }
 
     fn plan_catch_binding(
@@ -1832,7 +2058,9 @@ impl<'arena> CompilationContext<'_, 'arena, '_> {
                 span: statement.span,
             });
         }
+        work.push(StatementWork::PopAbruptMarker(AbruptMarkerTag::ForOf));
         work.push(StatementWork::ForOfAssignment(&statement.left));
+        work.push(StatementWork::PushAbruptMarker(AbruptMarkerKind::ForOf));
         work.push(StatementWork::Bind(assign.clone()));
         work.push(StatementWork::Branch {
             kind: BranchKind::Goto,
@@ -2226,7 +2454,9 @@ impl<'arena> CompilationContext<'_, 'arena, '_> {
                     invariant: "active statement control has an abrupt-marker depth",
                     span: Some(statement_span),
                 })?;
-        let crossed_markers = state.abrupt_markers.get(abrupt_marker_depth..).ok_or(
+        let executable_floor = state.executable_abrupt_marker_floor(statement_span)?;
+        let crossed_marker_start = abrupt_marker_depth.max(executable_floor);
+        let crossed_markers = state.abrupt_markers.get(crossed_marker_start..).ok_or(
             LeafCompilationError::SemanticInvariant {
                 invariant: "statement control abrupt-marker depth is active",
                 span: Some(statement_span),
@@ -2308,7 +2538,7 @@ impl<'arena> CompilationContext<'_, 'arena, '_> {
                     Operands::None,
                     span,
                 ))?;
-                flow.branch(BranchKind::Gosub, finalizer, span)?;
+                Self::emit_finalizer_gosub(flow, finalizer, span)?;
                 flow.emit(PlannedInstruction::new(
                     FinalOpcode::Drop,
                     Operands::None,
@@ -2331,6 +2561,34 @@ impl<'arena> CompilationContext<'_, 'arena, '_> {
                     ))?;
                 }
             }
+        }
+        Ok(())
+    }
+
+    fn emit_finalizer_gosub(
+        flow: &mut PlannedControlFlow,
+        finalizer: &FinallyTarget,
+        span: Span,
+    ) -> Result<(), LeafCompilationError> {
+        if let Some(completion) = finalizer.script_completion {
+            let (get, operands) = compact_get_local(completion.current);
+            flow.emit(PlannedInstruction::new(get, operands, span))?;
+            let (put, operands) = compact_put_local(completion.saved);
+            flow.emit(PlannedInstruction::new(put, operands, span))?;
+            flow.emit(PlannedInstruction::new(
+                FinalOpcode::Undefined,
+                Operands::None,
+                span,
+            ))?;
+            let (put, operands) = compact_put_local(completion.current);
+            flow.emit(PlannedInstruction::new(put, operands, span))?;
+        }
+        flow.branch(BranchKind::Gosub, &finalizer.label, span)?;
+        if let Some(completion) = finalizer.script_completion {
+            let (get, operands) = compact_get_local(completion.saved);
+            flow.emit(PlannedInstruction::new(get, operands, span))?;
+            let (put, operands) = compact_put_local(completion.current);
+            flow.emit(PlannedInstruction::new(put, operands, span))?;
         }
         Ok(())
     }

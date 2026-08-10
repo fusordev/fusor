@@ -518,7 +518,12 @@ impl Runtime {
                         &mut work,
                     );
                 }
-                for function in [errors.to_string, errors.is_error] {
+                for function in [
+                    errors.to_string,
+                    errors.stack_getter,
+                    errors.stack_setter,
+                    errors.is_error,
+                ] {
                     mark_heap_reference(
                         HeapReference::Function(function),
                         &mut marked_functions,

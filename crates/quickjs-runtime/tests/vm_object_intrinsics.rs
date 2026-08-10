@@ -1728,6 +1728,31 @@ fn proxy_get_drives_operator_and_property_key_conversion() {
 }
 
 #[test]
+fn symbol_primitive_get_uses_the_mutable_intrinsic_prototype_and_original_receiver() {
+    assert_eq!(
+        text(
+            "var value=Symbol('value'),seen=[];\
+             Object.defineProperty(Symbol.prototype,'getter',{configurable:true,get:function(){\
+               'use strict';seen.push(this===value);return 'getter';}});\
+             var proxy=new Proxy({}, {get:function(target,key,receiver){\
+               seen.push(key==='key');seen.push(receiver===value);return 'proxy';}});\
+             Object.setPrototypeOf(Symbol.prototype,proxy);\
+             return [value.getter,value.key,seen.join(',')].join('|');"
+        ),
+        "getter|proxy|true,true,true"
+    );
+}
+
+#[test]
+fn array_prototype_remains_the_intrinsic_after_its_length_is_frozen() {
+    assert!(boolean(
+        "delete Array.prototype.slice;\
+         Object.freeze(Array.prototype);\
+         return Object.isFrozen(Array.prototype);"
+    ));
+}
+
+#[test]
 fn object_prototype_to_string_uses_the_regexp_matcher_builtin_tag() {
     assert_eq!(
         text("return Object.prototype.toString.call(/./);"),
@@ -1829,6 +1854,41 @@ fn proxy_get_enforces_non_configurable_target_invariants() {
     );
 }
 
+#[test]
+fn proxy_missing_get_trap_forwards_through_proxy_targets_with_the_original_receiver() {
+    assert_eq!(
+        text(
+            "var target={get 0(){return 1;}};var inner=new Proxy(target,{});\
+             var outer=new Proxy(inner,{get:undefined});return String(Object.create(outer)[0]);"
+        ),
+        "1"
+    );
+    assert_eq!(
+        text(
+            "var receiver;var target={get value(){receiver=this;return 1;},plain:2};\
+             var inner=new Proxy(target,{});var outer=new Proxy(inner,{get:undefined});\
+             var child=Object.create(outer);\
+             return child.value+'|'+outer.plain+'|'+(receiver===child);"
+        ),
+        "1|2|true"
+    );
+    assert_eq!(
+        text(
+            "var target={set value(next){}};var inner=new Proxy(target,{});\
+             var outer=new Proxy(inner,{get:undefined});return String(outer.value);"
+        ),
+        "undefined"
+    );
+    assert_eq!(
+        text(
+            "var array=[1,2,3];var inner=new Proxy(array,{});\
+             var outer=new Proxy(inner,{get:undefined});\
+             return outer.length+'|'+outer[0]+'|'+outer[1]+'|'+outer[2];"
+        ),
+        "3|1|2|3"
+    );
+}
+
 /// `%Proxy%` has no ordinary call behavior and `Proxy.revocable` publishes its
 /// result record in the specification's `proxy`, `revoke` order.
 #[test]
@@ -1903,6 +1963,11 @@ fn proxy_revocation_affects_objects_and_callable_proxies() {
          pair.revoke();return pair.proxy();",
         ExceptionKind::TypeError,
     );
+    assert_exception_kind(
+        "var pair=Proxy.revocable(function(){},{get:function(){pair.revoke();}});\
+         return new pair.proxy();",
+        ExceptionKind::TypeError,
+    );
 }
 
 #[test]
@@ -1956,6 +2021,27 @@ fn proxy_boolean_internal_methods_cover_language_and_reflect_paths() {
              return Reflect.set(target,'x',5,receiver)+'|'+log;"
         ),
         "true|x5r"
+    );
+    assert_eq!(
+        text(
+            "var seenHandler,seenTarget,seenKey,seenValue,seenReceiver;\
+             var target={};var handler={set:function(t,k,v,r){\
+               seenHandler=this;seenTarget=t;seenKey=k;seenValue=v;seenReceiver=r;return true;}};\
+             var proxy=new Proxy(target,handler);var receiver=Object.create(proxy);\
+             receiver.prop='value';\
+             return (seenHandler===handler)+'|'+(seenTarget===target)+'|'+seenKey+'|'+\
+                    seenValue+'|'+(seenReceiver===receiver);"
+        ),
+        "true|true|prop|value|true"
+    );
+    assert_eq!(
+        text(
+            "var context;var target={set attr(value){context=this;}};\
+             var proxy=new Proxy(target,{set:null});proxy.attr=1;var direct=context===proxy;\
+             var child=Object.create(new Proxy(target,{}));child.attr=2;\
+             return direct+'|'+(context===child);"
+        ),
+        "true|true"
     );
     assert_exception_kind(
         "'use strict';var proxy=new Proxy({x:1},{set(){return false;}});\
@@ -2206,6 +2292,14 @@ fn proxy_get_own_property_descriptor_enforces_target_invariants() {
            new Proxy({},{getOwnPropertyDescriptor(){return 1;}}),'x');",
         ExceptionKind::TypeError,
     );
+    assert_exception_kind(
+        "var target={};Object.defineProperty(target,'x',{\
+           configurable:false,writable:true});\
+         var proxy=new Proxy(target,{getOwnPropertyDescriptor(){\
+           return {configurable:false,writable:false};}});\
+         return Object.getOwnPropertyDescriptor(proxy,'x');",
+        ExceptionKind::TypeError,
+    );
     assert_eq!(
         text(
             "var log='';var target={x:1};\
@@ -2289,6 +2383,12 @@ fn proxy_define_own_property_enforces_target_invariants() {
         "var target={};Object.defineProperty(target,'x',{value:1});\
          return Reflect.defineProperty(new Proxy(target,{defineProperty(){return true;}}),\
            'x',{value:2});",
+        ExceptionKind::TypeError,
+    );
+    assert_exception_kind(
+        "var target={};var proxy=new Proxy(target,{defineProperty(t,k,d){\
+           Object.defineProperty(t,k,{configurable:false,writable:true});return true;}});\
+         return Reflect.defineProperty(proxy,'x',{writable:false});",
         ExceptionKind::TypeError,
     );
 }

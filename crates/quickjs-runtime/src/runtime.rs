@@ -228,6 +228,8 @@ struct ErrorIntrinsic {
 struct ErrorIntrinsics {
     entries: [ErrorIntrinsic; ErrorIntrinsicKind::ALL.len()],
     to_string: FunctionId,
+    stack_getter: FunctionId,
+    stack_setter: FunctionId,
     is_error: FunctionId,
 }
 
@@ -839,6 +841,7 @@ pub(crate) enum LocaleStringMethod {
     Number,
     BigInt,
     Array,
+    TypedArray,
 }
 
 impl ArrayFlatten {
@@ -1450,6 +1453,8 @@ pub(crate) enum NativeFunctionKind {
     FunctionPrototypeToString,
     ErrorConstructor(ErrorIntrinsicKind),
     ErrorPrototypeToString,
+    ErrorPrototypeStackGetter,
+    ErrorPrototypeStackSetter,
     ErrorIsError,
     BooleanConstructor,
     BooleanPrototypeToString,
@@ -4741,6 +4746,7 @@ impl NativeFunctionKind {
                 | Self::ArrayBufferConstructor
                 | Self::SharedArrayBufferConstructor
                 | Self::DataViewConstructor
+                | Self::TypedArrayBaseConstructor
                 | Self::TypedArrayConstructor(_)
                 | Self::DateConstructor
                 | Self::IntlCollatorConstructor
@@ -5821,6 +5827,7 @@ const fn is_supported_opcode(opcode: FinalOpcode) -> bool {
             | FinalOpcode::PrivateIn
             | FinalOpcode::GetArrayEl
             | FinalOpcode::GetArrayEl2
+            | FinalOpcode::GetArrayEl3
             | FinalOpcode::PutField
             | FinalOpcode::PutPrivateField
             | FinalOpcode::PutArrayEl
@@ -5833,6 +5840,8 @@ const fn is_supported_opcode(opcode: FinalOpcode) -> bool {
             | FinalOpcode::WithDeleteVar
             | FinalOpcode::WithMakeRef
             | FinalOpcode::WithGetRef
+            | FinalOpcode::MakeVarRefRef
+            | FinalOpcode::GetRefValue
             | FinalOpcode::PutRefValue
             | FinalOpcode::CopyDataProperties
             | FinalOpcode::DefineField

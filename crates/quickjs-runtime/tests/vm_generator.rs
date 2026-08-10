@@ -301,6 +301,21 @@ fn generator_return_completion_survives_a_yielding_finally() {
 }
 
 #[test]
+fn generator_return_abandons_a_suspended_property_reference_before_finally() {
+    assert_eq!(
+        run("function run(){\
+                let box={value:'unchanged'};\
+                function* values(){try{box.value=yield;}finally{return 1;}}\
+                let iterator=values();\
+                iterator.next();\
+                let result=iterator.return(45);\
+                return box.value+'|'+result.value+':'+result.done;\
+            }"),
+        "unchanged|1:true"
+    );
+}
+
+#[test]
 fn generator_return_closes_an_active_for_of_iterator() {
     assert_eq!(
         run("function run(){\
@@ -331,6 +346,58 @@ fn generator_return_from_a_destructuring_default_runs_finally() {
                 return first.value+':'+first.done+'|'+log+'|'+second.value+':'+second.done;\
             }"),
         "1:false|finally|8:true"
+    );
+}
+
+#[test]
+fn generator_return_exits_an_assignment_destructuring_iterator() {
+    assert_eq!(
+        run("function run(){\
+                function* values(){let value;[value=yield 1]=[void 0];}\
+                let iterator=values();\
+                let first=iterator.next();\
+                let second=iterator.return(8);\
+                return first.value+':'+first.done+'|'+second.value+':'+second.done;\
+            }"),
+        "1:false|8:true"
+    );
+    assert_eq!(
+        run("function run(){\
+                function* values(){let value;for({value=yield 1} of [{}]){}}\
+                let iterator=values();\
+                let first=iterator.next();\
+                let second=iterator.return(8);\
+                return first.value+':'+first.done+'|'+second.value+':'+second.done;\
+            }"),
+        "1:false|8:true"
+    );
+    assert_eq!(
+        run("function run(){\
+                function* values(){let target={};[...[target[yield 1]]]=[86];}\
+                let iterator=values();\
+                let first=iterator.next();\
+                let second=iterator.return(8);\
+                return first.value+':'+first.done+'|'+second.value+':'+second.done;\
+        }"),
+        "1:false|8:true"
+    );
+    assert_eq!(
+        run("function run(){\
+                function* values(){\
+                    try{\
+                        let target={};\
+                        function* source(){yield void 0;}\
+                        let input=source();\
+                        input.return=function(){throw 42;};\
+                        [target[yield 1]]=input;\
+                    }catch(error){return 'caught:'+error;}\
+                }\
+                let iterator=values();\
+                let first=iterator.next();\
+                let second=iterator.return(8);\
+                return first.value+':'+first.done+'|'+second.value+':'+second.done;\
+            }"),
+        "1:false|caught:42:true"
     );
 }
 

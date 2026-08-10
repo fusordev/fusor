@@ -574,6 +574,12 @@ fn transfer_object_definition_provenance(
             state.push(base);
             state.push(ObjectDefinitionProvenance::Unknown);
         }
+        FinalOpcode::GetArrayEl3 => {
+            let base_index = state.len() - 2;
+            state[base_index] = retained_object_definition_provenance(state[base_index]);
+            convert_property_key_provenance(state);
+            state.push(ObjectDefinitionProvenance::Unknown);
+        }
         FinalOpcode::ToPropKey => convert_property_key_provenance(state),
         // The closure-name/home-object primitives retain their surrounding
         // class provenance. `copy_data_properties` likewise retains all

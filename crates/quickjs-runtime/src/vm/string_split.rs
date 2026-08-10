@@ -25,9 +25,10 @@
 
 //! Resumable `String.prototype.split` protocol and plain-string fallback.
 //!
-//! The implementation follows the ES2025 ordering contract: `@@split` is read
-//! before fallback coercion, including from non-null primitive separators, and
-//! the fallback converts receiver, limit, and separator in that order.
+//! The implementation follows the current ECMA-262 ordering contract:
+//! `@@split` is read from Object separators before fallback coercion, while
+//! primitive separators enter the fallback directly. The fallback converts
+//! receiver, limit, and separator in that order.
 
 #[allow(
     clippy::wildcard_imports,
@@ -74,7 +75,7 @@ impl StringSplitContinuation {
     }
 }
 
-/// Starts the ES2025 `@@split` protocol lookup or the plain-string fallback.
+/// Starts the `@@split` protocol lookup or the plain-string fallback.
 pub(super) fn begin_string_split(
     runtime: &mut Runtime,
     realm: RealmId,
@@ -100,10 +101,13 @@ pub(super) fn begin_string_split(
         origin,
     };
 
-    if matches!(state.separator, StoredValue::Undefined | StoredValue::Null) {
-        begin_split_fallback(runtime, state, return_to, execution_budget)
-    } else {
+    if matches!(
+        state.separator,
+        StoredValue::Function(_) | StoredValue::Object(_)
+    ) {
         read_split_method(runtime, state, return_to, execution_budget)
+    } else {
+        begin_split_fallback(runtime, state, return_to, execution_budget)
     }
 }
 

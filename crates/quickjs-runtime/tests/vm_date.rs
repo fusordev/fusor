@@ -157,9 +157,10 @@ fn date_utc_converts_arguments_left_to_right_and_normalizes_calendar_fields() {
             "var log=[];function value(label,value){return {valueOf:function(){log.push(label);return value}}}
              var result=Date.UTC(value('year',2020),value('month',12),value('date',1),
                value('hour',2),value('minute',3),value('second',4),value('ms',5));
-             return result+'|'+log.join(',')+'|'+Date.UTC(99,0,1)+'|'+String(Date.UTC(NaN,0));"
+             return result+'|'+log.join(',')+'|'+Date.UTC(99,0,1)+'|'+String(Date.UTC(NaN,0))+
+               '|'+Date.UTC(1970)+'|'+String(Date.UTC());"
         ),
-        "1609466584005|year,month,date,hour,minute,second,ms|915148800000|NaN"
+        "1609466584005|year,month,date,hour,minute,second,ms|915148800000|NaN|0|NaN"
     );
 }
 
@@ -442,14 +443,14 @@ fn date_to_json_is_generic_and_invokes_to_iso_string_after_number_hint_coercion(
 }
 
 #[test]
-fn date_no_intl_locale_fallbacks_ignore_options_and_utc_years_keep_four_digits() {
+fn date_intl_locale_methods_accept_empty_locale_lists_without_primitive_coercion() {
     assert_eq!(
         rendered(
             "var d=new Date(0),observed=false;
              var ignored={valueOf:function(){observed=true;throw 0}};
-             return [d.toLocaleString(ignored,ignored)===d.toString(),
-               d.toLocaleDateString(ignored,ignored)===d.toDateString(),
-               d.toLocaleTimeString(ignored,ignored)===d.toTimeString(),observed,
+             return [typeof d.toLocaleString(ignored,ignored)==='string',
+               typeof d.toLocaleDateString(ignored,ignored)==='string',
+               typeof d.toLocaleTimeString(ignored,ignored)==='string',observed,
                Date.prototype.toLocaleString.length,
                Date.prototype.toLocaleDateString.length,
                Date.prototype.toLocaleTimeString.length,

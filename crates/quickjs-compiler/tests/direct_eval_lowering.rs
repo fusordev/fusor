@@ -225,3 +225,113 @@ fn eval_resolved_through_with_retains_its_reference_receiver() {
         [u32::try_from(eval).expect("instruction index")]
     );
 }
+
+#[test]
+fn captured_compound_assignment_retains_its_reference_across_direct_eval() {
+    let compiled = compile(
+        "function testCompoundAssignment(eval){var x=3;return function(){x*=(eval('var x=2;'),4);return x;}();}",
+        "testCompoundAssignment",
+    );
+    let opcodes = compiled
+        .verified_bytecode()
+        .functions()
+        .map(|function| {
+            function
+                .function()
+                .control_flow()
+                .instructions()
+                .iter()
+                .map(|instruction| instruction.decoded().instruction().opcode())
+                .collect::<Vec<_>>()
+        })
+        .find(|opcodes| opcodes.contains(&FinalOpcode::MakeVarRefRef))
+        .expect("nested assignment retains a captured reference");
+
+    let position = |opcode| {
+        opcodes
+            .iter()
+            .position(|&candidate| candidate == opcode)
+            .expect("reference transaction opcode")
+    };
+    let make = position(FinalOpcode::MakeVarRefRef);
+    let get = position(FinalOpcode::GetRefValue);
+    let insert = position(FinalOpcode::Insert3);
+    let put = position(FinalOpcode::PutRefValue);
+
+    assert_eq!(get, make + 1);
+    assert!(get < insert);
+    assert_eq!(put, insert + 1);
+    assert!(!opcodes.iter().any(|opcode| matches!(
+        opcode,
+        FinalOpcode::PutVarRef
+            | FinalOpcode::PutVarRef0
+            | FinalOpcode::PutVarRef1
+            | FinalOpcode::PutVarRef2
+            | FinalOpcode::PutVarRef3
+    )));
+}
+
+#[test]
+fn captured_simple_assignment_retains_its_reference_across_direct_eval() {
+    let compiled = compile(
+        "function testAssignment(eval){var x=3;return function(){x=(eval('var x=2;'),4);return x;}();}",
+        "testAssignment",
+    );
+    let opcodes = compiled
+        .verified_bytecode()
+        .functions()
+        .map(|function| {
+            function
+                .function()
+                .control_flow()
+                .instructions()
+                .iter()
+                .map(|instruction| instruction.decoded().instruction().opcode())
+                .collect::<Vec<_>>()
+        })
+        .find(|opcodes| opcodes.contains(&FinalOpcode::MakeVarRefRef))
+        .expect("nested assignment retains a captured reference");
+
+    let make = opcodes
+        .iter()
+        .position(|&opcode| opcode == FinalOpcode::MakeVarRefRef)
+        .expect("retained reference producer");
+    let insert = opcodes
+        .iter()
+        .position(|&opcode| opcode == FinalOpcode::Insert3)
+        .expect("assignment result preservation");
+    let put = opcodes
+        .iter()
+        .position(|&opcode| opcode == FinalOpcode::PutRefValue)
+        .expect("retained reference write");
+
+    assert!(make < insert);
+    assert_eq!(put, insert + 1);
+    assert!(!opcodes.iter().any(|opcode| matches!(
+        opcode,
+        FinalOpcode::PutVarRef
+            | FinalOpcode::PutVarRef0
+            | FinalOpcode::PutVarRef1
+            | FinalOpcode::PutVarRef2
+            | FinalOpcode::PutVarRef3
+    )));
+}
+
+#[test]
+fn captured_lexical_compound_reference_retains_tdz_metadata() {
+    let compiled = compile(
+        "function outer(eval){let value=1;return function(){value+=(eval(''),2);return value;}();}",
+        "outer",
+    );
+
+    assert!(compiled.verified_bytecode().functions().any(|function| {
+        function
+            .function()
+            .control_flow()
+            .instructions()
+            .iter()
+            .any(|instruction| {
+                instruction.decoded().instruction().opcode() == FinalOpcode::MakeVarRefRef
+            })
+    }));
+}

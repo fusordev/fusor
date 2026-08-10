@@ -138,12 +138,27 @@ impl RealmSnapshot {
             "%Object.prototype%",
             &mut identities,
         );
+        let Some(OwnProperty::Data {
+            value: StoredValue::Object(array_unscopables),
+            ..
+        }) = runtime
+            .objects
+            .get(array.prototype)
+            .expect("snapshot Array.prototype is live")
+            .record
+            .own_property(
+                &runtime.predefined_symbol_property_key(PredefinedAtom::SymbolUnscopables),
+            )
+        else {
+            panic!("Array.prototype @@unscopables is an intrinsic object");
+        };
         for (object, identity) in [
             (boolean.prototype, "%Boolean.prototype%"),
             (number.prototype, "%Number.prototype%"),
             (bigint.prototype, "%BigInt.prototype%"),
             (string.prototype, "%String.prototype%"),
             (array.prototype, "%Array.prototype%"),
+            (array_unscopables, "%Array.prototype%[@@unscopables]"),
             (array_buffer.prototype, "%ArrayBuffer.prototype%"),
             (
                 shared_array_buffer.prototype,

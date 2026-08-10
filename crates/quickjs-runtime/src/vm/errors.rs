@@ -330,12 +330,92 @@ fn finish_error_constructor(
         );
     }
     let stack = render_error_stack(runtime, &state.stack)?;
-    runtime.define_error_data_property(
-        object,
-        PredefinedAtom::Stack,
-        StoredValue::String(stack),
-    )?;
+    runtime.replace_error_stack(object, stack)?;
     Ok(NativeDispatch::Immediate(StoredValue::Object(object)))
+}
+
+pub(super) fn get_error_stack(
+    runtime: &Runtime,
+    receiver: &StoredValue,
+    realm: RealmId,
+    origin: JsStackFrame,
+) -> Result<NativeDispatch, NativeFailure> {
+    match receiver {
+        StoredValue::Object(object) => Ok(NativeDispatch::Immediate(
+            runtime
+                .error_stack(*object)?
+                .map_or(StoredValue::Undefined, |stack| {
+                    StoredValue::String(stack.clone())
+                }),
+        )),
+        StoredValue::Function(_) => Ok(NativeDispatch::Immediate(StoredValue::Undefined)),
+        StoredValue::Undefined
+        | StoredValue::Null
+        | StoredValue::Boolean(_)
+        | StoredValue::Number(_)
+        | StoredValue::BigInt(_)
+        | StoredValue::String(_)
+        | StoredValue::Symbol(_) => Err(NativeFailure::Abrupt(PendingException {
+            realm,
+            payload: PendingExceptionPayload::EngineError {
+                kind: ExceptionKind::TypeError,
+                message: JsString::from_utf8("Error stack getter receiver must be an object")?,
+            },
+            origin,
+        })),
+    }
+}
+
+#[allow(
+    clippy::too_many_arguments,
+    reason = "the Error stack setter preserves the exact receiver, value, intrinsic home, realm, and caller continuation"
+)]
+pub(super) fn begin_error_stack_setter(
+    runtime: &mut Runtime,
+    receiver: StoredValue,
+    value: StoredValue,
+    realm: RealmId,
+    return_to: Option<CallReturn>,
+    origin: JsStackFrame,
+    execution_budget: &mut ExecutionBudget,
+) -> Result<NativeDispatch, NativeFailure> {
+    if receiver.heap_reference().is_none() {
+        return Err(NativeFailure::Abrupt(PendingException {
+            realm,
+            payload: PendingExceptionPayload::EngineError {
+                kind: ExceptionKind::TypeError,
+                message: JsString::from_utf8("Error stack setter receiver must be an object")?,
+            },
+            origin,
+        }));
+    }
+    if !matches!(value, StoredValue::String(_)) {
+        return Err(NativeFailure::Abrupt(PendingException {
+            realm,
+            payload: PendingExceptionPayload::EngineError {
+                kind: ExceptionKind::TypeError,
+                message: JsString::from_utf8("Error stack value must be a string")?,
+            },
+            origin,
+        }));
+    }
+    begin_setter_ignoring_prototype_properties(
+        runtime,
+        receiver,
+        value,
+        HeapReference::Object(
+            runtime.realm_error_intrinsic_prototype(
+                realm,
+                crate::runtime::ErrorIntrinsicKind::Error,
+            )?,
+        ),
+        runtime.predefined_property_key(PredefinedAtom::Stack),
+        JsString::from_utf8("stack")?,
+        realm,
+        return_to,
+        origin,
+        execution_budget,
+    )
 }
 
 fn define_error_property(

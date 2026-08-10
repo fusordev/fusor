@@ -1,10 +1,11 @@
 use quickjs_bytecode::{
-    AssemblerError, BranchKind, BytecodePc, FinalOpcode, FunctionIndexDomains, Operands,
-    UnverifiedFunctionHeader, VerificationErrorKind, VerificationLimits,
+    AssemblerError, BranchKind, BytecodePc, CompilerCaptureLayout, CompilerConstantLayout,
+    FinalOpcode, FunctionIndexDomains, Operands, UnverifiedFunctionHeader, VerificationErrorKind,
+    VerificationLimits,
 };
 use quickjs_frontend::Span;
 
-use super::{PlannedControlFlow, PlannedInstruction};
+use super::{ControlFlowVerificationInputs, PlannedControlFlow, PlannedInstruction};
 use crate::lowering::LeafCompilationError;
 
 #[test]
@@ -113,12 +114,12 @@ fn reachable_statement_anchors_require_an_empty_stack() {
             pc,
             expected: 0,
             actual: 1,
-        } if span == anchor_span && pc == BytecodePc::new(134)
+        } if span == anchor_span && pc == BytecodePc::new(3)
     ));
 }
 
 #[test]
-fn unreachable_statement_anchors_have_no_required_entry_depth() {
+fn unreachable_statement_anchors_and_blocks_are_excised() {
     let mut flow = PlannedControlFlow::new(VerificationLimits::default());
     let live_exit = flow.new_label(Span::new(40, 41)).expect("live exit");
     flow.branch(BranchKind::Goto, &live_exit, Span::new(0, 1))
@@ -156,19 +157,33 @@ fn unreachable_statement_anchors_have_no_required_entry_depth() {
             VerificationLimits::default(),
         )
         .expect("unreachable anchor is accepted");
-    let anchor_source = source_instructions
-        .iter()
-        .find(|instruction| instruction.span() == Span::new(21, 22))
-        .expect("unreachable target source");
-    let anchor_index = control_flow
-        .instruction_index_at(anchor_source.pc())
-        .expect("verified unreachable target");
+    assert!(
+        source_instructions
+            .iter()
+            .all(|instruction| !matches!(instruction.span(), span if span == Span::new(10, 11) || span == Span::new(21, 22))),
+        "dead instructions and their statement anchor source are removed"
+    );
+    assert_eq!(source_instructions.len(), 2);
+    assert_eq!(control_flow.instructions().len(), 2);
+    assert!(matches!(
+        control_flow.instructions()[0]
+            .decoded()
+            .instruction()
+            .opcode(),
+        FinalOpcode::Goto | FinalOpcode::Goto8 | FinalOpcode::Goto16
+    ));
     assert_eq!(
+        control_flow.instructions()[1]
+            .decoded()
+            .instruction()
+            .opcode(),
+        FinalOpcode::ReturnUndef
+    );
+    assert!(
         control_flow
-            .instruction(anchor_index)
-            .expect("unreachable target instruction")
-            .entry_stack_depth(),
-        None
+            .instructions()
+            .iter()
+            .all(|instruction| instruction.entry_stack_depth().is_some())
     );
 }
 
@@ -371,4 +386,276 @@ fn widened_branch_verifier_failures_use_the_relocated_target_span() {
                 }
             )
     ));
+}
+
+#[test]
+fn known_branch_rewrite_preserves_sources_anchors_and_instruction_boundaries() {
+    let condition_span = Span::new(0, 1);
+    let branch_span = Span::new(1, 2);
+    let dead_span = Span::new(2, 3);
+    let target_span = Span::new(3, 4);
+    let mut flow = PlannedControlFlow::new(VerificationLimits::default());
+    let target = flow.new_statement_label(target_span).expect("target label");
+
+    flow.emit(PlannedInstruction::new(
+        FinalOpcode::PushTrue,
+        Operands::None,
+        condition_span,
+    ))
+    .expect("known condition");
+    flow.mark_function_initializer_prefix_start(condition_span)
+        .expect("initializer boundary");
+    flow.branch(BranchKind::IfTrue, &target, branch_span)
+        .expect("known branch");
+    flow.mark_parameter_initialization_end(branch_span)
+        .expect("parameter boundary");
+    flow.emit(PlannedInstruction::new(
+        FinalOpcode::Push1,
+        Operands::NoneInt,
+        dead_span,
+    ))
+    .expect("dead value");
+    flow.emit(PlannedInstruction::new(
+        FinalOpcode::Drop,
+        Operands::None,
+        dead_span,
+    ))
+    .expect("dead drop");
+    flow.bind(&target).expect("target binding");
+    flow.emit(PlannedInstruction::new(
+        FinalOpcode::ReturnUndef,
+        Operands::None,
+        target_span,
+    ))
+    .expect("target return");
+
+    let verified = flow
+        .finish()
+        .expect("assembly")
+        .verify_with_inputs(
+            FunctionIndexDomains::new(0, 0, 0, 0, 0),
+            UnverifiedFunctionHeader::stripped_ordinary_source_function(false, 0),
+            ControlFlowVerificationInputs::new(
+                CompilerCaptureLayout::default(),
+                CompilerConstantLayout::default(),
+                &[],
+                &[],
+            ),
+            VerificationLimits::default(),
+        )
+        .expect("optimized verification");
+    assert_eq!(verified.function_initializer_prefix_start(), 1);
+    assert_eq!(verified.parameter_initialization_end(), Some(3));
+
+    let (sources, control_flow) = verified.into_control_flow();
+    let opcodes = control_flow
+        .instructions()
+        .iter()
+        .map(|verified| verified.decoded().instruction().opcode())
+        .collect::<Vec<_>>();
+    assert_eq!(opcodes[0], FinalOpcode::PushTrue);
+    assert_eq!(opcodes[1], FinalOpcode::Drop);
+    assert!(matches!(
+        opcodes[2],
+        FinalOpcode::Goto | FinalOpcode::Goto8 | FinalOpcode::Goto16
+    ));
+    assert!(!opcodes.iter().any(|opcode| matches!(
+        opcode,
+        FinalOpcode::IfFalse | FinalOpcode::IfFalse8 | FinalOpcode::IfTrue | FinalOpcode::IfTrue8
+    )));
+    assert_eq!(
+        sources
+            .iter()
+            .filter(|source| source.span() == branch_span)
+            .count(),
+        2
+    );
+    assert_eq!(sources.len(), control_flow.instructions().len());
+
+    assert_eq!(opcodes.len(), 4);
+    assert!(sources.iter().all(|source| source.span() != dead_span));
+    assert!(
+        control_flow
+            .instructions()
+            .iter()
+            .all(|instruction| instruction.entry_stack_depth().is_some())
+    );
+    let target = sources
+        .iter()
+        .position(|source| source.span() == target_span)
+        .expect("remapped target source");
+    assert_eq!(
+        control_flow.instructions()[target].entry_stack_depth(),
+        Some(0)
+    );
+}
+
+#[test]
+fn constant_propagation_folds_es_truthiness_and_known_truthy_joins() {
+    let folded_span = Span::new(20, 21);
+    let mut flow = PlannedControlFlow::new(VerificationLimits::default());
+    let alternate = flow.new_label(Span::new(10, 11)).expect("alternate");
+    let join = flow.new_label(Span::new(20, 21)).expect("join");
+    let taken = flow.new_label(Span::new(30, 31)).expect("taken");
+    flow.emit(PlannedInstruction::new(
+        FinalOpcode::GetArg0,
+        Operands::NoneArg,
+        Span::new(0, 1),
+    ))
+    .expect("unknown selector");
+    flow.branch(BranchKind::IfFalse, &alternate, Span::new(1, 2))
+        .expect("unknown branch");
+    flow.emit(PlannedInstruction::new(
+        FinalOpcode::Push1,
+        Operands::NoneInt,
+        Span::new(2, 3),
+    ))
+    .expect("first truthy value");
+    flow.branch(BranchKind::Goto, &join, Span::new(3, 4))
+        .expect("join branch");
+    flow.bind(&alternate).expect("alternate binding");
+    flow.emit(PlannedInstruction::new(
+        FinalOpcode::Push2,
+        Operands::NoneInt,
+        Span::new(10, 11),
+    ))
+    .expect("second truthy value");
+    flow.bind(&join).expect("join binding");
+    flow.branch(BranchKind::IfTrue, &taken, folded_span)
+        .expect("folded branch");
+    flow.emit(PlannedInstruction::new(
+        FinalOpcode::ReturnUndef,
+        Operands::None,
+        Span::new(21, 22),
+    ))
+    .expect("dead fallthrough");
+    flow.bind(&taken).expect("taken binding");
+    flow.emit(PlannedInstruction::new(
+        FinalOpcode::ReturnUndef,
+        Operands::None,
+        Span::new(30, 31),
+    ))
+    .expect("taken return");
+
+    let (sources, control_flow) = flow
+        .finish()
+        .expect("assembly")
+        .verify(
+            FunctionIndexDomains::new(0, 0, 1, 0, 0),
+            UnverifiedFunctionHeader::stripped_ordinary_source_function(false, 1),
+            VerificationLimits::default(),
+        )
+        .expect("optimized verification");
+    let conditional_spans = control_flow
+        .instructions()
+        .iter()
+        .zip(&sources)
+        .filter_map(|(verified, source)| {
+            matches!(
+                verified.decoded().instruction().opcode(),
+                FinalOpcode::IfFalse
+                    | FinalOpcode::IfFalse8
+                    | FinalOpcode::IfTrue
+                    | FinalOpcode::IfTrue8
+            )
+            .then_some(source.span())
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(conditional_spans, [Span::new(1, 2)]);
+    assert_eq!(
+        sources
+            .iter()
+            .filter(|source| source.span() == folded_span)
+            .count(),
+        2
+    );
+}
+
+#[test]
+fn empty_string_is_folded_as_falsy_but_unknown_values_keep_both_edges() {
+    let mut falsy = PlannedControlFlow::new(VerificationLimits::default());
+    let falsy_target = falsy.new_label(Span::new(10, 11)).expect("falsy target");
+    falsy
+        .emit(PlannedInstruction::new(
+            FinalOpcode::PushEmptyString,
+            Operands::None,
+            Span::new(0, 1),
+        ))
+        .expect("empty string");
+    falsy
+        .branch(BranchKind::IfTrue, &falsy_target, Span::new(1, 2))
+        .expect("falsy branch");
+    falsy
+        .emit(PlannedInstruction::new(
+            FinalOpcode::ReturnUndef,
+            Operands::None,
+            Span::new(2, 3),
+        ))
+        .expect("fallthrough");
+    falsy.bind(&falsy_target).expect("falsy target binding");
+    falsy
+        .emit(PlannedInstruction::new(
+            FinalOpcode::ReturnUndef,
+            Operands::None,
+            Span::new(10, 11),
+        ))
+        .expect("target return");
+    let (_, falsy) = falsy
+        .finish()
+        .expect("falsy assembly")
+        .verify(
+            FunctionIndexDomains::new(0, 0, 0, 0, 0),
+            UnverifiedFunctionHeader::stripped_ordinary_source_function(false, 0),
+            VerificationLimits::default(),
+        )
+        .expect("falsy verification");
+    assert!(!falsy.instructions().iter().any(|verified| matches!(
+        verified.decoded().instruction().opcode(),
+        FinalOpcode::IfTrue | FinalOpcode::IfTrue8
+    )));
+
+    let mut unknown = PlannedControlFlow::new(VerificationLimits::default());
+    let unknown_target = unknown
+        .new_label(Span::new(20, 21))
+        .expect("unknown target");
+    unknown
+        .emit(PlannedInstruction::new(
+            FinalOpcode::GetArg0,
+            Operands::NoneArg,
+            Span::new(0, 1),
+        ))
+        .expect("unknown value");
+    unknown
+        .branch(BranchKind::IfTrue, &unknown_target, Span::new(1, 2))
+        .expect("unknown branch");
+    unknown
+        .emit(PlannedInstruction::new(
+            FinalOpcode::ReturnUndef,
+            Operands::None,
+            Span::new(2, 3),
+        ))
+        .expect("unknown fallthrough");
+    unknown
+        .bind(&unknown_target)
+        .expect("unknown target binding");
+    unknown
+        .emit(PlannedInstruction::new(
+            FinalOpcode::ReturnUndef,
+            Operands::None,
+            Span::new(20, 21),
+        ))
+        .expect("unknown target return");
+    let (_, unknown) = unknown
+        .finish()
+        .expect("unknown assembly")
+        .verify(
+            FunctionIndexDomains::new(0, 0, 1, 0, 0),
+            UnverifiedFunctionHeader::stripped_ordinary_source_function(false, 1),
+            VerificationLimits::default(),
+        )
+        .expect("unknown verification");
+    assert!(unknown.instructions().iter().any(|verified| matches!(
+        verified.decoded().instruction().opcode(),
+        FinalOpcode::IfTrue | FinalOpcode::IfTrue8
+    )));
 }

@@ -6,8 +6,9 @@ rust-version.workspace = true
 license.workspace = true
 
 [dependencies]
-# Use the ICU4X facade while enabling baked data only for the two components
-# needed by the RegExp engine.
+# ICU4X owns case mapping and code-point/string properties; `emojis` supplies
+# the exact current RGI sequence index that ICU4X does not expose dynamically.
+emojis.workspace = true
 icu.workspace = true
 icu_casemap.workspace = true
 icu_properties.workspace = true

@@ -416,11 +416,7 @@ fn finish_aggregate_error(
         StoredValue::Object(array),
     )?;
     let stack = render_error_stack(runtime, &state.stack)?;
-    runtime.define_error_data_property(
-        state.error,
-        PredefinedAtom::Stack,
-        StoredValue::String(stack),
-    )?;
+    runtime.replace_error_stack(state.error, stack)?;
     Ok(NativeDispatch::Immediate(StoredValue::Object(state.error)))
 }
 

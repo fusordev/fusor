@@ -49,17 +49,11 @@ impl Runtime {
                 message: "realm Symbol intrinsics are not initialized",
             });
         };
-        let prototype =
-            self.objects
-                .get(symbol.prototype)
-                .ok_or(crate::EngineFault::StaleHeapEdge {
-                    edge: "Symbol.prototype intrinsic",
-                    index: symbol.prototype.index(),
-                    generation: symbol.prototype.generation(),
-                })?;
-        if prototype.record.prototype() != Some(HeapReference::Object(state.object_prototype)) {
-            return Err(crate::EngineFault::RuntimeInvariant {
-                message: "Symbol.prototype intrinsic has the wrong prototype",
+        if self.objects.get(symbol.prototype).is_none() {
+            return Err(crate::EngineFault::StaleHeapEdge {
+                edge: "Symbol.prototype intrinsic",
+                index: symbol.prototype.index(),
+                generation: symbol.prototype.generation(),
             });
         }
         Ok(symbol.prototype)

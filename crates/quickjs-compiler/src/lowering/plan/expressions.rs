@@ -17,7 +17,7 @@ use super::super::{
     UpdateOperator, compiled_static_property_key, plan_external_put, plan_external_read,
     plan_put_slot, unsupported,
 };
-use super::abrupt::{AbruptMarker, AbruptMarkerKind};
+use super::abrupt::{AbruptMarker, AbruptMarkerKind, AbruptMarkerTag};
 use super::bindings::WithObjectSource;
 use super::calls::MemberCallee;
 use oxc_ast::ast::{SpreadElement, StaticBlock};
@@ -226,6 +226,11 @@ const fn super_member_update_permutation(prefix: bool) -> FinalOpcode {
 pub(in crate::lowering) enum ExpressionWork<'expression, 'arena> {
     Visit(&'expression Expression<'arena>),
     VisitTail(&'expression Expression<'arena>),
+    EnterAbruptMarker(AbruptMarker),
+    ExitAbruptMarker {
+        expected: AbruptMarkerTag,
+        span: Span,
+    },
     VisitCallExpression {
         call: &'expression CallExpression<'arena>,
         tail: bool,
@@ -403,6 +408,14 @@ impl<'compiler, 'unit, 'arena, 'scope> ExpressionPlanner<'compiler, 'unit, 'aren
         abrupt_markers: &[AbruptMarker],
         flow: &mut PlannedControlFlow,
     ) -> Result<(), LeafCompilationError> {
+        let initial_abrupt_marker_count = abrupt_markers.len();
+        let mut active_abrupt_markers = Vec::new();
+        active_abrupt_markers
+            .try_reserve_exact(initial_abrupt_marker_count)
+            .map_err(|_| LeafCompilationError::CapacityExceeded {
+                domain: "expression abrupt-marker stack",
+            })?;
+        active_abrupt_markers.extend_from_slice(abrupt_markers);
         let mut work = vec![if tail {
             ExpressionWork::VisitTail(expression)
         } else {
@@ -411,6 +424,28 @@ impl<'compiler, 'unit, 'arena, 'scope> ExpressionPlanner<'compiler, 'unit, 'aren
         while let Some(task) = work.pop() {
             match task {
                 ExpressionWork::Emit(instruction) => flow.emit(instruction)?,
+                ExpressionWork::EnterAbruptMarker(marker) => {
+                    active_abrupt_markers.try_reserve(1).map_err(|_| {
+                        LeafCompilationError::CapacityExceeded {
+                            domain: "expression abrupt-marker stack",
+                        }
+                    })?;
+                    active_abrupt_markers.push(marker);
+                }
+                ExpressionWork::ExitAbruptMarker { expected, span } => {
+                    let Some(marker) = active_abrupt_markers.pop() else {
+                        return Err(LeafCompilationError::SemanticInvariant {
+                            invariant: "expression abrupt-marker exit has an active marker",
+                            span: Some(span),
+                        });
+                    };
+                    if marker.tag() != expected {
+                        return Err(LeafCompilationError::SemanticInvariant {
+                            invariant: "expression abrupt-marker exits in LIFO order",
+                            span: Some(span),
+                        });
+                    }
+                }
                 ExpressionWork::VisitCallExpression { call, tail } => {
                     self.plan_call_expression(
                         call,
@@ -721,7 +756,7 @@ impl<'compiler, 'unit, 'arena, 'scope> ExpressionPlanner<'compiler, 'unit, 'aren
                                     yield_expression,
                                     async_generator,
                                     constants,
-                                    abrupt_markers,
+                                    &active_abrupt_markers,
                                     flow,
                                     &mut work,
                                 )?;
@@ -735,7 +770,7 @@ impl<'compiler, 'unit, 'arena, 'scope> ExpressionPlanner<'compiler, 'unit, 'aren
                                 yield_expression.span,
                             )));
                             Self::schedule_yield_return_cleanup(
-                                abrupt_markers,
+                                &active_abrupt_markers,
                                 yield_expression.span,
                                 &mut work,
                             );
@@ -817,6 +852,12 @@ impl<'compiler, 'unit, 'arena, 'scope> ExpressionPlanner<'compiler, 'unit, 'aren
                     }
                 }
             }
+        }
+        if active_abrupt_markers.len() != initial_abrupt_marker_count {
+            return Err(LeafCompilationError::SemanticInvariant {
+                invariant: "expression abrupt-marker scheduling is balanced",
+                span: Some(expression.span()),
+            });
         }
         Ok(())
     }
@@ -2216,7 +2257,10 @@ impl<'compiler, 'unit, 'arena, 'scope> ExpressionPlanner<'compiler, 'unit, 'aren
             active_scopes: vec![class.scope_id()],
             controls: StatementControlStack::default(),
             abrupt_markers: Vec::new(),
+            disconnected_abrupt_floors: Vec::new(),
             completion: StatementCompletion::Discard,
+            next_script_finally_completion: 0,
+            script_finally_completion_limit: 0,
         };
         while let Some(task) = state.work.pop() {
             self.process_statement_work(task, block.span, &planning, flow, &mut state)?;
@@ -2224,6 +2268,7 @@ impl<'compiler, 'unit, 'arena, 'scope> ExpressionPlanner<'compiler, 'unit, 'aren
         if state.active_scopes.as_slice() != [class.scope_id()]
             || !state.controls.is_empty()
             || !state.abrupt_markers.is_empty()
+            || !state.disconnected_abrupt_floors.is_empty()
         {
             return Err(LeafCompilationError::SemanticInvariant {
                 invariant: "static block closes its scope and control regions",
@@ -3786,7 +3831,7 @@ impl<'compiler, 'unit, 'arena, 'scope> ExpressionPlanner<'compiler, 'unit, 'aren
                     if let Some(finalizer) = finalizer {
                         work.push(ExpressionWork::Branch {
                             kind: BranchKind::Gosub,
-                            target: finalizer.clone(),
+                            target: finalizer.label.clone(),
                             span,
                         });
                     }
@@ -5055,17 +5100,24 @@ impl<'compiler, 'unit, 'arena, 'scope> ExpressionPlanner<'compiler, 'unit, 'aren
             identifier,
             reference,
             inferred_name,
+            constants,
             flow,
             work,
         )
     }
 
+    #[allow(
+        clippy::too_many_arguments,
+        clippy::too_many_lines,
+        reason = "identifier assignment carries its resolved storage, inferred name, atom pool, and reverse expression schedule explicitly"
+    )]
     fn plan_lowered_identifier_assignment<'expression>(
         &self,
         assignment: &'expression AssignmentExpression<'arena>,
         identifier: &'expression IdentifierReference<'arena>,
         reference: LoweredReference,
         inferred_name: Option<PlannedInstruction>,
+        constants: &CompiledConstantPool,
         flow: &mut PlannedControlFlow,
         work: &mut Vec<ExpressionWork<'expression, 'arena>>,
     ) -> Result<(), LeafCompilationError> {
@@ -5074,9 +5126,11 @@ impl<'compiler, 'unit, 'arena, 'scope> ExpressionPlanner<'compiler, 'unit, 'aren
             LoweredReference::RealmGlobal { slot, binding, .. } => {
                 return Self::plan_realm_global_assignment(
                     assignment,
+                    identifier,
                     slot,
                     binding,
                     inferred_name,
+                    constants,
                     flow,
                     work,
                 );
@@ -5085,6 +5139,16 @@ impl<'compiler, 'unit, 'arena, 'scope> ExpressionPlanner<'compiler, 'unit, 'aren
 
         match assignment.operator {
             AssignmentOperator::Assign => {
+                if let FrameSlot::Capture(slot) = frame_slot {
+                    return Self::push_retained_identifier_simple_assignment(
+                        assignment,
+                        identifier,
+                        slot,
+                        inferred_name,
+                        constants,
+                        work,
+                    );
+                }
                 self.push_slot_write(binding, frame_slot, true, identifier.span, work)?;
                 if let Some(set_name) = inferred_name {
                     work.push(ExpressionWork::Emit(set_name));
@@ -5148,6 +5212,11 @@ impl<'compiler, 'unit, 'arena, 'scope> ExpressionPlanner<'compiler, 'unit, 'aren
                         span: Some(assignment.span),
                     },
                 )?;
+                if let FrameSlot::Capture(slot) = frame_slot {
+                    return Self::push_captured_identifier_compound_assignment(
+                        assignment, identifier, slot, binary, constants, work,
+                    );
+                }
                 self.push_slot_write(binding, frame_slot, true, identifier.span, work)?;
                 work.push(ExpressionWork::Emit(PlannedInstruction::new(
                     binary_opcode(binary),
@@ -5162,6 +5231,75 @@ impl<'compiler, 'unit, 'arena, 'scope> ExpressionPlanner<'compiler, 'unit, 'aren
                 )?));
             }
         }
+        Ok(())
+    }
+
+    pub(in crate::lowering) fn push_retained_identifier_simple_assignment<'expression>(
+        assignment: &'expression AssignmentExpression<'arena>,
+        identifier: &'expression IdentifierReference<'arena>,
+        slot: u16,
+        inferred_name: Option<PlannedInstruction>,
+        constants: &CompiledConstantPool,
+        work: &mut Vec<ExpressionWork<'expression, 'arena>>,
+    ) -> Result<(), LeafCompilationError> {
+        let atom = constants.property_atom_index(identifier.span)?;
+        work.push(ExpressionWork::Emit(PlannedInstruction::new(
+            FinalOpcode::PutRefValue,
+            Operands::None,
+            identifier.span,
+        )));
+        work.push(ExpressionWork::Emit(PlannedInstruction::new(
+            FinalOpcode::Insert3,
+            Operands::None,
+            assignment.span,
+        )));
+        if let Some(set_name) = inferred_name {
+            work.push(ExpressionWork::Emit(set_name));
+        }
+        work.push(ExpressionWork::Visit(&assignment.right));
+        work.push(ExpressionWork::Emit(PlannedInstruction::new(
+            FinalOpcode::MakeVarRefRef,
+            Operands::AtomU16 { atom, value: slot },
+            identifier.span,
+        )));
+        Ok(())
+    }
+
+    fn push_captured_identifier_compound_assignment<'expression>(
+        assignment: &'expression AssignmentExpression<'arena>,
+        identifier: &'expression IdentifierReference<'arena>,
+        slot: u16,
+        binary: BinaryOperator,
+        constants: &CompiledConstantPool,
+        work: &mut Vec<ExpressionWork<'expression, 'arena>>,
+    ) -> Result<(), LeafCompilationError> {
+        let atom = constants.property_atom_index(identifier.span)?;
+        work.push(ExpressionWork::Emit(PlannedInstruction::new(
+            FinalOpcode::PutRefValue,
+            Operands::None,
+            identifier.span,
+        )));
+        work.push(ExpressionWork::Emit(PlannedInstruction::new(
+            FinalOpcode::Insert3,
+            Operands::None,
+            assignment.span,
+        )));
+        work.push(ExpressionWork::Emit(PlannedInstruction::new(
+            binary_opcode(binary),
+            Operands::None,
+            assignment.span,
+        )));
+        work.push(ExpressionWork::Visit(&assignment.right));
+        work.push(ExpressionWork::Emit(PlannedInstruction::new(
+            FinalOpcode::GetRefValue,
+            Operands::None,
+            identifier.span,
+        )));
+        work.push(ExpressionWork::Emit(PlannedInstruction::new(
+            FinalOpcode::MakeVarRefRef,
+            Operands::AtomU16 { atom, value: slot },
+            identifier.span,
+        )));
         Ok(())
     }
 
@@ -5241,6 +5379,7 @@ impl<'compiler, 'unit, 'arena, 'scope> ExpressionPlanner<'compiler, 'unit, 'aren
             identifier,
             reference,
             inferred_name,
+            constants,
             flow,
             work,
         )
@@ -6095,9 +6234,10 @@ impl<'compiler, 'unit, 'arena, 'scope> ExpressionPlanner<'compiler, 'unit, 'aren
             }
         };
 
-        // `dup2; get_array_el` preserves the raw base/key pair for the
-        // possible write while reading the old value. The key conversion is
-        // deliberately observable once for the read and again for the write.
+        // `get_array_el3` checks the base before converting the key, then
+        // preserves the base and converted PropertyKey for the possible write.
+        // `GetValue(leftRef)` performs this conversion once, so
+        // `PutValue(leftRef, value)` must reuse it.
         // The short-circuit and write paths both leave exactly one completion.
         work.push(ExpressionWork::Bind(done.clone()));
         work.push(ExpressionWork::Emit(PlannedInstruction::new(
@@ -6160,12 +6300,7 @@ impl<'compiler, 'unit, 'arena, 'scope> ExpressionPlanner<'compiler, 'unit, 'aren
             member.span,
         )));
         work.push(ExpressionWork::Emit(PlannedInstruction::new(
-            FinalOpcode::GetArrayEl,
-            Operands::None,
-            member.span,
-        )));
-        work.push(ExpressionWork::Emit(PlannedInstruction::new(
-            FinalOpcode::Dup2,
+            FinalOpcode::GetArrayEl3,
             Operands::None,
             member.span,
         )));
@@ -6211,12 +6346,7 @@ impl<'compiler, 'unit, 'arena, 'scope> ExpressionPlanner<'compiler, 'unit, 'aren
         )));
         work.push(ExpressionWork::Visit(&assignment.right));
         work.push(ExpressionWork::Emit(PlannedInstruction::new(
-            FinalOpcode::GetArrayEl,
-            Operands::None,
-            member.span,
-        )));
-        work.push(ExpressionWork::Emit(PlannedInstruction::new(
-            FinalOpcode::Dup2,
+            FinalOpcode::GetArrayEl3,
             Operands::None,
             member.span,
         )));
@@ -6361,9 +6491,10 @@ impl<'compiler, 'unit, 'arena, 'scope> ExpressionPlanner<'compiler, 'unit, 'aren
                 update.argument.span(),
             );
         }
-        // `dup2; get_array_el` preserves the base and raw key for the write.
-        // A prefix update keeps its new value as the completion; a postfix
-        // update moves the old value below the saved reference triple.
+        // `get_array_el3` checks the base, converts the key once, and preserves
+        // the base and PropertyKey for the write. A prefix update keeps its new
+        // value as the completion; a postfix update moves the old value below
+        // the saved reference triple.
         work.push(ExpressionWork::Emit(PlannedInstruction::new(
             FinalOpcode::PutArrayEl,
             Operands::None,
@@ -6384,12 +6515,7 @@ impl<'compiler, 'unit, 'arena, 'scope> ExpressionPlanner<'compiler, 'unit, 'aren
             update.span,
         )));
         work.push(ExpressionWork::Emit(PlannedInstruction::new(
-            FinalOpcode::GetArrayEl,
-            Operands::None,
-            member.span,
-        )));
-        work.push(ExpressionWork::Emit(PlannedInstruction::new(
-            FinalOpcode::Dup2,
+            FinalOpcode::GetArrayEl3,
             Operands::None,
             member.span,
         )));

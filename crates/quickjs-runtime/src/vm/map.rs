@@ -685,7 +685,7 @@ pub(super) fn dispatch_map_method(
             Ok(NativeDispatch::Immediate(value))
         }
         MapMethod::GetOrInsertComputed => {
-            let key = arguments.take_first_or_undefined();
+            let key = canonicalize_map_computed_key(arguments.take_first_or_undefined());
             let callback = arguments.take_first_or_undefined();
             let StoredValue::Function(callback) = callback else {
                 return map_type_error(realm, origin, "not a function");
@@ -727,6 +727,15 @@ pub(super) fn dispatch_map_method(
                 runtime.allocate_map_iterator(realm, map, kind)?,
             )))
         }
+    }
+}
+
+fn canonicalize_map_computed_key(key: StoredValue) -> StoredValue {
+    match key {
+        StoredValue::Number(value) if value.as_f64() == 0.0 => {
+            StoredValue::Number(JsNumber::from_f64(0.0))
+        }
+        key => key,
     }
 }
 

@@ -101,6 +101,28 @@ fn catch_only_accepts_optional_and_simple_identifier_bindings() {
 }
 
 #[test]
+fn disconnected_abrupt_statements_do_not_consume_live_region_markers() {
+    let dead_return = compile(
+        "function deadReturn(){try{throw 1;return 2;}catch(error){return error;}}",
+        "deadReturn",
+    );
+    assert!(
+        !opcodes(&dead_return).contains(&FinalOpcode::NipCatch),
+        "a disconnected return has no executable catch marker to consume"
+    );
+
+    let dead_throw = compile(
+        "function deadThrow(object){for(const key in object){return;throw key;}}",
+        "deadThrow",
+    );
+    let dead_throw_opcodes = opcodes(&dead_throw);
+    assert!(
+        !dead_throw_opcodes.contains(&FinalOpcode::Throw),
+        "the disconnected throw and its cleanup sequence are excised"
+    );
+}
+
+#[test]
 fn catch_destructuring_materializes_exceptional_static_keys_for_dynamic_reads() {
     let compiled = compile(
         r#"function f(){try{throw {"":1,0:2,length:3};}catch({"":empty,0:zero,length}){return [empty,zero,length];}}"#,

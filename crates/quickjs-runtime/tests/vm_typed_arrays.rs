@@ -163,6 +163,14 @@ fn typed_array_constructors_require_new_and_validate_the_length() {
         thrown("return new Uint8Array(-1);"),
         ExceptionKind::RangeError
     );
+    assert_eq!(
+        thrown("return new Uint8Array({length:Math.pow(2,53)});"),
+        ExceptionKind::RangeError
+    );
+    assert_eq!(
+        thrown("return new BigInt64Array({length:Math.pow(2,53)});"),
+        ExceptionKind::RangeError
+    );
 }
 
 #[test]
@@ -188,6 +196,19 @@ fn typed_array_constructors_create_fixed_and_length_tracking_array_buffer_views(
     assert_eq!(
         thrown("return new Uint16Array(new ArrayBuffer(4),0,3);"),
         ExceptionKind::RangeError
+    );
+}
+
+#[test]
+fn growable_shared_buffers_keep_only_fixed_typed_array_views_fixed_length() {
+    assert_eq!(
+        rendered(
+            "var buffer=new SharedArrayBuffer(8,{maxByteLength:16});\
+             var fixed=new Uint8Array(buffer,0,4),tracking=new Uint8Array(buffer);\
+             return [Reflect.preventExtensions(fixed),Object.isExtensible(fixed),\
+               Reflect.preventExtensions(tracking),Object.isExtensible(tracking)].join('|');"
+        ),
+        "true|false|false|true"
     );
 }
 
@@ -226,11 +247,15 @@ fn typed_array_constructors_initialize_iterable_and_array_like_inputs_in_their_d
 fn typed_array_constructors_expose_the_shared_species_getter() {
     assert_eq!(
         rendered(
-            "return [Int8Array[Symbol.species]===Int8Array,\
+            "var TypedArray=Object.getPrototypeOf(Int8Array);\
+             var descriptor=Object.getOwnPropertyDescriptor(TypedArray,Symbol.species);\
+             return [Int8Array[Symbol.species]===Int8Array,\
              BigInt64Array[Symbol.species]===BigInt64Array,\
-             Object.getOwnPropertyDescriptor(Int8Array,Symbol.species).get.name].join('|');"
+             descriptor.get.name,descriptor.get.length,descriptor.set===undefined,\
+             descriptor.enumerable,descriptor.configurable,\
+             Object.hasOwn(Int8Array,Symbol.species)].join('|');"
         ),
-        "true|true|get [Symbol.species]"
+        "true|true|get [Symbol.species]|0|true|false|true|false"
     );
 }
 
@@ -239,11 +264,13 @@ fn typed_array_constructors_inherit_from_the_hidden_abstract_constructor() {
     assert_eq!(
         rendered(
             "var TypedArray=Object.getPrototypeOf(Int8Array),descriptor=Object.getOwnPropertyDescriptor(TypedArray,'prototype');\
+             class SharedTypedArray extends TypedArray{}\
              return [TypedArray.name,TypedArray.length,TypedArray.prototype.constructor===TypedArray,\
                Object.getPrototypeOf(Int8Array)===TypedArray,Object.getPrototypeOf(BigInt64Array)===TypedArray,\
+               Object.getPrototypeOf(SharedTypedArray)===TypedArray,\
                descriptor.writable,descriptor.enumerable,descriptor.configurable].join('|');"
         ),
-        "TypedArray|0|true|true|true|false|false|false"
+        "TypedArray|0|true|true|true|true|false|false|false"
     );
     assert_eq!(
         thrown("var TypedArray=Object.getPrototypeOf(Int8Array);TypedArray();"),
@@ -252,6 +279,22 @@ fn typed_array_constructors_inherit_from_the_hidden_abstract_constructor() {
     assert_eq!(
         thrown("var TypedArray=Object.getPrototypeOf(Int8Array);new TypedArray();"),
         ExceptionKind::TypeError
+    );
+}
+
+#[test]
+fn typed_array_to_string_tag_getter_is_generic() {
+    assert_eq!(
+        rendered(
+            "var TypedArray=Object.getPrototypeOf(Int8Array);\
+             var getter=Object.getOwnPropertyDescriptor(TypedArray.prototype,Symbol.toStringTag).get;\
+             var proxy=new Proxy(new Int8Array(1),{});\
+             return [getter.call(new Int8Array(1)),getter.call(new BigUint64Array(1)),\
+               getter.call(TypedArray.prototype),getter.call(),getter.call(null),getter.call(1),\
+               getter.call('x'),getter.call(Symbol()),getter.call({}),getter.call(proxy)]\
+               .map(String).join('|');"
+        ),
+        "Int8Array|BigUint64Array|undefined|undefined|undefined|undefined|undefined|undefined|undefined|undefined"
     );
 }
 
@@ -282,11 +325,64 @@ fn typed_array_set_copies_typed_and_array_like_sources_with_fresh_target_indices
         ExceptionKind::TypeError
     );
     assert_eq!(
-        thrown(
+        rendered(
             "var buffer=new ArrayBuffer(4,{maxByteLength:4}),target=new Uint8Array(buffer);\
-             var source={length:1,get 0(){buffer.resize(0);return 1}};target.set(source);"
+             var source={length:1,get 0(){buffer.resize(0);return 1}};\
+             target.set(source);return String(buffer.byteLength);"
         ),
+        "0"
+    );
+}
+
+#[test]
+fn typed_array_set_boxes_non_nullish_primitive_sources_after_offset_conversion() {
+    assert_eq!(
+        rendered(
+            "var target=new Int32Array(4),caught;\
+             try{target.set(null,{valueOf:function(){throw 'offset'}})}catch(error){caught=error}\
+             target.set('123');\
+             Number.prototype.length=4;Number.prototype[3]=-1;\
+             try{target.set(456)}finally{delete Number.prototype.length;delete Number.prototype[3]}\
+             return [caught,target[0],target[1],target[2],target[3]].join('|');"
+        ),
+        "offset|0|0|0|-1"
+    );
+    assert_eq!(
+        thrown("return new Int32Array(1).set(null);"),
         ExceptionKind::TypeError
+    );
+    assert_eq!(
+        rendered(
+            "var buffer=new ArrayBuffer(2,{maxByteLength:2}),target=new Uint8Array(buffer,1,1);\
+             buffer.resize(0);\
+             target.set([7],{valueOf:function(){buffer.resize(2);return 0}});\
+             return String(target[0]);"
+        ),
+        "7"
+    );
+}
+
+#[test]
+fn typed_array_set_snapshots_length_and_refreshes_each_post_conversion_witness() {
+    assert_eq!(
+        rendered(
+            "var buffer=new ArrayBuffer(4,{maxByteLength:6}),target=new Uint8Array(buffer),caught;\
+             var source={get length(){buffer.resize(6);return 6}};\
+             try{target.set(source)}catch(error){caught=error.name}\
+             return caught+'|'+buffer.byteLength;"
+        ),
+        "RangeError|6"
+    );
+    assert_eq!(
+        rendered(
+            "var buffer=new ArrayBuffer(5,{maxByteLength:10}),target=new Int8Array(buffer),log=[];\
+             var down=0,up=0;\
+             var shrink={valueOf:function(){log.push('shrink');buffer.resize(buffer.byteLength-1);return ++down}};\
+             var grow={valueOf:function(){log.push('grow');buffer.resize(buffer.byteLength+1);return --up}};\
+             target.set({0:shrink,1:shrink,2:shrink,3:grow,4:grow,length:5});\
+             return log.join(',')+'|'+target.join(',');"
+        ),
+        "shrink,shrink,shrink,grow,grow|1,2,0,0"
     );
 }
 
@@ -309,11 +405,37 @@ fn typed_array_subarray_uses_relative_bounds_shared_storage_and_species() {
         ExceptionKind::TypeError
     );
     assert_eq!(
-        thrown(
+        rendered(
             "var buffer=new ArrayBuffer(8,{maxByteLength:8}),source=new Uint8Array(buffer);\
+             var view=source.subarray({valueOf(){buffer.resize(2);return 1}});\
+             return [view.byteOffset,view.length].join('|');"
+        ),
+        "1|1"
+    );
+    assert_eq!(
+        thrown(
+            "var buffer=new ArrayBuffer(8,{maxByteLength:8}),source=new Uint8Array(buffer,0,8);\
              source.subarray({valueOf(){buffer.resize(2);return 1}});"
         ),
         ExceptionKind::RangeError
+    );
+    assert_eq!(
+        rendered(
+            "var buffer=new ArrayBuffer(4,{maxByteLength:8}),source=new Uint8Array(buffer),seen;\
+             source.constructor={[Symbol.species]:function(bufferArg,offset){seen=arguments;return new Uint8Array(bufferArg,offset)}};\
+             var view=source.subarray(1);\
+             return [seen.length,seen[0]===buffer,seen[1],view.length].join('|');"
+        ),
+        "2|true|1|3"
+    );
+    assert_eq!(
+        rendered(
+            "var buffer=new ArrayBuffer(10,{maxByteLength:10}),source=new Int8Array(buffer,4,2);\
+             buffer.resize(0);\
+             var view=source.subarray({valueOf:function(){buffer.resize(10);return 1}});\
+             return [view.byteOffset,view.length].join('|');"
+        ),
+        "4|0"
     );
 }
 
@@ -352,6 +474,16 @@ fn typed_array_includes_uses_same_value_zero_without_coercing_the_search_value()
              values[1]=7;return String(values.includes(7,{valueOf(){buffer.resize(1);return 0}}));"
         ),
         "false"
+    );
+    assert_eq!(
+        rendered(
+            "var fixedBuffer=new ArrayBuffer(4,{maxByteLength:4}),fixed=new Uint8Array(fixedBuffer,0,4);\
+             var fixedResult=fixed.includes(undefined,{valueOf(){fixedBuffer.resize(2);return 0}});\
+             var autoBuffer=new ArrayBuffer(4,{maxByteLength:4}),auto=new Uint8Array(autoBuffer);\
+             var autoResult=auto.includes(undefined,{valueOf(){autoBuffer.resize(0);return 0}});\
+             return [fixedResult,autoResult].join('|');"
+        ),
+        "true|true"
     );
 }
 
@@ -622,18 +754,40 @@ fn typed_array_join_captures_length_before_separator_conversion() {
 }
 
 #[test]
-fn typed_array_to_locale_string_shares_array_function_and_forwards_arguments() {
+fn typed_array_to_locale_string_is_distinct_validates_and_forwards_arguments() {
     assert_eq!(
         rendered(
             "var proto=Object.getPrototypeOf(Uint8Array.prototype),\
              descriptor=Object.getOwnPropertyDescriptor(proto,'toLocaleString'),\
              expected=(0).toLocaleString('th-u-nu-thai',{minimumFractionDigits:3});\
-             return [proto.toLocaleString===Array.prototype.toLocaleString,\
+             return [proto.toLocaleString!==Array.prototype.toLocaleString,\
+               proto.toString===Array.prototype.toString,\
                descriptor.writable,descriptor.enumerable,descriptor.configurable,\
                proto.toLocaleString.length,proto.toLocaleString.name,\
                new Uint8Array([0]).toLocaleString('th-u-nu-thai',{minimumFractionDigits:3})===expected].join('|');"
         ),
-        "true|true|false|true|0|toLocaleString|true"
+        "true|true|true|false|true|0|toLocaleString|true"
+    );
+    assert_eq!(
+        rendered(
+            "var calls=0,sample=new Uint8Array([4,5]);\
+             Object.defineProperty(sample,'length',{get:function(){calls++;return 0;}});\
+             return [sample.toLocaleString(),calls].join('|');"
+        ),
+        "4,5|0"
+    );
+    assert_eq!(
+        thrown(
+            "var buffer=new ArrayBuffer(4,{maxByteLength:4}),sample=new Uint8Array(buffer,2,2);\
+             buffer.resize(1);sample.toLocaleString();"
+        ),
+        ExceptionKind::TypeError
+    );
+    assert_eq!(
+        thrown(
+            "var method=Object.getPrototypeOf(Uint8Array.prototype).toLocaleString;method.call({});"
+        ),
+        ExceptionKind::TypeError
     );
 }
 

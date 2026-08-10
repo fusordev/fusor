@@ -480,6 +480,7 @@ fn exception_caller_frames(
                 | FinalOpcode::PutField
                 | FinalOpcode::GetArrayEl
                 | FinalOpcode::GetArrayEl2
+                | FinalOpcode::GetArrayEl3
                 | FinalOpcode::PutArrayEl
                 | FinalOpcode::Apply
                 | FinalOpcode::Append
@@ -574,7 +575,11 @@ pub(super) fn dispatch_pending_exception(
                         marker,
                     },
                     Some(
-                        OperandStackEntry::JavaScript(_) | OperandStackEntry::FinallyReturn { .. },
+                        OperandStackEntry::JavaScript(_)
+                        | OperandStackEntry::CapturedReference { .. }
+                        | OperandStackEntry::RealmGlobalReference { .. }
+                        | OperandStackEntry::CapturedReferenceAnchor
+                        | OperandStackEntry::FinallyReturn { .. },
                     )
                     | None => {
                         return Err(EngineFault::RuntimeInvariant {
@@ -1041,6 +1046,9 @@ pub(super) fn dispatch_pending_exception(
             Some(OperandStackEntry::Catch { handler }) => *handler,
             Some(
                 OperandStackEntry::JavaScript(_)
+                | OperandStackEntry::CapturedReference { .. }
+                | OperandStackEntry::RealmGlobalReference { .. }
+                | OperandStackEntry::CapturedReferenceAnchor
                 | OperandStackEntry::ForOfCatch { .. }
                 | OperandStackEntry::FinallyReturn { .. },
             )
@@ -1053,7 +1061,10 @@ pub(super) fn dispatch_pending_exception(
         };
         frame.stack.truncate(catch_marker);
         push(frame, caught);
+        // Catch entry reconstructs the certified handler stack independently
+        // of any variable-width `nip_catch` cleanup on the abandoned path.
         frame.instruction = handler;
+        normalize_stack_depth_correction(runtime, frame, handler)?;
 
         if cleanup_temporary_receivers && runtime.collection_pending {
             collect_cycles_with_execution_roots(runtime, frames, &[], &[])?;

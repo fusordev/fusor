@@ -122,8 +122,30 @@ fn normal_finalizer_expressions_do_not_replace_script_completion() {
     assert!(
         opcodes
             .windows(2)
-            .any(|window| window == [FinalOpcode::Push2, FinalOpcode::Drop]),
-        "the normally completing finalizer discards its expression value"
+            .any(|window| window == [FinalOpcode::Push2, FinalOpcode::PutLoc0]),
+        "the finalizer records its own Script completion until it returns normally"
+    );
+    assert!(
+        opcodes.windows(5).any(|window| {
+            window
+                == [
+                    FinalOpcode::GetLoc0,
+                    FinalOpcode::PutLoc1,
+                    FinalOpcode::Undefined,
+                    FinalOpcode::PutLoc0,
+                    FinalOpcode::Gosub,
+                ]
+        }),
+        "the protected completion is saved before entering the finalizer"
+    );
+    assert!(
+        opcodes.windows(3).any(|window| window
+            == [
+                FinalOpcode::Gosub,
+                FinalOpcode::GetLoc1,
+                FinalOpcode::PutLoc0
+            ]),
+        "a normally completing finalizer restores the protected completion"
     );
 }
 
@@ -214,6 +236,30 @@ fn throw_reaches_the_handler_before_running_the_finalizer() {
 }
 
 #[test]
+fn generated_rethrow_cleans_the_crossed_outer_for_in_marker() {
+    let compiled = compile(
+        "function f(object){for(const key in object){try{throw key;}finally{void key;}}}",
+        "f",
+    );
+    let opcodes = opcodes(compiled.root());
+
+    assert!(
+        opcodes
+            .windows(3)
+            .any(|window| { window == [FinalOpcode::Gosub, FinalOpcode::Nip, FinalOpcode::Throw] }),
+        "the handler rethrow must clean the for-in marker after running the finalizer: {opcodes:?}"
+    );
+    assert_eq!(
+        opcodes
+            .iter()
+            .filter(|&&opcode| opcode == FinalOpcode::Throw)
+            .count(),
+        2,
+        "the protected source throw and generated handler rethrow remain distinct"
+    );
+}
+
+#[test]
 fn break_and_continue_crossing_finally_use_the_normal_cleanup_protocol() {
     for (name, keyword) in [("breakOuter", "break"), ("continueOuter", "continue")] {
         let source = format!(
@@ -283,29 +329,31 @@ fn return_and_throw_in_finally_override_the_pending_completion() {
         "function returned(){try{return 1;}finally{return 2;}}",
         "returned",
     );
-    assert!(opcodes(returned.root()).windows(5).any(|window| {
+    let returned_opcodes = opcodes(returned.root());
+    assert!(returned_opcodes.windows(4).any(|window| {
         window
             == [
                 FinalOpcode::Push2,
                 FinalOpcode::Nip,
                 FinalOpcode::Nip,
                 FinalOpcode::Return,
-                FinalOpcode::Ret,
             ]
     }));
+    assert!(!returned_opcodes.contains(&FinalOpcode::Ret));
 
     let thrown = compile(
         "function thrown(){try{return 1;}finally{throw 2;}}",
         "thrown",
     );
-    assert!(opcodes(thrown.root()).windows(5).any(|window| window
+    let thrown_opcodes = opcodes(thrown.root());
+    assert!(thrown_opcodes.windows(4).any(|window| window
         == [
             FinalOpcode::Push2,
             FinalOpcode::Nip,
             FinalOpcode::Nip,
             FinalOpcode::Throw,
-            FinalOpcode::Ret,
         ]));
+    assert!(!thrown_opcodes.contains(&FinalOpcode::Ret));
 }
 
 #[test]

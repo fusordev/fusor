@@ -461,6 +461,7 @@ pub(super) fn resume_native_continuations(
                 return_to,
                 execution_budget,
             )?,
+            NativeContinuation::RetainedPropertyKey(key) => NativeDispatch::Pair(key, value),
             NativeContinuation::OperatorPrimitive(state) => {
                 let operation = match &state.target {
                     OperatorPrimitiveTarget::ArrayFromAsyncLength { operation } => Some(*operation),
@@ -1084,8 +1085,8 @@ pub(super) fn resume_native_continuations(
                 return_to,
                 execution_budget,
             )?,
-            NativeContinuation::IteratorPrototypeSetter(state) => {
-                advance_iterator_prototype_setter(
+            NativeContinuation::SetterIgnoringPrototype(state) => {
+                advance_setter_ignoring_prototype_properties(
                     runtime,
                     state,
                     &value,
@@ -1281,6 +1282,13 @@ pub(super) fn resume_native_continuations(
                 runtime,
                 *state,
                 value.duplicate(),
+                return_to,
+                execution_budget,
+            )?,
+            NativeContinuation::StringMethod(state) => advance_string_method(
+                runtime,
+                *state,
+                Some(value.duplicate()),
                 return_to,
                 execution_budget,
             )?,
@@ -2494,6 +2502,37 @@ pub(super) fn execute_root_dispatch_with_budget(
     }
 }
 
+fn legacy_restricted_function_getter_returns_undefined(
+    runtime: &Runtime,
+    inputs: &CallInputs,
+) -> Result<bool, EngineFault> {
+    if !inputs.arguments.remaining().is_empty() {
+        return Ok(false);
+    }
+    let StoredValue::Function(function) = &inputs.receiver else {
+        return Ok(false);
+    };
+    let function = runtime
+        .functions
+        .get(*function)
+        .ok_or(EngineFault::StaleHeapEdge {
+            edge: "restricted accessor receiver function",
+            index: function.index(),
+            generation: function.generation(),
+        })?;
+    let FunctionImplementation::Bytecode(bytecode) = &function.implementation else {
+        return Ok(false);
+    };
+    let function = code(runtime, bytecode.code)?
+        .authority
+        .function(bytecode.template)
+        .ok_or(EngineFault::InvalidClosureEnvironment {
+            function: bytecode.template,
+        })?;
+    let header = function.function().control_flow().function_header();
+    Ok(!header.mode().is_strict() && header.flags().has_prototype())
+}
+
 #[allow(
     clippy::too_many_arguments,
     clippy::too_many_lines,
@@ -2567,14 +2606,19 @@ pub(super) fn dispatch_native_call_with_frames(
         NativeFunctionKind::FunctionPrototype => {
             Ok(NativeDispatch::Immediate(StoredValue::Undefined))
         }
-        NativeFunctionKind::ThrowTypeError => Err(NativeFailure::Abrupt(PendingException {
-            realm: native.realm,
-            payload: PendingExceptionPayload::EngineError {
-                kind: ExceptionKind::TypeError,
-                message: JsString::from_utf8("invalid property access")?,
-            },
-            origin: origin.unwrap_or_else(native_function_host_origin),
-        })),
+        NativeFunctionKind::ThrowTypeError => {
+            if legacy_restricted_function_getter_returns_undefined(runtime, &inputs)? {
+                return Ok(NativeDispatch::Immediate(StoredValue::Undefined));
+            }
+            Err(NativeFailure::Abrupt(PendingException {
+                realm: native.realm,
+                payload: PendingExceptionPayload::EngineError {
+                    kind: ExceptionKind::TypeError,
+                    message: JsString::from_utf8("invalid property access")?,
+                },
+                origin: origin.unwrap_or_else(native_function_host_origin),
+            }))
+        }
         NativeFunctionKind::FunctionPrototypeApply => begin_function_apply(
             runtime,
             native.realm,
@@ -2711,6 +2755,21 @@ pub(super) fn dispatch_native_call_with_frames(
             runtime,
             native.realm,
             inputs.receiver,
+            return_to,
+            origin.unwrap_or_else(native_function_host_origin),
+            execution_budget,
+        ),
+        NativeFunctionKind::ErrorPrototypeStackGetter => get_error_stack(
+            runtime,
+            &inputs.receiver,
+            native.realm,
+            origin.unwrap_or_else(native_function_host_origin),
+        ),
+        NativeFunctionKind::ErrorPrototypeStackSetter => begin_error_stack_setter(
+            runtime,
+            inputs.receiver,
+            inputs.arguments.take_first_or_undefined(),
+            native.realm,
             return_to,
             origin.unwrap_or_else(native_function_host_origin),
             execution_budget,
@@ -4772,10 +4831,11 @@ pub(super) fn dispatch_native_call_with_frames(
                 ),
                 _ => unreachable!("Iterator prototype setter arm is exhaustive"),
             };
-            begin_iterator_prototype_setter(
+            begin_setter_ignoring_prototype_properties(
                 runtime,
                 inputs.receiver,
                 value,
+                HeapReference::Object(runtime.realm_iterator_prototype(native.realm)?),
                 key,
                 name,
                 native.realm,

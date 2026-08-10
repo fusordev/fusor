@@ -676,6 +676,8 @@ impl RealmBuildTransaction<'_> {
                     constructor: function(NativeFunctionKind::ErrorConstructor(kind)),
                 }),
                 to_string: function(NativeFunctionKind::ErrorPrototypeToString),
+                stack_getter: function(NativeFunctionKind::ErrorPrototypeStackGetter),
+                stack_setter: function(NativeFunctionKind::ErrorPrototypeStackSetter),
                 is_error: function(NativeFunctionKind::ErrorIsError),
             },
             boolean: BooleanIntrinsics {

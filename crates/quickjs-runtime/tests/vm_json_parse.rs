@@ -562,6 +562,20 @@ fn reviver_rechecks_values_and_observes_prior_mutation() {
 }
 
 #[test]
+fn reviver_ignores_a_rejected_create_data_property_result() {
+    assert_eq!(
+        text(
+            "const value=JSON.parse('[1,2]',function(key,item){\
+               if(key==='0')Object.defineProperty(this,'1',{configurable:false});\
+               return key==='1'?22:item;\
+             });\
+             return value[0]+'|'+value[1];"
+        ),
+        "1|2"
+    );
+}
+
+#[test]
 fn reviver_routes_replaced_containers_through_proxy_internals() {
     assert_eq!(
         text(

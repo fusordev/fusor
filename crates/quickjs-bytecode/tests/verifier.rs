@@ -1097,22 +1097,28 @@ fn synchronous_for_of_markers_are_compiler_only_structural_inputs() {
         }
     );
 
-    for (opcode, operands) in [
-        (FinalOpcode::ForAwaitOfNext, Operands::None),
-        (FinalOpcode::IteratorGetValueDone, Operands::None),
+    for (opcode, operands, input_depth, output_depth) in [
+        (FinalOpcode::ForAwaitOfNext, Operands::None, 3, 4),
+        (FinalOpcode::IteratorGetValueDone, Operands::None, 2, 3),
     ] {
-        let error = verify_compiler_control_flow(
+        let mut instructions = vec![(FinalOpcode::Undefined, Operands::None); input_depth];
+        instructions.push((opcode, operands));
+        for _ in 0..output_depth {
+            instructions.push((FinalOpcode::Drop, Operands::None));
+        }
+        instructions.push((FinalOpcode::ReturnUndef, Operands::None));
+        let bytecode = encode(&instructions);
+        verify_compiler_control_flow(
             UnverifiedCompilerFunctionBody::new(
-                encode(&[
-                    (opcode, operands),
-                    (FinalOpcode::ReturnUndef, Operands::None),
-                ]),
+                bytecode.clone(),
                 FunctionIndexDomains::default(),
                 UnverifiedFunctionHeader::default(),
             ),
             VerificationLimits::default(),
         )
-        .expect_err("async iterator marker families stay fail-closed");
+        .expect("the compiler structural pass accepts balanced async iterator shapes");
+
+        let error = reject(bytecode, output_depth, FunctionIndexDomains::default());
         assert_eq!(
             error.kind(),
             &VerificationErrorKind::UnsupportedOpcodeSemantics {
@@ -1276,6 +1282,57 @@ fn gosub_and_ret_have_structural_successors_and_stack_depths() {
         VerificationLimits::default(),
     )
     .expect("ret returns the pending completion to the synthetic continuation");
+}
+
+#[test]
+fn compiler_gosub_depth_join_defers_to_the_typed_whole_graph() {
+    let bytecode = encode(&[
+        (FinalOpcode::PushTrue, Operands::None),
+        (FinalOpcode::IfFalse8, Operands::Label8(9)),
+        (FinalOpcode::Undefined, Operands::None),
+        (FinalOpcode::Gosub, Operands::Label(16)),
+        (FinalOpcode::Drop, Operands::None),
+        (FinalOpcode::ReturnUndef, Operands::None),
+        (FinalOpcode::Push1, Operands::NoneInt),
+        (FinalOpcode::Push2, Operands::NoneInt),
+        (FinalOpcode::Gosub, Operands::Label(7)),
+        (FinalOpcode::Drop, Operands::None),
+        (FinalOpcode::Drop, Operands::None),
+        (FinalOpcode::ReturnUndef, Operands::None),
+        (FinalOpcode::Ret, Operands::None),
+    ]);
+
+    let serialized = verify_control_flow(
+        unverified(bytecode.clone(), 3, FunctionIndexDomains::default()),
+        VerificationLimits::default(),
+    )
+    .expect_err("serialized bytecode retains exact ordinary-depth joins");
+    assert!(
+        matches!(
+            serialized.kind(),
+            VerificationErrorKind::InconsistentStackAtJoin {
+                target,
+                established_depth,
+                incoming_depth,
+                ..
+            } if *target == BytecodePc::new(21)
+                && ((*established_depth == 2 && *incoming_depth == 3)
+                    || (*established_depth == 3 && *incoming_depth == 2))
+        ),
+        "{serialized:?}"
+    );
+
+    let compiler = verify_compiler_control_flow(
+        UnverifiedCompilerFunctionBody::new(
+            bytecode,
+            FunctionIndexDomains::default(),
+            UnverifiedFunctionHeader::default(),
+        ),
+        VerificationLimits::default(),
+    )
+    .expect("the typed whole graph owns compiler-generated finalizer-state equality");
+    assert_eq!(compiler.computed_stack_size(), 3);
+    assert_eq!(compiler.instructions()[12].entry_stack_depth(), Some(2));
 }
 
 #[test]

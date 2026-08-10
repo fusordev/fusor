@@ -69,6 +69,33 @@ fn global_script_returns_a_directive_expression_completion() {
 }
 
 #[test]
+fn sloppy_for_in_head_initializers_apply_annex_b_named_evaluation() {
+    let mut runtime = Runtime::try_new(RuntimeLimits::default()).expect("runtime");
+    let realm = runtime.create_realm().expect("realm");
+    let mut context = runtime.context(&realm).expect("context");
+
+    let value = evaluate_script(
+        &mut context,
+        "for(var ordinary=function(){} in {}){}\
+         for(var generator=function*(){} in {}){}\
+         for(var asynchronous=async function(){} in {}){}\
+         for(var arrow=()=>{} in {}){}\
+         for(var asyncArrow=async()=>{} in {}){}\
+         for(var anonymousClass=class{} in {}){}\
+         for(var explicitlyNamed=function explicit(){} in {}){}\
+         [ordinary.name,generator.name,asynchronous.name,arrow.name,asyncArrow.name,anonymousClass.name,explicitlyNamed.name].join('|');",
+        "annex-b-for-in-named-evaluation.js",
+        ScriptLimits::default(),
+    )
+    .expect("sloppy Annex B.3.5 Script");
+
+    assert_eq!(
+        string(&value),
+        "ordinary|generator|asynchronous|arrow|asyncArrow|anonymousClass|explicit"
+    );
+}
+
+#[test]
 fn proxied_derived_new_target_enforces_the_frozen_class_prototype_get_invariant() {
     let mut runtime = Runtime::try_new(RuntimeLimits::default()).expect("runtime");
     let realm = runtime.create_realm().expect("realm");
