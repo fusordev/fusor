@@ -1097,22 +1097,28 @@ fn synchronous_for_of_markers_are_compiler_only_structural_inputs() {
         }
     );
 
-    for (opcode, operands) in [
-        (FinalOpcode::ForAwaitOfNext, Operands::None),
-        (FinalOpcode::IteratorGetValueDone, Operands::None),
+    for (opcode, operands, input_depth, output_depth) in [
+        (FinalOpcode::ForAwaitOfNext, Operands::None, 3, 4),
+        (FinalOpcode::IteratorGetValueDone, Operands::None, 2, 3),
     ] {
-        let error = verify_compiler_control_flow(
+        let mut instructions = vec![(FinalOpcode::Undefined, Operands::None); input_depth];
+        instructions.push((opcode, operands));
+        for _ in 0..output_depth {
+            instructions.push((FinalOpcode::Drop, Operands::None));
+        }
+        instructions.push((FinalOpcode::ReturnUndef, Operands::None));
+        let bytecode = encode(&instructions);
+        verify_compiler_control_flow(
             UnverifiedCompilerFunctionBody::new(
-                encode(&[
-                    (opcode, operands),
-                    (FinalOpcode::ReturnUndef, Operands::None),
-                ]),
+                bytecode.clone(),
                 FunctionIndexDomains::default(),
                 UnverifiedFunctionHeader::default(),
             ),
             VerificationLimits::default(),
         )
-        .expect_err("async iterator marker families stay fail-closed");
+        .expect("the compiler structural pass accepts balanced async iterator shapes");
+
+        let error = reject(bytecode, output_depth, FunctionIndexDomains::default());
         assert_eq!(
             error.kind(),
             &VerificationErrorKind::UnsupportedOpcodeSemantics {
