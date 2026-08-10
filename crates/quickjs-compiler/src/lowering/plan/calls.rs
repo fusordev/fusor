@@ -27,6 +27,14 @@ pub(in crate::lowering) fn plan_direct_call(argument_count: u16, span: Span) -> 
     PlannedInstruction::new(opcode, operands, span)
 }
 
+fn plan_tail_call(argument_count: u16, span: Span) -> PlannedInstruction {
+    PlannedInstruction::new(
+        FinalOpcode::TailCall,
+        Operands::NPop { argument_count },
+        span,
+    )
+}
+
 impl<'arena> ExpressionPlanner<'_, '_, 'arena, '_> {
     fn with_identifier_callee<'expression>(
         &self,
@@ -142,6 +150,7 @@ impl<'arena> ExpressionPlanner<'_, '_, 'arena, '_> {
     pub(in crate::lowering) fn plan_tagged_template_expression<'expression>(
         &self,
         tagged: &'expression TaggedTemplateExpression<'arena>,
+        tail: bool,
         layout: &FrameLayout,
         tree_layout: &FunctionTreeLayout,
         constants: &CompiledConstantPool,
@@ -170,10 +179,16 @@ impl<'arena> ExpressionPlanner<'_, '_, 'arena, '_> {
         work.push(ExpressionWork::Emit(
             if member.is_some() || with_identifier.is_some() {
                 PlannedInstruction::new(
-                    FinalOpcode::CallMethod,
+                    if tail {
+                        FinalOpcode::TailCallMethod
+                    } else {
+                        FinalOpcode::CallMethod
+                    },
                     Operands::NPop { argument_count },
                     tagged.span,
                 )
+            } else if tail {
+                plan_tail_call(argument_count, tagged.span)
             } else {
                 plan_direct_call(argument_count, tagged.span)
             },
@@ -247,6 +262,7 @@ impl<'arena> ExpressionPlanner<'_, '_, 'arena, '_> {
                 work.push(ExpressionWork::VisitOptionalChain {
                     chain,
                     preserve_final_reference: true,
+                    tail: false,
                 });
             }
             Some(MemberCallee::Private(member)) => {
@@ -269,6 +285,7 @@ impl<'arena> ExpressionPlanner<'_, '_, 'arena, '_> {
     pub(in crate::lowering) fn plan_call_expression<'expression>(
         &self,
         call: &'expression CallExpression<'arena>,
+        tail: bool,
         layout: &FrameLayout,
         tree_layout: &FunctionTreeLayout,
         constants: &CompiledConstantPool,
@@ -391,7 +408,7 @@ impl<'arena> ExpressionPlanner<'_, '_, 'arena, '_> {
             // index drop, the ordinary receiver insert when needed, and
             // finally `apply` or identity-checked `apply_eval`.
             let eval_reference_call = direct_eval_scope.is_some() && with_identifier.is_some();
-            if eval_reference_call {
+            if eval_reference_call && !tail {
                 work.push(ExpressionWork::Emit(PlannedInstruction::new(
                     FinalOpcode::Drop,
                     Operands::None,
@@ -404,7 +421,20 @@ impl<'arena> ExpressionPlanner<'_, '_, 'arena, '_> {
                 )));
             }
             let call_instruction = PlannedInstruction::new(
-                direct_eval_scope.map_or(FinalOpcode::Apply, |_| FinalOpcode::ApplyEval),
+                direct_eval_scope.map_or(
+                    if tail {
+                        FinalOpcode::TailApply
+                    } else {
+                        FinalOpcode::Apply
+                    },
+                    |_| {
+                        if tail {
+                            FinalOpcode::TailApplyEval
+                        } else {
+                            FinalOpcode::ApplyEval
+                        }
+                    },
+                ),
                 Operands::U16(direct_eval_scope.unwrap_or(0)),
                 call.span,
             );
@@ -550,6 +580,7 @@ impl<'arena> ExpressionPlanner<'_, '_, 'arena, '_> {
                     work.push(ExpressionWork::VisitOptionalChain {
                         chain,
                         preserve_final_reference: true,
+                        tail: false,
                     });
                 }
                 Some(MemberCallee::Private(member)) => {
@@ -572,7 +603,7 @@ impl<'arena> ExpressionPlanner<'_, '_, 'arena, '_> {
         })?;
         let member = Self::member_callee(&call.callee)?;
         let eval_reference_call = direct_eval_scope.is_some() && with_identifier.is_some();
-        if eval_reference_call {
+        if eval_reference_call && !tail {
             work.push(ExpressionWork::Emit(PlannedInstruction::new(
                 FinalOpcode::Drop,
                 Operands::None,
@@ -586,7 +617,11 @@ impl<'arena> ExpressionPlanner<'_, '_, 'arena, '_> {
         }
         let call_instruction = if let Some(scope_index) = direct_eval_scope {
             let instruction = PlannedInstruction::new(
-                FinalOpcode::Eval,
+                if tail {
+                    FinalOpcode::TailEval
+                } else {
+                    FinalOpcode::Eval
+                },
                 Operands::NPopU16 {
                     argument_count,
                     scope_index,
@@ -600,10 +635,16 @@ impl<'arena> ExpressionPlanner<'_, '_, 'arena, '_> {
             }
         } else if member.is_some() || with_identifier.is_some() {
             PlannedInstruction::new(
-                FinalOpcode::CallMethod,
+                if tail {
+                    FinalOpcode::TailCallMethod
+                } else {
+                    FinalOpcode::CallMethod
+                },
                 Operands::NPop { argument_count },
                 call.span,
             )
+        } else if tail {
+            plan_tail_call(argument_count, call.span)
         } else {
             plan_direct_call(argument_count, call.span)
         };
@@ -678,6 +719,7 @@ impl<'arena> ExpressionPlanner<'_, '_, 'arena, '_> {
                 work.push(ExpressionWork::VisitOptionalChain {
                     chain,
                     preserve_final_reference: true,
+                    tail: false,
                 });
             }
             Some(MemberCallee::Private(member)) => {
@@ -850,6 +892,7 @@ impl<'arena> ExpressionPlanner<'_, '_, 'arena, '_> {
     pub(in crate::lowering) fn plan_call_after_callee<'expression>(
         call: &'expression CallExpression<'arena>,
         method: bool,
+        tail: bool,
         work: &mut Vec<ExpressionWork<'expression, 'arena>>,
     ) -> Result<(), LeafCompilationError> {
         if call.type_arguments.is_some() {
@@ -868,7 +911,11 @@ impl<'arena> ExpressionPlanner<'_, '_, 'arena, '_> {
                 }
             })?;
             work.push(ExpressionWork::Emit(PlannedInstruction::new(
-                FinalOpcode::Apply,
+                if tail {
+                    FinalOpcode::TailApply
+                } else {
+                    FinalOpcode::Apply
+                },
                 Operands::U16(0),
                 call.span,
             )));
@@ -952,10 +999,16 @@ impl<'arena> ExpressionPlanner<'_, '_, 'arena, '_> {
         })?;
         work.push(ExpressionWork::Emit(if method {
             PlannedInstruction::new(
-                FinalOpcode::CallMethod,
+                if tail {
+                    FinalOpcode::TailCallMethod
+                } else {
+                    FinalOpcode::CallMethod
+                },
                 Operands::NPop { argument_count },
                 call.span,
             )
+        } else if tail {
+            plan_tail_call(argument_count, call.span)
         } else {
             plan_direct_call(argument_count, call.span)
         }));

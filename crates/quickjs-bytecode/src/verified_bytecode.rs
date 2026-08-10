@@ -3893,8 +3893,8 @@ fn verify_eval_scope_operands(
     for verified in flow.instructions() {
         let decoded = verified.decoded();
         let instruction = decoded.instruction();
-        let ((FinalOpcode::Eval, Operands::NPopU16 { scope_index, .. })
-        | (FinalOpcode::ApplyEval, Operands::U16(scope_index))) =
+        let ((FinalOpcode::Eval | FinalOpcode::TailEval, Operands::NPopU16 { scope_index, .. })
+        | (FinalOpcode::ApplyEval | FinalOpcode::TailApplyEval, Operands::U16(scope_index))) =
             (instruction.opcode(), instruction.operands())
         else {
             continue;
@@ -6566,6 +6566,25 @@ fn verify_supported_opcodes(
             ) && !generator)
             || (matches!(opcode, FinalOpcode::Return | FinalOpcode::ReturnUndef)
                 && (generator || asynchronous))
+            || (matches!(
+                opcode,
+                FinalOpcode::TailCall
+                    | FinalOpcode::TailCallMethod
+                    | FinalOpcode::TailApply
+                    | FinalOpcode::TailEval
+                    | FinalOpcode::TailApplyEval
+            ) && (!flow.function_header().mode().is_strict()
+                || generator
+                || asynchronous
+                || !matches!(
+                    executable_kind,
+                    CompilerExecutableKind::OrdinaryFunction
+                        | CompilerExecutableKind::OrdinaryArrow
+                        | CompilerExecutableKind::OrdinaryMethod
+                        | CompilerExecutableKind::ClassConstructor
+                )))
+            || (opcode == FinalOpcode::TailApply
+                && !matches!(instruction.operands(), Operands::U16(0)))
             || (opcode == FinalOpcode::CheckCtorReturn
                 && !(matches!(
                     executable_kind,
@@ -6819,6 +6838,11 @@ const fn supported_compiler_opcode(opcode: FinalOpcode) -> bool {
             | FinalOpcode::Call
             | FinalOpcode::CallMethod
             | FinalOpcode::Apply
+            | FinalOpcode::TailCall
+            | FinalOpcode::TailCallMethod
+            | FinalOpcode::TailApply
+            | FinalOpcode::TailEval
+            | FinalOpcode::TailApplyEval
             | FinalOpcode::Eval
             | FinalOpcode::ApplyEval
             | FinalOpcode::Import
@@ -9882,11 +9906,41 @@ fn verify_internal_stack_exit(
         prefix_len = pair_start;
     }
     let state = &state[..prefix_len];
+    let tail_transfer = matches!(
+        decoded.instruction().opcode(),
+        FinalOpcode::TailCall
+            | FinalOpcode::TailCallMethod
+            | FinalOpcode::TailApply
+            | FinalOpcode::TailEval
+            | FinalOpcode::TailApplyEval
+    );
     if !is_throw && state.iter().any(|value| value.is_finally_value()) {
         return Err(BytecodeVerificationError::function(
             id,
             BytecodeVerificationErrorKind::FinallyReturnMarkerAtExit { pc: decoded.pc() },
         ));
+    }
+    if tail_transfer {
+        if state.iter().any(|value| value.is_for_of_value()) {
+            return Err(BytecodeVerificationError::function(
+                id,
+                BytecodeVerificationErrorKind::ForOfIteratorMarkerAtExit { pc: decoded.pc() },
+            ));
+        }
+        if state
+            .iter()
+            .any(|value| matches!(value, InternalStackValue::CatchMarker { .. }))
+        {
+            return Err(BytecodeVerificationError::function(
+                id,
+                BytecodeVerificationErrorKind::CatchMarkerAtExit { pc: decoded.pc() },
+            ));
+        }
+        // A proper tail transfer abandons the current execution context.
+        // Ordinary values and a certified for-in iterator marker therefore
+        // need no cleanup; catch and for-of regions above remain forbidden by
+        // HasCallInTailPosition and are rejected explicitly.
+        return Ok(());
     }
     if is_throw {
         let mut cursor = 0;
@@ -11238,6 +11292,11 @@ fn collect_requirements(
             | FinalOpcode::Call3
             | FinalOpcode::CallMethod
             | FinalOpcode::Apply
+            | FinalOpcode::TailCall
+            | FinalOpcode::TailCallMethod
+            | FinalOpcode::TailApply
+            | FinalOpcode::TailEval
+            | FinalOpcode::TailApplyEval
             | FinalOpcode::Eval
             | FinalOpcode::ApplyEval
             | FinalOpcode::InitCtor

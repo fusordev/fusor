@@ -1833,7 +1833,10 @@ fn validate_direct_eval_record(
     let encoded_direct_eval = flow.instructions().iter().any(|instruction| {
         matches!(
             instruction.decoded().instruction().opcode(),
-            FinalOpcode::Eval | FinalOpcode::ApplyEval
+            FinalOpcode::Eval
+                | FinalOpcode::ApplyEval
+                | FinalOpcode::TailEval
+                | FinalOpcode::TailApplyEval
         )
     });
     if function.has_direct_eval != encoded_direct_eval {
@@ -1863,9 +1866,14 @@ fn validate_direct_eval_record(
     }
     for (instruction_index, verified) in flow.instructions().iter().enumerate() {
         let instruction = verified.decoded().instruction();
-        let ((FinalOpcode::Eval, crate::Operands::NPopU16 { scope_index, .. })
-        | (FinalOpcode::ApplyEval, crate::Operands::U16(scope_index))) =
-            (instruction.opcode(), instruction.operands())
+        let ((
+            FinalOpcode::Eval | FinalOpcode::TailEval,
+            crate::Operands::NPopU16 { scope_index, .. },
+        )
+        | (
+            FinalOpcode::ApplyEval | FinalOpcode::TailApplyEval,
+            crate::Operands::U16(scope_index),
+        )) = (instruction.opcode(), instruction.operands())
         else {
             continue;
         };
@@ -1918,10 +1926,11 @@ fn validate_eval_reference_calls(
         };
         let instruction = verified.decoded().instruction();
         let required = match (instruction.opcode(), instruction.operands()) {
-            (FinalOpcode::Eval, crate::Operands::NPopU16 { argument_count, .. }) => {
-                u32::from(argument_count).saturating_add(2)
-            }
-            (FinalOpcode::ApplyEval, crate::Operands::U16(_)) => 3,
+            (
+                FinalOpcode::Eval | FinalOpcode::TailEval,
+                crate::Operands::NPopU16 { argument_count, .. },
+            ) => u32::from(argument_count).saturating_add(2),
+            (FinalOpcode::ApplyEval | FinalOpcode::TailApplyEval, crate::Operands::U16(_)) => 3,
             (opcode, _) => {
                 return Err(FunctionGraphVerificationError::at_function(
                     id,

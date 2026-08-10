@@ -58,6 +58,9 @@ pub(super) const fn opcode_semantics(opcode: FinalOpcode) -> OpcodeSemantics {
 
         FinalOpcode::TailCall
         | FinalOpcode::TailCallMethod
+        | FinalOpcode::TailApply
+        | FinalOpcode::TailEval
+        | FinalOpcode::TailApplyEval
         | FinalOpcode::Return
         | FinalOpcode::ReturnUndef
         | FinalOpcode::ReturnAsync

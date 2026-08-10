@@ -369,6 +369,14 @@ impl<'compiler, 'statement, 'unit, 'arena, 'scope, 'layout>
         } else {
             FinalOpcode::Return
         };
+        let strict = compiler
+            .planned
+            .plan
+            .executable(planning.executable)
+            .ok_or(LeafCompilationError::InvalidExecutable {
+                executable: planning.executable,
+            })?
+            .is_strict();
         let mut work = if arrow.expression {
             let [Statement::ExpressionStatement(expression)] = arrow.body.statements.as_slice()
             else {
@@ -390,7 +398,11 @@ impl<'compiler, 'statement, 'unit, 'arena, 'scope, 'layout>
                     Operands::None,
                     arrow.body.span,
                 )),
-                StatementWork::Expression(&expression.expression),
+                if !arrow.r#async && strict {
+                    StatementWork::TailExpression(&expression.expression)
+                } else {
+                    StatementWork::Expression(&expression.expression)
+                },
             ]
         } else {
             vec![

@@ -603,7 +603,9 @@ pub(super) fn direct_call_argument_count(
     operands: Operands,
 ) -> Result<usize, EngineFault> {
     match (opcode, operands) {
-        (FinalOpcode::Call, Operands::NPop { argument_count }) => Ok(usize::from(argument_count)),
+        (FinalOpcode::Call | FinalOpcode::TailCall, Operands::NPop { argument_count }) => {
+            Ok(usize::from(argument_count))
+        }
         (FinalOpcode::Call0, Operands::NPopX) => Ok(0),
         (FinalOpcode::Call1, Operands::NPopX) => Ok(1),
         (FinalOpcode::Call2, Operands::NPopX) => Ok(2),

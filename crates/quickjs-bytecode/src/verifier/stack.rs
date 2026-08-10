@@ -240,7 +240,13 @@ pub(super) fn analyze_ordinary_stack(
                 // records, so ordinary depth alone need not be zero here.
                 let abandons_expression = matches!(
                     current.decoded.instruction().opcode(),
-                    FinalOpcode::Throw | FinalOpcode::ThrowError
+                    FinalOpcode::Throw
+                        | FinalOpcode::ThrowError
+                        | FinalOpcode::TailCall
+                        | FinalOpcode::TailCallMethod
+                        | FinalOpcode::TailApply
+                        | FinalOpcode::TailEval
+                        | FinalOpcode::TailApplyEval
                 );
                 let returns_from_finally =
                     current.decoded.instruction().opcode() == FinalOpcode::Ret;

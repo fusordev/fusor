@@ -1452,7 +1452,8 @@ impl<'arena> CompilationContext<'_, 'arena, '_> {
                         flow,
                     )?;
                 }
-                ExpressionWork::VisitCallExpression(_)
+                ExpressionWork::VisitTail(_)
+                | ExpressionWork::VisitCallExpression { .. }
                 | ExpressionWork::VisitOptionalChain { .. }
                 | ExpressionWork::IdentifierCallReference(_)
                 | ExpressionWork::IdentifierDelete { .. }

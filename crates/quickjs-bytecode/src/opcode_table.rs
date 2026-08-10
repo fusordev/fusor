@@ -293,5 +293,14 @@ define_opcode_tables! {
         IsNull => ("is_null", 1, 1, 1, None),
         TypeofIsUndefined => ("typeof_is_undefined", 1, 1, 1, None),
         TypeofIsFunction => ("typeof_is_function", 1, 1, 1, None),
+        // Fusor extension: spread argument lists need their own terminal form
+        // so verified proper-tail-call lowering never has to synthesize an
+        // unbounded fixed-arity call.
+        TailApply => ("tail_apply", 3, 3, 0, U16),
+        // The `eval` spellings must preserve the runtime identity check: the
+        // intrinsic performs direct eval, while every other callable receives
+        // a proper tail transfer.
+        TailEval => ("tail_eval", 5, 1, 0, NPopU16),
+        TailApplyEval => ("tail_apply_eval", 3, 2, 0, U16),
     }
 }
