@@ -4973,6 +4973,24 @@ fn for_of_marker_certificate_accepts_exact_loop_close_return_and_throw_grammars(
 }
 
 #[test]
+fn throw_may_retain_outer_for_in_beneath_a_complete_for_of_handler() {
+    let instructions = [
+        (FinalOpcode::Undefined, Operands::None),
+        (FinalOpcode::ForInStart, Operands::None),
+        (FinalOpcode::Undefined, Operands::None),
+        (FinalOpcode::ForOfStart, Operands::None),
+        (FinalOpcode::Push1, Operands::NoneInt),
+        (FinalOpcode::Throw, Operands::None),
+    ];
+
+    verify_compiler_bytecode_graph(
+        typed_stack_input(&instructions, &[], &[]),
+        BytecodeGraphVerificationLimits::default(),
+    )
+    .expect("the active inner for-of handler owns exceptional cleanup above outer for-in");
+}
+
+#[test]
 fn nip_catch_discards_expression_temporaries_above_a_for_of_marker() {
     let returning = [
         (FinalOpcode::InitialYield, Operands::None),

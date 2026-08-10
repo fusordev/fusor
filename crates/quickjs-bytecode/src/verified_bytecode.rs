@@ -9882,14 +9882,20 @@ fn verify_internal_stack_exit(
                     ));
                 }
                 InternalStackValue::ForInIterator(_) => {
-                    // A catch nested inside the for-in region restores the
-                    // iterator marker beneath its handler value. An uncaught
-                    // throw, or a throw to an outer handler, must instead have
-                    // removed every crossed for-in marker before this terminal.
-                    let retained_by_inner_catch = state[cursor.saturating_add(1)..]
-                        .iter()
-                        .any(|value| matches!(value, InternalStackValue::CatchMarker { .. }));
-                    if !retained_by_inner_catch {
+                    // A catch or active for-of handler nested inside the
+                    // for-in region owns the next unwind step and may retain
+                    // the enumeration marker beneath it. An uncaught throw,
+                    // or a throw to an outer handler, must instead have removed
+                    // every crossed for-in marker before this terminal.
+                    let retained_by_inner_handler =
+                        state[cursor.saturating_add(1)..].iter().any(|value| {
+                            matches!(
+                                value,
+                                InternalStackValue::CatchMarker { .. }
+                                    | InternalStackValue::ForOfCatch(_)
+                            )
+                        });
+                    if !retained_by_inner_handler {
                         return Err(for_in_stack_error(
                             id,
                             decoded.pc(),

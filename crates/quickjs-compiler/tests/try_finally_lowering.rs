@@ -214,6 +214,30 @@ fn throw_reaches_the_handler_before_running_the_finalizer() {
 }
 
 #[test]
+fn generated_rethrow_cleans_the_crossed_outer_for_in_marker() {
+    let compiled = compile(
+        "function f(object){for(const key in object){try{throw key;}finally{void key;}}}",
+        "f",
+    );
+    let opcodes = opcodes(compiled.root());
+
+    assert!(
+        opcodes
+            .windows(3)
+            .any(|window| { window == [FinalOpcode::Gosub, FinalOpcode::Nip, FinalOpcode::Throw] }),
+        "the handler rethrow must clean the for-in marker after running the finalizer: {opcodes:?}"
+    );
+    assert_eq!(
+        opcodes
+            .iter()
+            .filter(|&&opcode| opcode == FinalOpcode::Throw)
+            .count(),
+        2,
+        "the protected source throw and generated handler rethrow remain distinct"
+    );
+}
+
+#[test]
 fn break_and_continue_crossing_finally_use_the_normal_cleanup_protocol() {
     for (name, keyword) in [("breakOuter", "break"), ("continueOuter", "continue")] {
         let source = format!(

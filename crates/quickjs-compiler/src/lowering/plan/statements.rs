@@ -955,6 +955,25 @@ impl<'arena> CompilationContext<'_, 'arena, '_> {
         } else {
             &[]
         };
+        work.try_reserve(2)
+            .map_err(|_| LeafCompilationError::CapacityExceeded {
+                domain: "statement work stack",
+            })?;
+        work.push(StatementWork::Emit(PlannedInstruction::new(
+            FinalOpcode::Throw,
+            Operands::None,
+            statement.span,
+        )));
+        Self::schedule_throw_cleanup(abrupt_markers, statement.span, work)?;
+        work.push(StatementWork::Expression(&statement.argument));
+        Ok(())
+    }
+
+    fn schedule_throw_cleanup<'statement>(
+        abrupt_markers: &[AbruptMarker],
+        span: Span,
+        work: &mut Vec<StatementWork<'statement, 'arena>>,
+    ) -> Result<(), LeafCompilationError> {
         let removable_markers = abrupt_markers
             .iter()
             .rposition(|marker| marker.tag() == AbruptMarkerTag::Catch)
@@ -978,15 +997,11 @@ impl<'arena> CompilationContext<'_, 'arena, '_> {
                     domain: "statement throw cleanup",
                 })?
         };
-        work.try_reserve(cleanup_instructions.saturating_add(2))
-            .map_err(|_| LeafCompilationError::CapacityExceeded {
+        work.try_reserve(cleanup_instructions).map_err(|_| {
+            LeafCompilationError::CapacityExceeded {
                 domain: "statement work stack",
-            })?;
-        work.push(StatementWork::Emit(PlannedInstruction::new(
-            FinalOpcode::Throw,
-            Operands::None,
-            statement.span,
-        )));
+            }
+        })?;
         if !preserves_for_of_marker {
             for marker in removable_markers {
                 let nips = match marker.tag() {
@@ -998,12 +1013,11 @@ impl<'arena> CompilationContext<'_, 'arena, '_> {
                     work.push(StatementWork::Emit(PlannedInstruction::new(
                         FinalOpcode::Nip,
                         Operands::None,
-                        statement.span,
+                        span,
                     )));
                 }
             }
         }
-        work.push(StatementWork::Expression(&statement.argument));
         Ok(())
     }
 
@@ -1118,7 +1132,14 @@ impl<'arena> CompilationContext<'_, 'arena, '_> {
             })?;
 
         Self::push_finalizer_subroutine(&mut state.work, finalizer, &labels, state.completion);
-        Self::push_try_finally_handler_path(&mut state.work, statement, catch_plan, &labels);
+        let floor = state.executable_abrupt_marker_floor(statement.span)?;
+        Self::push_try_finally_handler_path(
+            &mut state.work,
+            statement,
+            catch_plan,
+            &labels,
+            &state.abrupt_markers[floor..],
+        )?;
         Self::push_try_finally_body(&mut state.work, statement, &labels);
         Ok(())
     }
@@ -1187,13 +1208,15 @@ impl<'arena> CompilationContext<'_, 'arena, '_> {
         statement: &'statement TryStatement<'arena>,
         catch_plan: Option<TryFinallyCatchPlan<'statement, 'arena>>,
         labels: &TryFinallyLabels,
-    ) {
+        outer_abrupt_markers: &[AbruptMarker],
+    ) -> Result<(), LeafCompilationError> {
         if let Some(catch) = catch_plan {
             work.push(StatementWork::Emit(PlannedInstruction::new(
                 FinalOpcode::Throw,
                 Operands::None,
                 catch.handler.body.span,
             )));
+            Self::schedule_throw_cleanup(outer_abrupt_markers, catch.handler.body.span, work)?;
             work.push(StatementWork::Branch {
                 kind: BranchKind::Gosub,
                 target: labels.finalizer.clone(),
@@ -1240,6 +1263,7 @@ impl<'arena> CompilationContext<'_, 'arena, '_> {
                 Operands::None,
                 statement.span,
             )));
+            Self::schedule_throw_cleanup(outer_abrupt_markers, statement.span, work)?;
             work.push(StatementWork::Branch {
                 kind: BranchKind::Gosub,
                 target: labels.finalizer.clone(),
@@ -1247,6 +1271,7 @@ impl<'arena> CompilationContext<'_, 'arena, '_> {
             });
             work.push(StatementWork::Bind(labels.handler.clone()));
         }
+        Ok(())
     }
 
     fn push_try_finally_body<'statement>(
