@@ -1136,13 +1136,7 @@ fn typed_array_sequence_allocate(
             "TypedArray length exceeds implementation range",
         );
     };
-    let buffer = runtime
-        .allocate_array_buffer(
-            HeapReference::Object(runtime.realm_array_buffer_prototype(state.realm)?),
-            byte_length,
-            None,
-        )
-        .map_err(NativeFailure::Execution)?;
+    let buffer = allocate_typed_array_buffer(runtime, state.realm, byte_length, &state.origin)?;
     let target = runtime
         .allocate_typed_array(
             state.prototype,
@@ -1548,6 +1542,7 @@ pub(super) fn finish_typed_array_constructor_length(
             new_target: state.new_target,
             element: state.element,
             length,
+            origin: state.origin.clone(),
         },
         return_to,
         Some(state.origin),
@@ -1561,6 +1556,7 @@ pub(super) fn finish_typed_array_constructor_wrapper(
     element: TypedArrayElementType,
     length: usize,
     requested: &StoredValue,
+    origin: &JsStackFrame,
 ) -> Result<NativeDispatch, NativeFailure> {
     let realm = runtime.function_realm(new_target)?;
     let prototype = typed_array_constructor_prototype(runtime, new_target, element, requested)?;
@@ -1570,13 +1566,7 @@ pub(super) fn finish_typed_array_constructor_wrapper(
             .ok_or(EngineFault::RuntimeInvariant {
                 message: "validated typed-array length overflowed its byte length",
             })?;
-    let buffer = runtime
-        .allocate_array_buffer(
-            HeapReference::Object(runtime.realm_array_buffer_prototype(realm)?),
-            byte_length,
-            None,
-        )
-        .map_err(NativeFailure::Execution)?;
+    let buffer = allocate_typed_array_buffer(runtime, realm, byte_length, origin)?;
     let object = runtime
         .allocate_typed_array(
             prototype,
@@ -1666,13 +1656,7 @@ fn finish_typed_array_constructor_from_typed_array(
             "TypedArray source and destination content types differ",
         );
     }
-    let target_buffer = runtime
-        .allocate_array_buffer(
-            HeapReference::Object(runtime.realm_array_buffer_prototype(realm)?),
-            byte_length,
-            None,
-        )
-        .map_err(NativeFailure::Execution)?;
+    let target_buffer = allocate_typed_array_buffer(runtime, realm, byte_length, origin)?;
     if source_element == element {
         runtime
             .copy_array_buffer_bytes(source_buffer, source_offset, target_buffer, byte_length)
@@ -2201,13 +2185,7 @@ pub(super) fn typed_array_create_same_type(
             "TypedArray length exceeds implementation range",
         );
     };
-    let buffer = runtime
-        .allocate_array_buffer(
-            HeapReference::Object(runtime.realm_array_buffer_prototype(realm)?),
-            byte_length,
-            None,
-        )
-        .map_err(NativeFailure::Execution)?;
+    let buffer = allocate_typed_array_buffer(runtime, realm, byte_length, origin)?;
     runtime
         .allocate_typed_array(
             HeapReference::Object(runtime.realm_typed_array_prototype(realm, element)?),
@@ -5072,6 +5050,29 @@ fn typed_array_range_error<T>(
         },
         origin: origin.clone(),
     }))
+}
+
+fn allocate_typed_array_buffer(
+    runtime: &mut Runtime,
+    realm: RealmId,
+    byte_length: usize,
+    origin: &JsStackFrame,
+) -> Result<ObjectId, NativeFailure> {
+    let prototype = HeapReference::Object(runtime.realm_array_buffer_prototype(realm)?);
+    match runtime.allocate_array_buffer(prototype, byte_length, None) {
+        Ok(buffer) => Ok(buffer),
+        Err(
+            ExecutionError::LimitExceeded {
+                resource: RuntimeResource::ArrayBufferBytes,
+                ..
+            }
+            | ExecutionError::AllocationFailed {
+                resource: RuntimeResource::ArrayBufferBytes,
+                ..
+            },
+        ) => typed_array_range_error(realm, origin, "invalid TypedArray length"),
+        Err(error) => Err(NativeFailure::Execution(error)),
+    }
 }
 
 /// Starts `TypedArraySetElement` for a canonical numeric key. `Invalid` is

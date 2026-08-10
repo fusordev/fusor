@@ -549,7 +549,10 @@ pub(super) fn finish_intrinsic_get(
             new_target,
             element,
             length,
-        } => finish_typed_array_constructor_wrapper(runtime, new_target, element, length, &value),
+            origin,
+        } => finish_typed_array_constructor_wrapper(
+            runtime, new_target, element, length, &value, &origin,
+        ),
         IntrinsicGetContinuation::TemporalInstantConstructor {
             new_target,
             epoch_nanoseconds,

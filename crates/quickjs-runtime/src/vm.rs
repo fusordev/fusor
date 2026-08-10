@@ -1658,6 +1658,7 @@ enum IntrinsicGetContinuation {
         new_target: FunctionId,
         element: TypedArrayElementType,
         length: usize,
+        origin: JsStackFrame,
     },
     TemporalInstantConstructor {
         new_target: FunctionId,

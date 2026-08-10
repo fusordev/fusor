@@ -163,6 +163,14 @@ fn typed_array_constructors_require_new_and_validate_the_length() {
         thrown("return new Uint8Array(-1);"),
         ExceptionKind::RangeError
     );
+    assert_eq!(
+        thrown("return new Uint8Array({length:Math.pow(2,53)});"),
+        ExceptionKind::RangeError
+    );
+    assert_eq!(
+        thrown("return new BigInt64Array({length:Math.pow(2,53)});"),
+        ExceptionKind::RangeError
+    );
 }
 
 #[test]
