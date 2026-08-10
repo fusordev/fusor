@@ -82,6 +82,11 @@ pub(super) fn visit_functions(visit: FunctionSink<'_>) {
         IntrinsicNameSpec::Literal("get [Symbol.species]"),
         0,
     ));
+    visit(ordinary(
+        NativeFunctionKind::LocaleString(LocaleStringMethod::TypedArray),
+        IntrinsicNameSpec::Predefined(PredefinedAtom::ToLocaleString),
+        0,
+    ));
 }
 
 pub(super) fn visit_properties(visit: PropertySink<'_>) {
@@ -183,7 +188,12 @@ fn visit_typed_array_prototype_properties(visit: PropertySink<'_>, prototype: In
     visit(method(
         prototype,
         IntrinsicKeySpec::PredefinedString(PredefinedAtom::ToLocaleString),
-        NativeFunctionKind::LocaleString(LocaleStringMethod::Array),
+        NativeFunctionKind::LocaleString(LocaleStringMethod::TypedArray),
+    ));
+    visit(method(
+        prototype,
+        IntrinsicKeySpec::PredefinedString(PredefinedAtom::ToString),
+        NativeFunctionKind::ArrayPrototypeToString,
     ));
 }
 

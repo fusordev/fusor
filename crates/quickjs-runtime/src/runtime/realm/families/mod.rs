@@ -250,6 +250,7 @@ pub(super) const fn is_declarative_function(id: IntrinsicFunctionId) -> bool {
                 super::LocaleStringMethod::Number
                     | super::LocaleStringMethod::BigInt
                     | super::LocaleStringMethod::Array
+                    | super::LocaleStringMethod::TypedArray
             )
             | NativeFunctionKind::ArrayConstructor
             | NativeFunctionKind::ArraySpeciesGetter
@@ -949,6 +950,7 @@ const fn is_array_function(id: IntrinsicFunctionId) -> bool {
             | NativeFunctionKind::TypedArraySpeciesGetter
             | NativeFunctionKind::TypedArrayPrototype(_)
             | NativeFunctionKind::Uint8Array(_)
+            | NativeFunctionKind::LocaleString(super::LocaleStringMethod::TypedArray)
             | NativeFunctionKind::ArrayPrototypeJoin
             | NativeFunctionKind::ArrayPrototypeToString
             | NativeFunctionKind::ArrayPrototypeSearch(_)

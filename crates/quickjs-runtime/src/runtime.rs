@@ -841,6 +841,7 @@ pub(crate) enum LocaleStringMethod {
     Number,
     BigInt,
     Array,
+    TypedArray,
 }
 
 impl ArrayFlatten {

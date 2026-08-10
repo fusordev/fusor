@@ -733,18 +733,40 @@ fn typed_array_join_captures_length_before_separator_conversion() {
 }
 
 #[test]
-fn typed_array_to_locale_string_shares_array_function_and_forwards_arguments() {
+fn typed_array_to_locale_string_is_distinct_validates_and_forwards_arguments() {
     assert_eq!(
         rendered(
             "var proto=Object.getPrototypeOf(Uint8Array.prototype),\
              descriptor=Object.getOwnPropertyDescriptor(proto,'toLocaleString'),\
              expected=(0).toLocaleString('th-u-nu-thai',{minimumFractionDigits:3});\
-             return [proto.toLocaleString===Array.prototype.toLocaleString,\
+             return [proto.toLocaleString!==Array.prototype.toLocaleString,\
+               proto.toString===Array.prototype.toString,\
                descriptor.writable,descriptor.enumerable,descriptor.configurable,\
                proto.toLocaleString.length,proto.toLocaleString.name,\
                new Uint8Array([0]).toLocaleString('th-u-nu-thai',{minimumFractionDigits:3})===expected].join('|');"
         ),
-        "true|true|false|true|0|toLocaleString|true"
+        "true|true|true|false|true|0|toLocaleString|true"
+    );
+    assert_eq!(
+        rendered(
+            "var calls=0,sample=new Uint8Array([4,5]);\
+             Object.defineProperty(sample,'length',{get:function(){calls++;return 0;}});\
+             return [sample.toLocaleString(),calls].join('|');"
+        ),
+        "4,5|0"
+    );
+    assert_eq!(
+        thrown(
+            "var buffer=new ArrayBuffer(4,{maxByteLength:4}),sample=new Uint8Array(buffer,2,2);\
+             buffer.resize(1);sample.toLocaleString();"
+        ),
+        ExceptionKind::TypeError
+    );
+    assert_eq!(
+        thrown(
+            "var method=Object.getPrototypeOf(Uint8Array.prototype).toLocaleString;method.call({});"
+        ),
+        ExceptionKind::TypeError
     );
 }
 
