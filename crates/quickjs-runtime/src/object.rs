@@ -3098,7 +3098,7 @@ pub(crate) enum HeapObjectKind {
     /// An ordinary null-prototype object with the `[[IsRawJSON]]` slot.
     RawJson,
     Array(ArrayState),
-    Error,
+    Error(ErrorState),
     /// An ECMAScript Promise object with its specification-level internal slots.
     Promise(PromiseState),
     BoxedPrimitive(BoxedPrimitive),
@@ -3176,6 +3176,24 @@ pub(crate) enum HeapObjectKind {
     WeakRef(WeakRefState),
     /// An ECMAScript `FinalizationRegistry` with strongly held cleanup state.
     FinalizationRegistry(FinalizationRegistryState),
+}
+
+pub(crate) struct ErrorState {
+    stack: JsString,
+}
+
+impl ErrorState {
+    pub(crate) const fn new(stack: JsString) -> Self {
+        Self { stack }
+    }
+
+    pub(crate) const fn stack(&self) -> &JsString {
+        &self.stack
+    }
+
+    pub(crate) fn replace_stack(&mut self, stack: JsString) {
+        self.stack = stack;
+    }
 }
 
 pub(crate) struct IntlCollatorObjectState {
@@ -3317,7 +3335,7 @@ impl HeapObjectKind {
             | Self::Arguments(_)
             | Self::RawJson
             | Self::Array(_)
-            | Self::Error
+            | Self::Error(_)
             | Self::Promise(_)
             | Self::ForInIterator(_)
             | Self::ArrayIterator(_)
@@ -3368,7 +3386,7 @@ impl HeapObjectKind {
             | Self::Proxy(_)
             | Self::Arguments(_)
             | Self::RawJson
-            | Self::Error
+            | Self::Error(_)
             | Self::Promise(_)
             | Self::BoxedPrimitive(_)
             | Self::ForInIterator(_)
@@ -3419,7 +3437,7 @@ impl HeapObjectKind {
             | Self::Proxy(_)
             | Self::Arguments(_)
             | Self::RawJson
-            | Self::Error
+            | Self::Error(_)
             | Self::Promise(_)
             | Self::BoxedPrimitive(_)
             | Self::ForInIterator(_)
@@ -3471,7 +3489,7 @@ impl HeapObjectKind {
             | Self::Arguments(_)
             | Self::RawJson
             | Self::Array(_)
-            | Self::Error
+            | Self::Error(_)
             | Self::Promise(_)
             | Self::BoxedPrimitive(_)
             | Self::ArrayIterator(_)
@@ -3522,7 +3540,7 @@ impl HeapObjectKind {
             | Self::Arguments(_)
             | Self::RawJson
             | Self::Array(_)
-            | Self::Error
+            | Self::Error(_)
             | Self::Promise(_)
             | Self::BoxedPrimitive(_)
             | Self::ArrayIterator(_)
@@ -3573,7 +3591,7 @@ impl HeapObjectKind {
             | Self::Arguments(_)
             | Self::RawJson
             | Self::Array(_)
-            | Self::Error
+            | Self::Error(_)
             | Self::Promise(_)
             | Self::BoxedPrimitive(_)
             | Self::ForInIterator(_)
@@ -3624,7 +3642,7 @@ impl HeapObjectKind {
             | Self::Arguments(_)
             | Self::RawJson
             | Self::Array(_)
-            | Self::Error
+            | Self::Error(_)
             | Self::Promise(_)
             | Self::BoxedPrimitive(_)
             | Self::ForInIterator(_)
@@ -3689,7 +3707,7 @@ impl HeapObjectKind {
             | Self::Arguments(_)
             | Self::RawJson
             | Self::Array(_)
-            | Self::Error
+            | Self::Error(_)
             | Self::Promise(_)
             | Self::BoxedPrimitive(_)
             | Self::ForInIterator(_)
@@ -3740,7 +3758,7 @@ impl HeapObjectKind {
             | Self::Arguments(_)
             | Self::RawJson
             | Self::Array(_)
-            | Self::Error
+            | Self::Error(_)
             | Self::Promise(_)
             | Self::BoxedPrimitive(_)
             | Self::ForInIterator(_)
@@ -3991,9 +4009,9 @@ impl HeapObject {
     }
 
     #[must_use]
-    pub(crate) const fn error(record: ObjectRecord) -> Self {
+    pub(crate) const fn error(record: ObjectRecord, stack: JsString) -> Self {
         Self {
-            kind: HeapObjectKind::Error,
+            kind: HeapObjectKind::Error(ErrorState::new(stack)),
             record,
             public_roots: 0,
         }
@@ -4430,7 +4448,22 @@ impl HeapObject {
 
     #[must_use]
     pub(crate) const fn is_error(&self) -> bool {
-        matches!(self.kind, HeapObjectKind::Error)
+        matches!(self.kind, HeapObjectKind::Error(_))
+    }
+
+    pub(crate) const fn error_stack(&self) -> Option<&JsString> {
+        match &self.kind {
+            HeapObjectKind::Error(state) => Some(state.stack()),
+            _ => None,
+        }
+    }
+
+    pub(crate) fn replace_error_stack(&mut self, stack: JsString) -> bool {
+        let HeapObjectKind::Error(state) = &mut self.kind else {
+            return false;
+        };
+        state.replace_stack(stack);
+        true
     }
 
     #[must_use]
@@ -4695,7 +4728,7 @@ impl HeapObject {
             | HeapObjectKind::Proxy(_)
             | HeapObjectKind::RawJson
             | HeapObjectKind::Array(_)
-            | HeapObjectKind::Error
+            | HeapObjectKind::Error(_)
             | HeapObjectKind::Promise(_)
             | HeapObjectKind::BoxedPrimitive(_)
             | HeapObjectKind::ForInIterator(_)
@@ -4746,7 +4779,7 @@ impl HeapObject {
             | HeapObjectKind::Proxy(_)
             | HeapObjectKind::RawJson
             | HeapObjectKind::Array(_)
-            | HeapObjectKind::Error
+            | HeapObjectKind::Error(_)
             | HeapObjectKind::Promise(_)
             | HeapObjectKind::BoxedPrimitive(_)
             | HeapObjectKind::ForInIterator(_)
@@ -4799,7 +4832,7 @@ impl HeapObject {
             | HeapObjectKind::Proxy(_)
             | HeapObjectKind::RawJson
             | HeapObjectKind::Array(_)
-            | HeapObjectKind::Error
+            | HeapObjectKind::Error(_)
             | HeapObjectKind::Promise(_)
             | HeapObjectKind::BoxedPrimitive(_)
             | HeapObjectKind::ForInIterator(_)
@@ -5502,10 +5535,12 @@ mod tests {
 
     #[test]
     fn error_heap_object_preserves_its_internal_brand() {
-        let object = HeapObject::error(ObjectRecord::empty(None));
+        let stack = JsString::from_utf8("stack").expect("stack");
+        let object = HeapObject::error(ObjectRecord::empty(None), stack.clone());
 
-        assert!(matches!(object.kind(), HeapObjectKind::Error));
+        assert!(matches!(object.kind(), HeapObjectKind::Error(_)));
         assert!(object.is_error());
+        assert_eq!(object.error_stack(), Some(&stack));
         assert!(object.boxed_primitive().is_none());
         assert!(object.for_in_state().is_none());
         assert_eq!(object.public_roots, 0);

@@ -911,7 +911,7 @@ enum NativeContinuation {
     IteratorHelperNext(IteratorHelperNextContinuation),
     IteratorHelperReturn(IteratorHelperReturnContinuation),
     IteratorWrapperReturn(IteratorWrapperReturnContinuation),
-    IteratorPrototypeSetter(IteratorPrototypeSetterContinuation),
+    SetterIgnoringPrototype(SetterIgnoringPrototypeContinuation),
     ArrayIteratorNext(ArrayIteratorNextContinuation),
     ForOfStart(ForOfStartContinuation),
     ForOfNext(ForOfNextContinuation),
@@ -1177,8 +1177,8 @@ impl NativeContinuation {
             Self::IteratorHelperNext(state) => state.retained_values(),
             Self::IteratorHelperReturn(state) => state.retained_values(),
             Self::IteratorWrapperReturn(_) => IteratorWrapperReturnContinuation::retained_values(),
-            Self::IteratorPrototypeSetter(_) => {
-                IteratorPrototypeSetterContinuation::retained_values()
+            Self::SetterIgnoringPrototype(_) => {
+                SetterIgnoringPrototypeContinuation::retained_values()
             }
             Self::ArrayIteratorNext(state) => state.retained_values(),
             Self::ForOfStart(state) => state.retained_values(),
@@ -3889,7 +3889,7 @@ fn trace_native_continuation_roots(
         NativeContinuation::IteratorHelperNext(state) => state.trace_roots(mark),
         NativeContinuation::IteratorHelperReturn(state) => state.trace_roots(mark),
         NativeContinuation::IteratorWrapperReturn(state) => state.trace_roots(mark),
-        NativeContinuation::IteratorPrototypeSetter(state) => state.trace_roots(mark),
+        NativeContinuation::SetterIgnoringPrototype(state) => state.trace_roots(mark),
         NativeContinuation::ArrayIteratorNext(state) => {
             mark(CollectionRoot::Heap(HeapReference::Object(state.iterator)));
             trace_stored_value_root(&state.iterated, mark);

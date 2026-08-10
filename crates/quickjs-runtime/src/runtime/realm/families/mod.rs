@@ -225,6 +225,8 @@ pub(super) const fn is_declarative_function(id: IntrinsicFunctionId) -> bool {
         id.0,
         NativeFunctionKind::ErrorConstructor(_)
             | NativeFunctionKind::ErrorPrototypeToString
+            | NativeFunctionKind::ErrorPrototypeStackGetter
+            | NativeFunctionKind::ErrorPrototypeStackSetter
             | NativeFunctionKind::ErrorIsError
             | NativeFunctionKind::BooleanConstructor
             | NativeFunctionKind::BooleanPrototypeToString
@@ -494,6 +496,8 @@ pub(super) fn property_batch(property: IntrinsicPropertySpec) -> DeclarativeBatc
             Some(IntrinsicFunctionId(
                 NativeFunctionKind::ErrorConstructor(_)
                     | NativeFunctionKind::ErrorPrototypeToString
+                    | NativeFunctionKind::ErrorPrototypeStackGetter
+                    | NativeFunctionKind::ErrorPrototypeStackSetter
                     | NativeFunctionKind::ErrorIsError
             ))
         )
@@ -647,6 +651,8 @@ const fn is_error_identity(id: IntrinsicIdentity) -> bool {
             | IntrinsicIdentity::Function(IntrinsicFunctionId(
                 NativeFunctionKind::ErrorConstructor(_)
                     | NativeFunctionKind::ErrorPrototypeToString
+                    | NativeFunctionKind::ErrorPrototypeStackGetter
+                    | NativeFunctionKind::ErrorPrototypeStackSetter
                     | NativeFunctionKind::ErrorIsError,
             ))
     )
@@ -1033,6 +1039,8 @@ pub(super) const fn function_batch(id: IntrinsicFunctionId) -> DeclarativeBatch 
         id.0,
         NativeFunctionKind::ErrorConstructor(_)
             | NativeFunctionKind::ErrorPrototypeToString
+            | NativeFunctionKind::ErrorPrototypeStackGetter
+            | NativeFunctionKind::ErrorPrototypeStackSetter
             | NativeFunctionKind::ErrorIsError
     ) {
         DeclarativeBatch::Errors

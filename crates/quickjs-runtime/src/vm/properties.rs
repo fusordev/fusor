@@ -134,6 +134,35 @@ pub(super) enum PropertyDefinitionOutcome {
     Failed(PropertyFailure),
 }
 
+#[derive(Clone, Copy)]
+enum SetterIgnoringPrototypeStage {
+    OwnDescriptor,
+    Complete,
+}
+
+pub(super) struct SetterIgnoringPrototypeContinuation {
+    receiver: StoredValue,
+    value: StoredValue,
+    key: PropertyKey,
+    name: JsString,
+    reference: HeapReference,
+    realm: RealmId,
+    stage: SetterIgnoringPrototypeStage,
+    origin: JsStackFrame,
+}
+
+impl SetterIgnoringPrototypeContinuation {
+    pub(super) const fn retained_values() -> u64 {
+        3
+    }
+
+    pub(super) fn trace_roots(&self, mark: &mut dyn FnMut(CollectionRoot)) {
+        trace_stored_value_root(&self.receiver, mark);
+        trace_stored_value_root(&self.value, mark);
+        mark(CollectionRoot::Heap(self.reference));
+    }
+}
+
 pub(super) enum RealmGlobalReadOutcome {
     Value(StoredValue),
     Getter {
@@ -2340,4 +2369,139 @@ fn apply_mapped_arguments_definition(
         debug_assert_eq!(detached, Some(cell));
     }
     Ok(())
+}
+
+#[allow(
+    clippy::too_many_arguments,
+    reason = "SetterThatIgnoresPrototypeProperties retains its home, key, receiver, value, realm, and caller continuation explicitly"
+)]
+pub(super) fn begin_setter_ignoring_prototype_properties(
+    runtime: &mut Runtime,
+    receiver: StoredValue,
+    value: StoredValue,
+    home: HeapReference,
+    key: PropertyKey,
+    name: JsString,
+    realm: RealmId,
+    return_to: Option<CallReturn>,
+    origin: JsStackFrame,
+    execution_budget: &mut ExecutionBudget,
+) -> Result<NativeDispatch, NativeFailure> {
+    let Some(reference) = receiver.heap_reference() else {
+        return Err(NativeFailure::Abrupt(PendingException {
+            realm,
+            payload: PendingExceptionPayload::EngineError {
+                kind: ExceptionKind::TypeError,
+                message: JsString::from_utf8(
+                    "intrinsic prototype setter receiver must be an object",
+                )?,
+            },
+            origin,
+        }));
+    };
+    if reference == home {
+        return Err(NativeFailure::Abrupt(PendingException {
+            realm,
+            payload: PendingExceptionPayload::EngineError {
+                kind: ExceptionKind::TypeError,
+                message: JsString::from_utf8(
+                    "cannot replace an intrinsic prototype accessor property",
+                )?,
+            },
+            origin,
+        }));
+    }
+    execution_budget.charge_instructions(1)?;
+    let state = SetterIgnoringPrototypeContinuation {
+        receiver,
+        value,
+        key: key.clone(),
+        name,
+        reference,
+        realm,
+        stage: SetterIgnoringPrototypeStage::OwnDescriptor,
+        origin,
+    };
+    let dispatch = begin_internal_get_own_property(
+        runtime,
+        reference,
+        key,
+        realm,
+        return_to,
+        state.origin.clone(),
+        execution_budget,
+    )?;
+    continue_get_after(
+        dispatch,
+        state,
+        NativeContinuation::SetterIgnoringPrototype,
+        |state, value| {
+            advance_setter_ignoring_prototype_properties(
+                runtime,
+                state,
+                &value,
+                return_to,
+                execution_budget,
+            )
+        },
+        "SetterThatIgnoresPrototypeProperties [[GetOwnProperty]] produced a structured result",
+    )
+}
+
+pub(super) fn advance_setter_ignoring_prototype_properties(
+    runtime: &mut Runtime,
+    mut state: SetterIgnoringPrototypeContinuation,
+    completion: &StoredValue,
+    return_to: Option<CallReturn>,
+    execution_budget: &mut ExecutionBudget,
+) -> Result<NativeDispatch, NativeFailure> {
+    match state.stage {
+        SetterIgnoringPrototypeStage::Complete => {
+            Ok(NativeDispatch::Immediate(StoredValue::Undefined))
+        }
+        SetterIgnoringPrototypeStage::OwnDescriptor => {
+            state.stage = SetterIgnoringPrototypeStage::Complete;
+            let dispatch = if matches!(completion, StoredValue::Undefined) {
+                let definition = PropertyDefinition::data(
+                    Requested::Present(state.value.duplicate()),
+                    Requested::Present(true),
+                )
+                .with_enumerable(Requested::Present(true))
+                .with_configurable(Requested::Present(true));
+                begin_internal_define_own_property(
+                    runtime,
+                    state.reference,
+                    state.key.clone(),
+                    definition,
+                    state.realm,
+                    return_to,
+                    state.origin.clone(),
+                    execution_budget,
+                    DefinePropertyResult::Target,
+                )?
+            } else {
+                begin_internal_set(
+                    runtime,
+                    state.reference,
+                    state.key.clone(),
+                    state.name.clone(),
+                    state.value.duplicate(),
+                    state.receiver.duplicate(),
+                    true,
+                    false,
+                    state.realm,
+                    return_to,
+                    state.origin.clone(),
+                    execution_budget,
+                )?
+            };
+            continue_get_after(
+                dispatch,
+                state,
+                NativeContinuation::SetterIgnoringPrototype,
+                |_state, _value| Ok(NativeDispatch::Immediate(StoredValue::Undefined)),
+                "SetterThatIgnoresPrototypeProperties write produced a structured result",
+            )
+        }
+    }
 }

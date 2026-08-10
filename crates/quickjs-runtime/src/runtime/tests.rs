@@ -2938,6 +2938,24 @@ fn realm_installs_complete_realm_owned_error_intrinsic_graph() {
     );
     assert_native_method_named(
         &runtime,
+        errors.stack_getter,
+        function_prototype,
+        realm_id,
+        NativeFunctionKind::ErrorPrototypeStackGetter,
+        &JsString::from_utf8("get stack").expect("getter name"),
+        0,
+    );
+    assert_native_method_named(
+        &runtime,
+        errors.stack_setter,
+        function_prototype,
+        realm_id,
+        NativeFunctionKind::ErrorPrototypeStackSetter,
+        &JsString::from_utf8("set stack").expect("setter name"),
+        1,
+    );
+    assert_native_method_named(
+        &runtime,
         errors.is_error,
         function_prototype,
         realm_id,
@@ -2972,7 +2990,7 @@ fn realm_installs_complete_realm_owned_error_intrinsic_graph() {
         assert_eq!(
             prototype.record.property_count(),
             if kind == ErrorIntrinsicKind::Error {
-                4
+                5
             } else {
                 3
             }
@@ -3000,6 +3018,7 @@ fn realm_installs_complete_realm_owned_error_intrinsic_graph() {
         );
 
         let to_string_key = runtime.predefined_property_key(PredefinedAtom::ToString);
+        let stack_key = runtime.predefined_property_key(PredefinedAtom::Stack);
         let name_key = runtime.predefined_property_key(PredefinedAtom::Name);
         let message_key = runtime.predefined_property_key(PredefinedAtom::Message);
         let constructor_key = runtime.predefined_property_key(PredefinedAtom::Constructor);
@@ -3017,19 +3036,33 @@ fn realm_installs_complete_realm_owned_error_intrinsic_graph() {
                 prototype.record.has_own_property_with_scan(&to_string_key),
                 (true, 1)
             );
+            assert!(matches!(
+                prototype.record.own_property(&stack_key),
+                Some(OwnProperty::Accessor {
+                    layout,
+                    getter: Some(getter),
+                    setter: Some(setter),
+                }) if layout == PropertyLayout::accessor(false, true)
+                    && getter == errors.stack_getter
+                    && setter == errors.stack_setter
+            ));
             assert_eq!(
-                prototype.record.has_own_property_with_scan(&name_key),
+                prototype.record.has_own_property_with_scan(&stack_key),
                 (true, 2)
             );
             assert_eq!(
-                prototype.record.has_own_property_with_scan(&message_key),
+                prototype.record.has_own_property_with_scan(&name_key),
                 (true, 3)
+            );
+            assert_eq!(
+                prototype.record.has_own_property_with_scan(&message_key),
+                (true, 4)
             );
             assert_eq!(
                 prototype
                     .record
                     .has_own_property_with_scan(&constructor_key),
-                (true, 4)
+                (true, 5)
             );
         } else {
             assert!(!has_own_property(
@@ -3214,7 +3247,6 @@ fn error_runtime_helpers_preserve_brand_descriptors_and_exact_accounting() {
         PredefinedAtom::Message,
         PredefinedAtom::Cause,
         PredefinedAtom::Errors,
-        PredefinedAtom::Stack,
     ]
     .into_iter()
     .enumerate()
@@ -3243,13 +3275,32 @@ fn error_runtime_helpers_preserve_brand_descriptors_and_exact_accounting() {
     }
     assert_eq!(
         runtime.usage().object_properties(),
-        prior_usage.object_properties() + 4
+        prior_usage.object_properties() + 3
     );
+
+    let stack = JsString::from_utf8("internal stack").expect("stack");
+    runtime
+        .replace_error_stack(error, stack.clone())
+        .expect("replace internal Error stack");
+    assert_eq!(
+        runtime.error_stack(error).expect("Error stack"),
+        Some(&stack)
+    );
+    assert!(!has_own_property(
+        &runtime.objects.get(error).expect("Error object").record,
+        &runtime,
+        PredefinedAtom::Stack,
+    ));
 
     let usage = runtime.usage();
     assert!(
         runtime
             .define_error_data_property(error, PredefinedAtom::Name, StoredValue::Undefined)
+            .is_err()
+    );
+    assert!(
+        runtime
+            .define_error_data_property(error, PredefinedAtom::Stack, StoredValue::Undefined)
             .is_err()
     );
     assert!(
@@ -3309,20 +3360,19 @@ fn engine_error_materialization_is_realm_owned_branded_and_exact() {
             PropertyLayout::data(true, false, true),
             |value| matches!(value, StoredValue::String(actual) if actual == message),
         );
-        assert_data_property(
+        assert_eq!(node.error_stack(), Some(&stack));
+        assert!(!has_own_property(
             &node.record,
             &runtime,
             PredefinedAtom::Stack,
-            PropertyLayout::data(true, false, true),
-            |value| matches!(value, StoredValue::String(actual) if actual == stack),
-        );
+        ));
         assert_eq!(
             runtime.usage().heap_objects(),
             prior_usage.heap_objects() + 1
         );
         assert_eq!(
             runtime.usage().object_properties(),
-            prior_usage.object_properties() + 2
+            prior_usage.object_properties() + 1
         );
         prior_usage = runtime.usage();
     }
@@ -3331,27 +3381,18 @@ fn engine_error_materialization_is_realm_owned_branded_and_exact() {
 
 #[test]
 fn engine_error_materialization_limit_failures_are_atomic() {
-    for (limits, expected_resource, expected_limit, expected_observed, stack) in [
+    for (limits, expected_resource, expected_limit, expected_observed) in [
         (
             RuntimeLimits::default().with_max_heap_objects(realm_object_slots()),
             RuntimeResource::HeapObjects,
             realm_object_slots(),
             realm_object_slots() + 1,
-            None,
         ),
         (
             RuntimeLimits::default().with_max_object_properties(realm_property_slots()),
             RuntimeResource::ObjectProperties,
             realm_property_slots(),
             realm_property_slots() + 1,
-            None,
-        ),
-        (
-            RuntimeLimits::default().with_max_object_properties(realm_property_slots() + 1),
-            RuntimeResource::ObjectProperties,
-            realm_property_slots() + 1,
-            realm_property_slots() + 2,
-            Some(JsString::from_utf8("    at test (unit.js:1:1)\n").expect("stack")),
         ),
     ] {
         let mut runtime = Runtime::try_new(limits).expect("runtime");
@@ -3364,7 +3405,7 @@ fn engine_error_materialization_limit_failures_are_atomic() {
                 realm.0.id,
                 ExceptionKind::TypeError,
                 JsString::from_utf8("boom").expect("message"),
-                stack,
+                None,
             )
             .expect_err("materialization must exceed its exact limit");
 
@@ -3381,6 +3422,26 @@ fn engine_error_materialization_limit_failures_are_atomic() {
         assert_eq!(runtime.usage(), usage);
         assert_eq!(runtime.collection_pending, collection_pending);
     }
+
+    let mut runtime = Runtime::try_new(
+        RuntimeLimits::default().with_max_object_properties(realm_property_slots() + 1),
+    )
+    .expect("runtime");
+    let realm = runtime.create_realm().expect("realm");
+    let stack = JsString::from_utf8("    at test (unit.js:1:1)\n").expect("stack");
+    let object = runtime
+        .materialize_error_object(
+            realm.0.id,
+            ExceptionKind::TypeError,
+            JsString::from_utf8("boom").expect("message"),
+            Some(stack.clone()),
+        )
+        .expect("internal Error stack does not consume an own-property slot");
+    assert_eq!(
+        runtime.usage().object_properties(),
+        realm_property_slots() + 1
+    );
+    assert_eq!(runtime.error_stack(object).expect("stack"), Some(&stack));
 }
 
 #[test]

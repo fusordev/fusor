@@ -419,7 +419,8 @@ impl Runtime {
                 additional: 1,
             });
         }
-        let Ok(error) = self.insert_heap_object(HeapObject::error(error_record)) else {
+        let Ok(error) = self.insert_heap_object(HeapObject::error(error_record, JsString::empty()))
+        else {
             let removed = self.objects.remove(errors);
             debug_assert!(removed.is_some());
             return Err(crate::ExecutionError::AllocationFailed {

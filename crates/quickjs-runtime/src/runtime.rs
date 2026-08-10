@@ -228,6 +228,8 @@ struct ErrorIntrinsic {
 struct ErrorIntrinsics {
     entries: [ErrorIntrinsic; ErrorIntrinsicKind::ALL.len()],
     to_string: FunctionId,
+    stack_getter: FunctionId,
+    stack_setter: FunctionId,
     is_error: FunctionId,
 }
 
@@ -1450,6 +1452,8 @@ pub(crate) enum NativeFunctionKind {
     FunctionPrototypeToString,
     ErrorConstructor(ErrorIntrinsicKind),
     ErrorPrototypeToString,
+    ErrorPrototypeStackGetter,
+    ErrorPrototypeStackSetter,
     ErrorIsError,
     BooleanConstructor,
     BooleanPrototypeToString,

@@ -1081,8 +1081,8 @@ pub(super) fn resume_native_continuations(
                 return_to,
                 execution_budget,
             )?,
-            NativeContinuation::IteratorPrototypeSetter(state) => {
-                advance_iterator_prototype_setter(
+            NativeContinuation::SetterIgnoringPrototype(state) => {
+                advance_setter_ignoring_prototype_properties(
                     runtime,
                     state,
                     &value,
@@ -2705,6 +2705,21 @@ pub(super) fn dispatch_native_call_with_frames(
             runtime,
             native.realm,
             inputs.receiver,
+            return_to,
+            origin.unwrap_or_else(native_function_host_origin),
+            execution_budget,
+        ),
+        NativeFunctionKind::ErrorPrototypeStackGetter => get_error_stack(
+            runtime,
+            &inputs.receiver,
+            native.realm,
+            origin.unwrap_or_else(native_function_host_origin),
+        ),
+        NativeFunctionKind::ErrorPrototypeStackSetter => begin_error_stack_setter(
+            runtime,
+            inputs.receiver,
+            inputs.arguments.take_first_or_undefined(),
+            native.realm,
             return_to,
             origin.unwrap_or_else(native_function_host_origin),
             execution_budget,
@@ -4766,10 +4781,11 @@ pub(super) fn dispatch_native_call_with_frames(
                 ),
                 _ => unreachable!("Iterator prototype setter arm is exhaustive"),
             };
-            begin_iterator_prototype_setter(
+            begin_setter_ignoring_prototype_properties(
                 runtime,
                 inputs.receiver,
                 value,
+                HeapReference::Object(runtime.realm_iterator_prototype(native.realm)?),
                 key,
                 name,
                 native.realm,
