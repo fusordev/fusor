@@ -145,6 +145,27 @@ fn data_view_uses_resizable_buffer_witnesses_and_coerces_in_spec_order() {
 }
 
 #[test]
+fn data_view_constructor_rechecks_resized_buffer_after_prototype_lookup() {
+    assert_eq!(
+        rendered(
+            "function target(buffer,size){\
+               var newTarget=function(){}.bind(null);\
+               Object.defineProperty(newTarget,'prototype',{get:function(){buffer.resize(size);}});\
+               return newTarget;\
+             }\
+             var fixedBuffer=new ArrayBuffer(3,{maxByteLength:3}),fixedError;\
+             try{Reflect.construct(DataView,[fixedBuffer,1,2],target(fixedBuffer,2));}\
+             catch(error){fixedError=error.constructor===RangeError;}\
+             var autoBuffer=new ArrayBuffer(3,{maxByteLength:3}),autoError;\
+             try{Reflect.construct(DataView,[autoBuffer,2],target(autoBuffer,1));}\
+             catch(error){autoError=error.constructor===RangeError;}\
+             return [fixedError,autoError].join('|');"
+        ),
+        "true|true"
+    );
+}
+
+#[test]
 fn data_view_constructor_and_accessors_reject_invalid_receivers_and_ranges() {
     assert_eq!(
         thrown("return DataView(new ArrayBuffer(1));"),
