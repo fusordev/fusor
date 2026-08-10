@@ -222,6 +222,84 @@ fn malformed_patterns_and_structural_limits_fail_before_execution() {
 }
 
 #[test]
+fn unicode_mode_rejects_restricted_identity_and_control_escapes() {
+    let compile_utf16 = |pattern: &[u16]| {
+        CompiledRegExp::compile_utf16(pattern, &[u16::from(b'u')], CompileLimits::default())
+    };
+    let atom_escapes = b"bBfnrtvdDsSwW";
+    let class_escapes = b"bfnrtvdDsSwW";
+    for letter in b'A'..=b'Z' {
+        if !atom_escapes.contains(&letter) {
+            assert!(
+                compile_utf16(&[u16::from(b'\\'), u16::from(letter)]).is_err(),
+                "atom identity escape {letter:?}"
+            );
+        }
+        if !class_escapes.contains(&letter) {
+            assert!(
+                compile_utf16(&[
+                    u16::from(b'['),
+                    u16::from(b'\\'),
+                    u16::from(letter),
+                    u16::from(b']'),
+                ])
+                .is_err(),
+                "class identity escape {letter:?}"
+            );
+        }
+    }
+    for letter in b'a'..=b'z' {
+        if !atom_escapes.contains(&letter) {
+            assert!(
+                compile_utf16(&[u16::from(b'\\'), u16::from(letter)]).is_err(),
+                "atom identity escape {letter:?}"
+            );
+        }
+        if !class_escapes.contains(&letter) {
+            assert!(
+                compile_utf16(&[
+                    u16::from(b'['),
+                    u16::from(b'\\'),
+                    u16::from(letter),
+                    u16::from(b']'),
+                ])
+                .is_err(),
+                "class identity escape {letter:?}"
+            );
+        }
+    }
+    assert!(compile_utf16(&[u16::from(b'\\'), u16::from(b'c')]).is_err());
+    assert!(
+        compile_utf16(&[
+            u16::from(b'['),
+            u16::from(b'\\'),
+            u16::from(b'c'),
+            u16::from(b']'),
+        ])
+        .is_err()
+    );
+    for value in 0_u16..=0x7f {
+        if !u8::try_from(value).is_ok_and(|value| value.is_ascii_alphabetic()) {
+            assert!(
+                compile_utf16(&[u16::from(b'\\'), u16::from(b'c'), value]).is_err(),
+                "atom control escape {value:#x}"
+            );
+            assert!(
+                compile_utf16(&[
+                    u16::from(b'['),
+                    u16::from(b'\\'),
+                    u16::from(b'c'),
+                    value,
+                    u16::from(b']'),
+                ])
+                .is_err(),
+                "class control escape {value:#x}"
+            );
+        }
+    }
+}
+
+#[test]
 fn execution_budget_fails_closed_on_exponential_backtracking() {
     let expression = compile("^(a|aa)*b$", "");
     let input = "a".repeat(30).encode_utf16().collect::<Vec<_>>();

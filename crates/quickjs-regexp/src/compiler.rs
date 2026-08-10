@@ -36,6 +36,7 @@ pub(crate) fn compile(
         flags.unicode_mode(),
         limits.max_pattern_bytes,
     )?;
+    validate_unicode_control_escapes(annex_b_source.as_ref(), flags.unicode_mode())?;
     let pattern_source = normalize_group_name_source(annex_b_source.as_ref())?;
     let allocator = Allocator::default();
     let pattern = LiteralParser::new(
@@ -64,6 +65,7 @@ pub(crate) fn validate_literal(
     let canonical_flags = flags.canonical_source();
     let annex_b_source =
         annex_b_pattern_source(pattern_source, flags.unicode_mode(), max_pattern_bytes)?;
+    validate_unicode_control_escapes(annex_b_source.as_ref(), flags.unicode_mode())?;
     let pattern_source = normalize_group_name_source(annex_b_source.as_ref())?;
     let allocator = Allocator::default();
     LiteralParser::new(
@@ -163,6 +165,32 @@ fn annex_b_pattern_source(
     normalized.push_str(&source[copied..]);
     debug_assert_eq!(normalized.len(), normalized_len);
     Ok(Cow::Owned(normalized))
+}
+
+/// Enforces the Unicode grammar's `c AsciiLetter` boundary before Oxc's class
+/// parser can recover a bare `\c` as a legacy identity escape.
+fn validate_unicode_control_escapes(source: &str, unicode_mode: bool) -> Result<(), CompileError> {
+    if !unicode_mode {
+        return Ok(());
+    }
+    let bytes = source.as_bytes();
+    let mut index = 0;
+    while index < bytes.len() {
+        if bytes[index] != b'\\' {
+            index += 1;
+            continue;
+        }
+        let Some(&escaped) = bytes.get(index + 1) else {
+            break;
+        };
+        if escaped == b'c' && !bytes.get(index + 2).is_some_and(u8::is_ascii_alphabetic) {
+            return Err(CompileError::Syntax(
+                "Unicode control escape requires an ASCII letter".to_owned(),
+            ));
+        }
+        index = index.saturating_add(if escaped == b'c' { 3 } else { 2 });
+    }
+    Ok(())
 }
 
 /// Cooks the `RegExpIdentifierName` inside named captures and backreferences.
