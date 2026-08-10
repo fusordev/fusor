@@ -1350,6 +1350,31 @@ pub(super) fn execute_one(
             )?;
             push(frame, StoredValue::Object(object));
         }
+        FinalOpcode::Import => {
+            let options = pop(frame)?;
+            let specifier = pop(frame)?;
+            let realm = code(runtime, frame.code)?.realm;
+            let return_to =
+                CallReturn::push(verified_instruction.successors().fallthrough().ok_or(
+                    EngineFault::InvalidSuccessor {
+                        function: frame.template,
+                        pc: source_pc,
+                    },
+                )?);
+            let origin = instruction_location(runtime, frame, source_pc)?;
+            return native_step(
+                begin_dynamic_import(
+                    runtime,
+                    specifier,
+                    options,
+                    realm,
+                    Some(return_to),
+                    origin,
+                    execution_budget,
+                ),
+                return_to,
+            );
+        }
         FinalOpcode::ArrayFrom => {
             let Operands::NPop { argument_count } = operands else {
                 return unsupported_dispatch(opcode);

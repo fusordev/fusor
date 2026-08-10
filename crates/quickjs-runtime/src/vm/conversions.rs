@@ -1656,14 +1656,17 @@ fn resume_operator_primitive_target_abrupt(
     return_to: Option<CallReturn>,
     execution_budget: &mut ExecutionBudget,
 ) -> Result<NativeDispatch, NativeFailure> {
-    let OperatorPrimitiveTarget::IteratorJoin(state) = target else {
-        return Err(error);
-    };
-    match error {
-        NativeFailure::Abrupt(pending) | NativeFailure::AbruptAfterTransient(pending) => {
-            resume_iterator_join_abrupt(runtime, *state, pending, return_to, execution_budget)
-        }
-        NativeFailure::Execution(error) => Err(NativeFailure::Execution(error)),
+    match (target, error) {
+        (
+            OperatorPrimitiveTarget::DynamicImportSpecifier(state),
+            NativeFailure::Abrupt(pending) | NativeFailure::AbruptAfterTransient(pending),
+        ) => resume_dynamic_import_abrupt(runtime, &state, pending),
+        (
+            OperatorPrimitiveTarget::IteratorJoin(state),
+            NativeFailure::Abrupt(pending) | NativeFailure::AbruptAfterTransient(pending),
+        ) => resume_iterator_join_abrupt(runtime, *state, pending, return_to, execution_budget),
+        (_, NativeFailure::Execution(error)) => Err(NativeFailure::Execution(error)),
+        (_, error) => Err(error),
     }
 }
 
@@ -1837,6 +1840,9 @@ fn finish_operator_primitive_target(
     execution_budget: &mut ExecutionBudget,
 ) -> Result<NativeDispatch, NativeFailure> {
     match target {
+        OperatorPrimitiveTarget::DynamicImportSpecifier(state) => {
+            finish_dynamic_import_specifier(runtime, *state, value, return_to, execution_budget)
+        }
         OperatorPrimitiveTarget::Unary { opcode } => {
             apply_unary_operator(opcode, value, realm, origin)
         }

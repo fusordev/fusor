@@ -663,6 +663,26 @@ impl<'compiler, 'unit, 'arena, 'scope> ExpressionPlanner<'compiler, 'unit, 'aren
                             )));
                             work.push(ExpressionWork::Visit(&await_expression.argument));
                         }
+                        Expression::ImportExpression(import_expression) => {
+                            // EvaluateImportCall evaluates the specifier before the optional
+                            // options expression. The opcode owns every subsequent observable
+                            // operation, beginning with NewPromiseCapability and ToString.
+                            work.push(ExpressionWork::Emit(PlannedInstruction::new(
+                                FinalOpcode::Import,
+                                Operands::None,
+                                import_expression.span,
+                            )));
+                            if let Some(options) = &import_expression.options {
+                                work.push(ExpressionWork::Visit(options));
+                            } else {
+                                work.push(ExpressionWork::Emit(PlannedInstruction::new(
+                                    FinalOpcode::Undefined,
+                                    Operands::None,
+                                    import_expression.span,
+                                )));
+                            }
+                            work.push(ExpressionWork::Visit(&import_expression.source));
+                        }
                         Expression::ThisExpression(this) => {
                             flow.emit(self.plan_this_expression(this.span, layout)?)?;
                         }

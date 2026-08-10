@@ -283,6 +283,9 @@ pub(super) fn resume_iterator_abrupt_continuations(
                         execution_budget,
                     )
                 }
+                OperatorPrimitiveTarget::DynamicImportSpecifier(state) => {
+                    resume_dynamic_import_abrupt(runtime, &state, pending)
+                }
                 OperatorPrimitiveTarget::IteratorLimit(state) => resume_iterator_limit_abrupt(
                     runtime,
                     *state,
@@ -307,6 +310,9 @@ pub(super) fn resume_iterator_abrupt_continuations(
             },
             NativeContinuation::RegExp(state) if state.handles_abrupt() => {
                 resume_regexp_abrupt(runtime, &state, pending)
+            }
+            NativeContinuation::DynamicImport(state) => {
+                resume_dynamic_import_abrupt(runtime, &state, pending)
             }
             NativeContinuation::Promise(state) => {
                 resume_promise_abrupt(runtime, state, pending, return_to, execution_budget)
@@ -1497,6 +1503,13 @@ pub(super) fn resume_native_continuations(
             NativeContinuation::InstanceOf(state) => {
                 advance_instance_of(runtime, state, &value, return_to, execution_budget)?
             }
+            NativeContinuation::DynamicImport(state) => advance_dynamic_import(
+                runtime,
+                *state,
+                value.duplicate(),
+                return_to,
+                execution_budget,
+            )?,
             NativeContinuation::Promise(state) => advance_promise_continuation(
                 runtime,
                 state,

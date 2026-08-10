@@ -129,6 +129,7 @@ mod data_view;
 mod date;
 mod define_property_intrinsics;
 mod dynamic;
+mod dynamic_import;
 mod error_stack;
 mod errors;
 mod exceptions;
@@ -181,13 +182,13 @@ use {
     array_from_async::*, array_join::*, array_mutators::*, array_search::*, array_sort::*,
     array_statics::*, async_from_sync::*, async_generator::*, atomics::*, bigint_intrinsics::*,
     bindings::*, conversions::*, data_view::*, date::*, define_property_intrinsics::*, dynamic::*,
-    error_stack::*, errors::*, exceptions::*, execution::*, for_in::*, from_entries::*,
-    generator::*, group_by::*, intl::*, iterators::*, json_parse::*, json_stringify::*,
-    locale_string::*, map::*, math::*, math_sum_precise::*, native::*, object_intrinsics::*,
-    promise::*, promise_combinators::*, properties::*, proxy::*, reflect::*, regexp::*, set::*,
-    stack::*, string_methods::*, string_raw::*, string_replace::*, string_split::*, temporal::*,
-    typed_array::*, uint8_array::*, uri::*, weak_collections::*, weak_references::*,
-    with_environment::*,
+    dynamic_import::*, error_stack::*, errors::*, exceptions::*, execution::*, for_in::*,
+    from_entries::*, generator::*, group_by::*, intl::*, iterators::*, json_parse::*,
+    json_stringify::*, locale_string::*, map::*, math::*, math_sum_precise::*, native::*,
+    object_intrinsics::*, promise::*, promise_combinators::*, properties::*, proxy::*, reflect::*,
+    regexp::*, set::*, stack::*, string_methods::*, string_raw::*, string_replace::*,
+    string_split::*, temporal::*, typed_array::*, uint8_array::*, uri::*, weak_collections::*,
+    weak_references::*, with_environment::*,
 };
 
 /// Inclusive per-call interpreter limits.
@@ -971,6 +972,7 @@ enum NativeContinuation {
     DefineProperty(Box<DefinePropertyContinuation>),
     DefineProperties(Box<DefinePropertiesContinuation>),
     InstanceOf(InstanceOfContinuation),
+    DynamicImport(Box<DynamicImportContinuation>),
     Promise(PromiseContinuation),
     PromiseCombinator(Box<PromiseCombinatorContinuation>),
     WithGet(Box<WithGetContinuation>),
@@ -1241,6 +1243,7 @@ impl NativeContinuation {
             Self::DefineProperty(state) => state.retained_values(),
             Self::DefineProperties(state) => state.retained_values(),
             Self::InstanceOf(state) => state.retained_values(),
+            Self::DynamicImport(state) => state.retained_values(),
             Self::Promise(state) => state.retained_values(),
             Self::PromiseCombinator(state) => state.retained_values(),
             Self::WithGet(state) => state.retained_values(),
@@ -1277,6 +1280,7 @@ impl NativeContinuation {
                 | Self::SetConstructor(_)
                 | Self::ArrayStatic(_)
                 | Self::ArrayFromAsync(_)
+                | Self::DynamicImport(_)
                 | Self::PromiseCombinator(_)
                 | Self::IteratorHelperNext(_)
                 | Self::IteratorHelperReturn(_)
@@ -1297,6 +1301,7 @@ impl NativeContinuation {
                     if matches!(
                         &state.target,
                         OperatorPrimitiveTarget::ArrayFromAsyncLength { .. }
+                            | OperatorPrimitiveTarget::DynamicImportSpecifier(_)
                             | OperatorPrimitiveTarget::IteratorLimit(_)
                             | OperatorPrimitiveTarget::IteratorJoin(_)
                     ) || matches!(
@@ -2747,6 +2752,8 @@ enum OperatorPrimitiveTarget {
     StringMethodSubject(Box<StringMethodContinuation>),
     /// A `String.prototype` method's argument, awaiting its own coercion.
     StringMethodArgument(Box<StringMethodContinuation>),
+    /// `import()`'s specifier after observable `ToPrimitive(string)`.
+    DynamicImportSpecifier(Box<DynamicImportContinuation>),
 }
 
 impl OperatorPrimitiveTarget {
@@ -3048,6 +3055,7 @@ impl OperatorPrimitiveTarget {
             Self::StringMethodSubject(state) | Self::StringMethodArgument(state) => {
                 state.retained_values()
             }
+            Self::DynamicImportSpecifier(state) => state.retained_values(),
             Self::ArrayCallbackLength(_) => ArrayCallbackContinuation::retained_values(),
             Self::ArrayReductionLength(_) => ArrayReductionContinuation::retained_values(),
             Self::ArraySearchPosition(_) => ArraySearchContinuation::retained_values(),
@@ -3523,6 +3531,7 @@ fn trace_operator_primitive_target_roots(
         }
         OperatorPrimitiveTarget::StringMethodSubject(state)
         | OperatorPrimitiveTarget::StringMethodArgument(state) => state.trace_roots(mark),
+        OperatorPrimitiveTarget::DynamicImportSpecifier(state) => state.trace_roots(mark),
         OperatorPrimitiveTarget::ArrayCallbackLength(state) => state.trace_roots(mark),
         OperatorPrimitiveTarget::ArrayReductionLength(state) => state.trace_roots(mark),
         OperatorPrimitiveTarget::ArraySearchPosition(state) => state.trace_roots(mark),
@@ -3980,6 +3989,7 @@ fn trace_native_continuation_roots(
         NativeContinuation::InstanceOf(state) => {
             trace_instance_of_roots(state, mark);
         }
+        NativeContinuation::DynamicImport(state) => state.trace_roots(mark),
         NativeContinuation::Promise(state) => state.trace_roots(mark),
         NativeContinuation::PromiseCombinator(state) => state.trace_roots(mark),
         NativeContinuation::WithGet(state) => state.trace_roots(mark),

@@ -6821,6 +6821,7 @@ const fn supported_compiler_opcode(opcode: FinalOpcode) -> bool {
             | FinalOpcode::Apply
             | FinalOpcode::Eval
             | FinalOpcode::ApplyEval
+            | FinalOpcode::Import
             | FinalOpcode::WithGetVar
             | FinalOpcode::WithDeleteVar
             | FinalOpcode::WithMakeRef
