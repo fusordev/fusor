@@ -314,10 +314,18 @@ fn regexp_escape_follows_the_spec_scalar_and_punctuator_rules() {
     assert_eq!(
         rendered(
             "return [RegExp.escape('foo'),RegExp.escape('1a'),RegExp.escape('a-b'),RegExp.escape('a/b'),\
-                     RegExp.escape('a b'),RegExp.escape('[x]'),RegExp.escape('é'),RegExp.escape('\\ud800')].join('|');"
+                     RegExp.escape('a b'),RegExp.escape('[x]'),RegExp.escape('é'),RegExp.escape('\\ud800'),\
+                     RegExp.escape('\\u00a0'),RegExp.escape('\\ufeff'),RegExp.escape('\\u202f')].join('|');"
         ),
-        "\\x66oo|\\x31a|\\x61\\x2db|\\x61\\/b|\\x61\\x20b|\\[x\\]|é|\\ud800"
+        "\\x66oo|\\x31a|\\x61\\x2db|\\x61\\/b|\\x61\\x20b|\\[x\\]|é|\\ud800|\\xa0|\\ufeff|\\u202f"
     );
+    for source in ["123", "({})", "[]", "null", "undefined"] {
+        assert_eq!(
+            thrown(&format!("return RegExp.escape({source});")).0,
+            ExceptionKind::TypeError,
+            "{source}"
+        );
+    }
 }
 
 #[test]
