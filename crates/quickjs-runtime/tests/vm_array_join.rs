@@ -200,6 +200,50 @@ fn array_to_string_drives_ordinary_string_coercion() {
     // lowering is a separate milestone, so concatenation covers it here.
 }
 
+#[test]
+fn array_to_string_calls_join_or_the_intrinsic_object_fallback() {
+    assert_eq!(
+        text(
+            "var receiver={flag:'ok',join:function(){\
+                 return this.flag+':'+arguments.length;\
+             }};\
+             return Array.prototype.toString.call(receiver);"
+        ),
+        "ok:0"
+    );
+    assert_eq!(
+        text(
+            "delete Object.prototype.toString;\
+             return Array.prototype.toString.call({join:null});"
+        ),
+        "[object Object]"
+    );
+    assert_eq!(
+        text(
+            "return Array.prototype.toString.call(true)+'|'\
+                 +Array.prototype.toString.call(false);"
+        ),
+        "[object Boolean]|[object Boolean]"
+    );
+    assert_eq!(
+        text(
+            "return Array.prototype.toString.call({\
+                 join:0,[Symbol.toStringTag]:'Tagged'\
+             });"
+        ),
+        "[object Tagged]"
+    );
+    assert_eq!(
+        type_error_message(
+            "return [{\
+                 toString(){return {};},\
+                 valueOf(){return {};}\
+             }].toString();"
+        ),
+        "toPrimitive"
+    );
+}
+
 /// Oracle: `join toString order => [oo]`. Each element's `toString` runs, in
 /// index order, and its result is interpolated.
 #[test]
@@ -240,14 +284,8 @@ fn join_and_to_string_report_the_pinned_arities() {
     assert_number("return Array.prototype.toString.length;", 0);
 }
 
-/// Oracle: `toString on nonarray => [[object Object]]`.
-///
-/// `Array.prototype.toString` is generic: it reads `length` from any receiver,
-/// so a plain object with no `length` joins to the empty string. The oracle
-/// reports `[object Object]` because its `toString` first looks for a callable
-/// `join` on the receiver; with the profile's non-replaceable `join` the
-/// generic length path is what remains observable, so this asserts the
-/// array-like behavior instead.
+/// `Array.prototype.join` is generic over array-like receivers and reads
+/// `length` with `LengthOfArrayLike`.
 #[test]
 fn join_is_generic_over_array_like_receivers() {
     assert_eq!(

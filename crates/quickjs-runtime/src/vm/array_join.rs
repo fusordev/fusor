@@ -25,17 +25,114 @@
 
 //! `Array.prototype.join` and `Array.prototype.toString`.
 //!
-//! Both are one resumable element loop, because every element read can run a
-//! getter and every element's `ToString` can run a user `toString` method. The
-//! loop mirrors `js_array_join` (`quickjs.c:42505`): the length is read once
-//! with `ToLength`, `null` and `undefined` elements contribute nothing, and the
-//! separator defaults to `","` when it is absent or `undefined`.
+//! `toString` first performs its own observable `Get(array, "join")`, calls a
+//! callable result with no arguments, and otherwise invokes the intrinsic
+//! `%Object.prototype.toString%` even if that property was deleted. The join
+//! loop remains separately resumable because every element read and conversion
+//! can run user code.
 
 #[allow(
     clippy::wildcard_imports,
     reason = "this private VM sibling participates in the shared interpreter implementation namespace"
 )]
 use super::*;
+
+/// The boxed receiver retained while `Array.prototype.toString` awaits its
+/// observable `join` property read.
+pub(super) struct ArrayToStringContinuation {
+    target: StoredValue,
+    realm: RealmId,
+    origin: JsStackFrame,
+}
+
+impl ArrayToStringContinuation {
+    pub(super) const fn retained_values() -> u64 {
+        1
+    }
+
+    pub(super) fn trace_roots(&self, mark: &mut dyn FnMut(CollectionRoot)) {
+        trace_stored_value_root(&self.target, mark);
+    }
+}
+
+/// Performs the `Get(array, "join")` half of `Array.prototype.toString`.
+pub(super) fn begin_array_to_string(
+    runtime: &mut Runtime,
+    realm: RealmId,
+    receiver: StoredValue,
+    return_to: Option<CallReturn>,
+    origin: JsStackFrame,
+    execution_budget: &mut ExecutionBudget,
+) -> Result<NativeDispatch, NativeFailure> {
+    let target = match to_object_value(runtime, realm, receiver, origin.clone())? {
+        Ok(target) => target,
+        Err(exception) => return Err(NativeFailure::Abrupt(exception)),
+    };
+    let state = ArrayToStringContinuation {
+        target,
+        realm,
+        origin,
+    };
+    let join_key = runtime.predefined_property_key(PredefinedAtom::Join);
+    charge_heap_property_lookup(runtime, &state.target, execution_budget)?;
+    let dispatch = begin_value_get(
+        runtime,
+        &state.target,
+        join_key,
+        None,
+        realm,
+        return_to,
+        state.origin.clone(),
+        execution_budget,
+    )?;
+    continue_get_after(
+        dispatch,
+        state,
+        array_to_string_continuation,
+        |state, value| finish_array_to_string(runtime, state, &value, return_to, execution_budget),
+        "Array.prototype.toString join Get produced a structured result",
+    )
+}
+
+/// Calls a callable `join`, or the unforgeable intrinsic Object fallback.
+pub(super) fn finish_array_to_string(
+    runtime: &mut Runtime,
+    state: ArrayToStringContinuation,
+    join: &StoredValue,
+    return_to: Option<CallReturn>,
+    execution_budget: &mut ExecutionBudget,
+) -> Result<NativeDispatch, NativeFailure> {
+    let ArrayToStringContinuation {
+        target,
+        realm,
+        origin,
+    } = state;
+    let StoredValue::Function(function) = join else {
+        return begin_object_prototype_to_string(
+            runtime,
+            realm,
+            target,
+            return_to,
+            Some(origin),
+            execution_budget,
+        );
+    };
+    Ok(NativeDispatch::Call(NativeCall {
+        function: *function,
+        receiver: target,
+        arguments: CallArguments::empty(),
+        return_to,
+        origin,
+        continuations: Vec::new(),
+        pre_call: None,
+        new_target: None,
+        native_caller: None,
+    }))
+}
+
+fn array_to_string_continuation(state: ArrayToStringContinuation) -> NativeContinuation {
+    NativeContinuation::ArrayToString(state)
+}
 
 /// Which stage of the join loop a continuation resumes into.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -89,13 +186,7 @@ impl ArrayJoinContinuation {
     }
 }
 
-/// Starts `Array.prototype.join` or `Array.prototype.toString`.
-///
-/// `Array.prototype.toString` is defined as `join` with no separator once its
-/// receiver's `join` property is not callable; the pinned engine reaches the
-/// same observable result by dispatching straight to `js_array_join`
-/// (`quickjs.c:44558`), and the profile's `Array.prototype.join` is
-/// non-replaceable, so this shares one implementation.
+/// Starts `Array.prototype.join`.
 pub(super) fn begin_array_join(
     runtime: &mut Runtime,
     realm: RealmId,
@@ -133,16 +224,19 @@ pub(super) fn begin_array_join(
             state.stage = ArrayJoinStage::AwaitLength;
             advance_array_join(runtime, state, None, return_to, execution_budget)
         }
-        Some(value) => begin_operator_primitive_conversion(
-            runtime,
-            value,
-            OperatorPrimitiveHint::String,
-            OperatorPrimitiveTarget::ArrayJoinSeparator(Box::new(state)),
-            realm,
-            return_to,
-            native_function_host_origin(),
-            execution_budget,
-        ),
+        Some(value) => {
+            let origin = state.origin.clone();
+            begin_operator_primitive_conversion(
+                runtime,
+                value,
+                OperatorPrimitiveHint::String,
+                OperatorPrimitiveTarget::ArrayJoinSeparator(Box::new(state)),
+                realm,
+                return_to,
+                origin,
+                execution_budget,
+            )
+        }
     }
 }
 
@@ -188,16 +282,19 @@ pub(super) fn begin_typed_array_join(
             state.stage = ArrayJoinStage::NextElement;
             advance_array_join(runtime, state, None, return_to, execution_budget)
         }
-        Some(value) => begin_operator_primitive_conversion(
-            runtime,
-            value,
-            OperatorPrimitiveHint::String,
-            OperatorPrimitiveTarget::ArrayJoinSeparator(Box::new(state)),
-            realm,
-            return_to,
-            native_function_host_origin(),
-            execution_budget,
-        ),
+        Some(value) => {
+            let origin = state.origin.clone();
+            begin_operator_primitive_conversion(
+                runtime,
+                value,
+                OperatorPrimitiveHint::String,
+                OperatorPrimitiveTarget::ArrayJoinSeparator(Box::new(state)),
+                realm,
+                return_to,
+                origin,
+                execution_budget,
+            )
+        }
     }
 }
 
@@ -343,6 +440,7 @@ pub(super) fn advance_array_join(
                     }
                     value @ (StoredValue::Function(_) | StoredValue::Object(_)) => {
                         let realm = state.realm;
+                        let origin = state.origin.clone();
                         state.stage = ArrayJoinStage::AwaitElementString;
                         return begin_operator_primitive_conversion(
                             runtime,
@@ -351,7 +449,7 @@ pub(super) fn advance_array_join(
                             OperatorPrimitiveTarget::ArrayJoinElement(Box::new(state)),
                             realm,
                             return_to,
-                            native_function_host_origin(),
+                            origin,
                             execution_budget,
                         );
                     }

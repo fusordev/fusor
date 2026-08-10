@@ -1180,6 +1180,9 @@ pub(super) fn resume_native_continuations(
                 return_to,
                 execution_budget,
             )?,
+            NativeContinuation::ArrayToString(state) => {
+                finish_array_to_string(runtime, state, &value, return_to, execution_budget)?
+            }
             NativeContinuation::ArrayJoin(state) => advance_array_join(
                 runtime,
                 *state,
@@ -4961,14 +4964,10 @@ pub(super) fn dispatch_native_call_with_frames(
                 execution_budget,
             )
         }
-        // `Array.prototype.toString` is `join` with no separator: the pinned
-        // table dispatches it straight to `js_array_join`
-        // (`quickjs.c:44558`).
-        NativeFunctionKind::ArrayPrototypeToString => begin_array_join(
+        NativeFunctionKind::ArrayPrototypeToString => begin_array_to_string(
             runtime,
             native.realm,
             inputs.receiver,
-            None,
             return_to,
             origin.unwrap_or_else(native_function_host_origin),
             execution_budget,

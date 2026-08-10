@@ -927,6 +927,7 @@ enum NativeContinuation {
     ProxyEnumerable(Box<ProxyEnumerableContinuation>),
     ObjectAssign(Box<ObjectAssignContinuation>),
     GetOwnPropertyDescriptors(Box<GetOwnPropertyDescriptorsContinuation>),
+    ArrayToString(ArrayToStringContinuation),
     ArrayJoin(Box<ArrayJoinContinuation>),
     ArraySearch(Box<ArraySearchContinuation>),
     ArrayMutator(Box<ArrayMutatorContinuation>),
@@ -1194,6 +1195,7 @@ impl NativeContinuation {
             Self::ProxyEnumerable(state) => state.retained_values(),
             Self::ObjectAssign(state) => state.retained_values(),
             Self::GetOwnPropertyDescriptors(state) => state.retained_values(),
+            Self::ArrayToString(_) => ArrayToStringContinuation::retained_values(),
             Self::ArrayJoin(_) => ArrayJoinContinuation::retained_values(),
             Self::ArraySearch(_) => ArraySearchContinuation::retained_values(),
             Self::ArrayMutator(state) => state.retained_values(),
@@ -3668,6 +3670,7 @@ fn trace_native_continuation_roots(
         NativeContinuation::FunctionApply(state) => {
             trace_function_apply_roots(state, mark);
         }
+        NativeContinuation::ArrayToString(state) => state.trace_roots(mark),
         NativeContinuation::ArrayJoin(state) => {
             trace_stored_value_root(state.target(), mark);
         }
