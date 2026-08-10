@@ -412,6 +412,31 @@ fn anonymous_declaration_initializers_emit_adjacent_inferred_name_pairs() {
 }
 
 #[test]
+fn sloppy_for_in_head_initializers_emit_adjacent_inferred_name_pairs() {
+    let tree = compile_tree(
+        "function outer(object){\
+             for(var ordinary=function(){} in object){}\
+             for(var generator=function*(){} in object){}\
+             for(var asynchronous=async function(){} in object){}\
+             for(var arrow=()=>{} in object){}\
+             for(var asyncArrow=async()=>{} in object){}\
+         }",
+        "outer",
+    );
+
+    assert_eq!(
+        inferred_names(tree.root()),
+        [
+            "ordinary",
+            "generator",
+            "asynchronous",
+            "arrow",
+            "asyncArrow"
+        ]
+    );
+}
+
+#[test]
 fn owned_argument_and_local_cells_keep_distinct_parent_reference_indices() {
     let tree = compile_tree(
         "function outer(argument){ \

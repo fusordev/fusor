@@ -7,8 +7,8 @@ use super::super::{
     NativeReferenceId, NodeId, Operands, PlannedControlFlow, PlannedInstruction,
     PrivateFieldExpression, RealmGlobalId, ReferenceAccess, ReferenceId, ScopeId, Span,
     StaticMemberExpression, StoragePlacement, SymbolId, UnresolvedGlobalId, UnsupportedLeafFeature,
-    VariableDeclaration, VariableDeclarationKind, VariableDeclarator, WritePolicy,
-    anonymous_named_evaluation_span, binary_opcode, unsupported,
+    VariableDeclaration, VariableDeclarationKind, VariableDeclarator, WritePolicy, binary_opcode,
+    unsupported,
 };
 use super::expressions::{ExpressionPlanner, ExpressionWork};
 
@@ -980,9 +980,8 @@ impl<'arena> CompilationContext<'_, 'arena, '_> {
                 declaration.span,
             );
         }
-        if let Some(span) = anonymous_named_evaluation_span(initializer) {
-            return unsupported(UnsupportedLeafFeature::InferredFunctionName, span);
-        }
+        let inferred_name =
+            self.plan_inferred_function_name_for_initializer(identifier, initializer, constants)?;
         self.plan_expression_with_abrupt_markers(
             initializer,
             layout,
@@ -991,6 +990,9 @@ impl<'arena> CompilationContext<'_, 'arena, '_> {
             abrupt_markers,
             flow,
         )?;
+        if let Some(inferred_name) = inferred_name {
+            flow.emit(inferred_name)?;
+        }
         self.emit_for_in_declaration_write(declaration.kind, identifier, layout, tree_layout, flow)
     }
 
